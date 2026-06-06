@@ -1,0 +1,15 @@
+{
+  "name": "huading-ai-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @huading/frontend dev",
+    "lint": "pnpm --filter @huading/frontend lint && pnpm backend:lint",
+    "test": "pnpm --filter @huading/frontend test && pnpm backend:test",
+    "backend:dev": "cd backend && uv --cache-dir ../.uv-cache run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
+    "backend:lint": "cd backend && uv --cache-dir ../.uv-cache run ruff check .",
+    "backend:test": "cd backend && uv --cache-dir ../.uv-cache run pytest"
+  },
+  "devDependencies": {}
+}
