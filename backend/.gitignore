@@ -1,0 +1,3 @@
+# Engine runtime output (task index, generated videos) — written cwd-relative
+# by PersistenceService(output_dir="output") when scripts run from backend/.
+output/
