@@ -1,0 +1,39 @@
+# gitleaks configuration for the Huading AI monorepo.
+# Docs: https://github.com/gitleaks/gitleaks#configuration
+#
+# We extend the bundled default ruleset and add a rule for `sk-` style API keys,
+# because several providers we use (DashScope, DeepSeek, Moonshot, ...) issue keys
+# like `sk-<hex>` that are SHORTER than the 48-char OpenAI key the default rule
+# expects — so the default config alone would NOT have caught the hard-coded
+# DashScope key removed in commit 3bbe278.
+
+title = "Huading gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "huading-sk-api-key"
+description = "Generic sk- style provider API key (OpenAI/DashScope/DeepSeek/Moonshot/etc.)"
+# `sk-` (optionally `sk-proj-`/`sk-ant-` style) followed by 16+ key chars.
+regex = '''sk-(?:proj-|ant-|or-)?[A-Za-z0-9_\-]{16,}'''
+keywords = ["sk-"]
+
+[allowlist]
+description = "Known, already-removed historical leaks and non-secret patterns."
+
+# Vendored upstream code (Pixelle-Video, Apache-2.0). We still SCAN it (a real
+# key here must fail), but the specific key below was committed before the repo
+# existed publicly, has been removed (commit 3bbe278) and must be rotated/revoked.
+# Allowlisted by exact value so full-history scans of OLD commits don't fail the
+# build; any other/new key (including a different sk- key in this dir) still fails.
+regexes = [
+  '''sk-bcab316d69a7414faa9dc29737019333''',
+]
+
+# Lockfiles contain integrity hashes that can resemble high-entropy secrets.
+paths = [
+  '''.*uv\.lock$''',
+  '''.*pnpm-lock\.yaml$''',
+  '''.*package-lock\.json$''',
+]
