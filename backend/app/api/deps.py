@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.db.session import SessionLocal
+from app.services.progress import ProgressStore, build_progress_store
 from app.services.storage.base import ObjectStorage
 from app.services.storage.factory import create_object_storage
 
@@ -29,3 +30,8 @@ def get_redis_client() -> redis.Redis:
 def get_object_storage() -> ObjectStorage:
     settings = get_settings()
     return create_object_storage(settings)
+
+
+def get_progress_store() -> ProgressStore:
+    settings = get_settings()
+    return build_progress_store(settings.redis_url)
