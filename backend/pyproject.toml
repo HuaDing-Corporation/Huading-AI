@@ -5,6 +5,7 @@ description = "FastAPI backend for the Huading AI monorepo."
 requires-python = ">=3.11,<3.12"
 dependencies = [
   "alembic>=1.13.3",
+  "boto3>=1.35.0",
   "celery>=5.4.0",
   "fastapi>=0.115.0",
   "psycopg[binary]>=3.2.3",
@@ -12,6 +13,7 @@ dependencies = [
   "pydantic-settings>=2.6.1",
   "redis>=5.1.1",
   "sqlalchemy>=2.0.35",
+  "structlog>=24.4.0",
   "uvicorn[standard]>=0.31.0"
 ]
 

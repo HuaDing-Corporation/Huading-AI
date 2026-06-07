@@ -40,6 +40,8 @@ uv sync
 uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
+Backend API docs are available at `http://localhost:8000/docs`.
+
 Run frontend only:
 
 ```powershell
