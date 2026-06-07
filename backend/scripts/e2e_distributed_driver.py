@@ -22,15 +22,18 @@ POLL_TIMEOUT_S = int(os.environ.get("E2E_TIMEOUT", "420"))
 TERMINAL = {"SUCCESS", "FAILURE"}
 
 
-def _file_url_to_path(url: str) -> str:
+def _file_url_to_path(url: str, *, is_windows: bool | None = None) -> str:
     """Convert a file:// URL to a local filesystem path.
 
     Percent-decodes the path (so non-ASCII dirs like '华鼎' -> %E5%8D%8E... are
     restored) and handles Windows file URLs ('/C:/x' -> 'C:/x', plus UNC hosts).
+    ``is_windows`` defaults to the running platform; tests pass it explicitly.
     """
+    if is_windows is None:
+        is_windows = os.name == "nt"
     parsed = urlparse(url)
     path = unquote(parsed.path)
-    if os.name == "nt":
+    if is_windows:
         # file://server/share -> \\server\share
         if parsed.netloc:
             return f"\\\\{parsed.netloc}{path}".replace("/", "\\")
