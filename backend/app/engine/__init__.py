@@ -30,6 +30,6 @@ if _ENGINE_DIR not in _sys.path:
     _sys.path.insert(0, _ENGINE_DIR)
 
 from .config import EngineConfig  # noqa: E402
-from .factory import create_engine, configure_runtime  # noqa: E402
+from .factory import configure_runtime, create_engine  # noqa: E402
 
 __all__ = ["EngineConfig", "create_engine", "configure_runtime"]

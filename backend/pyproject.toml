@@ -5,6 +5,7 @@ description = "FastAPI backend for the Huading AI monorepo."
 requires-python = ">=3.11,<3.12"
 dependencies = [
   "alembic>=1.13.3",
+  "boto3>=1.35.0",
   "celery>=5.4.0",
   "fastapi>=0.115.0",
   "psycopg[binary]>=3.2.3",
@@ -12,6 +13,7 @@ dependencies = [
   "pydantic-settings>=2.6.1",
   "redis>=5.1.1",
   "sqlalchemy>=2.0.35",
+  "structlog>=24.4.0",
   "uvicorn[standard]>=0.31.0",
   # ---- Video engine (distilled from Pixelle-Video, Streamlit removed) ----
   "loguru>=0.7.0",
@@ -45,6 +47,10 @@ package = false
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Vendored, minimally-modified upstream code (Pixelle-Video, Apache-2.0).
+# Excluded from lint to keep it in sync with upstream and avoid churn; our own
+# interface layer (engine/__init__.py, config.py, factory.py) is still linted.
+extend-exclude = ["app/engine/pixelle_video"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

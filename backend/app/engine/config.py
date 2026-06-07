@@ -24,25 +24,22 @@ can be layered on later without changing call sites.
 
 from __future__ import annotations
 
-from typing import Optional
-
-from pydantic import BaseModel, Field
-
 from pixelle_video.config.schema import (
-    PixelleVideoConfig,
-    LLMConfig,
-    APIProvidersConfig,
-    APIProviderCommonConfig,
-    APIKeyProviderConfig,
     AccessSecretProviderConfig,
+    APIKeyProviderConfig,
+    APIProviderCommonConfig,
+    APIProvidersConfig,
     ComfyUIConfig,
-    TTSSubConfig,
-    TTSLocalConfig,
-    TTSComfyUIConfig,
     ImageSubConfig,
-    VideoSubConfig,
+    LLMConfig,
+    PixelleVideoConfig,
     TemplateConfig,
+    TTSComfyUIConfig,
+    TTSLocalConfig,
+    TTSSubConfig,
+    VideoSubConfig,
 )
+from pydantic import BaseModel, Field
 
 
 class EngineConfig(BaseModel):
@@ -92,9 +89,9 @@ class EngineConfig(BaseModel):
     runninghub_instance_type: str = Field(default="")
 
     # ---- Default media workflows (used by image/video templates) ----
-    image_workflow: Optional[str] = Field(default=None)
-    video_workflow: Optional[str] = Field(default=None)
-    tts_workflow: Optional[str] = Field(default=None)
+    image_workflow: str | None = Field(default=None)
+    video_workflow: str | None = Field(default=None)
+    tts_workflow: str | None = Field(default=None)
 
     # ---- TTS (local edge-tts by default) ----
     tts_inference_mode: str = Field(default="local", description="'local' or 'comfyui'")
@@ -108,7 +105,7 @@ class EngineConfig(BaseModel):
     )
 
     # ---- Runtime root (PIXELLE_VIDEO_ROOT) ----
-    runtime_root: Optional[str] = Field(
+    runtime_root: str | None = Field(
         default=None,
         description="Root dir holding templates/bgm/workflows/output. "
         "Defaults to backend/app/engine/runtime.",
