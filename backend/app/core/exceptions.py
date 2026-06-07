@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -60,12 +61,14 @@ async def validation_exception_handler(
     request: Request,
     exc: RequestValidationError,
 ) -> JSONResponse:
+    # jsonable_encoder makes the errors JSON-safe: custom validators raise
+    # ValueError, which pydantic puts in ctx as a non-serializable object.
     return _error_response(
         request,
         status_code=422,
         code="VALIDATION_ERROR",
         message="Request validation failed.",
-        detail=exc.errors(),
+        detail=jsonable_encoder(exc.errors()),
     )
 
 
