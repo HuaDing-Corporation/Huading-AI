@@ -10,15 +10,34 @@ local file:// storage, the file exists on disk).
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import requests
 
 BASE_URL = os.environ.get("E2E_BASE_URL", "http://127.0.0.1:8000")
 POLL_TIMEOUT_S = int(os.environ.get("E2E_TIMEOUT", "420"))
 TERMINAL = {"SUCCESS", "FAILURE"}
+
+
+def _file_url_to_path(url: str) -> str:
+    """Convert a file:// URL to a local filesystem path.
+
+    Percent-decodes the path (so non-ASCII dirs like '华鼎' -> %E5%8D%8E... are
+    restored) and handles Windows file URLs ('/C:/x' -> 'C:/x', plus UNC hosts).
+    """
+    parsed = urlparse(url)
+    path = unquote(parsed.path)
+    if os.name == "nt":
+        # file://server/share -> \\server\share
+        if parsed.netloc:
+            return f"\\\\{parsed.netloc}{path}".replace("/", "\\")
+        # '/C:/Users/...' -> 'C:/Users/...'
+        if re.match(r"^/[A-Za-z]:", path):
+            path = path[1:]
+    return path
 
 
 def _submit() -> str:
@@ -94,9 +113,7 @@ def main() -> int:
 
     # For local file:// storage, verify the artifact exists on disk.
     if url.startswith("file://"):
-        path = urlparse(url).path
-        if os.name == "nt" and path.startswith("/"):
-            path = path[1:]
+        path = _file_url_to_path(url)
         if not (os.path.exists(path) and os.path.getsize(path) > 0):
             print(f"[fail] artifact missing/empty: {path}")
             return 1
