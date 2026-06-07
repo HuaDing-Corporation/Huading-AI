@@ -14,7 +14,23 @@ dependencies = [
   "redis>=5.1.1",
   "sqlalchemy>=2.0.35",
   "structlog>=24.4.0",
-  "uvicorn[standard]>=0.31.0"
+  "uvicorn[standard]>=0.31.0",
+  # ---- Video engine (distilled from Pixelle-Video, Streamlit removed) ----
+  "loguru>=0.7.0",
+  "pyyaml>=6.0.0",
+  "openai>=2.6.0",
+  "edge-tts==7.2.7",
+  "ffmpeg-python>=0.2.0",
+  "moviepy==1.0.3",
+  "pillow>=10.0.0,<12",
+  "comfykit>=0.1.12",
+  "beautifulsoup4>=4.14.2",
+  "playwright>=1.58.0",
+  "dashscope>=1.23.0",
+  "requests>=2.32.0",
+  "pyjwt>=2.10.0",
+  "numpy>=1.26.0",
+  "certifi>=2025.10.5"
 ]
 
 [dependency-groups]
@@ -31,6 +47,10 @@ package = false
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Vendored, minimally-modified upstream code (Pixelle-Video, Apache-2.0).
+# Excluded from lint to keep it in sync with upstream and avoid churn; our own
+# interface layer (engine/__init__.py, config.py, factory.py) is still linted.
+extend-exclude = ["app/engine/pixelle_video"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
