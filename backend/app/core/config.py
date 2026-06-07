@@ -28,6 +28,23 @@ class Settings(BaseSettings):
     storage_access_key_id: str | None = None
     storage_secret_access_key: str | None = None
 
+    # ---- Video engine ----
+    # Keys are injected from the platform/environment, never hardcoded (#002-FIX-1).
+    # Multi-tenancy is out of scope (M2); the engine config is a single process-wide
+    # singleton, so run the worker single-config / single-process (see backend README).
+    engine_llm_api_key: str = ""
+    engine_llm_base_url: str = ""
+    engine_llm_model: str = ""
+    engine_dashscope_api_key: str = ""
+    engine_default_template: str = "1080x1920/static_default.html"
+    # Playwright browser channel for frame rendering: "chrome"/"msedge" to use a
+    # system browser, or "" for Playwright's bundled Chromium.
+    engine_browser_channel: str = ""
+    # Resource root (templates/bgm/workflows/output). None -> app/engine/runtime.
+    engine_runtime_root: str | None = None
+    # Object-storage key prefix for generated videos (task-isolated under it).
+    engine_output_prefix: str = "videos"
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def split_cors_origins(cls, value: str | list[str]) -> list[str]:

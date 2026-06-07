@@ -37,6 +37,55 @@ Check status:
 curl.exe http://127.0.0.1:8000/api/v1/tasks/<task_id>
 ```
 
+## Video generation (engine task layer)
+
+Async "topic → finished video" via FastAPI + Celery + the distilled engine
+(`app/engine`). Keys are injected from the environment (`ENGINE_LLM_*`,
+`ENGINE_DASHSCOPE_API_KEY`), never hardcoded — see `.env.example`.
+
+Submit a job (returns a `task_id`):
+
+```powershell
+curl.exe -X POST http://127.0.0.1:8000/api/v1/videos -H "Content-Type: application/json" -d "{\"topic\":\"如何提高学习效率\",\"n_scenes\":3}"
+```
+
+Poll status / progress (`status`, `progress` 0..1, `stage`, `video_url`):
+
+```powershell
+curl.exe http://127.0.0.1:8000/api/v1/videos/<task_id>
+```
+
+Or subscribe to live progress over SSE:
+
+```powershell
+curl.exe -N http://127.0.0.1:8000/api/v1/videos/<task_id>/events
+```
+
+The finished `final.mp4` is uploaded through the object-storage layer at the
+task-isolated key `videos/<task_id>/final.mp4`; `video_url` is the returned
+location (a `file://` URI under local storage, `s3://…` under S3/OSS).
+
+### Request parameters
+
+`topic` (required), `pipeline` (`standard`|`custom`, default `standard`),
+`mode` (`generate`|`fixed`), `n_scenes`, `frame_template`
+(e.g. `1080x1920/static_default.html`), `voice`, `tts_speed`.
+There is **no** `output_path` parameter: the output path is chosen server-side
+under a whitelisted, task-isolated location, so a client cannot write arbitrary
+paths (#002-RV P2). `frame_template` is validated against path traversal.
+
+### Concurrency constraint (single-config / single-process)
+
+The engine configuration is a **process-wide singleton** (`config_manager` +
+`PIXELLE_VIDEO_ROOT`). Until per-task instantiation lands in M2, run the video
+worker single-process so concurrent tasks can't race on shared config:
+
+```powershell
+uv run celery -A app.workers.celery_app.celery_app worker --loglevel=info --pool=solo --concurrency=1 -Q default
+```
+
+Single-tenant only for now; multi-tenant key resolution is M2.
+
 ## Checks
 
 ```powershell
