@@ -1,3 +1,7 @@
+# Modifications Copyright (C) 2026 Huading (Apache-2.0 §4(b)):
+#   - Removed a hard-coded DashScope API key default; key is now injected at
+#     runtime (or read from DASHSCOPE_API_KEY), and upload raises if absent.
+# Derived from Pixelle-Video (AIDC-AI, Apache-2.0). See engine LICENSE/NOTICE.
 import os
 import requests
 import numpy as np
@@ -18,15 +22,16 @@ class ImageProcessor:
     
     def __init__(self,
                  image_path='',
-                 api_key: str = "sk-bcab316d69a7414faa9dc29737019333",
+                 api_key: str | None = None,
                  model_name: str = "wan2.6-i2v-flash",
                  local_proxy: str | None = None):
         """
         初始化图片处理器
-        
+
         Args:
             image_path: 图片文件路径（可选，用于处理已有图片）
-            api_key: DashScope API Key（用于上传，可从环境变量 DASHSCOPE_API_KEY 读取）
+            api_key: DashScope API Key（用于上传）。运行期注入；为空时回退到
+                     环境变量 DASHSCOPE_API_KEY。两者皆缺时，上传方法会抛错而非使用内置默认。
             model_name: 模型名称，默认使用 wan2.6-i2v-flash
         """
         # 图片处理部分

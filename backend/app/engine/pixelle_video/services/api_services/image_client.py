@@ -1,3 +1,7 @@
+# Modifications Copyright (C) 2026 Huading (Apache-2.0 §4(b)):
+#   - Pass the runtime-injected DashScope key into ImageProcessor instead of
+#     relying on its (now removed) hard-coded default key.
+# Derived from Pixelle-Video (AIDC-AI, Apache-2.0). See engine LICENSE/NOTICE.
 import os
 import time
 import uuid
@@ -52,8 +56,14 @@ class ImageClient:
             local_proxy=local_proxy or Config.LOCAL_PROXY
         )
 
-        # Initialize Image Processor for downloads
-        self.image_processor = ImageProcessor()
+        # Initialize Image Processor for downloads/uploads.
+        # Pass the runtime-injected DashScope key (EngineConfig -> Config) so OSS
+        # upload uses the hosted key; ImageProcessor falls back to the
+        # DASHSCOPE_API_KEY env var and raises if neither is set (no built-in default).
+        self.image_processor = ImageProcessor(
+            api_key=dashscope_api_key or Config.DASHSCOPE_API_KEY or None,
+            local_proxy=local_proxy,
+        )
 
         # Default save directory
         self.base_save_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "code", "result", "image_client")
