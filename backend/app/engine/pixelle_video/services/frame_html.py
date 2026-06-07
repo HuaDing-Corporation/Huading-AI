@@ -1,5 +1,11 @@
 # Copyright (C) 2025 AIDC-AI
 #
+# Modifications Copyright (C) 2026 Huading:
+#   - Support launching a system browser channel (e.g. system-installed Chrome)
+#     via the HUADING_BROWSER_CHANNEL env var, with fallback to bundled Chromium.
+#     Enables deployment where downloading Playwright's bundled browser is blocked.
+# This file is a modified version of a Pixelle-Video source file (Apache-2.0 §4(b)).
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -328,16 +334,41 @@ class HTMLFrameGenerator:
             cls._playwright = None
             from playwright.async_api import async_playwright
             cls._playwright = await async_playwright().start()
-            cls._browser = await cls._playwright.chromium.launch(
-                args=[
+
+            launch_kwargs = {
+                "args": [
                     '--no-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-gpu',
                     '--disable-extensions',
                 ]
-            )
+            }
+
+            # Huading: optionally launch a system-installed browser channel
+            # (e.g. "chrome", "msedge") instead of Playwright's bundled Chromium.
+            # Set via HUADING_BROWSER_CHANNEL (threaded from EngineConfig.browser_channel).
+            # Empty -> bundled Chromium (original upstream behavior).
+            channel = os.environ.get("HUADING_BROWSER_CHANNEL", "").strip()
+            if channel:
+                launch_kwargs["channel"] = channel
+
+            try:
+                cls._browser = await cls._playwright.chromium.launch(**launch_kwargs)
+            except Exception as e:
+                if channel:
+                    logger.warning(
+                        f"Failed to launch browser channel '{channel}' ({e}); "
+                        "falling back to bundled Chromium"
+                    )
+                    launch_kwargs.pop("channel", None)
+                    cls._browser = await cls._playwright.chromium.launch(**launch_kwargs)
+                else:
+                    raise
+
             cls._browser_loop = current_loop
-            logger.debug("Initialized Playwright Chromium browser")
+            logger.debug(
+                f"Initialized Playwright browser (channel={channel or 'bundled-chromium'})"
+            )
         return cls._browser
 
     @classmethod

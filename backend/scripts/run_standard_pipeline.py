@@ -51,6 +51,10 @@ async def main() -> int:
         llm_base_url=base_url,
         llm_model=model,
         default_template="1080x1920/static_default.html",
+        # Use a system-installed browser by default so frame rendering works
+        # without downloading Playwright's bundled Chromium. Override with
+        # HUADING_BROWSER_CHANNEL="" to force the bundled Chromium instead.
+        browser_channel=os.environ.get("HUADING_BROWSER_CHANNEL", "chrome"),
     )
 
     engine = await create_engine(cfg)

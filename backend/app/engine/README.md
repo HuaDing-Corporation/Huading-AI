@@ -91,6 +91,7 @@ finally:
 | TTS | `tts_inference_mode`(`local`) / `tts_voice` / `tts_speed` | edge-tts | 本地语音默认 |
 | 模板 | `default_template` | `1080x1920/static_default.html` | `static_*` 无需 ComfyUI |
 | 运行根 | `runtime_root` | `None`→`runtime/` | 资源根目录 |
+| 渲染浏览器 | `browser_channel` | `""` | 帧渲染浏览器通道：`chrome`/`msedge` 用系统已装浏览器（免下载 Chromium）；空=Playwright 自带 Chromium |
 
 > 多租户暂不接入（M2）：每个 `EngineConfig` 为一次构建期输入；接口形态已便于后续叠加
 > 租户级密钥解析而无需改调用点。
@@ -175,8 +176,10 @@ ctx = await pipe(assets=[...], video_title="...", intent=None, duration=30,
 | `history` (`HistoryManager`) | 基于 persistence 的历史检索 | — |
 | `image_analysis` / `video_analysis` / `api_asset_analysis` | 分析服务 | 素材/媒体 → 分析结构（供 asset_based 等） |
 
-> 渲染依赖：`services/frame_html.py` 用 Playwright Chromium 把 HTML 模板渲染为帧图，
-> 通过 `chromium.launch()` 启动。需先 `playwright install chromium`。
+> 渲染依赖：`services/frame_html.py` 用 Playwright 把 HTML 模板渲染为帧图。
+> 默认用 Playwright 自带 Chromium（需 `playwright install chromium`）；若设置
+> `EngineConfig.browser_channel="chrome"`（经 `HUADING_BROWSER_CHANNEL` 传入），则改用
+> 系统已装 Chrome/Edge，免下载，启动失败会自动回退到自带 Chromium。
 
 ---
 
@@ -235,7 +238,8 @@ set HUADING_LLM_MODEL=qwen-max
 python scripts/run_standard_pipeline.py
 ```
 
-前置：`ffmpeg` 在 PATH；已执行 `playwright install chromium`。
+前置：`ffmpeg` 在 PATH；浏览器二选一 —— 已执行 `playwright install chromium`，
+或主机已装 Chrome/Edge（脚本默认 `browser_channel="chrome"`，免下载）。
 脚本断言生成的 `result.video_path` 存在且非空。
 
 ---

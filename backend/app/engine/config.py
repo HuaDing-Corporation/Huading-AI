@@ -114,6 +114,14 @@ class EngineConfig(BaseModel):
         "Defaults to backend/app/engine/runtime.",
     )
 
+    # ---- Frame rendering browser ----
+    browser_channel: str = Field(
+        default="",
+        description="Playwright browser channel for HTML frame rendering "
+        "(e.g. 'chrome', 'msedge' to use a system-installed browser). "
+        "Empty = Playwright's bundled Chromium (requires `playwright install chromium`).",
+    )
+
     def to_pixelle_config(self) -> PixelleVideoConfig:
         """Map the platform-facing EngineConfig onto the internal PixelleVideoConfig."""
         return PixelleVideoConfig(

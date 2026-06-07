@@ -49,6 +49,10 @@ def configure_runtime(cfg: EngineConfig) -> Path:
     # templates/ bgm/ workflows/ output/.
     os.environ["PIXELLE_VIDEO_ROOT"] = str(runtime_root)
 
+    # frame_html.py reads this to pick a system browser channel (e.g. "chrome")
+    # instead of Playwright's bundled Chromium. Empty -> bundled Chromium.
+    os.environ["HUADING_BROWSER_CHANNEL"] = cfg.browser_channel or ""
+
     # Inject config into the global singleton BEFORE PixelleVideoCore is created,
     # since PixelleVideoCore.__init__ reads config_manager.config.
     from pixelle_video.config import config_manager
