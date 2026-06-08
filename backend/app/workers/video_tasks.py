@@ -26,6 +26,8 @@ logger = get_logger(__name__)
 
 # Celery task ids are UUIDs; validate before using one in a storage key/path.
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# Output prefix: one or more safe segments separated by '/', no traversal.
+_PREFIX_RE = re.compile(r"^[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$")
 
 
 def _safe_task_id(task_id: str) -> str:
@@ -34,9 +36,17 @@ def _safe_task_id(task_id: str) -> str:
     return task_id
 
 
+def _safe_prefix(prefix: str) -> str:
+    # Guard the videos/{task_id}/final.mp4 contract even if the prefix is
+    # misconfigured (e.g. '../', leading '/', backslashes) (#005-FIX P2).
+    if not prefix or ".." in prefix or not _PREFIX_RE.match(prefix):
+        raise ValueError(f"unsafe engine_output_prefix: {prefix!r}")
+    return prefix
+
+
 def _storage_key(task_id: str) -> str:
     """Task-isolated object-storage key. No user input flows in here (#002-RV P2)."""
-    return f"{settings.engine_output_prefix}/{_safe_task_id(task_id)}/final.mp4"
+    return f"{_safe_prefix(settings.engine_output_prefix)}/{_safe_task_id(task_id)}/final.mp4"
 
 
 def _build_engine_config(params: dict[str, Any]):

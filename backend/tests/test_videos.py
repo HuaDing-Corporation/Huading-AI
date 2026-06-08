@@ -124,11 +124,13 @@ def test_rejects_unknown_pipeline() -> None:
 
 
 def test_output_path_is_not_accepted() -> None:
+    from pydantic import ValidationError
+
     from app.schemas.videos import VideoGenerateRequest
 
-    # An attacker-supplied output_path must be ignored, not honored.
-    req = VideoGenerateRequest(**{"topic": "x", "output_path": "/etc/cron.d/x"})
-    assert "output_path" not in req.model_dump()
+    # An attacker-supplied output_path must be rejected (extra="forbid"), not honored.
+    with pytest.raises(ValidationError):
+        VideoGenerateRequest(topic="x", output_path="/etc/cron.d/x")
 
 
 def test_storage_key_rejects_traversal() -> None:

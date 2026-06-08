@@ -20,6 +20,15 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://localhost:6379/2"
     celery_task_always_eager: bool = False
 
+    # Readiness probe timeouts so an unreachable dependency degrades fast
+    # instead of hanging the /ready handler (#003-FIX P2).
+    db_connect_timeout: int = 3  # seconds (psycopg connect_timeout)
+    redis_socket_connect_timeout: float = 2.0  # seconds
+    redis_socket_timeout: float = 2.0  # seconds
+
+    # SSE progress stream cap (seconds) before emitting an sse_timeout event.
+    sse_timeout_seconds: int = 600
+
     storage_backend: str = "local"
     storage_local_root: str = ".local-storage"
     storage_bucket: str = "huading-dev"

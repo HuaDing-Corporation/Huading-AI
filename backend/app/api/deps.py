@@ -24,7 +24,13 @@ def get_db_session() -> Generator[Session, None, None]:
 
 def get_redis_client() -> redis.Redis:
     settings = get_settings()
-    return redis.Redis.from_url(settings.redis_url, decode_responses=True)
+    # Socket timeouts so an unreachable Redis degrades fast (#003-FIX P2).
+    return redis.Redis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        socket_connect_timeout=settings.redis_socket_connect_timeout,
+        socket_timeout=settings.redis_socket_timeout,
+    )
 
 
 def get_object_storage() -> ObjectStorage:

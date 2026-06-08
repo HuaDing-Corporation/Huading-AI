@@ -1,6 +1,6 @@
 import re
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _ALLOWED_PIPELINES = {"standard", "custom"}
 _ALLOWED_MODES = {"generate", "fixed"}
@@ -14,7 +14,12 @@ class VideoGenerateRequest(BaseModel):
     Note: there is deliberately no ``output_path`` field. The output location is
     chosen server-side under a task-isolated, whitelisted path (#002-RV P2); a
     client cannot direct the engine to write anywhere on disk.
+
+    ``extra="forbid"`` rejects unknown fields (e.g. a sneaked-in ``output_path``)
+    with 422 instead of silently ignoring them (#005-FIX P2).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     topic: str = Field(min_length=1, max_length=2000, description="Theme/topic or fixed script")
     pipeline: str = Field(default="standard")

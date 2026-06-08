@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from app.services.storage.base import StorageKeyError
+
 
 class LocalObjectStorage:
     def __init__(self, root: str) -> None:
@@ -12,7 +14,7 @@ class LocalObjectStorage:
         path = (self.root / key).resolve()
         root = self.root.resolve()
         if root not in path.parents and path != root:
-            raise ValueError("Object key escapes local storage root.")
+            raise StorageKeyError("Object key escapes local storage root.")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         return path.as_uri()
