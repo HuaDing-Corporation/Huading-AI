@@ -20,20 +20,17 @@ regex = '''sk-(?:proj-|ant-|or-)?[A-Za-z0-9_\-]{16,}'''
 keywords = ["sk-"]
 
 [allowlist]
-description = "Known, already-removed historical leaks and non-secret patterns."
-
-# Vendored upstream code (Pixelle-Video, Apache-2.0). We still SCAN it (a real
-# key here must fail), but the specific key below was committed before the repo
-# existed publicly, has been removed (commit 3bbe278) and must be rotated/revoked.
-# Allowlisted by exact value so full-history scans of OLD commits don't fail the
-# build; any other/new key (including a different sk- key in this dir) still fails.
+description = "Historical removed key + lockfile integrity/hash shapes (not secrets)."
+# Allowlist by VALUE/SHAPE only — NOT by file path. The previous config
+# wholesale-allowlisted entire lockfile paths, which would have hidden a real
+# token sneaked into a lockfile. Here we only ignore integrity/hash-shaped
+# strings, so a real credential in a lockfile is still reported.
 regexes = [
+  # Known historical leak: committed before the repo was public, removed in
+  # 3bbe278, rotated/revoked. Kept so full-history scans of OLD commits pass.
   '''sk-bcab316d69a7414faa9dc29737019333''',
-]
-
-# Lockfiles contain integrity hashes that can resemble high-entropy secrets.
-paths = [
-  '''.*uv\.lock$''',
-  '''.*pnpm-lock\.yaml$''',
-  '''.*package-lock\.json$''',
+  # npm/yarn/pnpm Subresource Integrity: sha1-/sha256-/sha384-/sha512-<base64>.
+  '''sha(?:1|256|384|512)-[A-Za-z0-9+/=_-]{16,}''',
+  # uv.lock / Python package hashes: sha256:<hex>.
+  '''sha256:[a-f0-9]{64}''',
 ]
