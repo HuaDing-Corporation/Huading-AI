@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_progress_store
+from app.core.config import settings
 from app.schemas.response import ApiResponse, ok
 from app.schemas.videos import VideoAccepted, VideoGenerateRequest, VideoTaskStatus
 from app.services.progress import ProgressStore
@@ -17,7 +18,6 @@ ProgressStoreDependency = Depends(get_progress_store)
 
 # Terminal states that end an SSE stream.
 _TERMINAL = {"SUCCESS", "FAILURE"}
-_SSE_MAX_TICKS = 600  # ~10 min at 1s/tick
 _SSE_INTERVAL_S = 1.0
 
 
@@ -51,7 +51,8 @@ async def stream_video_events(
 
     async def event_generator():
         last: str | None = None
-        for _ in range(_SSE_MAX_TICKS):
+        max_ticks = max(1, int(settings.sse_timeout_seconds / _SSE_INTERVAL_S))
+        for _ in range(max_ticks):
             snapshot = store.read(task_id)
             if snapshot:
                 payload = json.dumps(snapshot)
@@ -61,5 +62,14 @@ async def stream_video_events(
                 if snapshot.get("status") in _TERMINAL:
                     return
             await asyncio.sleep(_SSE_INTERVAL_S)
+
+        # Reached the cap without a terminal status: tell the client explicitly
+        # instead of silently closing the stream (#005-FIX P2).
+        timeout_event = {
+            "task_id": task_id,
+            "stage": "sse_timeout",
+            "timeout_seconds": settings.sse_timeout_seconds,
+        }
+        yield f"data: {json.dumps(timeout_event)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")

@@ -32,11 +32,20 @@ def _error_response(
     message: str,
     detail: object | None = None,
 ) -> JSONResponse:
+    request_id = _request_id(request)
     payload = ApiResponse(
         error=ErrorDetail(code=code, message=message, detail=detail),
-        request_id=_request_id(request),
+        request_id=request_id,
     )
-    return JSONResponse(status_code=status_code, content=payload.model_dump(mode="json"))
+    # Attach X-Request-ID here so every error response carries it — including the
+    # 500 handler, whose response is produced by ServerErrorMiddleware (outside
+    # RequestIdMiddleware, which therefore can't add the header) (#003-FIX P2).
+    headers = {"X-Request-ID": request_id} if request_id else None
+    return JSONResponse(
+        status_code=status_code,
+        content=payload.model_dump(mode="json"),
+        headers=headers,
+    )
 
 
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
