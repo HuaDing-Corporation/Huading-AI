@@ -2,12 +2,13 @@ name: CI
 
 on:
   pull_request:
+    branches:
+      - main
+      - develop
   push:
     branches:
       - main
       - develop
-      - "feature/**"
-      - "fix/**"
 
 jobs:
   backend:
