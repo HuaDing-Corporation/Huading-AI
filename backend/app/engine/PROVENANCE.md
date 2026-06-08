@@ -52,6 +52,13 @@ a Huading copyright header:
 - `backend/app/engine/config.py` — `EngineConfig` (platform key hosting + run params)
 - `backend/app/engine/factory.py` — `create_engine()` / `configure_runtime()`
 
+Related Huading-authored file **outside** the vendored tree (a caller of the
+engine, not part of `app/engine/`):
+
+- `backend/scripts/run_standard_pipeline.py` — standalone acceptance script that
+  drives the standard pipeline (derived-work *usage* of Pixelle-Video; carries a
+  Huading copyright header).
+
 ## Streamlit/web layer
 
 The upstream Streamlit/web display layer was **not** vendored (stripped during
