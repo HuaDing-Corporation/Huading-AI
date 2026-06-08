@@ -12,6 +12,8 @@ from typing import Any
 
 import redis
 
+from app.core.config import settings
+
 _TTL_SECONDS = 24 * 3600
 _KNOWN_FIELDS = {
     "task_id",
@@ -53,4 +55,13 @@ class ProgressStore:
 
 
 def build_progress_store(redis_url: str) -> ProgressStore:
-    return ProgressStore(redis.Redis.from_url(redis_url, decode_responses=True))
+    # Socket timeouts so a Redis outage degrades fast (e.g. GET /videos falls
+    # back / returns) instead of hanging the request or worker (#003-FIX P2).
+    return ProgressStore(
+        redis.Redis.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_connect_timeout=settings.redis_socket_connect_timeout,
+            socket_timeout=settings.redis_socket_timeout,
+        )
+    )

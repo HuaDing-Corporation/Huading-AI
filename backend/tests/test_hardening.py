@@ -5,6 +5,7 @@ from app.api.deps import get_progress_store, get_redis_client
 from app.core.config import settings
 from app.db.session import _connect_args_for
 from app.main import app
+from app.services.progress import build_progress_store
 from app.services.storage.base import StorageKeyError
 from app.services.storage.local import LocalObjectStorage
 from app.workers import video_tasks
@@ -23,6 +24,13 @@ def test_db_connect_args_sqlite_empty() -> None:
 def test_redis_client_has_socket_timeouts() -> None:
     client = get_redis_client()
     kwargs = client.connection_pool.connection_kwargs
+    assert kwargs["socket_connect_timeout"] == settings.redis_socket_connect_timeout
+    assert kwargs["socket_timeout"] == settings.redis_socket_timeout
+
+
+def test_progress_store_redis_has_socket_timeouts() -> None:
+    store = build_progress_store(settings.redis_url)
+    kwargs = store._redis.connection_pool.connection_kwargs
     assert kwargs["socket_connect_timeout"] == settings.redis_socket_connect_timeout
     assert kwargs["socket_timeout"] == settings.redis_socket_timeout
 
