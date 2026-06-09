@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://localhost:6379/2"
     celery_task_always_eager: bool = False
 
+    jwt_secret_key: str = Field(min_length=32)
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60
+
     # Readiness probe timeouts so an unreachable dependency degrades fast
     # instead of hanging the /ready handler (#003-FIX P2).
     db_connect_timeout: int = 3  # seconds (psycopg connect_timeout)

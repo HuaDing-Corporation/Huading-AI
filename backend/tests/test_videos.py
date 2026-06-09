@@ -40,7 +40,7 @@ class _FakeStorage:
         return f"memory://{key}"
 
 
-def test_video_generation_end_to_end_eager(monkeypatch, tmp_path: Path) -> None:
+def test_video_generation_end_to_end_eager(monkeypatch, tmp_path: Path, auth_context) -> None:
     store = _MemProgressStore()
     storage = _FakeStorage()
 
@@ -65,21 +65,26 @@ def test_video_generation_end_to_end_eager(monkeypatch, tmp_path: Path) -> None:
     celery_app.conf.task_always_eager = True
     try:
         client = TestClient(app)
-        resp = client.post("/api/v1/videos", json={"topic": "如何提高学习效率", "n_scenes": 2})
+        resp = client.post(
+            "/api/v1/videos",
+            json={"topic": "learn faster", "n_scenes": 2},
+            headers=auth_context["headers"],
+        )
         assert resp.status_code == 202
         task_id = resp.json()["data"]["task_id"]
         assert task_id
 
-        status = client.get(f"/api/v1/videos/{task_id}")
+        status = client.get(f"/api/v1/videos/{task_id}", headers=auth_context["headers"])
         assert status.status_code == 200
         body = status.json()["data"]
         assert body["status"] == "SUCCESS"
         assert body["progress"] == 1.0
         assert body["stage"] == "completed"
-        assert body["video_url"] == f"memory://videos/{task_id}/final.mp4"
 
-        # Artifact stored as mp4 under a task-isolated key.
-        key = f"videos/{task_id}/final.mp4"
+        tenant_id = auth_context["tenant_id"]
+        assert body["video_url"] == f"memory://videos/{tenant_id}/{task_id}/final.mp4"
+
+        key = f"videos/{tenant_id}/{task_id}/final.mp4"
         assert key in storage.saved
         assert storage.saved[key][1] == "video/mp4"
     finally:
@@ -87,11 +92,10 @@ def test_video_generation_end_to_end_eager(monkeypatch, tmp_path: Path) -> None:
         app.dependency_overrides.pop(get_progress_store, None)
 
 
-def test_unknown_task_falls_back_to_celery_status(monkeypatch) -> None:
+def test_unknown_task_is_not_disclosed(monkeypatch, auth_context) -> None:
     store = _MemProgressStore()
     app.dependency_overrides[get_progress_store] = lambda: store
 
-    # No Redis available in CI; stub Celery's result lookup for the fallback path.
     class _FakeResult:
         def __init__(self, task_id, app=None):
             self.status = "PENDING"
@@ -101,25 +105,30 @@ def test_unknown_task_falls_back_to_celery_status(monkeypatch) -> None:
     monkeypatch.setattr(videos_route, "AsyncResult", _FakeResult)
     try:
         client = TestClient(app)
-        resp = client.get("/api/v1/videos/does-not-exist")
-        assert resp.status_code == 200
-        assert resp.json()["data"]["status"] == "PENDING"
+        resp = client.get("/api/v1/videos/does-not-exist", headers=auth_context["headers"])
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "VIDEO_TASK_NOT_FOUND"
     finally:
         app.dependency_overrides.pop(get_progress_store, None)
 
 
-def test_rejects_bad_frame_template() -> None:
+def test_rejects_bad_frame_template(auth_context) -> None:
     client = TestClient(app)
     resp = client.post(
         "/api/v1/videos",
         json={"topic": "x", "frame_template": "../../etc/passwd.html"},
+        headers=auth_context["headers"],
     )
     assert resp.status_code == 422
 
 
-def test_rejects_unknown_pipeline() -> None:
+def test_rejects_unknown_pipeline(auth_context) -> None:
     client = TestClient(app)
-    resp = client.post("/api/v1/videos", json={"topic": "x", "pipeline": "evil"})
+    resp = client.post(
+        "/api/v1/videos",
+        json={"topic": "x", "pipeline": "evil"},
+        headers=auth_context["headers"],
+    )
     assert resp.status_code == 422
 
 
@@ -128,15 +137,20 @@ def test_output_path_is_not_accepted() -> None:
 
     from app.schemas.videos import VideoGenerateRequest
 
-    # An attacker-supplied output_path must be rejected (extra="forbid"), not honored.
     with pytest.raises(ValidationError):
         VideoGenerateRequest(topic="x", output_path="/etc/cron.d/x")
 
 
 def test_storage_key_rejects_traversal() -> None:
-    assert video_tasks._storage_key("abc-123").endswith("/final.mp4")
+    assert video_tasks._storage_key("abc-123", "tenant-1").endswith("/final.mp4")
     with pytest.raises(ValueError):
-        video_tasks._storage_key("../../etc")
+        video_tasks._storage_key("../../etc", "tenant-1")
+
+
+def test_anonymous_video_rejected() -> None:
+    client = TestClient(app)
+    resp = client.post("/api/v1/videos", json={"topic": "x"})
+    assert resp.status_code == 401
 
 
 def test_build_engine_config_requires_credentials(monkeypatch) -> None:
