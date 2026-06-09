@@ -4,6 +4,7 @@
 
 @layer base {
   :root {
+    /* shadcn compatibility (kept so existing primitives keep working) */
     --background: 0 0% 100%;
     --foreground: 222.2 84% 4.9%;
     --primary: 221.2 83.2% 53.3%;
@@ -12,6 +13,89 @@
     --muted-foreground: 215.4 16.3% 46.9%;
     --border: 214.3 31.8% 91.4%;
     --radius: 0.5rem;
+
+    /* ── 华鼎 design system tokens (light, default) ── */
+    /* brand gold */
+    --gold: #bd9a59;
+    --gold-deep: #8c6f3a;
+    --bronze: #6e521f;
+    --champ: #e6d3a3;
+    --grad-gold: linear-gradient(135deg, #ecd9aa 0%, #c8a563 52%, #a37f3f 100%);
+    --logo-grad-from: #caa55f;
+    --logo-grad-to: #6e521f;
+
+    /* ink / text */
+    --ink: #3a3320;
+    --ink-soft: #6f6650;
+    --ink-faint: #a89c80;
+    --bg-base: #f5efe2;
+
+    /* borders */
+    --bd-gold: rgba(189, 154, 89, 0.64);
+    --bd-glass: rgba(255, 255, 255, 0.78);
+    --bd-sel: rgba(168, 134, 62, 0.9);
+
+    /* glass material */
+    --glass-fill: rgba(255, 255, 255, 0.42);
+    --glass-soft: rgba(255, 255, 255, 0.45);
+    --glass-hover: rgba(255, 255, 255, 0.58);
+    --chip-sel: rgba(189, 154, 89, 0.18);
+    --glass-bg: linear-gradient(
+      158deg,
+      rgba(255, 255, 255, 0.6) 0%,
+      rgba(255, 255, 255, 0.5) 60%,
+      rgba(231, 210, 162, 0.3) 100%
+    );
+    --glass-fallback: rgba(255, 255, 255, 0.92);
+    --grad-mark: linear-gradient(158deg, rgba(255, 255, 255, 0.7), rgba(231, 210, 162, 0.5));
+
+    /* semantic status */
+    --success-fg: #447d5f;
+    --success-bg: rgba(106, 166, 127, 0.2);
+    --run-fg: #8c6f3a;
+    --run-bg: rgba(189, 154, 89, 0.2);
+    --queue-fg: #a89c80;
+    --queue-bg: rgba(155, 128, 62, 0.15);
+    --track: rgba(155, 128, 62, 0.16);
+
+    /* page background (warm champagne halo) */
+    --page-bg: #f5efe2;
+    --page-image: radial-gradient(1200px 820px at 50% -12%, rgba(255, 255, 255, 0.95), transparent 62%),
+      radial-gradient(940px 720px at 88% 8%, rgba(229, 210, 162, 0.46), transparent 60%),
+      radial-gradient(880px 720px at 10% 96%, rgba(238, 224, 189, 0.52), transparent 60%),
+      radial-gradient(700px 600px at 70% 100%, rgba(213, 182, 122, 0.3), transparent 58%);
+  }
+
+  /* ── Dark theme tokens (reserved for M2; placeholder values) ── */
+  .dark {
+    --ink: #efe7d4;
+    --ink-soft: #c9bd9f;
+    --ink-faint: #8a8068;
+    --bg-base: #1b1810;
+
+    --bd-gold: rgba(189, 154, 89, 0.5);
+    --bd-glass: rgba(255, 255, 255, 0.14);
+    --bd-sel: rgba(214, 182, 122, 0.85);
+
+    --glass-fill: rgba(255, 255, 255, 0.06);
+    --glass-soft: rgba(255, 255, 255, 0.08);
+    --glass-hover: rgba(255, 255, 255, 0.12);
+    --chip-sel: rgba(214, 182, 122, 0.22);
+    --glass-bg: linear-gradient(
+      158deg,
+      rgba(64, 56, 34, 0.55) 0%,
+      rgba(44, 38, 22, 0.5) 60%,
+      rgba(86, 70, 40, 0.35) 100%
+    );
+    --glass-fallback: rgba(28, 24, 15, 0.94);
+    --grad-mark: linear-gradient(158deg, rgba(120, 102, 60, 0.5), rgba(70, 58, 32, 0.5));
+
+    --track: rgba(214, 182, 122, 0.18);
+
+    --page-bg: #161208;
+    --page-image: radial-gradient(1200px 820px at 50% -12%, rgba(86, 72, 40, 0.4), transparent 62%),
+      radial-gradient(940px 720px at 88% 8%, rgba(120, 100, 56, 0.22), transparent 60%),
+      radial-gradient(880px 720px at 10% 96%, rgba(90, 74, 42, 0.26), transparent 60%);
   }
 
   * {
@@ -19,6 +103,34 @@
   }
 
   body {
-    @apply bg-background text-foreground;
+    color: var(--ink);
+    background-color: var(--page-bg);
+    background-image: var(--page-image);
+    background-attachment: fixed;
+    -webkit-font-smoothing: antialiased;
+    @apply font-sans;
+  }
+}
+
+@layer components {
+  /* Apple-style liquid glass. backdrop-filter carries the -webkit- prefix; on
+     engines without backdrop-filter support we degrade to a high-white opaque
+     panel so content never shows through illegibly (低端降级). */
+  .glass {
+    position: relative;
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: blur(34px) saturate(1.32);
+    backdrop-filter: blur(34px) saturate(1.32);
+    border: 1px solid var(--bd-glass);
+    box-shadow:
+      8px 18px 48px -16px rgba(150, 118, 52, 0.26),
+      0 0 28px rgba(231, 210, 162, 0.24),
+      inset 0 1px 0 rgba(255, 255, 255, 0.92);
+  }
+
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .glass {
+      background: var(--glass-fallback);
+    }
   }
 }

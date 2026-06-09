@@ -1,20 +1,37 @@
-import { Button } from "@/components/ui/button";
+import { Store } from "lucide-react";
+
+import { NewVideoCard } from "@/components/console/new-video-card";
+import { Sidebar } from "@/components/console/sidebar";
+import { TaskList } from "@/components/console/task-list";
+import { TopBar } from "@/components/console/top-bar";
 
 export default function Home() {
   return (
-    <main className="min-h-screen bg-background px-6 py-10 text-foreground">
-      <section className="mx-auto flex max-w-5xl flex-col gap-6">
-        <p className="text-sm font-medium text-muted-foreground">Huading AI</p>
-        <div className="flex flex-col gap-4">
-          <h1 className="text-4xl font-semibold tracking-normal">华鼎项目骨架已就绪</h1>
-          <p className="max-w-2xl text-base leading-7 text-muted-foreground">
-            Next.js、TypeScript、Tailwind CSS 与 shadcn/ui 组件目录已经初始化，等待后续业务模块接入。
-          </p>
-        </div>
-        <div>
-          <Button>开始构建</Button>
-        </div>
-      </section>
+    <main className="min-h-screen p-5 md:p-7">
+      <div className="mx-auto grid max-w-[1280px] grid-cols-1 grid-rows-[auto_1fr] gap-5 md:grid-cols-[248px_1fr]">
+        <TopBar />
+        <Sidebar />
+
+        <section className="flex flex-col gap-5">
+          <header className="flex flex-wrap items-end gap-3.5 px-1">
+            <h1 className="text-[27px] font-semibold tracking-[1px] text-ink">工作台</h1>
+            <p className="mb-1 text-[13.5px] text-ink-soft">输入主题，一键生成成片</p>
+            <div className="ml-auto flex gap-2">
+              <span className="flex items-center gap-1.5 rounded-pill border border-line-gold bg-glass-soft px-3.5 py-2 text-[12.5px] text-ink-soft">
+                <Store size={14} strokeWidth={1.8} /> 电商带货
+              </span>
+              <span className="rounded-pill border border-line-gold bg-glass-soft px-3.5 py-2 text-[12.5px] text-ink-soft">
+                竖屏 9:16
+              </span>
+            </div>
+          </header>
+
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1.05fr_.95fr]">
+            <NewVideoCard />
+            <TaskList />
+          </div>
+        </section>
+      </div>
     </main>
   );
 }
