@@ -9,12 +9,27 @@ import { Chip } from "@/components/ui/chip";
 import { Input } from "@/components/ui/input";
 import { templateOptions, voiceSizeOptions } from "@/lib/mock";
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
+
+/** Single labelled control — label is explicitly tied to the control via htmlFor. */
+function Field({ label, htmlFor, children }: { label: string; htmlFor: string; children: ReactNode }) {
   return (
     <div className="mb-[15px]">
-      <label className="mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft">{label}</label>
+      <label htmlFor={htmlFor} className={labelClass}>
+        {label}
+      </label>
       {children}
     </div>
+  );
+}
+
+/** Group of chips — fieldset/legend gives assistive tech the group name. */
+function FieldGroup({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <fieldset className="mb-[15px] m-0 min-w-0 border-0 p-0">
+      <legend className={labelClass}>{label}</legend>
+      {children}
+    </fieldset>
   );
 }
 
@@ -32,11 +47,11 @@ export function NewVideoCard() {
       <CardTitle>新建视频</CardTitle>
       <CardSubtitle className="mb-[18px] mt-1">支持主题生成 / 商品驱动 / 自定义脚本</CardSubtitle>
 
-      <Field label="视频主题">
-        <Input defaultValue="秋冬新款羊绒大衣 · 卖点种草" />
+      <Field label="视频主题" htmlFor="video-topic">
+        <Input id="video-topic" name="video-topic" defaultValue="秋冬新款羊绒大衣 · 卖点种草" />
       </Field>
 
-      <Field label="视觉模板">
+      <FieldGroup label="视觉模板">
         <div className="grid grid-cols-3 gap-3">
           {templateOptions.map((option) => (
             <Chip
@@ -49,9 +64,9 @@ export function NewVideoCard() {
             </Chip>
           ))}
         </div>
-      </Field>
+      </FieldGroup>
 
-      <Field label="语音 / 尺寸">
+      <FieldGroup label="语音 / 尺寸">
         <div className="grid grid-cols-3 gap-3">
           {voiceSizeOptions.map((option) => (
             <Chip key={option} selected={options.includes(option)} onClick={() => toggleOption(option)}>
@@ -60,7 +75,7 @@ export function NewVideoCard() {
             </Chip>
           ))}
         </div>
-      </Field>
+      </FieldGroup>
 
       <Button variant="primary" size="lg" className="mt-2 w-full">
         <Sparkles size={18} strokeWidth={1.8} /> 生成视频

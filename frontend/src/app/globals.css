@@ -58,6 +58,35 @@
     --queue-bg: rgba(155, 128, 62, 0.15);
     --track: rgba(155, 128, 62, 0.16);
 
+    /* gradients (semantic) */
+    --grad-done: linear-gradient(135deg, #a7cba0, #6aa67f);
+
+    /* radii scale */
+    --radius-card: 26px;
+    --radius-panel: 20px;
+    --radius-btn: 17px;
+    --radius-field: 16px;
+    --radius-mark: 16px;
+    --radius-chip: 15px;
+    --radius-pill: 13px;
+    --radius-badge: 11px;
+
+    /* elevation / shadows */
+    --shadow-glass: 8px 18px 48px -16px rgba(150, 118, 52, 0.26),
+      0 0 28px rgba(231, 210, 162, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.92);
+    --shadow-button: 0 13px 30px rgba(156, 124, 62, 0.42),
+      inset 0 1px 0 rgba(255, 255, 255, 0.55);
+    --shadow-nav-active: 0 8px 20px rgba(156, 124, 62, 0.4),
+      inset 0 1px 0 rgba(255, 255, 255, 0.45);
+    --shadow-avatar: 0 5px 14px rgba(156, 124, 62, 0.42),
+      inset 0 1px 0 rgba(255, 255, 255, 0.5);
+    --shadow-thumb: 0 6px 15px rgba(156, 124, 62, 0.34),
+      inset 0 1px 0 rgba(255, 255, 255, 0.5);
+    --shadow-thumb-done: 0 6px 15px rgba(106, 166, 127, 0.3);
+    --shadow-mark: inset 0 1px 0 rgba(255, 255, 255, 0.9),
+      0 0 16px rgba(231, 210, 162, 0.34);
+    --shadow-focus-gold: 0 0 0 3px rgba(189, 154, 89, 0.22);
+
     /* page background (warm champagne halo) */
     --page-bg: #f5efe2;
     --page-image: radial-gradient(1200px 820px at 50% -12%, rgba(255, 255, 255, 0.95), transparent 62%),
@@ -122,10 +151,7 @@
     -webkit-backdrop-filter: blur(34px) saturate(1.32);
     backdrop-filter: blur(34px) saturate(1.32);
     border: 1px solid var(--bd-glass);
-    box-shadow:
-      8px 18px 48px -16px rgba(150, 118, 52, 0.26),
-      0 0 28px rgba(231, 210, 162, 0.24),
-      inset 0 1px 0 rgba(255, 255, 255, 0.92);
+    box-shadow: var(--shadow-glass);
   }
 
   @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {

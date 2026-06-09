@@ -13,8 +13,8 @@ const thumbIcon: Record<TaskStatus, LucideIcon> = {
 };
 
 const thumbStyle: Record<TaskStatus, string> = {
-  running: "bg-grad-gold text-white shadow-thumb",
-  done: "bg-grad-done text-white shadow-thumb-done",
+  running: "bg-grad-gold text-ink shadow-thumb",
+  done: "bg-grad-done text-ink shadow-thumb-done",
   queued: "bg-track text-ink-faint"
 };
 

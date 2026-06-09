@@ -9,9 +9,9 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        // Primary gold action button (gradient fill, white text).
+        // Primary gold action button (gradient fill, deep-ink text for AA contrast).
         primary:
-          "bg-grad-gold text-white shadow-button hover:brightness-[1.03]",
+          "bg-grad-gold text-ink shadow-button hover:brightness-[1.03]",
         // Quiet glass-tinted secondary.
         soft:
           "border border-line-gold bg-glass-fill text-ink-soft hover:bg-white/55",

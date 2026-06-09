@@ -49,33 +49,30 @@ const config: Config = {
         "grad-gold": "var(--grad-gold)",
         "grad-glass": "var(--glass-bg)",
         "grad-mark": "var(--grad-mark)",
-        "grad-done": "linear-gradient(135deg,#a7cba0,#6aa67f)"
+        "grad-done": "var(--grad-done)"
       },
       borderRadius: {
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
-        card: "26px",
-        panel: "20px",
-        btn: "17px",
-        field: "16px",
-        mark: "16px",
-        chip: "15px",
-        pill: "13px",
-        badge: "11px"
+        card: "var(--radius-card)",
+        panel: "var(--radius-panel)",
+        btn: "var(--radius-btn)",
+        field: "var(--radius-field)",
+        mark: "var(--radius-mark)",
+        chip: "var(--radius-chip)",
+        pill: "var(--radius-pill)",
+        badge: "var(--radius-badge)"
       },
       boxShadow: {
-        glass:
-          "8px 18px 48px -16px rgba(150,118,52,.26),0 0 28px rgba(231,210,162,.24),inset 0 1px 0 rgba(255,255,255,.92)",
-        button:
-          "0 13px 30px rgba(156,124,62,.42),inset 0 1px 0 rgba(255,255,255,.55)",
-        "nav-active":
-          "0 8px 20px rgba(156,124,62,.4),inset 0 1px 0 rgba(255,255,255,.45)",
-        avatar: "0 5px 14px rgba(156,124,62,.42),inset 0 1px 0 rgba(255,255,255,.5)",
-        thumb: "0 6px 15px rgba(156,124,62,.34),inset 0 1px 0 rgba(255,255,255,.5)",
-        "thumb-done": "0 6px 15px rgba(106,166,127,.3)",
-        mark: "inset 0 1px 0 rgba(255,255,255,.9),0 0 16px rgba(231,210,162,.34)",
-        "focus-gold": "0 0 0 3px rgba(189,154,89,.22)"
+        glass: "var(--shadow-glass)",
+        button: "var(--shadow-button)",
+        "nav-active": "var(--shadow-nav-active)",
+        avatar: "var(--shadow-avatar)",
+        thumb: "var(--shadow-thumb)",
+        "thumb-done": "var(--shadow-thumb-done)",
+        mark: "var(--shadow-mark)",
+        "focus-gold": "var(--shadow-focus-gold)"
       },
       fontFamily: {
         sans: [

@@ -35,7 +35,7 @@ export function SidebarNav({
             className={cn(
               "flex items-center gap-3.5 rounded-field px-4 py-3 text-sm outline-none transition-colors focus-visible:shadow-focus-gold",
               active
-                ? "bg-grad-gold text-white shadow-nav-active"
+                ? "bg-grad-gold text-ink shadow-nav-active"
                 : "text-ink-soft hover:bg-glass-soft"
             )}
           >
