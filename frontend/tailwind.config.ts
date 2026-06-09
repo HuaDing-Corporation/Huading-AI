@@ -43,6 +43,8 @@ const config: Config = {
         "run-bg": "var(--run-bg)",
         "queue-fg": "var(--queue-fg)",
         "queue-bg": "var(--queue-bg)",
+        "error-fg": "var(--error-fg)",
+        "error-bg": "var(--error-bg)",
         track: "var(--track)"
       },
       backgroundImage: {

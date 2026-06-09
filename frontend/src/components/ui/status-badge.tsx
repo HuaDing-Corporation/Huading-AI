@@ -2,12 +2,13 @@ import type { ReactNode } from "react";
 
 import { cn } from "@/lib/utils";
 
-export type TaskStatus = "running" | "done" | "queued";
+export type TaskStatus = "running" | "done" | "queued" | "failed";
 
 const styles: Record<TaskStatus, string> = {
   running: "bg-run-bg text-run-fg",
   done: "bg-success-bg text-success-fg",
-  queued: "bg-queue-bg text-queue-fg"
+  queued: "bg-queue-bg text-queue-fg",
+  failed: "bg-error-bg text-error-fg"
 };
 
 export function StatusBadge({

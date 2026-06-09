@@ -1,7 +1,9 @@
+import json
 from functools import lru_cache
+from typing import Annotated
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -10,7 +12,10 @@ class Settings(BaseSettings):
     api_v1_prefix: str = "/api/v1"
     environment: str = "local"
     log_level: str = "INFO"
-    cors_origins: list[str] = Field(
+    # NoDecode: stop pydantic-settings from JSON-decoding the env value before
+    # validation, so a plain comma-separated string reaches the validator below
+    # instead of raising SettingsError.
+    cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000"]
     )
 
@@ -61,8 +66,19 @@ class Settings(BaseSettings):
     @field_validator("cors_origins", mode="before")
     @classmethod
     def split_cors_origins(cls, value: str | list[str]) -> list[str]:
+        # Accept a JSON array, a comma-separated string, or a single URL.
         if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
+            text = value.strip()
+            if not text:
+                return []
+            if text.startswith("["):
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, list):
+                    return [str(item).strip() for item in parsed if str(item).strip()]
+            return [item.strip() for item in text.split(",") if item.strip()]
         return value
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
