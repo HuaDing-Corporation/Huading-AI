@@ -246,9 +246,12 @@ python scripts/run_standard_pipeline.py
 
 ## 7. 合规说明
 
-- 本目录保留上游 `LICENSE`（Apache-2.0）与 `NOTICE`。
-- 华鼎新增文件（`__init__.py` / `config.py` / `factory.py`）与修改文件
-  （`pixelle_video/config/manager.py` 新增 `configure_from_config()`）均在文件头部
-  按 Apache License §4(b) 标注「本文件系对 Pixelle-Video 的修改/衍生」声明。
-- 未改动的上游源文件保留其原始版权头（`Copyright (C) 2025 AIDC-AI`）。
+- **来源例外清单见 [`PROVENANCE.md`](./PROVENANCE.md)**：整个 `pixelle_video/` 树 vendored 自
+  AIDC-AI/Pixelle-Video（Apache-2.0），并列出华鼎已改文件（带 §4(b) 声明）与新增文件。
+- 本目录保留上游 `LICENSE`（Apache-2.0）与 `NOTICE`（含上游 `Copyright (C) 2025 AIDC-AI`）。
+- 华鼎新增文件（`__init__.py` / `config.py` / `factory.py`）与修改的上游文件
+  （`config/manager.py`、`services/frame_html.py`、`services/api_services/image_processor.py`、
+  `services/api_services/image_client.py`）均在文件头部按 Apache §4(b) 标注修改声明。
+- 未改动的上游源文件采用**树级来源声明**（PROVENANCE + LICENSE/NOTICE）而非逐文件加头，
+  以减少与上游漂移；部分上游文件本身无版权头属正常，合规由树级声明覆盖（§4(c)）。
 - 已剥离 Streamlit/Web 层，依赖中明确不含 `streamlit`。

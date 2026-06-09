@@ -65,6 +65,32 @@ docker compose -f infra/docker-compose.yml up -d
 
 All changes should go through pull requests with linked issues when possible.
 
+## Secret scanning
+
+CI runs gitleaks (`.github/workflows/secret-scan.yml`) over the **full git
+history** using `.gitleaks.toml`.
+
+- **After changing any secret-scan-related file** (`.gitleaks.toml`, the
+  workflow, or any file that adds/edits a token-shaped string — including test
+  fixtures), re-run a **full-history** scan, not just a working-tree check:
+
+  ```bash
+  # Either scan history in place …
+  gitleaks detect --source . --config .gitleaks.toml --no-banner
+  # … or, to mirror CI exactly (fresh checkout, no local orphan commits/reflog):
+  git clone --branch <your-branch> . /tmp/scan && \
+    gitleaks detect --source /tmp/scan --config /tmp/scan/.gitleaks.toml --no-banner
+  ```
+
+  Rationale: `gitleaks detect` scans every commit. A token added in one commit is
+  caught even if a later commit removes it, so a working-tree-only check (or a
+  scan run before the file existed) can pass locally while CI fails.
+
+- Never commit real secrets or secret-shaped literals. Build test fixtures from
+  parts (e.g. `"sk-" + "x" * 20`) so they don't trip the scanner. If a real
+  secret is committed, treat it as a leak: rotate it and remove it from history
+  (don't just allowlist it).
+
 ## License
 
 This repository is licensed under Apache-2.0. It is distilled from Pixelle-Video, also Apache-2.0 licensed; attribution is retained in `NOTICE`.
