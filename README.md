@@ -56,6 +56,41 @@ Optional local services:
 docker compose -f infra/docker-compose.yml up -d
 ```
 
+## Full-stack e2e (one command)
+
+Bring up Postgres + Redis + backend API + Celery worker + frontend with a single
+`docker compose`. The backend image bundles ffmpeg and Playwright Chromium, and
+the backend container runs `alembic upgrade head` on start.
+
+```bash
+cd infra
+cp .env.example .env
+# Edit .env: set ENGINE_LLM_API_KEY (and JWT_SECRET_KEY for non-throwaway use).
+docker compose -f docker-compose.full.yml up --build
+```
+
+Then:
+
+1. Open `http://localhost:3000` (redirects to `/login`).
+2. Register a tenant + admin (one-time):
+   ```bash
+   curl -X POST http://localhost:8000/api/v1/auth/register-tenant \
+     -H 'Content-Type: application/json' \
+     -d '{"tenant_slug":"huading","tenant_name":"华鼎","email":"admin@huading.ai","password":"changeme123"}'
+   ```
+3. Log in with `huading` / `admin@huading.ai` / `changeme123`.
+4. 新建视频 → enter a topic → 生成视频 → watch live progress (SSE) → 成片 URL.
+
+Notes:
+- `ENGINE_LLM_*` must be set for a task to actually produce a video; otherwise it
+  fails at the engine credential check (login/UI/progress wiring still works).
+- The browser talks to the backend via the published host port
+  (`http://localhost:8000`), not the internal `backend` service name — it runs on
+  your host, outside the compose network. CORS is preconfigured for
+  `localhost:3000`.
+- Generated videos land in the shared `media` volume (`file://` URLs in local
+  storage); switch `STORAGE_BACKEND=s3` for HTTP-accessible URLs.
+
 ## Branching
 
 - `main`: protected release branch

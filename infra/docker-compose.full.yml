@@ -1,0 +1,102 @@
+# Full-stack one-command e2e: postgres + redis + backend API + celery worker + frontend.
+#
+#   cd infra
+#   cp .env.example .env        # then fill ENGINE_LLM_* (and JWT_SECRET_KEY)
+#   docker compose -f docker-compose.full.yml up --build
+#
+# Open http://localhost:3000 -> register tenant -> login -> 新建视频 -> watch
+# progress -> 成片. See README for the full walkthrough.
+name: huading-full
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: huading
+      POSTGRES_USER: huading
+      POSTGRES_PASSWORD: huading
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U huading -d huading"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      # Point services at each other by compose service name (override .env's
+      # localhost defaults).
+      DATABASE_URL: postgresql+psycopg://huading:huading@postgres:5432/huading
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      STORAGE_LOCAL_ROOT: /app/.local-storage
+    # Run DB migrations, then serve the API.
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      - media:/app/.local-storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/openapi.json"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://huading:huading@postgres:5432/huading
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      STORAGE_LOCAL_ROOT: /app/.local-storage
+    # Single-config / single-process worker (engine config is a process singleton).
+    command: celery -A app.workers.celery_app.celery_app worker --pool=solo --concurrency=1 -Q default --loglevel=info
+    volumes:
+      - media:/app/.local-storage
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+      args:
+        # Browser-side base URL; reaches the backend via the published host port.
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  media:
