@@ -1,12 +1,19 @@
-import { Bell, Search, Settings } from "lucide-react";
+"use client";
+
+import { Bell, LogOut, Search, Settings } from "lucide-react";
 
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Glass } from "@/components/ui/glass";
 import { Input } from "@/components/ui/input";
 import { Logo } from "@/components/ui/logo";
+import { useAuth } from "@/lib/auth/auth-context";
 
 export function TopBar() {
+  const { session, logout } = useAuth();
+  const displayName = session?.user?.user.full_name ?? session?.user?.user.email ?? "华";
+  const initial = displayName.trim().slice(0, 1).toUpperCase() || "华";
+
   return (
     <Glass className="col-span-full flex items-center gap-[18px] rounded-card px-6 py-[15px]">
       <Logo />
@@ -31,7 +38,10 @@ export function TopBar() {
         <Button variant="icon" size="icon" aria-label="设置">
           <Settings size={18} strokeWidth={1.8} />
         </Button>
-        <Avatar>华</Avatar>
+        <Button variant="icon" size="icon" aria-label="退出登录" title="退出登录" onClick={logout}>
+          <LogOut size={18} strokeWidth={1.8} />
+        </Button>
+        <Avatar>{initial}</Avatar>
       </div>
     </Glass>
   );

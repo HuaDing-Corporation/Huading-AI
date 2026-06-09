@@ -1,11 +1,26 @@
+"use client";
+
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { Store } from "lucide-react";
 
 import { NewVideoCard } from "@/components/console/new-video-card";
 import { Sidebar } from "@/components/console/sidebar";
 import { TaskList } from "@/components/console/task-list";
 import { TopBar } from "@/components/console/top-bar";
+import { useAuth } from "@/lib/auth/auth-context";
 
 export default function Home() {
+  const { session, ready } = useAuth();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (ready && !session) router.replace("/login");
+  }, [ready, session, router]);
+
+  // Avoid rendering the console (and firing authed requests) until we know.
+  if (!ready || !session) return <main className="min-h-screen" aria-busy="true" />;
+
   return (
     <main className="min-h-screen p-5 md:p-7">
       <div className="mx-auto grid max-w-[1280px] grid-cols-1 grid-rows-[auto_1fr] gap-5 md:grid-cols-[248px_1fr]">

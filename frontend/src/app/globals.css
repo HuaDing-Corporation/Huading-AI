@@ -56,6 +56,8 @@
     --run-bg: rgba(189, 154, 89, 0.2);
     --queue-fg: #a89c80;
     --queue-bg: rgba(155, 128, 62, 0.15);
+    --error-fg: #a4503f;
+    --error-bg: rgba(164, 80, 63, 0.16);
     --track: rgba(155, 128, 62, 0.16);
 
     /* gradients (semantic) */
@@ -120,6 +122,8 @@
     --grad-mark: linear-gradient(158deg, rgba(120, 102, 60, 0.5), rgba(70, 58, 32, 0.5));
 
     --track: rgba(214, 182, 122, 0.18);
+    --error-fg: #e6a08f;
+    --error-bg: rgba(164, 80, 63, 0.26);
 
     --page-bg: #161208;
     --page-image: radial-gradient(1200px 820px at 50% -12%, rgba(86, 72, 40, 0.4), transparent 62%),
