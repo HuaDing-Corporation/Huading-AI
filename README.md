@@ -82,6 +82,9 @@ Then:
 4. 新建视频 → enter a topic → 生成视频 → watch live progress (SSE) → 成片 URL.
 
 Notes:
+- The backend image build downloads Playwright Chromium from the Playwright CDN.
+  On restricted networks, set the optional `APT_MIRROR` / `UV_INDEX` /
+  `PLAYWRIGHT_DOWNLOAD_HOST` in `.env` (examples included) to use mirrors.
 - `ENGINE_LLM_*` must be set for a task to actually produce a video; otherwise it
   fails at the engine credential check (login/UI/progress wiring still works).
 - The browser talks to the backend via the published host port

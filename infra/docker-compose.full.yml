@@ -35,6 +35,11 @@ services:
     build:
       context: ../backend
       dockerfile: Dockerfile
+      args:
+        # Optional package mirrors for restricted networks (empty = upstream).
+        APT_MIRROR: ${APT_MIRROR:-}
+        UV_INDEX: ${UV_INDEX:-}
+        PLAYWRIGHT_DOWNLOAD_HOST: ${PLAYWRIGHT_DOWNLOAD_HOST:-}
     env_file: .env
     environment:
       # Point services at each other by compose service name (override .env's
@@ -67,6 +72,11 @@ services:
     build:
       context: ../backend
       dockerfile: Dockerfile
+      args:
+        # Optional package mirrors for restricted networks (empty = upstream).
+        APT_MIRROR: ${APT_MIRROR:-}
+        UV_INDEX: ${UV_INDEX:-}
+        PLAYWRIGHT_DOWNLOAD_HOST: ${PLAYWRIGHT_DOWNLOAD_HOST:-}
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://huading:huading@postgres:5432/huading
