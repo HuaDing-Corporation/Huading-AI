@@ -144,3 +144,16 @@ def test_auth_request_rejects_unknown_fields() -> None:
         assert resp.headers.get("X-Request-ID")
     finally:
         _cleanup_test_db(engine)
+
+
+def test_login_requires_tenant_slug() -> None:
+    _SessionTesting, engine = _install_test_db()
+    try:
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/auth/login",
+            json={"email": "owner@example.com", "password": "secret-pass"},
+        )
+        assert resp.status_code == 422
+    finally:
+        _cleanup_test_db(engine)

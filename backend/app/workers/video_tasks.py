@@ -44,9 +44,12 @@ def _safe_prefix(prefix: str) -> str:
     return prefix
 
 
-def _storage_key(task_id: str) -> str:
+def _storage_key(task_id: str, tenant_id: str) -> str:
     """Task-isolated object-storage key. No user input flows in here (#002-RV P2)."""
-    return f"{_safe_prefix(settings.engine_output_prefix)}/{_safe_task_id(task_id)}/final.mp4"
+    return (
+        f"{_safe_prefix(settings.engine_output_prefix)}/"
+        f"{_safe_task_id(tenant_id)}/{_safe_task_id(task_id)}/final.mp4"
+    )
 
 
 def _build_engine_config(params: dict[str, Any]):
@@ -103,14 +106,16 @@ async def _generate_with_engine(params: dict[str, Any], progress_cb) -> dict[str
 @celery_app.task(bind=True, name="app.workers.tasks.generate_video")
 def generate_video_task(self, params: dict[str, Any]) -> dict[str, Any]:
     task_id = self.request.id or "eager"
+    tenant_id = _safe_task_id(str(params["tenant_id"]))
+    progress_task_id = f"{tenant_id}:{task_id}"
     store = build_progress_store(settings.redis_url)
-    store.update(task_id, status="STARTED", progress=0.0, stage="queued")
+    store.update(progress_task_id, status="STARTED", progress=0.0, stage="queued")
 
     def progress_cb(event: Any) -> None:
         # Progress reporting must never break generation.
         try:
             store.update(
-                task_id,
+                progress_task_id,
                 status="PROGRESS",
                 stage=getattr(event, "event_type", None),
                 progress=float(getattr(event, "progress", 0.0) or 0.0),
@@ -124,9 +129,11 @@ def generate_video_task(self, params: dict[str, Any]) -> dict[str, Any]:
         result = asyncio.run(_generate_with_engine(params, progress_cb))
         video_bytes = Path(result["video_path"]).read_bytes()
         storage = create_object_storage(settings)
-        url = storage.put_bytes(_storage_key(task_id), video_bytes, content_type="video/mp4")
+        url = storage.put_bytes(
+            _storage_key(task_id, tenant_id), video_bytes, content_type="video/mp4"
+        )
         store.update(
-            task_id,
+            progress_task_id,
             status="SUCCESS",
             progress=1.0,
             stage="completed",
@@ -142,5 +149,5 @@ def generate_video_task(self, params: dict[str, Any]) -> dict[str, Any]:
         }
     except Exception as exc:  # noqa: BLE001
         logger.error("video.generation_failed", task_id=task_id, error=str(exc))
-        store.update(task_id, status="FAILURE", stage="failed", error=str(exc))
+        store.update(progress_task_id, status="FAILURE", stage="failed", error=str(exc))
         raise

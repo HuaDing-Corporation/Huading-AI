@@ -37,14 +37,18 @@ def test_progress_store_redis_has_socket_timeouts() -> None:
 
 # ---------------- #003-FIX P2: X-Request-ID on error responses ----------------
 
-def test_request_id_header_on_validation_error() -> None:
+def test_request_id_header_on_validation_error(auth_context) -> None:
     client = TestClient(app)
-    resp = client.post("/api/v1/videos", json={"topic": "x", "pipeline": "evil"})
+    resp = client.post(
+        "/api/v1/videos",
+        json={"topic": "x", "pipeline": "evil"},
+        headers=auth_context["headers"],
+    )
     assert resp.status_code == 422
     assert resp.headers.get("X-Request-ID")
 
 
-def test_request_id_header_on_500(monkeypatch) -> None:
+def test_request_id_header_on_500(monkeypatch, auth_context) -> None:
     # Force the unhandled-exception (500) path, produced by ServerErrorMiddleware
     # outside RequestIdMiddleware — the header must still be present.
     def boom() -> None:
@@ -53,7 +57,7 @@ def test_request_id_header_on_500(monkeypatch) -> None:
     app.dependency_overrides[get_progress_store] = boom
     client = TestClient(app, raise_server_exceptions=False)
     try:
-        resp = client.get("/api/v1/videos/some-id")
+        resp = client.get("/api/v1/videos/some-id", headers=auth_context["headers"])
         assert resp.status_code == 500
         assert resp.headers.get("X-Request-ID")
     finally:
@@ -62,11 +66,12 @@ def test_request_id_header_on_500(monkeypatch) -> None:
 
 # ---------------- #003-FIX P3: storage key escape -> 400 ----------------
 
-def test_storage_key_escape_returns_400() -> None:
+def test_storage_key_escape_returns_400(auth_context) -> None:
     client = TestClient(app)
     resp = client.post(
         "/api/v1/storage/objects",
         json={"key": "../escape.txt", "content": "x"},
+        headers=auth_context["headers"],
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "INVALID_STORAGE_KEY"
@@ -85,23 +90,31 @@ class _NoneStore:
         return None
 
 
-def test_sse_emits_timeout_event(monkeypatch) -> None:
+def test_sse_emits_timeout_event(monkeypatch, auth_context) -> None:
     monkeypatch.setattr(settings, "sse_timeout_seconds", 1)
     app.dependency_overrides[get_progress_store] = lambda: _NoneStore()
     try:
         client = TestClient(app)
-        resp = client.get("/api/v1/videos/abc/events")
+        from app.api.v1.routes import videos as videos_route
+
+        videos_route._video_task_tenants["abc"] = auth_context["tenant_id"]
+        resp = client.get("/api/v1/videos/abc/events", headers=auth_context["headers"])
         assert resp.status_code == 200
         assert "sse_timeout" in resp.text
     finally:
+        videos_route._video_task_tenants.pop("abc", None)
         app.dependency_overrides.pop(get_progress_store, None)
 
 
 # ---------------- #005-FIX P2: extra="forbid" ----------------
 
-def test_unknown_field_rejected() -> None:
+def test_unknown_field_rejected(auth_context) -> None:
     client = TestClient(app)
-    resp = client.post("/api/v1/videos", json={"topic": "x", "output_path": "/etc/x"})
+    resp = client.post(
+        "/api/v1/videos",
+        json={"topic": "x", "output_path": "/etc/x"},
+        headers=auth_context["headers"],
+    )
     assert resp.status_code == 422
 
 

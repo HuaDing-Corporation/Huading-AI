@@ -11,6 +11,17 @@ from app.core.config import settings
 from app.core.exceptions import AppError
 
 _HASH_ITERATIONS = 210_000
+_MIN_JWT_SECRET_BYTES = 32
+
+
+def _jwt_secret() -> str:
+    if len(settings.jwt_secret_key.encode("utf-8")) < _MIN_JWT_SECRET_BYTES:
+        raise AppError(
+            "JWT secret is not configured.",
+            code="JWT_SECRET_NOT_CONFIGURED",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+    return settings.jwt_secret_key
 
 
 def hash_password(password: str) -> str:
@@ -51,12 +62,12 @@ def create_access_token(
         "role": role,
         "exp": expires_at,
     }
-    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+    return jwt.encode(payload, _jwt_secret(), algorithm=settings.jwt_algorithm)
 
 
 def decode_access_token(token: str) -> dict[str, Any]:
     try:
-        return jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+        return jwt.decode(token, _jwt_secret(), algorithms=[settings.jwt_algorithm])
     except jwt.PyJWTError as exc:
         raise AppError(
             "Invalid or expired access token.",

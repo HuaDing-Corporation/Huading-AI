@@ -100,6 +100,7 @@ def get_current_user(
     request.state.tenant_id = tenant_id
     request.state.user_id = user.id
     request.state.role = user.role
+    request.state.current_user = user
     return user
 
 
@@ -146,3 +147,20 @@ def require_permission(permission: str):
         return user
 
     return dependency
+
+
+def scoped_task_id(tenant_id: str, task_id: str) -> str:
+    return f"{tenant_id}:{task_id}"
+
+
+def tenant_storage_key(tenant_id: str, key: str) -> str:
+    return f"tenants/{tenant_id}/{key}"
+
+
+def ensure_same_tenant(entity_tenant_id: str | None, current_tenant_id: str) -> None:
+    if entity_tenant_id != current_tenant_id:
+        raise AppError(
+            "Resource does not belong to the current tenant.",
+            code="TENANT_RESOURCE_MISMATCH",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )

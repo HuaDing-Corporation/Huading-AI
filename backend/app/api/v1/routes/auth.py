@@ -84,9 +84,15 @@ def login(
     payload: LoginRequest,
     db: Session = DbSessionDependency,
 ) -> ApiResponse[TokenResponse]:
-    query = select(User).where(User.email == payload.email, User.is_active.is_(True))
-    if payload.tenant_slug:
-        query = query.join(Tenant).where(Tenant.slug == payload.tenant_slug)
+    query = (
+        select(User)
+        .join(Tenant)
+        .where(
+            User.email == payload.email,
+            User.is_active.is_(True),
+            Tenant.slug == payload.tenant_slug,
+        )
+    )
     users = db.scalars(query).all()
     user = next(
         (
