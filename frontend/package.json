@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint || echo \"lint placeholder: configure ESLint rules in M2\"",
+    "lint": "next lint",
     "test": "echo \"test placeholder: frontend tests start in M2\""
   },
   "dependencies": {
