@@ -1,3 +1,6 @@
+# Modifications Copyright (C) 2026 Huading (Apache-2.0 §4(b)):
+#   - _generate_seedance unwraps SeedanceResult.video_url to keep VideoClient's
+#     str (video URL) return contract consistent across providers.
 """
 统一视频生成客户端
 根据 model 名称自动路由到对应后端：
@@ -290,7 +293,9 @@ class VideoClient:
     ) -> str:
         """通过 Seedance 模型生成视频"""
         logger.info(f"VideoClient: 路由至 Seedance model={model}")
-        return self.seedance_client.generate_video(
+        # SeedanceVideoClient returns a SeedanceResult; unwrap to keep
+        # VideoClient's str (video URL) contract consistent across providers.
+        result = self.seedance_client.generate_video(
             prompt=prompt,
             image_path=image_path,
             save_path=save_path,
@@ -302,3 +307,4 @@ class VideoClient:
             watermark=watermark,
             generate_audio=generate_audio,
         )
+        return result.video_url

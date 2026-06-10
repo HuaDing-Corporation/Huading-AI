@@ -11,3 +11,6 @@ class ObjectStorage(Protocol):
 
     def put_text(self, key: str, content: str, *, content_type: str) -> str:
         return self.put_bytes(key, content.encode("utf-8"), content_type=content_type)
+
+    def get_bytes(self, key: str) -> bytes:
+        ...

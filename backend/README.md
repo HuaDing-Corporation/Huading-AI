@@ -136,6 +136,34 @@ uv run python scripts/run_seedance.py --mode i2v --image .\product.jpg --prompt 
 
 Each prints the task id, remote video URL, and the saved mp4 path.
 
+### Seedance pipelines via the API (video_mode)
+
+`POST /api/v1/videos` accepts `video_mode`:
+
+- `static_template` (default) — the existing HTML-frame pipeline (unchanged).
+- `seedance_t2v` — topic → LLM scene plan → Seedance text-to-video clips →
+  edge-tts voiceover → ffmpeg compose (+BGM).
+- `seedance_i2v` — same flow, but every clip is conditioned on an uploaded
+  product image: first `POST /api/v1/uploads` (multipart `file`; jpeg/png/webp,
+  ≤10MB; stored under `tenants/{tenant_id}/uploads/...`), then pass the returned
+  `key` as `image_key`.
+
+Requires `ENGINE_SEEDANCE_API_KEY` (plus the `ENGINE_LLM_*` credentials) on the
+worker. Progress/SSE and the tenant-isolated output key work exactly as for
+static_template. Example:
+
+```bash
+# 1) upload the product shot
+curl -X POST http://127.0.0.1:8000/api/v1/uploads \
+  -H "Authorization: Bearer $TOKEN" -F "file=@product.jpg"
+# -> {"data": {"key": "uploads/<uuid>.jpg", ...}}
+
+# 2) generate (i2v)
+curl -X POST http://127.0.0.1:8000/api/v1/videos \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"topic":"秋冬羊绒大衣种草","video_mode":"seedance_i2v","image_key":"uploads/<uuid>.jpg","n_scenes":2}'
+```
+
 ## Checks
 
 ```powershell

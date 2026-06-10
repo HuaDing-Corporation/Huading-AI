@@ -72,6 +72,9 @@ def _build_engine_config(params: dict[str, Any]):
         llm_base_url=settings.engine_llm_base_url,
         llm_model=settings.engine_llm_model,
         dashscope_api_key=settings.engine_dashscope_api_key,
+        seedance_api_key=settings.engine_seedance_api_key,
+        seedance_base_url=settings.engine_seedance_base_url,
+        seedance_model=settings.engine_seedance_model,
         default_template=params.get("frame_template") or settings.engine_default_template,
         browser_channel=settings.engine_browser_channel,
         runtime_root=settings.engine_runtime_root,
@@ -103,6 +106,51 @@ async def _generate_with_engine(params: dict[str, Any], progress_cb) -> dict[str
         await engine.cleanup()
 
 
+def _resolve_i2v_image(params: dict[str, Any]) -> str:
+    """Fetch the uploaded product image from tenant-scoped storage to a temp file."""
+    import tempfile
+
+    image_key = params.get("image_key") or ""
+    tenant_id = _safe_task_id(str(params["tenant_id"]))
+    if not image_key.startswith("uploads/") or ".." in image_key:
+        raise ValueError(f"unsafe image_key: {image_key!r}")
+
+    storage = create_object_storage(settings)
+    content = storage.get_bytes(f"tenants/{tenant_id}/{image_key}")
+    suffix = Path(image_key).suffix or ".jpg"
+    handle = tempfile.NamedTemporaryFile(prefix="i2v-", suffix=suffix, delete=False)
+    with handle as fh:
+        fh.write(content)
+    return handle.name
+
+
+async def _generate_with_seedance(params: dict[str, Any], progress_cb) -> dict[str, Any]:
+    """seedance_t2v / seedance_i2v flows (LLM scenes + Seedance clips + TTS + compose)."""
+    from app.engine import run_seedance_pipeline
+
+    cfg = _build_engine_config(params)
+    if not cfg.seedance_api_key:
+        raise RuntimeError("Seedance is not configured (set ENGINE_SEEDANCE_API_KEY).")
+
+    image_path: str | None = None
+    if params.get("video_mode") == "seedance_i2v":
+        image_path = _resolve_i2v_image(params)
+
+    try:
+        return await run_seedance_pipeline(
+            cfg,
+            params["topic"],
+            image_path=image_path,
+            n_scenes=params.get("n_scenes", 2),
+            voice=params.get("voice"),
+            tts_speed=params.get("tts_speed"),
+            progress_callback=progress_cb,
+        )
+    finally:
+        if image_path:
+            Path(image_path).unlink(missing_ok=True)
+
+
 @celery_app.task(bind=True, name="app.workers.tasks.generate_video")
 def generate_video_task(self, params: dict[str, Any]) -> dict[str, Any]:
     task_id = self.request.id or "eager"
@@ -126,7 +174,13 @@ def generate_video_task(self, params: dict[str, Any]) -> dict[str, Any]:
             logger.warning("progress.update_failed", task_id=task_id)
 
     try:
-        result = asyncio.run(_generate_with_engine(params, progress_cb))
+        # static_template (default) runs the engine's HTML-frame pipeline;
+        # seedance_t2v / seedance_i2v run the Seedance clip pipelines.
+        video_mode = params.get("video_mode", "static_template")
+        if video_mode in ("seedance_t2v", "seedance_i2v"):
+            result = asyncio.run(_generate_with_seedance(params, progress_cb))
+        else:
+            result = asyncio.run(_generate_with_engine(params, progress_cb))
         video_bytes = Path(result["video_path"]).read_bytes()
         storage = create_object_storage(settings)
         url = storage.put_bytes(
