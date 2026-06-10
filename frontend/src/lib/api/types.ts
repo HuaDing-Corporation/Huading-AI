@@ -54,12 +54,23 @@ export interface VideoTaskStatus {
   timeout_seconds?: number;
 }
 
+export type VideoMode = "static_template" | "seedance_t2v" | "seedance_i2v";
+
 export interface CreateVideoRequest {
   topic: string;
+  video_mode?: VideoMode;
+  image_key?: string | null; // required for seedance_i2v (from POST /uploads)
   pipeline?: "standard" | "custom";
   mode?: "generate" | "fixed";
   n_scenes?: number;
   frame_template?: string | null;
   voice?: string | null;
   tts_speed?: number;
+}
+
+export interface UploadResponse {
+  key: string; // tenant-relative, e.g. "uploads/<uuid>.jpg"
+  uri: string;
+  content_type: string;
+  size: number;
 }
