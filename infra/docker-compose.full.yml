@@ -53,7 +53,9 @@ services:
     # Run DB migrations, then serve the API.
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     ports:
-      - "8000:8000"
+      # Host port is configurable via BACKEND_PORT (default 8000). If you change
+      # it, also set NEXT_PUBLIC_API_BASE_URL to match (the browser uses it).
+      - "${BACKEND_PORT:-8000}:8000"
     volumes:
       - media:/app/.local-storage
     depends_on:
