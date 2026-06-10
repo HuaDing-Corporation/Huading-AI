@@ -36,6 +36,8 @@ These vendored files were changed by Huading and each carries a prominent
 | `pixelle_video/services/frame_html.py` | Support a system browser channel (`HUADING_BROWSER_CHANNEL`) with fallback to bundled Chromium |
 | `pixelle_video/services/api_services/image_processor.py` | Removed a hard-coded DashScope API key default; key injected at runtime / from env |
 | `pixelle_video/services/api_services/image_client.py` | Pass the injected DashScope key + DashScope-specific proxy into `ImageProcessor` |
+| `pixelle_video/services/api_services/video_seedance.py` | Hardened Doubao-Seedance (Ark) client: t2v/i2v, top-level Ark params, status handling, retries, `SEEDANCE_*` env |
+| `pixelle_video/services/api_services/video_client.py` | `_generate_seedance` unwraps `SeedanceResult.video_url` to keep the str return contract |
 
 To re-verify this list:
 
@@ -51,13 +53,18 @@ a Huading copyright header:
 - `backend/app/engine/__init__.py`
 - `backend/app/engine/config.py` — `EngineConfig` (platform key hosting + run params)
 - `backend/app/engine/factory.py` — `create_engine()` / `configure_runtime()`
+- `backend/app/engine/video.py` — unified Seedance entry point
+  (`generate_seedance_video` / `create_seedance_client`)
+- `backend/app/engine/seedance_pipeline.py` — Seedance t2v / i2v pipelines
+  (LLM scene planning + clips + voiceover + compose)
 
-Related Huading-authored file **outside** the vendored tree (a caller of the
+Related Huading-authored files **outside** the vendored tree (callers of the
 engine, not part of `app/engine/`):
 
 - `backend/scripts/run_standard_pipeline.py` — standalone acceptance script that
   drives the standard pipeline (derived-work *usage* of Pixelle-Video; carries a
   Huading copyright header).
+- `backend/scripts/run_seedance.py` — Seedance t2v / i2v verification script.
 
 ## Streamlit/web layer
 
