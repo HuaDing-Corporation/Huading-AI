@@ -29,9 +29,14 @@ class _MemProgressStore:
 
 class _FakeStorage:
     def __init__(self) -> None:
+        self.bucket = "test-bucket"
         self.saved: dict[str, str] = {}
 
     def put_text(self, key: str, content: str, *, content_type: str) -> str:
+        self.saved[key] = content_type
+        return f"memory://{key}"
+
+    def put_bytes(self, key: str, content: bytes, *, content_type: str) -> str:
         self.saved[key] = content_type
         return f"memory://{key}"
 

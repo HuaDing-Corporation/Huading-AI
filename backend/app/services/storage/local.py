@@ -6,6 +6,7 @@ from app.services.storage.base import StorageKeyError
 class LocalObjectStorage:
     def __init__(self, root: str) -> None:
         self.root = Path(root)
+        self.bucket = "local"
 
     def _resolve(self, key: str) -> Path:
         path = (self.root / key).resolve()
@@ -28,3 +29,12 @@ class LocalObjectStorage:
         if not path.is_file():
             raise FileNotFoundError(f"object not found: {key}")
         return path.read_bytes()
+
+    def presign_get_url(
+        self,
+        key: str,
+        *,
+        expires_in: int,
+        download_filename: str | None = None,
+    ) -> str:
+        return self._resolve(key).as_uri()

@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.deps import get_progress_store
+from app.api.deps import get_object_storage, get_progress_store
 from app.main import app
 from app.services.progress import _KNOWN_FIELDS
 from app.workers import video_tasks
@@ -33,14 +33,27 @@ class _MemProgressStore:
 
 class _FakeStorage:
     def __init__(self) -> None:
+        self.bucket = "test-bucket"
         self.saved: dict[str, tuple[bytes, str]] = {}
 
     def put_bytes(self, key: str, content: bytes, *, content_type: str) -> str:
         self.saved[key] = (content, content_type)
         return f"memory://{key}"
 
+    def presign_get_url(
+        self,
+        key: str,
+        *,
+        expires_in: int,
+        download_filename: str | None = None,
+    ) -> str:
+        suffix = "&download=1" if download_filename else ""
+        return f"https://storage.test/{key}?ttl={expires_in}{suffix}"
 
-def test_video_generation_end_to_end_eager(monkeypatch, tmp_path: Path, auth_context) -> None:
+
+def test_video_generation_end_to_end_eager(
+    monkeypatch, tmp_path: Path, auth_context, auth_db
+) -> None:
     store = _MemProgressStore()
     storage = _FakeStorage()
 
@@ -59,7 +72,9 @@ def test_video_generation_end_to_end_eager(monkeypatch, tmp_path: Path, auth_con
     monkeypatch.setattr(video_tasks, "_generate_with_engine", fake_generate)
     monkeypatch.setattr(video_tasks, "build_progress_store", lambda url: store)
     monkeypatch.setattr(video_tasks, "create_object_storage", lambda settings: storage)
+    monkeypatch.setattr(video_tasks, "SessionLocal", auth_db)
     app.dependency_overrides[get_progress_store] = lambda: store
+    app.dependency_overrides[get_object_storage] = lambda: storage
 
     previous = celery_app.conf.task_always_eager
     celery_app.conf.task_always_eager = True
@@ -77,32 +92,31 @@ def test_video_generation_end_to_end_eager(monkeypatch, tmp_path: Path, auth_con
         status = client.get(f"/api/v1/videos/{task_id}", headers=auth_context["headers"])
         assert status.status_code == 200
         body = status.json()["data"]
-        assert body["status"] == "SUCCESS"
-        assert body["progress"] == 1.0
-        assert body["stage"] == "completed"
+        assert body["status"] == "done"
+        assert body["progress"] == 100
 
         tenant_id = auth_context["tenant_id"]
-        assert body["video_url"] == f"memory://videos/{tenant_id}/{task_id}/final.mp4"
+        assert body["playback_url"].startswith(
+            f"https://storage.test/tenants/{tenant_id}/videos/{task_id}/output.mp4"
+        )
+        assert body["download_url"].endswith("&download=1")
 
-        key = f"videos/{tenant_id}/{task_id}/final.mp4"
+        key = f"tenants/{tenant_id}/videos/{task_id}/output.mp4"
         assert key in storage.saved
         assert storage.saved[key][1] == "video/mp4"
+
+        listing = client.get("/api/v1/videos", headers=auth_context["headers"])
+        assert listing.status_code == 200
+        assert listing.json()["data"]["items"][0]["id"] == task_id
     finally:
         celery_app.conf.task_always_eager = previous
         app.dependency_overrides.pop(get_progress_store, None)
+        app.dependency_overrides.pop(get_object_storage, None)
 
 
-def test_unknown_task_is_not_disclosed(monkeypatch, auth_context) -> None:
+def test_unknown_task_is_not_disclosed(auth_context) -> None:
     store = _MemProgressStore()
     app.dependency_overrides[get_progress_store] = lambda: store
-
-    class _FakeResult:
-        def __init__(self, task_id, app=None):
-            self.status = "PENDING"
-
-    from app.api.v1.routes import videos as videos_route
-
-    monkeypatch.setattr(videos_route, "AsyncResult", _FakeResult)
     try:
         client = TestClient(app)
         resp = client.get("/api/v1/videos/does-not-exist", headers=auth_context["headers"])
@@ -142,7 +156,7 @@ def test_output_path_is_not_accepted() -> None:
 
 
 def test_storage_key_rejects_traversal() -> None:
-    assert video_tasks._storage_key("abc-123", "tenant-1").endswith("/final.mp4")
+    assert video_tasks._storage_key("abc-123", "tenant-1").endswith("/output.mp4")
     with pytest.raises(ValueError):
         video_tasks._storage_key("../../etc", "tenant-1")
 

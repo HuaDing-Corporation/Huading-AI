@@ -2,7 +2,17 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -84,6 +94,19 @@ class VideoTask(TenantScopedMixin, Base):
     )
     status: Mapped[str] = mapped_column(String(32), default="PENDING")
     topic: Mapped[str | None] = mapped_column(Text, default=None)
+    video_mode: Mapped[str] = mapped_column(String(32), default="static_template")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, default=None)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    storage_bucket: Mapped[str | None] = mapped_column(String(255), default=None)
+    storage_key: Mapped[str | None] = mapped_column(String(500), default=None)
+    thumbnail_key: Mapped[str | None] = mapped_column(String(500), default=None)
+    content_type: Mapped[str | None] = mapped_column(String(100), default=None)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, default=None)
+    duration_sec: Mapped[float | None] = mapped_column(Float, default=None)
+    local_path: Mapped[str | None] = mapped_column(String(1000), default=None)
     created_by_user_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )

@@ -6,6 +6,8 @@ class StorageKeyError(ValueError):
 
 
 class ObjectStorage(Protocol):
+    bucket: str
+
     def put_bytes(self, key: str, content: bytes, *, content_type: str) -> str:
         ...
 
@@ -13,4 +15,13 @@ class ObjectStorage(Protocol):
         return self.put_bytes(key, content.encode("utf-8"), content_type=content_type)
 
     def get_bytes(self, key: str) -> bytes:
+        ...
+
+    def presign_get_url(
+        self,
+        key: str,
+        *,
+        expires_in: int,
+        download_filename: str | None = None,
+    ) -> str:
         ...
