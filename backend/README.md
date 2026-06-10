@@ -116,6 +116,26 @@ Notes:
   first.
 - Requires `docker` (compose v2) and `uv` on PATH.
 
+## Seedance video (text-to-video / image-to-video)
+
+Doubao-Seedance 2.0 via Volcengine Ark. Keys come from env (never hardcoded);
+the engine entry point is `app.engine.generate_seedance_video(cfg, ...)` for
+Phase-2 pipelines. Verify with your own Ark key:
+
+```powershell
+$env:SEEDANCE_API_KEY="..."                                   # required
+$env:SEEDANCE_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"  # optional
+$env:SEEDANCE_MODEL="doubao-seedance-2-0-260128"             # optional
+
+# Text-to-video
+uv run python scripts/run_seedance.py --mode t2v --prompt "一只柯基在草地奔跑，电影质感"
+
+# Image-to-video (local file or http(s) URL; omit --image for a generated sample)
+uv run python scripts/run_seedance.py --mode i2v --image .\product.jpg --prompt "镜头缓慢推近，柔光"
+```
+
+Each prints the task id, remote video URL, and the saved mp4 path.
+
 ## Checks
 
 ```powershell

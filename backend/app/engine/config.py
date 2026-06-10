@@ -73,6 +73,12 @@ class EngineConfig(BaseModel):
     ark_api_key: str = Field(default="")
     ark_base_url: str = Field(default="https://ark.cn-beijing.volces.com/api/v3")
 
+    # Doubao-Seedance (Ark) text-to-video / image-to-video. Separate key so the
+    # video provider can be configured independently of other Ark usage.
+    seedance_api_key: str = Field(default="")
+    seedance_base_url: str = Field(default="https://ark.cn-beijing.volces.com/api/v3")
+    seedance_model: str = Field(default="doubao-seedance-2-0-260128")
+
     kling_access_key: str = Field(default="")
     kling_secret_key: str = Field(default="")
     kling_base_url: str = Field(default="https://api-beijing.klingai.com")
