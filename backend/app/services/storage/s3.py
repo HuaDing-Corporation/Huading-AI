@@ -30,3 +30,7 @@ class S3ObjectStorage:
             ContentType=content_type,
         )
         return f"s3://{self.bucket}/{key}"
+
+    def get_bytes(self, key: str) -> bytes:
+        response = self.client.get_object(Bucket=self.bucket, Key=key)
+        return response["Body"].read()

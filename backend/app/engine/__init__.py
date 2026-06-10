@@ -31,6 +31,7 @@ if _ENGINE_DIR not in _sys.path:
 
 from .config import EngineConfig  # noqa: E402
 from .factory import configure_runtime, create_engine  # noqa: E402
+from .seedance_pipeline import run_seedance_pipeline  # noqa: E402
 from .video import (  # noqa: E402
     SeedanceResult,
     create_seedance_client,
@@ -43,5 +44,6 @@ __all__ = [
     "configure_runtime",
     "create_seedance_client",
     "generate_seedance_video",
+    "run_seedance_pipeline",
     "SeedanceResult",
 ]

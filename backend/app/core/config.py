@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     engine_llm_base_url: str = ""
     engine_llm_model: str = ""
     engine_dashscope_api_key: str = ""
+    # Doubao-Seedance (Volcengine Ark) for seedance_t2v / seedance_i2v modes.
+    engine_seedance_api_key: str = ""
+    engine_seedance_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
+    engine_seedance_model: str = "doubao-seedance-2-0-260128"
     engine_default_template: str = "1080x1920/static_default.html"
     # Playwright browser channel for frame rendering: "chrome"/"msedge" to use a
     # system browser, or "" for Playwright's bundled Chromium.
