@@ -1,15 +1,26 @@
 import { API_BASE_URL, ApiError, apiFetch, authHeaders } from "@/lib/api/client";
 import { authStore } from "@/lib/auth/store";
-import type { CreateVideoRequest, VideoAccepted, VideoTaskStatus } from "@/lib/api/types";
+import type {
+  CreateVideoRequest,
+  VideoAccepted,
+  VideoEvent,
+  VideoListResponse,
+  VideoRead
+} from "@/lib/api/types";
 
 export function createVideo(input: CreateVideoRequest): Promise<VideoAccepted> {
   return apiFetch<VideoAccepted>("/api/v1/videos", { method: "POST", body: input });
 }
 
-export function getVideoStatus(taskId: string): Promise<VideoTaskStatus> {
-  return apiFetch<VideoTaskStatus>(`/api/v1/videos/${encodeURIComponent(taskId)}`, {
-    method: "GET"
-  });
+/** Authoritative record for one video (status + playback/download URLs). */
+export function getVideo(taskId: string): Promise<VideoRead> {
+  return apiFetch<VideoRead>(`/api/v1/videos/${encodeURIComponent(taskId)}`, { method: "GET" });
+}
+
+/** This tenant's videos, newest first — used to hydrate the task list on mount. */
+export async function listVideos(): Promise<VideoRead[]> {
+  const res = await apiFetch<VideoListResponse>("/api/v1/videos", { method: "GET" });
+  return res?.items ?? [];
 }
 
 /**
@@ -19,7 +30,7 @@ export function getVideoStatus(taskId: string): Promise<VideoTaskStatus> {
  */
 export async function streamVideoEvents(
   taskId: string,
-  onMessage: (event: VideoTaskStatus) => void,
+  onMessage: (event: VideoEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {
   const res = await fetch(
@@ -47,12 +58,10 @@ export async function streamVideoEvents(
     const frames = buffer.split("\n\n");
     buffer = frames.pop() ?? "";
     for (const frame of frames) {
-      const dataLine = frame
-        .split("\n")
-        .find((line) => line.startsWith("data:"));
+      const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
       if (!dataLine) continue;
       try {
-        onMessage(JSON.parse(dataLine.slice(5).trim()) as VideoTaskStatus);
+        onMessage(JSON.parse(dataLine.slice(5).trim()) as VideoEvent);
       } catch {
         // ignore malformed frame
       }

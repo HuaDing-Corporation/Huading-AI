@@ -15,7 +15,7 @@ export function TopBar() {
   const initial = displayName.trim().slice(0, 1).toUpperCase() || "华";
 
   return (
-    <Glass className="col-span-full flex items-center gap-[18px] rounded-card px-6 py-[15px]">
+    <Glass className="col-span-full flex items-center gap-3 rounded-card px-4 py-[15px] sm:gap-[18px] sm:px-6">
       <Logo />
 
       <div className="relative mx-2 hidden max-w-[440px] flex-1 sm:block">
@@ -31,11 +31,11 @@ export function TopBar() {
         />
       </div>
 
-      <div className="ml-auto flex items-center gap-3">
-        <Button variant="icon" size="icon" aria-label="通知">
+      <div className="ml-auto flex items-center gap-2.5 sm:gap-3">
+        <Button variant="icon" size="icon" aria-label="通知" className="hidden sm:flex">
           <Bell size={18} strokeWidth={1.8} />
         </Button>
-        <Button variant="icon" size="icon" aria-label="设置">
+        <Button variant="icon" size="icon" aria-label="设置" className="hidden sm:flex">
           <Settings size={18} strokeWidth={1.8} />
         </Button>
         <Button variant="icon" size="icon" aria-label="退出登录" title="退出登录" onClick={logout}>

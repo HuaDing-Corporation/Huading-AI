@@ -1,6 +1,6 @@
 "use client";
 
-import { type ChangeEvent, type ReactNode, useRef, useState } from "react";
+import { type ChangeEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { Check, ImagePlus, Sparkles, X } from "lucide-react";
 
 import { ApiError } from "@/lib/api/client";
@@ -20,10 +20,10 @@ import { templateOptions, voiceSizeOptions } from "@/lib/mock";
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 
-const VIDEO_MODES: { value: VideoMode; label: string }[] = [
-  { value: "static_template", label: "静态模板" },
-  { value: "seedance_t2v", label: "Seedance 文生" },
-  { value: "seedance_i2v", label: "Seedance 图生" }
+const VIDEO_MODES: { value: VideoMode; short: string; title: string; seedance: boolean }[] = [
+  { value: "static_template", short: "静态", title: "静态模板（HTML 帧）", seedance: false },
+  { value: "seedance_t2v", short: "文生", title: "Seedance 文生视频", seedance: true },
+  { value: "seedance_i2v", short: "图生", title: "Seedance 图生视频（需商品图）", seedance: true }
 ];
 
 function Field({ label, htmlFor, children }: { label: string; htmlFor: string; children: ReactNode }) {
@@ -63,6 +63,20 @@ export function NewVideoCard() {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+
+  // B0: revoke the object URL on unmount so leaving with a preview doesn't leak.
+  // clearImage/replace already revoke during normal use; revoke is a no-op on an
+  // already-revoked URL, so this is safe.
+  const previewUrlRef = useRef<string | null>(null);
+  useEffect(() => {
+    previewUrlRef.current = imagePreview;
+  }, [imagePreview]);
+  useEffect(
+    () => () => {
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    },
+    []
+  );
 
   const isI2v = videoMode === "seedance_i2v";
 
@@ -149,13 +163,33 @@ export function NewVideoCard() {
       </Field>
 
       <FieldGroup label="生成模式">
-        <div className="grid grid-cols-3 gap-3">
-          {VIDEO_MODES.map((m) => (
-            <Chip key={m.value} selected={videoMode === m.value} onClick={() => setVideoMode(m.value)}>
-              {m.label}
-              {videoMode === m.value && <Check size={16} strokeWidth={2} />}
-            </Chip>
-          ))}
+        <div className="flex gap-2">
+          {VIDEO_MODES.map((m) => {
+            const active = videoMode === m.value;
+            return (
+              <button
+                key={m.value}
+                type="button"
+                title={m.title}
+                aria-pressed={active}
+                onClick={() => setVideoMode(m.value)}
+                className={cn(
+                  "flex flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-chip border px-2 py-2.5 text-[13px] outline-none transition-colors focus-visible:shadow-focus-gold",
+                  active
+                    ? "border-line-sel bg-chip-sel font-medium text-gold-deep"
+                    : "border-line-gold bg-glass-fill text-ink-soft hover:bg-glass-hover"
+                )}
+              >
+                {m.seedance && (
+                  <span className="rounded-[6px] bg-grad-gold px-1 py-px text-[9px] font-semibold leading-none text-ink">
+                    SD
+                  </span>
+                )}
+                {m.short}
+                {active && <Check size={14} strokeWidth={2.2} />}
+              </button>
+            );
+          })}
         </div>
       </FieldGroup>
 
@@ -218,7 +252,7 @@ export function NewVideoCard() {
 
       {videoMode === "static_template" && (
         <FieldGroup label="视觉模板">
-          <div className="grid grid-cols-3 gap-3">
+          <div className="flex flex-wrap gap-2">
             {templateOptions.map((option) => (
               <Chip key={option} selected={template === option} onClick={() => setTemplate(option)}>
                 {option}
@@ -230,7 +264,7 @@ export function NewVideoCard() {
       )}
 
       <FieldGroup label="语音 / 尺寸">
-        <div className="grid grid-cols-3 gap-3">
+        <div className="flex flex-wrap gap-2">
           {voiceSizeOptions.map((option) => (
             <Chip key={option} selected={options.includes(option)} onClick={() => toggleOption(option)}>
               {option}
