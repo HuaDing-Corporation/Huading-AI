@@ -41,15 +41,40 @@ export interface VideoAccepted {
   status: string;
 }
 
-/** Mirrors VideoTaskStatus; the SSE timeout event reuses task_id + stage only. */
-export interface VideoTaskStatus {
-  task_id: string;
-  status: string; // PENDING | STARTED | PROGRESS | SUCCESS | FAILURE
+export type VideoStatus = "queued" | "running" | "done" | "failed";
+
+/** Authoritative video record (GET /videos and GET /videos/{id}). */
+export interface VideoRead {
+  id: string;
+  title: string;
+  prompt: string;
+  mode: string;
+  status: VideoStatus;
+  progress: number; // 0..100
+  created_at: string;
+  duration_sec?: number | null;
+  thumbnail_url?: string | null;
+  playback_url?: string | null;
+  download_url?: string | null;
+  error?: string | null;
+}
+
+export interface VideoListResponse {
+  items: VideoRead[];
+  next_cursor?: string | null;
+}
+
+/**
+ * SSE progress frame. The stream still carries the worker's progress-store shape
+ * (uppercase status, progress 0..1) — distinct from VideoRead — so we reconcile
+ * the authoritative record (playback_url etc.) via GET /videos/{id} on terminal.
+ * The timeout keep-alive reuses task_id + stage only.
+ */
+export interface VideoEvent {
+  task_id?: string;
+  status?: string; // PENDING | STARTED | PROGRESS | SUCCESS | FAILURE
   stage?: string | null;
   progress?: number; // 0..1
-  frame_current?: number | null;
-  frame_total?: number | null;
-  video_url?: string | null;
   error?: string | null;
   timeout_seconds?: number;
 }

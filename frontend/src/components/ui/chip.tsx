@@ -15,7 +15,7 @@ const Chip = React.forwardRef<HTMLButtonElement, ChipProps>(
       type="button"
       aria-pressed={selected}
       className={cn(
-        "flex items-center justify-between gap-2 rounded-chip border px-3.5 py-3 text-[13px] outline-none transition-colors focus-visible:shadow-focus-gold",
+        "flex items-center justify-between gap-2 whitespace-nowrap rounded-chip border px-3.5 py-3 text-[13px] outline-none transition-colors focus-visible:shadow-focus-gold",
         selected
           ? "border-line-sel bg-chip-sel font-medium text-gold-deep"
           : "border-line-gold bg-glass-fill text-ink-soft hover:bg-glass-hover",
