@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>华鼎 Logo · 磨砂玻璃质感</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;font-family:-apple-system,"SF Pro Display","PingFang SC","Microsoft YaHei",system-ui,sans-serif;}
+  body{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:34px;padding:60px 20px;
+    background:#f7f5f0;
+    background-image:radial-gradient(900px 700px at 50% 18%,rgba(255,255,255,.96),transparent 60%),radial-gradient(700px 600px at 50% 100%,rgba(222,214,179,.30),transparent 60%);}
+  .stage{display:flex;flex-direction:column;align-items:center;gap:26px;}
+  .word b{font-size:40px;font-weight:600;letter-spacing:4px;color:#3a3628;}
+  .word p{text-align:center;font-size:13px;letter-spacing:8px;color:#a59f86;margin-top:6px;}
+  .cap{font-size:13px;color:#8c876f;text-align:center;max-width:520px;line-height:1.8;}
+</style>
+</head>
+<body>
+  <div class="stage">
+    <svg width="300" height="280" viewBox="0 0 280 270" fill="none" aria-label="华鼎玻璃鼎标">
+      <defs>
+        <linearGradient id="glass" x1="0" y1="40" x2="0" y2="215" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stop-color="#ffffff"/>
+          <stop offset="0.46" stop-color="#fcfbf6"/>
+          <stop offset="0.70" stop-color="#efe9d6"/>
+          <stop offset="0.87" stop-color="#dcd2ab"/>
+          <stop offset="1" stop-color="#c7bb8e"/>
+        </linearGradient>
+        <linearGradient id="hl" x1="0" y1="40" x2="0" y2="120" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stop-color="#ffffff" stop-opacity="0.95"/>
+          <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+        </linearGradient>
+        <filter id="float" x="-40%" y="-40%" width="180%" height="200%">
+          <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#b6a571" flood-opacity="0.30"/>
+          <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#6e6450" flood-opacity="0.10"/>
+        </filter>
+        <filter id="frost" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="0.5"/>
+        </filter>
+        <radialGradient id="bloom" cx="0.5" cy="1" r="0.7">
+          <stop offset="0" stop-color="#d8c995" stop-opacity="0.55"/>
+          <stop offset="1" stop-color="#d8c995" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+
+      <ellipse cx="140" cy="214" rx="86" ry="14" fill="url(#bloom)"/>
+
+      <g filter="url(#float)">
+        <g filter="url(#frost)" stroke="url(#glass)" stroke-linecap="round" stroke-linejoin="round" fill="none">
+          <path d="M104 64 L104 92" stroke-width="15"/>
+          <path d="M176 64 L176 92" stroke-width="15"/>
+          <path d="M72 92 L208 92" stroke-width="22"/>
+          <path d="M86 96 C86 154 110 172 140 172 C170 172 194 154 194 96" stroke-width="22"/>
+          <path d="M108 166 L104 202" stroke-width="18"/>
+          <path d="M140 172 L140 206" stroke-width="18"/>
+          <path d="M172 166 L176 202" stroke-width="18"/>
+        </g>
+        <g stroke="url(#hl)" stroke-linecap="round" fill="none" opacity="0.9">
+          <path d="M104 66 L104 84" stroke-width="4"/>
+          <path d="M176 66 L176 84" stroke-width="4"/>
+          <path d="M80 88 L200 88" stroke-width="4"/>
+        </g>
+      </g>
+    </svg>
+
+    <div class="word"><b>华鼎 AI</b><p>HUADING</p></div>
+  </div>
+  <p class="cap">SVG 近似版：白色磨砂玻璃体 · 三足底部晕开冷香槟 · 柔光悬浮投影。<br>像素级的真·玻璃质感建议用 AI 出图（提示词见对话）。</p>
+</body>
+</html>

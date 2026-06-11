@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>华鼎 AI · 控制台视觉方向（磨砂玻璃 · 暖香槟鎏金）</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.7.0/dist/tabler-icons.min.css">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;font-family:-apple-system,"SF Pro Display","PingFang SC","Microsoft YaHei",system-ui,sans-serif;}
+  :root{
+    --gold:#bd9a59; --gold-deep:#8c6f3a; --bronze:#6e521f; --champ:#e6d3a3;
+    --grad:linear-gradient(135deg,#ecd9aa 0%,#c8a563 52%,#a37f3f 100%);
+    --bd-gold:rgba(189,154,89,.64);
+    --ink:#3a3320; --ink-soft:#6f6650; --ink-faint:#a89c80;
+  }
+  body{
+    min-height:100vh;color:var(--ink);-webkit-font-smoothing:antialiased;padding:28px;
+    background:#f5efe2;
+    background-image:
+      radial-gradient(1200px 820px at 50% -12%,rgba(255,255,255,.95),transparent 62%),
+      radial-gradient(940px 720px at 88% 8%,rgba(229,210,162,.46),transparent 60%),
+      radial-gradient(880px 720px at 10% 96%,rgba(238,224,189,.52),transparent 60%),
+      radial-gradient(700px 600px at 70% 100%,rgba(213,182,122,.3),transparent 58%);
+    background-attachment:fixed;
+  }
+  .glass{
+    position:relative;
+    background:linear-gradient(158deg,rgba(255,255,255,.60) 0%,rgba(255,255,255,.50) 60%,rgba(231,210,162,.30) 100%);
+    backdrop-filter:blur(34px) saturate(1.32);-webkit-backdrop-filter:blur(34px) saturate(1.32);
+    border:1px solid rgba(255,255,255,.78);
+    box-shadow:8px 18px 48px -16px rgba(150,118,52,.26),0 0 28px rgba(231,210,162,.24),inset 0 1px 0 rgba(255,255,255,.92);
+  }
+  .shell{max-width:1280px;margin:0 auto;display:grid;grid-template-columns:248px 1fr;grid-template-rows:auto 1fr;gap:20px;}
+  .topbar{grid-column:1 / -1;border-radius:26px;padding:15px 24px;display:flex;align-items:center;gap:18px;}
+  .logo{display:flex;align-items:center;gap:14px;}
+  .logo-mark{width:48px;height:48px;border-radius:16px;background:linear-gradient(158deg,rgba(255,255,255,.7),rgba(231,210,162,.5));
+    border:1px solid rgba(255,255,255,.8);display:flex;align-items:center;justify-content:center;box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 0 16px rgba(231,210,162,.34);}
+  .logo-tx b{font-size:18px;letter-spacing:1px;font-weight:600;}
+  .logo-tx span{display:block;font-size:11px;color:var(--ink-faint);letter-spacing:3px;margin-top:2px;}
+  .search{flex:1;max-width:440px;margin:0 8px;display:flex;align-items:center;gap:9px;padding:11px 17px;border-radius:15px;
+    background:rgba(255,255,255,.4);border:1px solid var(--bd-gold);color:var(--ink-faint);font-size:13.5px;}
+  .top-actions{margin-left:auto;display:flex;align-items:center;gap:13px;}
+  .tbtn{width:40px;height:40px;border-radius:13px;background:rgba(255,255,255,.42);border:1px solid var(--bd-gold);
+    display:flex;align-items:center;justify-content:center;color:var(--ink-soft);font-size:18px;}
+  .avatar{width:40px;height:40px;border-radius:50%;background:var(--grad);color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;box-shadow:0 5px 14px rgba(156,124,62,.42),inset 0 1px 0 rgba(255,255,255,.5);}
+  .side{border-radius:26px;padding:16px 13px;display:flex;flex-direction:column;gap:4px;}
+  .nav{display:flex;align-items:center;gap:13px;padding:12px 15px;border-radius:15px;color:var(--ink-soft);font-size:14px;cursor:default;}
+  .nav i{font-size:19px;width:20px;text-align:center;}
+  .nav:hover{background:rgba(255,255,255,.45);}
+  .nav.on{background:var(--grad);color:#fff;box-shadow:0 8px 20px rgba(156,124,62,.4),inset 0 1px 0 rgba(255,255,255,.45);}
+  .nav.on i{color:#fff;}
+  .side-foot{margin-top:auto;padding:14px 15px;border-radius:16px;background:rgba(255,255,255,.4);border:1px solid var(--bd-gold);}
+  .side-foot p{font-size:12px;color:var(--ink-soft);} .side-foot b{color:var(--ink);}
+  .bar{height:6px;border-radius:6px;background:rgba(156,124,62,.16);margin-top:9px;overflow:hidden;}
+  .bar i{display:block;height:100%;width:62%;background:var(--grad);border-radius:6px;}
+  .main{display:flex;flex-direction:column;gap:20px;}
+  .page-h{display:flex;align-items:flex-end;gap:14px;padding:2px 4px;}
+  .page-h h1{font-size:27px;font-weight:600;letter-spacing:1px;}
+  .page-h p{font-size:13.5px;color:var(--ink-soft);margin-bottom:4px;}
+  .pill{margin-left:auto;display:flex;gap:8px;}
+  .pill span{font-size:12.5px;padding:8px 14px;border-radius:13px;background:rgba(255,255,255,.45);border:1px solid var(--bd-gold);color:var(--ink-soft);}
+  .card{border-radius:26px;padding:24px 26px;}
+  .card h3{font-size:16px;font-weight:600;margin-bottom:4px;}
+  .card .sub{font-size:13px;color:var(--ink-soft);margin-bottom:18px;}
+  .field{margin-bottom:15px;}
+  .field label{display:block;font-size:12.5px;color:var(--ink-soft);margin-bottom:8px;letter-spacing:.5px;}
+  .input{width:100%;padding:14px 16px;border-radius:16px;background:rgba(255,255,255,.42);border:1px solid var(--bd-gold);font-size:14px;color:var(--ink);}
+  .row3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
+  .chip{padding:12px 14px;border-radius:15px;background:rgba(255,255,255,.42);border:1px solid var(--bd-gold);font-size:13px;color:var(--ink-soft);display:flex;align-items:center;justify-content:space-between;}
+  .chip.sel{background:rgba(189,154,89,.18);border-color:rgba(168,134,62,.9);color:var(--gold-deep);}
+  .gen{margin-top:9px;width:100%;padding:16px;border-radius:17px;background:var(--grad);color:#fff;font-size:15px;font-weight:600;border:none;
+    box-shadow:0 13px 30px rgba(156,124,62,.42),inset 0 1px 0 rgba(255,255,255,.55);display:flex;align-items:center;justify-content:center;gap:9px;cursor:pointer;letter-spacing:1px;}
+  .split{display:grid;grid-template-columns:1.05fr .95fr;gap:20px;}
+  .task{display:flex;align-items:center;gap:14px;padding:15px 8px;border-bottom:1px solid rgba(155,128,62,.14);}
+  .task:last-child{border-bottom:none;}
+  .thumb{width:48px;height:48px;border-radius:15px;background:var(--grad);flex:none;display:flex;align-items:center;justify-content:center;color:#fff;font-size:20px;box-shadow:0 6px 15px rgba(156,124,62,.34),inset 0 1px 0 rgba(255,255,255,.5);}
+  .thumb.done{background:linear-gradient(135deg,#a7cba0,#6aa67f);box-shadow:0 6px 15px rgba(106,166,127,.3);}
+  .thumb.wait{background:rgba(155,128,62,.18);color:var(--ink-faint);box-shadow:none;}
+  .task .meta{flex:1;min-width:0;}
+  .task .meta b{font-size:14px;font-weight:500;display:block;}
+  .task .meta .pb{height:5px;border-radius:5px;background:rgba(155,128,62,.16);margin-top:9px;overflow:hidden;}
+  .task .meta .pb i{display:block;height:100%;background:var(--grad);border-radius:5px;}
+  .stat{font-size:12px;padding:6px 12px;border-radius:11px;font-weight:500;flex:none;}
+  .stat.run{background:rgba(189,154,89,.2);color:var(--gold-deep);}
+  .stat.ok{background:rgba(106,166,127,.2);color:#447d5f;}
+  .stat.q{background:rgba(155,128,62,.15);color:var(--ink-faint);}
+  .brand{border-radius:26px;padding:24px 26px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:30px;}
+  .brand h4{font-size:12.5px;letter-spacing:1.5px;color:var(--ink-faint);margin-bottom:16px;font-weight:500;}
+  .sw{display:flex;gap:11px;flex-wrap:wrap;}
+  .sw div{width:58px;height:58px;border-radius:16px;display:flex;align-items:flex-end;justify-content:center;font-size:10px;color:#fff;padding-bottom:6px;box-shadow:inset 0 1px 0 rgba(255,255,255,.4);}
+  .lock{display:flex;align-items:center;gap:16px;}
+  .lbox{width:66px;height:66px;border-radius:20px;background:linear-gradient(158deg,rgba(255,255,255,.72),rgba(231,210,162,.54));border:1px solid rgba(255,255,255,.8);display:flex;align-items:center;justify-content:center;box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 0 18px rgba(231,210,162,.36);}
+  .type b{font-size:30px;font-weight:600;letter-spacing:2px;color:var(--gold-deep);} .type p{font-size:12.5px;color:var(--ink-soft);margin-top:8px;line-height:1.8;}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <div class="topbar glass">
+    <div class="logo">
+      <div class="logo-mark">
+        <svg width="30" height="30" viewBox="0 0 34 34" fill="none">
+          <path d="M7 12 H27 V20 Q27 25 22 25 H12 Q7 25 7 20 Z" fill="url(#g)"/>
+          <rect x="9" y="8" width="3.4" height="6" rx="1.7" fill="url(#g)"/>
+          <rect x="21.6" y="8" width="3.4" height="6" rx="1.7" fill="url(#g)"/>
+          <rect x="10.5" y="25" width="3" height="5" rx="1.5" fill="url(#g)"/>
+          <rect x="20.5" y="25" width="3" height="5" rx="1.5" fill="url(#g)"/>
+          <defs><linearGradient id="g" x1="0" y1="0" x2="34" y2="34"><stop stop-color="#caa55f"/><stop offset="1" stop-color="#6e521f"/></linearGradient></defs>
+        </svg>
+      </div>
+      <div class="logo-tx"><b>华鼎 AI</b><span>VIDEO&nbsp;ENGINE</span></div>
+    </div>
+    <div class="search"><i class="ti ti-search"></i> 搜索项目、模板、任务…</div>
+    <div class="top-actions">
+      <div class="tbtn"><i class="ti ti-bell"></i></div>
+      <div class="tbtn"><i class="ti ti-settings"></i></div>
+      <div class="avatar">华</div>
+    </div>
+  </div>
+
+  <div class="side glass">
+    <div class="nav on"><i class="ti ti-layout-dashboard"></i> 工作台</div>
+    <div class="nav"><i class="ti ti-stack-2"></i> 批量生产</div>
+    <div class="nav"><i class="ti ti-template"></i> 模板中心</div>
+    <div class="nav"><i class="ti ti-palette"></i> 品牌库</div>
+    <div class="nav"><i class="ti ti-photo"></i> 封面工坊</div>
+    <div class="nav"><i class="ti ti-send"></i> 发布中心</div>
+    <div class="nav"><i class="ti ti-chart-line"></i> 数据看板</div>
+    <div class="nav"><i class="ti ti-users"></i> 团队</div>
+    <div class="side-foot">
+      <p><b>本月额度</b> · 旗舰版</p>
+      <p style="margin-top:2px;font-size:11.5px;">已用 620 / 1000 条</p>
+      <div class="bar"><i></i></div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="page-h">
+      <h1>工作台</h1>
+      <p>输入主题，一键生成成片</p>
+      <div class="pill"><span><i class="ti ti-building-store" style="font-size:14px"></i> 电商带货</span><span>竖屏 9:16</span></div>
+    </div>
+
+    <div class="split">
+      <div class="card glass">
+        <h3>新建视频</h3>
+        <div class="sub">支持主题生成 / 商品驱动 / 自定义脚本</div>
+        <div class="field"><label>视频主题</label><div class="input">秋冬新款羊绒大衣 · 卖点种草</div></div>
+        <div class="field"><label>视觉模板</label>
+          <div class="row3">
+            <div class="chip sel">人文纪实 <i class="ti ti-check"></i></div>
+            <div class="chip">商品融合</div>
+            <div class="chip">数字人口播</div>
+          </div>
+        </div>
+        <div class="field"><label>语音 / 尺寸</label>
+          <div class="row3">
+            <div class="chip">知性女声</div>
+            <div class="chip">9:16 竖屏</div>
+            <div class="chip">品牌音色</div>
+          </div>
+        </div>
+        <button class="gen"><i class="ti ti-sparkles"></i> 生成视频</button>
+      </div>
+
+      <div class="card glass">
+        <h3 style="margin-bottom:14px;">生成任务</h3>
+        <div class="task">
+          <div class="thumb"><i class="ti ti-movie"></i></div>
+          <div class="meta"><b>秋冬羊绒大衣 · 卖点种草</b>
+            <div class="pb"><i style="width:70%"></i></div></div>
+          <span class="stat run">生成中 70%</span>
+        </div>
+        <div class="task">
+          <div class="thumb done"><i class="ti ti-check"></i></div>
+          <div class="meta"><b>新品面霜 · 成分解析</b>
+            <div class="pb"><i style="width:100%"></i></div></div>
+          <span class="stat ok">已完成</span>
+        </div>
+        <div class="task">
+          <div class="thumb done"><i class="ti ti-check"></i></div>
+          <div class="meta"><b>智能扫地机 · 场景演示</b>
+            <div class="pb"><i style="width:100%"></i></div></div>
+          <span class="stat ok">已完成</span>
+        </div>
+        <div class="task">
+          <div class="thumb wait"><i class="ti ti-clock"></i></div>
+          <div class="meta"><b>儿童保温杯 · 卖点合集</b>
+            <div class="pb"><i style="width:6%"></i></div></div>
+          <span class="stat q">排队中</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="brand glass">
+      <div>
+        <h4>品牌色 · 暖香槟鎏金</h4>
+        <div class="sw">
+          <div style="background:linear-gradient(135deg,#ecd9aa,#c8a563)">主金</div>
+          <div style="background:linear-gradient(135deg,#a8854a,#6e521f)">古铜</div>
+          <div style="background:#f5efe2;color:#8c6f3a">米白</div>
+          <div style="background:#3a3320">墨</div>
+          <div style="background:#6aa67f">成功</div>
+        </div>
+        <p style="font-size:12px;color:var(--ink-soft);margin-top:13px;line-height:1.8;">近白磨砂主体，底部暖香槟+暖米白低饱和虹彩，古铜金压重。</p>
+      </div>
+      <div>
+        <h4>Logo · 几何鼎（古铜金）</h4>
+        <div class="lock">
+          <div class="lbox">
+            <svg width="40" height="40" viewBox="0 0 34 34" fill="none">
+              <path d="M7 12 H27 V20 Q27 25 22 25 H12 Q7 25 7 20 Z" fill="url(#g2)"/>
+              <rect x="9" y="8" width="3.4" height="6" rx="1.7" fill="url(#g2)"/>
+              <rect x="21.6" y="8" width="3.4" height="6" rx="1.7" fill="url(#g2)"/>
+              <rect x="10.5" y="25" width="3" height="5" rx="1.5" fill="url(#g2)"/>
+              <rect x="20.5" y="25" width="3" height="5" rx="1.5" fill="url(#g2)"/>
+              <defs><linearGradient id="g2" x1="0" y1="0" x2="34" y2="34"><stop stop-color="#caa55f"/><stop offset="1" stop-color="#6e521f"/></linearGradient></defs>
+            </svg>
+          </div>
+          <div><b style="font-size:21px;letter-spacing:2px;color:var(--ink)">华鼎 AI</b>
+          <p style="font-size:11px;color:var(--ink-faint);letter-spacing:3px;margin-top:3px;">HUADING</p></div>
+        </div>
+        <p style="font-size:12px;color:var(--ink-soft);margin-top:13px;line-height:1.8;">几何鼎压深为古铜金渐变，嵌入磨砂玻璃徽。</p>
+      </div>
+      <div class="type">
+        <h4>材质 / 质感</h4>
+        <b>华鼎 AI</b>
+        <p>磨砂玻璃 · 近白半透 · 次表面散射感<br>边缘柔光 · 右下悬浮投影 · 底部暖香槟虹彩 · 输入框淡金边，整体苹果液态玻璃 × 华鼎金质。</p>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
