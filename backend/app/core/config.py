@@ -46,6 +46,15 @@ class Settings(BaseSettings):
     storage_access_key_id: str | None = None
     storage_secret_access_key: str | None = None
 
+    engine_s3_endpoint: str | None = None
+    engine_s3_public_endpoint: str | None = None
+    engine_s3_access_key: str | None = None
+    engine_s3_secret_key: str | None = None
+    engine_s3_bucket: str = "huading-videos"
+    engine_s3_region: str = "us-east-1"
+    engine_s3_secure: bool = False
+    engine_s3_presign_ttl: int = 3600
+
     # ---- Video engine ----
     # Keys are injected from the platform/environment, never hardcoded (#002-FIX-1).
     # Multi-tenancy is out of scope (M2); the engine config is a single process-wide

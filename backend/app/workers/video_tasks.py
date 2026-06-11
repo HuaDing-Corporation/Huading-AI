@@ -18,6 +18,8 @@ from typing import Any
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.db.models import VideoTask
+from app.db.session import SessionLocal
 from app.services.progress import build_progress_store
 from app.services.storage.factory import create_object_storage
 from app.workers.celery_app import celery_app
@@ -47,9 +49,60 @@ def _safe_prefix(prefix: str) -> str:
 def _storage_key(task_id: str, tenant_id: str) -> str:
     """Task-isolated object-storage key. No user input flows in here (#002-RV P2)."""
     return (
-        f"{_safe_prefix(settings.engine_output_prefix)}/"
-        f"{_safe_task_id(tenant_id)}/{_safe_task_id(task_id)}/final.mp4"
+        f"tenants/{_safe_task_id(tenant_id)}/"
+        f"{_safe_prefix(settings.engine_output_prefix)}/{_safe_task_id(task_id)}/output.mp4"
     )
+
+
+def _thumbnail_key(task_id: str, tenant_id: str) -> str:
+    return (
+        f"tenants/{_safe_task_id(tenant_id)}/"
+        f"{_safe_prefix(settings.engine_output_prefix)}/{_safe_task_id(task_id)}/thumbnail.jpg"
+    )
+
+
+def _update_video_task(
+    task_id: str,
+    tenant_id: str,
+    *,
+    status: str,
+    progress: int | None = None,
+    storage_bucket: str | None = None,
+    storage_key: str | None = None,
+    thumbnail_key: str | None = None,
+    content_type: str | None = None,
+    size_bytes: int | None = None,
+    duration_sec: float | None = None,
+    local_path: str | None = None,
+    error: str | None = None,
+) -> None:
+    try:
+        with SessionLocal() as db:
+            task = db.get(VideoTask, task_id)
+            if task is None or task.tenant_id != tenant_id:
+                return
+            task.status = status
+            if progress is not None:
+                task.progress = progress
+            if storage_bucket is not None:
+                task.storage_bucket = storage_bucket
+            if storage_key is not None:
+                task.storage_key = storage_key
+            if thumbnail_key is not None:
+                task.thumbnail_key = thumbnail_key
+            if content_type is not None:
+                task.content_type = content_type
+            if size_bytes is not None:
+                task.size_bytes = size_bytes
+            if duration_sec is not None:
+                task.duration_sec = duration_sec
+            if local_path is not None:
+                task.local_path = local_path
+            if error is not None:
+                task.error = error
+            db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("video_task.db_update_failed", task_id=task_id, error=str(exc))
 
 
 def _build_engine_config(params: dict[str, Any]):
@@ -153,11 +206,12 @@ async def _generate_with_seedance(params: dict[str, Any], progress_cb) -> dict[s
 
 @celery_app.task(bind=True, name="app.workers.tasks.generate_video")
 def generate_video_task(self, params: dict[str, Any]) -> dict[str, Any]:
-    task_id = self.request.id or "eager"
+    task_id = self.request.id or params.get("video_task_id") or "eager"
     tenant_id = _safe_task_id(str(params["tenant_id"]))
     progress_task_id = f"{tenant_id}:{task_id}"
     store = build_progress_store(settings.redis_url)
     store.update(progress_task_id, status="STARTED", progress=0.0, stage="queued")
+    _update_video_task(task_id, tenant_id, status="running", progress=0)
 
     def progress_cb(event: Any) -> None:
         # Progress reporting must never break generation.
@@ -183,25 +237,47 @@ def generate_video_task(self, params: dict[str, Any]) -> dict[str, Any]:
             result = asyncio.run(_generate_with_engine(params, progress_cb))
         video_bytes = Path(result["video_path"]).read_bytes()
         storage = create_object_storage(settings)
-        url = storage.put_bytes(
-            _storage_key(task_id, tenant_id), video_bytes, content_type="video/mp4"
+        storage_bucket = getattr(storage, "bucket", settings.engine_s3_bucket)
+        storage_key = _storage_key(task_id, tenant_id)
+        storage.put_bytes(storage_key, video_bytes, content_type="video/mp4")
+        thumbnail_key = None
+        thumbnail_path = result.get("thumbnail_path")
+        if thumbnail_path:
+            thumbnail_bytes = Path(thumbnail_path).read_bytes()
+            thumbnail_key = _thumbnail_key(task_id, tenant_id)
+            storage.put_bytes(thumbnail_key, thumbnail_bytes, content_type="image/jpeg")
+        duration = result.get("duration")
+        file_size = int(result.get("file_size") or len(video_bytes))
+        _update_video_task(
+            task_id,
+            tenant_id,
+            status="done",
+            progress=100,
+            storage_bucket=storage_bucket,
+            storage_key=storage_key,
+            thumbnail_key=thumbnail_key,
+            content_type="video/mp4",
+            size_bytes=file_size,
+            duration_sec=float(duration) if duration is not None else None,
+            local_path=str(result["video_path"]),
         )
         store.update(
             progress_task_id,
             status="SUCCESS",
             progress=1.0,
             stage="completed",
-            video_url=url,
         )
-        logger.info("video.generated", task_id=task_id, url=url, size=result["file_size"])
+        logger.info("video.generated", task_id=task_id, bucket=storage_bucket, size=file_size)
         return {
             "task_id": task_id,
             "status": "SUCCESS",
-            "video_url": url,
-            "duration": result["duration"],
-            "file_size": result["file_size"],
+            "storage_bucket": storage_bucket,
+            "storage_key": storage_key,
+            "duration": duration,
+            "file_size": file_size,
         }
     except Exception as exc:  # noqa: BLE001
         logger.error("video.generation_failed", task_id=task_id, error=str(exc))
+        _update_video_task(task_id, tenant_id, status="failed", error=str(exc))
         store.update(progress_task_id, status="FAILURE", stage="failed", error=str(exc))
         raise

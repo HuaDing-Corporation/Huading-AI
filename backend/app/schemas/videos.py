@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -104,3 +105,23 @@ class VideoTaskStatus(BaseModel):
     frame_total: int | None = None
     video_url: str | None = None
     error: str | None = None
+
+
+class VideoRead(BaseModel):
+    id: str
+    title: str
+    prompt: str
+    mode: str
+    status: str
+    progress: int
+    created_at: datetime
+    duration_sec: float | None = None
+    thumbnail_url: str | None = None
+    playback_url: str | None = None
+    download_url: str | None = None
+    error: str | None = None
+
+
+class VideoListResponse(BaseModel):
+    items: list[VideoRead]
+    next_cursor: str | None = None
