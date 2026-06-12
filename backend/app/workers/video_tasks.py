@@ -30,6 +30,10 @@ logger = get_logger(__name__)
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # Output prefix: one or more safe segments separated by '/', no traversal.
 _PREFIX_RE = re.compile(r"^[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$")
+_UPLOAD_IMAGE_KEY_RE = re.compile(r"^uploads/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|webp)$")
+_TENANT_UPLOAD_OBJECT_KEY_RE = re.compile(
+    r"^tenants/[A-Za-z0-9_-]+/uploads/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|webp)$"
+)
 
 
 def _safe_task_id(task_id: str) -> str:
@@ -59,6 +63,15 @@ def _thumbnail_key(task_id: str, tenant_id: str) -> str:
         f"tenants/{_safe_task_id(tenant_id)}/"
         f"{_safe_prefix(settings.engine_output_prefix)}/{_safe_task_id(task_id)}/thumbnail.jpg"
     )
+
+
+def _tenant_upload_storage_key(tenant_id: str, image_key: str) -> str:
+    if not image_key or ".." in image_key or not _UPLOAD_IMAGE_KEY_RE.match(image_key):
+        raise ValueError(f"unsafe image_key: {image_key!r}")
+    storage_key = f"tenants/{_safe_task_id(tenant_id)}/{image_key}"
+    if not _TENANT_UPLOAD_OBJECT_KEY_RE.match(storage_key):
+        raise ValueError(f"unsafe image_key: {image_key!r}")
+    return storage_key
 
 
 def _update_video_task(
@@ -128,6 +141,9 @@ def _build_engine_config(params: dict[str, Any]):
         seedance_api_key=settings.engine_seedance_api_key,
         seedance_base_url=settings.engine_seedance_base_url,
         seedance_model=settings.engine_seedance_model,
+        seedance_request_timeout_seconds=settings.engine_seedance_request_timeout_seconds,
+        seedance_poll_interval_seconds=settings.engine_seedance_poll_interval_seconds,
+        seedance_timeout_seconds=settings.engine_seedance_timeout_seconds,
         default_template=params.get("frame_template") or settings.engine_default_template,
         browser_channel=settings.engine_browser_channel,
         runtime_root=settings.engine_runtime_root,
@@ -165,11 +181,10 @@ def _resolve_i2v_image(params: dict[str, Any]) -> str:
 
     image_key = params.get("image_key") or ""
     tenant_id = _safe_task_id(str(params["tenant_id"]))
-    if not image_key.startswith("uploads/") or ".." in image_key:
-        raise ValueError(f"unsafe image_key: {image_key!r}")
+    storage_key = _tenant_upload_storage_key(tenant_id, image_key)
 
     storage = create_object_storage(settings)
-    content = storage.get_bytes(f"tenants/{tenant_id}/{image_key}")
+    content = storage.get_bytes(storage_key)
     suffix = Path(image_key).suffix or ".jpg"
     handle = tempfile.NamedTemporaryFile(prefix="i2v-", suffix=suffix, delete=False)
     with handle as fh:
@@ -190,7 +205,7 @@ async def _generate_with_seedance(params: dict[str, Any], progress_cb) -> dict[s
         image_path = _resolve_i2v_image(params)
 
     try:
-        return await run_seedance_pipeline(
+        pipeline = run_seedance_pipeline(
             cfg,
             params["topic"],
             image_path=image_path,
@@ -199,6 +214,14 @@ async def _generate_with_seedance(params: dict[str, Any], progress_cb) -> dict[s
             tts_speed=params.get("tts_speed"),
             progress_callback=progress_cb,
         )
+        try:
+            return await asyncio.wait_for(
+                pipeline,
+                timeout=settings.engine_seedance_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            timeout = settings.engine_seedance_timeout_seconds
+            raise RuntimeError(f"Seedance generation timed out after {timeout:g}s.") from exc
     finally:
         if image_path:
             Path(image_path).unlink(missing_ok=True)

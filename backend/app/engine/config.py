@@ -78,6 +78,9 @@ class EngineConfig(BaseModel):
     seedance_api_key: str = Field(default="")
     seedance_base_url: str = Field(default="https://ark.cn-beijing.volces.com/api/v3")
     seedance_model: str = Field(default="doubao-seedance-2-0-260128")
+    seedance_request_timeout_seconds: float = Field(default=120.0, gt=0)
+    seedance_poll_interval_seconds: float = Field(default=5.0, gt=0)
+    seedance_timeout_seconds: float = Field(default=600.0, gt=0)
 
     kling_access_key: str = Field(default="")
     kling_secret_key: str = Field(default="")

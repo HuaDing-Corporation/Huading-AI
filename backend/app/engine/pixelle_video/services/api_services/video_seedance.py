@@ -67,9 +67,9 @@ class SeedanceVideoClient:
         base_url: Optional[str] = None,
         model: Optional[str] = None,
         local_proxy: Optional[str] = None,
-        timeout: int = 120,
-        poll_interval: int = 5,
-        max_poll_seconds: int = 600,
+        timeout: float = 120.0,
+        poll_interval: float = 5.0,
+        max_poll_seconds: float = 600.0,
         max_retries: int = 3,
     ) -> None:
         self.api_key = api_key or os.getenv("SEEDANCE_API_KEY") or os.getenv("ARK_API_KEY")

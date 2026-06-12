@@ -39,6 +39,9 @@ def create_seedance_client(cfg: EngineConfig) -> SeedanceVideoClient:
         base_url=cfg.seedance_base_url or None,
         model=cfg.seedance_model or None,
         local_proxy=cfg.provider_local_proxy or None,
+        timeout=cfg.seedance_request_timeout_seconds,
+        poll_interval=cfg.seedance_poll_interval_seconds,
+        max_poll_seconds=cfg.seedance_timeout_seconds,
     )
 
 
