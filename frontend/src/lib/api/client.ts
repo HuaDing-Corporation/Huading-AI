@@ -53,6 +53,11 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
     ...((headers as Record<string, string>) ?? {})
   };
 
+  // Only an authenticated 401 (the request actually carried a token) should
+  // drop the session. A tokenless 401 — e.g. a request that raced ahead of
+  // session hydration, or a public endpoint — must not log the user out. (Fix 2)
+  const sentAuth = finalHeaders.Authorization !== undefined;
+
   let res: Response;
   try {
     res = await fetch(`${API_BASE_URL}${path}`, {
@@ -64,7 +69,7 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
     throw new ApiError("网络连接失败，请检查后端服务是否在线。", "NETWORK_ERROR", 0);
   }
 
-  if (res.status === 401) {
+  if (res.status === 401 && sentAuth) {
     handleUnauthorized();
   }
 
