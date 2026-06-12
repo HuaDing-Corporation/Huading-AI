@@ -3,6 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, Request, UploadFile, status
 
 from app.api.deps import get_object_storage, require_permission, tenant_storage_key
+from app.core.config import settings
 from app.core.exceptions import AppError
 from app.db.models import User
 from app.schemas.response import ApiResponse, ok
@@ -19,7 +20,26 @@ _ALLOWED_TYPES: dict[str, str] = {
     "image/png": ".png",
     "image/webp": ".webp",
 }
-_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+_MAX_BYTES = settings.upload_max_bytes
+_UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
+
+
+async def _read_limited_upload(file: UploadFile) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _MAX_BYTES:
+            raise AppError(
+                f"File too large ({total} bytes); limit is {_MAX_BYTES} bytes.",
+                code="UPLOAD_TOO_LARGE",
+                status_code=413,
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 @router.post("", response_model=ApiResponse[UploadResponse], status_code=status.HTTP_201_CREATED)
@@ -41,15 +61,9 @@ async def upload_image(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
         )
 
-    content = await file.read()
+    content = await _read_limited_upload(file)
     if not content:
         raise AppError("Uploaded file is empty.", code="EMPTY_UPLOAD", status_code=400)
-    if len(content) > _MAX_BYTES:
-        raise AppError(
-            f"File too large ({len(content)} bytes); limit is {_MAX_BYTES} bytes.",
-            code="UPLOAD_TOO_LARGE",
-            status_code=413,
-        )
 
     # Server-generated key: no client-controlled path components (#002-RV P2).
     key = f"uploads/{uuid.uuid4().hex}{extension}"

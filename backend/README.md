@@ -148,6 +148,12 @@ Each prints the task id, remote video URL, and the saved mp4 path.
   ≤10MB; stored under `tenants/{tenant_id}/uploads/...`), then pass the returned
   `key` as `image_key`.
 
+Upload bodies are capped by the API before multipart parsing using
+`UPLOAD_MAX_BYTES` (default `10485760`, 10 MiB). In production, also set the same
+limit at the reverse proxy layer (for example nginx `client_max_body_size 10m`,
+or the equivalent Traefik/body-size middleware) so oversized uploads are rejected
+before they reach the application process.
+
 Requires `ENGINE_SEEDANCE_API_KEY` (plus the `ENGINE_LLM_*` credentials) on the
 worker. Progress/SSE and the tenant-isolated output key work exactly as for
 static_template. Example:

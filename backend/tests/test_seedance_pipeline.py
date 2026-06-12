@@ -5,7 +5,10 @@ orchestration, routing, validation, and tenant scoping.
 """
 
 import sys
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 _ENGINE_DIR = Path(__file__).resolve().parents[1] / "app" / "engine"
 if str(_ENGINE_DIR) not in sys.path:
@@ -15,6 +18,9 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.api.deps import get_object_storage  # noqa: E402
+from app.api.v1.routes import uploads as uploads_route  # noqa: E402
+from app.core.exceptions import AppError  # noqa: E402
+from app.db.models import VideoTask  # noqa: E402
 from app.engine import EngineConfig, seedance_pipeline  # noqa: E402
 from app.main import app  # noqa: E402
 from app.workers import video_tasks  # noqa: E402
@@ -148,8 +154,10 @@ class _Store:
 class _FakeStorage:
     def __init__(self):
         self.objects = {}
+        self.put_calls = 0
 
     def put_bytes(self, key, content, *, content_type):
+        self.put_calls += 1
         self.objects[key] = content
         return f"memory://{key}"
 
@@ -157,6 +165,25 @@ class _FakeStorage:
         if key not in self.objects:
             raise FileNotFoundError(key)
         return self.objects[key]
+
+
+class _ChunkedUpload:
+    content_type = "image/png"
+    filename = "product.png"
+
+    def __init__(self, size: int) -> None:
+        self.remaining = size
+        self.read_sizes: list[int] = []
+
+    async def read(self, size: int = -1) -> bytes:
+        if size <= 0:
+            raise AssertionError("upload must be read in bounded chunks")
+        self.read_sizes.append(size)
+        if self.remaining <= 0:
+            return b""
+        chunk_size = min(size, self.remaining)
+        self.remaining -= chunk_size
+        return b"0" * chunk_size
 
 
 def test_resolve_i2v_image_tenant_scoped(monkeypatch, tmp_path):
@@ -172,6 +199,27 @@ def test_resolve_i2v_image_tenant_scoped(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError):
         video_tasks._resolve_i2v_image({"tenant_id": "tn1", "image_key": "../../etc/passwd"})
+
+
+@pytest.mark.parametrize(
+    "bad_key",
+    [
+        "tenants/tn2/uploads/abc.jpg",
+        "uploads/../abc.jpg",
+        "uploads/nested/abc.jpg",
+        "uploads/abc$.jpg",
+        "uploads/abc.jpg/extra",
+        "uploads/abc.gif",
+        "uploads\\abc.jpg",
+    ],
+)
+def test_resolve_i2v_image_rejects_non_whitelisted_keys(monkeypatch, bad_key):
+    storage = _FakeStorage()
+    monkeypatch.setattr(video_tasks, "create_object_storage", lambda settings: storage)
+
+    with pytest.raises(ValueError, match="unsafe image_key"):
+        video_tasks._resolve_i2v_image({"tenant_id": "tn1", "image_key": bad_key})
+    assert storage.objects == {}
 
 
 # ---------------- uploads endpoint ----------------
@@ -194,6 +242,38 @@ def test_upload_image_tenant_scoped(monkeypatch, auth_context):
         assert f"tenants/{tenant_id}/{data['key']}" in storage.objects
     finally:
         app.dependency_overrides.pop(get_object_storage, None)
+
+
+@pytest.mark.asyncio
+async def test_upload_reads_stream_in_bounded_chunks() -> None:
+    storage = _FakeStorage()
+    request = SimpleNamespace(state=SimpleNamespace(request_id="req-test"))
+    user = SimpleNamespace(tenant_id="tn1")
+    upload = _ChunkedUpload(size=uploads_route._MAX_BYTES)
+
+    response = await uploads_route.upload_image(request, upload, user=user, storage=storage)
+
+    assert response.data is not None
+    assert response.data.size == uploads_route._MAX_BYTES
+    assert storage.put_calls == 1
+    assert upload.read_sizes
+    assert all(0 < size <= uploads_route._UPLOAD_READ_CHUNK_BYTES for size in upload.read_sizes)
+
+
+@pytest.mark.asyncio
+async def test_upload_over_limit_413_without_storage_write() -> None:
+    storage = _FakeStorage()
+    request = SimpleNamespace(state=SimpleNamespace(request_id="req-test"))
+    user = SimpleNamespace(tenant_id="tn1")
+    upload = _ChunkedUpload(size=uploads_route._MAX_BYTES + 1)
+
+    with pytest.raises(AppError) as exc:
+        await uploads_route.upload_image(request, upload, user=user, storage=storage)
+
+    assert exc.value.status_code == 413
+    assert exc.value.code == "UPLOAD_TOO_LARGE"
+    assert storage.put_calls == 0
+    assert storage.objects == {}
 
 
 def test_upload_rejects_bad_type_and_size(auth_context):
@@ -256,3 +336,77 @@ def test_video_client_seedance_returns_str(monkeypatch, tmp_path):
     client.seedance_client = _FakeSeedance()
     url = client._generate_seedance("p", None, str(tmp_path / "o.mp4"), "doubao-seedance-2-0")
     assert url == "https://v.example/x.mp4"  # str contract preserved
+
+
+class _RecordingStore:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    def update(self, task_id, **fields):
+        self.events.append({"task_id": task_id, **fields})
+
+
+def test_seedance_to_thread_provider_timeout_marks_failed_without_zombie(
+    monkeypatch, auth_context, auth_db
+):
+    task_id = "seedance-thread-timeout"
+    tenant_id = auth_context["tenant_id"]
+    with auth_db() as db:
+        db.add(
+            VideoTask(
+                id=task_id,
+                tenant_id=tenant_id,
+                created_by_user_id=auth_context["user_id"],
+                status="queued",
+                topic="thread timeout test",
+                video_mode="seedance_t2v",
+            )
+        )
+        db.commit()
+
+    async def fake_plan(cfg, topic, n_scenes):
+        return [seedance_pipeline.Scene(narration="旁白", video_prompt="画面")]
+
+    finished = threading.Event()
+    thread_seen: list[threading.Thread] = []
+
+    def blocking_provider_timeout(*args, **kwargs):
+        thread = threading.current_thread()
+        thread_seen.append(thread)
+        time.sleep(0.05)
+        finished.set()
+        raise TimeoutError("Ark request timed out after 0.05s")
+
+    store = _RecordingStore()
+    monkeypatch.setattr(seedance_pipeline, "_plan_scenes", fake_plan)
+    monkeypatch.setattr(seedance_pipeline, "generate_seedance_video", blocking_provider_timeout)
+    monkeypatch.setattr(video_tasks, "build_progress_store", lambda url: store)
+    monkeypatch.setattr(video_tasks, "create_object_storage", lambda settings: _FakeStorage())
+    monkeypatch.setattr(video_tasks, "SessionLocal", auth_db)
+    monkeypatch.setattr(video_tasks.settings, "engine_llm_api_key", "llm-k")
+    monkeypatch.setattr(video_tasks.settings, "engine_llm_base_url", "https://llm.example")
+    monkeypatch.setattr(video_tasks.settings, "engine_llm_model", "m")
+    monkeypatch.setattr(video_tasks.settings, "engine_seedance_api_key", "sd-k")
+
+    with pytest.raises(TimeoutError, match="Ark request timed out"):
+        video_tasks.generate_video_task.apply(
+            args=[
+                {
+                    "topic": "thread timeout test",
+                    "video_mode": "seedance_t2v",
+                    "tenant_id": tenant_id,
+                }
+            ],
+            task_id=task_id,
+        ).get(propagate=True)
+
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        assert task is not None
+        assert task.status == "failed"
+        assert "Ark request timed out" in (task.error or "")
+    assert store.events[-1]["status"] == "FAILURE"
+    assert "Ark request timed out" in store.events[-1]["error"]
+    assert finished.wait(0.1)
+    assert thread_seen
+    assert not thread_seen[0].is_alive()

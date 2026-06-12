@@ -37,6 +37,7 @@ class Settings(BaseSettings):
 
     # SSE progress stream cap (seconds) before emitting an sse_timeout event.
     sse_timeout_seconds: int = 600
+    upload_max_bytes: int = 10 * 1024 * 1024
 
     storage_backend: str = "local"
     storage_local_root: str = ".local-storage"
@@ -67,6 +68,9 @@ class Settings(BaseSettings):
     engine_seedance_api_key: str = ""
     engine_seedance_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     engine_seedance_model: str = "doubao-seedance-2-0-260128"
+    engine_seedance_request_timeout_seconds: float = 120.0
+    engine_seedance_poll_interval_seconds: float = 5.0
+    engine_seedance_timeout_seconds: float = 600.0
     engine_default_template: str = "1080x1920/static_default.html"
     # Playwright browser channel for frame rendering: "chrome"/"msedge" to use a
     # system browser, or "" for Playwright's bundled Chromium.
