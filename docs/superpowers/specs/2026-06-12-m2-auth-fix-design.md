@@ -61,7 +61,8 @@ No backend change.
 
 ## Verification
 
-- **TDD unit tests** (vitest-free; plain assertions or component tests):
+- **TDD unit tests** — bootstrap Vitest + jsdom + Testing Library (the M2
+  frontend test runner; the repo currently has only a `test` placeholder):
   - `apiFetch`: a tokenless 401 does **not** clear a session; an authed 401 does.
   - `authStore`: `get()` returns the persisted session without an explicit
     `hydrate()` call (simulates pre-AuthProvider read).
