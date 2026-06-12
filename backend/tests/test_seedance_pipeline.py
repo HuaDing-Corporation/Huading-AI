@@ -5,6 +5,8 @@ orchestration, routing, validation, and tenant scoping.
 """
 
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +17,6 @@ if str(_ENGINE_DIR) not in sys.path:
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-import app.engine as engine_module  # noqa: E402
 from app.api.deps import get_object_storage  # noqa: E402
 from app.api.v1.routes import uploads as uploads_route  # noqa: E402
 from app.core.exceptions import AppError  # noqa: E402
@@ -345,8 +346,10 @@ class _RecordingStore:
         self.events.append({"task_id": task_id, **fields})
 
 
-def test_seedance_timeout_marks_video_task_failed(monkeypatch, auth_context, auth_db):
-    task_id = "seedance-timeout"
+def test_seedance_to_thread_provider_timeout_marks_failed_without_zombie(
+    monkeypatch, auth_context, auth_db
+):
+    task_id = "seedance-thread-timeout"
     tenant_id = auth_context["tenant_id"]
     with auth_db() as db:
         db.add(
@@ -355,20 +358,28 @@ def test_seedance_timeout_marks_video_task_failed(monkeypatch, auth_context, aut
                 tenant_id=tenant_id,
                 created_by_user_id=auth_context["user_id"],
                 status="queued",
-                topic="timeout test",
+                topic="thread timeout test",
                 video_mode="seedance_t2v",
             )
         )
         db.commit()
 
-    async def slow_pipeline(*args, **kwargs):
-        import asyncio
+    async def fake_plan(cfg, topic, n_scenes):
+        return [seedance_pipeline.Scene(narration="旁白", video_prompt="画面")]
 
-        await asyncio.sleep(1)
-        raise AssertionError("timeout should fire before pipeline completes")
+    finished = threading.Event()
+    thread_seen: list[threading.Thread] = []
+
+    def blocking_provider_timeout(*args, **kwargs):
+        thread = threading.current_thread()
+        thread_seen.append(thread)
+        time.sleep(0.05)
+        finished.set()
+        raise TimeoutError("Ark request timed out after 0.05s")
 
     store = _RecordingStore()
-    monkeypatch.setattr(engine_module, "run_seedance_pipeline", slow_pipeline)
+    monkeypatch.setattr(seedance_pipeline, "_plan_scenes", fake_plan)
+    monkeypatch.setattr(seedance_pipeline, "generate_seedance_video", blocking_provider_timeout)
     monkeypatch.setattr(video_tasks, "build_progress_store", lambda url: store)
     monkeypatch.setattr(video_tasks, "create_object_storage", lambda settings: _FakeStorage())
     monkeypatch.setattr(video_tasks, "SessionLocal", auth_db)
@@ -376,13 +387,12 @@ def test_seedance_timeout_marks_video_task_failed(monkeypatch, auth_context, aut
     monkeypatch.setattr(video_tasks.settings, "engine_llm_base_url", "https://llm.example")
     monkeypatch.setattr(video_tasks.settings, "engine_llm_model", "m")
     monkeypatch.setattr(video_tasks.settings, "engine_seedance_api_key", "sd-k")
-    monkeypatch.setattr(video_tasks.settings, "engine_seedance_timeout_seconds", 0.01)
 
-    with pytest.raises(RuntimeError, match="timed out"):
+    with pytest.raises(TimeoutError, match="Ark request timed out"):
         video_tasks.generate_video_task.apply(
             args=[
                 {
-                    "topic": "timeout test",
+                    "topic": "thread timeout test",
                     "video_mode": "seedance_t2v",
                     "tenant_id": tenant_id,
                 }
@@ -394,6 +404,9 @@ def test_seedance_timeout_marks_video_task_failed(monkeypatch, auth_context, aut
         task = db.get(VideoTask, task_id)
         assert task is not None
         assert task.status == "failed"
-        assert "timed out" in (task.error or "")
+        assert "Ark request timed out" in (task.error or "")
     assert store.events[-1]["status"] == "FAILURE"
-    assert "timed out" in store.events[-1]["error"]
+    assert "Ark request timed out" in store.events[-1]["error"]
+    assert finished.wait(0.1)
+    assert thread_seen
+    assert not thread_seen[0].is_alive()

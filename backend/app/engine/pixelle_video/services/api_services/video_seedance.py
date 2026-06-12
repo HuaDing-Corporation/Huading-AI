@@ -221,7 +221,7 @@ class SeedanceVideoClient:
         url = f"{self.base_url}/contents/generations/tasks/{task_id}"
         deadline = time.monotonic() + self.max_poll_seconds
         while time.monotonic() < deadline:
-            resp = self._request_with_retry("GET", url, timeout=30)
+            resp = self._request_with_retry("GET", url, timeout=self.timeout)
             resp.raise_for_status()
             data = resp.json() or {}
             status = (data.get("status") or "").lower()
@@ -246,7 +246,7 @@ class SeedanceVideoClient:
         parent = os.path.dirname(save_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        resp = self._request_with_retry("GET", url, timeout=180, stream=True, auth=False)
+        resp = self._request_with_retry("GET", url, timeout=self.timeout, stream=True, auth=False)
         resp.raise_for_status()
         with open(save_path, "wb") as fh:
             for chunk in resp.iter_content(chunk_size=8192):

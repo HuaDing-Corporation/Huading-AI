@@ -145,3 +145,38 @@ def test_engine_unified_entry(monkeypatch, patched, tmp_path):
     )
     result = generate_seedance_video(cfg, "hello", save_path=str(tmp_path / "o.mp4"))
     assert result.video_url == "https://ark.example/v.mp4"
+
+
+def test_seedance_configured_timeout_reaches_submit_poll_and_download(monkeypatch, tmp_path):
+    from app.engine import EngineConfig, generate_seedance_video
+
+    monkeypatch.setattr(video_seedance.time, "sleep", lambda *_: None)
+    calls = []
+    statuses = iter(["succeeded"])
+
+    def fake_request(method, url, **kwargs):
+        calls.append({"method": method, "url": url, "timeout": kwargs.get("timeout")})
+        if method == "POST":
+            return FakeResponse(json_data={"id": "cgt-timeout"})
+        if method == "GET" and "/tasks/cgt-timeout" in url:
+            next(statuses)
+            return FakeResponse(json_data={"status": "succeeded", "content": {"video_url": "https://ark.example/v.mp4"}})
+        if method == "GET" and url == "https://ark.example/v.mp4":
+            return FakeResponse(content=b"MP4")
+        raise AssertionError(f"unexpected {method} {url}")
+
+    monkeypatch.setattr(video_seedance.requests, "request", fake_request)
+    cfg = EngineConfig(
+        llm_api_key="unused",
+        llm_base_url="unused",
+        llm_model="unused",
+        seedance_api_key="k",
+        seedance_base_url="https://ark.example/api/v3",
+        seedance_request_timeout_seconds=7.5,
+        seedance_poll_interval_seconds=0.1,
+        seedance_timeout_seconds=12,
+    )
+
+    generate_seedance_video(cfg, "hello", save_path=str(tmp_path / "out.mp4"))
+
+    assert [call["timeout"] for call in calls] == [7.5, 7.5, 7.5]

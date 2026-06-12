@@ -9,6 +9,7 @@ from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
+from app.middleware.body_size_limit import BodySizeLimitMiddleware
 from app.middleware.request_id import RequestIdMiddleware
 from app.middleware.tenant_context import TenantContextMiddleware
 
@@ -35,6 +36,11 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(RequestIdMiddleware)
     app.add_middleware(TenantContextMiddleware)
+    app.add_middleware(
+        BodySizeLimitMiddleware,
+        max_body_size=settings.upload_max_bytes,
+        paths=(f"{settings.api_v1_prefix}/uploads",),
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

@@ -205,7 +205,7 @@ async def _generate_with_seedance(params: dict[str, Any], progress_cb) -> dict[s
         image_path = _resolve_i2v_image(params)
 
     try:
-        pipeline = run_seedance_pipeline(
+        return await run_seedance_pipeline(
             cfg,
             params["topic"],
             image_path=image_path,
@@ -214,14 +214,6 @@ async def _generate_with_seedance(params: dict[str, Any], progress_cb) -> dict[s
             tts_speed=params.get("tts_speed"),
             progress_callback=progress_cb,
         )
-        try:
-            return await asyncio.wait_for(
-                pipeline,
-                timeout=settings.engine_seedance_timeout_seconds,
-            )
-        except TimeoutError as exc:
-            timeout = settings.engine_seedance_timeout_seconds
-            raise RuntimeError(f"Seedance generation timed out after {timeout:g}s.") from exc
     finally:
         if image_path:
             Path(image_path).unlink(missing_ok=True)
