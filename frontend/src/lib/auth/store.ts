@@ -21,6 +21,7 @@ export interface Session {
 const STORAGE_KEY = "huading.session";
 
 let session: Session | null = null;
+let hydrated = false;
 const listeners = new Set<() => void>();
 
 function notify() {
@@ -36,24 +37,35 @@ function persist() {
   }
 }
 
+// Load the persisted session on first read so the fetch client sees the token
+// regardless of React effect order (child effects run before the parent
+// AuthProvider's). Runs once; SSR no-ops. set()/clear() mark `hydrated` so a
+// later read never overwrites the in-memory session with stale storage.
+function ensureHydrated() {
+  if (hydrated || typeof window === "undefined") return;
+  hydrated = true;
+  const raw = window.localStorage.getItem(STORAGE_KEY);
+  if (raw) {
+    try {
+      session = JSON.parse(raw) as Session;
+    } catch {
+      session = null;
+    }
+  }
+}
+
 export const authStore = {
   hydrate(): Session | null {
-    if (typeof window === "undefined") return null;
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      try {
-        session = JSON.parse(raw) as Session;
-      } catch {
-        session = null;
-      }
-    }
+    ensureHydrated();
     return session;
   },
   get(): Session | null {
+    ensureHydrated();
     return session;
   },
   set(next: Session) {
     session = next;
+    hydrated = true;
     persist();
     notify();
   },
@@ -65,6 +77,7 @@ export const authStore = {
   },
   clear() {
     session = null;
+    hydrated = true;
     persist();
     notify();
   },
