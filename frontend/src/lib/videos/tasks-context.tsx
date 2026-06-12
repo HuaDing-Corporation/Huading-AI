@@ -13,6 +13,7 @@ import {
 import { ApiError } from "@/lib/api/client";
 import { createVideo, getVideo, listVideos, streamVideoEvents } from "@/lib/api/videos";
 import type { CreateVideoRequest, VideoEvent, VideoRead, VideoStatus } from "@/lib/api/types";
+import { useAuth } from "@/lib/auth/auth-context";
 
 export type UiStatus = VideoStatus; // queued | running | done | failed
 
@@ -92,6 +93,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
   const [tasks, setTasks] = useState<TrackedTask[]>([]);
   const controllers = useRef<Map<string, AbortController>>(new Map());
   const hydratedRef = useRef(false);
+  const { session } = useAuth();
 
   const patch = useCallback((taskId: string, next: Partial<TrackedTask>) => {
     setTasks((prev) => prev.map((t) => (t.taskId === taskId ? { ...t, ...next } : t)));
@@ -197,8 +199,11 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
     [subscribe]
   );
 
-  // Hydrate the list once on mount (B4) and resume any in-flight tasks.
+  // Hydrate the list once we have a session (B4) and resume in-flight tasks.
+  // Gating on `session` prevents a tokenless GET /videos from racing
+  // AuthProvider's hydration (which 401s and used to wipe the session).
   useEffect(() => {
+    if (!session) return;
     if (hydratedRef.current) return;
     hydratedRef.current = true;
     let cancelled = false;
@@ -221,7 +226,18 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [subscribe]);
+  }, [session, subscribe]);
+
+  // On logout, abort live streams and clear the list so the next user starts
+  // clean and a re-login re-hydrates from scratch.
+  useEffect(() => {
+    if (session) return;
+    hydratedRef.current = false;
+    const active = controllers.current;
+    active.forEach((controller) => controller.abort());
+    active.clear();
+    setTasks([]);
+  }, [session]);
 
   useEffect(() => {
     const active = controllers.current;
