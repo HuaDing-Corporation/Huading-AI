@@ -321,9 +321,21 @@ def upgrade() -> None:
     op.create_index("ix_platform_accounts_tenant_id", "platform_accounts", ["tenant_id"])
 
     # Extend existing templates instead of recreating the target singular table.
+    # schema_0001 supports platform templates, represented by tenant_id NULL.
+    op.alter_column(
+        "templates",
+        "tenant_id",
+        existing_type=sa.String(length=36),
+        nullable=True,
+    )
     op.add_column(
         "templates",
         sa.Column("type", sa.String(length=32), nullable=False, server_default="visual"),
+    )
+    op.create_check_constraint(
+        "ck_templates_type",
+        "templates",
+        "type IN ('subtitle', 'cover', 'visual')",
     )
     op.add_column(
         "templates",
@@ -768,6 +780,18 @@ def downgrade() -> None:
     ):
         op.drop_column("video_tasks", column_name)
 
+    # This revision was amended before merge. Some dev databases may have an
+    # earlier local 0003 without ck_templates_type, so keep downgrade replayable.
+    op.execute("ALTER TABLE templates DROP CONSTRAINT IF EXISTS ck_templates_type")
+    # Reverting to the pre-schema_0001 table shape cannot represent platform
+    # templates, so remove those dev-only rows before restoring NOT NULL.
+    op.execute("DELETE FROM templates WHERE tenant_id IS NULL")
+    op.alter_column(
+        "templates",
+        "tenant_id",
+        existing_type=sa.String(length=36),
+        nullable=False,
+    )
     op.drop_column("templates", "created_at")
     op.drop_column("templates", "config")
     op.drop_column("templates", "type")

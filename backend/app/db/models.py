@@ -196,7 +196,16 @@ class BrandAsset(TenantScopedMixin, Base):
 
 class Template(TenantScopedMixin, Base):
     __tablename__ = "templates"
+    __table_args__ = (
+        CheckConstraint(
+            "type IN ('subtitle', 'cover', 'visual')",
+            name="ck_templates_type",
+        ),
+    )
 
+    tenant_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     type: Mapped[str] = mapped_column(String(32), default="visual")
     name: Mapped[str] = mapped_column(String(200))

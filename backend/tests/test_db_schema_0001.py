@@ -1,7 +1,9 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import CheckConstraint, create_engine, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -12,6 +14,7 @@ from app.db.models import (
     Plan,
     Subscription,
     TaskAsset,
+    Template,
     Tenant,
     UsageRecord,
     User,
@@ -73,6 +76,7 @@ def test_db_schema_0001_extends_existing_contract_tables() -> None:
         "deleted_at",
     } <= set(video_tasks.c.keys())
     assert {"type", "config", "created_at"} <= set(templates.c.keys())
+    assert templates.c.tenant_id.nullable is True
 
 
 def test_db_schema_0001_core_indexes_and_constraints_are_declared() -> None:
@@ -92,6 +96,11 @@ def test_db_schema_0001_core_indexes_and_constraints_are_declared() -> None:
     assert "ck_video_tasks_progress_range" in {
         constraint.name
         for constraint in video_tasks.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    assert "ck_templates_type" in {
+        constraint.name
+        for constraint in Base.metadata.tables["templates"].constraints
         if isinstance(constraint, CheckConstraint)
     }
 
@@ -252,5 +261,43 @@ def test_db_schema_0001_mapped_smoke_flow() -> None:
             assert remaining == 970
             assert usage_rows == 1
             assert cross_tenant_rows == 0
+    finally:
+        Base.metadata.drop_all(engine)
+
+
+def test_db_schema_0001_templates_support_platform_rows_and_validate_type() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    SessionTesting = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+    try:
+        with SessionTesting() as db:
+            platform_template = Template(
+                id="99999999-9999-9999-9999-999999999901",
+                tenant_id=None,
+                type="visual",
+                name="Platform Visual",
+                path="1080x1920/static_default.html",
+            )
+            db.add(platform_template)
+            db.commit()
+
+            assert db.get(Template, platform_template.id).tenant_id is None
+
+            db.add(
+                Template(
+                    id="99999999-9999-9999-9999-999999999902",
+                    tenant_id=None,
+                    type="invalid",
+                    name="Invalid Platform Template",
+                    path="1080x1920/static_default.html",
+                )
+            )
+            with pytest.raises(IntegrityError):
+                db.commit()
     finally:
         Base.metadata.drop_all(engine)
