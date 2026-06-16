@@ -1,6 +1,7 @@
 from collections.abc import Generator
 
 import redis
+import structlog
 from fastapi import Depends, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
@@ -49,7 +50,7 @@ def get_progress_store() -> ProgressStore:
     return build_progress_store(settings.redis_url)
 
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
 DbSessionDependency = Depends(get_db_session)
 TokenDependency = Depends(oauth2_scheme)
 
@@ -69,9 +70,15 @@ def permissions_for_role(role: Role | str) -> set[str]:
 
 def get_current_user(
     request: Request,
-    token: str = TokenDependency,
+    token: str | None = TokenDependency,
     db: Session = DbSessionDependency,
 ) -> User:
+    if not token:
+        raise AppError(
+            "Missing access token.",
+            code="UNAUTHORIZED",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
     payload = decode_access_token(token)
     user_id = payload.get("sub")
     tenant_id = payload.get("tenant_id")
@@ -82,7 +89,7 @@ def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
 
-    header_tenant_id = getattr(request.state, "tenant_id", None)
+    header_tenant_id = getattr(request.state, "requested_tenant_id", None)
     if header_tenant_id and header_tenant_id != tenant_id:
         raise AppError(
             "Authenticated user does not belong to the requested tenant.",
@@ -101,6 +108,7 @@ def get_current_user(
     request.state.user_id = user.id
     request.state.role = user.role
     request.state.current_user = user
+    structlog.contextvars.bind_contextvars(tenant_id=tenant_id, user_id=user.id)
     return user
 
 
@@ -134,6 +142,9 @@ def require_roles(*roles: Role):
         return user
 
     return dependency
+
+
+require_role = require_roles
 
 
 def require_permission(permission: str):

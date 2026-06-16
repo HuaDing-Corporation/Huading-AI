@@ -9,7 +9,9 @@ T = TypeVar("T")
 class ErrorDetail(BaseModel):
     code: str
     message: str
+    request_id: str | None = None
     detail: object | None = None
+    details: list[object] | None = None
 
 
 class ApiResponse(BaseModel, Generic[T]):
