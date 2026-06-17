@@ -14,13 +14,7 @@ import { ApiError } from "@/lib/api/client";
 import { createVideo, getVideo, listVideos, streamVideoEvents } from "@/lib/api/videos";
 import type { CreateVideoRequest, VideoEvent, VideoRead } from "@/lib/api/types";
 import { useAuth } from "@/lib/auth/auth-context";
-import {
-  fromVideoRead,
-  labelFor,
-  mapSseStatus,
-  TERMINAL,
-  type TrackedTask
-} from "@/lib/sse/progress-mapping";
+import { eventToProgress, fromVideoRead, TERMINAL, type TrackedTask } from "@/lib/sse/progress-mapping";
 
 export type { TrackedTask, UiStatus } from "@/lib/sse/progress-mapping";
 
@@ -60,15 +54,8 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
   /** Live SSE progress (status/percent only; URLs come from the reconcile). */
   const applyEvent = useCallback(
     (taskId: string, event: VideoEvent) => {
-      if (event.stage === "sse_timeout") return; // informational keep-alive
-      const pct = Math.round((event.progress ?? 0) * 100);
-      const status = mapSseStatus(event.status);
-      patch(taskId, {
-        status,
-        progress: status === "done" ? 100 : pct,
-        statusLabel: labelFor(status, pct),
-        error: event.error ?? undefined
-      });
+      const next = eventToProgress(event);
+      if (next) patch(taskId, next);
     },
     [patch]
   );

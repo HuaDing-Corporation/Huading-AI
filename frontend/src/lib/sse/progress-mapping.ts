@@ -1,4 +1,4 @@
-import type { VideoRead, VideoStatus } from "@/lib/api/types";
+import type { VideoEvent, VideoRead, VideoStatus } from "@/lib/api/types";
 
 export type UiStatus = VideoStatus; // queued | running | done | failed
 
@@ -28,6 +28,30 @@ export function labelFor(status: UiStatus, pct: number): string {
     default:
       return "排队中";
   }
+}
+
+/** Live progress snapshot shared by the SSE, poll, and reconcile paths. */
+export interface ProgressSnapshot {
+  status: UiStatus;
+  progress: number; // 0..100
+  statusLabel: string;
+  error?: string | null;
+}
+
+/** Normalize a status + percent into the snapshot the UI renders (done pins 100). */
+export function progressFields(status: UiStatus, pct: number): ProgressSnapshot {
+  return {
+    status,
+    progress: status === "done" ? 100 : pct,
+    statusLabel: labelFor(status, pct)
+  };
+}
+
+/** SSE frame -> progress snapshot, or null for keep-alive/timeout frames. */
+export function eventToProgress(event: VideoEvent): ProgressSnapshot | null {
+  if (event.stage === "sse_timeout") return null; // informational keep-alive
+  const pct = Math.round((event.progress ?? 0) * 100);
+  return { ...progressFields(mapSseStatus(event.status), pct), error: event.error ?? undefined };
 }
 
 /** SSE frame -> UI status (the stream still uses uppercase worker statuses). */

@@ -4,16 +4,17 @@ import { useEffect, useState } from "react";
 
 import { ApiError } from "@/lib/api/client";
 import { getVideo, streamVideoEvents } from "@/lib/api/videos";
-import { labelFor, mapSseStatus, TERMINAL, type UiStatus } from "@/lib/sse/progress-mapping";
+import {
+  eventToProgress,
+  progressFields,
+  TERMINAL,
+  type ProgressSnapshot,
+  type UiStatus
+} from "@/lib/sse/progress-mapping";
 
-export interface TaskProgress {
-  status: UiStatus;
-  progress: number; // 0..100
-  statusLabel: string;
-  error?: string | null;
-}
+export type TaskProgress = ProgressSnapshot;
 
-const INITIAL: TaskProgress = { status: "queued", progress: 0, statusLabel: labelFor("queued", 0) };
+const INITIAL: TaskProgress = progressFields("queued", 0);
 
 /**
  * Single-task progress: subscribe to the SSE stream, fall back to polling if SSE
@@ -28,12 +29,7 @@ export function useTaskProgress(taskId: string | undefined): TaskProgress {
     const controller = new AbortController();
 
     const apply = (status: UiStatus, pct: number, error?: string | null) => {
-      setState({
-        status,
-        progress: status === "done" ? 100 : pct,
-        statusLabel: labelFor(status, pct),
-        error: error ?? undefined
-      });
+      setState({ ...progressFields(status, pct), error: error ?? undefined });
     };
 
     const poll = async () => {
@@ -53,9 +49,8 @@ export function useTaskProgress(taskId: string | undefined): TaskProgress {
     streamVideoEvents(
       taskId,
       (event) => {
-        if (event.stage === "sse_timeout") return;
-        const pct = Math.round((event.progress ?? 0) * 100);
-        apply(mapSseStatus(event.status), pct, event.error);
+        const next = eventToProgress(event);
+        if (next) setState(next);
       },
       controller.signal
     )
