@@ -39,3 +39,4 @@ coverage/
 # Infrastructure
 infra/postgres-data/
 infra/redis-data/
+.gstack/

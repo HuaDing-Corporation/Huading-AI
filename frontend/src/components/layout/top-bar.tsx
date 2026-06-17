@@ -2,6 +2,7 @@
 
 import { Bell, LogOut, Search, Settings } from "lucide-react";
 
+import { QuotaBadge } from "@/components/layout/quota-badge";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Glass } from "@/components/ui/glass";
@@ -32,6 +33,7 @@ export function TopBar() {
       </div>
 
       <div className="ml-auto flex items-center gap-2.5 sm:gap-3">
+        <QuotaBadge />
         <Button variant="icon" size="icon" aria-label="通知" className="hidden sm:flex">
           <Bell size={18} strokeWidth={1.8} />
         </Button>
