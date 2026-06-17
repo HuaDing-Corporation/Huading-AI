@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 import { AuthProvider } from "@/lib/auth/auth-context";
+import { QueryProvider } from "@/lib/query/query-provider";
 import { VideoTasksProvider } from "@/lib/videos/tasks-context";
 
 export const metadata: Metadata = {
@@ -17,9 +18,11 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <body>
-        <AuthProvider>
-          <VideoTasksProvider>{children}</VideoTasksProvider>
-        </AuthProvider>
+        <QueryProvider>
+          <AuthProvider>
+            <VideoTasksProvider>{children}</VideoTasksProvider>
+          </AuthProvider>
+        </QueryProvider>
       </body>
     </html>
   );
