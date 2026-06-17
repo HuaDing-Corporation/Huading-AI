@@ -12,23 +12,17 @@ import {
 
 import { ApiError } from "@/lib/api/client";
 import { createVideo, getVideo, listVideos, streamVideoEvents } from "@/lib/api/videos";
-import type { CreateVideoRequest, VideoEvent, VideoRead, VideoStatus } from "@/lib/api/types";
+import type { CreateVideoRequest, VideoEvent, VideoRead } from "@/lib/api/types";
 import { useAuth } from "@/lib/auth/auth-context";
+import {
+  fromVideoRead,
+  labelFor,
+  mapSseStatus,
+  TERMINAL,
+  type TrackedTask
+} from "@/lib/sse/progress-mapping";
 
-export type UiStatus = VideoStatus; // queued | running | done | failed
-
-export interface TrackedTask {
-  taskId: string;
-  topic: string;
-  status: UiStatus;
-  progress: number; // 0..100
-  statusLabel: string;
-  playbackUrl?: string | null;
-  downloadUrl?: string | null;
-  thumbnailUrl?: string | null;
-  durationSec?: number | null;
-  error?: string | null;
-}
+export type { TrackedTask, UiStatus } from "@/lib/sse/progress-mapping";
 
 interface TasksContextValue {
   tasks: TrackedTask[];
@@ -39,55 +33,6 @@ interface TasksContextValue {
 }
 
 const TasksContext = createContext<TasksContextValue | null>(null);
-
-const _TERMINAL: UiStatus[] = ["done", "failed"];
-
-function labelFor(status: UiStatus, pct: number): string {
-  switch (status) {
-    case "done":
-      return "已完成";
-    case "failed":
-      return "失败";
-    case "running":
-      return `生成中 ${pct}%`;
-    default:
-      return "排队中";
-  }
-}
-
-/** SSE frame -> UI status (the stream still uses uppercase worker statuses). */
-function mapSseStatus(status: string | undefined): UiStatus {
-  switch ((status ?? "").toUpperCase()) {
-    case "SUCCESS":
-    case "DONE":
-      return "done";
-    case "FAILURE":
-    case "FAILED":
-      return "failed";
-    case "PROGRESS":
-    case "STARTED":
-    case "RUNNING":
-      return "running";
-    default:
-      return "queued";
-  }
-}
-
-function fromVideoRead(read: VideoRead): TrackedTask {
-  const pct = read.progress ?? 0;
-  return {
-    taskId: read.id,
-    topic: read.title || read.prompt || "未命名视频",
-    status: read.status,
-    progress: pct,
-    statusLabel: labelFor(read.status, pct),
-    playbackUrl: read.playback_url ?? null,
-    downloadUrl: read.download_url ?? null,
-    thumbnailUrl: read.thumbnail_url ?? null,
-    durationSec: read.duration_sec ?? null,
-    error: read.error ?? null
-  };
-}
 
 export function VideoTasksProvider({ children }: { children: ReactNode }) {
   const [tasks, setTasks] = useState<TrackedTask[]>([]);
@@ -145,7 +90,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
         try {
           const read = await getVideo(taskId);
           applyRead(read);
-          if (_TERMINAL.includes(read.status)) return;
+          if (TERMINAL.includes(read.status)) return;
         } catch (err) {
           if (err instanceof ApiError && err.status === 401) return;
           patch(taskId, { status: "failed", statusLabel: "失败", error: "进度获取失败" });
@@ -217,7 +162,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
           return [...mapped, ...prev.filter((t) => !known.has(t.taskId))];
         });
         for (const task of mapped) {
-          if (!_TERMINAL.includes(task.status)) subscribe(task.taskId);
+          if (!TERMINAL.includes(task.status)) subscribe(task.taskId);
         }
       } catch {
         // empty list / unauthenticated -> show empty state
