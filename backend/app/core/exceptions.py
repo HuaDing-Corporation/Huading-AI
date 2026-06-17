@@ -1,9 +1,12 @@
+import structlog
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.schemas.response import ApiResponse, ErrorDetail
+
+logger = structlog.get_logger(__name__)
 
 
 class AppError(Exception):
@@ -33,8 +36,15 @@ def _error_response(
     detail: object | None = None,
 ) -> JSONResponse:
     request_id = _request_id(request)
+    details = detail if isinstance(detail, list) else None
     payload = ApiResponse(
-        error=ErrorDetail(code=code, message=message, detail=detail),
+        error=ErrorDetail(
+            code=code,
+            message=message,
+            request_id=request_id,
+            detail=detail,
+            details=details,
+        ),
         request_id=request_id,
     )
     # Attach X-Request-ID here so every error response carries it — including the
@@ -82,6 +92,12 @@ async def validation_exception_handler(
 
 
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.error(
+        "unhandled_exception",
+        error=str(exc),
+        request_id=_request_id(request),
+        exc_info=True,
+    )
     return _error_response(
         request,
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

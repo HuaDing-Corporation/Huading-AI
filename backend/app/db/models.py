@@ -421,12 +421,14 @@ class ProviderConfig(Base):
             "capability",
             unique=True,
             postgresql_where=text("tenant_id IS NOT NULL"),
+            sqlite_where=text("tenant_id IS NOT NULL"),
         ),
         Index(
             "uq_provider_configs_platform_capability",
             "capability",
             unique=True,
             postgresql_where=text("tenant_id IS NULL"),
+            sqlite_where=text("tenant_id IS NULL"),
         ),
     )
 
