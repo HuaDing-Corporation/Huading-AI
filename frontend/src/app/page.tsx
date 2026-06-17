@@ -4,10 +4,10 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronLeft, Store } from "lucide-react";
 
-import { NewVideoCard } from "@/components/console/new-video-card";
-import { Sidebar } from "@/components/console/sidebar";
-import { TaskList } from "@/components/console/task-list";
-import { TopBar } from "@/components/console/top-bar";
+import { NewVideoCard } from "@/components/workbench/new-video-card";
+import { Sidebar } from "@/components/layout/sidebar";
+import { TaskList } from "@/components/tasks/task-list";
+import { TopBar } from "@/components/layout/top-bar";
 import { useAuth } from "@/lib/auth/auth-context";
 
 export default function Home() {
