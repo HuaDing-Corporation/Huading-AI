@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { eventToProgress, fromVideoRead, labelFor, mapSseStatus, TERMINAL } from "./progress-mapping";
+import { eventToProgress, fromVideoRead, mapSseStatus, TERMINAL } from "./progress-mapping";
 
 describe("progress-mapping", () => {
   it("maps new lowercase + old uppercase statuses", () => {
