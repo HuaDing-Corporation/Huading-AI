@@ -10,6 +10,10 @@ vi.mock("@/lib/api/videos", () => ({
 }));
 vi.mock("@/lib/api/uploads", () => ({ uploadImage: vi.fn() }));
 vi.mock("@/lib/api/auth", () => ({ fetchMe: vi.fn() }));
+vi.mock("@/lib/api/scripts", () => ({ generateScript: vi.fn() }));
+vi.mock("@/lib/api/voices", () => ({ listVoices: vi.fn().mockResolvedValue([]) }));
+vi.mock("@/lib/api/avatars", () => ({ listAvatarPresets: vi.fn().mockResolvedValue([]) }));
+vi.mock("@/lib/api/quota", () => ({ getQuota: vi.fn().mockResolvedValue({ total: 0, used: 0, reserved: 0, remaining: 0 }) }));
 
 let mockSession: { token: string } | null = { token: "t" };
 vi.mock("@/lib/auth/auth-context", () => ({
@@ -31,10 +35,10 @@ afterEach(() => {
 
 describe("useVideos", () => {
   it("fetches the list when a session is present", async () => {
-    (listVideos as Mock).mockResolvedValue([{ id: "v1" }]);
+    (listVideos as Mock).mockResolvedValue([{ id: "v1", status: "queued", progress: 0, topic: "t", created_at: "" }]);
     const { result } = renderHook(() => useVideos(), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toEqual([{ id: "v1" }]);
+    expect(result.current.data).toEqual([{ id: "v1", status: "queued", progress: 0, topic: "t", created_at: "" }]);
   });
 
   it("does not fetch when there is no session", async () => {
@@ -48,10 +52,10 @@ describe("useVideos", () => {
 
 describe("useCreateVideo", () => {
   it("creates a video via the mutation", async () => {
-    (createVideo as Mock).mockResolvedValue({ task_id: "x", status: "queued" });
+    (createVideo as Mock).mockResolvedValue({ id: "x", status: "queued" });
     const { result } = renderHook(() => useCreateVideo(), { wrapper });
-    result.current.mutate({ topic: "hi" });
+    result.current.mutate({ topic: "hi", voice_id: "v", avatar_asset_id: "a" });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(createVideo).toHaveBeenCalledWith({ topic: "hi" });
+    expect(createVideo).toHaveBeenCalledWith({ topic: "hi", voice_id: "v", avatar_asset_id: "a" });
   });
 });

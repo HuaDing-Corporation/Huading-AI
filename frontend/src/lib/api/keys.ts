@@ -6,3 +6,5 @@ export const videoKeys = {
 
 export const meKey = ["me"] as const;
 export const quotaKey = ["quota"] as const;
+export const voicesKey = ["voices"] as const;
+export const avatarPresetsKey = ["avatars", "presets"] as const;
