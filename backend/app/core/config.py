@@ -71,6 +71,14 @@ class Settings(BaseSettings):
     engine_seedance_request_timeout_seconds: float = 120.0
     engine_seedance_poll_interval_seconds: float = 5.0
     engine_seedance_timeout_seconds: float = 600.0
+    # Volcengine Jimeng OmniHuman (CV API). Secrets are env-only and never
+    # hardcoded; req_key is a public model identifier in the provider adapter.
+    engine_omnihuman_access_key: str = ""
+    engine_omnihuman_secret_key: str = ""
+    engine_omnihuman_region: str = "cn-north-1"
+    engine_omnihuman_request_timeout_seconds: float = 120.0
+    engine_omnihuman_poll_interval_seconds: float = 5.0
+    engine_omnihuman_timeout_seconds: float = 600.0
     engine_default_template: str = "1080x1920/static_default.html"
     # Playwright browser channel for frame rendering: "chrome"/"msedge" to use a
     # system browser, or "" for Playwright's bundled Chromium.

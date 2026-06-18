@@ -43,3 +43,16 @@ def test_default_when_unset(monkeypatch) -> None:
 def test_empty_string(monkeypatch, raw: str) -> None:
     s = _settings_with_cors(monkeypatch, raw)
     assert s.cors_origins == []
+
+
+def test_omnihuman_settings_are_env_driven_without_default_secret(monkeypatch) -> None:
+    monkeypatch.setenv("ENGINE_OMNIHUMAN_ACCESS_KEY", "ak")
+    monkeypatch.setenv("ENGINE_OMNIHUMAN_SECRET_KEY", "sk")
+    monkeypatch.setenv("ENGINE_OMNIHUMAN_REGION", "cn-north-1")
+    s = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    assert s.engine_omnihuman_access_key == "ak"
+    assert s.engine_omnihuman_secret_key == "sk"
+    assert s.engine_omnihuman_region == "cn-north-1"
+    assert s.engine_omnihuman_request_timeout_seconds > 0
+    assert s.engine_omnihuman_timeout_seconds > 0

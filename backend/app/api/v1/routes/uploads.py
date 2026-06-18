@@ -1,13 +1,19 @@
 import uuid
 
 from fastapi import APIRouter, Depends, Request, UploadFile, status
+from sqlalchemy.orm import Session
 
-from app.api.deps import get_object_storage, require_permission, tenant_storage_key
+from app.api.deps import (
+    DbSessionDependency,
+    get_object_storage,
+    require_permission,
+    tenant_storage_key,
+)
 from app.core.config import settings
 from app.core.exceptions import AppError
-from app.db.models import User
+from app.db.models import Asset, User
 from app.schemas.response import ApiResponse, ok
-from app.schemas.uploads import UploadResponse
+from app.schemas.uploads import UploadImageResponse, UploadResponse
 from app.services.storage.base import ObjectStorage
 
 router = APIRouter()
@@ -73,4 +79,50 @@ async def upload_image(
     return ok(
         request,
         UploadResponse(key=key, uri=uri, content_type=content_type, size=len(content)),
+    )
+
+
+@router.post(
+    "/images",
+    response_model=ApiResponse[UploadImageResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_avatar_image(
+    request: Request,
+    file: UploadFile,
+    user: User = UploadPermissionDependency,
+    db: Session = DbSessionDependency,
+    storage: ObjectStorage = ObjectStorageDependency,
+) -> ApiResponse[UploadImageResponse]:
+    content_type = (file.content_type or "").lower()
+    extension = _ALLOWED_TYPES.get(content_type)
+    if extension is None:
+        raise AppError(
+            f"Unsupported image type {content_type or 'unknown'!r}; "
+            f"allowed: {', '.join(sorted(_ALLOWED_TYPES))}.",
+            code="UNSUPPORTED_MEDIA_TYPE",
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        )
+
+    content = await _read_limited_upload(file)
+    if not content:
+        raise AppError("Uploaded file is empty.", code="EMPTY_UPLOAD", status_code=400)
+
+    storage_key = tenant_storage_key(user.tenant_id, f"uploads/{uuid.uuid4().hex}{extension}")
+    storage.put_bytes(storage_key, content, content_type=content_type)
+    asset = Asset(
+        tenant_id=user.tenant_id,
+        type="avatar_image",
+        source="upload",
+        storage_key=storage_key,
+        mime_type=content_type,
+        size_bytes=len(content),
+        status="ready",
+    )
+    db.add(asset)
+    db.commit()
+    db.refresh(asset)
+    return ok(
+        request,
+        UploadImageResponse(asset_id=asset.id, type=asset.type, status=asset.status),
     )

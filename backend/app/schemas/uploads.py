@@ -9,3 +9,10 @@ class UploadResponse(BaseModel):
     uri: str
     content_type: str
     size: int
+
+
+class UploadImageResponse(BaseModel):
+    asset_id: str
+    type: str
+    status: str
+    thumbnail_url: str | None = None

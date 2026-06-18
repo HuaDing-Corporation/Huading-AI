@@ -1,0 +1,305 @@
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+from fastapi.testclient import TestClient
+
+from app.api.deps import get_object_storage, get_progress_store
+from app.db.models import Asset, CreditRate, Plan, Subscription, UsageRecord, VideoTask, Voice
+from app.main import app
+
+
+class _FakeStorage:
+    def __init__(self) -> None:
+        self.bucket = "test-bucket"
+        self.saved: dict[str, tuple[bytes, str]] = {}
+
+    def put_bytes(self, key: str, content: bytes, *, content_type: str) -> str:
+        self.saved[key] = (content, content_type)
+        return f"memory://{key}"
+
+    def get_bytes(self, key: str) -> bytes:
+        return self.saved[key][0]
+
+    def presign_get_url(
+        self,
+        key: str,
+        *,
+        expires_in: int,
+        download_filename: str | None = None,
+    ) -> str:
+        suffix = "&download=1" if download_filename else ""
+        return f"https://storage.test/{key}?ttl={expires_in}{suffix}"
+
+
+class _MemProgressStore:
+    def __init__(self) -> None:
+        self.data: dict[str, dict] = {}
+
+    def update(self, task_id: str, **fields) -> None:
+        snapshot = self.data.get(task_id, {})
+        snapshot.update({k: v for k, v in fields.items() if v is not None})
+        snapshot["task_id"] = task_id
+        self.data[task_id] = snapshot
+
+    def read(self, task_id: str) -> dict | None:
+        return self.data.get(task_id)
+
+
+def _seed_billing(db, tenant_id: str) -> Subscription:
+    now = datetime.now(UTC)
+    plan = Plan(
+        code=f"plan-{tenant_id}",
+        name="Test Plan",
+        price_cents=0,
+        period="monthly",
+        quota_credits=100,
+        max_concurrent=1,
+        seat_limit=3,
+    )
+    db.add(plan)
+    db.flush()
+    subscription = Subscription(
+        tenant_id=tenant_id,
+        plan_id=plan.id,
+        status="active",
+        period_start=now - timedelta(days=1),
+        period_end=now + timedelta(days=30),
+        quota_credits_total=100,
+        quota_credits_used=25,
+        quota_credits_reserved=5,
+    )
+    db.add(subscription)
+    db.add_all(
+        [
+            CreditRate(
+                tenant_id=None,
+                capability="avatar",
+                unit="second",
+                credits_per_unit=Decimal("1.0000"),
+            ),
+            CreditRate(
+                tenant_id=None,
+                capability="tts",
+                unit="second",
+                credits_per_unit=Decimal("0.2000"),
+            ),
+        ]
+    )
+    db.commit()
+    return subscription
+
+
+def _seed_voice_and_avatar(db, tenant_id: str) -> tuple[Voice, Asset]:
+    voice = Voice(
+        provider="edge-tts",
+        voice_code="zh-CN-XiaoxiaoNeural",
+        display_name="Xiaoxiao",
+        gender="female",
+        language="zh-CN",
+        is_active=True,
+    )
+    avatar = Asset(
+        tenant_id=tenant_id,
+        type="avatar_image",
+        source="upload",
+        storage_key=f"tenants/{tenant_id}/uploads/avatar.png",
+        mime_type="image/png",
+        status="ready",
+    )
+    db.add_all([voice, avatar])
+    db.commit()
+    return voice, avatar
+
+
+def test_quota_returns_current_subscription_totals(auth_context, auth_db) -> None:
+    with auth_db() as db:
+        _seed_billing(db, auth_context["tenant_id"])
+
+    client = TestClient(app)
+    resp = client.get("/api/v1/quota", headers=auth_context["headers"])
+
+    assert resp.status_code == 200
+    assert resp.json()["data"] == {
+        "total": 100,
+        "used": 25,
+        "reserved": 5,
+        "remaining": 70,
+    }
+
+
+def test_catalog_endpoints_return_voices_and_platform_avatar_presets(
+    auth_context,
+    auth_db,
+) -> None:
+    storage = _FakeStorage()
+    with auth_db() as db:
+        db.add(
+            Voice(
+                provider="edge-tts",
+                voice_code="zh-CN-YunjianNeural",
+                display_name="Yunjian",
+                gender="male",
+                language="zh-CN",
+                sample_url="https://sample.test/yunjian.mp3",
+                is_active=True,
+            )
+        )
+        db.add(
+            Asset(
+                tenant_id=None,
+                type="avatar_image",
+                source="preset",
+                storage_key="platform/avatars/default.png",
+                mime_type="image/png",
+                status="ready",
+                metadata_={"display_name": "Default Presenter"},
+            )
+        )
+        db.commit()
+
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        client = TestClient(app)
+        voices = client.get("/api/v1/voices", headers=auth_context["headers"])
+        avatars = client.get("/api/v1/avatars/presets", headers=auth_context["headers"])
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert voices.status_code == 200
+    assert voices.json()["data"]["total"] == 1
+    assert voices.json()["data"]["items"][0]["voice_code"] == "zh-CN-YunjianNeural"
+    assert avatars.status_code == 200
+    assert avatars.json()["data"]["total"] == 1
+    assert avatars.json()["data"]["items"][0]["display_name"] == "Default Presenter"
+    assert avatars.json()["data"]["items"][0]["thumbnail_url"].startswith(
+        "https://storage.test/platform/avatars/default.png"
+    )
+
+
+def test_upload_images_creates_avatar_asset_under_tenant_scope(
+    auth_context,
+    auth_db,
+) -> None:
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/uploads/images",
+            files={"file": ("avatar.png", b"\x89PNG fake", "image/png")},
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 201
+    data = resp.json()["data"]
+    assert data["asset_id"]
+    assert data["type"] == "avatar_image"
+    assert data["status"] == "ready"
+    with auth_db() as db:
+        asset = db.get(Asset, data["asset_id"])
+        assert asset is not None
+        assert asset.tenant_id == auth_context["tenant_id"]
+        assert asset.storage_key.startswith(f"tenants/{auth_context['tenant_id']}/uploads/")
+        assert asset.storage_key in storage.saved
+
+
+def test_avatar_talk_order_reserves_quota_and_returns_queued_id(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(db, auth_context["tenant_id"])
+        voice, avatar = _seed_voice_and_avatar(db, auth_context["tenant_id"])
+        voice_id = voice.id
+        avatar_id = avatar.id
+        subscription_id = subscription.id
+
+    enqueued: dict[str, object] = {}
+
+    class _FakeTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            enqueued.update({"args": args, "task_id": task_id, "queue": queue})
+            return type("Result", (), {"status": "PENDING"})()
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _FakeTask())
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/videos",
+        json={
+            "topic": "羊绒大衣怎么选",
+            "script": "这是一段测试口播文案。",
+            "voice_id": voice_id,
+            "avatar_asset_id": avatar_id,
+            "speed": 1.0,
+            "aspect_ratio": "9:16",
+            "subtitle_enabled": True,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 202
+    data = resp.json()["data"]
+    assert data["id"]
+    assert data["status"] == "queued"
+    assert enqueued["task_id"] == data["id"]
+    with auth_db() as db:
+        task = db.get(VideoTask, data["id"])
+        assert task is not None
+        assert task.mode == "avatar_talk"
+        assert task.tenant_id == auth_context["tenant_id"]
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved > 5
+        reserved = db.query(UsageRecord).filter_by(video_task_id=data["id"]).one()
+        assert reserved.status == "reserved"
+        assert reserved.capability == "avatar"
+
+
+def test_video_sse_emits_new_enum_terminal_frame(auth_context, auth_db) -> None:
+    store = _MemProgressStore()
+    storage = _FakeStorage()
+    with auth_db() as db:
+        task = VideoTask(
+            id="avatar-task-1",
+            tenant_id=auth_context["tenant_id"],
+            created_by_user_id=auth_context["user_id"],
+            mode="avatar_talk",
+            video_mode="avatar_talk",
+            status="done",
+            progress=100,
+            topic="topic",
+            script="script",
+            storage_key=f"tenants/{auth_context['tenant_id']}/videos/avatar-task-1/final.mp4",
+        )
+        db.add(task)
+        db.commit()
+
+    store.update(
+        f"{auth_context['tenant_id']}:avatar-task-1",
+        status="done",
+        progress=100,
+        step="upload",
+        playback_url="https://storage.test/play.mp4",
+        download_url="https://storage.test/download.mp4",
+        thumbnail_url="https://storage.test/thumb.jpg",
+    )
+    app.dependency_overrides[get_progress_store] = lambda: store
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        client = TestClient(app)
+        resp = client.get(
+            "/api/v1/videos/avatar-task-1/events",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_progress_store, None)
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 200
+    assert '"status": "done"' in resp.text
+    assert '"progress": 100' in resp.text
+    assert '"playback_url": "https://storage.test/play.mp4"' in resp.text
