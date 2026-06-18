@@ -52,6 +52,18 @@ function sseStream(id: string, fail = false): Response {
 }
 
 export const handlers = [
+  // Auth = M2 shapes (unchanged). Mocked so the (app) client auth-gate can be
+  // passed during the MSW parallel period without a real backend.
+  http.post(`${BASE}/api/v1/auth/login`, () =>
+    ok({ access_token: "mock-token", token_type: "bearer", tenant_id: "ten-mock", user_id: "u-mock", role: "admin" })
+  ),
+  http.get(`${BASE}/api/v1/auth/me`, () =>
+    ok({
+      tenant: { id: "ten-mock", slug: "huading", name: "华鼎（mock）" },
+      user: { id: "u-mock", tenant_id: "ten-mock", email: "qa@huading.test", full_name: "QA 测试", role: "admin" },
+      permissions: ["video:create", "video:read"]
+    })
+  ),
   http.get(`${BASE}/api/v1/quota`, () => ok({ total: 1000, used: 120, reserved: 36, remaining: 844 })),
   http.get(`${BASE}/api/v1/voices`, () =>
     ok({
