@@ -28,7 +28,7 @@ const thumbStyle: Record<UiStatus, string> = {
   running: "bg-grad-gold text-ink shadow-thumb",
   done: "bg-grad-done text-ink shadow-thumb-done",
   queued: "bg-track text-ink-faint",
-  failed: "bg-error-bg text-error-fg"
+  failed: "bg-error-bg text-error-fg shadow-thumb-failed"
 };
 
 // ── Props ─────────────────────────────────────────────────────────────────────
