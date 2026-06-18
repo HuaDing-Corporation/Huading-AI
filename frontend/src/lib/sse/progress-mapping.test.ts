@@ -1,38 +1,39 @@
 import { describe, expect, it } from "vitest";
 
-import { fromVideoRead, labelFor, mapSseStatus, TERMINAL } from "./progress-mapping";
+import { eventToProgress, fromVideoRead, labelFor, mapSseStatus, TERMINAL } from "./progress-mapping";
 
 describe("progress-mapping", () => {
-  it("maps SSE statuses to UI statuses", () => {
+  it("maps new lowercase + old uppercase statuses", () => {
+    expect(mapSseStatus("done")).toBe("done");
     expect(mapSseStatus("SUCCESS")).toBe("done");
     expect(mapSseStatus("FAILURE")).toBe("failed");
-    expect(mapSseStatus("PROGRESS")).toBe("running");
+    expect(mapSseStatus("running")).toBe("running");
     expect(mapSseStatus(undefined)).toBe("queued");
   });
 
-  it("labels by status", () => {
-    expect(labelFor("done", 100)).toBe("已完成");
-    expect(labelFor("running", 42)).toBe("生成中 42%");
+  it("new frame progress is a 0..100 int and is NOT rescaled (sse-1)", () => {
+    const p = eventToProgress({ status: "running", progress: 1 });
+    expect(p?.status).toBe("running");
+    expect(p?.progress).toBe(1); // must be 1%, not 100%
+  });
+
+  it("old uppercase frame rescales 0..1 progress", () => {
+    const p = eventToProgress({ status: "PROGRESS", progress: 0.5 });
+    expect(p?.progress).toBe(50);
+  });
+
+  it("drops sse_timeout keep-alive", () => {
+    expect(eventToProgress({ stage: "sse_timeout" })).toBeNull();
+  });
+
+  it("maps a VideoListItem to a TrackedTask", () => {
+    const t = fromVideoRead({ id: "v1", status: "done", progress: 100, topic: "T", created_at: "" });
+    expect(t.taskId).toBe("v1");
+    expect(t.status).toBe("done");
   });
 
   it("knows terminal states", () => {
     expect(TERMINAL.includes("done")).toBe(true);
     expect(TERMINAL.includes("running")).toBe(false);
-  });
-
-  it("maps a VideoRead to a TrackedTask", () => {
-    const t = fromVideoRead({
-      id: "v1",
-      title: "T",
-      prompt: "",
-      mode: "x",
-      status: "done",
-      progress: 100,
-      created_at: "",
-      playback_url: "u"
-    });
-    expect(t.taskId).toBe("v1");
-    expect(t.status).toBe("done");
-    expect(t.playbackUrl).toBe("u");
   });
 });

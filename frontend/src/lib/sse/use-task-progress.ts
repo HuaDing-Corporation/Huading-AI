@@ -36,7 +36,7 @@ export function useTaskProgress(taskId: string | undefined): TaskProgress {
       while (!controller.signal.aborted) {
         try {
           const read = await getVideo(taskId);
-          apply(read.status, read.progress ?? 0, read.error);
+          apply(read.status, read.progress ?? 0, read.error_message);
           if (TERMINAL.includes(read.status)) return;
         } catch (err) {
           if (err instanceof ApiError && err.status === 401) return;
@@ -58,7 +58,7 @@ export function useTaskProgress(taskId: string | undefined): TaskProgress {
         if (controller.signal.aborted) return;
         try {
           const read = await getVideo(taskId);
-          apply(read.status, read.progress ?? 0, read.error);
+          apply(read.status, read.progress ?? 0, read.error_message);
         } catch {
           // keep last state
         }

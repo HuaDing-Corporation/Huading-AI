@@ -1,12 +1,12 @@
-import type { VideoEvent, VideoRead, VideoStatus } from "@/lib/api/types";
+import type { VideoDetail, VideoEvent, VideoListItem, VideoStatus } from "@/lib/api/types";
 
-export type UiStatus = VideoStatus; // queued | running | done | failed
+export type UiStatus = VideoStatus;
 
 export interface TrackedTask {
   taskId: string;
   topic: string;
   status: UiStatus;
-  progress: number; // 0..100
+  progress: number;
   statusLabel: string;
   playbackUrl?: string | null;
   downloadUrl?: string | null;
@@ -17,73 +17,83 @@ export interface TrackedTask {
 
 export const TERMINAL: UiStatus[] = ["done", "failed"];
 
-export function labelFor(status: UiStatus, pct: number): string {
+const STEP_LABEL: Record<string, string> = {
+  script: "撰写文案",
+  tts: "合成语音",
+  avatar: "驱动形象",
+  subtitle: "生成字幕",
+  compose: "合成视频",
+  upload: "上传成片"
+};
+
+export function labelFor(status: UiStatus, pct: number, step?: string | null): string {
   switch (status) {
     case "done":
       return "已完成";
     case "failed":
       return "失败";
     case "running":
-      return `生成中 ${pct}%`;
+      return step && STEP_LABEL[step] ? `${STEP_LABEL[step]} ${pct}%` : `生成中 ${pct}%`;
     default:
       return "排队中";
   }
 }
 
-/** Live progress snapshot shared by the SSE, poll, and reconcile paths. */
-export interface ProgressSnapshot {
-  status: UiStatus;
-  progress: number; // 0..100
-  statusLabel: string;
-  error?: string | null;
-}
+const OLD_UPPER = /^[A-Z_]+$/;
 
-/** Normalize a status + percent into the snapshot the UI renders (done pins 100). */
-export function progressFields(status: UiStatus, pct: number): ProgressSnapshot {
-  return {
-    status,
-    progress: status === "done" ? 100 : pct,
-    statusLabel: labelFor(status, pct)
-  };
-}
-
-/** SSE frame -> progress snapshot, or null for keep-alive/timeout frames. */
-export function eventToProgress(event: VideoEvent): ProgressSnapshot | null {
-  if (event.stage === "sse_timeout") return null; // informational keep-alive
-  const pct = Math.round((event.progress ?? 0) * 100);
-  return { ...progressFields(mapSseStatus(event.status), pct), error: event.error ?? undefined };
-}
-
-/** SSE frame -> UI status (the stream still uses uppercase worker statuses). */
 export function mapSseStatus(status: string | undefined): UiStatus {
-  switch ((status ?? "").toUpperCase()) {
-    case "SUCCESS":
-    case "DONE":
+  switch ((status ?? "").toLowerCase()) {
+    case "success":
+    case "done":
       return "done";
-    case "FAILURE":
-    case "FAILED":
+    case "failure":
+    case "failed":
       return "failed";
-    case "PROGRESS":
-    case "STARTED":
-    case "RUNNING":
+    case "progress":
+    case "started":
+    case "running":
       return "running";
     default:
       return "queued";
   }
 }
 
-export function fromVideoRead(read: VideoRead): TrackedTask {
+export interface ProgressSnapshot {
+  status: UiStatus;
+  progress: number;
+  statusLabel: string;
+  error?: string | null;
+}
+
+export function progressFields(status: UiStatus, pct: number, step?: string | null): ProgressSnapshot {
+  return { status, progress: status === "done" ? 100 : pct, statusLabel: labelFor(status, pct, step) };
+}
+
+// New frame: progress is 0..100 int (trust it). Old frame (UPPERCASE status):
+// progress is 0..1 → rescale. Gate ONLY on the status casing, never the value,
+// so a new {status:"running",progress:1} stays 1% (sse-1).
+export function eventToProgress(event: VideoEvent): ProgressSnapshot | null {
+  if (event.stage === "sse_timeout") return null;
+  const raw = event.progress ?? 0;
+  const isOld = typeof event.status === "string" && OLD_UPPER.test(event.status);
+  const pct = isOld ? Math.round(raw * 100) : Math.round(raw);
+  const status = mapSseStatus(event.status);
+  return { ...progressFields(status, pct, event.step), error: event.error_message ?? event.error ?? undefined };
+}
+
+export function fromVideoRead(read: VideoDetail | VideoListItem): TrackedTask {
   const pct = read.progress ?? 0;
+  const detail = read as Partial<VideoDetail>;
   return {
     taskId: read.id,
-    topic: read.title || read.prompt || "未命名视频",
+    topic: read.topic || "未命名视频",
     status: read.status,
     progress: pct,
     statusLabel: labelFor(read.status, pct),
-    playbackUrl: read.playback_url ?? null,
-    downloadUrl: read.download_url ?? null,
+    playbackUrl: detail.playback_url ?? null,
+    downloadUrl: detail.download_url ?? null,
     thumbnailUrl: read.thumbnail_url ?? null,
-    durationSec: read.duration_sec ?? null,
-    error: read.error ?? null
+    durationSec: detail.duration_ms != null ? detail.duration_ms / 1000 : null,
+    error: detail.error_message ?? null
   };
 }
