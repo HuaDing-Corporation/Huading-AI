@@ -1,0 +1,56 @@
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+
+import type { TrackedTask } from "@/lib/sse/progress-mapping";
+
+import { TaskCard } from "./task-card";
+
+const failed: TrackedTask = {
+  taskId: "t1",
+  topic: "T",
+  status: "failed",
+  progress: 0,
+  statusLabel: "失败",
+  error: "boom"
+};
+
+describe("TaskCard retry visibility (P2-1)", () => {
+  it("hides retry and shows a refill hint for a hydrated failed task (not retryable)", () => {
+    const onRetry = vi.fn();
+    render(<TaskCard task={failed} onOpen={vi.fn()} onRetry={onRetry} onUrlError={vi.fn()} />);
+    expect(screen.queryByText("重试")).toBeNull();
+    expect(screen.getByText("请到工作台重新发起")).toBeTruthy();
+    expect(onRetry).not.toHaveBeenCalled();
+  });
+
+  it("shows retry for a retryable failed task and calls onRetry", () => {
+    const onRetry = vi.fn();
+    render(
+      <TaskCard task={{ ...failed, retryable: true }} onOpen={vi.fn()} onRetry={onRetry} onUrlError={vi.fn()} />
+    );
+    fireEvent.click(screen.getByText("重试"));
+    expect(onRetry).toHaveBeenCalledWith("t1");
+  });
+});
+
+describe("TaskCard inline player onError once (P2-2)", () => {
+  it("fires onUrlError at most once across repeated errors", () => {
+    const onUrlError = vi.fn();
+    const done: TrackedTask = {
+      taskId: "d1",
+      topic: "T",
+      status: "done",
+      progress: 100,
+      statusLabel: "已完成",
+      playbackUrl: "https://example.test/v.mp4"
+    };
+    const { container } = render(
+      <TaskCard task={done} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={onUrlError} />
+    );
+    const video = container.querySelector("video") as HTMLVideoElement;
+    fireEvent.error(video);
+    fireEvent.error(video);
+    fireEvent.error(video);
+    expect(onUrlError).toHaveBeenCalledTimes(1);
+  });
+});

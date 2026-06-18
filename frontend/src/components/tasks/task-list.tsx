@@ -28,7 +28,12 @@ export function TaskList() {
               key={task.taskId}
               task={task}
               onOpen={(id) => router.push(`/videos/${id}`)}
-              onRetry={(id) => void retryTask(id)}
+              onRetry={(id) => {
+                // TaskCard only shows retry for retryable tasks; this catch is a
+                // defensive guard so a missing stored request can't become an
+                // unhandled rejection (P2-1).
+                void retryTask(id).catch(() => undefined);
+              }}
               onUrlError={(id) => void refreshTask(id)}
             />
           ))}

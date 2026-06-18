@@ -53,6 +53,9 @@ export function ImagePicker({
     setPreview(null);
     setLocalError(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
+    // Also clear the parent's avatarAssetId so 生成 can't submit a removed asset
+    // (two-step upload state stays consistent). (P1)
+    onChange(null);
   };
 
   const onSelectFile = (event: ChangeEvent<HTMLInputElement>) => {
@@ -91,7 +94,7 @@ export function ImagePicker({
               {/* preset thumbnail (remote URL) */}
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
-                src={preset.thumbnail_url}
+                src={preset.thumbnail_url ?? undefined}
                 alt={preset.display_name}
                 className="h-10 w-10 flex-none rounded-mark object-cover"
               />

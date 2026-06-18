@@ -13,6 +13,12 @@ export interface TrackedTask {
   thumbnailUrl?: string | null;
   durationSec?: number | null;
   error?: string | null;
+  /**
+   * True only for tasks this session created via createAndTrack (we hold their
+   * original request and can re-submit). Hydrated-from-list tasks omit it, so
+   * the UI hides "retry" instead of calling retryTask and failing silently (P2-1).
+   */
+  retryable?: boolean;
 }
 
 export const TERMINAL: UiStatus[] = ["done", "failed"];

@@ -55,11 +55,13 @@ export interface VideoDetail {
   id: string;
   status: VideoStatus;
   progress: number;
-  topic: string;
-  script: string;
-  voice_id: string;
-  aspect_ratio: string;
-  subtitle_enabled: boolean;
+  // Backend VideoRead leaves these nullable (e.g. before the script step runs);
+  // align the types so consumers null-handle rather than assume present (P2-3).
+  topic: string | null;
+  script: string | null;
+  voice_id: string | null;
+  aspect_ratio: string | null;
+  subtitle_enabled: boolean | null;
   playback_url?: string | null;
   download_url?: string | null;
   thumbnail_url?: string | null;
@@ -96,7 +98,7 @@ export interface Voice {
 export interface AvatarPreset {
   asset_id: string;
   display_name: string;
-  thumbnail_url: string;
+  thumbnail_url: string | null; // backend str|None (P2-3)
 }
 
 export interface ScriptGenerateResponse {

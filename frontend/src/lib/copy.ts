@@ -22,7 +22,12 @@ export const copy = {
     network: "网络连接失败，请检查后端服务是否在线",
     generic: "操作失败，请重试"
   },
-  tasks: { empty: "暂无任务，输入主题开始生成。", retry: "重试", open: "查看详情" },
+  tasks: {
+    empty: "暂无任务，输入主题开始生成。",
+    retry: "重试",
+    retryUnavailable: "请到工作台重新发起",
+    open: "查看详情"
+  },
   detail: { notFound: "视频不存在或无权访问", back: "返回", download: "下载 MP4" },
   status: { queued: "排队中", failed: "失败", done: "已完成" }
 } as const;

@@ -210,7 +210,8 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
           topic,
           status: "queued",
           progress: 0,
-          statusLabel: "排队中"
+          statusLabel: "排队中",
+          retryable: true // we hold this request → retry can re-submit it (P2-1)
         },
         ...prev
       ]);

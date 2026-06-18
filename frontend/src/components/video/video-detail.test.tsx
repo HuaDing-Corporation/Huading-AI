@@ -76,4 +76,26 @@ describe("VideoDetail", () => {
     expect(screen.getByText("今天的主题是测试")).toBeInTheDocument();
     expect(screen.getByText(copy.detail.download)).toBeInTheDocument();
   });
+
+  it("P2-3: renders without crashing when backend nullable fields are null", () => {
+    (useVideo as Mock).mockReturnValue({
+      data: {
+        id: "v2",
+        status: "running",
+        progress: 40,
+        topic: null,
+        script: null,
+        voice_id: null,
+        aspect_ratio: null,
+        subtitle_enabled: null,
+        thumbnail_url: null,
+        created_at: "2026-06-18T00:00:00Z"
+      },
+      error: null,
+      isLoading: false
+    });
+    render(<VideoDetail id="v2" />, { wrapper });
+    // null topic falls back to a placeholder; no crash, no subtitle block.
+    expect(screen.getByText("未命名视频")).toBeInTheDocument();
+  });
 });

@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import {
   AlertTriangle,
   Check,
@@ -58,6 +59,18 @@ export function TaskCard({ task, onOpen, onRetry, onUrlError }: TaskCardProps) {
   const Icon = thumbIcon[task.status];
   const showPlayer = task.status === "done" && !!task.playbackUrl;
 
+  // Fire onUrlError at most once per playback URL (mirrors VideoPlayer); reset
+  // the guard when the URL changes so a refreshed URL can error once again (P2-2).
+  const urlErrored = useRef(false);
+  useEffect(() => {
+    urlErrored.current = false;
+  }, [task.playbackUrl]);
+  const handleVideoError = () => {
+    if (urlErrored.current) return;
+    urlErrored.current = true;
+    onUrlError(task.taskId);
+  };
+
   return (
     <div className="border-b border-track py-3.5 last:border-none">
       {/* Header row: icon · title/duration · status badge */}
@@ -94,13 +107,20 @@ export function TaskCard({ task, onOpen, onRetry, onUrlError }: TaskCardProps) {
               {task.error}
             </p>
           ) : null}
-          <button
-            type="button"
-            onClick={() => onRetry(task.taskId)}
-            className="inline-flex items-center rounded-field border border-line-gold bg-glass-fill px-3 py-1.5 text-[12.5px] text-gold-deep transition-colors hover:bg-glass-hover"
-          >
-            {copy.tasks.retry}
-          </button>
+          {/* Only offer retry when we hold the original request (this-session
+              tasks). Hydrated-from-list failed tasks have no stored request, so
+              show a "refill on the workbench" hint instead of silently failing (P2-1). */}
+          {task.retryable ? (
+            <button
+              type="button"
+              onClick={() => onRetry(task.taskId)}
+              className="inline-flex items-center rounded-field border border-line-gold bg-glass-fill px-3 py-1.5 text-[12.5px] text-gold-deep transition-colors hover:bg-glass-hover"
+            >
+              {copy.tasks.retry}
+            </button>
+          ) : (
+            <p className="text-[12px] text-ink-faint">{copy.tasks.retryUnavailable}</p>
+          )}
         </div>
       ) : showPlayer ? (
         /* Done + playback URL: thumbnail player + open-detail + download */
@@ -110,7 +130,7 @@ export function TaskCard({ task, onOpen, onRetry, onUrlError }: TaskCardProps) {
             preload="metadata"
             poster={task.thumbnailUrl ?? undefined}
             src={task.playbackUrl ?? undefined}
-            onError={() => onUrlError(task.taskId)}
+            onError={handleVideoError}
             className="max-h-[320px] w-full rounded-field border border-line-gold bg-black/5"
           />
           <div className="mt-2 flex items-center gap-2">

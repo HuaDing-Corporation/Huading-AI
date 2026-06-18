@@ -124,7 +124,7 @@ export function VideoDetail({ id }: VideoDetailProps) {
 
       {/* Topic heading */}
       <header>
-        <h1 className="text-[22px] font-semibold tracking-wide text-ink">{data.topic}</h1>
+        <h1 className="text-[22px] font-semibold tracking-wide text-ink">{data.topic ?? "未命名视频"}</h1>
       </header>
 
       {/* Player — only when done and URL is available */}
