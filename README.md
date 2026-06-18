@@ -87,6 +87,10 @@ Notes:
   `PLAYWRIGHT_DOWNLOAD_HOST` in `.env` (examples included) to use mirrors.
 - `ENGINE_LLM_*` must be set for a task to actually produce a video; otherwise it
   fails at the engine credential check (login/UI/progress wiring still works).
+- Object storage defaults to local MinIO. For real OmniHuman e2e, edit
+  `infra/.env` so both `ENGINE_S3_ENDPOINT` and `ENGINE_S3_PUBLIC_ENDPOINT` point
+  to the public Volcengine TOS endpoint, set `ENGINE_S3_SECURE=true`, and provide
+  the TOS access key, secret key, bucket, and `ENGINE_S3_REGION=cn-beijing`.
 - The browser talks to the backend via the published host port
   (`http://localhost:8000`), not the internal `backend` service name — it runs on
   your host, outside the compose network. CORS is preconfigured for
