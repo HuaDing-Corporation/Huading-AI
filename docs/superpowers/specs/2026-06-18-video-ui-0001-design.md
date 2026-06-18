@@ -140,8 +140,9 @@ export interface VideoEvent {
 
 ## 5. SSE 升级与进度（消双映射 + 保留容错）
 
-- `progress-mapping.ts`：`eventToProgress` 直接吃**新枚举**（小写 status，`progress` 当作 0..100 int，`step` → 中文标签）。**保留旧帧兜底**：若 status 是大写（SUCCESS/FAILURE/PROGRESS…）或 `progress ≤ 1` 的小数，走旧映射换算。`stage==="sse_timeout"` 仍当 keep-alive 忽略。
+- `progress-mapping.ts`：`eventToProgress` 直接吃**新枚举**（小写 status，`progress` 当作 0..100 int，`step` → 中文标签）。**旧帧兜底只凭 status 大小写判定（sse-1 加固）**：仅当 status 为大写旧枚举（SUCCESS/FAILURE/PROGRESS…）才走旧映射 + `progress×100` 换算；**新帧（小写/已知枚举 status）一律把 `progress` 当 0..100 int，永不 rescale**——即便 `progress` 为 0 或 1（新帧 `progress:1` = 1%，**绝不能**被当 0..1 小数 ×100 成 100%）。旧规则"`progress ≤ 1` 的小数就 rescale"作废（会误伤新帧 `progress:1`）。`stage==="sse_timeout"` 仍当 keep-alive 忽略。单测必含 `{status:"running", progress:1} → 1%`。
 - **实时循环主消费方 = `lib/videos/tasks-context.tsx`**（`applyEvent`/`pollFallback`/`subscribe`/`createAndTrack` 直接调 `eventToProgress`/`fromVideoRead`/`getVideo`/`TERMINAL`）——这是必须改的生产路径；`lib/sse/use-task-progress.ts` 是次要/重复路径（仅其自身测试消费），两者经 `progress-mapping.ts` 共同受益。
+- **客户端自超时计时器落点（timeout-1 加固）= `lib/videos/tasks-context.tsx` 每任务 `subscribe` 生命周期**：进帧时记 `lastProgressAt`（仅当 `progress` 推进或 `step` 变化才刷新），入队时记 `queuedAt`；常量 `STALL_MS`/`HARD_CAP_MS` 从 `lib/sse/constants.ts` 读（集中可配；帧带 `timeout_seconds` 时优先）。满足停滞或硬上限即本地强制 `failed`（即便后端永不发 `failed`）+ 中止该任务 SSE/轮询 + 暴露重试入口。完整规则见 §10。
 - SSE 为主 + React Query `refetchInterval` 轮询兜底；`done` → 重取 `GET /videos/{id}` 拿权威 `playback_url/download_url/thumbnail_url` → 停 SSE+轮询；`failed`/超时 → 失败态 + 重试入口。
 - `fromVideoRead` 改吃 `VideoDetail | VideoListItem` 联合，**对窄类型容错**：列表项无 `playback_url/download_url/duration_ms`（权威 URL 仍由 done-reconcile 补），`durationSec = duration_ms!=null ? duration_ms/1000 : null`，error 取 `error_message`，topic 取代 `title||prompt`。
 - step→进度权重映射（展示用，§4 进度建议）：queued0/script10/tts20/avatar20-85/subtitle90/compose95/upload98/done100；映射只为标签，权威进度仍以帧 `progress` 为准。
@@ -165,9 +166,10 @@ export interface VideoEvent {
 
 - **锁定态 token**：尺寸/字幕的只读锁定外观用既有禁用语义（`bg-queue-bg` / `text-ink-faint`）+ 锁图标，不用临时 opacity 或未定义 disabled token。
 - **ScriptReview 重写路径**：`onRegenerate` 重新调 `useScriptGenerate(topic)` 覆盖可编辑缓冲；用户手改文本保留进 `CreateVideoRequest.script`，除非再次重写。`topic` 取表单当前主题。
+- **脚本长度/时长提示（trunc-1，契约 §7 明确把"超长 script 前端应提示截断"交给前端）**：ScriptReview 显示字数 + 估算时长 `est_seconds = ceil(len(script)/CPS/speed)`（CPS≈5）；超 `MAX_SCRIPT_SECONDS=60`（对齐 OmniHuman 音频 ≤60s、避免 provider `50215 音频超长` 失败）即给"将被截断/建议精简"软提示（**不硬阻下单**，后端会 clamp 估算）。常量 `MAX_SCRIPT_SECONDS`/`CPS` 进 `lib/sse/constants.ts`，文案进 `lib/copy.ts`。
 
 ### 6.3 tasks/
-- `TaskList`（容器消费既有 `useVideoTasks`，来自 `lib/videos/tasks-context.tsx`，提供 `tasks/createAndTrack/refreshTask`）+ `TaskCard`（纯展示三态：排队=进度条、进行=进度条+step、失败=`error_message`+重试、完成=缩略图+打开详情）。`TaskCard` 纯 props + 发"打开详情/重试"事件。**失败态 token**：`bg-error-bg`/`text-error-fg`（已在 globals.css）；缩略图失败可加 `--shadow-thumb-failed`（实现期补 token + tailwind boxShadow，error 色调变体）。
+- `TaskList`（容器消费既有 `useVideoTasks`，来自 `lib/videos/tasks-context.tsx`，提供 `tasks/createAndTrack/refreshTask`）+ `TaskCard`（纯展示三态：排队=进度条、进行=进度条+step、失败=`error_message`+重试、完成=缩略图+打开详情）。`TaskCard` 纯 props + 发"打开详情/重试"事件。**失败态来源含客户端自超时**（§5/§10：后端永不发 `failed` 时由 `tasks-context` 计时器转失败+重试）。**失败态 token**：`bg-error-bg`/`text-error-fg`（已在 globals.css）；缩略图失败可加 `--shadow-thumb-failed`（实现期补 token + tailwind boxShadow，error 色调变体）。
 
 ### 6.4 video/
 | 组件 | 职责 | 关键 props |
@@ -175,6 +177,8 @@ export interface VideoEvent {
 | `VideoDetail`（容器） | `useVideo(id)` 拉详情，组织播放/字幕/元信息 | `id` |
 | `VideoPlayer` | 播放/seek/下载/onError 刷 URL | `playbackUrl/downloadUrl/poster/onUrlExpired` |
 | `SubtitlePreview` | 仅展示 `script` 文本（字幕已烧入） | `script` |
+
+- **404/not_found 空态（nf-1）**：`/videos/[id]` 是可直达/分享路由，`useVideo(id)` 抛 `ApiError`(status 404 / code `not_found`，含**跨租户=404** 防 IDOR) 时，`VideoDetail` 渲染专门"视频不存在或无权访问"空态（**非通用错误 toast**），文案进 `lib/copy.ts`。
 
 ### 6.5 layout/
 - `QuotaBadge`：消费 `useQuota`，展示 `remaining/total`。**用既有中性玻璃 pill**（`bg-glass-soft` + `text-ink-soft`，已 token 驱动且 AA 安全）——顶栏元信息 pill 不用重量级金底（无轻量金 pill token，避免临时造色）；无数据时不渲染假数字。
@@ -196,10 +200,12 @@ export interface VideoEvent {
 
 ## 10. 错误/失败/超时处理
 - `ApiError`（现有）：401 清 session 跳 login；网络错误友好提示。
+- **错误分支按契约 §10 小写 code 串匹配（code-1）**：所有 `err.code` 判断用契约小写串（`tenant_quota_exceeded`/`payload_too_large`/`not_found`/`validation_error`…），**不靠 HTTP 状态**（两个 403——角色 `forbidden` 与 `tenant_quota_exceeded`——状态无法区分）。MSW handlers 发同款小写串；现网 M2 旧端点发大写串（`REQUEST_BODY_TOO_LARGE` 等）属旧端点，§9 新业务端点由 VIDEO-PIPELINE-0001 按契约发小写串——真联调校验。
 - 下单 403 `tenant_quota_exceeded` → 明确"额度不足"提示，不入队。
 - 上传 413 `payload_too_large` → "图片过大"提示。
+- **404 `not_found`（含跨租户/IDOR，契约 §9/§10）**：详情页 `/videos/[id]`（可直达/分享）`getVideo` 抛 404 → 专门"视频不存在或无权访问"空态（非通用 toast，见 §6.4）。
 - 任务 `failed`（`error_code`/`error_message`）→ TaskCard/详情失败态 + **重试入口**（重提同参 → 新任务）。
-- **客户端自超时（关键，必须独立于后端 `failed` 事件）**：跟踪每个在途任务「上次进度推进时间」。运行期满足任一即强制失败态 + 重试：(a) 停滞窗口 `STALL_MS`（默认 120s）内 `progress` 无推进且无终态帧；(b) 自 `queued` 起总时长超硬上限 `HARD_CAP_MS`（默认 15min）。帧若带 `timeout_seconds` 则优先采用。常量集中可配。**即使后端永不发 `failed` 也要触发**——这正是 Seedance 卡死坑的根因。
+- **客户端自超时（关键，必须独立于后端 `failed` 事件）**：跟踪每个在途任务「上次进度推进时间」。运行期满足任一即强制失败态 + 重试：(a) 停滞窗口 `STALL_MS`（默认 120s）内 `progress` 无推进且无终态帧；(b) 自 `queued` 起总时长超硬上限 `HARD_CAP_MS`（默认 15min）。帧若带 `timeout_seconds` 则优先采用。**落点 = `lib/videos/tasks-context.tsx` 每任务 `subscribe` 生命周期**（记 `lastProgressAt`/`queuedAt`）；常量集中在 `lib/sse/constants.ts`。**即使后端永不发 `failed` 也要触发**——这正是 Seedance 卡死坑的根因。**§12 必有对应 vitest 用例**。
 - SSE 断 → 轮询兜底；轮询也失败 → 失败态。脱敏：只展示 `error_message`，不泄堆栈。
 
 ## 11. 安全 / 鉴权
@@ -209,7 +215,7 @@ export interface VideoEvent {
 
 ## 12. 测试与验收（证据贴回执）
 1. `pnpm lint` 无告警、`tsc --noEmit` 过、`pnpm build` ✓。
-2. `pnpm test`（vitest）全绿（含数据层映射、SSE 新/旧帧、组件）。
+2. `pnpm test`（vitest）全绿（含数据层映射、SSE 新/旧帧、组件）。**必含三条加固用例**：(a) 客户端自超时——mock SSE 只发 `running` 不发终态 → 断言 `STALL_MS` 后转 `failed`+重试入口（timeout-1）；(b) SSE 新帧 `{status:"running",progress:1}` → 1%（不被 rescale，sse-1）；(c) 详情页 `getVideo` 404 → not_found 空态（nf-1）。
 3. grep 证 UI 组件无裸 `fetch`（后端访问全在 `lib/api`）。
 4. grep 证无硬编码色值；金底深墨字 AA。
 5. 复用自查：无 >2 次复制粘贴的同类结构。
@@ -227,6 +233,7 @@ export interface VideoEvent {
 - 上传端点 `/uploads → /uploads/images`，返回 `key → asset_id`。
 - SSE 旧帧→新枚举：保留旧帧兜底，前向兼容；现场回归 M2 管道。
 - `Quota {used,limit,resetAt} → {total,used,reserved,remaining}`：删 `lib/api/hooks.ts` 内本地 `interface Quota`，移到 `types.ts`；`components/layout/quota-badge.tsx` 由 `used/limit` 改 `remaining/total`；`useQuota` 返回类型由占位 `Quota|null` → 真 `Quota`。
+- **侧栏第二处额度面板（sidebar-quota-1）**：`components/layout/sidebar.tsx` 另从 `lib/mock.ts` 渲染硬编码 `used/total`(620/1000)。动到额度即一并处理：侧栏额度面板改接 `useQuota`（与顶栏 QuotaBadge 同源）或移除，**不得两份额度并存且不一致**。
 - **测试夹具迁移（否则 `pnpm test` 红）**：`lib/api/hooks.test.tsx`（createVideo mock `{task_id}`→`{id}`）、`lib/sse/progress-mapping.test.ts`（`fromVideoRead` 入参 title/prompt/mode → topic 等新 schema）、`lib/sse/use-task-progress.test.tsx`（getVideo mock 改新 schema）。
 - `VideoListResponse {items, next_cursor} → {items, total}`：无消费者读 next_cursor；`total` 可用于列表计数或不引入。
 - 旧 `lib/mock.ts`（占位静态数据）按需清理/替换为 MSW；旧 `NewVideoCard` 删除（被 NewVideoForm 替换）。
@@ -244,7 +251,7 @@ export interface VideoEvent {
 - `components/ui/`：SelectableOption（复用原子）。
 - `components/layout/`：QuotaBadge（接真）。
 - `lib/api/`：scripts/voices/avatars/quota（新）+ videos/uploads/types/hooks/keys（改）。
-- `lib/copy.ts`（文案集中）；`lib/sse/*`（简化）。
+- `lib/copy.ts`（文案集中）；`lib/sse/*`（简化 + `constants.ts`：`STALL_MS`/`HARD_CAP_MS`/`MAX_SCRIPT_SECONDS`/`CPS` 等集中常量）。
 - `app/(app)/page.tsx`（工作台）、`app/(app)/videos/[id]/page.tsx`（详情）。
 - MSW handlers（dev/test）。
 - Playwright 用例 + vitest 用例。
