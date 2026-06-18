@@ -22,7 +22,7 @@
 ## 2. 范围
 
 **做**
-- 工作台 `/`（同页）：`NewVideoForm`（主题/卖点 → `ScriptReview` 可改文案 → `ImagePicker` 上传/预设 → `VoicePicker` 音色 → `MoreSettings` 折叠[语速/尺寸默认9:16锁/字幕默认开不可关] → 金底生成按钮）；`TaskList`/`TaskCard`（状态徽+进度+缩略图，SSE 实时，三态）。
+- 工作台 `/`（同页）：`NewVideoForm`（主题/卖点 → `ScriptReview` 可改文案 → `ImagePicker` 上传/预设 → `VoicePicker` 音色 → `MoreSettings` 折叠[语速/尺寸默认9:16锁/字幕默认开不可关] → 金底生成按钮）；`TaskList`/`TaskCard`（状态徽+进度+缩略图，SSE 实时，四态）。
 - 成片详情 `/videos/[id]`：`VideoDetail` + `VideoPlayer`（seek/下载/onError 刷 URL）+ `SubtitlePreview`（仅展示 `script` 文本，字幕已烧入视频）。
 - 顶栏 `QuotaBadge`：接真 `GET /quota`。
 - 新 hooks（`lib/api` 唯一数据层）：`useScriptGenerate`、`useVoices`、`useAvatarPresets`、`useQuota`（接真）。
@@ -169,7 +169,7 @@ export interface VideoEvent {
 - **脚本长度/时长提示（trunc-1，契约 §7 明确把"超长 script 前端应提示截断"交给前端）**：ScriptReview 显示字数 + 估算时长 `est_seconds = ceil(len(script)/CPS/speed)`（CPS≈5）；超 `MAX_SCRIPT_SECONDS=60`（对齐 OmniHuman 音频 ≤60s、避免 provider `50215 音频超长` 失败）即给"将被截断/建议精简"软提示（**不硬阻下单**，后端会 clamp 估算）。常量 `MAX_SCRIPT_SECONDS`/`CPS` 进 `lib/sse/constants.ts`，文案进 `lib/copy.ts`。
 
 ### 6.3 tasks/
-- `TaskList`（容器消费既有 `useVideoTasks`，来自 `lib/videos/tasks-context.tsx`，提供 `tasks/createAndTrack/refreshTask`）+ `TaskCard`（纯展示三态：排队=进度条、进行=进度条+step、失败=`error_message`+重试、完成=缩略图+打开详情）。`TaskCard` 纯 props + 发"打开详情/重试"事件。**失败态来源含客户端自超时**（§5/§10：后端永不发 `failed` 时由 `tasks-context` 计时器转失败+重试）。**失败态 token**：`bg-error-bg`/`text-error-fg`（已在 globals.css）；缩略图失败可加 `--shadow-thumb-failed`（实现期补 token + tailwind boxShadow，error 色调变体）。
+- `TaskList`（容器消费既有 `useVideoTasks`，来自 `lib/videos/tasks-context.tsx`，提供 `tasks/createAndTrack/refreshTask`）+ `TaskCard`（纯展示**四态**，对齐 status 枚举：排队=进度条、进行=进度条+step、完成=缩略图+打开详情、失败=`error_message`+重试）。`TaskCard` 纯 props + 发"打开详情/重试"事件。**失败态来源含客户端自超时**（§5/§10：后端永不发 `failed` 时由 `tasks-context` 计时器转失败+重试）。**失败态 token（设计系统，已落地）**：`--error-fg:#9c3b28` / `--error-bg:rgba(193,99,74,.18)`（暖陶土红，AA≈5.5:1）→ tailwind `text-error-fg`/`bg-error-bg`；缩略图失败用 `--shadow-thumb-failed`（由 error-fg 派生，已加 tailwind `shadow-thumb-failed`）。**不在 globals.css 凭空造 error 色**。
 
 ### 6.4 video/
 | 组件 | 职责 | 关键 props |
@@ -220,7 +220,7 @@ export interface VideoEvent {
 4. grep 证无硬编码色值；金底深墨字 AA。
 5. 复用自查：无 >2 次复制粘贴的同类结构。
 6. Playwright 全流程对 MSW 跑（截图/录制）：登录门 → 输主题 → 生成文案可改 → 上传形象 → 选音色 → 生成 → SSE 进度推进 → done → 内嵌播放(currentTime>0)+seek+下载 → 刷新历史留存 → 失败态 → 移动端无溢出。
-7. Chrome DevTools：Console 0 报错；Network 关键接口 200/201/202（SSE `/events` 为 200 流式）。
+7. Chrome DevTools：Console 0 报错；Network 关键接口 200/201/202/**206**（SSE `/events` 200 流式；视频 seek 走 HTTP Range → 206）。
 8. 不破 M2 回归：登录→生成→SSE→播放管道现场过（用 avatar_talk 流）。
 9. CI 三绿（push 后）。
 
@@ -246,7 +246,7 @@ export interface VideoEvent {
 
 ## 15. 交付物清单
 - `components/workbench/`：NewVideoForm、ImagePicker、ScriptReview、VoicePicker、MoreSettings。
-- `components/tasks/`：TaskList、TaskCard（三态）。
+- `components/tasks/`：TaskList、TaskCard（四态）。
 - `components/video/`：VideoDetail、VideoPlayer、SubtitlePreview。
 - `components/ui/`：SelectableOption（复用原子）。
 - `components/layout/`：QuotaBadge（接真）。
