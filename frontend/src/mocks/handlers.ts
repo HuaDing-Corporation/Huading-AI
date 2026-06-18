@@ -1,6 +1,8 @@
 import { http, HttpResponse } from "msw";
 
-const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+// Mirror client.ts's trailing-slash normalization so handler URLs always match
+// what apiFetch requests (avoids a latent "mock silently bypassed" footgun).
+const BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000").replace(/\/$/, "");
 const ok = <T>(data: T) => HttpResponse.json({ data, error: null, request_id: "mock-req" });
 const err = (status: number, code: string, message: string) =>
   HttpResponse.json({ data: null, error: { code, message, request_id: "mock-req" }, request_id: "mock-req" }, { status });
