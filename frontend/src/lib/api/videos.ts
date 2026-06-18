@@ -1,24 +1,18 @@
 import { API_BASE_URL, ApiError, apiFetch, authHeaders } from "@/lib/api/client";
 import { authStore } from "@/lib/auth/store";
-import type {
-  CreateVideoRequest,
-  VideoAccepted,
-  VideoEvent,
-  VideoListResponse,
-  VideoRead
-} from "@/lib/api/types";
+import type { CreateVideoRequest, VideoAccepted, VideoDetail, VideoEvent, VideoListItem, VideoListResponse } from "@/lib/api/types";
 
 export function createVideo(input: CreateVideoRequest): Promise<VideoAccepted> {
   return apiFetch<VideoAccepted>("/api/v1/videos", { method: "POST", body: input });
 }
 
 /** Authoritative record for one video (status + playback/download URLs). */
-export function getVideo(taskId: string): Promise<VideoRead> {
-  return apiFetch<VideoRead>(`/api/v1/videos/${encodeURIComponent(taskId)}`, { method: "GET" });
+export function getVideo(id: string): Promise<VideoDetail> {
+  return apiFetch<VideoDetail>(`/api/v1/videos/${encodeURIComponent(id)}`, { method: "GET" });
 }
 
 /** This tenant's videos, newest first — used to hydrate the task list on mount. */
-export async function listVideos(): Promise<VideoRead[]> {
+export async function listVideos(): Promise<VideoListItem[]> {
   const res = await apiFetch<VideoListResponse>("/api/v1/videos", { method: "GET" });
   return res?.items ?? [];
 }

@@ -2,7 +2,7 @@
 
 export interface ApiResponse<T> {
   data: T | null;
-  error: { code: string; message: string; detail?: unknown } | null;
+  error: { code: string; message: string; request_id?: string; detail?: unknown; details?: unknown } | null;
   request_id: string | null;
 }
 
@@ -36,66 +36,102 @@ export interface CurrentUserResponse {
   permissions: string[];
 }
 
+export type VideoStatus = "queued" | "running" | "done" | "failed";
+
+export interface VideoListItem {
+  id: string;
+  status: VideoStatus;
+  progress: number; // 0..100
+  topic: string;
+  thumbnail_url?: string | null;
+  created_at: string;
+}
+export interface VideoListResponse {
+  items: VideoListItem[];
+  total: number;
+}
+
+export interface VideoDetail {
+  id: string;
+  status: VideoStatus;
+  progress: number;
+  // Backend VideoRead leaves these nullable (e.g. before the script step runs);
+  // align the types so consumers null-handle rather than assume present (P2-3).
+  topic: string | null;
+  script: string | null;
+  voice_id: string | null;
+  aspect_ratio: string | null;
+  subtitle_enabled: boolean | null;
+  playback_url?: string | null;
+  download_url?: string | null;
+  thumbnail_url?: string | null;
+  duration_ms?: number | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  created_at: string;
+  finished_at?: string | null;
+}
+
+export interface CreateVideoRequest {
+  topic: string; // 必填 ≤500
+  script?: string; // 可选；缺则后端 DeepSeek 生成（前端流程会带）
+  voice_id: string; // 必填
+  avatar_asset_id: string; // 必填（上传或预设产出的 asset_id）
+  speed?: number; // 默认 1.0
+  aspect_ratio?: string; // 默认 "9:16"
+  subtitle_enabled?: boolean; // 默认 true
+}
 export interface VideoAccepted {
-  task_id: string;
+  id: string;
   status: string;
 }
 
-export type VideoStatus = "queued" | "running" | "done" | "failed";
-
-/** Authoritative video record (GET /videos and GET /videos/{id}). */
-export interface VideoRead {
+export interface Voice {
   id: string;
-  title: string;
-  prompt: string;
-  mode: string;
-  status: VideoStatus;
-  progress: number; // 0..100
-  created_at: string;
-  duration_sec?: number | null;
+  provider: string;
+  voice_code: string;
+  display_name: string;
+  gender: string | null;
+  language: string | null;
+  sample_url?: string | null;
+}
+export interface AvatarPreset {
+  asset_id: string;
+  display_name: string;
+  thumbnail_url: string | null; // backend str|None (P2-3)
+}
+
+export interface ScriptGenerateResponse {
+  script: string;
+}
+
+export interface UploadImageResponse {
+  asset_id: string;
+  type: "avatar_image";
+  status: "ready";
   thumbnail_url?: string | null;
+}
+
+export interface Quota {
+  total: number;
+  used: number;
+  reserved: number;
+  remaining: number;
+}
+
+// SSE 新枚举帧（§8）+ 旧帧兜底字段
+export interface VideoEvent {
+  status?: VideoStatus | string;
+  progress?: number; // 新帧 0..100 int；旧帧 0..1 小数
+  step?: string | null; // tts|avatar|subtitle|compose|upload
   playback_url?: string | null;
   download_url?: string | null;
-  error?: string | null;
-}
-
-export interface VideoListResponse {
-  items: VideoRead[];
-  next_cursor?: string | null;
-}
-
-/**
- * SSE progress frame. The stream still carries the worker's progress-store shape
- * (uppercase status, progress 0..1) — distinct from VideoRead — so we reconcile
- * the authoritative record (playback_url etc.) via GET /videos/{id} on terminal.
- * The timeout keep-alive reuses task_id + stage only.
- */
-export interface VideoEvent {
+  thumbnail_url?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  // 旧帧兜底
   task_id?: string;
-  status?: string; // PENDING | STARTED | PROGRESS | SUCCESS | FAILURE
   stage?: string | null;
-  progress?: number; // 0..1
   error?: string | null;
   timeout_seconds?: number;
-}
-
-export type VideoMode = "static_template" | "seedance_t2v" | "seedance_i2v";
-
-export interface CreateVideoRequest {
-  topic: string;
-  video_mode?: VideoMode;
-  image_key?: string | null; // required for seedance_i2v (from POST /uploads)
-  pipeline?: "standard" | "custom";
-  mode?: "generate" | "fixed";
-  n_scenes?: number;
-  frame_template?: string | null;
-  voice?: string | null;
-  tts_speed?: number;
-}
-
-export interface UploadResponse {
-  key: string; // tenant-relative, e.g. "uploads/<uuid>.jpg"
-  uri: string;
-  content_type: string;
-  size: number;
 }

@@ -22,7 +22,3 @@ export const navItems: NavItem[] = [
   { key: "team", label: "团队", icon: Users }
 ];
 
-export const quota = { plan: "旗舰版", used: 620, total: 1000 };
-
-export const templateOptions = ["人文纪实", "商品融合", "数字人口播"];
-export const voiceSizeOptions = ["知性女声", "9:16 竖屏", "品牌音色"];

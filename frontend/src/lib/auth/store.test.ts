@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const KEY = "huading.session";
-const SEED = { token: "t1", tenantId: "ten1", userId: "u1", role: "owner" as const };
+const SEED = { token: "t1", tenantId: "ten1", userId: "u1", role: "admin" as const };
 
 describe("authStore self-hydration", () => {
   beforeEach(() => {

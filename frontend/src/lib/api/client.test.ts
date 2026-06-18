@@ -4,7 +4,7 @@ import { authStore } from "@/lib/auth/store";
 
 import { apiFetch } from "./client";
 
-const SESSION = { token: "t", tenantId: "x", userId: "u", role: "owner" as const };
+const SESSION = { token: "t", tenantId: "x", userId: "u", role: "admin" as const };
 
 function json401() {
   return new Response(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "no" } }), {

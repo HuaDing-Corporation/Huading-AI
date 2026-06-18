@@ -73,6 +73,7 @@ const config: Config = {
         avatar: "var(--shadow-avatar)",
         thumb: "var(--shadow-thumb)",
         "thumb-done": "var(--shadow-thumb-done)",
+        "thumb-failed": "var(--shadow-thumb-failed)",
         mark: "var(--shadow-mark)",
         "focus-gold": "var(--shadow-focus-gold)"
       },

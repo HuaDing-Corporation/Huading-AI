@@ -15,16 +15,18 @@ describe("useTaskProgress", () => {
   it("reflects SSE progress events", async () => {
     (streamVideoEvents as Mock).mockImplementation(
       async (_id: string, onMessage: (e: unknown) => void) => {
-        onMessage({ status: "PROGRESS", progress: 0.5 });
+        onMessage({ status: "running", progress: 50 });
       }
     );
     (getVideo as Mock).mockResolvedValue({
       id: "v1",
-      title: "T",
-      prompt: "",
-      mode: "x",
       status: "running",
       progress: 50,
+      topic: "T",
+      script: "",
+      voice_id: "v",
+      aspect_ratio: "9:16",
+      subtitle_enabled: true,
       created_at: ""
     });
     const { result } = renderHook(() => useTaskProgress("v1"));

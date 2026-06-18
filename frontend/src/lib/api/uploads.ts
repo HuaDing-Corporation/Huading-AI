@@ -1,6 +1,6 @@
 import { API_BASE_URL, ApiError, authHeaders } from "@/lib/api/client";
 import { authStore } from "@/lib/auth/store";
-import type { ApiResponse, UploadResponse } from "@/lib/api/types";
+import type { ApiResponse, UploadImageResponse } from "@/lib/api/types";
 
 // Client-side guards (the backend enforces the same; this is a fast first pass).
 export const ALLOWED_UPLOAD_TYPES = ["image/jpeg", "image/png", "image/webp"];
@@ -12,13 +12,13 @@ export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
  * body is FormData — the browser must set the multipart Content-Type/boundary,
  * so we only attach the auth headers.
  */
-export async function uploadImage(file: File): Promise<UploadResponse> {
+export async function uploadImage(file: File): Promise<UploadImageResponse> {
   const form = new FormData();
   form.append("file", file);
 
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}/api/v1/uploads`, {
+    res = await fetch(`${API_BASE_URL}/api/v1/uploads/images`, {
       method: "POST",
       headers: authHeaders(),
       body: form
@@ -29,9 +29,9 @@ export async function uploadImage(file: File): Promise<UploadResponse> {
 
   if (res.status === 401 && authStore.get()) authStore.clear();
 
-  let payload: ApiResponse<UploadResponse> | null = null;
+  let payload: ApiResponse<UploadImageResponse> | null = null;
   try {
-    payload = (await res.json()) as ApiResponse<UploadResponse>;
+    payload = (await res.json()) as ApiResponse<UploadImageResponse>;
   } catch {
     payload = null;
   }
@@ -46,5 +46,5 @@ export async function uploadImage(file: File): Promise<UploadResponse> {
     );
   }
 
-  return payload?.data as UploadResponse;
+  return payload?.data as UploadImageResponse;
 }
