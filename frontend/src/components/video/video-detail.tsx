@@ -1,0 +1,174 @@
+"use client";
+
+import { ChevronLeft } from "lucide-react";
+import { useRouter } from "next/navigation";
+
+import { ApiError } from "@/lib/api/client";
+import { useVideo } from "@/lib/api/hooks";
+import { videoKeys } from "@/lib/api/keys";
+import { copy } from "@/lib/copy";
+import { cn } from "@/lib/utils";
+import { useQueryClient } from "@tanstack/react-query";
+
+import { SubtitlePreview } from "@/components/video/subtitle-preview";
+import { VideoPlayer } from "@/components/video/video-player";
+
+export interface VideoDetailProps {
+  id: string;
+}
+
+function formatDate(iso: string) {
+  try {
+    return new Date(iso).toLocaleString("zh-CN", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function formatDuration(ms: number | null | undefined) {
+  if (ms == null) return null;
+  const s = Math.round(ms / 1000);
+  return `${s} 秒`;
+}
+
+/**
+ * Container component for the video detail page.
+ * Calls useVideo(id) and handles:
+ *  - loading state
+ *  - 404 / not_found → dedicated empty state (nf-1)
+ *  - other errors → error message
+ *  - success → VideoPlayer + SubtitlePreview + meta
+ */
+export function VideoDetail({ id }: VideoDetailProps) {
+  const { data, error, isLoading } = useVideo(id);
+  const queryClient = useQueryClient();
+  const router = useRouter();
+
+  function handleUrlExpired() {
+    void queryClient.invalidateQueries({ queryKey: videoKeys.detail(id) });
+  }
+
+  // Loading state
+  if (isLoading) {
+    return (
+      <div className="flex min-h-[240px] items-center justify-center">
+        <span className="text-[14px] text-ink-soft">加载中…</span>
+      </div>
+    );
+  }
+
+  // nf-1: 404 / not_found → dedicated empty state, NOT a generic toast
+  if (error instanceof ApiError && (error.status === 404 || error.code === "not_found")) {
+    return (
+      <div className="flex min-h-[320px] flex-col items-center justify-center gap-4 text-center">
+        <p className="text-[15px] text-ink-soft">{copy.detail.notFound}</p>
+        <button
+          type="button"
+          onClick={() => router.back()}
+          className="inline-flex items-center gap-1 rounded-field border border-line-gold bg-glass-fill px-4 py-2 text-[13px] text-gold-deep transition-colors hover:bg-glass-hover"
+        >
+          <ChevronLeft size={15} strokeWidth={2} />
+          {copy.detail.back}
+        </button>
+      </div>
+    );
+  }
+
+  // Other errors
+  if (error) {
+    return (
+      <div className="flex min-h-[240px] flex-col items-center justify-center gap-3 text-center">
+        <p className="text-[14px] text-error-fg">
+          {error instanceof ApiError ? error.message : copy.errors.generic}
+        </p>
+        <button
+          type="button"
+          onClick={() => router.back()}
+          className="inline-flex items-center gap-1 rounded-field border border-line-gold bg-glass-fill px-4 py-2 text-[13px] text-gold-deep transition-colors hover:bg-glass-hover"
+        >
+          <ChevronLeft size={15} strokeWidth={2} />
+          {copy.detail.back}
+        </button>
+      </div>
+    );
+  }
+
+  if (!data) return null;
+
+  const statusLabel: Record<string, string> = {
+    queued: copy.status.queued,
+    running: `生成中 ${data.progress}%`,
+    done: copy.status.done,
+    failed: copy.status.failed
+  };
+
+  return (
+    <div className="flex flex-col gap-6">
+      {/* Back navigation */}
+      <nav aria-label="导航">
+        <button
+          type="button"
+          onClick={() => router.back()}
+          className="inline-flex items-center gap-1 rounded-field px-2 py-1 text-[13px] text-gold-deep outline-none transition-colors hover:bg-glass-soft focus-visible:shadow-focus-gold"
+        >
+          <ChevronLeft size={15} strokeWidth={2} />
+          {copy.detail.back}
+        </button>
+      </nav>
+
+      {/* Topic heading */}
+      <header>
+        <h1 className="text-[22px] font-semibold tracking-wide text-ink">{data.topic}</h1>
+      </header>
+
+      {/* Player — only when done and URL is available */}
+      {data.status === "done" && data.playback_url ? (
+        <VideoPlayer
+          playbackUrl={data.playback_url}
+          downloadUrl={data.download_url}
+          poster={data.thumbnail_url}
+          onUrlExpired={handleUrlExpired}
+        />
+      ) : (
+        <div className="flex min-h-[160px] items-center justify-center rounded-field border border-line-gold bg-glass-fill">
+          <span className="text-[13px] text-ink-soft">{statusLabel[data.status] ?? data.status}</span>
+        </div>
+      )}
+
+      {/* Script / subtitle preview */}
+      {data.script && <SubtitlePreview script={data.script} />}
+
+      {/* Meta info */}
+      <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-[13px] sm:grid-cols-3">
+        <div>
+          <dt className="text-ink-faint">状态</dt>
+          <dd className={cn("font-medium", data.status === "failed" ? "text-error-fg" : "text-ink")}>
+            {statusLabel[data.status] ?? data.status}
+          </dd>
+        </div>
+        {data.duration_ms != null && (
+          <div>
+            <dt className="text-ink-faint">时长</dt>
+            <dd className="text-ink">{formatDuration(data.duration_ms)}</dd>
+          </div>
+        )}
+        <div>
+          <dt className="text-ink-faint">创建时间</dt>
+          <dd className="text-ink">{formatDate(data.created_at)}</dd>
+        </div>
+        {data.error_message && (
+          <div className="col-span-full">
+            <dt className="text-ink-faint">错误信息</dt>
+            <dd className="text-error-fg">{data.error_message}</dd>
+          </div>
+        )}
+      </dl>
+    </div>
+  );
+}
