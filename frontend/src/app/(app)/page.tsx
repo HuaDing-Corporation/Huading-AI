@@ -3,7 +3,7 @@
 import { ChevronLeft, Store } from "lucide-react";
 import { useRouter } from "next/navigation";
 
-import { NewVideoCard } from "@/components/workbench/new-video-card";
+import { NewVideoForm } from "@/components/workbench/new-video-form";
 import { Sidebar } from "@/components/layout/sidebar";
 import { TaskList } from "@/components/tasks/task-list";
 import { TopBar } from "@/components/layout/top-bar";
@@ -51,7 +51,7 @@ export default function Home() {
 
           {/* B1: form column ~320px (min 300), task list takes the rest; stacks on narrow */}
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(300px,340px)_minmax(0,1fr)]">
-            <NewVideoCard />
+            <NewVideoForm />
             <TaskList />
           </div>
         </section>
