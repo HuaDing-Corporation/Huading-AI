@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 import { AuthProvider } from "@/lib/auth/auth-context";
+import { MockGate } from "@/mocks/mock-gate";
 import { QueryProvider } from "@/lib/query/query-provider";
 import { VideoTasksProvider } from "@/lib/videos/tasks-context";
 
@@ -18,6 +19,7 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <body>
+        <MockGate />
         <QueryProvider>
           <AuthProvider>
             <VideoTasksProvider>{children}</VideoTasksProvider>
