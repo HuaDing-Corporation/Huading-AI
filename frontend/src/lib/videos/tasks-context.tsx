@@ -25,6 +25,11 @@ interface TasksContextValue {
   createAndTrack: (req: CreateVideoRequest, topic: string) => Promise<string>;
   /** Re-fetch one video (e.g. to refresh an expired presigned playback URL). */
   refreshTask: (taskId: string) => Promise<void>;
+  /**
+   * Re-submit the original request for a failed task, creating a new task.
+   * Resolves to the new task id or throws if the original request is unknown.
+   */
+  retryTask: (taskId: string) => Promise<string>;
 }
 
 const TasksContext = createContext<TasksContextValue | null>(null);
@@ -45,6 +50,8 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
   const controllers = useRef<Map<string, AbortController>>(new Map());
   const timers = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
   const meta = useRef<Map<string, TaskMeta>>(new Map());
+  /** Original CreateVideoRequest keyed by taskId — used to re-submit on retry. */
+  const requests = useRef<Map<string, { req: CreateVideoRequest; topic: string }>>(new Map());
   const hydratedRef = useRef(false);
   const { session } = useAuth();
 
@@ -195,6 +202,8 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
   const createAndTrack = useCallback(
     async (req: CreateVideoRequest, topic: string): Promise<string> => {
       const accepted = await createVideo(req);
+      // Store the original request so retryTask can re-submit it later.
+      requests.current.set(accepted.id, { req, topic });
       setTasks((prev) => [
         {
           taskId: accepted.id,
@@ -209,6 +218,23 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
       return accepted.id;
     },
     [subscribe]
+  );
+
+  /**
+   * Re-submit the stored original request for a failed task.
+   * Looks up the request by `taskId`; if none is found the promise rejects.
+   * The retry creates a brand-new task (new id) and the old card stays visible
+   * until a future list refresh replaces it.
+   */
+  const retryTask = useCallback(
+    async (taskId: string): Promise<string> => {
+      const stored = requests.current.get(taskId);
+      if (!stored) {
+        throw new Error(`No stored request for task ${taskId}`);
+      }
+      return createAndTrack(stored.req, stored.topic);
+    },
+    [createAndTrack]
   );
 
   // Hydrate the list once we have a session (B4) and resume in-flight tasks.
@@ -251,6 +277,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
     timers.current.forEach((tm) => clearInterval(tm));
     timers.current.clear();
     meta.current.clear();
+    requests.current.clear();
     setTasks([]);
   }, [session]);
 
@@ -258,17 +285,19 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
     const activeControllers = controllers.current;
     const activeTimers = timers.current;
     const activeMeta = meta.current;
+    const activeRequests = requests.current;
     return () => {
       activeControllers.forEach((controller) => controller.abort());
       activeControllers.clear();
       activeTimers.forEach((tm) => clearInterval(tm));
       activeTimers.clear();
       activeMeta.clear();
+      activeRequests.clear();
     };
   }, []);
 
   return (
-    <TasksContext.Provider value={{ tasks, createAndTrack, refreshTask }}>
+    <TasksContext.Provider value={{ tasks, createAndTrack, refreshTask, retryTask }}>
       {children}
     </TasksContext.Provider>
   );
