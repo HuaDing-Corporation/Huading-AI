@@ -180,7 +180,6 @@ async def invoke(
                     settled_at=datetime.now(UTC),
                 )
             )
-            db.commit()
         return result
 
     raise ProviderInvocationError(f"Provider invocation failed for {capability}.") from last_error

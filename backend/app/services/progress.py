@@ -19,11 +19,17 @@ _KNOWN_FIELDS = {
     "task_id",
     "status",
     "stage",
+    "step",
     "progress",
     "frame_current",
     "frame_total",
     "video_url",
+    "playback_url",
+    "download_url",
+    "thumbnail_url",
     "error",
+    "error_code",
+    "error_message",
 }
 
 

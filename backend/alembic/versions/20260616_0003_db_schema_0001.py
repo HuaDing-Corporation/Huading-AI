@@ -713,6 +713,39 @@ def _seed_defaults() -> None:
         ON CONFLICT (id) DO NOTHING
         """
     )
+    op.execute(
+        """
+        INSERT INTO provider_configs (
+            id, tenant_id, capability, provider, config, is_active
+        )
+        VALUES
+            (
+                '00000000-0000-0000-0000-000000000401',
+                NULL,
+                'llm',
+                'deepseek',
+                '{}'::jsonb,
+                true
+            ),
+            (
+                '00000000-0000-0000-0000-000000000402',
+                NULL,
+                'tts',
+                'edge-tts',
+                '{}'::jsonb,
+                true
+            ),
+            (
+                '00000000-0000-0000-0000-000000000403',
+                NULL,
+                'avatar',
+                'omnihuman',
+                '{}'::jsonb,
+                true
+            )
+        ON CONFLICT (id) DO NOTHING
+        """
+    )
 
 
 def downgrade() -> None:
