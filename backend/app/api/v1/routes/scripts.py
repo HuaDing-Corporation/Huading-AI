@@ -1,12 +1,13 @@
 import asyncio
 
 from fastapi import APIRouter, Request
+from sqlalchemy.orm import Session
 
-from app.api.deps import CurrentUserDependency
+from app.api.deps import CurrentUserDependency, DbSessionDependency
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.db.models import User
-from app.providers.llm.deepseek import DeepSeekProvider
+from app.providers.base import invoke, resolve
 from app.schemas.response import ApiResponse, ok
 from app.schemas.scripts import ScriptGenerateRequest, ScriptGenerateResponse
 
@@ -17,7 +18,8 @@ router = APIRouter()
 def generate_script(
     request: Request,
     payload: ScriptGenerateRequest,
-    _user: User = CurrentUserDependency,
+    user: User = CurrentUserDependency,
+    db: Session = DbSessionDependency,
 ) -> ApiResponse[ScriptGenerateResponse]:
     topic = payload.topic.strip()
     if not (
@@ -30,12 +32,17 @@ def generate_script(
             code="LLM_NOT_CONFIGURED",
             status_code=503,
         )
-    provider = DeepSeekProvider(
-        api_key=settings.engine_llm_api_key,
-        base_url=settings.engine_llm_base_url,
-        model=settings.engine_llm_model,
+    provider = resolve(db, tenant_id=user.tenant_id, capability="llm")
+    result = asyncio.run(
+        invoke(
+            db,
+            tenant_id=user.tenant_id,
+            capability="llm",
+            provider=provider.__class__.__name__,
+            operation=lambda: provider.generate_text({"topic": topic}),
+            timeout_seconds=30.0,
+        )
     )
-    result = asyncio.run(provider.generate_text({"topic": topic}))
     script = str(result.get("text") or "").strip()
     if not script:
         raise AppError(

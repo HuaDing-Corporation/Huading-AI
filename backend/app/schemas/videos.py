@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -30,7 +31,7 @@ class VideoGenerateRequest(BaseModel):
     voice_id: str | None = None
     avatar_asset_id: str | None = None
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
-    aspect_ratio: str = Field(default="9:16")
+    aspect_ratio: Literal["9:16", "16:9", "1:1"] = Field(default="9:16")
     subtitle_enabled: bool = True
     pipeline: str = Field(default="standard")
     mode: str = Field(default="generate", description="'generate' (LLM) or 'fixed' (use script)")
@@ -146,4 +147,3 @@ class VideoRead(BaseModel):
 class VideoListResponse(BaseModel):
     items: list[VideoRead]
     total: int | None = None
-    next_cursor: str | None = None

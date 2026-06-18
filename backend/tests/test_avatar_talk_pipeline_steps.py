@@ -3,6 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import numpy as np
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -135,19 +136,23 @@ def test_default_avatar_talk_steps_create_assets_and_final_video(monkeypatch, tm
             }
 
     class _FakeOmni:
-        def __init__(self, **kwargs) -> None:
-            pass
-
-        def generate_avatar_sync(self, payload: dict):
+        async def generate_avatar(self, payload: dict):
             assert payload["image_url"].startswith("https://storage.test/")
             assert payload["audio_url"].startswith("https://storage.test/")
             return {"task_id": "cv-1", "video_url": "https://visual.test/video.mp4"}
 
+    def fake_resolve(_db, *, tenant_id: str, capability: str):
+        assert tenant_id == "tenant-pipeline"
+        if capability == "tts":
+            return _FakeTTS(output_dir=str(tmp_path))
+        if capability == "avatar":
+            return _FakeOmni()
+        raise AssertionError(f"unexpected capability {capability}")
+
     monkeypatch.setattr(avatar_talk, "SessionLocal", SessionTesting)
     monkeypatch.setattr(avatar_talk, "build_progress_store", lambda _url: _Store())
     monkeypatch.setattr(avatar_talk, "create_object_storage", lambda _settings: storage)
-    monkeypatch.setattr(avatar_talk, "EdgeTTSProvider", _FakeTTS)
-    monkeypatch.setattr(avatar_talk, "OmniHumanProvider", _FakeOmni)
+    monkeypatch.setattr(avatar_talk, "resolve", fake_resolve)
     monkeypatch.setattr(avatar_talk, "_download_bytes", lambda _url: b"BASE-MP4")
     monkeypatch.setattr(
         avatar_talk,
@@ -193,19 +198,20 @@ def test_script_step_generates_missing_script_with_deepseek(monkeypatch):
         db.commit()
 
         class _FakeDeepSeek:
-            def __init__(self, *, api_key: str, base_url: str, model: str) -> None:
-                assert api_key == "k"
-                assert base_url == "https://deepseek.test"
-                assert model == "m"
-
             async def generate_text(self, payload: dict):
                 assert payload["topic"] == "cashmere coat"
                 return {"text": "Generated worker script"}
 
+        def fake_resolve(db_arg, *, tenant_id: str, capability: str):
+            assert db_arg is db
+            assert tenant_id == "tenant-script"
+            assert capability == "llm"
+            return _FakeDeepSeek()
+
         monkeypatch.setattr(avatar_talk.settings, "engine_llm_api_key", "k")
         monkeypatch.setattr(avatar_talk.settings, "engine_llm_base_url", "https://deepseek.test")
         monkeypatch.setattr(avatar_talk.settings, "engine_llm_model", "m")
-        monkeypatch.setattr(avatar_talk, "DeepSeekProvider", _FakeDeepSeek, raising=False)
+        monkeypatch.setattr(avatar_talk, "resolve", fake_resolve)
         ctx = avatar_talk.AvatarTalkContext(
             task_id=task_id,
             tenant_id=tenant_id,
@@ -220,6 +226,76 @@ def test_script_step_generates_missing_script_with_deepseek(monkeypatch):
         assert db.get(VideoTask, task_id).script == "Generated worker script"
 
     Base.metadata.drop_all(engine)
+
+
+def test_script_step_resolves_llm_provider_from_registry(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-script-registry"
+    task_id = "task-script-registry"
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="script-registry", name="Script Registry"))
+        db.add(
+            VideoTask(
+                id=task_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="wool coat",
+                script=None,
+            )
+        )
+        db.commit()
+
+        class _RegistryDeepSeek:
+            async def generate_text(self, payload: dict):
+                assert payload["topic"] == "wool coat"
+                return {"text": "Registry generated script"}
+
+        def fake_resolve(db_arg, *, tenant_id: str, capability: str):
+            assert db_arg is db
+            assert tenant_id == "tenant-script-registry"
+            assert capability == "llm"
+            return _RegistryDeepSeek()
+
+        def fail_direct_provider(**kwargs):
+            raise AssertionError("script_step must resolve the LLM provider via registry")
+
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_api_key", "k")
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_base_url", "https://deepseek.test")
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_model", "m")
+        monkeypatch.setattr(avatar_talk, "resolve", fake_resolve, raising=False)
+        monkeypatch.setattr(avatar_talk, "DeepSeekProvider", fail_direct_provider, raising=False)
+
+        avatar_talk.script_step(
+            avatar_talk.AvatarTalkContext(
+                task_id=task_id,
+                tenant_id=tenant_id,
+                db=db,
+                store=_Store(),
+                storage=_Storage(),
+            )
+        )
+
+        assert db.get(VideoTask, task_id).script == "Registry generated script"
+
+    Base.metadata.drop_all(engine)
+
+
+def test_download_bytes_rejects_non_whitelisted_result_url(monkeypatch):
+    called = False
+
+    def fake_get(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("non-whitelisted URL must be rejected before requests.get")
+
+    monkeypatch.setattr("requests.get", fake_get)
+
+    with pytest.raises(RuntimeError, match="not allowed|whitelist"):
+        avatar_talk._download_bytes("https://evil.example/result.mp4")
+
+    assert called is False
 
 
 def test_burn_subtitles_writes_9x16_video_with_visible_caption(tmp_path: Path):

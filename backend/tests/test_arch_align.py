@@ -194,6 +194,7 @@ async def test_provider_invoke_records_usage() -> None:
             )
 
             assert result == {"message": "ok"}
+            db.flush()
             records = db.query(UsageRecord).all()
             assert len(records) == 1
             assert records[0].tenant_id == "tenant-a"
@@ -202,3 +203,35 @@ async def test_provider_invoke_records_usage() -> None:
             assert records[0].status == "settled"
     finally:
         Base.metadata.drop_all(engine)
+
+
+@pytest.mark.asyncio
+async def test_provider_invoke_records_usage_without_committing() -> None:
+    from app.providers.base import ProviderUsage, invoke
+
+    class FakeDb:
+        def __init__(self) -> None:
+            self.added: list[UsageRecord] = []
+
+        def add(self, value: UsageRecord) -> None:
+            self.added.append(value)
+
+        def commit(self) -> None:
+            raise AssertionError("provider invoke must not commit caller transaction")
+
+    async def operation() -> dict[str, str]:
+        return {"message": "ok"}
+
+    db = FakeDb()
+    result = await invoke(
+        db,  # type: ignore[arg-type]
+        tenant_id="tenant-a",
+        capability="llm",
+        provider="fake-llm",
+        operation=operation,
+        usage=ProviderUsage(unit="call", quantity=1, credits=2, cost_cents=0),
+    )
+
+    assert result == {"message": "ok"}
+    assert len(db.added) == 1
+    assert db.added[0].tenant_id == "tenant-a"

@@ -15,9 +15,11 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.models import Asset, TaskAsset, VideoTask, Voice
 from app.db.session import SessionLocal
-from app.providers.avatar.omnihuman import OmniHumanProvider
-from app.providers.llm.deepseek import DeepSeekProvider
-from app.providers.tts.edge_tts_provider import EdgeTTSProvider
+from app.providers.base import invoke, resolve
+from app.providers.url_guard import (
+    ensure_https_url_allowed,
+    object_storage_public_hosts,
+)
 from app.services.progress import ProgressStore, build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
 from app.services.storage.base import ObjectStorage
@@ -58,6 +60,11 @@ def _work_dir(task_id: str) -> Path:
 def _download_bytes(url: str) -> bytes:
     import requests
 
+    allowed_hosts = {"visual.volcengineapi.com"} | object_storage_public_hosts(
+        settings.engine_s3_public_endpoint,
+        settings.storage_endpoint_url,
+    )
+    ensure_https_url_allowed(url, allowed_hosts=allowed_hosts)
     response = requests.get(url, timeout=settings.engine_omnihuman_request_timeout_seconds)
     response.raise_for_status()
     return response.content
@@ -115,12 +122,17 @@ def script_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
             and settings.engine_llm_model
         ):
             raise RuntimeError("DeepSeek is not configured for avatar_talk script generation.")
-        provider = DeepSeekProvider(
-            api_key=settings.engine_llm_api_key,
-            base_url=settings.engine_llm_base_url,
-            model=settings.engine_llm_model,
+        provider = resolve(ctx.db, tenant_id=ctx.tenant_id, capability="llm")
+        result = asyncio.run(
+            invoke(
+                ctx.db,
+                tenant_id=ctx.tenant_id,
+                capability="llm",
+                provider=provider.__class__.__name__,
+                operation=lambda: provider.generate_text({"topic": task.topic or ""}),
+                timeout_seconds=30.0,
+            )
         )
-        result = asyncio.run(provider.generate_text({"topic": task.topic or ""}))
         script = str(result.get("text") or "").strip()
         if not script:
             raise RuntimeError("DeepSeek returned an empty avatar_talk script.")
@@ -133,15 +145,23 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     voice = ctx.db.get(Voice, task.voice_id) if task.voice_id else None
     if voice is None:
         raise RuntimeError("Voice not found for avatar_talk.")
-    provider = EdgeTTSProvider(output_dir=str(_work_dir(ctx.task_id)))
+    provider = resolve(ctx.db, tenant_id=ctx.tenant_id, capability="tts")
     result = asyncio.run(
-        provider.synthesize_speech(
-            {
-                "text": task.script or task.topic or "",
-                "voice": voice.voice_code,
-                "speed": float(task.speed or 1.0),
-                "task_id": ctx.task_id,
-            }
+        invoke(
+            ctx.db,
+            tenant_id=ctx.tenant_id,
+            capability="tts",
+            provider=provider.__class__.__name__,
+            operation=lambda: provider.synthesize_speech(
+                {
+                    "text": task.script or task.topic or "",
+                    "voice": voice.voice_code,
+                    "speed": float(task.speed or 1.0),
+                    "task_id": ctx.task_id,
+                    "output_dir": str(_work_dir(ctx.task_id)),
+                }
+            ),
+            timeout_seconds=settings.engine_omnihuman_request_timeout_seconds,
         )
     )
     audio_bytes = Path(str(result["audio_path"])).read_bytes()
@@ -167,32 +187,33 @@ def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     audio_key = getattr(ctx, "audio_key", None)
     if not audio_key:
         raise RuntimeError("TTS audio is missing for avatar generation.")
-    provider = OmniHumanProvider(
-        access_key=settings.engine_omnihuman_access_key,
-        secret_key=settings.engine_omnihuman_secret_key,
-        region=settings.engine_omnihuman_region,
-        request_timeout_seconds=settings.engine_omnihuman_request_timeout_seconds,
-        poll_interval_seconds=settings.engine_omnihuman_poll_interval_seconds,
-        timeout_seconds=settings.engine_omnihuman_timeout_seconds,
-    )
-    result = provider.generate_avatar_sync(
-        {
-            "image_url": ctx.storage.presign_get_url(
-                avatar.storage_key,
-                expires_in=settings.engine_s3_presign_ttl,
-            ),
-            "audio_url": ctx.storage.presign_get_url(
-                audio_key,
-                expires_in=settings.engine_s3_presign_ttl,
-            ),
-            "prompt": _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id).topic,
-            "aigc_meta": {
-                "content_producer": "Huading",
-                "producer_id": ctx.tenant_id,
-                "content_propagator": "Huading",
-                "propagate_id": ctx.task_id,
-            },
-        }
+    provider = resolve(ctx.db, tenant_id=ctx.tenant_id, capability="avatar")
+    payload = {
+        "image_url": ctx.storage.presign_get_url(
+            avatar.storage_key,
+            expires_in=settings.engine_s3_presign_ttl,
+        ),
+        "audio_url": ctx.storage.presign_get_url(
+            audio_key,
+            expires_in=settings.engine_s3_presign_ttl,
+        ),
+        "prompt": _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id).topic,
+        "aigc_meta": {
+            "content_producer": "Huading",
+            "producer_id": ctx.tenant_id,
+            "content_propagator": "Huading",
+            "propagate_id": ctx.task_id,
+        },
+    }
+    result = asyncio.run(
+        invoke(
+            ctx.db,
+            tenant_id=ctx.tenant_id,
+            capability="avatar",
+            provider=provider.__class__.__name__,
+            operation=lambda: provider.generate_avatar(payload),
+            timeout_seconds=settings.engine_omnihuman_timeout_seconds,
+        )
     )
     ctx.base_video_bytes = _download_bytes(str(result["video_url"]))
     return ctx

@@ -11,6 +11,11 @@ from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 from botocore.credentials import Credentials
 
+from app.core.config import settings
+from app.db.models import ProviderConfig
+from app.providers.base import register_provider
+from app.providers.url_guard import ensure_https_url_allowed, object_storage_public_hosts
+
 _REQ_KEY = "jimeng_realman_avatar_picture_omni_v15"
 _ENDPOINT = "https://visual.volcengineapi.com"
 _VERSION = "2022-08-31"
@@ -36,6 +41,7 @@ class OmniHumanProvider:
         poll_interval_seconds: float = 5.0,
         timeout_seconds: float = 600.0,
         max_retries: int = 3,
+        allowed_hosts: set[str] | None = None,
     ) -> None:
         if not access_key or not secret_key:
             raise OmniHumanProviderError("OmniHuman access key and secret key are required.")
@@ -46,6 +52,7 @@ class OmniHumanProvider:
         self.poll_interval_seconds = poll_interval_seconds
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
+        self.allowed_hosts = set(allowed_hosts or {"visual.volcengineapi.com"})
         if http_client is None:
             import requests
 
@@ -58,8 +65,11 @@ class OmniHumanProvider:
     def generate_avatar_sync(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         image_url = str(payload.get("image_url") or "")
         audio_url = str(payload.get("audio_url") or "")
-        if not image_url.startswith("https://") or not audio_url.startswith("https://"):
-            raise OmniHumanProviderError("OmniHuman image_url and audio_url must be HTTPS URLs.")
+        try:
+            ensure_https_url_allowed(image_url, allowed_hosts=self.allowed_hosts)
+            ensure_https_url_allowed(audio_url, allowed_hosts=self.allowed_hosts)
+        except RuntimeError as exc:
+            raise OmniHumanProviderError(str(exc)) from exc
 
         submit_body: dict[str, Any] = {
             "req_key": _REQ_KEY,
@@ -92,6 +102,10 @@ class OmniHumanProvider:
                     raise OmniHumanProviderError(
                         "OmniHuman done response did not include video_url."
                     )
+                try:
+                    ensure_https_url_allowed(str(video_url), allowed_hosts=self.allowed_hosts)
+                except RuntimeError as exc:
+                    raise OmniHumanProviderError(str(exc)) from exc
                 return {
                     "task_id": task_id,
                     "video_url": video_url,
@@ -141,3 +155,33 @@ class OmniHumanProvider:
             self.region,
         ).add_auth(request)
         return dict(request.headers.items())
+
+
+def _omnihuman_factory(config: ProviderConfig) -> OmniHumanProvider:
+    values = config.config or {}
+    allowed_hosts = {"visual.volcengineapi.com"} | object_storage_public_hosts(
+        settings.engine_s3_public_endpoint,
+        settings.storage_endpoint_url,
+    )
+    extra_hosts = values.get("allowed_hosts")
+    if isinstance(extra_hosts, list):
+        allowed_hosts.update(str(host) for host in extra_hosts)
+    return OmniHumanProvider(
+        access_key=str(values.get("access_key") or settings.engine_omnihuman_access_key),
+        secret_key=str(values.get("secret_key") or settings.engine_omnihuman_secret_key),
+        region=str(values.get("region") or settings.engine_omnihuman_region),
+        request_timeout_seconds=float(
+            values.get("request_timeout_seconds")
+            or settings.engine_omnihuman_request_timeout_seconds
+        ),
+        poll_interval_seconds=float(
+            values.get("poll_interval_seconds") or settings.engine_omnihuman_poll_interval_seconds
+        ),
+        timeout_seconds=float(
+            values.get("timeout_seconds") or settings.engine_omnihuman_timeout_seconds
+        ),
+        allowed_hosts=allowed_hosts,
+    )
+
+
+register_provider("avatar", "omnihuman", _omnihuman_factory)

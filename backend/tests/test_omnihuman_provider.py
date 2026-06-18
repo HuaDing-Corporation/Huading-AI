@@ -55,6 +55,7 @@ def test_omnihuman_submit_poll_sends_locked_req_key_and_aigc_meta(monkeypatch) -
         request_timeout_seconds=7,
         poll_interval_seconds=0,
         timeout_seconds=30,
+        allowed_hosts={"assets.example", "visual.example", "visual.volcengineapi.com"},
     )
 
     result = provider.generate_avatar_sync(
@@ -93,6 +94,7 @@ def test_omnihuman_audit_error_is_not_retried() -> None:
         region="cn-north-1",
         http_client=http,
         poll_interval_seconds=0,
+        allowed_hosts={"assets.example", "visual.volcengineapi.com"},
     )
 
     with pytest.raises(OmniHumanProviderError, match="image audit failed"):
@@ -105,3 +107,25 @@ def test_omnihuman_audit_error_is_not_retried() -> None:
         )
 
     assert len(http.calls) == 1
+
+
+def test_omnihuman_rejects_non_whitelisted_media_urls_before_submit() -> None:
+    http = _Http([{"code": 10000, "data": {"task_id": "should-not-submit"}}])
+    provider = OmniHumanProvider(
+        access_key="ak",
+        secret_key="sk",
+        region="cn-north-1",
+        http_client=http,
+        allowed_hosts={"assets.example", "visual.volcengineapi.com"},
+    )
+
+    with pytest.raises(OmniHumanProviderError, match="not allowed|whitelist"):
+        provider.generate_avatar_sync(
+            {
+                "image_url": "https://evil.example/avatar.png",
+                "audio_url": "https://assets.example/audio.mp3",
+                "aigc_meta": {},
+            }
+        )
+
+    assert http.calls == []

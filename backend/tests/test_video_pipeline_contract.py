@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from app.api.deps import get_object_storage, get_progress_store
 from app.db.models import Asset, CreditRate, Plan, Subscription, UsageRecord, VideoTask, Voice
 from app.main import app
+from app.schemas.videos import VideoGenerateRequest
 
 
 class _FakeStorage:
@@ -257,6 +258,96 @@ def test_avatar_talk_order_reserves_quota_and_returns_queued_id(
         reserved = db.query(UsageRecord).filter_by(video_task_id=data["id"]).one()
         assert reserved.status == "reserved"
         assert reserved.capability == "avatar"
+
+
+def test_avatar_talk_order_without_script_leaves_worker_to_generate_it(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        _seed_billing(db, auth_context["tenant_id"])
+        voice, avatar = _seed_voice_and_avatar(db, auth_context["tenant_id"])
+        voice_id = voice.id
+        avatar_id = avatar.id
+
+    class _FakeTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            return type("Result", (), {"status": "PENDING"})()
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _FakeTask())
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/videos",
+        json={
+            "topic": "cashmere coat",
+            "voice_id": voice_id,
+            "avatar_asset_id": avatar_id,
+            "video_mode": "avatar_talk",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 202
+    with auth_db() as db:
+        task = db.get(VideoTask, resp.json()["data"]["id"])
+        assert task is not None
+        assert task.topic == "cashmere coat"
+        assert task.script is None
+
+
+def test_video_list_uses_limit_offset_and_returns_items_total(
+    auth_context,
+    auth_db,
+) -> None:
+    store = _MemProgressStore()
+    storage = _FakeStorage()
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+    with auth_db() as db:
+        for index in range(3):
+            db.add(
+                VideoTask(
+                    id=f"list-task-{index}",
+                    tenant_id=auth_context["tenant_id"],
+                    created_by_user_id=auth_context["user_id"],
+                    mode="avatar_talk",
+                    video_mode="avatar_talk",
+                    status="done",
+                    progress=100,
+                    topic=f"topic-{index}",
+                    script=f"script-{index}",
+                    created_at=base_time + timedelta(minutes=index),
+                )
+            )
+        db.commit()
+
+    app.dependency_overrides[get_progress_store] = lambda: store
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        client = TestClient(app)
+        resp = client.get(
+            "/api/v1/videos?limit=1&offset=1",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_progress_store, None)
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert set(data) == {"items", "total"}
+    assert data["total"] == 3
+    assert [item["id"] for item in data["items"]] == ["list-task-1"]
+
+
+def test_video_schema_rejects_invalid_aspect_ratio_before_db_check() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        VideoGenerateRequest.model_validate({"topic": "bad ratio", "aspect_ratio": "4:3"})
 
 
 def test_video_sse_emits_new_enum_terminal_frame(auth_context, auth_db) -> None:

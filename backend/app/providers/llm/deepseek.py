@@ -4,6 +4,10 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from app.core.config import settings
+from app.db.models import ProviderConfig
+from app.providers.base import register_provider
+
 
 class DeepSeekProvider:
     def __init__(self, *, api_key: str, base_url: str, model: str) -> None:
@@ -32,3 +36,15 @@ class DeepSeekProvider:
         )
         text = response.choices[0].message.content or ""
         return {"text": text.strip()}
+
+
+def _deepseek_factory(config: ProviderConfig) -> DeepSeekProvider:
+    values = config.config or {}
+    return DeepSeekProvider(
+        api_key=str(values.get("api_key") or settings.engine_llm_api_key),
+        base_url=str(values.get("base_url") or settings.engine_llm_base_url),
+        model=str(values.get("model") or settings.engine_llm_model),
+    )
+
+
+register_provider("llm", "deepseek", _deepseek_factory)

@@ -38,24 +38,28 @@ async def test_deepseek_provider_uses_openai_compatible_chat_client() -> None:
     assert "cashmere coat" in calls["messages"][-1]["content"]
 
 
-def test_scripts_generate_route_uses_deepseek_provider(monkeypatch, auth_context) -> None:
+def test_scripts_generate_route_uses_provider_registry(monkeypatch, auth_context) -> None:
     from app.api.v1.routes import scripts as scripts_route
     from app.main import app
 
     class _FakeDeepSeek:
-        def __init__(self, *, api_key: str, base_url: str, model: str) -> None:
-            assert api_key == "k"
-            assert base_url == "https://deepseek.test"
-            assert model == "m"
-
         async def generate_text(self, payload: dict):
             assert payload["topic"] == "cashmere coat"
             return {"text": "DeepSeek script"}
 
+    def fake_resolve(db, *, tenant_id: str, capability: str):
+        assert tenant_id == auth_context["tenant_id"]
+        assert capability == "llm"
+        return _FakeDeepSeek()
+
+    def fail_direct_provider(**kwargs):
+        raise AssertionError("scripts route must resolve the LLM provider via registry")
+
     monkeypatch.setattr(scripts_route.settings, "engine_llm_api_key", "k")
     monkeypatch.setattr(scripts_route.settings, "engine_llm_base_url", "https://deepseek.test")
     monkeypatch.setattr(scripts_route.settings, "engine_llm_model", "m")
-    monkeypatch.setattr(scripts_route, "DeepSeekProvider", _FakeDeepSeek, raising=False)
+    monkeypatch.setattr(scripts_route, "resolve", fake_resolve, raising=False)
+    monkeypatch.setattr(scripts_route, "DeepSeekProvider", fail_direct_provider, raising=False)
 
     resp = TestClient(app).post(
         "/api/v1/scripts/generate",

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import edge_tts as edge_tts_sdk
+
+from app.db.models import ProviderConfig
+from app.providers.base import register_provider
 
 
 def _speed_to_rate(speed: float) -> str:
@@ -20,8 +24,8 @@ def _ticks_to_ms(value: int | float) -> int:
 
 
 class EdgeTTSProvider:
-    def __init__(self, *, output_dir: str) -> None:
-        self.output_dir = Path(output_dir)
+    def __init__(self, *, output_dir: str | None = None) -> None:
+        self.output_dir = Path(output_dir) if output_dir else None
 
     async def synthesize_speech(self, payload: dict[str, Any]) -> dict[str, Any]:
         text = str(payload.get("text") or "")
@@ -31,8 +35,11 @@ class EdgeTTSProvider:
         if not text.strip():
             raise ValueError("TTS text is required.")
 
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        audio_path = self.output_dir / f"{task_id}.mp3"
+        output_dir = Path(
+            str(payload.get("output_dir") or self.output_dir or tempfile.gettempdir())
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = output_dir / f"{task_id}.mp3"
         timeline: list[dict[str, int | str]] = []
         audio = bytearray()
         communicate = edge_tts_sdk.Communicate(text, voice, rate=_speed_to_rate(speed))
@@ -58,3 +65,11 @@ class EdgeTTSProvider:
             "mime_type": "audio/mpeg",
             "size_bytes": audio_path.stat().st_size,
         }
+
+
+def _edge_tts_factory(config: ProviderConfig) -> EdgeTTSProvider:
+    output_dir = (config.config or {}).get("output_dir")
+    return EdgeTTSProvider(output_dir=str(output_dir) if output_dir else None)
+
+
+register_provider("tts", "edge-tts", _edge_tts_factory)

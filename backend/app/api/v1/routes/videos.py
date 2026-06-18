@@ -1,6 +1,5 @@
 import asyncio
 import json
-from datetime import datetime
 from decimal import Decimal
 from uuid import uuid4
 
@@ -120,19 +119,18 @@ def list_videos(
     store: ProgressStore = ProgressStoreDependency,
     storage: ObjectStorage = ObjectStorageDependency,
     limit: int = Query(default=20, ge=1, le=100),
-    cursor: str | None = Query(default=None),
+    offset: int = Query(default=0, ge=0),
 ) -> ApiResponse[VideoListResponse]:
     query = select(VideoTask).where(VideoTask.tenant_id == user.tenant_id)
-    if cursor:
-        query = query.where(VideoTask.created_at < datetime.fromisoformat(cursor))
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
-    tasks = list(db.scalars(query.order_by(VideoTask.created_at.desc()).limit(limit + 1)))
+    tasks = list(
+        db.scalars(query.order_by(VideoTask.created_at.desc()).offset(offset).limit(limit))
+    )
     items = [
         _video_read(task, storage=storage, snapshot=_snapshot_for(store, user.tenant_id, task.id))
-        for task in tasks[:limit]
+        for task in tasks
     ]
-    next_cursor = tasks[limit].created_at.isoformat() if len(tasks) > limit else None
-    return ok(request, VideoListResponse(items=items, total=total, next_cursor=next_cursor))
+    return ok(request, VideoListResponse(items=items, total=total))
 
 
 def _create_avatar_talk_video(
@@ -163,7 +161,7 @@ def _create_avatar_talk_video(
         raise AppError("Avatar asset not found.", code="AVATAR_ASSET_NOT_FOUND", status_code=404)
 
     task_id = str(uuid4())
-    script = payload.script or payload.topic
+    script = payload.script
     task = VideoTask(
         id=task_id,
         tenant_id=user.tenant_id,
@@ -189,7 +187,7 @@ def _create_avatar_talk_video(
         db,
         tenant_id=user.tenant_id,
         video_task_id=task_id,
-        script=script,
+        script=script or payload.topic,
         speed=payload.speed,
     )
     db.commit()
