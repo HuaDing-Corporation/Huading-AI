@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Sparkles } from "lucide-react";
 
 import { ApiError } from "@/lib/api/client";
@@ -64,15 +64,29 @@ export function NewVideoForm() {
     }
   };
 
+  // Generation counter so a late upload resolution can't repopulate an asset the
+  // user already removed/changed (P1 async edge — guards "submit a removed asset").
+  const uploadSeq = useRef(0);
+
   const onUpload = async (file: File) => {
+    const seq = (uploadSeq.current += 1);
     setUploadError(null);
     setAvatarAssetId(null);
     try {
       const res = await uploadImg.mutateAsync(file);
-      setAvatarAssetId(res.asset_id);
+      if (seq === uploadSeq.current) setAvatarAssetId(res.asset_id);
     } catch (err) {
-      setUploadError(err instanceof ApiError ? err.message : copy.errors.generic);
+      if (seq === uploadSeq.current) {
+        setUploadError(err instanceof ApiError ? err.message : copy.errors.generic);
+      }
     }
+  };
+
+  // Any explicit avatar change (preset pick or remove) supersedes an in-flight
+  // upload so its late resolution won't overwrite the user's choice.
+  const handleAvatarChange = (id: string | null) => {
+    uploadSeq.current += 1;
+    setAvatarAssetId(id);
   };
 
   const onGenerate = async () => {
@@ -135,7 +149,7 @@ export function NewVideoForm() {
 
       <ImagePicker
         value={avatarAssetId}
-        onChange={setAvatarAssetId}
+        onChange={handleAvatarChange}
         presets={presets.data ?? []}
         uploading={uploadImg.isPending}
         onUpload={onUpload}
