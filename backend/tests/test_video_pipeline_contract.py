@@ -350,6 +350,19 @@ def test_video_schema_rejects_invalid_aspect_ratio_before_db_check() -> None:
         VideoGenerateRequest.model_validate({"topic": "bad ratio", "aspect_ratio": "4:3"})
 
 
+def test_video_progress_snapshot_accepts_percent_and_legacy_fraction() -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    task = VideoTask(progress=5)
+
+    assert videos_route._progress(task, {"progress": 10}) == 10
+    assert videos_route._progress(task, {"progress": 85}) == 85
+    assert videos_route._progress(task, {"progress": 0.1}) == 10
+    assert videos_route._progress(task, {"progress": 200}) == 100
+    assert videos_route._sse_progress({"progress": 10}) == 10
+    assert videos_route._sse_progress({"progress": 0.1}) == 10
+
+
 def test_video_sse_emits_new_enum_terminal_frame(auth_context, auth_db) -> None:
     store = _MemProgressStore()
     storage = _FakeStorage()

@@ -54,10 +54,17 @@ def _api_status(task: VideoTask, snapshot: dict | None = None) -> str:
     return "queued"
 
 
+def _normalize_progress(progress: object) -> int:
+    value = float(progress or 0)
+    if value <= 1:
+        value *= 100
+    return max(0, min(100, int(round(value))))
+
+
 def _progress(task: VideoTask, snapshot: dict | None = None) -> int:
     if snapshot and snapshot.get("progress") is not None:
-        return max(0, min(100, int(float(snapshot["progress"]) * 100)))
-    return max(0, min(100, int(task.progress or 0)))
+        return _normalize_progress(snapshot["progress"])
+    return _normalize_progress(task.progress)
 
 
 def _video_read(
@@ -312,11 +319,7 @@ def _sse_status(status_value: object) -> str:
 
 
 def _sse_progress(snapshot: dict) -> int:
-    progress = snapshot.get("progress", 0)
-    value = float(progress or 0)
-    if value <= 1:
-        value *= 100
-    return max(0, min(100, int(round(value))))
+    return _normalize_progress(snapshot.get("progress", 0))
 
 
 def _sse_payload(task_id: str, snapshot: dict) -> dict:
