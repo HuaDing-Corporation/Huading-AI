@@ -29,6 +29,8 @@ from app.workers.celery_app import celery_app
 
 logger = get_logger(__name__)
 
+_MIN_TIMELINE_COVERAGE_RATIO = 0.8
+
 
 @dataclass
 class AvatarTalkContext:
@@ -75,6 +77,19 @@ def _download_bytes(url: str) -> bytes:
     response = requests.get(url, timeout=settings.engine_omnihuman_request_timeout_seconds)
     response.raise_for_status()
     return response.content
+
+
+def _audio_duration_sec(path: Path) -> float:
+    from moviepy.editor import AudioFileClip
+
+    try:
+        clip = AudioFileClip(str(path))
+    except Exception:
+        return 0.0
+    try:
+        return max(0.0, float(clip.duration or 0))
+    finally:
+        clip.close()
 
 
 def _input_avatar_asset(ctx: AvatarTalkContext) -> Asset:
@@ -174,6 +189,11 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     audio_bytes = Path(str(result["audio_path"])).read_bytes()
     audio_key = f"tenants/{ctx.tenant_id}/videos/{ctx.task_id}/audio.mp3"
     ctx.storage.put_bytes(audio_key, audio_bytes, content_type="audio/mpeg")
+    detected_duration_sec = _audio_duration_sec(Path(str(result["audio_path"])))
+    duration_ms = int(round(detected_duration_sec * 1000))
+    if duration_ms <= 0:
+        duration_ms = int(result.get("duration_ms") or 0)
+        detected_duration_sec = duration_ms / 1000 if duration_ms > 0 else 1.0
     _add_asset(
         ctx,
         storage_key=audio_key,
@@ -181,11 +201,11 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         asset_type="audio",
         mime_type="audio/mpeg",
         size_bytes=len(audio_bytes),
-        duration_ms=int(result.get("duration_ms") or 0),
+        duration_ms=duration_ms,
     )
     ctx.audio_key = audio_key
     ctx.timeline = result.get("timeline") or []
-    ctx.duration_sec = max(1, int(result.get("duration_ms") or 1000) / 1000)
+    ctx.duration_sec = max(1.0, detected_duration_sec)
     logger.info(
         "avatar_talk.tts",
         task_id=ctx.task_id,
@@ -237,11 +257,14 @@ def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     timeline = getattr(ctx, "timeline", []) or []
     captions = _timeline_captions(timeline)
     source = "timeline"
+    duration_sec = float(ctx.duration_sec or 1)
+    if captions and not _timeline_covers_duration(captions, duration_sec=duration_sec):
+        captions = []
     if not captions:
         task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
         captions = _fallback_captions(
             str(task.script or task.topic or ""),
-            duration_sec=float(ctx.duration_sec or 1),
+            duration_sec=duration_sec,
         )
         source = "script_fallback"
     lines = []
@@ -284,6 +307,17 @@ def _timeline_captions(timeline: list[dict[str, Any]]) -> list[tuple[int, int, s
             end_ms = start_ms + 1000
         captions.append((start_ms, end_ms, text))
     return captions
+
+
+def _timeline_covers_duration(
+    captions: list[tuple[int, int, str]],
+    *,
+    duration_sec: float,
+) -> bool:
+    if duration_sec <= 0:
+        return True
+    last_end_ms = max((end_ms for _start_ms, end_ms, _text in captions), default=0)
+    return last_end_ms >= int(duration_sec * 1000 * _MIN_TIMELINE_COVERAGE_RATIO)
 
 
 def _fallback_captions(text: str, *, duration_sec: float) -> list[tuple[int, int, str]]:
@@ -393,7 +427,7 @@ def _parse_srt(path: Path) -> list[tuple[float, float, str]]:
 def _font(size: int):
     from PIL import ImageFont
 
-    for name in ("arial.ttf", "DejaVuSans.ttf"):
+    for name in _font_candidates():
         try:
             return ImageFont.truetype(name, size=size)
         except OSError:
@@ -401,20 +435,36 @@ def _font(size: int):
     return ImageFont.load_default()
 
 
+def _font_candidates() -> tuple[str, ...]:
+    candidates = [
+        settings.engine_subtitle_font_path,
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/simsun.ttc",
+        "arial.ttf",
+        "DejaVuSans.ttf",
+    ]
+    return tuple(dict.fromkeys(item for item in candidates if item))
+
+
 def _wrap_text(text: str, *, max_width: int, draw, font) -> list[str]:
-    words = text.split()
-    if not words:
+    has_whitespace = any(char.isspace() for char in text)
+    units = text.split() if has_whitespace else list(text)
+    if not units:
         return [text]
+    separator = " " if has_whitespace else ""
     lines: list[str] = []
     current = ""
-    for word in words:
-        candidate = f"{current} {word}".strip()
+    for unit in units:
+        candidate = f"{current}{separator}{unit}".strip()
         bbox = draw.textbbox((0, 0), candidate, font=font)
         if bbox[2] - bbox[0] <= max_width or not current:
             current = candidate
         else:
             lines.append(current)
-            current = word
+            current = unit
     if current:
         lines.append(current)
     return lines

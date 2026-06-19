@@ -396,7 +396,7 @@ def test_subtitle_step_preserves_word_boundary_timeline(tmp_path: Path):
             db=db,
             store=_Store(),
             storage=storage,
-            duration_sec=6.0,
+            duration_sec=4.0,
         )
         ctx.timeline = [
             {"text": "real first", "start_ms": 500, "end_ms": 1500},
@@ -413,6 +413,156 @@ def test_subtitle_step_preserves_word_boundary_timeline(tmp_path: Path):
         assert captions == [(0.5, 1.5, "real first"), (2.0, 3.2, "real second")]
 
     Base.metadata.drop_all(engine)
+
+
+def test_tts_step_uses_audio_file_duration_when_timeline_is_empty(monkeypatch, tmp_path: Path):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-audio-duration"
+    unit_id = "subtitle-duration-job"
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="audio-duration", name="Audio Duration"))
+        voice = Voice(
+            id="voice-duration",
+            provider="edge-tts",
+            voice_code="zh-CN-XiaoxiaoNeural",
+            display_name="Xiaoxiao",
+            gender="female",
+        )
+        db.add(voice)
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="duration topic",
+                script="duration script",
+                voice_id=voice.id,
+            )
+        )
+        db.commit()
+
+        class _TTSNoTimeline:
+            async def synthesize_speech(self, payload: dict):
+                audio = tmp_path / "audio-duration.mp3"
+                audio.write_bytes(b"MP3")
+                return {
+                    "audio_path": str(audio),
+                    "timeline": [],
+                    "duration_ms": 0,
+                    "mime_type": "audio/mpeg",
+                    "size_bytes": 3,
+                }
+
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _TTSNoTimeline(),
+        )
+        monkeypatch.setattr(avatar_talk, "_audio_duration_sec", lambda _path: 9.8, raising=False)
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=storage,
+        )
+
+        avatar_talk.tts_step(ctx)
+
+        assert ctx.duration_sec == 9.8
+        assert storage.objects[f"tenants/{tenant_id}/videos/{unit_id}/audio.mp3"] == b"MP3"
+
+    Base.metadata.drop_all(engine)
+
+
+def test_subtitle_step_falls_back_when_timeline_covers_too_little_duration(tmp_path: Path):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-subtitle-partial"
+    unit_id = "subtitle-partial-job"
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="subtitle-partial", name="Subtitle Partial"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="partial topic",
+                script="First long sentence. Second long sentence. Third long sentence.",
+            )
+        )
+        db.commit()
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=storage,
+            duration_sec=10.0,
+        )
+        ctx.timeline = [{"text": "partial", "start_ms": 0, "end_ms": 1000}]
+
+        avatar_talk.subtitle_step(ctx)
+
+        subtitle_key = f"tenants/{tenant_id}/videos/{unit_id}/subtitle.srt"
+        srt_path = tmp_path / "subtitle.srt"
+        srt_path.write_text(storage.objects[subtitle_key].decode("utf-8"), encoding="utf-8")
+        captions = avatar_talk._parse_srt(srt_path)
+        assert [caption[2] for caption in captions] == [
+            "First long sentence.",
+            "Second long sentence.",
+            "Third long sentence.",
+        ]
+        assert captions[-1][1] == 10.0
+
+    Base.metadata.drop_all(engine)
+
+
+def test_wrap_text_breaks_long_chinese_without_spaces():
+    from PIL import Image, ImageDraw
+
+    font = avatar_talk._font(24)
+    image = Image.new("RGB", (220, 120))
+    draw = ImageDraw.Draw(image)
+
+    lines = avatar_talk._wrap_text(
+        "这是一段没有空格的中文长句用于测试字幕换行不会溢出画面",
+        max_width=120,
+        draw=draw,
+        font=font,
+    )
+
+    assert len(lines) > 1
+    assert all(draw.textbbox((0, 0), line, font=font)[2] <= 120 for line in lines)
+
+
+def test_subtitle_font_candidates_include_docker_cjk_font():
+    assert "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc" in (
+        avatar_talk._font_candidates()
+    )
+
+
+def test_subtitle_font_path_can_render_chinese_glyph(monkeypatch):
+    candidates = [
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf"),
+        Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+        Path("C:/Windows/Fonts/simhei.ttf"),
+        Path("C:/Windows/Fonts/simsun.ttc"),
+    ]
+    font_path = next((path for path in candidates if path.exists()), None)
+    if font_path is None:
+        pytest.skip("No local CJK font available outside the backend Docker image.")
+    monkeypatch.setattr(avatar_talk.settings, "engine_subtitle_font_path", str(font_path))
+
+    font = avatar_talk._font(24)
+
+    assert font.getmask("中").getbbox() is not None
 
 
 def test_download_bytes_rejects_non_whitelisted_result_url(monkeypatch):

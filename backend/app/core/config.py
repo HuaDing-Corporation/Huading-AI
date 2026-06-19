@@ -81,6 +81,7 @@ class Settings(BaseSettings):
     engine_omnihuman_poll_interval_seconds: float = 5.0
     engine_omnihuman_timeout_seconds: float = 600.0
     engine_omnihuman_result_host_suffixes: str = "aigc-cloud.com"
+    engine_subtitle_font_path: str = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
     engine_default_template: str = "1080x1920/static_default.html"
     # Playwright browser channel for frame rendering: "chrome"/"msedge" to use a
     # system browser, or "" for Playwright's bundled Chromium.

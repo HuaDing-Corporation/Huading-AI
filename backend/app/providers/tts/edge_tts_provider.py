@@ -23,6 +23,19 @@ def _ticks_to_ms(value: int | float) -> int:
     return int(round(float(value) / 10_000))
 
 
+def _audio_duration_ms(path: Path) -> int:
+    from moviepy.editor import AudioFileClip
+
+    try:
+        clip = AudioFileClip(str(path))
+    except Exception:
+        return 0
+    try:
+        return max(0, int(round(float(clip.duration or 0) * 1000)))
+    finally:
+        clip.close()
+
+
 class EdgeTTSProvider:
     def __init__(self, *, output_dir: str | None = None) -> None:
         self.output_dir = Path(output_dir) if output_dir else None
@@ -57,7 +70,9 @@ class EdgeTTSProvider:
                     }
                 )
         audio_path.write_bytes(bytes(audio))
-        duration_ms = max((int(item["end_ms"]) for item in timeline), default=0)
+        duration_ms = _audio_duration_ms(audio_path)
+        if duration_ms <= 0:
+            duration_ms = max((int(item["end_ms"]) for item in timeline), default=0)
         return {
             "audio_path": str(audio_path),
             "timeline": timeline,
