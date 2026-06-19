@@ -50,8 +50,9 @@ def register_tenant(
     payload: TenantRegisterRequest,
     db: Session = DbSessionDependency,
 ) -> ApiResponse[TenantRegisterResponse]:
-    # Pre-check the globally-unique slug so a duplicate returns a clear 409 rather
-    # than the IntegrityError at db.flush() (below) surfacing as a 500 (P1).
+    # Fast, friendly path for the common (sequential) duplicate: a clear 409 without
+    # hitting the DB constraint. This only narrows the race window — correctness does
+    # NOT depend on it; the try/except below closes a genuine concurrent race (P1-①).
     if db.scalar(select(Tenant).where(Tenant.slug == payload.tenant_slug)) is not None:
         raise AppError(
             "Tenant slug is already taken.",
@@ -59,35 +60,40 @@ def register_tenant(
             status_code=status.HTTP_409_CONFLICT,
         )
 
-    tenant = Tenant(slug=payload.tenant_slug, name=payload.tenant_name)
-    db.add(tenant)
-    db.flush()
-
-    user = User(
-        tenant_id=tenant.id,
-        email=payload.email,
-        password_hash=hash_password(payload.password),
-        full_name=payload.full_name,
-        role=Role.ADMIN.value,
-    )
-    db.add(user)
-    db.add(Organization(tenant_id=tenant.id, name=payload.tenant_name))
-    # New tenants get an active subscription from the default plan, same
-    # transaction (P0-B). If no plan is configured it logs a warning and returns
-    # None (registration still succeeds) rather than 500.
-    create_default_subscription(db, tenant.id)
+    # The whole write — tenant/user/org/subscription create + flush + commit — runs in
+    # ONE try so an IntegrityError from EITHER flush (the tenant INSERT) or commit is
+    # caught and mapped to the unified-envelope 409 (P1-①). The only unique constraint
+    # reachable here is tenants.slug (global): email is unique per-tenant
+    # (uq_users_tenant_email), so a brand-new tenant's first user never collides, and
+    # the same email may register under different tenants — one person, many orgs (P1-②).
     try:
+        tenant = Tenant(slug=payload.tenant_slug, name=payload.tenant_name)
+        db.add(tenant)
+        db.flush()
+
+        user = User(
+            tenant_id=tenant.id,
+            email=payload.email,
+            password_hash=hash_password(payload.password),
+            full_name=payload.full_name,
+            role=Role.ADMIN.value,
+        )
+        db.add(user)
+        db.add(Organization(tenant_id=tenant.id, name=payload.tenant_name))
+        # New tenants get an active subscription from the default plan, same
+        # transaction (P0-B). If no plan is configured it logs a warning and returns
+        # None (registration still succeeds) rather than 500.
+        create_default_subscription(db, tenant.id)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        # Race between the slug pre-check and commit, or a duplicate user email:
-        # map the offending constraint to a clear 409 (P1).
-        detail = str(getattr(exc, "orig", exc)).lower()
-        if "email" in detail:
-            code, message = "email_taken", "Email is already registered."
-        else:
-            code, message = "tenant_slug_taken", "Tenant slug is already taken."
-        raise AppError(message, code=code, status_code=status.HTTP_409_CONFLICT) from exc
+        # A concurrent register won the race between our pre-check and flush/commit —
+        # the slug is taken (only tenants.slug can violate here; see above).
+        raise AppError(
+            "Tenant slug is already taken.",
+            code="tenant_slug_taken",
+            status_code=status.HTTP_409_CONFLICT,
+        ) from exc
 
     db.refresh(tenant)
     db.refresh(user)
