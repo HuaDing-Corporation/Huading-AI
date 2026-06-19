@@ -24,6 +24,19 @@ import { copy } from "@/lib/copy";
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 
 /**
+ * Surface the backend error.message (P2) so users see the real reason — e.g.
+ * "Active subscription not found." / "积分不足" — instead of only a generic line.
+ * Quota keeps its curated friendly copy; a missing message falls back to generic.
+ */
+function errorText(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.code === "tenant_quota_exceeded") return copy.errors.quota;
+    return err.message || copy.errors.generic;
+  }
+  return copy.errors.generic;
+}
+
+/**
  * avatar_talk workbench container — the ONLY hooks caller. Sub-components are
  * pure props; this orchestrates script generation, upload, voice/avatar
  * selection and assembles the CreateVideoRequest. Errors are keyed on the
@@ -60,7 +73,7 @@ export function NewVideoForm() {
       const res = await scriptGen.mutateAsync(trimmed);
       setScript(res.script);
     } catch (err) {
-      setError(err instanceof ApiError && err.code === "tenant_quota_exceeded" ? copy.errors.quota : copy.errors.generic);
+      setError(errorText(err));
     }
   };
 
@@ -108,11 +121,7 @@ export function NewVideoForm() {
     try {
       await createAndTrack(request, trimmed);
     } catch (err) {
-      setError(
-        err instanceof ApiError && err.code === "tenant_quota_exceeded"
-          ? copy.errors.quota
-          : copy.errors.generic
-      );
+      setError(errorText(err));
     } finally {
       setSubmitting(false);
     }

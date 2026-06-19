@@ -4,7 +4,7 @@ from decimal import Decimal
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.db.models import Asset, CreditRate, Plan, Subscription, UsageRecord, Voice
+from app.db.models import Asset, CreditRate, Plan, Subscription, UsageRecord, VideoTask, Voice
 from app.main import app
 from app.services import quota
 
@@ -101,6 +101,8 @@ def test_avatar_talk_order_with_insufficient_quota_rejects_without_task_or_usage
 def test_release_reserved_quota_marks_usage_released(auth_context, auth_db) -> None:
     with auth_db() as db:
         sub = _seed_subscription(db, auth_context["tenant_id"], total=100)
+        db.add(VideoTask(id="task-release", tenant_id=auth_context["tenant_id"], status="queued"))
+        db.flush()
         record = UsageRecord(
             tenant_id=auth_context["tenant_id"],
             subscription_id=sub.id,
@@ -133,6 +135,8 @@ def test_release_reserved_quota_marks_usage_released(auth_context, auth_db) -> N
 def test_settle_reserved_quota_moves_reserved_to_used(auth_context, auth_db) -> None:
     with auth_db() as db:
         sub = _seed_subscription(db, auth_context["tenant_id"], total=100)
+        db.add(VideoTask(id="task-settle", tenant_id=auth_context["tenant_id"], status="queued"))
+        db.flush()
         record = UsageRecord(
             tenant_id=auth_context["tenant_id"],
             subscription_id=sub.id,
