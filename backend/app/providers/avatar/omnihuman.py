@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import time
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlencode
-
-from botocore.auth import SigV4Auth
-from botocore.awsrequest import AWSRequest
-from botocore.credentials import Credentials
+from urllib.parse import quote
 
 from app.core.config import settings
 from app.db.models import ProviderConfig
@@ -23,6 +22,14 @@ _SERVICE = "cv"
 _RETRYABLE_CODES = {50429, 50430, 50500, 50501}
 _NON_RETRYABLE_CODES = {50215, 50411, 50511, 50412, 50512, 50413, 50514}
 _PENDING_STATUSES = {"processing", "in_queue", "generating"}
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _hmac_sha256(key: bytes, message: str) -> bytes:
+    return hmac.new(key, message.encode("utf-8"), hashlib.sha256).digest()
 
 
 class OmniHumanProviderError(RuntimeError):
@@ -120,11 +127,12 @@ class OmniHumanProvider:
         params = {"Action": action, "Version": _VERSION}
         last_error: OmniHumanProviderError | None = None
         for attempt in range(self.max_retries + 1):
-            headers = self._signed_headers(params, body)
+            body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
+            headers = self._signed_headers(params, body_bytes)
             response = self.http.post(
                 _ENDPOINT,
                 params=params,
-                json=body,
+                data=body_bytes,
                 headers=headers,
                 timeout=self.request_timeout_seconds,
             )
@@ -141,20 +149,55 @@ class OmniHumanProvider:
                 time.sleep(min(2**attempt, 8))
         raise last_error or OmniHumanProviderError("OmniHuman request failed.")
 
-    def _signed_headers(self, params: dict[str, str], body: dict[str, Any]) -> dict[str, str]:
-        body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
-        request = AWSRequest(
-            method="POST",
-            url=f"{_ENDPOINT}?{urlencode(params)}",
-            data=body_bytes,
-            headers={"Content-Type": "application/json"},
+    def _signed_headers(self, params: dict[str, str], body_bytes: bytes) -> dict[str, str]:
+        x_date = _utcnow().strftime("%Y%m%dT%H%M%SZ")
+        short_date = x_date[:8]
+        payload_hash = hashlib.sha256(body_bytes).hexdigest()
+        canonical_query = "&".join(
+            f"{quote(key, safe='')}={quote(value, safe='')}"
+            for key, value in sorted(params.items())
         )
-        SigV4Auth(
-            Credentials(self.access_key, self.secret_key),
-            _SERVICE,
-            self.region,
-        ).add_auth(request)
-        return dict(request.headers.items())
+        signed_headers = "content-type;host;x-content-sha256;x-date"
+        canonical_headers = (
+            "content-type:application/json\n"
+            "host:visual.volcengineapi.com\n"
+            f"x-content-sha256:{payload_hash}\n"
+            f"x-date:{x_date}\n"
+        )
+        canonical_request = "\n".join(
+            [
+                "POST",
+                "/",
+                canonical_query,
+                canonical_headers,
+                signed_headers,
+                payload_hash,
+            ]
+        )
+        credential_scope = f"{short_date}/{self.region}/{_SERVICE}/request"
+        string_to_sign = "\n".join(
+            [
+                "HMAC-SHA256",
+                x_date,
+                credential_scope,
+                hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+            ]
+        )
+        k_date = _hmac_sha256(self.secret_key.encode("utf-8"), short_date)
+        k_region = _hmac_sha256(k_date, self.region)
+        k_service = _hmac_sha256(k_region, _SERVICE)
+        k_signing = _hmac_sha256(k_service, "request")
+        signature = hmac.new(k_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+        authorization = (
+            f"HMAC-SHA256 Credential={self.access_key}/{credential_scope}, "
+            f"SignedHeaders={signed_headers}, Signature={signature}"
+        )
+        return {
+            "Content-Type": "application/json",
+            "X-Date": x_date,
+            "X-Content-Sha256": payload_hash,
+            "Authorization": authorization,
+        }
 
 
 def _omnihuman_factory(config: ProviderConfig) -> OmniHumanProvider:
