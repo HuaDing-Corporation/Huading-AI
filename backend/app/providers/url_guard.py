@@ -15,8 +15,15 @@ def host_from_url(url: str | None) -> str | None:
     return parsed.hostname.lower() if parsed.hostname else None
 
 
-def object_storage_public_hosts(*urls: str | None) -> set[str]:
-    return {host for host in (host_from_url(url) for url in urls) if host}
+def object_storage_public_hosts(
+    *urls: str | None,
+    bucket: str | None = None,
+    addressing_style: str = "path",
+) -> set[str]:
+    hosts = {host for host in (host_from_url(url) for url in urls) if host}
+    if addressing_style == "virtual" and bucket:
+        hosts.update(f"{bucket}.{host}" for host in tuple(hosts))
+    return hosts
 
 
 def ensure_https_url_allowed(url: str, *, allowed_hosts: Iterable[str]) -> str:

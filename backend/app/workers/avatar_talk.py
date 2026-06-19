@@ -63,6 +63,8 @@ def _download_bytes(url: str) -> bytes:
     allowed_hosts = {"visual.volcengineapi.com"} | object_storage_public_hosts(
         settings.engine_s3_public_endpoint,
         settings.storage_endpoint_url,
+        bucket=settings.engine_s3_bucket,
+        addressing_style=settings.engine_s3_addressing_style,
     )
     ensure_https_url_allowed(url, allowed_hosts=allowed_hosts)
     response = requests.get(url, timeout=settings.engine_omnihuman_request_timeout_seconds)

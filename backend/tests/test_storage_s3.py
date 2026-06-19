@@ -20,3 +20,18 @@ def test_s3_presign_uses_public_endpoint() -> None:
     assert url.startswith("http://localhost:9000/huading-videos/tenants/t1/videos/v1/output.mp4")
     assert "X-Amz-Signature=" in url
     assert "response-content-disposition=" in url.lower()
+
+
+def test_s3_storage_accepts_virtual_hosted_addressing_style() -> None:
+    storage = S3ObjectStorage(
+        bucket="huading-media",
+        endpoint_url="https://tos-s3-cn-beijing.volces.com",
+        public_endpoint_url="https://tos-s3-cn-beijing.volces.com",
+        region_name="cn-beijing",
+        access_key_id="ak",
+        secret_access_key="sk",
+        addressing_style="virtual",
+    )
+
+    assert storage.client.meta.config.s3["addressing_style"] == "virtual"
+    assert storage.public_client.meta.config.s3["addressing_style"] == "virtual"
