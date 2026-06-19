@@ -298,6 +298,79 @@ def test_download_bytes_rejects_non_whitelisted_result_url(monkeypatch):
     assert called is False
 
 
+def test_download_bytes_allows_configured_omnihuman_result_host_suffix(monkeypatch):
+    class _Response:
+        content = b"MP4"
+
+        def raise_for_status(self) -> None:
+            pass
+
+    calls: list[dict] = []
+
+    def fake_get(url: str, *, timeout: float):
+        calls.append({"url": url, "timeout": timeout})
+        return _Response()
+
+    monkeypatch.setattr(
+        avatar_talk.settings,
+        "engine_omnihuman_result_host_suffixes",
+        "aigc-cloud.com",
+    )
+    monkeypatch.setattr("requests.get", fake_get)
+
+    content = avatar_talk._download_bytes("https://v26-aiop.aigc-cloud.com/result.mp4")
+
+    assert content == b"MP4"
+    assert calls == [
+        {
+            "url": "https://v26-aiop.aigc-cloud.com/result.mp4",
+            "timeout": avatar_talk.settings.engine_omnihuman_request_timeout_seconds,
+        }
+    ]
+
+
+def test_download_bytes_rejects_evil_result_url_with_suffix_configured(monkeypatch):
+    called = False
+
+    def fake_get(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("non-whitelisted URL must be rejected before requests.get")
+
+    monkeypatch.setattr(
+        avatar_talk.settings,
+        "engine_omnihuman_result_host_suffixes",
+        "aigc-cloud.com",
+    )
+    monkeypatch.setattr("requests.get", fake_get)
+
+    with pytest.raises(RuntimeError, match="not allowed|whitelist"):
+        avatar_talk._download_bytes("https://aigc-cloud.com.evil.example/result.mp4")
+
+    assert called is False
+
+
+def test_download_bytes_rejects_http_result_url_with_suffix_configured(monkeypatch):
+    called = False
+
+    def fake_get(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("http URL must be rejected before requests.get")
+
+    monkeypatch.setattr(
+        avatar_talk.settings,
+        "engine_omnihuman_result_host_suffixes",
+        "aigc-cloud.com",
+    )
+    monkeypatch.setattr("requests.get", fake_get)
+
+    with pytest.raises(RuntimeError, match="not allowed|whitelist"):
+        avatar_talk._download_bytes("http://v26-aiop.aigc-cloud.com/result.mp4")
+
+    assert called is False
+
+
 def test_burn_subtitles_writes_9x16_video_with_visible_caption(tmp_path: Path):
     from moviepy.editor import ColorClip, VideoFileClip
 
