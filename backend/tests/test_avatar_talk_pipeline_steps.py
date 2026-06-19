@@ -282,6 +282,139 @@ def test_script_step_resolves_llm_provider_from_registry(monkeypatch):
     Base.metadata.drop_all(engine)
 
 
+def test_subtitle_step_falls_back_to_script_when_timeline_is_empty(tmp_path: Path):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-subtitle-fallback"
+    task_id = "subtitle-fallback-task"
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="subtitle-fallback", name="Subtitle Fallback"))
+        db.add(
+            VideoTask(
+                id=task_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="fallback topic",
+                script="First sentence. Second sentence. Third sentence.",
+            )
+        )
+        db.commit()
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=task_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=storage,
+            duration_sec=6.0,
+        )
+        ctx.timeline = []
+
+        avatar_talk.subtitle_step(ctx)
+
+        subtitle_key = f"tenants/{tenant_id}/videos/{task_id}/subtitle.srt"
+        srt = storage.objects[subtitle_key].decode("utf-8")
+        srt_path = tmp_path / "subtitle.srt"
+        srt_path.write_text(srt, encoding="utf-8")
+        captions = avatar_talk._parse_srt(srt_path)
+        assert [caption[2] for caption in captions] == [
+            "First sentence.",
+            "Second sentence.",
+            "Third sentence.",
+        ]
+        assert captions[0][0] == 0
+        assert captions[-1][1] == 6.0
+        assert all(end > start for start, end, _text in captions)
+
+    Base.metadata.drop_all(engine)
+
+
+def test_subtitle_step_falls_back_when_timeline_has_no_effective_text(tmp_path: Path):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-subtitle-blank"
+    task_id = "task-subtitle-blank"
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="subtitle-blank", name="Subtitle Blank"))
+        db.add(
+            VideoTask(
+                id=task_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="topic fallback",
+                script="Visible fallback caption.",
+            )
+        )
+        db.commit()
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=task_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=storage,
+            duration_sec=3.0,
+        )
+        ctx.timeline = [{"text": "  ", "start_ms": 0, "end_ms": 3000}]
+
+        avatar_talk.subtitle_step(ctx)
+
+        subtitle_key = f"tenants/{tenant_id}/videos/{task_id}/subtitle.srt"
+        srt = storage.objects[subtitle_key].decode("utf-8")
+        srt_path = tmp_path / "subtitle.srt"
+        srt_path.write_text(srt, encoding="utf-8")
+        captions = avatar_talk._parse_srt(srt_path)
+        assert captions == [(0.0, 3.0, "Visible fallback caption.")]
+
+    Base.metadata.drop_all(engine)
+
+
+def test_subtitle_step_preserves_word_boundary_timeline(tmp_path: Path):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-subtitle-timeline"
+    task_id = "subtitle-timeline-task"
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="subtitle-timeline", name="Subtitle Timeline"))
+        db.add(
+            VideoTask(
+                id=task_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="timeline topic",
+                script="Fallback must not be used.",
+            )
+        )
+        db.commit()
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=task_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=storage,
+            duration_sec=6.0,
+        )
+        ctx.timeline = [
+            {"text": "real first", "start_ms": 500, "end_ms": 1500},
+            {"text": "real second", "start_ms": 2000, "end_ms": 3200},
+        ]
+
+        avatar_talk.subtitle_step(ctx)
+
+        subtitle_key = f"tenants/{tenant_id}/videos/{task_id}/subtitle.srt"
+        srt = storage.objects[subtitle_key].decode("utf-8")
+        srt_path = tmp_path / "subtitle.srt"
+        srt_path.write_text(srt, encoding="utf-8")
+        captions = avatar_talk._parse_srt(srt_path)
+        assert captions == [(0.5, 1.5, "real first"), (2.0, 3.2, "real second")]
+
+    Base.metadata.drop_all(engine)
+
+
 def test_download_bytes_rejects_non_whitelisted_result_url(monkeypatch):
     called = False
 

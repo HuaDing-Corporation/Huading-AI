@@ -186,6 +186,13 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     ctx.audio_key = audio_key
     ctx.timeline = result.get("timeline") or []
     ctx.duration_sec = max(1, int(result.get("duration_ms") or 1000) / 1000)
+    logger.info(
+        "avatar_talk.tts",
+        task_id=ctx.task_id,
+        tenant_id=ctx.tenant_id,
+        timeline_items=len(ctx.timeline),
+        duration_sec=ctx.duration_sec,
+    )
     return ctx
 
 
@@ -228,12 +235,19 @@ def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
 
 def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     timeline = getattr(ctx, "timeline", []) or []
+    captions = _timeline_captions(timeline)
+    source = "timeline"
+    if not captions:
+        task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
+        captions = _fallback_captions(
+            str(task.script or task.topic or ""),
+            duration_sec=float(ctx.duration_sec or 1),
+        )
+        source = "script_fallback"
     lines = []
-    for index, item in enumerate(timeline, start=1):
-        start_ms = int(item.get("start_ms") or 0)
-        end_ms = int(item.get("end_ms") or start_ms + 1000)
+    for index, (start_ms, end_ms, text) in enumerate(captions, start=1):
         lines.append(
-            f"{index}\n{_srt_time(start_ms)} --> {_srt_time(end_ms)}\n{item.get('text') or ''}\n"
+            f"{index}\n{_srt_time(start_ms)} --> {_srt_time(end_ms)}\n{text}\n"
         )
     content = "\n".join(lines).encode("utf-8")
     subtitle_key = f"tenants/{ctx.tenant_id}/videos/{ctx.task_id}/subtitle.srt"
@@ -247,7 +261,72 @@ def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         size_bytes=len(content),
     )
     ctx.subtitle_key = subtitle_key
+    logger.info(
+        "avatar_talk.subtitle",
+        task_id=ctx.task_id,
+        tenant_id=ctx.tenant_id,
+        timeline_items=len(timeline),
+        caption_count=len(captions),
+        source=source,
+    )
     return ctx
+
+
+def _timeline_captions(timeline: list[dict[str, Any]]) -> list[tuple[int, int, str]]:
+    captions = []
+    for item in timeline:
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        start_ms = int(item.get("start_ms") or 0)
+        end_ms = int(item.get("end_ms") or start_ms + 1000)
+        if end_ms <= start_ms:
+            end_ms = start_ms + 1000
+        captions.append((start_ms, end_ms, text))
+    return captions
+
+
+def _fallback_captions(text: str, *, duration_sec: float) -> list[tuple[int, int, str]]:
+    segments = _split_caption_text(text)
+    if not segments:
+        return []
+    duration_ms = max(1000, int(duration_sec * 1000))
+    captions = []
+    for index, segment in enumerate(segments):
+        start_ms = round(duration_ms * index / len(segments))
+        end_ms = round(duration_ms * (index + 1) / len(segments))
+        captions.append((start_ms, max(start_ms + 1, end_ms), segment))
+    return captions
+
+
+def _split_caption_text(text: str, *, max_chars: int = 42) -> list[str]:
+    sentence_parts = re.findall(r"[^.!?。！？；;，,\n]+[.!?。！？；;，,]*", text)
+    segments: list[str] = []
+    for part in sentence_parts or [text]:
+        part = part.strip()
+        if not part:
+            continue
+        segments.extend(_split_long_caption(part, max_chars=max_chars))
+    return segments
+
+
+def _split_long_caption(text: str, *, max_chars: int) -> list[str]:
+    if len(text) <= max_chars:
+        return [text]
+    if " " not in text:
+        return [text[index : index + max_chars].strip() for index in range(0, len(text), max_chars)]
+    segments: list[str] = []
+    current = ""
+    for word in text.split():
+        candidate = f"{current} {word}".strip()
+        if len(candidate) <= max_chars or not current:
+            current = candidate
+        else:
+            segments.append(current)
+            current = word
+    if current:
+        segments.append(current)
+    return segments
 
 
 def _srt_time(ms: int) -> str:
