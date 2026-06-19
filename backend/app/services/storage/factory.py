@@ -16,5 +16,6 @@ def create_object_storage(settings: Settings) -> ObjectStorage:
             region_name=settings.engine_s3_region or settings.storage_region,
             access_key_id=settings.engine_s3_access_key or settings.storage_access_key_id,
             secret_access_key=settings.engine_s3_secret_key or settings.storage_secret_access_key,
+            addressing_style=settings.engine_s3_addressing_style,
         )
     raise ValueError(f"Unsupported storage backend: {settings.storage_backend}")

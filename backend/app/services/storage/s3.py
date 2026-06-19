@@ -8,12 +8,13 @@ class S3ObjectStorage:
         region_name: str,
         access_key_id: str | None,
         secret_access_key: str | None,
+        addressing_style: str = "path",
     ) -> None:
         import boto3
         from botocore.config import Config
 
         self.bucket = bucket
-        config = Config(signature_version="s3v4", s3={"addressing_style": "path"})
+        config = Config(signature_version="s3v4", s3={"addressing_style": addressing_style})
         self.client = boto3.client(
             "s3",
             endpoint_url=endpoint_url or None,
