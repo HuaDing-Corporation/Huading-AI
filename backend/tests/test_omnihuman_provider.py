@@ -258,3 +258,62 @@ def test_omnihuman_rejects_non_whitelisted_media_urls_before_submit() -> None:
         )
 
     assert http.calls == []
+
+
+def test_omnihuman_allows_configured_result_host_suffix(monkeypatch) -> None:
+    http = _Http(
+        [
+            {"code": 10000, "data": {"task_id": "cv-task-1"}},
+            {
+                "code": 10000,
+                "data": {
+                    "status": "done",
+                    "video_url": "https://v26-aiop.aigc-cloud.com/result.mp4",
+                    "aigc_meta_tagged": True,
+                },
+            },
+        ]
+    )
+    monkeypatch.setattr("app.providers.avatar.omnihuman.time.sleep", lambda *_: None)
+    provider = OmniHumanProvider(
+        access_key="ak",
+        secret_key="sk",
+        region="cn-north-1",
+        http_client=http,
+        poll_interval_seconds=0,
+        allowed_hosts={"assets.example", "visual.volcengineapi.com"},
+        result_host_suffixes={"aigc-cloud.com"},
+    )
+
+    result = provider.generate_avatar_sync(
+        {
+            "image_url": "https://assets.example/avatar.png",
+            "audio_url": "https://assets.example/audio.mp3",
+            "aigc_meta": {},
+        }
+    )
+
+    assert result["video_url"] == "https://v26-aiop.aigc-cloud.com/result.mp4"
+
+
+def test_omnihuman_keeps_media_urls_strict_when_result_suffix_configured() -> None:
+    http = _Http([{"code": 10000, "data": {"task_id": "should-not-submit"}}])
+    provider = OmniHumanProvider(
+        access_key="ak",
+        secret_key="sk",
+        region="cn-north-1",
+        http_client=http,
+        allowed_hosts={"assets.example", "visual.volcengineapi.com"},
+        result_host_suffixes={"aigc-cloud.com"},
+    )
+
+    with pytest.raises(OmniHumanProviderError, match="not allowed|whitelist"):
+        provider.generate_avatar_sync(
+            {
+                "image_url": "https://v26-aiop.aigc-cloud.com/avatar.png",
+                "audio_url": "https://assets.example/audio.mp3",
+                "aigc_meta": {},
+            }
+        )
+
+    assert http.calls == []

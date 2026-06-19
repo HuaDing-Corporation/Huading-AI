@@ -49,6 +49,7 @@ class OmniHumanProvider:
         timeout_seconds: float = 600.0,
         max_retries: int = 3,
         allowed_hosts: set[str] | None = None,
+        result_host_suffixes: set[str] | None = None,
     ) -> None:
         if not access_key or not secret_key:
             raise OmniHumanProviderError("OmniHuman access key and secret key are required.")
@@ -60,6 +61,7 @@ class OmniHumanProvider:
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.allowed_hosts = set(allowed_hosts or {"visual.volcengineapi.com"})
+        self.result_host_suffixes = set(result_host_suffixes or set())
         if http_client is None:
             import requests
 
@@ -110,7 +112,11 @@ class OmniHumanProvider:
                         "OmniHuman done response did not include video_url."
                     )
                 try:
-                    ensure_https_url_allowed(str(video_url), allowed_hosts=self.allowed_hosts)
+                    ensure_https_url_allowed(
+                        str(video_url),
+                        allowed_hosts=self.allowed_hosts,
+                        allowed_host_suffixes=self.result_host_suffixes,
+                    )
                 except RuntimeError as exc:
                     raise OmniHumanProviderError(str(exc)) from exc
                 return {
@@ -200,6 +206,14 @@ class OmniHumanProvider:
         }
 
 
+def _parse_host_suffixes(value: object) -> set[str]:
+    if isinstance(value, str):
+        return {item.strip().lower().lstrip(".") for item in value.split(",") if item.strip()}
+    if isinstance(value, list | tuple | set):
+        return {str(item).strip().lower().lstrip(".") for item in value if str(item).strip()}
+    return set()
+
+
 def _omnihuman_factory(config: ProviderConfig) -> OmniHumanProvider:
     values = config.config or {}
     allowed_hosts = {"visual.volcengineapi.com"} | object_storage_public_hosts(
@@ -211,6 +225,9 @@ def _omnihuman_factory(config: ProviderConfig) -> OmniHumanProvider:
     extra_hosts = values.get("allowed_hosts")
     if isinstance(extra_hosts, list):
         allowed_hosts.update(str(host) for host in extra_hosts)
+    result_host_suffixes = _parse_host_suffixes(settings.engine_omnihuman_result_host_suffixes)
+    if "result_host_suffixes" in values:
+        result_host_suffixes = _parse_host_suffixes(values.get("result_host_suffixes"))
     return OmniHumanProvider(
         access_key=str(values.get("access_key") or settings.engine_omnihuman_access_key),
         secret_key=str(values.get("secret_key") or settings.engine_omnihuman_secret_key),
@@ -226,6 +243,7 @@ def _omnihuman_factory(config: ProviderConfig) -> OmniHumanProvider:
             values.get("timeout_seconds") or settings.engine_omnihuman_timeout_seconds
         ),
         allowed_hosts=allowed_hosts,
+        result_host_suffixes=result_host_suffixes,
     )
 
 

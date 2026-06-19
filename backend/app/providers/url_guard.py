@@ -26,10 +26,21 @@ def object_storage_public_hosts(
     return hosts
 
 
-def ensure_https_url_allowed(url: str, *, allowed_hosts: Iterable[str]) -> str:
+def ensure_https_url_allowed(
+    url: str,
+    *,
+    allowed_hosts: Iterable[str],
+    allowed_host_suffixes: Iterable[str] = (),
+) -> str:
     parsed = urlparse(url)
     host = parsed.hostname.lower() if parsed.hostname else ""
     normalized_hosts = {item.lower() for item in allowed_hosts if item}
-    if parsed.scheme != "https" or host not in normalized_hosts:
+    normalized_suffixes = {
+        item.strip().lower().lstrip(".") for item in allowed_host_suffixes if item.strip()
+    }
+    suffix_allowed = any(
+        host == suffix or host.endswith(f".{suffix}") for suffix in normalized_suffixes
+    )
+    if parsed.scheme != "https" or (host not in normalized_hosts and not suffix_allowed):
         raise ProviderUrlError(f"Provider URL host is not allowed by whitelist: {host or url}")
     return url
