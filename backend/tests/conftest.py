@@ -3,7 +3,7 @@ from collections.abc import Generator
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -11,7 +11,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-test-secret-test-secret-32"
 
 from app.api.deps import get_db_session
 from app.core.config import settings
-from app.db.models import Base
+from app.db.models import Base, Plan
 from app.main import app
 
 
@@ -27,6 +27,15 @@ def auth_db():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+
+    # Enforce foreign keys like Postgres so FK-ordering bugs (e.g. inserting a
+    # task_asset before its video_task is persisted) surface in tests too.
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_fk(dbapi_connection, _record):  # pragma: no cover - trivial
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
     Base.metadata.create_all(engine)
     SessionTesting = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
@@ -46,7 +55,25 @@ def auth_db():
 
 
 @pytest.fixture
-def auth_context(auth_db):
+def seed_plan(auth_db):
+    """Seed a default 'basic' plan so register-tenant can attach a subscription."""
+    session = auth_db()
+    plan = Plan(
+        code="basic",
+        name="Basic",
+        price_cents=0,
+        period="monthly",
+        quota_credits=1000,
+        is_active=True,
+    )
+    session.add(plan)
+    session.commit()
+    session.close()
+    return plan
+
+
+@pytest.fixture
+def auth_context(auth_db, seed_plan):
     client = TestClient(app)
     resp = client.post(
         "/api/v1/auth/register-tenant",

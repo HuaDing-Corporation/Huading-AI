@@ -23,6 +23,7 @@ from app.schemas.auth import (
     UserRead,
 )
 from app.schemas.response import ApiResponse, ok
+from app.services.subscription import create_default_subscription
 
 router = APIRouter()
 CurrentTenantDependency = Depends(get_current_tenant)
@@ -49,6 +50,15 @@ def register_tenant(
     payload: TenantRegisterRequest,
     db: Session = DbSessionDependency,
 ) -> ApiResponse[TenantRegisterResponse]:
+    # Pre-check the globally-unique slug so a duplicate returns a clear 409 rather
+    # than the IntegrityError at db.flush() (below) surfacing as a 500 (P1).
+    if db.scalar(select(Tenant).where(Tenant.slug == payload.tenant_slug)) is not None:
+        raise AppError(
+            "Tenant slug is already taken.",
+            code="tenant_slug_taken",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+
     tenant = Tenant(slug=payload.tenant_slug, name=payload.tenant_name)
     db.add(tenant)
     db.flush()
@@ -62,15 +72,22 @@ def register_tenant(
     )
     db.add(user)
     db.add(Organization(tenant_id=tenant.id, name=payload.tenant_name))
+    # New tenants get an active subscription from the default plan, same
+    # transaction (P0-B). If no plan is configured it logs a warning and returns
+    # None (registration still succeeds) rather than 500.
+    create_default_subscription(db, tenant.id)
     try:
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        raise AppError(
-            "Tenant slug or user email already exists.",
-            code="TENANT_ALREADY_EXISTS",
-            status_code=status.HTTP_409_CONFLICT,
-        ) from exc
+        # Race between the slug pre-check and commit, or a duplicate user email:
+        # map the offending constraint to a clear 409 (P1).
+        detail = str(getattr(exc, "orig", exc)).lower()
+        if "email" in detail:
+            code, message = "email_taken", "Email is already registered."
+        else:
+            code, message = "tenant_slug_taken", "Tenant slug is already taken."
+        raise AppError(message, code=code, status_code=status.HTTP_409_CONFLICT) from exc
 
     db.refresh(tenant)
     db.refresh(user)

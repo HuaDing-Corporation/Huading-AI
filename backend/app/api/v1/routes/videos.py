@@ -188,12 +188,17 @@ def _create_avatar_talk_video(
             "estimated": True,
         },
     )
+    # Persist the parent video_task BEFORE inserting rows that FK-reference it
+    # (task_asset, and the usage_record created in reserve_*). Without this flush
+    # the child insert can hit the DB before the parent exists → FK violation
+    # (P0-A: task_assets_video_task_id_fkey). Same transaction, single commit.
     db.add(task)
-    db.add(TaskAsset(video_task_id=task_id, asset_id=avatar.id, role="input_avatar"))
+    db.flush()
+    db.add(TaskAsset(video_task_id=task.id, asset_id=avatar.id, role="input_avatar"))
     reserve_avatar_talk_quota(
         db,
         tenant_id=user.tenant_id,
-        video_task_id=task_id,
+        video_task_id=task.id,
         script=script or payload.topic,
         speed=payload.speed,
     )
