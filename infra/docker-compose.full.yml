@@ -139,7 +139,9 @@ services:
       ENGINE_S3_REGION: ${ENGINE_S3_REGION:-us-east-1}
       ENGINE_S3_SECURE: ${ENGINE_S3_SECURE:-false}
     # Single-config / single-process worker (engine config is a process singleton).
-    command: celery -A app.workers.celery_app.celery_app worker --pool=solo --concurrency=1 -Q default --loglevel=info
+    # It consumes default tasks plus avatar_talk/OmniHuman jobs routed to avatar;
+    # production can split avatar into a dedicated worker if backlog isolation is needed.
+    command: celery -A app.workers.celery_app.celery_app worker --pool=solo --concurrency=1 -Q default,avatar --loglevel=info
     volumes:
       - media:/app/.local-storage
     depends_on:
