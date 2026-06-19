@@ -26,6 +26,14 @@ def object_storage_public_hosts(
     return hosts
 
 
+def parse_host_suffixes(value: object) -> set[str]:
+    if isinstance(value, str):
+        return {item.strip().lower().lstrip(".") for item in value.split(",") if item.strip()}
+    if isinstance(value, list | tuple | set):
+        return {str(item).strip().lower().lstrip(".") for item in value if str(item).strip()}
+    return set()
+
+
 def ensure_https_url_allowed(
     url: str,
     *,

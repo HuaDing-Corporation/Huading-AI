@@ -19,6 +19,7 @@ from app.providers.base import invoke, resolve
 from app.providers.url_guard import (
     ensure_https_url_allowed,
     object_storage_public_hosts,
+    parse_host_suffixes,
 )
 from app.services.progress import ProgressStore, build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
@@ -66,7 +67,11 @@ def _download_bytes(url: str) -> bytes:
         bucket=settings.engine_s3_bucket,
         addressing_style=settings.engine_s3_addressing_style,
     )
-    ensure_https_url_allowed(url, allowed_hosts=allowed_hosts)
+    ensure_https_url_allowed(
+        url,
+        allowed_hosts=allowed_hosts,
+        allowed_host_suffixes=parse_host_suffixes(settings.engine_omnihuman_result_host_suffixes),
+    )
     response = requests.get(url, timeout=settings.engine_omnihuman_request_timeout_seconds)
     response.raise_for_status()
     return response.content

@@ -13,7 +13,11 @@ from urllib.parse import quote
 from app.core.config import settings
 from app.db.models import ProviderConfig
 from app.providers.base import register_provider
-from app.providers.url_guard import ensure_https_url_allowed, object_storage_public_hosts
+from app.providers.url_guard import (
+    ensure_https_url_allowed,
+    object_storage_public_hosts,
+    parse_host_suffixes,
+)
 
 _REQ_KEY = "jimeng_realman_avatar_picture_omni_v15"
 _ENDPOINT = "https://visual.volcengineapi.com"
@@ -206,14 +210,6 @@ class OmniHumanProvider:
         }
 
 
-def _parse_host_suffixes(value: object) -> set[str]:
-    if isinstance(value, str):
-        return {item.strip().lower().lstrip(".") for item in value.split(",") if item.strip()}
-    if isinstance(value, list | tuple | set):
-        return {str(item).strip().lower().lstrip(".") for item in value if str(item).strip()}
-    return set()
-
-
 def _omnihuman_factory(config: ProviderConfig) -> OmniHumanProvider:
     values = config.config or {}
     allowed_hosts = {"visual.volcengineapi.com"} | object_storage_public_hosts(
@@ -225,9 +221,9 @@ def _omnihuman_factory(config: ProviderConfig) -> OmniHumanProvider:
     extra_hosts = values.get("allowed_hosts")
     if isinstance(extra_hosts, list):
         allowed_hosts.update(str(host) for host in extra_hosts)
-    result_host_suffixes = _parse_host_suffixes(settings.engine_omnihuman_result_host_suffixes)
+    result_host_suffixes = parse_host_suffixes(settings.engine_omnihuman_result_host_suffixes)
     if "result_host_suffixes" in values:
-        result_host_suffixes = _parse_host_suffixes(values.get("result_host_suffixes"))
+        result_host_suffixes = parse_host_suffixes(values.get("result_host_suffixes"))
     return OmniHumanProvider(
         access_key=str(values.get("access_key") or settings.engine_omnihuman_access_key),
         secret_key=str(values.get("secret_key") or settings.engine_omnihuman_secret_key),
