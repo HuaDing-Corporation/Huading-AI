@@ -34,6 +34,7 @@ _TIMELINE_DURATION_TOLERANCE_RATIO = 0.08
 _MAX_CAPTION_CHARS = 10
 _MIN_CAPTION_CHARS = 4
 _MAX_CAPTION_GAP_MS = 700
+_SCRIPT_CLAUSE_ENDINGS = tuple(".!?;。！？；，、")
 _STRONG_CAPTION_ENDINGS = tuple(".!?。！？…")
 _WEAK_CAPTION_ENDINGS = tuple(",，、;；:：")
 
@@ -273,21 +274,22 @@ def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
 
 
 def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
+    task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
     timeline = getattr(ctx, "timeline", []) or []
-    captions = _timeline_captions(timeline)
-    source = "timeline"
     duration_sec = float(ctx.duration_sec or 1)
-    if captions and not _timeline_covers_duration(captions, duration_sec=duration_sec):
-        captions = []
-    elif captions:
-        captions = _fit_timeline_to_duration(captions, duration_sec=duration_sec)
+    script = str(task.script or task.topic or "")
+    captions, source, clause_count = _script_timed_captions(
+        script,
+        timeline,
+        duration_sec=duration_sec,
+    )
     if not captions:
-        task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
         captions = _fallback_captions(
-            str(task.script or task.topic or ""),
+            script,
             duration_sec=duration_sec,
         )
         source = "script_fallback"
+        clause_count = len(captions)
     lines = []
     for index, (start_ms, end_ms, text) in enumerate(captions, start=1):
         lines.append(
@@ -305,15 +307,173 @@ def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         size_bytes=len(content),
     )
     ctx.subtitle_key = subtitle_key
+    timeline_items = _caption_timeline_items(timeline)
     logger.info(
         "avatar_talk.subtitle",
         task_id=ctx.task_id,
         tenant_id=ctx.tenant_id,
         timeline_items=len(timeline),
+        timeline_first_ms=timeline_items[0][0] if timeline_items else None,
+        timeline_last_ms=timeline_items[-1][1] if timeline_items else None,
+        audio_duration_ms=int(round(duration_sec * 1000)),
+        clause_count=clause_count,
         caption_count=len(captions),
         source=source,
     )
     return ctx
+
+
+def _script_timed_captions(
+    script: str,
+    timeline: list[dict[str, Any]],
+    *,
+    duration_sec: float,
+) -> tuple[list[tuple[int, int, str]], str, int]:
+    clauses = _script_caption_clauses(script)
+    if not clauses:
+        return [], "script_empty", 0
+
+    timeline_items = _caption_timeline_items(timeline)
+    duration_ms = max(1, int(round(duration_sec * 1000)))
+    if timeline_items and _timeline_items_cover_duration(timeline_items, duration_sec=duration_sec):
+        captions, source = _time_clauses_from_timeline(clauses, timeline_items)
+        captions = _fit_timeline_to_duration(captions, duration_sec=duration_sec)
+        return captions, source, len(clauses)
+
+    return (
+        _time_clauses_proportionally(clauses, span_start_ms=0, span_end_ms=duration_ms),
+        "script_duration",
+        len(clauses),
+    )
+
+
+def _script_caption_clauses(script: str) -> list[str]:
+    newline_marker = "\uE000"
+    text = _clean_caption_text(
+        script.replace("\r\n", "\n").replace("\r", "\n").replace("\n", newline_marker)
+    ).replace(newline_marker, "\n")
+    if not text:
+        return []
+    clauses: list[str] = []
+    buffer: list[str] = []
+    for char in text:
+        if char == "\n":
+            _append_caption_clause(clauses, buffer)
+            continue
+        buffer.append(char)
+        if char in _SCRIPT_CLAUSE_ENDINGS:
+            _append_caption_clause(clauses, buffer)
+    _append_caption_clause(clauses, buffer)
+    return clauses
+
+
+def _append_caption_clause(clauses: list[str], buffer: list[str]) -> None:
+    clause = _clean_caption_text("".join(buffer))
+    buffer.clear()
+    if clause:
+        clauses.append(clause)
+
+
+def _caption_timeline_items(timeline: list[dict[str, Any]]) -> list[tuple[int, int]]:
+    items: list[tuple[int, int]] = []
+    for item in timeline:
+        raw_text = str(item.get("text") or "")
+        if not _clean_caption_text(raw_text) or _is_script_clause_punctuation(raw_text):
+            continue
+        start_ms = int(item.get("start_ms") or 0)
+        end_ms = int(item.get("end_ms") or start_ms + 1000)
+        if end_ms <= start_ms:
+            end_ms = start_ms + 1
+        items.append((start_ms, end_ms))
+    return items
+
+
+def _timeline_items_cover_duration(
+    items: list[tuple[int, int]],
+    *,
+    duration_sec: float,
+) -> bool:
+    if not items:
+        return False
+    if duration_sec <= 0:
+        return True
+    return items[-1][1] >= int(duration_sec * 1000 * _MIN_TIMELINE_COVERAGE_RATIO)
+
+
+def _time_clauses_from_timeline(
+    clauses: list[str],
+    timeline_items: list[tuple[int, int]],
+) -> tuple[list[tuple[int, int, str]], str]:
+    counts = [_caption_sync_len(clause) for clause in clauses]
+    total = sum(counts)
+    if total > 0 and len(timeline_items) == total:
+        captions: list[tuple[int, int, str]] = []
+        cursor = 0
+        for clause, count in zip(clauses, counts, strict=True):
+            if count <= 0:
+                start_ms = timeline_items[min(cursor, len(timeline_items) - 1)][0]
+                end_ms = start_ms + 1
+            else:
+                start_ms = timeline_items[cursor][0]
+                end_ms = timeline_items[cursor + count - 1][1]
+            captions.append((start_ms, max(start_ms + 1, end_ms), clause))
+            cursor += count
+        return captions, "script_timeline_exact"
+
+    return (
+        _time_clauses_proportionally(
+            clauses,
+            span_start_ms=timeline_items[0][0],
+            span_end_ms=timeline_items[-1][1],
+        ),
+        "script_timeline_interpolated",
+    )
+
+
+def _time_clauses_proportionally(
+    clauses: list[str],
+    *,
+    span_start_ms: int,
+    span_end_ms: int,
+) -> list[tuple[int, int, str]]:
+    span_end_ms = max(span_start_ms + 1, span_end_ms)
+    counts = [_caption_sync_len(clause) for clause in clauses]
+    total = sum(counts)
+    captions: list[tuple[int, int, str]] = []
+    previous_end = span_start_ms
+    cursor = 0
+    for index, (clause, count) in enumerate(zip(clauses, counts, strict=True)):
+        if total > 0:
+            start_ratio = cursor / total
+            cursor += count
+            end_ratio = cursor / total
+        else:
+            start_ratio = index / len(clauses)
+            end_ratio = (index + 1) / len(clauses)
+        start_ms = max(previous_end, _lerp_ms(span_start_ms, span_end_ms, start_ratio))
+        end_ms = max(start_ms + 1, _lerp_ms(span_start_ms, span_end_ms, end_ratio))
+        captions.append((start_ms, end_ms, clause))
+        previous_end = end_ms
+    return captions
+
+
+def _lerp_ms(start_ms: int, end_ms: int, ratio: float) -> int:
+    return int(round(start_ms + (end_ms - start_ms) * ratio))
+
+
+def _caption_sync_len(text: str) -> int:
+    return len(
+        [
+            char
+            for char in _clean_caption_text(text)
+            if not char.isspace() and char not in _SCRIPT_CLAUSE_ENDINGS
+        ]
+    )
+
+
+def _is_script_clause_punctuation(text: str) -> bool:
+    cleaned = _clean_caption_text(text)
+    return len(cleaned) == 1 and cleaned in _SCRIPT_CLAUSE_ENDINGS
 
 
 def _timeline_captions(timeline: list[dict[str, Any]]) -> list[tuple[int, int, str]]:
@@ -481,17 +641,6 @@ def _is_caption_punctuation(text: str) -> bool:
     return len(cleaned) == 1 and cleaned.endswith(
         _STRONG_CAPTION_ENDINGS + _WEAK_CAPTION_ENDINGS
     )
-
-
-def _timeline_covers_duration(
-    captions: list[tuple[int, int, str]],
-    *,
-    duration_sec: float,
-) -> bool:
-    if duration_sec <= 0:
-        return True
-    last_end_ms = max((end_ms for _start_ms, end_ms, _text in captions), default=0)
-    return last_end_ms >= int(duration_sec * 1000 * _MIN_TIMELINE_COVERAGE_RATIO)
 
 
 def _fallback_captions(text: str, *, duration_sec: float) -> list[tuple[int, int, str]]:
@@ -723,7 +872,15 @@ def _burn_subtitles(
         resized = video.resize(scale).set_position("center")
         canvas = ColorClip(target_size, color=(0, 0, 0), duration=video.duration)
         clips = [canvas, resized]
-        for start, end, text in _parse_srt(subtitle_file):
+        captions = _parse_srt(subtitle_file)
+        logger.info(
+            "avatar_talk.compose",
+            video_duration_ms=int(round(video.duration * 1000)),
+            caption_count=len(captions),
+            target_width=width,
+            target_height=height,
+        )
+        for start, end, text in captions:
             if end <= 0 or start >= video.duration:
                 continue
             subtitle_image = _subtitle_image(text, width=width, height=height)

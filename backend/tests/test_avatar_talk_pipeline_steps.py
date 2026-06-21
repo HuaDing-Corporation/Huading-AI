@@ -374,11 +374,16 @@ def test_subtitle_step_falls_back_when_timeline_has_no_effective_text(tmp_path: 
     Base.metadata.drop_all(engine)
 
 
-def test_subtitle_step_preserves_word_boundary_timeline(tmp_path: Path):
+def test_subtitle_step_times_script_clauses_from_character_timeline(tmp_path: Path):
     SessionTesting, engine = _session()
     tenant_id = "tenant-subtitle-timeline"
     task_id = "subtitle-timeline-task"
     storage = _Storage()
+    script = "real first. real second."
+    timeline = _caption_timeline_from_script(script, step_ms=100)
+    for item in timeline:
+        item["start_ms"] = int(item["start_ms"]) + 500
+        item["end_ms"] = int(item["end_ms"]) + 500
     with SessionTesting() as db:
         db.add(Tenant(id=tenant_id, slug="subtitle-timeline", name="Subtitle Timeline"))
         db.add(
@@ -389,7 +394,7 @@ def test_subtitle_step_preserves_word_boundary_timeline(tmp_path: Path):
                 video_mode="avatar_talk",
                 status="running",
                 topic="timeline topic",
-                script="Fallback must not be used.",
+                script=script,
             )
         )
         db.commit()
@@ -399,12 +404,9 @@ def test_subtitle_step_preserves_word_boundary_timeline(tmp_path: Path):
             db=db,
             store=_Store(),
             storage=storage,
-            duration_sec=4.0,
+            duration_sec=timeline[-1]["end_ms"] / 1000,
         )
-        ctx.timeline = [
-            {"text": "real first", "start_ms": 500, "end_ms": 1500},
-            {"text": "real second", "start_ms": 2000, "end_ms": 3200},
-        ]
+        ctx.timeline = timeline
 
         avatar_talk.subtitle_step(ctx)
 
@@ -413,7 +415,7 @@ def test_subtitle_step_preserves_word_boundary_timeline(tmp_path: Path):
         srt_path = tmp_path / "subtitle.srt"
         srt_path.write_text(srt, encoding="utf-8")
         captions = avatar_talk._parse_srt(srt_path)
-        assert captions == [(0.625, 1.875, "real first"), (2.5, 4.0, "real second")]
+        assert captions == [(0.5, 1.4, "real first."), (1.4, 2.4, "real second.")]
 
     Base.metadata.drop_all(engine)
 
@@ -435,6 +437,135 @@ def _word_timeline(
         if gap_after_index is not None and index == gap_after_index:
             cursor += gap_ms
     return timeline
+
+
+_CAPTION_PUNCTUATION = set(".!?;。！？；，、\n")
+
+
+def _caption_timeline_from_script(script: str, *, step_ms: int = 100):
+    return _word_timeline(
+        "".join(
+            char
+            for char in script
+            if char not in _CAPTION_PUNCTUATION and not char.isspace()
+        ),
+        step_ms=step_ms,
+    )
+
+
+def _subtitle_captions_for_script(
+    tmp_path: Path,
+    *,
+    script: str,
+    timeline: list[dict[str, int | str]],
+    duration_sec: float,
+):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-punct-seg"
+    unit_id = "subtitle-punct-seg"
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="punct-seg", name="Punct Seg"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="punct topic",
+                script=script,
+            )
+        )
+        db.commit()
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=storage,
+            duration_sec=duration_sec,
+        )
+        ctx.timeline = timeline
+
+        avatar_talk.subtitle_step(ctx)
+
+        subtitle_key = f"tenants/{tenant_id}/videos/{unit_id}/subtitle.srt"
+        srt_path = tmp_path / f"{unit_id}.srt"
+        srt_path.write_text(storage.objects[subtitle_key].decode("utf-8"), encoding="utf-8")
+        captions = avatar_talk._parse_srt(srt_path)
+
+    Base.metadata.drop_all(engine)
+    return captions
+
+
+def test_subtitle_step_uses_script_punctuation_for_clauses(tmp_path: Path):
+    script = "用华鼎AI短视频引擎，一键生成专业级营销视频，让企业内容生产效率提升10倍，效果更精准。"
+    timeline = _caption_timeline_from_script(script, step_ms=100)
+    duration_sec = timeline[-1]["end_ms"] / 1000
+
+    captions = _subtitle_captions_for_script(
+        tmp_path,
+        script=script,
+        timeline=timeline,
+        duration_sec=duration_sec,
+    )
+
+    assert [caption[2] for caption in captions] == [
+        "用华鼎AI短视频引擎，",
+        "一键生成专业级营销视频，",
+        "让企业内容生产效率提升10倍，",
+        "效果更精准。",
+    ]
+    assert captions[0][0] == timeline[0]["start_ms"] / 1000
+    first_clause_len = len("用华鼎AI短视频引擎")
+    assert captions[0][1] == timeline[first_clause_len - 1]["end_ms"] / 1000
+    assert captions[1][0] == timeline[first_clause_len]["start_ms"] / 1000
+    assert captions[-1][1] == timeline[-1]["end_ms"] / 1000
+
+
+def test_subtitle_step_interpolates_when_timeline_length_differs(tmp_path: Path):
+    script = "价格提升10倍，效果更精准。"
+    timeline = _word_timeline("价格提升十倍效果更精准", step_ms=200)
+    duration_sec = timeline[-1]["end_ms"] / 1000
+
+    captions = _subtitle_captions_for_script(
+        tmp_path,
+        script=script,
+        timeline=timeline,
+        duration_sec=duration_sec,
+    )
+
+    assert [caption[2] for caption in captions] == ["价格提升10倍，", "效果更精准。"]
+    assert captions[0][0] == timeline[0]["start_ms"] / 1000
+    assert captions[-1][1] == timeline[-1]["end_ms"] / 1000
+    assert captions[0][1] == captions[1][0]
+    assert 1.2 < captions[0][1] < 1.4
+
+
+def test_subtitle_step_distributes_script_clauses_without_timeline(tmp_path: Path):
+    captions = _subtitle_captions_for_script(
+        tmp_path,
+        script="短句，长一点。",
+        timeline=[],
+        duration_sec=5.0,
+    )
+
+    assert captions == [(0.0, 2.0, "短句，"), (2.0, 5.0, "长一点。")]
+
+
+def test_subtitle_step_keeps_long_unpunctuated_script_as_single_cue(tmp_path: Path):
+    script = "这是一个没有标点但非常长的字幕文本用于验证不会拆成多条字幕"
+    timeline = _caption_timeline_from_script(script, step_ms=80)
+
+    captions = _subtitle_captions_for_script(
+        tmp_path,
+        script=script,
+        timeline=timeline,
+        duration_sec=timeline[-1]["end_ms"] / 1000,
+    )
+
+    assert captions == [(0.0, timeline[-1]["end_ms"] / 1000, script)]
 
 
 def test_timeline_captions_groups_word_level_chinese_into_readable_cues():
@@ -589,7 +720,7 @@ def test_subtitle_step_strips_markdown_from_fallback_script(tmp_path: Path):
     Base.metadata.drop_all(engine)
 
 
-def test_subtitle_step_strips_markdown_from_timeline_text(tmp_path: Path):
+def test_subtitle_step_strips_markdown_from_script_text(tmp_path: Path):
     SessionTesting, engine = _session()
     tenant_id = "tenant-caption-timeline"
     unit_id = "caption-timeline-job"
@@ -604,7 +735,7 @@ def test_subtitle_step_strips_markdown_from_timeline_text(tmp_path: Path):
                 video_mode="avatar_talk",
                 status="running",
                 topic="caption timeline",
-                script="Fallback must not be used.",
+                script="**真实** `字幕`",
             )
         )
         db.commit()
@@ -616,7 +747,7 @@ def test_subtitle_step_strips_markdown_from_timeline_text(tmp_path: Path):
             storage=storage,
             duration_sec=2.0,
         )
-        ctx.timeline = [{"text": "**真实** `字幕`", "start_ms": 0, "end_ms": 2000}]
+        ctx.timeline = _caption_timeline_from_script("真实 字幕", step_ms=500)
 
         avatar_talk.subtitle_step(ctx)
 
