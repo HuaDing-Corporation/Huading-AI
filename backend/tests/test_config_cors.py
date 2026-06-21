@@ -61,14 +61,15 @@ def test_omnihuman_settings_are_env_driven_without_default_secret(monkeypatch) -
 def test_doubao_seed_tts_settings_are_env_driven(monkeypatch) -> None:
     monkeypatch.setenv("ENGINE_DOUBAO_TTS_APPID", "doubao-appid")
     monkeypatch.setenv("ENGINE_DOUBAO_TTS_ACCESS_TOKEN", "seed-token")
-    monkeypatch.setenv("ENGINE_DOUBAO_TTS_CLUSTER", "volcano_tts")
-    monkeypatch.setenv("ENGINE_DOUBAO_TTS_DEFAULT_VOICE", "BV001_streaming")
+    monkeypatch.setenv("ENGINE_DOUBAO_TTS_RESOURCE_ID", "seed-tts-2.0")
+    monkeypatch.setenv("ENGINE_DOUBAO_TTS_DEFAULT_VOICE", "zh_male_m191_uranus_bigtts")
     s = Settings(_env_file=None, jwt_secret_key=_JWT)
 
     assert s.engine_doubao_tts_appid == "doubao-appid"
     assert s.engine_doubao_tts_access_token == "seed-token"
-    assert s.engine_doubao_tts_cluster == "volcano_tts"
-    assert s.engine_doubao_tts_default_voice == "BV001_streaming"
-    assert s.engine_doubao_tts_endpoint == "https://openspeech.bytedance.com/api/v1/tts"
-    assert s.engine_doubao_tts_model == "seed-tts-1.1"
+    assert s.engine_doubao_tts_resource_id == "seed-tts-2.0"
+    assert s.engine_doubao_tts_default_voice == "zh_male_m191_uranus_bigtts"
+    assert s.engine_doubao_tts_endpoint == (
+        "https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse"
+    )
     assert s.engine_doubao_tts_request_timeout_seconds > 0
