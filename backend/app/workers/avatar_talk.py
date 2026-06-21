@@ -30,6 +30,11 @@ from app.workers.celery_app import celery_app
 logger = get_logger(__name__)
 
 _MIN_TIMELINE_COVERAGE_RATIO = 0.8
+_MAX_CAPTION_CHARS = 16
+_MIN_CAPTION_CHARS = 6
+_MAX_CAPTION_GAP_MS = 700
+_STRONG_CAPTION_ENDINGS = tuple(".!?。！？…")
+_WEAK_CAPTION_ENDINGS = tuple(",，、;；:：")
 
 
 @dataclass
@@ -309,17 +314,87 @@ def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
 
 
 def _timeline_captions(timeline: list[dict[str, Any]]) -> list[tuple[int, int, str]]:
-    captions = []
+    return _group_word_timeline(timeline)
+
+
+def _group_word_timeline(timeline: list[dict[str, Any]]) -> list[tuple[int, int, str]]:
+    words: list[tuple[int, int, str]] = []
     for item in timeline:
-        text = _clean_caption_text(str(item.get("text") or ""))
-        if not text:
+        raw_text = str(item.get("text") or "")
+        if not _clean_caption_text(raw_text):
             continue
         start_ms = int(item.get("start_ms") or 0)
         end_ms = int(item.get("end_ms") or start_ms + 1000)
         if end_ms <= start_ms:
             end_ms = start_ms + 1000
-        captions.append((start_ms, end_ms, text))
+        words.append((start_ms, end_ms, raw_text))
+
+    captions: list[tuple[int, int, str]] = []
+    group_start = 0
+    group_end = 0
+    group_texts: list[str] = []
+
+    def group_text() -> str:
+        return "".join(group_texts)
+
+    def flush_group() -> None:
+        nonlocal group_start, group_end, group_texts
+        text = _clean_caption_text(group_text())
+        if text:
+            captions.append((group_start, max(group_start + 1, group_end), text))
+        group_start = 0
+        group_end = 0
+        group_texts = []
+
+    for index, (start_ms, end_ms, text) in enumerate(words):
+        next_text = words[index + 1][2] if index + 1 < len(words) else ""
+        candidate_len = _caption_visible_len(group_text() + text)
+        if (
+            group_texts
+            and _is_caption_punctuation(next_text)
+            and candidate_len >= _MAX_CAPTION_CHARS
+        ):
+            flush_group()
+        elif group_texts and candidate_len > _MAX_CAPTION_CHARS:
+            flush_group()
+
+        if not group_texts:
+            group_start = start_ms
+        group_texts.append(text)
+        group_end = end_ms
+
+        visible_len = _caption_visible_len(group_text())
+        next_start = words[index + 1][0] if index + 1 < len(words) else None
+        gap_to_next = next_start - end_ms if next_start is not None else 0
+        if (
+            _ends_with(group_text(), _STRONG_CAPTION_ENDINGS)
+            or (
+                _ends_with(group_text(), _WEAK_CAPTION_ENDINGS)
+                and visible_len >= _MIN_CAPTION_CHARS
+            )
+            or visible_len >= _MAX_CAPTION_CHARS
+            or gap_to_next > _MAX_CAPTION_GAP_MS
+        ):
+            flush_group()
+
+    if group_texts:
+        flush_group()
     return captions
+
+
+def _caption_visible_len(text: str) -> int:
+    return len(re.sub(r"\s+", "", _clean_caption_text(text)))
+
+
+def _ends_with(text: str, endings: tuple[str, ...]) -> bool:
+    return _clean_caption_text(text).endswith(endings)
+
+
+def _is_caption_punctuation(text: str) -> bool:
+    cleaned = _clean_caption_text(text)
+    return len(cleaned) == 1 and cleaned.endswith(
+        _STRONG_CAPTION_ENDINGS + _WEAK_CAPTION_ENDINGS
+    )
 
 
 def _timeline_covers_duration(
