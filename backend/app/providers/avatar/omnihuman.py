@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
@@ -78,6 +78,10 @@ class OmniHumanProvider:
     def generate_avatar_sync(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         image_url = str(payload.get("image_url") or "")
         audio_url = str(payload.get("audio_url") or "")
+        progress_callback = payload.get("progress_callback")
+        on_progress: Callable[[dict[str, Any]], None] | None = (
+            progress_callback if callable(progress_callback) else None
+        )
         try:
             ensure_https_url_allowed(image_url, allowed_hosts=self.allowed_hosts)
             ensure_https_url_allowed(audio_url, allowed_hosts=self.allowed_hosts)
@@ -101,8 +105,11 @@ class OmniHumanProvider:
             raise OmniHumanProviderError("OmniHuman submit response did not include task_id.")
 
         deadline = time.monotonic() + self.timeout_seconds
+        started_at = time.monotonic()
+        poll_count = 0
         req_json = json.dumps({"aigc_meta": payload.get("aigc_meta") or {}}, separators=(",", ":"))
         while time.monotonic() < deadline:
+            poll_count += 1
             result = self._post_json(
                 "CVGetResult",
                 {"req_key": _REQ_KEY, "task_id": task_id, "req_json": req_json},
@@ -130,6 +137,16 @@ class OmniHumanProvider:
                 }
             if task_status not in _PENDING_STATUSES:
                 raise OmniHumanProviderError(f"OmniHuman task ended with status {task_status}.")
+            if on_progress is not None:
+                on_progress(
+                    {
+                        "task_id": task_id,
+                        "status": task_status,
+                        "poll_count": poll_count,
+                        "elapsed_seconds": max(0.0, time.monotonic() - started_at),
+                        "timeout_seconds": self.timeout_seconds,
+                    }
+                )
             time.sleep(self.poll_interval_seconds)
         raise OmniHumanProviderError("OmniHuman task timed out.")
 

@@ -215,6 +215,46 @@ def test_omnihuman_submit_poll_sends_locked_req_key_and_aigc_meta(monkeypatch) -
     assert "aigc_meta" in poll2_body["req_json"]
 
 
+def test_omnihuman_pending_polls_emit_progress_heartbeat(monkeypatch) -> None:
+    http = _Http(
+        [
+            {"code": 10000, "data": {"task_id": "cv-job-1"}},
+            {"code": 10000, "data": {"status": "in_queue"}},
+            {"code": 10000, "data": {"status": "processing"}},
+            {
+                "code": 10000,
+                "data": {
+                    "status": "done",
+                    "video_url": "https://visual.example/result.mp4",
+                    "aigc_meta_tagged": True,
+                },
+            },
+        ]
+    )
+    heartbeats: list[dict] = []
+    monkeypatch.setattr("app.providers.avatar.omnihuman.time.sleep", lambda *_: None)
+    provider = OmniHumanProvider(
+        access_key="ak",
+        secret_key="sk",
+        region="cn-north-1",
+        http_client=http,
+        poll_interval_seconds=0,
+        allowed_hosts={"assets.example", "visual.example", "visual.volcengineapi.com"},
+    )
+
+    provider.generate_avatar_sync(
+        {
+            "image_url": "https://assets.example/avatar.png",
+            "audio_url": "https://assets.example/audio.mp3",
+            "aigc_meta": {},
+            "progress_callback": heartbeats.append,
+        }
+    )
+
+    assert [item["status"] for item in heartbeats] == ["in_queue", "processing"]
+    assert [item["poll_count"] for item in heartbeats] == [1, 2]
+
+
 def test_omnihuman_audit_error_is_not_retried() -> None:
     http = _Http([{"code": 50411, "message": "image audit failed"}])
     provider = OmniHumanProvider(
