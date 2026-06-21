@@ -41,12 +41,69 @@ class _FakeHTTP:
         return _Response(self.responses.pop(0))
 
 
+class _Utf8SseResponse:
+    def __init__(self, lines: list[dict]) -> None:
+        self.lines = lines
+        self.encoding = "ISO-8859-1"
+        self.decode_unicode_calls: list[bool] = []
+
+    def iter_lines(self, decode_unicode: bool = False):
+        self.decode_unicode_calls.append(decode_unicode)
+        for item in self.lines:
+            line = (
+                f"data: {json.dumps(item, ensure_ascii=False, separators=(',', ':'))}"
+            ).encode()
+            if decode_unicode:
+                yield line.decode("latin-1")
+            else:
+                yield line
+
+
 def _seed_sse_response(audio: bytes, *, words: list[dict]) -> list[dict]:
     return [
         {"code": 0, "message": "", "data": base64.b64encode(audio).decode("ascii")},
         {"code": 0, "data": None, "sentence": {"text": "hello", "words": words}},
         {"code": 20000000, "message": "ok", "data": None, "usage": {"characters": 5}},
     ]
+
+
+def test_parse_sse_response_decodes_utf8_chinese_timeline_from_bytes():
+    from app.providers.tts.doubao_seed_tts_provider import _parse_sse_response
+
+    response = _Utf8SseResponse(
+        _seed_sse_response(
+            b"MP3",
+            words=[
+                {"word": "公", "startTime": 0.0, "endTime": 0.2},
+                {"word": "益", "startTime": 0.2, "endTime": 0.4},
+                {"word": "简单", "startTime": 0.4, "endTime": 0.8},
+            ],
+        )
+    )
+
+    audio, timeline = _parse_sse_response(response)
+
+    assert audio == b"MP3"
+    assert [item["text"] for item in timeline] == ["公", "益", "简单"]
+    assert "æ" not in "".join(str(item["text"]) for item in timeline)
+    assert "�" not in "".join(str(item["text"]) for item in timeline)
+
+
+def test_parse_sse_response_does_not_ask_requests_to_latin1_decode():
+    from app.providers.tts.doubao_seed_tts_provider import _parse_sse_response
+
+    response = _Utf8SseResponse(
+        _seed_sse_response(
+            b"MP3",
+            words=[{"word": "微笑", "startTime": 0.0, "endTime": 0.5}],
+        )
+    )
+
+    _audio, timeline = _parse_sse_response(response)
+
+    assert response.decode_unicode_calls == [False]
+    assert response.encoding == "utf-8"
+    assert timeline[0]["text"] == "微笑"
 
 
 @pytest.mark.asyncio
