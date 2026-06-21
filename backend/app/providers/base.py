@@ -11,6 +11,7 @@ from typing import Any, Literal, Protocol, TypeVar, runtime_checkable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.db.models import ProviderConfig, UsageRecord
 
 Capability = Literal["llm", "tts", "avatar", "video", "image", "asr", "publish"]
@@ -122,7 +123,27 @@ def _provider_config(
     )
     if platform_config is None:
         raise ProviderResolutionError(f"No provider configured for {capability}.")
+    if _should_promote_doubao_tts(capability, platform_config):
+        return ProviderConfig(
+            tenant_id=None,
+            capability="tts",
+            provider="doubao-seed-tts",
+            config={},
+            is_active=True,
+        )
     return platform_config
+
+
+def _should_promote_doubao_tts(
+    capability: Capability | str,
+    platform_config: ProviderConfig,
+) -> bool:
+    return (
+        capability == "tts"
+        and platform_config.provider == "edge-tts"
+        and bool(settings.engine_doubao_tts_appid)
+        and bool(settings.engine_doubao_tts_access_token)
+    )
 
 
 def resolve(db: Session, *, tenant_id: str, capability: Capability | str) -> Provider:

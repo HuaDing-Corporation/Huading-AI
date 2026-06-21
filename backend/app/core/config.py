@@ -81,6 +81,15 @@ class Settings(BaseSettings):
     engine_omnihuman_poll_interval_seconds: float = 5.0
     engine_omnihuman_timeout_seconds: float = 600.0
     engine_omnihuman_result_host_suffixes: str = "aigc-cloud.com"
+    # Volcengine Doubao Seed-TTS. Credentials are env-only; when absent the
+    # provider resolver keeps using edge-tts so CI/dev stays self-contained.
+    engine_doubao_tts_appid: str = ""
+    engine_doubao_tts_access_token: str = ""
+    engine_doubao_tts_cluster: str = "volcano_tts"
+    engine_doubao_tts_default_voice: str = "BV001_streaming"
+    engine_doubao_tts_endpoint: str = "https://openspeech.bytedance.com/api/v1/tts"
+    engine_doubao_tts_model: str = "seed-tts-1.1"
+    engine_doubao_tts_request_timeout_seconds: float = 60.0
     engine_subtitle_font_path: str = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
     engine_default_template: str = "1080x1920/static_default.html"
     # Playwright browser channel for frame rendering: "chrome"/"msedge" to use a

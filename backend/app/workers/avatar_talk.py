@@ -509,17 +509,6 @@ def _subtitle_image(text: str, *, width: int, height: int):
         line_heights.append(bbox[3] - bbox[1])
     text_h = sum(line_heights) + line_gap * max(0, len(lines) - 1)
     y = max(0, (image.height - text_h) // 2)
-    pad_x = int(width * 0.06)
-    pad_y = int(font_size * 0.45)
-    box_w = min(int(width * 0.9), max(line_widths, default=0) + pad_x * 2)
-    box_h = text_h + pad_y * 2
-    box_x = (width - box_w) // 2
-    box_y = max(0, y - pad_y)
-    draw.rounded_rectangle(
-        (box_x, box_y, box_x + box_w, box_y + box_h),
-        radius=max(8, font_size // 2),
-        fill=(0, 0, 0, 150),
-    )
     for line, line_w, line_h in zip(lines, line_widths, line_heights, strict=False):
         x = (width - line_w) // 2
         for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2)):

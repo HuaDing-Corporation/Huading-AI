@@ -717,6 +717,22 @@ def test_subtitle_font_path_can_render_chinese_glyph(monkeypatch):
     assert font.getmask("中").getbbox() is not None
 
 
+def test_subtitle_image_keeps_transparent_background_without_black_box(monkeypatch):
+    from PIL import ImageDraw
+
+    calls = []
+
+    def fake_rounded_rectangle(self, *args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "rounded_rectangle", fake_rounded_rectangle)
+
+    image = avatar_talk._subtitle_image("VISIBLE CAPTION", width=360, height=640)
+
+    assert calls == []
+    assert image.mode == "RGBA"
+
+
 def test_download_bytes_rejects_non_whitelisted_result_url(monkeypatch):
     called = False
 
