@@ -413,7 +413,7 @@ def test_subtitle_step_preserves_word_boundary_timeline(tmp_path: Path):
         srt_path = tmp_path / "subtitle.srt"
         srt_path.write_text(srt, encoding="utf-8")
         captions = avatar_talk._parse_srt(srt_path)
-        assert captions == [(0.5, 1.5, "real first"), (2.0, 3.2, "real second")]
+        assert captions == [(0.625, 1.875, "real first"), (2.5, 4.0, "real second")]
 
     Base.metadata.drop_all(engine)
 
@@ -463,6 +463,85 @@ def test_timeline_captions_splits_on_long_pause_between_words():
     assert [caption[2] for caption in captions] == ["品牌", "增长稳定"]
     assert captions[0][1] == timeline[1]["end_ms"]
     assert captions[1][0] == timeline[2]["start_ms"]
+
+
+def test_timeline_captions_keep_words_intact_and_single_line_short():
+    text = "零门槛制作高质量营销视频，品牌获客更轻松。"
+    timeline = _word_timeline(text, step_ms=100)
+
+    captions = avatar_talk._timeline_captions(timeline)
+    caption_texts = [caption[2] for caption in captions]
+
+    assert "".join(caption_texts) == text
+    assert all(
+        avatar_talk._caption_visible_len(caption) <= avatar_talk._MAX_CAPTION_CHARS
+        for caption in caption_texts
+    )
+    for term in ("门槛", "高质量", "营销视频"):
+        assert any(term in caption for caption in caption_texts)
+    assert captions[0][0] == timeline[0]["start_ms"]
+    assert captions[-1][1] == timeline[-1]["end_ms"]
+
+
+def test_timeline_captions_are_denser_than_previous_long_cues():
+    text = "零门槛制作高质量营销视频让品牌获客更轻松"
+    timeline = _word_timeline(text, step_ms=100)
+
+    captions = avatar_talk._timeline_captions(timeline)
+
+    assert len(captions) >= 3
+    assert all(
+        avatar_talk._caption_visible_len(caption[2]) <= avatar_talk._MAX_CAPTION_CHARS
+        for caption in captions
+    )
+
+
+def test_caption_position_stays_inside_letterboxed_content():
+    band_height = 260
+    position = avatar_talk._caption_position(
+        video_w=1080,
+        video_h=1080,
+        target_size=(1080, 1920),
+        band_height=band_height,
+    )
+
+    assert position[0] == "center"
+    y = position[1]
+    content_top = 420
+    content_bottom = 1500
+    margin = 64
+    assert content_top <= y
+    assert y + band_height <= content_bottom - margin
+
+
+def test_caption_position_falls_back_near_bottom_for_full_height_video():
+    position = avatar_talk._caption_position(
+        video_w=1080,
+        video_h=1920,
+        target_size=(1080, 1920),
+        band_height=260,
+    )
+
+    assert position[0] == "center"
+    assert 1200 <= position[1] <= 1660
+
+
+def test_timeline_duration_guard_scales_large_drift_only():
+    captions = [(0, 1000, "第一句"), (1000, 2000, "第二句")]
+
+    scaled = avatar_talk._fit_timeline_to_duration(captions, duration_sec=3.0)
+
+    assert scaled == [(0, 1500, "第一句"), (1500, 3000, "第二句")]
+    assert avatar_talk._fit_timeline_to_duration(captions, duration_sec=2.1) == captions
+
+
+def test_caption_word_segmentation_falls_back_when_jieba_fails(monkeypatch):
+    def fail_lcut(_text: str) -> list[str]:
+        raise RuntimeError("jieba unavailable")
+
+    monkeypatch.setattr(avatar_talk, "_jieba_lcut", fail_lcut, raising=False)
+
+    assert avatar_talk._segment_caption_words("零门槛") == ["零", "门", "槛"]
 
 
 def test_subtitle_step_strips_markdown_from_fallback_script(tmp_path: Path):
@@ -738,6 +817,23 @@ def test_wrap_text_breaks_long_chinese_without_spaces():
 
     assert len(lines) > 1
     assert all(draw.textbbox((0, 0), line, font=font)[2] <= 120 for line in lines)
+
+
+def test_wrap_text_keeps_chinese_terms_on_the_same_line():
+    from PIL import Image, ImageDraw
+
+    font = avatar_talk._font(24)
+    image = Image.new("RGB", (320, 120))
+    draw = ImageDraw.Draw(image)
+    text = "零门槛制作高质量营销视频"
+    max_width = draw.textbbox((0, 0), "零门槛制作高", font=font)[2]
+
+    lines = avatar_talk._wrap_text(text, max_width=max_width, draw=draw, font=font)
+
+    assert "".join(lines) == text
+    assert any("高质量" in line for line in lines)
+    assert any("营销视频" in line for line in lines)
+    assert all("高" not in line or "高质量" in line for line in lines)
 
 
 def test_subtitle_font_candidates_include_docker_cjk_font():

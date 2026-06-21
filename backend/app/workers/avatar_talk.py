@@ -30,8 +30,9 @@ from app.workers.celery_app import celery_app
 logger = get_logger(__name__)
 
 _MIN_TIMELINE_COVERAGE_RATIO = 0.8
-_MAX_CAPTION_CHARS = 16
-_MIN_CAPTION_CHARS = 6
+_TIMELINE_DURATION_TOLERANCE_RATIO = 0.08
+_MAX_CAPTION_CHARS = 10
+_MIN_CAPTION_CHARS = 4
 _MAX_CAPTION_GAP_MS = 700
 _STRONG_CAPTION_ENDINGS = tuple(".!?。！？…")
 _WEAK_CAPTION_ENDINGS = tuple(",，、;；:：")
@@ -278,6 +279,8 @@ def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     duration_sec = float(ctx.duration_sec or 1)
     if captions and not _timeline_covers_duration(captions, duration_sec=duration_sec):
         captions = []
+    elif captions:
+        captions = _fit_timeline_to_duration(captions, duration_sec=duration_sec)
     if not captions:
         task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
         captions = _fallback_captions(
@@ -328,6 +331,7 @@ def _group_word_timeline(timeline: list[dict[str, Any]]) -> list[tuple[int, int,
         if end_ms <= start_ms:
             end_ms = start_ms + 1000
         words.append((start_ms, end_ms, raw_text))
+    words = _timeline_caption_words(words)
 
     captions: list[tuple[int, int, str]] = []
     group_start = 0
@@ -380,6 +384,88 @@ def _group_word_timeline(timeline: list[dict[str, Any]]) -> list[tuple[int, int,
     if group_texts:
         flush_group()
     return captions
+
+
+def _timeline_caption_words(
+    words: list[tuple[int, int, str]],
+) -> list[tuple[int, int, str]]:
+    if not _looks_character_level(words):
+        return words
+
+    text = "".join(word for _start_ms, _end_ms, word in words)
+    tokens = _segment_caption_words(text)
+    if not tokens:
+        return words
+
+    grouped: list[tuple[int, int, str]] = []
+    cursor = 0
+    for token in tokens:
+        token_len = len(token)
+        if token_len <= 0 or cursor + token_len > len(words):
+            return words
+        token_words = words[cursor : cursor + token_len]
+        if "".join(word for _start_ms, _end_ms, word in token_words) != token:
+            return words
+        grouped.append((token_words[0][0], token_words[-1][1], token))
+        cursor += token_len
+
+    if cursor != len(words):
+        return words
+    return grouped
+
+
+def _looks_character_level(words: list[tuple[int, int, str]]) -> bool:
+    visible_words = [word for _start_ms, _end_ms, word in words if _caption_visible_len(word)]
+    if len(visible_words) < 2:
+        return False
+    single_units = sum(1 for word in visible_words if _caption_visible_len(word) <= 1)
+    return single_units / len(visible_words) >= 0.8
+
+
+def _segment_caption_words(text: str) -> list[str]:
+    if not text:
+        return []
+    try:
+        tokens = [token for token in _jieba_lcut(text) if token]
+    except Exception:
+        return list(text)
+    if not tokens or "".join(tokens) != text:
+        return list(text)
+    return tokens
+
+
+def _jieba_lcut(text: str) -> list[str]:
+    import jieba
+
+    for word in ("零门槛", "门槛", "高质量", "营销视频"):
+        jieba.add_word(word, freq=1_000_000)
+    return list(jieba.lcut(text, cut_all=False))
+
+
+def _fit_timeline_to_duration(
+    captions: list[tuple[int, int, str]],
+    *,
+    duration_sec: float,
+) -> list[tuple[int, int, str]]:
+    if not captions or duration_sec <= 0:
+        return captions
+    target_end_ms = max(1, int(round(duration_sec * 1000)))
+    timeline_end_ms = max(end_ms for _start_ms, end_ms, _text in captions)
+    if timeline_end_ms <= 0:
+        return captions
+    drift_ratio = abs(timeline_end_ms - target_end_ms) / target_end_ms
+    if drift_ratio <= _TIMELINE_DURATION_TOLERANCE_RATIO:
+        return captions
+
+    scale = target_end_ms / timeline_end_ms
+    scaled: list[tuple[int, int, str]] = []
+    previous_end = 0
+    for start_ms, end_ms, text in captions:
+        scaled_start = max(previous_end, int(round(start_ms * scale)))
+        scaled_end = max(scaled_start + 1, int(round(end_ms * scale)))
+        scaled.append((scaled_start, scaled_end, text))
+        previous_end = scaled_end
+    return scaled
 
 
 def _caption_visible_len(text: str) -> int:
@@ -548,7 +634,7 @@ def _font_candidates() -> tuple[str, ...]:
 
 def _wrap_text(text: str, *, max_width: int, draw, font) -> list[str]:
     has_whitespace = any(char.isspace() for char in text)
-    units = text.split() if has_whitespace else list(text)
+    units = text.split() if has_whitespace else _segment_caption_words(text)
     if not units:
         return [text]
     separator = " " if has_whitespace else ""
@@ -567,6 +653,28 @@ def _wrap_text(text: str, *, max_width: int, draw, font) -> list[str]:
     return lines
 
 
+def _caption_position(
+    *,
+    video_w: int,
+    video_h: int,
+    target_size: tuple[int, int],
+    band_height: int,
+) -> tuple[str, int]:
+    width, height = target_size
+    if video_w <= 0 or video_h <= 0 or band_height <= 0:
+        return ("center", max(0, min(height, int(height * 0.72))))
+
+    scale = min(width / video_w, height / video_h)
+    content_h = video_h * scale
+    content_top = (height - content_h) / 2
+    content_bottom = content_top + content_h
+    margin = max(24, int(content_h * 0.06))
+    y = int(round(content_bottom - margin - band_height))
+    y = max(int(round(content_top)), y)
+    y = min(max(0, height - band_height), y)
+    return ("center", y)
+
+
 def _subtitle_image(text: str, *, width: int, height: int):
     from PIL import Image, ImageDraw
 
@@ -583,7 +691,8 @@ def _subtitle_image(text: str, *, width: int, height: int):
         line_widths.append(bbox[2] - bbox[0])
         line_heights.append(bbox[3] - bbox[1])
     text_h = sum(line_heights) + line_gap * max(0, len(lines) - 1)
-    y = max(0, (image.height - text_h) // 2)
+    bottom_padding = max(8, int(font_size * 0.35))
+    y = max(0, image.height - text_h - bottom_padding)
     for line, line_w, line_h in zip(lines, line_widths, line_heights, strict=False):
         x = (width - line_w) // 2
         for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2)):
@@ -617,14 +726,22 @@ def _burn_subtitles(
         for start, end, text in _parse_srt(subtitle_file):
             if end <= 0 or start >= video.duration:
                 continue
+            subtitle_image = _subtitle_image(text, width=width, height=height)
             caption = ImageClip(
-                np.array(_subtitle_image(text, width=width, height=height)),
+                np.array(subtitle_image),
                 transparent=True,
             )
             caption = (
                 caption.set_start(max(0, start))
                 .set_duration(max(0.1, min(end, video.duration) - max(0, start)))
-                .set_position(("center", int(height * 0.72)))
+                .set_position(
+                    _caption_position(
+                        video_w=video.w,
+                        video_h=video.h,
+                        target_size=target_size,
+                        band_height=subtitle_image.height,
+                    )
+                )
             )
             clips.append(caption)
         final = CompositeVideoClip(clips, size=target_size).set_duration(video.duration)

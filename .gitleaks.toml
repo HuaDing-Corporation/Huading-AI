@@ -29,6 +29,10 @@ regexes = [
   # Known historical leak: committed before the repo was public, removed in
   # 3bbe278, rotated/revoked. Kept so full-history scans of OLD commits pass.
   '''sk-bcab316d69a7414faa9dc29737019333''',
+  # Historical test IDs that contain `task-...`, which the custom sk- rule sees
+  # from the middle of the word as `sk-...`; these are not provider keys.
+  '''sk-subtitle-fallback''',
+  '''sk-subtitle-timeline''',
   # npm/yarn/pnpm Subresource Integrity: sha1-/sha256-/sha384-/sha512-<base64>.
   '''sha(?:1|256|384|512)-[A-Za-z0-9+/=_-]{16,}''',
   # uv.lock / Python package hashes: sha256:<hex>.
