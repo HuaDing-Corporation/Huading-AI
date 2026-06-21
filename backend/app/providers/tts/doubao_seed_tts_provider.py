@@ -14,10 +14,9 @@ from app.core.config import settings
 from app.db.models import ProviderConfig
 from app.providers.base import register_provider
 
-_DEFAULT_ENDPOINT = "https://openspeech.bytedance.com/api/v1/tts"
-_DEFAULT_CLUSTER = "volcano_tts"
-_DEFAULT_MODEL = "seed-tts-1.1"
-_DEFAULT_VOICE = "BV001_streaming"
+_DEFAULT_ENDPOINT = "https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse"
+_DEFAULT_RESOURCE_ID = "seed-tts-2.0"
+_DEFAULT_VOICE = "zh_male_m191_uranus_bigtts"
 _SENTENCE_PATTERN = re.compile(r"[^.!?\n。！？；;]+[.!?\n。！？；;]*")
 
 
@@ -31,23 +30,25 @@ class DoubaoSeedTTSProvider:
         *,
         appid: str,
         access_token: str,
-        cluster: str = _DEFAULT_CLUSTER,
+        resource_id: str = _DEFAULT_RESOURCE_ID,
         default_voice: str = _DEFAULT_VOICE,
         endpoint: str = _DEFAULT_ENDPOINT,
-        model: str = _DEFAULT_MODEL,
+        api_key: str = "",
         http_client: Any | None = None,
         output_dir: str | None = None,
         request_timeout_seconds: float = 60.0,
         max_text_bytes: int = 1024,
     ) -> None:
-        if not appid or not access_token:
-            raise DoubaoSeedTTSError("Doubao Seed-TTS appid and access token are required.")
+        if not api_key and (not appid or not access_token):
+            raise DoubaoSeedTTSError(
+                "Doubao Seed-TTS appid/access token or api key are required."
+            )
         self.appid = appid
         self.access_token = access_token
-        self.cluster = cluster or _DEFAULT_CLUSTER
+        self.api_key = api_key
+        self.resource_id = resource_id or _DEFAULT_RESOURCE_ID
         self.default_voice = default_voice or _DEFAULT_VOICE
         self.endpoint = endpoint or _DEFAULT_ENDPOINT
-        self.model = model or _DEFAULT_MODEL
         self.output_dir = Path(output_dir) if output_dir else None
         self.request_timeout_seconds = request_timeout_seconds
         self.max_text_bytes = max_text_bytes
@@ -64,15 +65,15 @@ class DoubaoSeedTTSProvider:
         text = str(payload.get("text") or "").strip()
         if not text:
             raise ValueError("TTS text is required.")
-        task_id = str(payload.get("task_id") or uuid4().hex)
+        unit_id = str(payload.get("task_id") or uuid4().hex)
         output_dir = Path(
             str(payload.get("output_dir") or self.output_dir or tempfile.gettempdir())
         )
         output_dir.mkdir(parents=True, exist_ok=True)
-        audio_path = output_dir / f"{task_id}.mp3"
+        audio_path = output_dir / f"{unit_id}.mp3"
         voice = self._voice_type(str(payload.get("voice") or ""))
         speed = float(payload.get("speed") or 1.0)
-        uid = str(payload.get("uid") or task_id or "huading")
+        uid = str(payload.get("uid") or unit_id or "huading")
 
         audio = bytearray()
         timeline: list[dict[str, int | str]] = []
@@ -106,25 +107,17 @@ class DoubaoSeedTTSProvider:
         uid: str,
     ) -> tuple[bytes, list[dict[str, int | str]], int]:
         body = {
-            "app": {
-                "appid": self.appid,
-                "token": self.access_token,
-                "cluster": self.cluster,
-            },
             "user": {"uid": uid},
-            "audio": {
-                "voice_type": voice,
-                "encoding": "mp3",
-                "speed_ratio": speed,
-                "rate": 24000,
-            },
-            "request": {
-                "reqid": uuid4().hex,
+            "req_params": {
                 "text": text,
-                "operation": "query",
-                "with_timestamp": 1,
-                "model": self.model,
-                "extra_param": json.dumps(
+                "speaker": voice,
+                "audio_params": {
+                    "format": "mp3",
+                    "sample_rate": 24000,
+                    "speech_rate": _speech_rate(speed),
+                    "enable_subtitle": True,
+                },
+                "additions": json.dumps(
                     {"disable_markdown_filter": True, "aigc_watermark": True},
                     separators=(",", ":"),
                 ),
@@ -133,35 +126,38 @@ class DoubaoSeedTTSProvider:
         response = self.http.post(
             self.endpoint,
             json=body,
-            headers={
-                "Authorization": f"Bearer;{self.access_token}",
-                "Content-Type": "application/json",
-            },
+            headers=self._headers(),
             timeout=self.request_timeout_seconds,
+            stream=True,
         )
         response.raise_for_status()
-        data = response.json()
-        code = int(data.get("code") or 0)
-        if code != 3000:
-            message = str(data.get("message") or data.get("msg") or data)
-            raise DoubaoSeedTTSError(message)
-        audio_b64 = str(data.get("data") or "")
-        try:
-            audio = base64.b64decode(audio_b64)
-        except Exception as exc:
-            raise DoubaoSeedTTSError("Doubao Seed-TTS returned invalid base64 audio.") from exc
-        duration_ms = _duration_ms(data)
-        timeline = _extract_timeline(data)
-        if duration_ms <= 0:
-            duration_ms = max((int(item["end_ms"]) for item in timeline), default=0)
+        audio, timeline = _parse_sse_response(response)
+        duration_ms = max((int(item["end_ms"]) for item in timeline), default=0)
         return audio, timeline, duration_ms
 
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "X-Api-Resource-Id": self.resource_id,
+            "X-Api-Request-Id": uuid4().hex,
+        }
+        if self.api_key:
+            headers["X-Api-Key"] = self.api_key
+        else:
+            headers["X-Api-App-Id"] = self.appid
+            headers["X-Api-Access-Key"] = self.access_token
+        return headers
+
     def _voice_type(self, value: str) -> str:
-        # The existing voice table may still contain Edge voice ids. Keep those
-        # selectable while routing synthesis through the configured Doubao voice.
+        # Legacy voice rows contain Edge ids like zh-CN-XiaoxiaoNeural; those
+        # cannot be sent to Seed-TTS 2.0, so use the configured 2.0 voice.
         if not value or value.startswith("zh-"):
             return self.default_voice
         return value
+
+
+def _speech_rate(speed: float) -> int:
+    return max(-50, min(100, int(round((speed - 1.0) * 100))))
 
 
 def _split_text(text: str, *, max_bytes: int) -> list[str]:
@@ -203,51 +199,63 @@ def _hard_split(text: str, *, max_bytes: int) -> list[str]:
     return segments
 
 
-def _duration_ms(data: Mapping[str, Any]) -> int:
-    addition = data.get("addition") if isinstance(data, Mapping) else None
-    if isinstance(addition, Mapping):
-        value = addition.get("duration")
-        if value is not None:
-            return max(0, int(round(float(value))))
-    value = data.get("duration") if isinstance(data, Mapping) else None
-    return max(0, int(round(float(value or 0))))
-
-
-def _extract_timeline(data: Mapping[str, Any]) -> list[dict[str, int | str]]:
-    for items in _iter_candidate_timeline_lists(data):
-        timeline = _timeline_from_items(items)
-        if timeline:
-            return timeline
-    return []
-
-
-def _iter_candidate_timeline_lists(value: Any):
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            return
-    if isinstance(value, Mapping):
-        for item in value.values():
-            yield from _iter_candidate_timeline_lists(item)
-    elif isinstance(value, list):
-        if all(isinstance(item, Mapping) for item in value):
-            yield value
-        for item in value:
-            yield from _iter_candidate_timeline_lists(item)
-
-
-def _timeline_from_items(items: list[Mapping[str, Any]]) -> list[dict[str, int | str]]:
+def _parse_sse_response(response: Any) -> tuple[bytes, list[dict[str, int | str]]]:
+    audio = bytearray()
     timeline: list[dict[str, int | str]] = []
-    for item in items:
+    finished = False
+    for raw_line in response.iter_lines(decode_unicode=True):
+        line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else str(raw_line)
+        line = line.strip()
+        if not line or not line.startswith("data:"):
+            continue
+        event = json.loads(line.removeprefix("data:").strip())
+        code = int(event.get("code") or 0)
+        if code == 20000000:
+            finished = True
+            continue
+        if code != 0:
+            message = str(event.get("message") or event.get("msg") or event)
+            raise DoubaoSeedTTSError(message)
+        if event.get("data"):
+            try:
+                audio.extend(base64.b64decode(str(event["data"])))
+            except Exception as exc:
+                raise DoubaoSeedTTSError(
+                    "Doubao Seed-TTS returned invalid base64 audio."
+                ) from exc
+        sentence = event.get("sentence")
+        if isinstance(sentence, Mapping):
+            timeline.extend(_timeline_from_words(sentence.get("words") or []))
+    if not finished:
+        raise DoubaoSeedTTSError("Doubao Seed-TTS stream ended before SessionFinish.")
+    return bytes(audio), timeline
+
+
+def _timeline_from_words(words: Any) -> list[dict[str, int | str]]:
+    if not isinstance(words, list):
+        return []
+    timeline: list[dict[str, int | str]] = []
+    for item in words:
+        if not isinstance(item, Mapping):
+            continue
         text = _first_present(item, ("word", "text", "char", "grapheme"))
-        start = _first_present(item, ("start_ms", "start_time", "start", "begin_time", "begin"))
-        end = _first_present(item, ("end_ms", "end_time", "end", "finish_time", "finish"))
+        start_key, start = _first_present_with_key(
+            item,
+            ("startTime", "start_time", "start_ms", "start"),
+        )
+        end_key, end = _first_present_with_key(
+            item,
+            ("endTime", "end_time", "end_ms", "end"),
+        )
         if text is None or start is None or end is None:
-            return []
-        start_ms = _time_to_ms(start, key_hint="start_ms" if "start_ms" in item else "")
-        end_ms = _time_to_ms(end, key_hint="end_ms" if "end_ms" in item else "")
-        timeline.append({"text": str(text), "start_ms": start_ms, "end_ms": end_ms})
+            continue
+        timeline.append(
+            {
+                "text": str(text),
+                "start_ms": _time_to_ms(start, key=start_key),
+                "end_ms": _time_to_ms(end, key=end_key),
+            }
+        )
     return timeline
 
 
@@ -258,12 +266,20 @@ def _first_present(item: Mapping[str, Any], keys: tuple[str, ...]) -> Any | None
     return None
 
 
-def _time_to_ms(value: Any, *, key_hint: str = "") -> int:
+def _first_present_with_key(
+    item: Mapping[str, Any],
+    keys: tuple[str, ...],
+) -> tuple[str, Any | None]:
+    for key in keys:
+        if key in item:
+            return key, item[key]
+    return "", None
+
+
+def _time_to_ms(value: Any, *, key: str) -> int:
     numeric = float(value or 0)
-    if key_hint.endswith("_ms"):
-        return max(0, int(round(numeric)))
-    if 0 < numeric < 60 and not float(numeric).is_integer():
-        return max(0, int(round(numeric * 1000)))
+    if key in {"startTime", "endTime", "start_time", "end_time"}:
+        numeric *= 1000
     return max(0, int(round(numeric)))
 
 
@@ -286,12 +302,12 @@ def _doubao_seed_tts_factory(config: ProviderConfig) -> DoubaoSeedTTSProvider:
     return DoubaoSeedTTSProvider(
         appid=str(values.get("appid") or settings.engine_doubao_tts_appid),
         access_token=str(values.get("access_token") or settings.engine_doubao_tts_access_token),
-        cluster=str(values.get("cluster") or settings.engine_doubao_tts_cluster),
+        api_key=str(values.get("api_key") or settings.engine_doubao_tts_api_key),
+        resource_id=str(values.get("resource_id") or settings.engine_doubao_tts_resource_id),
         default_voice=str(
             values.get("default_voice") or settings.engine_doubao_tts_default_voice
         ),
         endpoint=str(values.get("endpoint") or settings.engine_doubao_tts_endpoint),
-        model=str(values.get("model") or settings.engine_doubao_tts_model),
         request_timeout_seconds=float(
             values.get("request_timeout_seconds")
             or settings.engine_doubao_tts_request_timeout_seconds

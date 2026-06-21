@@ -85,10 +85,10 @@ class Settings(BaseSettings):
     # provider resolver keeps using edge-tts so CI/dev stays self-contained.
     engine_doubao_tts_appid: str = ""
     engine_doubao_tts_access_token: str = ""
-    engine_doubao_tts_cluster: str = "volcano_tts"
-    engine_doubao_tts_default_voice: str = "BV001_streaming"
-    engine_doubao_tts_endpoint: str = "https://openspeech.bytedance.com/api/v1/tts"
-    engine_doubao_tts_model: str = "seed-tts-1.1"
+    engine_doubao_tts_api_key: str = ""
+    engine_doubao_tts_resource_id: str = "seed-tts-2.0"
+    engine_doubao_tts_default_voice: str = "zh_male_m191_uranus_bigtts"
+    engine_doubao_tts_endpoint: str = "https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse"
     engine_doubao_tts_request_timeout_seconds: float = 60.0
     engine_subtitle_font_path: str = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
     engine_default_template: str = "1080x1920/static_default.html"

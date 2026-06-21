@@ -141,8 +141,13 @@ def _should_promote_doubao_tts(
     return (
         capability == "tts"
         and platform_config.provider == "edge-tts"
-        and bool(settings.engine_doubao_tts_appid)
-        and bool(settings.engine_doubao_tts_access_token)
+        and (
+            bool(settings.engine_doubao_tts_api_key)
+            or (
+                bool(settings.engine_doubao_tts_appid)
+                and bool(settings.engine_doubao_tts_access_token)
+            )
+        )
     )
 
 
