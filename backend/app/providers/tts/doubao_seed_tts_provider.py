@@ -203,8 +203,13 @@ def _parse_sse_response(response: Any) -> tuple[bytes, list[dict[str, int | str]
     audio = bytearray()
     timeline: list[dict[str, int | str]] = []
     finished = False
-    for raw_line in response.iter_lines(decode_unicode=True):
-        line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else str(raw_line)
+    response.encoding = "utf-8"
+    for raw_line in response.iter_lines():
+        line = (
+            raw_line.decode("utf-8", errors="replace")
+            if isinstance(raw_line, bytes)
+            else str(raw_line)
+        )
         line = line.strip()
         if not line or not line.startswith("data:"):
             continue
