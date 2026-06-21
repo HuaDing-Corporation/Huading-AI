@@ -23,8 +23,11 @@ from app.workers import avatar_talk
 
 
 class _Store:
+    def __init__(self) -> None:
+        self.events: list[tuple[tuple, dict]] = []
+
     def update(self, *args, **kwargs):
-        pass
+        self.events.append((args, kwargs))
 
 
 class _Storage:
@@ -411,6 +414,155 @@ def test_subtitle_step_preserves_word_boundary_timeline(tmp_path: Path):
         srt_path.write_text(srt, encoding="utf-8")
         captions = avatar_talk._parse_srt(srt_path)
         assert captions == [(0.5, 1.5, "real first"), (2.0, 3.2, "real second")]
+
+    Base.metadata.drop_all(engine)
+
+
+def test_subtitle_step_strips_markdown_from_fallback_script(tmp_path: Path):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-caption-clean"
+    unit_id = "caption-clean-job"
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="caption-clean", name="Caption Clean"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="caption clean",
+                script="# 标题：**价值** `让每个人` *看见*",
+            )
+        )
+        db.commit()
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=storage,
+            duration_sec=4.0,
+        )
+        ctx.timeline = []
+
+        avatar_talk.subtitle_step(ctx)
+
+        subtitle_key = f"tenants/{tenant_id}/videos/{unit_id}/subtitle.srt"
+        srt_path = tmp_path / "subtitle.srt"
+        srt_path.write_text(storage.objects[subtitle_key].decode("utf-8"), encoding="utf-8")
+        captions = avatar_talk._parse_srt(srt_path)
+        text = " ".join(caption[2] for caption in captions)
+        assert "价值" in text
+        assert "让每个人" in text
+        assert "*" not in text
+        assert "#" not in text
+        assert "`" not in text
+
+    Base.metadata.drop_all(engine)
+
+
+def test_subtitle_step_strips_markdown_from_timeline_text(tmp_path: Path):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-caption-timeline"
+    unit_id = "caption-timeline-job"
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="caption-timeline", name="Caption Timeline"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="caption timeline",
+                script="Fallback must not be used.",
+            )
+        )
+        db.commit()
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=storage,
+            duration_sec=2.0,
+        )
+        ctx.timeline = [{"text": "**真实** `字幕`", "start_ms": 0, "end_ms": 2000}]
+
+        avatar_talk.subtitle_step(ctx)
+
+        subtitle_key = f"tenants/{tenant_id}/videos/{unit_id}/subtitle.srt"
+        srt_path = tmp_path / "subtitle.srt"
+        srt_path.write_text(storage.objects[subtitle_key].decode("utf-8"), encoding="utf-8")
+        captions = avatar_talk._parse_srt(srt_path)
+        assert captions == [(0.0, 2.0, "真实 字幕")]
+
+    Base.metadata.drop_all(engine)
+
+
+def test_avatar_step_publishes_progress_heartbeat_during_provider_polling():
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-avatar-progress"
+    unit_id = "avatar-progress-job"
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="avatar-progress", name="Avatar Progress"))
+        avatar = Asset(
+            id="avatar-progress-asset",
+            tenant_id=tenant_id,
+            type="avatar_image",
+            source="upload",
+            storage_key=f"tenants/{tenant_id}/uploads/avatar.png",
+            status="ready",
+        )
+        db.add(avatar)
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="avatar progress",
+                script="avatar progress script",
+            )
+        )
+        db.add(TaskAsset(video_task_id=unit_id, asset_id=avatar.id, role="input_avatar"))
+        db.commit()
+
+        class _AvatarProvider:
+            async def generate_avatar(self, payload: dict):
+                payload["progress_callback"]({"poll_count": 1, "status": "in_queue"})
+                payload["progress_callback"]({"poll_count": 2, "status": "processing"})
+                return {"video_url": "https://visual.example/result.mp4"}
+
+        store = _Store()
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=store,
+            storage=storage,
+        )
+        ctx.audio_key = f"tenants/{tenant_id}/videos/{unit_id}/audio.mp3"
+
+        original_resolve = avatar_talk.resolve
+        original_download = avatar_talk._download_bytes
+        try:
+            avatar_talk.resolve = lambda _db, *, tenant_id, capability: _AvatarProvider()
+            avatar_talk._download_bytes = lambda _url: b"MP4"
+            avatar_talk.avatar_step(ctx)
+        finally:
+            avatar_talk.resolve = original_resolve
+            avatar_talk._download_bytes = original_download
+
+        progress_events = [kwargs for _args, kwargs in store.events]
+        assert [event["progress"] for event in progress_events] == [25, 26]
+        assert {event["step"] for event in progress_events} == {"avatar"}
+        assert {event["stage"] for event in progress_events} == {"avatar_generating"}
 
     Base.metadata.drop_all(engine)
 

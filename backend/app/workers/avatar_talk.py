@@ -239,6 +239,19 @@ def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
             "propagate_id": ctx.task_id,
         },
     }
+
+    def on_avatar_progress(event: dict[str, Any]) -> None:
+        poll_count = int(event.get("poll_count") or 1)
+        progress = min(84, 24 + poll_count)
+        ctx.store.update(
+            _scoped_id(ctx.tenant_id, ctx.task_id),
+            status="running",
+            progress=progress,
+            step="avatar",
+            stage="avatar_generating",
+        )
+
+    payload["progress_callback"] = on_avatar_progress
     result = asyncio.run(
         invoke(
             ctx.db,
@@ -298,7 +311,7 @@ def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
 def _timeline_captions(timeline: list[dict[str, Any]]) -> list[tuple[int, int, str]]:
     captions = []
     for item in timeline:
-        text = str(item.get("text") or "").strip()
+        text = _clean_caption_text(str(item.get("text") or ""))
         if not text:
             continue
         start_ms = int(item.get("start_ms") or 0)
@@ -321,7 +334,7 @@ def _timeline_covers_duration(
 
 
 def _fallback_captions(text: str, *, duration_sec: float) -> list[tuple[int, int, str]]:
-    segments = _split_caption_text(text)
+    segments = _split_caption_text(_clean_caption_text(text))
     if not segments:
         return []
     duration_ms = max(1000, int(duration_sec * 1000))
@@ -331,6 +344,15 @@ def _fallback_captions(text: str, *, duration_sec: float) -> list[tuple[int, int
         end_ms = round(duration_ms * (index + 1) / len(segments))
         captions.append((start_ms, max(start_ms + 1, end_ms), segment))
     return captions
+
+
+def _clean_caption_text(text: str) -> str:
+    text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.M)
+    text = re.sub(r"`([^`]*)`", r"\1", text)
+    text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text)
+    text = re.sub(r"(?<!\w)(\*|_)([^*_]+)\1(?!\w)", r"\2", text)
+    text = re.sub(r"[`*_#]+", "", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _split_caption_text(text: str, *, max_chars: int = 42) -> list[str]:
