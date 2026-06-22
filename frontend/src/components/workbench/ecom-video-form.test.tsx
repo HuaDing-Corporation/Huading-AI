@@ -1,0 +1,81 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const taskMocks = vi.hoisted(() => ({ createAndTrack: vi.fn() }));
+const uploadMock = vi.hoisted(() => ({ mutateAsync: vi.fn() }));
+
+vi.mock("@/lib/api/hooks", () => ({
+  useScriptGenerate: () => ({ mutateAsync: vi.fn().mockResolvedValue({ script: "s" }), isPending: false }),
+  useUploadProductImage: () => ({ mutateAsync: uploadMock.mutateAsync, isPending: false }),
+  useVoices: () => ({
+    data: [
+      { id: "v1", provider: "doubao", voice_code: "c", display_name: "豆包女声", gender: null, language: null }
+    ]
+  })
+}));
+vi.mock("@/lib/videos/tasks-context", () => ({ useVideoTasks: () => taskMocks }));
+
+import { EcomVideoForm } from "./ecom-video-form";
+
+beforeEach(() => {
+  URL.createObjectURL = vi.fn(() => "blob:mock");
+  URL.revokeObjectURL = vi.fn();
+  uploadMock.mutateAsync.mockResolvedValue({ image_key: "uploads/abc123.png" });
+});
+afterEach(() => vi.clearAllMocks());
+
+function selectProductImage() {
+  const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+  fireEvent.change(input, { target: { files: [new File(["x"], "p.png", { type: "image/png" })] } });
+}
+
+describe("EcomVideoForm (电商带货 i2v)", () => {
+  it("disables 生成 with a hint until both 卖点 and 产品图 are provided", async () => {
+    render(<EcomVideoForm />);
+    const generate = screen.getByRole("button", { name: /生成视频/ });
+
+    // Pristine: missing 卖点 → disabled + topic hint.
+    expect(generate).toBeDisabled();
+    expect(screen.getByText("请先输入产品卖点")).toBeInTheDocument();
+
+    // 卖点 only: still disabled, now hints to upload the product image.
+    fireEvent.change(screen.getByPlaceholderText(/输入产品卖点/), { target: { value: "保温杯" } });
+    expect(generate).toBeDisabled();
+    expect(screen.getByText("请上传产品图后再生成")).toBeInTheDocument();
+
+    // + 产品图 → enabled, hint cleared.
+    selectProductImage();
+    await waitFor(() => expect(generate).toBeEnabled());
+    expect(screen.queryByText("请上传产品图后再生成")).not.toBeInTheDocument();
+  });
+
+  it("uploads the product image (→image_key) then submits the seedance_i2v body", async () => {
+    render(<EcomVideoForm />);
+    fireEvent.change(screen.getByPlaceholderText(/输入产品卖点/), { target: { value: "316 不锈钢保温杯" } });
+    selectProductImage();
+
+    // Upload went through the PRODUCT-image hook (POST /uploads → image_key),
+    // not the avatar one.
+    await waitFor(() => expect(uploadMock.mutateAsync).toHaveBeenCalledTimes(1));
+
+    const generate = screen.getByRole("button", { name: /生成视频/ });
+    await waitFor(() => expect(generate).toBeEnabled());
+    fireEvent.click(generate);
+
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    const [request, topic] = taskMocks.createAndTrack.mock.calls[0];
+    expect(request).toEqual({
+      topic: "316 不锈钢保温杯",
+      script: undefined,
+      video_mode: "seedance_i2v",
+      image_key: "uploads/abc123.png",
+      voice_id: "v1",
+      speed: 1,
+      aspect_ratio: "9:16",
+      subtitle_enabled: true
+    });
+    expect(topic).toBe("316 不锈钢保温杯");
+    // i2v must NOT carry the avatar field.
+    expect(request).not.toHaveProperty("avatar_asset_id");
+  });
+});

@@ -13,7 +13,23 @@ export const copy = {
     subtitleLocked: "字幕已开启（锁定）",
     generate: "生成视频",
     generating: "提交中…",
-    scriptTooLong: (s: number) => `预计 ${s}s，将截断到 60s，建议精简文案`
+    scriptTooLong: (s: number) => `预计 ${s}s，将截断到 60s，建议精简文案`,
+    // 生成模式切换（数字人口播 / 电商带货）
+    modeGroupLabel: "生成模式",
+    modeAvatar: "数字人口播",
+    modeEcom: "电商带货",
+    aspectBadge: "竖屏 9:16",
+    avatarPreviewAlt: "形象预览",
+    // 电商带货（图生视频 i2v）表单
+    ecomTitle: "电商带货视频",
+    ecomSubtitle: "上传产品图、输入卖点，AI 一键生成带货短片",
+    ecomTopicLabel: "产品卖点 / 主题",
+    ecomTopicPlaceholder: "输入产品卖点，如：316 不锈钢保温杯，24 小时持续锁温",
+    ecomTopicRequired: "请先输入产品卖点",
+    ecomImageRequired: "请上传产品图后再生成",
+    productImageLabel: "产品图（必填）",
+    productImageUpload: "上传产品图（JPG / PNG / WebP，≤10MB）",
+    productImagePreviewAlt: "产品图预览"
   },
   errors: {
     quota: "额度不足，无法生成，请充值或精简任务",

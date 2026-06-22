@@ -10,11 +10,20 @@ import { copy } from "@/lib/copy";
 
 export interface ImagePickerProps {
   value: string | null;
-  onChange: (assetId: string | null) => void;
-  presets: AvatarPreset[];
+  onChange: (value: string | null) => void;
   uploading: boolean;
   onUpload: (file: File) => void;
   uploadError?: string | null;
+  /** Preset grid (数字人口播 形象预设)；电商带货 i2v 无预设，默认空。 */
+  presets?: AvatarPreset[];
+  /** Field legend；默认「数字人形象」。 */
+  label?: string;
+  /** Upload tile CTA；默认「上传形象图」。 */
+  uploadLabel?: string;
+  /** Preview <img> alt；默认「形象预览」。 */
+  previewAlt?: string;
+  /** File input id（多表单同页保持唯一）；默认 avatar-image。 */
+  inputId?: string;
 }
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
@@ -28,10 +37,14 @@ const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 export function ImagePicker({
   value,
   onChange,
-  presets,
   uploading,
   onUpload,
-  uploadError
+  uploadError,
+  presets = [],
+  label = copy.workbench.avatarLabel,
+  uploadLabel = copy.workbench.upload,
+  previewAlt = copy.workbench.avatarPreviewAlt,
+  inputId = "avatar-image"
 }: ImagePickerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [preview, setPreview] = useState<string | null>(null);
@@ -81,7 +94,7 @@ export function ImagePicker({
 
   return (
     <fieldset className="mb-[15px] m-0 min-w-0 border-0 p-0">
-      <legend className={labelClass}>{copy.workbench.avatarLabel}</legend>
+      <legend className={labelClass}>{label}</legend>
 
       {presets.length > 0 && (
         <div className="mb-2.5 grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -106,7 +119,7 @@ export function ImagePicker({
 
       <input
         ref={fileInputRef}
-        id="avatar-image"
+        id={inputId}
         type="file"
         accept={ALLOWED_UPLOAD_TYPES.join(",")}
         className="hidden"
@@ -119,7 +132,7 @@ export function ImagePicker({
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={preview}
-            alt="形象预览"
+            alt={previewAlt}
             className="h-14 w-14 flex-none rounded-mark object-cover"
           />
           <div className="min-w-0 flex-1 text-[12.5px]">
@@ -146,7 +159,7 @@ export function ImagePicker({
           onClick={() => fileInputRef.current?.click()}
           className="flex w-full items-center justify-center gap-2 rounded-field border border-dashed border-line-gold bg-glass-fill py-5 text-[13px] text-ink-soft hover:bg-glass-hover"
         >
-          <ImagePlus size={18} strokeWidth={1.8} /> {copy.workbench.upload}
+          <ImagePlus size={18} strokeWidth={1.8} /> {uploadLabel}
         </button>
       )}
 
