@@ -40,6 +40,8 @@ _SEEDANCE_I2V_DEFAULT_DURATION_SEC = 15
 _SEEDANCE_I2V_MIN_DURATION_SEC = 5
 _SEEDANCE_I2V_MAX_DURATION_SEC = 120
 _SEEDANCE_I2V_CLIP_DURATION_SEC = 5
+_SEEDANCE_I2V_PROGRESS_START = 25
+_SEEDANCE_I2V_PROGRESS_END = 88
 _SEEDANCE_I2V_PROMPT_SUFFIX = (
     "产品展示，镜头平稳推进，明亮商业棚拍，干净背景，"
     "突出商品材质与卖点，9:16竖屏电商带货短视频。"
@@ -114,6 +116,33 @@ def _seedance_i2v_scene_count(duration_sec: float | int | None) -> int:
 
 def _seedance_i2v_billable_duration(duration_sec: float | int | None) -> int:
     return _seedance_i2v_scene_count(duration_sec) * _SEEDANCE_I2V_CLIP_DURATION_SEC
+
+
+def _seedance_i2v_poll_progress(
+    *,
+    scene_index: int,
+    scene_count: int,
+    poll_count: int,
+) -> int:
+    safe_scene_count = max(1, scene_count)
+    safe_scene_index = max(0, min(scene_index, safe_scene_count - 1))
+    safe_poll_count = max(1, poll_count)
+    span = _SEEDANCE_I2V_PROGRESS_END - _SEEDANCE_I2V_PROGRESS_START
+    lower = int(
+        round(_SEEDANCE_I2V_PROGRESS_START + span * safe_scene_index / safe_scene_count)
+    )
+    upper = int(
+        round(
+            _SEEDANCE_I2V_PROGRESS_START
+            + span * (safe_scene_index + 1)
+            / safe_scene_count
+        )
+    )
+    if safe_scene_index == safe_scene_count - 1:
+        upper = _SEEDANCE_I2V_PROGRESS_END
+    if upper <= lower:
+        upper = min(_SEEDANCE_I2V_PROGRESS_END, lower + 1)
+    return min(upper, lower + safe_poll_count)
 
 
 def _seedance_engine_config() -> Any:
@@ -498,8 +527,11 @@ def seedance_i2v_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
 
             def on_seedance_progress(event: dict[str, Any], scene_index: int = index) -> None:
                 poll_count = int(event.get("poll_count") or 1)
-                per_scene = 54 / max(1, scene_count)
-                progress = min(79, int(25 + per_scene * scene_index + min(poll_count, 5)))
+                progress = _seedance_i2v_poll_progress(
+                    scene_index=scene_index,
+                    scene_count=scene_count,
+                    poll_count=poll_count,
+                )
                 ctx.store.update(
                     _scoped_id(ctx.tenant_id, ctx.task_id),
                     status="running",
@@ -1215,8 +1247,8 @@ AVATAR_TALK_STEPS = [
 ECOM_I2V_STEPS = [
     ("script", 10, script_step),
     ("tts", 25, tts_step),
-    ("seedance", 80, seedance_i2v_step),
-    ("subtitle", 88, subtitle_step),
+    ("seedance", 88, seedance_i2v_step),
+    ("subtitle", 90, subtitle_step),
     ("compose", 95, compose_step),
     ("upload", 98, upload_step),
 ]
