@@ -38,6 +38,46 @@ async def test_deepseek_provider_uses_openai_compatible_chat_client() -> None:
     assert "cashmere coat" in calls["messages"][-1]["content"]
 
 
+@pytest.mark.asyncio
+async def test_deepseek_provider_uses_custom_script_prompts() -> None:
+    calls = {}
+
+    class _Message:
+        content = "Custom script"
+
+    class _Choice:
+        message = _Message()
+
+    class _Response:
+        choices = [_Choice()]
+
+    class _Completions:
+        async def create(self, **kwargs):
+            calls.update(kwargs)
+            return _Response()
+
+    class _Chat:
+        completions = _Completions()
+
+    class _Client:
+        chat = _Chat()
+
+    provider = DeepSeekProvider(api_key="k", base_url="https://deepseek.test", model="m")
+    provider.client = _Client()
+
+    result = await provider.generate_text(
+        {
+            "topic": "ceramic bowl",
+            "system_prompt": "Write ecommerce selling scripts.",
+            "user_prompt": "Create a 30s script with a call to action.",
+        }
+    )
+
+    assert result["text"] == "Custom script"
+    assert calls["messages"][0]["content"] == "Write ecommerce selling scripts."
+    assert calls["messages"][1]["content"] == "Create a 30s script with a call to action."
+
+
 def test_scripts_generate_route_uses_provider_registry(monkeypatch, auth_context) -> None:
     from app.api.v1.routes import scripts as scripts_route
     from app.main import app

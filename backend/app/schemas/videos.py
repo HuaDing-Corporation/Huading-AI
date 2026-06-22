@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 _ALLOWED_PIPELINES = {"standard", "custom"}
 _ALLOWED_MODES = {"generate", "fixed"}
 _ALLOWED_VIDEO_MODES = {"static_template", "seedance_t2v", "seedance_i2v", "avatar_talk"}
+_MIN_DURATION_SEC = 5
+_MAX_DURATION_SEC = 120
 # e.g. "1080x1920/static_default.html" — size dir + html file, no path traversal.
 _TEMPLATE_RE = re.compile(r"^[A-Za-z0-9_]+x[A-Za-z0-9_]+/[A-Za-z0-9_.\-]+\.html$")
 # Tenant-relative upload key as returned by POST /api/v1/uploads.
@@ -45,6 +47,10 @@ class VideoGenerateRequest(BaseModel):
         default=None,
         description="Tenant-relative upload key from POST /uploads (seedance_i2v input)",
     )
+    duration_sec: int | None = Field(
+        default=None,
+        description="Target seedance_i2v duration in seconds; clamped to 5..120.",
+    )
     n_scenes: int = Field(default=3, ge=1, le=20)
     frame_template: str | None = Field(
         default=None, description="e.g. '1080x1920/static_default.html'; None uses server default"
@@ -81,6 +87,13 @@ class VideoGenerateRequest(BaseModel):
         if ".." in v or not _IMAGE_KEY_RE.match(v):
             raise ValueError("invalid image_key (use the key returned by POST /uploads)")
         return v
+
+    @field_validator("duration_sec")
+    @classmethod
+    def _clamp_duration(cls, v: int | None) -> int | None:
+        if v is None:
+            return v
+        return max(_MIN_DURATION_SEC, min(_MAX_DURATION_SEC, int(v)))
 
     @field_validator("frame_template")
     @classmethod

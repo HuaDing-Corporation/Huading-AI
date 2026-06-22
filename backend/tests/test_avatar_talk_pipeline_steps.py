@@ -182,10 +182,13 @@ def test_default_avatar_talk_steps_create_assets_and_final_video(monkeypatch, tm
         Base.metadata.drop_all(engine)
 
 
-def test_seedance_i2v_step_generates_clip_from_product_image(monkeypatch, tmp_path: Path):
+def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
+    monkeypatch,
+    tmp_path: Path,
+):
     SessionTesting, engine = _session()
     tenant_id = "tenant-i2v-step"
-    unit_id = "i2v-step-job"
+    unit_id = "i2v-multi-job"
     with SessionTesting() as db:
         db.add(Tenant(id=tenant_id, slug="i2v-step", name="I2V Step"))
         db.add(
@@ -197,25 +200,39 @@ def test_seedance_i2v_step_generates_clip_from_product_image(monkeypatch, tmp_pa
                 status="running",
                 topic="soft scarf for winter gifting",
                 script="soft scarf script",
-                params={"image_key": "uploads/product.png"},
+                duration_sec=12,
+                params={"image_key": "uploads/product.png", "duration_sec": 12},
             )
         )
         db.commit()
 
         image_path = tmp_path / "product.png"
         image_path.write_bytes(b"PNG")
-        calls: dict[str, object] = {}
+        calls: list[dict[str, object]] = []
 
         def fake_generate(cfg, prompt, **kwargs):
-            calls["cfg"] = cfg
-            calls["prompt"] = prompt
-            calls["kwargs"] = kwargs
+            calls.append({"cfg": cfg, "prompt": prompt, "kwargs": kwargs})
             kwargs["progress_callback"]({"poll_count": 4})
-            Path(kwargs["save_path"]).write_bytes(b"SEEDANCE-MP4")
+            Path(kwargs["save_path"]).write_bytes(f"SCENE-{len(calls)}".encode())
+
+        concat_calls: dict[str, object] = {}
+
+        def fake_concat(scene_paths, output_path):
+            concat_calls["scene_paths"] = [Path(path).name for path in scene_paths]
+            concat_calls["output_path"] = Path(output_path).name
+            Path(output_path).write_bytes(b"CONCAT-SEEDANCE-MP4")
 
         monkeypatch.setattr(avatar_talk, "_resolve_i2v_image", lambda params: str(image_path))
         monkeypatch.setattr(avatar_talk, "_seedance_engine_config", lambda: object())
+        monkeypatch.setattr(
+            avatar_talk,
+            "_plan_seedance_i2v_scenes",
+            lambda ctx, scene_count, clip_duration: [
+                f"visual prompt {index + 1}" for index in range(scene_count)
+            ],
+        )
         monkeypatch.setattr(avatar_talk, "generate_seedance_video", fake_generate)
+        monkeypatch.setattr(avatar_talk, "concat_seedance_clips", fake_concat)
 
         store = _Store()
         ctx = avatar_talk.AvatarTalkContext(
@@ -224,24 +241,111 @@ def test_seedance_i2v_step_generates_clip_from_product_image(monkeypatch, tmp_pa
             db=db,
             store=store,
             storage=_Storage(),
-            duration_sec=8.2,
+            duration_sec=12,
         )
 
         result = avatar_talk.seedance_i2v_step(ctx)
 
-        assert result.base_video_bytes == b"SEEDANCE-MP4"
+        assert result.base_video_bytes == b"CONCAT-SEEDANCE-MP4"
         assert result.use_tts_audio is True
-        assert calls["prompt"] == (
-            "soft scarf for winter gifting。产品展示，镜头平稳推进，明亮商业棚拍，干净背景，"
-            "突出商品材质与卖点，9:16竖屏电商带货短视频。"
+        assert len(calls) == 3
+        assert [call["prompt"] for call in calls] == [
+            "visual prompt 1",
+            "visual prompt 2",
+            "visual prompt 3",
+        ]
+        assert concat_calls["scene_paths"] == [
+            "seedance_scene_00.mp4",
+            "seedance_scene_01.mp4",
+            "seedance_scene_02.mp4",
+        ]
+        for call in calls:
+            kwargs = call["kwargs"]
+            assert kwargs["image_path"] == str(image_path)
+            assert kwargs["image_role"] == "first_frame"
+            assert kwargs["ratio"] == "9:16"
+            assert kwargs["resolution"] == "720p"
+            assert kwargs["generate_audio"] is False
+            assert kwargs["duration"] == 5
+        assert not any(call["kwargs"]["duration"] == 12 for call in calls)
+        frame_events = [
+            event[1].get("frame_current")
+            for event in store.events
+            if event[1].get("frame_total")
+        ]
+        assert frame_events == [
+            1,
+            2,
+            3,
+        ]
+
+    Base.metadata.drop_all(engine)
+
+
+def test_seedance_i2v_scene_planner_requests_visual_prompts(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-i2v-scenes"
+    unit_id = "i2v-scenes-job"
+    payloads: list[dict] = []
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="i2v-scenes", name="I2V Scenes"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic="水墨陶瓷碗",
+                script="这只水墨陶瓷碗很适合送礼，现在下单了解更多。",
+                duration_sec=15,
+                params={"duration_sec": 15},
+            )
         )
-        assert calls["kwargs"]["image_path"] == str(image_path)
-        assert calls["kwargs"]["image_role"] == "first_frame"
-        assert calls["kwargs"]["ratio"] == "9:16"
-        assert calls["kwargs"]["resolution"] == "720p"
-        assert calls["kwargs"]["generate_audio"] is False
-        assert calls["kwargs"]["duration"] == 9
-        assert any(event[1].get("stage") == "seedance_generating" for event in store.events)
+        db.commit()
+
+        class _FakeDeepSeek:
+            async def generate_text(self, payload: dict):
+                payloads.append(payload)
+                return {
+                    "text": json.dumps(
+                        [
+                            "镜头1：产品从水墨背景中缓慢推进，突出釉面质感。",
+                            "镜头2：俯拍碗口与礼盒组合，强调送礼场景。",
+                            "镜头3：侧逆光环绕展示器型，收束到行动号召氛围。",
+                        ],
+                        ensure_ascii=False,
+                    )
+                }
+
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
+        )
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=_Storage(),
+            duration_sec=15,
+        )
+
+        prompts = avatar_talk._plan_seedance_i2v_scenes(ctx, scene_count=3, clip_duration=5)
+
+        payload = payloads[0]
+        assert payload["video_mode"] == "seedance_i2v"
+        assert payload["scene_count"] == 3
+        assert payload["clip_duration_sec"] == 5
+        assert payload["target_duration_sec"] == 15
+        assert "视觉分镜" in payload["system_prompt"]
+        assert "first_frame" in payload["user_prompt"]
+        assert prompts == [
+            "镜头1：产品从水墨背景中缓慢推进，突出釉面质感。",
+            "镜头2：俯拍碗口与礼盒组合，强调送礼场景。",
+            "镜头3：侧逆光环绕展示器型，收束到行动号召氛围。",
+        ]
 
     Base.metadata.drop_all(engine)
 
@@ -367,6 +471,115 @@ def test_script_step_generates_missing_script_with_deepseek(monkeypatch):
         db.flush()
 
         assert db.get(VideoTask, task_id).script == "Generated worker script"
+
+    Base.metadata.drop_all(engine)
+
+
+def test_script_step_keeps_avatar_prompt_payload_unchanged(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-script-avatar"
+    unit_id = "script-avatar-job"
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="script-avatar", name="Script Avatar"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="wool coat",
+                script=None,
+            )
+        )
+        db.commit()
+
+        class _FakeDeepSeek:
+            async def generate_text(self, payload: dict):
+                assert payload == {"topic": "wool coat"}
+                return {"text": "Avatar script"}
+
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_api_key", "k")
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_base_url", "https://deepseek.test")
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_model", "m")
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
+        )
+
+        avatar_talk.script_step(
+            avatar_talk.AvatarTalkContext(
+                task_id=unit_id,
+                tenant_id=tenant_id,
+                db=db,
+                store=_Store(),
+                storage=_Storage(),
+            )
+        )
+
+        assert db.get(VideoTask, unit_id).script == "Avatar script"
+
+    Base.metadata.drop_all(engine)
+
+
+def test_script_step_uses_ecommerce_prompt_and_duration_budget(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-script-ecom"
+    unit_id = "script-ecom-job"
+    payloads: list[dict] = []
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="script-ecom", name="Script Ecom"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic="新中式水墨陶瓷碗，适合送礼，质感高级",
+                script=None,
+                duration_sec=30,
+                params={"duration_sec": 30},
+            )
+        )
+        db.commit()
+
+        class _FakeDeepSeek:
+            async def generate_text(self, payload: dict):
+                payloads.append(payload)
+                return {"text": "这只陶瓷碗质感温润，送礼自用都很有面子，现在下单了解更多。"}
+
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_api_key", "k")
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_base_url", "https://deepseek.test")
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_model", "m")
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
+        )
+
+        avatar_talk.script_step(
+            avatar_talk.AvatarTalkContext(
+                task_id=unit_id,
+                tenant_id=tenant_id,
+                db=db,
+                store=_Store(),
+                storage=_Storage(),
+            )
+        )
+
+        payload = payloads[0]
+        assert payload["topic"] == "新中式水墨陶瓷碗，适合送礼，质感高级"
+        assert payload["video_mode"] == "seedance_i2v"
+        assert payload["target_duration_sec"] == 30
+        assert payload["target_chars_min"] == 150
+        assert payload["target_chars_max"] == 180
+        assert "电商带货" in payload["system_prompt"]
+        assert "卖点" in payload["user_prompt"]
+        assert "行动号召" in payload["user_prompt"]
+        assert "30秒" in payload["user_prompt"]
+        assert db.get(VideoTask, unit_id).script.startswith("这只陶瓷碗")
 
     Base.metadata.drop_all(engine)
 

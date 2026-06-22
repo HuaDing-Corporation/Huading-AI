@@ -36,11 +36,21 @@ _TAIL_TRIM_THRESHOLD_SEC = 0.6
 _TAIL_KEEP_AFTER_SPEECH_SEC = 0.5
 _AUDIO_FADEOUT_SEC = 0.3
 _SCRIPT_CLAUSE_ENDINGS = tuple(".!?;。！？；，、")
-_SEEDANCE_I2V_MIN_DURATION_SEC = 2
-_SEEDANCE_I2V_MAX_DURATION_SEC = 12
+_SEEDANCE_I2V_DEFAULT_DURATION_SEC = 15
+_SEEDANCE_I2V_MIN_DURATION_SEC = 5
+_SEEDANCE_I2V_MAX_DURATION_SEC = 120
+_SEEDANCE_I2V_CLIP_DURATION_SEC = 5
 _SEEDANCE_I2V_PROMPT_SUFFIX = (
     "产品展示，镜头平稳推进，明亮商业棚拍，干净背景，"
     "突出商品材质与卖点，9:16竖屏电商带货短视频。"
+)
+_ECOMMERCE_SCRIPT_SYSTEM_PROMPT = (
+    "你是电商带货短视频编导。输出自然口语化中文口播，突出产品卖点、"
+    "使用场景和行动号召，适合竖屏短视频配音。"
+)
+_SEEDANCE_SCENE_SYSTEM_PROMPT = (
+    "你是电商图生视频的视觉分镜导演。输出 Seedance i2v 视觉分镜提示词，"
+    "每条提示词都以同一张产品图作为 first_frame，并给出不同运镜、角度和卖点。"
 )
 
 
@@ -85,9 +95,25 @@ def _seedance_i2v_prompt(topic: str | None) -> str:
     return f"{subject}。{_SEEDANCE_I2V_PROMPT_SUFFIX}"
 
 
-def _seedance_i2v_duration(duration_sec: float | None) -> int:
-    raw = int(math.ceil(float(duration_sec or 5)))
+def _seedance_i2v_target_duration(duration_sec: float | int | None) -> int:
+    if duration_sec is None:
+        return _SEEDANCE_I2V_DEFAULT_DURATION_SEC
+    raw = int(float(duration_sec))
     return max(_SEEDANCE_I2V_MIN_DURATION_SEC, min(_SEEDANCE_I2V_MAX_DURATION_SEC, raw))
+
+
+def _task_target_duration_sec(task: VideoTask) -> int:
+    params = task.params or {}
+    return _seedance_i2v_target_duration(params.get("duration_sec") or task.duration_sec)
+
+
+def _seedance_i2v_scene_count(duration_sec: float | int | None) -> int:
+    target = _seedance_i2v_target_duration(duration_sec)
+    return max(1, int(math.ceil(target / _SEEDANCE_I2V_CLIP_DURATION_SEC)))
+
+
+def _seedance_i2v_billable_duration(duration_sec: float | int | None) -> int:
+    return _seedance_i2v_scene_count(duration_sec) * _SEEDANCE_I2V_CLIP_DURATION_SEC
 
 
 def _seedance_engine_config() -> Any:
@@ -115,6 +141,21 @@ def generate_seedance_video(*args: Any, **kwargs: Any) -> Any:
     from app.engine.video import generate_seedance_video as run_generate_seedance_video
 
     return run_generate_seedance_video(*args, **kwargs)
+
+
+def concat_seedance_clips(scene_paths: list[str], output_path: str) -> str:
+    if not scene_paths:
+        raise RuntimeError("No Seedance scene clips to concatenate.")
+    if len(scene_paths) == 1:
+        Path(output_path).write_bytes(Path(scene_paths[0]).read_bytes())
+        return output_path
+
+    import importlib
+
+    importlib.import_module("app.engine")
+    from pixelle_video.services.video import VideoService
+
+    return VideoService().concat_videos(videos=scene_paths, output=output_path)
 
 
 def _download_bytes(url: str) -> bytes:
@@ -192,6 +233,31 @@ def _add_asset(
     return asset
 
 
+def _script_generation_payload(task: VideoTask) -> dict[str, Any]:
+    topic = task.topic or ""
+    if (task.video_mode or task.mode) != "seedance_i2v":
+        return {"topic": topic}
+
+    target_duration = _task_target_duration_sec(task)
+    target_chars_min = target_duration * 5
+    target_chars_max = target_duration * 6
+    return {
+        "topic": topic,
+        "video_mode": "seedance_i2v",
+        "target_duration_sec": target_duration,
+        "target_chars_min": target_chars_min,
+        "target_chars_max": target_chars_max,
+        "system_prompt": _ECOMMERCE_SCRIPT_SYSTEM_PROMPT,
+        "user_prompt": (
+            f"请基于以下产品卖点生成一段约{target_duration}秒的电商带货口播文案。"
+            f"字数控制在{target_chars_min}-{target_chars_max}字，语言口语化，"
+            "突出卖点、使用场景、购买理由，并在结尾加入自然行动号召。"
+            "只输出文案正文，不要标题、编号或 Markdown。\n"
+            f"产品卖点：{topic}"
+        ),
+    }
+
+
 def script_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
     if not task.script:
@@ -208,7 +274,7 @@ def script_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
                 tenant_id=ctx.tenant_id,
                 capability="llm",
                 provider=provider.__class__.__name__,
-                operation=lambda: provider.generate_text({"topic": task.topic or ""}),
+                operation=lambda: provider.generate_text(_script_generation_payload(task)),
                 timeout_seconds=30.0,
             )
         )
@@ -323,6 +389,95 @@ def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     return ctx
 
 
+def _strip_markdown_fence(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.I)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    return stripped.strip()
+
+
+def _fallback_scene_prompt(task: VideoTask, index: int, total: int) -> str:
+    topic = str(task.topic or "").strip() or "产品"
+    script = _clean_caption_text(str(task.script or ""))[:120]
+    return (
+        f"{topic}。第{index + 1}/{total}个镜头，产品图作为first_frame，"
+        "9:16竖屏，商业棚拍质感，镜头缓慢运动，突出不同卖点和使用场景。"
+        f"{script}"
+    )
+
+
+def _parse_scene_prompt_text(text: str, *, scene_count: int, task: VideoTask) -> list[str]:
+    cleaned = _strip_markdown_fence(text)
+    prompts: list[str] = []
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        data = None
+
+    if isinstance(data, dict):
+        data = data.get("scenes") or data.get("prompts") or data.get("items")
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, str):
+                prompts.append(item.strip())
+            elif isinstance(item, dict):
+                value = item.get("video_prompt") or item.get("prompt") or item.get("text")
+                if value:
+                    prompts.append(str(value).strip())
+    if not prompts:
+        for line in cleaned.splitlines():
+            line = re.sub(r"^\s*(?:[-*]|\d+[.)、])\s*", "", line).strip()
+            if line:
+                prompts.append(line)
+
+    prompts = [prompt for prompt in prompts if prompt]
+    while len(prompts) < scene_count:
+        prompts.append(_fallback_scene_prompt(task, len(prompts), scene_count))
+    return prompts[:scene_count]
+
+
+def _plan_seedance_i2v_scenes(
+    ctx: AvatarTalkContext,
+    scene_count: int,
+    clip_duration: int,
+) -> list[str]:
+    task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
+    provider = resolve(ctx.db, tenant_id=ctx.tenant_id, capability="llm")
+    target_duration = scene_count * clip_duration
+    payload = {
+        "topic": task.topic or "",
+        "script": task.script or "",
+        "video_mode": "seedance_i2v",
+        "scene_count": scene_count,
+        "clip_duration_sec": clip_duration,
+        "target_duration_sec": target_duration,
+        "system_prompt": _SEEDANCE_SCENE_SYSTEM_PROMPT,
+        "user_prompt": (
+            f"请为电商图生视频规划{scene_count}个视觉分镜提示词。每个分镜约"
+            f"{clip_duration}秒，全部使用同一张产品图作为first_frame，但运镜、"
+            "角度、光线、卖点呈现要有变化。输出 JSON 字符串数组，数组长度必须等于"
+            f"{scene_count}，每项只写 Seedance 可用的中文视觉提示词。\n"
+            f"产品卖点：{task.topic or ''}\n口播文案：{task.script or ''}"
+        ),
+    }
+    result = asyncio.run(
+        invoke(
+            ctx.db,
+            tenant_id=ctx.tenant_id,
+            capability="llm",
+            provider=provider.__class__.__name__,
+            operation=lambda: provider.generate_text(payload),
+            timeout_seconds=30.0,
+        )
+    )
+    return _parse_scene_prompt_text(
+        str(result.get("text") or ""),
+        scene_count=scene_count,
+        task=task,
+    )
+
+
 def seedance_i2v_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
     work_dir = _work_dir(ctx.task_id)
@@ -330,35 +485,54 @@ def seedance_i2v_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     params = dict(task.params or {})
     params["tenant_id"] = ctx.tenant_id
     image_path = Path(_resolve_i2v_image(params))
-    save_path = work_dir / "seedance.mp4"
-
-    def on_seedance_progress(event: dict[str, Any]) -> None:
-        poll_count = int(event.get("poll_count") or 1)
-        ctx.store.update(
-            _scoped_id(ctx.tenant_id, ctx.task_id),
-            status="running",
-            progress=min(79, 25 + poll_count),
-            step="seedance",
-            stage="seedance_generating",
-        )
+    target_duration = _task_target_duration_sec(task)
+    scene_count = _seedance_i2v_scene_count(target_duration)
+    clip_duration = _SEEDANCE_I2V_CLIP_DURATION_SEC
+    scene_prompts = _plan_seedance_i2v_scenes(ctx, scene_count, clip_duration)
+    scene_paths: list[str] = []
 
     try:
-        generate_seedance_video(
-            _seedance_engine_config(),
-            _seedance_i2v_prompt(task.topic),
-            image_path=str(image_path),
-            save_path=str(save_path),
-            image_role="first_frame",
-            ratio="9:16",
-            resolution="720p",
-            generate_audio=False,
-            duration=_seedance_i2v_duration(ctx.duration_sec),
-            progress_callback=on_seedance_progress,
-        )
-        if not save_path.exists() or save_path.stat().st_size <= 0:
-            raise RuntimeError("Seedance did not produce a video file.")
-        ctx.base_video_bytes = save_path.read_bytes()
+        cfg = _seedance_engine_config()
+        for index, prompt in enumerate(scene_prompts):
+            save_path = work_dir / f"seedance_scene_{index:02d}.mp4"
+
+            def on_seedance_progress(event: dict[str, Any], scene_index: int = index) -> None:
+                poll_count = int(event.get("poll_count") or 1)
+                per_scene = 54 / max(1, scene_count)
+                progress = min(79, int(25 + per_scene * scene_index + min(poll_count, 5)))
+                ctx.store.update(
+                    _scoped_id(ctx.tenant_id, ctx.task_id),
+                    status="running",
+                    progress=progress,
+                    step="seedance",
+                    stage="seedance_generating",
+                    frame_current=scene_index + 1,
+                    frame_total=scene_count,
+                )
+
+            generate_seedance_video(
+                cfg,
+                prompt or _fallback_scene_prompt(task, index, scene_count),
+                image_path=str(image_path),
+                save_path=str(save_path),
+                image_role="first_frame",
+                ratio="9:16",
+                resolution="720p",
+                generate_audio=False,
+                duration=clip_duration,
+                progress_callback=on_seedance_progress,
+            )
+            if not save_path.exists() or save_path.stat().st_size <= 0:
+                raise RuntimeError(f"Seedance did not produce scene {index + 1}.")
+            scene_paths.append(str(save_path))
+
+        concat_path = work_dir / "seedance_concat.mp4"
+        concat_seedance_clips(scene_paths, str(concat_path))
+        if not concat_path.exists() or concat_path.stat().st_size <= 0:
+            raise RuntimeError("Seedance scene concatenation produced an empty video.")
+        ctx.base_video_bytes = concat_path.read_bytes()
         ctx.use_tts_audio = True
+        ctx.seedance_billable_seconds = scene_count * clip_duration
         return ctx
     finally:
         try:
@@ -1173,7 +1347,10 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
                 task.size_bytes = ctx.size_bytes
             if ctx.duration_sec is not None:
                 task.duration_sec = float(ctx.duration_sec)
-            actual_seconds = max(1, int(round(ctx.duration_sec or 1)))
+            actual_seconds = max(
+                1,
+                int(round(getattr(ctx, "seedance_billable_seconds", ctx.duration_sec or 1))),
+            )
             settle_reserved_quota(
                 db,
                 tenant_id=tenant_id,
