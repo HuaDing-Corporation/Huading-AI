@@ -1162,6 +1162,115 @@ def test_download_bytes_rejects_http_result_url_with_suffix_configured(monkeypat
     assert called is False
 
 
+def test_compose_end_time_trims_only_long_trailing_silence():
+    assert avatar_talk._compose_end_time(10.92, 9.235) == pytest.approx(9.735)
+    assert avatar_talk._compose_end_time(10.0, 9.5) == pytest.approx(10.0)
+    assert avatar_talk._compose_end_time(10.0, None) == pytest.approx(10.0)
+    assert avatar_talk._compose_end_time(0.8, 0.2) == pytest.approx(0.8)
+    assert avatar_talk._compose_end_time(10.0, 9.9) >= 9.9
+
+
+def test_burn_subtitles_trims_tail_and_applies_audio_fadeout(monkeypatch, tmp_path: Path):
+    import moviepy.editor as moviepy_editor
+
+    calls: dict[str, object] = {}
+
+    class _Audio:
+        def fx(self, effect, duration):
+            calls["fadeout_duration"] = duration
+            calls["fadeout_effect"] = getattr(effect, "__name__", str(effect))
+            return self
+
+    class _Video:
+        w = 1080
+        h = 1920
+        duration = 10.92
+        audio = _Audio()
+
+        def __init__(self, _path=None):
+            pass
+
+        def resize(self, _scale):
+            return self
+
+        def set_position(self, _position):
+            return self
+
+        def close(self):
+            calls["video_closed"] = True
+
+    class _ColorClip:
+        def __init__(self, _size, *, color, duration):
+            self.color = color
+            self.duration = duration
+
+    class _ImageClip:
+        def __init__(self, _array, *, transparent):
+            self.transparent = transparent
+
+        def set_start(self, start):
+            self.start = start
+            return self
+
+        def set_duration(self, duration):
+            self.duration = duration
+            return self
+
+        def set_position(self, position):
+            self.position = position
+            return self
+
+    class _CompositeVideoClip:
+        def __init__(self, clips, *, size):
+            calls["clip_count"] = len(clips)
+            calls["size"] = size
+            self.audio = None
+            self.duration = None
+
+        def set_duration(self, duration):
+            self.duration = duration
+            return self
+
+        def set_audio(self, audio):
+            self.audio = audio
+            calls["set_audio"] = True
+            return self
+
+        def subclip(self, start, end):
+            calls["subclip"] = (start, end)
+            self.duration = end - start
+            return self
+
+        def write_videofile(self, path, **kwargs):
+            calls["write_path"] = path
+            calls["write_kwargs"] = kwargs
+
+        def close(self):
+            calls["final_closed"] = True
+
+    monkeypatch.setattr(moviepy_editor, "VideoFileClip", _Video)
+    monkeypatch.setattr(moviepy_editor, "ColorClip", _ColorClip)
+    monkeypatch.setattr(moviepy_editor, "ImageClip", _ImageClip)
+    monkeypatch.setattr(moviepy_editor, "CompositeVideoClip", _CompositeVideoClip)
+
+    base = tmp_path / "base.mp4"
+    subtitle = tmp_path / "caption.srt"
+    output = tmp_path / "burned.mp4"
+    base.write_bytes(b"MP4")
+    subtitle.write_text(
+        "1\n00:00:00,000 --> 00:00:09,235\nVISIBLE CAPTION\n",
+        encoding="utf-8",
+    )
+
+    avatar_talk._burn_subtitles(base, subtitle, output)
+
+    assert calls["subclip"] == (0, pytest.approx(9.735))
+    assert calls["fadeout_duration"] == pytest.approx(0.3)
+    assert calls["write_kwargs"]["audio_bitrate"] == "192k"
+    assert calls["write_kwargs"]["audio_fps"] == 44100
+    assert calls["write_kwargs"]["audio"] is True
+
+
 def test_burn_subtitles_writes_9x16_video_with_visible_caption(tmp_path: Path):
     from moviepy.editor import ColorClip, VideoFileClip
 
