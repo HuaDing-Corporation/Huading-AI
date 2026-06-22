@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     engine_s3_secure: bool = False
     engine_s3_addressing_style: str = "path"
     engine_s3_presign_ttl: int = 3600
+    engine_aigc_producer: str = "Huading"
 
     # ---- Video engine ----
     # Keys are injected from the platform/environment, never hardcoded (#002-FIX-1).

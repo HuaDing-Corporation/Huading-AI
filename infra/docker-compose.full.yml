@@ -94,6 +94,7 @@ services:
       ENGINE_S3_REGION: ${ENGINE_S3_REGION:-us-east-1}
       ENGINE_S3_SECURE: ${ENGINE_S3_SECURE:-false}
       ENGINE_S3_ADDRESSING_STYLE: ${ENGINE_S3_ADDRESSING_STYLE:-path}
+      ENGINE_AIGC_PRODUCER: ${ENGINE_AIGC_PRODUCER:-Huading}
       ENGINE_DOUBAO_TTS_AIGC_WATERMARK: ${ENGINE_DOUBAO_TTS_AIGC_WATERMARK:-true}
     # Run DB migrations, then serve the API.
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
@@ -141,6 +142,7 @@ services:
       ENGINE_S3_REGION: ${ENGINE_S3_REGION:-us-east-1}
       ENGINE_S3_SECURE: ${ENGINE_S3_SECURE:-false}
       ENGINE_S3_ADDRESSING_STYLE: ${ENGINE_S3_ADDRESSING_STYLE:-path}
+      ENGINE_AIGC_PRODUCER: ${ENGINE_AIGC_PRODUCER:-Huading}
       ENGINE_DOUBAO_TTS_AIGC_WATERMARK: ${ENGINE_DOUBAO_TTS_AIGC_WATERMARK:-true}
     # Single-config / single-process worker (engine config is a process singleton).
     # It consumes default tasks plus avatar_talk/OmniHuman jobs routed to avatar;
