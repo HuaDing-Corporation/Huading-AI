@@ -22,12 +22,16 @@ from app.db.models import Asset, TaskAsset, User, VideoTask, Voice
 from app.schemas.response import ApiResponse, ok
 from app.schemas.videos import (
     VideoAccepted,
+    VideoEstimateResponse,
     VideoGenerateRequest,
     VideoListResponse,
     VideoRead,
 )
 from app.services.progress import ProgressStore
 from app.services.quota import (
+    QuotaEstimate,
+    estimate_avatar_talk_quota,
+    estimate_seedance_i2v_quota,
     reserve_avatar_talk_quota,
     reserve_seedance_i2v_quota,
     seedance_i2v_billable_seconds,
@@ -46,6 +50,52 @@ _video_task_tenants: dict[str, str] = {}
 # Terminal states that end an SSE stream.
 _TERMINAL = {"SUCCESS", "FAILURE"}
 _SSE_INTERVAL_S = 1.0
+_ESTIMATE_NOTE = "Estimated reservation; final settlement uses actual generated duration."
+
+
+def _is_avatar_talk_requested(payload: VideoGenerateRequest) -> bool:
+    return (
+        payload.video_mode == "avatar_talk"
+        or bool(payload.voice_id)
+        or bool(payload.avatar_asset_id)
+    )
+
+
+def _quota_estimate_for_payload(
+    payload: VideoGenerateRequest,
+    *,
+    tenant_id: str,
+    db: Session,
+) -> QuotaEstimate | None:
+    if payload.video_mode == "seedance_i2v":
+        target_duration_sec = seedance_i2v_target_seconds(payload.duration_sec)
+        return estimate_seedance_i2v_quota(
+            db,
+            tenant_id=tenant_id,
+            script=payload.script or payload.topic,
+            speed=payload.speed,
+            estimated_seconds=seedance_i2v_billable_seconds(target_duration_sec),
+        )
+    if _is_avatar_talk_requested(payload):
+        if not payload.voice_id:
+            raise AppError(
+                "avatar_talk requires voice_id.",
+                code="VALIDATION_ERROR",
+                status_code=422,
+            )
+        if not payload.avatar_asset_id:
+            raise AppError(
+                "avatar_talk requires avatar_asset_id.",
+                code="VALIDATION_ERROR",
+                status_code=422,
+            )
+        return estimate_avatar_talk_quota(
+            db,
+            tenant_id=tenant_id,
+            script=payload.script or payload.topic,
+            speed=payload.speed,
+        )
+    return None
 
 
 def _api_status(task: VideoTask, snapshot: dict | None = None) -> str:
@@ -263,6 +313,24 @@ def _create_seedance_i2v_video(
     return task_id
 
 
+@router.post("/estimate", response_model=ApiResponse[VideoEstimateResponse])
+def estimate_video(
+    request: Request,
+    payload: VideoGenerateRequest,
+    user: User = CreateVideoPermissionDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[VideoEstimateResponse]:
+    estimate = _quota_estimate_for_payload(payload, tenant_id=user.tenant_id, db=db)
+    return ok(
+        request,
+        VideoEstimateResponse(
+            estimated_credits=estimate.reservation_units if estimate is not None else 0,
+            unit="credits",
+            note=_ESTIMATE_NOTE,
+        ),
+    )
+
+
 @router.post("", response_model=ApiResponse[VideoAccepted], status_code=status.HTTP_202_ACCEPTED)
 def create_video(
     request: Request,
@@ -278,12 +346,7 @@ def create_video(
         generate_seedance_i2v_task.apply_async(args=[params], task_id=task_id, queue="avatar")
         return ok(request, VideoAccepted(id=task_id, task_id=task_id, status="queued"))
 
-    avatar_talk_requested = (
-        payload.video_mode == "avatar_talk"
-        or bool(payload.voice_id)
-        or bool(payload.avatar_asset_id)
-    )
-    if avatar_talk_requested:
+    if _is_avatar_talk_requested(payload):
         task_id = _create_avatar_talk_video(payload, user=user, db=db)
         params = payload.model_dump()
         params["tenant_id"] = user.tenant_id
