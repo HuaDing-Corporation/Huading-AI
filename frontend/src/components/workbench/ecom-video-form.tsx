@@ -11,6 +11,7 @@ import { useVideoTasks } from "@/lib/videos/tasks-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { DurationPicker, isValidDuration } from "@/components/workbench/duration-picker";
 import { ImagePicker } from "@/components/workbench/image-picker";
 import { MoreSettings } from "@/components/workbench/more-settings";
 import { ScriptReview } from "@/components/workbench/script-review";
@@ -37,6 +38,7 @@ export function EcomVideoForm() {
   const [topic, setTopic] = useState("");
   const [script, setScript] = useState("");
   const [voiceId, setVoiceId] = useState("");
+  const [durationSec, setDurationSec] = useState(30);
   const [speed, setSpeed] = useState(1);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -61,7 +63,8 @@ export function EcomVideoForm() {
 
   const onGenerate = async () => {
     const trimmed = topic.trim();
-    if (!trimmed || !voiceId || !productImage.value || submitting) return;
+    if (!trimmed || !voiceId || !productImage.value || !isValidDuration(durationSec) || submitting)
+      return;
     setError(null);
     setSubmitting(true);
 
@@ -71,6 +74,7 @@ export function EcomVideoForm() {
       video_mode: "seedance_i2v",
       image_key: productImage.value,
       voice_id: voiceId,
+      duration_sec: durationSec,
       speed,
       aspect_ratio: "9:16",
       subtitle_enabled: true
@@ -86,7 +90,12 @@ export function EcomVideoForm() {
   };
 
   const generateDisabled =
-    submitting || uploadProduct.isPending || !topic.trim() || !voiceId || !productImage.value;
+    submitting ||
+    uploadProduct.isPending ||
+    !topic.trim() ||
+    !voiceId ||
+    !productImage.value ||
+    !isValidDuration(durationSec);
 
   // Tell the user which required input is still missing (validation feedback).
   let hint: string | null = null;
@@ -132,6 +141,8 @@ export function EcomVideoForm() {
       />
 
       <VoicePicker voices={voiceList ?? []} value={voiceId} onChange={setVoiceId} />
+
+      <DurationPicker value={durationSec} onChange={setDurationSec} />
 
       <MoreSettings speed={speed} onSpeedChange={setSpeed} />
 
