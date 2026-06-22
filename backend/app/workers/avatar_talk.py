@@ -33,6 +33,9 @@ _MIN_TIMELINE_COVERAGE_RATIO = 0.8
 _MAX_CAPTION_CHARS = 10
 _MIN_CAPTION_CHARS = 4
 _MAX_CAPTION_GAP_MS = 700
+_TAIL_TRIM_THRESHOLD_SEC = 0.6
+_TAIL_KEEP_AFTER_SPEECH_SEC = 0.5
+_AUDIO_FADEOUT_SEC = 0.3
 _SCRIPT_CLAUSE_ENDINGS = tuple(".!?;。！？；，、")
 _STRONG_CAPTION_ENDINGS = tuple(".!?。！？…")
 _WEAK_CAPTION_ENDINGS = tuple(",，、;；:：")
@@ -826,6 +829,21 @@ def _caption_position(
     return ("center", y)
 
 
+def _compose_end_time(video_duration: float, last_caption_end: float | None) -> float:
+    if video_duration <= 0 or last_caption_end is None or last_caption_end <= 0:
+        return video_duration
+
+    speech_end = min(video_duration, max(0.0, last_caption_end))
+    if video_duration - speech_end <= _TAIL_TRIM_THRESHOLD_SEC:
+        return video_duration
+
+    min_duration = min(video_duration, 1.0)
+    return min(
+        video_duration,
+        max(speech_end, min_duration, speech_end + _TAIL_KEEP_AFTER_SPEECH_SEC),
+    )
+
+
 def _subtitle_image(text: str, *, width: int, height: int):
     from PIL import Image, ImageDraw
 
@@ -861,6 +879,7 @@ def _burn_subtitles(
     target_size: tuple[int, int] = (1080, 1920),
 ) -> None:
     import numpy as np
+    from moviepy.audio.fx.audio_fadeout import audio_fadeout
     from moviepy.editor import ColorClip, CompositeVideoClip, ImageClip, VideoFileClip
     from PIL import Image
 
@@ -875,9 +894,13 @@ def _burn_subtitles(
         canvas = ColorClip(target_size, color=(0, 0, 0), duration=video.duration)
         clips = [canvas, resized]
         captions = _parse_srt(subtitle_file)
+        last_caption_end = max((end for _start, end, _text in captions), default=None)
+        compose_end = _compose_end_time(video.duration, last_caption_end)
         logger.info(
             "avatar_talk.compose",
             video_duration_ms=int(round(video.duration * 1000)),
+            compose_end_ms=int(round(compose_end * 1000)),
+            speech_end_ms=int(round(last_caption_end * 1000)) if last_caption_end else None,
             caption_count=len(captions),
             target_width=width,
             target_height=height,
@@ -906,12 +929,22 @@ def _burn_subtitles(
         final = CompositeVideoClip(clips, size=target_size).set_duration(video.duration)
         if video.audio is not None:
             final = final.set_audio(video.audio)
+        if compose_end < video.duration:
+            final = final.subclip(0, compose_end)
+        if (
+            final.audio is not None
+            and last_caption_end is not None
+            and compose_end - last_caption_end >= _AUDIO_FADEOUT_SEC
+        ):
+            final = final.set_audio(final.audio.fx(audio_fadeout, _AUDIO_FADEOUT_SEC))
         output.parent.mkdir(parents=True, exist_ok=True)
         final.write_videofile(
             str(output),
             fps=24,
             codec="libx264",
             audio_codec="aac",
+            audio_bitrate="192k",
+            audio_fps=44100,
             audio=video.audio is not None,
             logger=None,
         )
