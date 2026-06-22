@@ -30,7 +30,6 @@ from app.workers.celery_app import celery_app
 logger = get_logger(__name__)
 
 _MIN_TIMELINE_COVERAGE_RATIO = 0.8
-_TIMELINE_DURATION_TOLERANCE_RATIO = 0.08
 _MAX_CAPTION_CHARS = 10
 _MIN_CAPTION_CHARS = 4
 _MAX_CAPTION_GAP_MS = 700
@@ -318,6 +317,7 @@ def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         audio_duration_ms=int(round(duration_sec * 1000)),
         clause_count=clause_count,
         caption_count=len(captions),
+        cue_ranges_ms=[{"start_ms": start, "end_ms": end} for start, end, _text in captions],
         source=source,
     )
     return ctx
@@ -335,9 +335,11 @@ def _script_timed_captions(
 
     timeline_items = _caption_timeline_items(timeline)
     duration_ms = max(1, int(round(duration_sec * 1000)))
-    if timeline_items and _timeline_items_cover_duration(timeline_items, duration_sec=duration_sec):
+    if (
+        len(timeline_items) >= len(clauses)
+        and _timeline_items_cover_duration(timeline_items, duration_sec=duration_sec)
+    ):
         captions, source = _time_clauses_from_timeline(clauses, timeline_items)
-        captions = _fit_timeline_to_duration(captions, duration_sec=duration_sec)
         return captions, source, len(clauses)
 
     return (
@@ -420,14 +422,40 @@ def _time_clauses_from_timeline(
             cursor += count
         return captions, "script_timeline_exact"
 
-    return (
-        _time_clauses_proportionally(
-            clauses,
-            span_start_ms=timeline_items[0][0],
-            span_end_ms=timeline_items[-1][1],
-        ),
-        "script_timeline_interpolated",
-    )
+    return _time_clauses_by_token_index(clauses, counts, total, timeline_items)
+
+
+def _time_clauses_by_token_index(
+    clauses: list[str],
+    counts: list[int],
+    total: int,
+    timeline_items: list[tuple[int, int]],
+) -> tuple[list[tuple[int, int, str]], str]:
+    if total <= 0:
+        return (
+            _time_clauses_proportionally(
+                clauses,
+                span_start_ms=timeline_items[0][0],
+                span_end_ms=timeline_items[-1][1],
+            ),
+            "script_timeline_interpolated",
+        )
+
+    token_count = len(timeline_items)
+    captions: list[tuple[int, int, str]] = []
+    cursor = 0
+    previous_end_idx = 0
+    for clause, count in zip(clauses, counts, strict=True):
+        start_idx = round(cursor / total * token_count)
+        cursor += count
+        end_idx = round(cursor / total * token_count)
+        start_idx = min(token_count - 1, max(previous_end_idx, start_idx))
+        end_idx = min(token_count, max(start_idx + 1, end_idx))
+        start_ms = timeline_items[start_idx][0]
+        end_ms = timeline_items[end_idx - 1][1]
+        captions.append((start_ms, max(start_ms + 1, end_ms), clause))
+        previous_end_idx = end_idx
+    return captions, "script_timeline_indexed"
 
 
 def _time_clauses_proportionally(
@@ -600,32 +628,6 @@ def _jieba_lcut(text: str) -> list[str]:
     for word in ("零门槛", "门槛", "高质量", "营销视频"):
         jieba.add_word(word, freq=1_000_000)
     return list(jieba.lcut(text, cut_all=False))
-
-
-def _fit_timeline_to_duration(
-    captions: list[tuple[int, int, str]],
-    *,
-    duration_sec: float,
-) -> list[tuple[int, int, str]]:
-    if not captions or duration_sec <= 0:
-        return captions
-    target_end_ms = max(1, int(round(duration_sec * 1000)))
-    timeline_end_ms = max(end_ms for _start_ms, end_ms, _text in captions)
-    if timeline_end_ms <= 0:
-        return captions
-    drift_ratio = abs(timeline_end_ms - target_end_ms) / target_end_ms
-    if drift_ratio <= _TIMELINE_DURATION_TOLERANCE_RATIO:
-        return captions
-
-    scale = target_end_ms / timeline_end_ms
-    scaled: list[tuple[int, int, str]] = []
-    previous_end = 0
-    for start_ms, end_ms, text in captions:
-        scaled_start = max(previous_end, int(round(start_ms * scale)))
-        scaled_end = max(scaled_start + 1, int(round(end_ms * scale)))
-        scaled.append((scaled_start, scaled_end, text))
-        previous_end = scaled_end
-    return scaled
 
 
 def _caption_visible_len(text: str) -> int:
