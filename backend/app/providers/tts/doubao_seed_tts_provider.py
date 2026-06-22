@@ -38,6 +38,7 @@ class DoubaoSeedTTSProvider:
         output_dir: str | None = None,
         request_timeout_seconds: float = 60.0,
         max_text_bytes: int = 1024,
+        aigc_watermark: bool = True,
     ) -> None:
         if not api_key and (not appid or not access_token):
             raise DoubaoSeedTTSError(
@@ -52,6 +53,7 @@ class DoubaoSeedTTSProvider:
         self.output_dir = Path(output_dir) if output_dir else None
         self.request_timeout_seconds = request_timeout_seconds
         self.max_text_bytes = max_text_bytes
+        self.aigc_watermark = aigc_watermark
         if http_client is None:
             import requests
 
@@ -118,7 +120,10 @@ class DoubaoSeedTTSProvider:
                     "enable_subtitle": True,
                 },
                 "additions": json.dumps(
-                    {"disable_markdown_filter": True, "aigc_watermark": True},
+                    {
+                        "disable_markdown_filter": True,
+                        "aigc_watermark": self.aigc_watermark,
+                    },
                     separators=(",", ":"),
                 ),
             },
@@ -317,8 +322,24 @@ def _doubao_seed_tts_factory(config: ProviderConfig) -> DoubaoSeedTTSProvider:
             values.get("request_timeout_seconds")
             or settings.engine_doubao_tts_request_timeout_seconds
         ),
+        aigc_watermark=_config_bool(
+            values,
+            "aigc_watermark",
+            default=settings.engine_doubao_tts_aigc_watermark,
+        ),
         output_dir=str(values.get("output_dir")) if values.get("output_dir") else None,
     )
+
+
+def _config_bool(values: Mapping[str, Any], key: str, *, default: bool) -> bool:
+    if key not in values or values[key] is None:
+        return default
+    value = values[key]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 register_provider("tts", "doubao-seed-tts", _doubao_seed_tts_factory)

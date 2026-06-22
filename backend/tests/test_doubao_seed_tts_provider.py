@@ -165,6 +165,40 @@ async def test_doubao_seed_tts_sends_auth_header_and_locked_request_body(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_doubao_seed_tts_can_disable_aigc_watermark_in_additions(
+    tmp_path: Path,
+):
+    from app.providers.tts.doubao_seed_tts_provider import DoubaoSeedTTSProvider
+
+    http = _FakeHTTP(
+        [
+            _seed_sse_response(
+                b"MP3",
+                words=[{"word": "hello", "startTime": 0.0, "endTime": 0.2}],
+            )
+        ]
+    )
+    provider = DoubaoSeedTTSProvider(
+        appid="doubao-appid",
+        access_token="seed-token",
+        http_client=http,
+        output_dir=str(tmp_path),
+        aigc_watermark=False,
+    )
+
+    await provider.synthesize_speech(
+        {
+            "text": "hello",
+            "voice": "zh_male_m191_uranus_bigtts",
+            "task_id": "tts-no-watermark-unit",
+        }
+    )
+
+    additions = json.loads(http.calls[0]["json"]["req_params"]["additions"])
+    assert additions == {"disable_markdown_filter": True, "aigc_watermark": False}
+
+
+@pytest.mark.asyncio
 async def test_doubao_seed_tts_splits_long_text_and_offsets_timeline(tmp_path: Path):
     from app.providers.tts.doubao_seed_tts_provider import DoubaoSeedTTSProvider
 
@@ -243,6 +277,36 @@ async def test_doubao_seed_tts_maps_speech_rate_and_raises_provider_error(tmp_pa
         )
 
     assert http.calls[0]["json"]["req_params"]["audio_params"]["speech_rate"] == 100
+
+
+def test_doubao_seed_tts_factory_injects_watermark_setting(monkeypatch):
+    from app.providers.tts import doubao_seed_tts_provider as module
+
+    monkeypatch.setattr(module.settings, "engine_doubao_tts_appid", "doubao-appid", raising=False)
+    monkeypatch.setattr(
+        module.settings,
+        "engine_doubao_tts_access_token",
+        "seed-token",
+        raising=False,
+    )
+    monkeypatch.setattr(module.settings, "engine_doubao_tts_api_key", "", raising=False)
+    monkeypatch.setattr(
+        module.settings,
+        "engine_doubao_tts_aigc_watermark",
+        False,
+        raising=False,
+    )
+
+    provider = module._doubao_seed_tts_factory(
+        ProviderConfig(
+            tenant_id=None,
+            capability="tts",
+            provider="doubao-seed-tts",
+            config={},
+        )
+    )
+
+    assert provider.aigc_watermark is False
 
 
 def test_tts_resolve_prefers_doubao_default_when_credentials_exist(monkeypatch):

@@ -63,6 +63,7 @@ def test_doubao_seed_tts_settings_are_env_driven(monkeypatch) -> None:
     monkeypatch.setenv("ENGINE_DOUBAO_TTS_ACCESS_TOKEN", "seed-token")
     monkeypatch.setenv("ENGINE_DOUBAO_TTS_RESOURCE_ID", "seed-tts-2.0")
     monkeypatch.setenv("ENGINE_DOUBAO_TTS_DEFAULT_VOICE", "zh_male_m191_uranus_bigtts")
+    monkeypatch.setenv("ENGINE_DOUBAO_TTS_AIGC_WATERMARK", "false")
     s = Settings(_env_file=None, jwt_secret_key=_JWT)
 
     assert s.engine_doubao_tts_appid == "doubao-appid"
@@ -73,3 +74,11 @@ def test_doubao_seed_tts_settings_are_env_driven(monkeypatch) -> None:
         "https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse"
     )
     assert s.engine_doubao_tts_request_timeout_seconds > 0
+    assert s.engine_doubao_tts_aigc_watermark is False
+
+
+def test_doubao_seed_tts_watermark_defaults_to_true(monkeypatch) -> None:
+    monkeypatch.delenv("ENGINE_DOUBAO_TTS_AIGC_WATERMARK", raising=False)
+    s = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    assert s.engine_doubao_tts_aigc_watermark is True
