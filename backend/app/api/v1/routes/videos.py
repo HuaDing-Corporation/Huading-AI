@@ -27,9 +27,9 @@ from app.schemas.videos import (
     VideoRead,
 )
 from app.services.progress import ProgressStore
-from app.services.quota import reserve_avatar_talk_quota
+from app.services.quota import reserve_avatar_talk_quota, reserve_seedance_i2v_quota
 from app.services.storage.base import ObjectStorage
-from app.workers.avatar_talk import generate_avatar_talk_task
+from app.workers.avatar_talk import generate_avatar_talk_task, generate_seedance_i2v_task
 from app.workers.video_tasks import generate_video_task
 
 router = APIRouter()
@@ -207,6 +207,53 @@ def _create_avatar_talk_video(
     return task_id
 
 
+def _create_seedance_i2v_video(
+    payload: VideoGenerateRequest,
+    *,
+    user: User,
+    db: Session,
+) -> str:
+    if not payload.voice_id:
+        raise AppError("seedance_i2v requires voice_id.", code="VALIDATION_ERROR", status_code=422)
+    voice = db.get(Voice, payload.voice_id)
+    if voice is None or not voice.is_active:
+        raise AppError("Voice not found.", code="VOICE_NOT_FOUND", status_code=404)
+
+    task_id = str(uuid4())
+    script = payload.script
+    task = VideoTask(
+        id=task_id,
+        tenant_id=user.tenant_id,
+        created_by_user_id=user.id,
+        status="queued",
+        topic=payload.topic,
+        script=script,
+        mode="seedance_i2v",
+        video_mode="seedance_i2v",
+        progress=0,
+        voice_id=payload.voice_id,
+        speed=Decimal(str(payload.speed)),
+        aspect_ratio=payload.aspect_ratio,
+        subtitle_enabled=payload.subtitle_enabled,
+        params={
+            "image_key": payload.image_key,
+            "estimated": True,
+        },
+    )
+    db.add(task)
+    db.flush()
+    reserve_seedance_i2v_quota(
+        db,
+        tenant_id=user.tenant_id,
+        video_task_id=task.id,
+        script=script or payload.topic,
+        speed=payload.speed,
+    )
+    db.commit()
+    _video_task_tenants[task_id] = user.tenant_id
+    return task_id
+
+
 @router.post("", response_model=ApiResponse[VideoAccepted], status_code=status.HTTP_202_ACCEPTED)
 def create_video(
     request: Request,
@@ -214,6 +261,14 @@ def create_video(
     user: User = CreateVideoPermissionDependency,
     db: Session = DbSessionDependency,
 ) -> ApiResponse[VideoAccepted]:
+    if payload.video_mode == "seedance_i2v":
+        task_id = _create_seedance_i2v_video(payload, user=user, db=db)
+        params = payload.model_dump()
+        params["tenant_id"] = user.tenant_id
+        params["video_task_id"] = task_id
+        generate_seedance_i2v_task.apply_async(args=[params], task_id=task_id, queue="avatar")
+        return ok(request, VideoAccepted(id=task_id, task_id=task_id, status="queued"))
+
     avatar_talk_requested = (
         payload.video_mode == "avatar_talk"
         or bool(payload.voice_id)

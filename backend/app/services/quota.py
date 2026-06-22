@@ -7,6 +7,7 @@ from decimal import ROUND_CEILING, Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.exceptions import AppError
 from app.db.models import CreditRate, Subscription, UsageRecord
 
@@ -143,6 +144,49 @@ def reserve_avatar_talk_quota(
         capability="avatar",
         provider="omnihuman",
         model="jimeng_realman_avatar_picture_omni_v15",
+        unit="second",
+        quantity=Decimal(seconds),
+        credits=credits,
+        cost_cents=0,
+        status="reserved",
+    )
+    db.add(usage_record)
+    return Reservation(subscription, usage_record, seconds, credits)
+
+
+def reserve_seedance_i2v_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    video_task_id: str,
+    script: str,
+    speed: Decimal | float | int,
+) -> Reservation:
+    subscription = active_subscription(db, tenant_id)
+    seconds = estimate_seconds(script, speed)
+    video_rate = _rate(
+        db,
+        tenant_id=tenant_id,
+        capability="video",
+        unit="second",
+        default=Decimal("2.0000"),
+    )
+    credits = (Decimal(seconds) * video_rate).quantize(Decimal("0.01"))
+    reservation_units = int(credits.to_integral_value(rounding=ROUND_CEILING))
+    if remaining_credits(subscription) < reservation_units:
+        raise AppError(
+            "Insufficient tenant quota.",
+            code="TENANT_QUOTA_EXCEEDED",
+            status_code=403,
+        )
+    subscription.quota_credits_reserved += reservation_units
+    usage_record = UsageRecord(
+        tenant_id=tenant_id,
+        subscription_id=subscription.id,
+        video_task_id=video_task_id,
+        capability="video",
+        provider="seedance",
+        model=settings.engine_seedance_model,
         unit="second",
         quantity=Decimal(seconds),
         credits=credits,

@@ -14,6 +14,7 @@ celery_app.conf.update(
     task_routes={
         "app.workers.tasks.*": {"queue": "default"},
         "app.workers.avatar_talk.generate": {"queue": "avatar"},
+        "app.workers.avatar_talk.generate_seedance_i2v": {"queue": "avatar"},
     },
     task_always_eager=settings.celery_task_always_eager,
     task_store_eager_result=False,

@@ -52,6 +52,7 @@ def generate_seedance_video(
     image: str | None = None,
     image_path: str | None = None,
     save_path: str | None = None,
+    progress_callback: Any | None = None,
     **params: Any,
 ) -> SeedanceResult:
     """Generate a video via Seedance.
@@ -63,5 +64,10 @@ def generate_seedance_video(
     """
     client = create_seedance_client(cfg)
     return client.generate_video(
-        prompt, image=image, image_path=image_path, save_path=save_path, **params
+        prompt,
+        image=image,
+        image_path=image_path,
+        save_path=save_path,
+        progress_callback=progress_callback,
+        **params,
     )

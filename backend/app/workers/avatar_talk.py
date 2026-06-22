@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import tempfile
 from dataclasses import dataclass
@@ -35,6 +36,12 @@ _TAIL_TRIM_THRESHOLD_SEC = 0.6
 _TAIL_KEEP_AFTER_SPEECH_SEC = 0.5
 _AUDIO_FADEOUT_SEC = 0.3
 _SCRIPT_CLAUSE_ENDINGS = tuple(".!?;。！？；，、")
+_SEEDANCE_I2V_MIN_DURATION_SEC = 2
+_SEEDANCE_I2V_MAX_DURATION_SEC = 12
+_SEEDANCE_I2V_PROMPT_SUFFIX = (
+    "产品展示，镜头平稳推进，明亮商业棚拍，干净背景，"
+    "突出商品材质与卖点，9:16竖屏电商带货短视频。"
+)
 
 
 @dataclass
@@ -63,6 +70,51 @@ def _task_or_raise(db: Session, *, tenant_id: str, task_id: str) -> VideoTask:
 
 def _work_dir(task_id: str) -> Path:
     return Path(tempfile.gettempdir()) / "huading-avatar-talk" / task_id
+
+
+def _resolve_i2v_image(params: dict[str, Any]) -> str:
+    from app.workers.video_tasks import _resolve_i2v_image as resolve_i2v_image
+
+    return resolve_i2v_image(params)
+
+
+def _seedance_i2v_prompt(topic: str | None) -> str:
+    subject = str(topic or "").strip()
+    if not subject:
+        return _SEEDANCE_I2V_PROMPT_SUFFIX
+    return f"{subject}。{_SEEDANCE_I2V_PROMPT_SUFFIX}"
+
+
+def _seedance_i2v_duration(duration_sec: float | None) -> int:
+    raw = int(math.ceil(float(duration_sec or 5)))
+    return max(_SEEDANCE_I2V_MIN_DURATION_SEC, min(_SEEDANCE_I2V_MAX_DURATION_SEC, raw))
+
+
+def _seedance_engine_config() -> Any:
+    from app.engine import EngineConfig
+
+    if not settings.engine_seedance_api_key:
+        raise RuntimeError("Seedance is not configured (set ENGINE_SEEDANCE_API_KEY).")
+    return EngineConfig(
+        llm_api_key=settings.engine_llm_api_key or "unused",
+        llm_base_url=settings.engine_llm_base_url or "https://unused.invalid",
+        llm_model=settings.engine_llm_model or "unused",
+        seedance_api_key=settings.engine_seedance_api_key,
+        seedance_base_url=settings.engine_seedance_base_url,
+        seedance_model=settings.engine_seedance_model,
+        seedance_request_timeout_seconds=settings.engine_seedance_request_timeout_seconds,
+        seedance_poll_interval_seconds=settings.engine_seedance_poll_interval_seconds,
+        seedance_timeout_seconds=settings.engine_seedance_timeout_seconds,
+        default_template=settings.engine_default_template,
+        runtime_root=settings.engine_runtime_root,
+        browser_channel=settings.engine_browser_channel,
+    )
+
+
+def generate_seedance_video(*args: Any, **kwargs: Any) -> Any:
+    from app.engine.video import generate_seedance_video as run_generate_seedance_video
+
+    return run_generate_seedance_video(*args, **kwargs)
 
 
 def _download_bytes(url: str) -> bytes:
@@ -269,6 +321,50 @@ def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     )
     ctx.base_video_bytes = _download_bytes(str(result["video_url"]))
     return ctx
+
+
+def seedance_i2v_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
+    task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
+    work_dir = _work_dir(ctx.task_id)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    params = dict(task.params or {})
+    params["tenant_id"] = ctx.tenant_id
+    image_path = Path(_resolve_i2v_image(params))
+    save_path = work_dir / "seedance.mp4"
+
+    def on_seedance_progress(event: dict[str, Any]) -> None:
+        poll_count = int(event.get("poll_count") or 1)
+        ctx.store.update(
+            _scoped_id(ctx.tenant_id, ctx.task_id),
+            status="running",
+            progress=min(79, 25 + poll_count),
+            step="seedance",
+            stage="seedance_generating",
+        )
+
+    try:
+        generate_seedance_video(
+            _seedance_engine_config(),
+            _seedance_i2v_prompt(task.topic),
+            image_path=str(image_path),
+            save_path=str(save_path),
+            image_role="first_frame",
+            ratio="9:16",
+            resolution="720p",
+            generate_audio=False,
+            duration=_seedance_i2v_duration(ctx.duration_sec),
+            progress_callback=on_seedance_progress,
+        )
+        if not save_path.exists() or save_path.stat().st_size <= 0:
+            raise RuntimeError("Seedance did not produce a video file.")
+        ctx.base_video_bytes = save_path.read_bytes()
+        ctx.use_tts_audio = True
+        return ctx
+    finally:
+        try:
+            image_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("seedance_i2v.input_cleanup_failed", image_path=str(image_path))
 
 
 def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
@@ -594,17 +690,25 @@ def compose_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     work_dir.mkdir(parents=True, exist_ok=True)
     base_path = work_dir / "base.mp4"
     subtitle_path = work_dir / "subtitle.srt"
+    audio_path = work_dir / "voiceover.mp3"
     output_path = work_dir / "final.mp4"
     base_path.write_bytes(base_video_bytes)
     subtitle_path.write_bytes(ctx.storage.get_bytes(subtitle_key))
-    _burn_subtitles(
-        base_path,
-        subtitle_path,
-        output_path,
-        task_id=ctx.task_id,
-        producer=settings.engine_aigc_producer,
-        propagate_id=ctx.tenant_id,
-    )
+    external_audio_path = None
+    if getattr(ctx, "use_tts_audio", False):
+        audio_key = getattr(ctx, "audio_key", None)
+        if not audio_key:
+            raise RuntimeError("TTS audio is missing for compose.")
+        audio_path.write_bytes(ctx.storage.get_bytes(audio_key))
+        external_audio_path = audio_path
+    burn_kwargs = {
+        "task_id": ctx.task_id,
+        "producer": settings.engine_aigc_producer,
+        "propagate_id": ctx.tenant_id,
+    }
+    if external_audio_path is not None:
+        burn_kwargs["audio_path"] = external_audio_path
+    _burn_subtitles(base_path, subtitle_path, output_path, **burn_kwargs)
     ctx.final_video_bytes = output_path.read_bytes()
     return ctx
 
@@ -783,6 +887,7 @@ def _burn_subtitles(
     subtitle_file: Path,
     output: Path,
     *,
+    audio_path: Path | None = None,
     target_size: tuple[int, int] = (1080, 1920),
     task_id: str | None = None,
     producer: str | None = None,
@@ -790,7 +895,14 @@ def _burn_subtitles(
 ) -> None:
     import numpy as np
     from moviepy.audio.fx.audio_fadeout import audio_fadeout
-    from moviepy.editor import ColorClip, CompositeVideoClip, ImageClip, VideoFileClip
+    from moviepy.editor import (
+        AudioFileClip,
+        ColorClip,
+        CompositeVideoClip,
+        ImageClip,
+        VideoFileClip,
+    )
+    from moviepy.video.fx.freeze import freeze
     from PIL import Image
 
     if not hasattr(Image, "ANTIALIAS"):
@@ -798,34 +910,57 @@ def _burn_subtitles(
 
     width, height = target_size
     video = VideoFileClip(str(base_video))
+    audio_clip = None
+    final = None
     try:
+        source_video = video
+        compose_duration = float(video.duration or 0)
+        if audio_path is not None:
+            audio_clip = AudioFileClip(str(audio_path))
+            audio_duration = max(0.0, float(audio_clip.duration or 0))
+            if audio_duration > compose_duration:
+                source_video = video.fx(
+                    freeze,
+                    t=max(0.0, compose_duration - 0.05),
+                    freeze_duration=audio_duration - compose_duration,
+                )
+            if audio_duration > 0:
+                compose_duration = audio_duration
+
         scale = min(width / video.w, height / video.h)
-        resized = video.resize(scale).set_position("center")
-        canvas = ColorClip(target_size, color=(0, 0, 0), duration=video.duration)
+        resized = source_video.resize(scale).set_position("center")
+        canvas = ColorClip(target_size, color=(0, 0, 0), duration=compose_duration)
         clips = [canvas, resized]
         captions = _parse_srt(subtitle_file)
         last_caption_end = max((end for _start, end, _text in captions), default=None)
-        compose_end = _compose_end_time(video.duration, last_caption_end)
+        compose_end = (
+            compose_duration
+            if audio_path is not None
+            else _compose_end_time(float(video.duration or 0), last_caption_end)
+        )
         logger.info(
             "avatar_talk.compose",
             video_duration_ms=int(round(video.duration * 1000)),
             compose_end_ms=int(round(compose_end * 1000)),
             speech_end_ms=int(round(last_caption_end * 1000)) if last_caption_end else None,
             caption_count=len(captions),
+            external_audio=audio_path is not None,
             target_width=width,
             target_height=height,
         )
         for start, end, text in captions:
-            if end <= 0 or start >= video.duration:
+            if end <= 0 or start >= compose_end:
                 continue
+            caption_start = max(0, start)
+            caption_end = min(end, compose_end)
             subtitle_image = _subtitle_image(text, width=width, height=height)
             caption = ImageClip(
                 np.array(subtitle_image),
                 transparent=True,
             )
             caption = (
-                caption.set_start(max(0, start))
-                .set_duration(max(0.1, min(end, video.duration) - max(0, start)))
+                caption.set_start(caption_start)
+                .set_duration(max(0.1, caption_end - caption_start))
                 .set_position(
                     _caption_position(
                         video_w=video.w,
@@ -836,10 +971,12 @@ def _burn_subtitles(
                 )
             )
             clips.append(caption)
-        final = CompositeVideoClip(clips, size=target_size).set_duration(video.duration)
-        if video.audio is not None:
+        final = CompositeVideoClip(clips, size=target_size).set_duration(compose_duration)
+        if audio_clip is not None:
+            final = final.set_audio(audio_clip)
+        elif video.audio is not None:
             final = final.set_audio(video.audio)
-        if compose_end < video.duration:
+        if audio_clip is None and compose_end < video.duration:
             final = final.subclip(0, compose_end)
         if (
             final.audio is not None
@@ -855,7 +992,7 @@ def _burn_subtitles(
             audio_codec="aac",
             audio_bitrate="192k",
             audio_fps=44100,
-            audio=video.audio is not None,
+            audio=final.audio is not None,
             ffmpeg_params=_aigc_metadata_params(
                 task_id=task_id,
                 producer=producer or settings.engine_aigc_producer,
@@ -865,8 +1002,11 @@ def _burn_subtitles(
             else [],
             logger=None,
         )
-        final.close()
     finally:
+        if final is not None:
+            final.close()
+        if audio_clip is not None:
+            audio_clip.close()
         video.close()
 
 
@@ -893,6 +1033,16 @@ AVATAR_TALK_STEPS = [
     ("tts", 20, tts_step),
     ("avatar", 85, avatar_step),
     ("subtitle", 90, subtitle_step),
+    ("compose", 95, compose_step),
+    ("upload", 98, upload_step),
+]
+
+
+ECOM_I2V_STEPS = [
+    ("script", 10, script_step),
+    ("tts", 25, tts_step),
+    ("seedance", 80, seedance_i2v_step),
+    ("subtitle", 88, subtitle_step),
     ("compose", 95, compose_step),
     ("upload", 98, upload_step),
 ]
@@ -986,9 +1136,106 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
             raise
 
 
+def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
+    store = build_progress_store(settings.redis_url)
+    storage = create_object_storage(settings)
+    scoped_id = _scoped_id(tenant_id, task_id)
+    with SessionLocal() as db:
+        task = _task_or_raise(db, tenant_id=tenant_id, task_id=task_id)
+        task.status = "running"
+        task.progress = max(task.progress or 0, 1)
+        task.started_at = task.started_at or datetime.now(UTC)
+        db.commit()
+        store.update(scoped_id, status="running", progress=1, step="queued")
+
+        ctx = AvatarTalkContext(
+            task_id=task_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=store,
+            storage=storage,
+        )
+        try:
+            for step, progress, fn in ECOM_I2V_STEPS:
+                ctx = fn(ctx)
+                task.progress = int(progress)
+                db.commit()
+                store.update(scoped_id, status="running", progress=int(progress), step=step)
+
+            task.status = "done"
+            task.progress = 100
+            task.finished_at = datetime.now(UTC)
+            if ctx.storage_key:
+                task.storage_key = ctx.storage_key
+            if ctx.thumbnail_key:
+                task.thumbnail_key = ctx.thumbnail_key
+            if ctx.size_bytes is not None:
+                task.size_bytes = ctx.size_bytes
+            if ctx.duration_sec is not None:
+                task.duration_sec = float(ctx.duration_sec)
+            actual_seconds = max(1, int(round(ctx.duration_sec or 1)))
+            settle_reserved_quota(
+                db,
+                tenant_id=tenant_id,
+                video_task_id=task_id,
+                actual_seconds=actual_seconds,
+                cost_cents=actual_seconds * 200,
+            )
+            db.commit()
+            store.update(
+                scoped_id,
+                status="done",
+                progress=100,
+                step="done",
+                playback_url=(
+                    storage.presign_get_url(
+                        task.storage_key,
+                        expires_in=settings.engine_s3_presign_ttl,
+                    )
+                    if task.storage_key
+                    else None
+                ),
+                download_url=(
+                    storage.presign_get_url(
+                        task.storage_key,
+                        expires_in=settings.engine_s3_presign_ttl,
+                        download_filename=f"{task.id}.mp4",
+                    )
+                    if task.storage_key
+                    else None
+                ),
+            )
+            return {"task_id": task_id, "status": "done"}
+        except Exception as exc:
+            task.status = "failed"
+            task.error_code = "SEEDANCE_I2V_FAILED"
+            task.error_message = str(exc)
+            task.error = str(exc)
+            task.finished_at = datetime.now(UTC)
+            release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
+            db.commit()
+            store.update(
+                scoped_id,
+                status="failed",
+                progress=task.progress or 0,
+                step="failed",
+                error_code="SEEDANCE_I2V_FAILED",
+                error_message=str(exc),
+            )
+            raise
+
+
 @celery_app.task(bind=True, name="app.workers.avatar_talk.generate")
 def generate_avatar_talk_task(self, params: dict[str, Any]) -> dict[str, Any]:
     task_id = self.request.id or params.get("video_task_id") or "unknown"
     tenant_id = str(params["tenant_id"])
     logger.info("avatar_talk.queued", task_id=task_id, tenant_id=tenant_id)
     return run_avatar_talk_pipeline(tenant_id=tenant_id, task_id=task_id)
+
+
+@celery_app.task(bind=True, name="app.workers.avatar_talk.generate_seedance_i2v")
+def generate_seedance_i2v_task(self, params: dict[str, Any]) -> dict[str, Any]:
+    task_id = self.request.id or params.get("video_task_id") or "unknown"
+    tenant_id = str(params["tenant_id"])
+    logger.info("seedance_i2v.queued", task_id=task_id, tenant_id=tenant_id)
+    return run_seedance_i2v_pipeline(tenant_id=tenant_id, task_id=task_id)

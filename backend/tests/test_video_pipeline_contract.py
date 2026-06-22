@@ -84,6 +84,12 @@ def _seed_billing(db, tenant_id: str) -> Subscription:
                 unit="second",
                 credits_per_unit=Decimal("0.2000"),
             ),
+            CreditRate(
+                tenant_id=None,
+                capability="video",
+                unit="second",
+                credits_per_unit=Decimal("2.0000"),
+            ),
         ]
     )
     db.commit()
@@ -296,6 +302,84 @@ def test_avatar_talk_order_without_script_leaves_worker_to_generate_it(
         assert task is not None
         assert task.topic == "cashmere coat"
         assert task.script is None
+
+
+def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(db, auth_context["tenant_id"])
+        voice, _avatar = _seed_voice_and_avatar(db, auth_context["tenant_id"])
+        voice_id = voice.id
+        subscription_id = subscription.id
+
+    enqueued: dict[str, object] = {}
+
+    class _FakeI2VTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            enqueued.update({"args": args, "task_id": task_id, "queue": queue})
+            return type("Result", (), {"status": "PENDING"})()
+
+    class _UnexpectedAvatarTask:
+        def apply_async(self, **_kwargs):  # pragma: no cover
+            raise AssertionError("seedance_i2v must route before avatar_talk")
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route, "generate_seedance_i2v_task", _FakeI2VTask())
+    monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _UnexpectedAvatarTask())
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/videos",
+        json={
+            "topic": "premium scarf product benefits",
+            "video_mode": "seedance_i2v",
+            "image_key": "uploads/product.png",
+            "voice_id": voice_id,
+            "speed": 1.0,
+            "aspect_ratio": "9:16",
+            "subtitle_enabled": True,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 202
+    data = resp.json()["data"]
+    assert enqueued["task_id"] == data["id"]
+    assert enqueued["queue"] == "avatar"
+    assert enqueued["args"][0]["video_mode"] == "seedance_i2v"
+    assert enqueued["args"][0]["image_key"] == "uploads/product.png"
+    with auth_db() as db:
+        task = db.get(VideoTask, data["id"])
+        assert task is not None
+        assert task.mode == "seedance_i2v"
+        assert task.video_mode == "seedance_i2v"
+        assert task.voice_id == voice_id
+        assert task.params["image_key"] == "uploads/product.png"
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved > 5
+        reserved = db.query(UsageRecord).filter_by(video_task_id=data["id"]).one()
+        assert reserved.status == "reserved"
+        assert reserved.capability == "video"
+        assert reserved.provider == "seedance"
+
+
+def test_seedance_i2v_order_requires_voice(auth_context) -> None:
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/videos",
+        json={
+            "topic": "premium scarf product benefits",
+            "video_mode": "seedance_i2v",
+            "image_key": "uploads/product.png",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 422
 
 
 def test_video_list_uses_limit_offset_and_returns_items_total(
