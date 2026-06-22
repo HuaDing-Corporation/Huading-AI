@@ -644,65 +644,6 @@ def test_subtitle_step_keeps_long_unpunctuated_script_as_single_cue(tmp_path: Pa
     assert captions == [(0.0, timeline[-1]["end_ms"] / 1000, script)]
 
 
-def test_timeline_captions_groups_word_level_chinese_into_readable_cues():
-    text = "华鼎AI短视频引擎，让您轻松实现批量生成高质量短视频。智能高效，助力品牌快速获客。"
-    timeline = _word_timeline(text)
-
-    captions = avatar_talk._timeline_captions(timeline)
-    caption_texts = [caption[2] for caption in captions]
-
-    assert len(captions) < len(timeline) // 3
-    assert all(1 < len(text) <= 16 for text in caption_texts)
-    assert "".join(caption_texts) == text
-    assert any(text.endswith("，") for text in caption_texts)
-    assert any(text.endswith("。") for text in caption_texts)
-    assert captions[0][0] == timeline[0]["start_ms"]
-    assert captions[-1][1] == timeline[-1]["end_ms"]
-    assert all(end > start for start, end, _text in captions)
-
-
-def test_timeline_captions_splits_on_long_pause_between_words():
-    text = "品牌增长稳定"
-    timeline = _word_timeline(text, gap_after_index=1, gap_ms=850)
-
-    captions = avatar_talk._timeline_captions(timeline)
-
-    assert [caption[2] for caption in captions] == ["品牌", "增长稳定"]
-    assert captions[0][1] == timeline[1]["end_ms"]
-    assert captions[1][0] == timeline[2]["start_ms"]
-
-
-def test_timeline_captions_keep_words_intact_and_single_line_short():
-    text = "零门槛制作高质量营销视频，品牌获客更轻松。"
-    timeline = _word_timeline(text, step_ms=100)
-
-    captions = avatar_talk._timeline_captions(timeline)
-    caption_texts = [caption[2] for caption in captions]
-
-    assert "".join(caption_texts) == text
-    assert all(
-        avatar_talk._caption_visible_len(caption) <= avatar_talk._MAX_CAPTION_CHARS
-        for caption in caption_texts
-    )
-    for term in ("门槛", "高质量", "营销视频"):
-        assert any(term in caption for caption in caption_texts)
-    assert captions[0][0] == timeline[0]["start_ms"]
-    assert captions[-1][1] == timeline[-1]["end_ms"]
-
-
-def test_timeline_captions_are_denser_than_previous_long_cues():
-    text = "零门槛制作高质量营销视频让品牌获客更轻松"
-    timeline = _word_timeline(text, step_ms=100)
-
-    captions = avatar_talk._timeline_captions(timeline)
-
-    assert len(captions) >= 3
-    assert all(
-        avatar_talk._caption_visible_len(caption[2]) <= avatar_talk._MAX_CAPTION_CHARS
-        for caption in captions
-    )
-
-
 def test_caption_position_stays_inside_letterboxed_content():
     band_height = 260
     position = avatar_talk._caption_position(

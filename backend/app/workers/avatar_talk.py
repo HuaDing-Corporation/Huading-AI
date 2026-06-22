@@ -31,15 +31,10 @@ from app.workers.celery_app import celery_app
 logger = get_logger(__name__)
 
 _MIN_TIMELINE_COVERAGE_RATIO = 0.8
-_MAX_CAPTION_CHARS = 10
-_MIN_CAPTION_CHARS = 4
-_MAX_CAPTION_GAP_MS = 700
 _TAIL_TRIM_THRESHOLD_SEC = 0.6
 _TAIL_KEEP_AFTER_SPEECH_SEC = 0.5
 _AUDIO_FADEOUT_SEC = 0.3
 _SCRIPT_CLAUSE_ENDINGS = tuple(".!?;。！？；，、")
-_STRONG_CAPTION_ENDINGS = tuple(".!?。！？…")
-_WEAK_CAPTION_ENDINGS = tuple(",，、;；:：")
 
 
 @dataclass
@@ -508,112 +503,6 @@ def _is_script_clause_punctuation(text: str) -> bool:
     return len(cleaned) == 1 and cleaned in _SCRIPT_CLAUSE_ENDINGS
 
 
-def _timeline_captions(timeline: list[dict[str, Any]]) -> list[tuple[int, int, str]]:
-    return _group_word_timeline(timeline)
-
-
-def _group_word_timeline(timeline: list[dict[str, Any]]) -> list[tuple[int, int, str]]:
-    words: list[tuple[int, int, str]] = []
-    for item in timeline:
-        raw_text = str(item.get("text") or "")
-        if not _clean_caption_text(raw_text):
-            continue
-        start_ms = int(item.get("start_ms") or 0)
-        end_ms = int(item.get("end_ms") or start_ms + 1000)
-        if end_ms <= start_ms:
-            end_ms = start_ms + 1000
-        words.append((start_ms, end_ms, raw_text))
-    words = _timeline_caption_words(words)
-
-    captions: list[tuple[int, int, str]] = []
-    group_start = 0
-    group_end = 0
-    group_texts: list[str] = []
-
-    def group_text() -> str:
-        return "".join(group_texts)
-
-    def flush_group() -> None:
-        nonlocal group_start, group_end, group_texts
-        text = _clean_caption_text(group_text())
-        if text:
-            captions.append((group_start, max(group_start + 1, group_end), text))
-        group_start = 0
-        group_end = 0
-        group_texts = []
-
-    for index, (start_ms, end_ms, text) in enumerate(words):
-        next_text = words[index + 1][2] if index + 1 < len(words) else ""
-        candidate_len = _caption_visible_len(group_text() + text)
-        if (
-            group_texts
-            and _is_caption_punctuation(next_text)
-            and candidate_len >= _MAX_CAPTION_CHARS
-        ):
-            flush_group()
-        elif group_texts and candidate_len > _MAX_CAPTION_CHARS:
-            flush_group()
-
-        if not group_texts:
-            group_start = start_ms
-        group_texts.append(text)
-        group_end = end_ms
-
-        visible_len = _caption_visible_len(group_text())
-        next_start = words[index + 1][0] if index + 1 < len(words) else None
-        gap_to_next = next_start - end_ms if next_start is not None else 0
-        if (
-            _ends_with(group_text(), _STRONG_CAPTION_ENDINGS)
-            or (
-                _ends_with(group_text(), _WEAK_CAPTION_ENDINGS)
-                and visible_len >= _MIN_CAPTION_CHARS
-            )
-            or visible_len >= _MAX_CAPTION_CHARS
-            or gap_to_next > _MAX_CAPTION_GAP_MS
-        ):
-            flush_group()
-
-    if group_texts:
-        flush_group()
-    return captions
-
-
-def _timeline_caption_words(
-    words: list[tuple[int, int, str]],
-) -> list[tuple[int, int, str]]:
-    if not _looks_character_level(words):
-        return words
-
-    text = "".join(word for _start_ms, _end_ms, word in words)
-    tokens = _segment_caption_words(text)
-    if not tokens:
-        return words
-
-    grouped: list[tuple[int, int, str]] = []
-    cursor = 0
-    for token in tokens:
-        token_len = len(token)
-        if token_len <= 0 or cursor + token_len > len(words):
-            return words
-        token_words = words[cursor : cursor + token_len]
-        if "".join(word for _start_ms, _end_ms, word in token_words) != token:
-            return words
-        grouped.append((token_words[0][0], token_words[-1][1], token))
-        cursor += token_len
-
-    if cursor != len(words):
-        return words
-    return grouped
-
-
-def _looks_character_level(words: list[tuple[int, int, str]]) -> bool:
-    visible_words = [word for _start_ms, _end_ms, word in words if _caption_visible_len(word)]
-    if len(visible_words) < 2:
-        return False
-    single_units = sum(1 for word in visible_words if _caption_visible_len(word) <= 1)
-    return single_units / len(visible_words) >= 0.8
-
-
 def _segment_caption_words(text: str) -> list[str]:
     if not text:
         return []
@@ -632,21 +521,6 @@ def _jieba_lcut(text: str) -> list[str]:
     for word in ("零门槛", "门槛", "高质量", "营销视频"):
         jieba.add_word(word, freq=1_000_000)
     return list(jieba.lcut(text, cut_all=False))
-
-
-def _caption_visible_len(text: str) -> int:
-    return len(re.sub(r"\s+", "", _clean_caption_text(text)))
-
-
-def _ends_with(text: str, endings: tuple[str, ...]) -> bool:
-    return _clean_caption_text(text).endswith(endings)
-
-
-def _is_caption_punctuation(text: str) -> bool:
-    cleaned = _clean_caption_text(text)
-    return len(cleaned) == 1 and cleaned.endswith(
-        _STRONG_CAPTION_ENDINGS + _WEAK_CAPTION_ENDINGS
-    )
 
 
 def _fallback_captions(text: str, *, duration_sec: float) -> list[tuple[int, int, str]]:
