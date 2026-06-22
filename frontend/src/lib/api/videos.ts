@@ -1,9 +1,14 @@
 import { API_BASE_URL, ApiError, apiFetch, authHeaders } from "@/lib/api/client";
 import { authStore } from "@/lib/auth/store";
-import type { CreateVideoRequest, VideoAccepted, VideoDetail, VideoEvent, VideoListItem, VideoListResponse } from "@/lib/api/types";
+import type { CreateVideoRequest, EstimateResponse, VideoAccepted, VideoDetail, VideoEvent, VideoListItem, VideoListResponse } from "@/lib/api/types";
 
 export function createVideo(input: CreateVideoRequest): Promise<VideoAccepted> {
   return apiFetch<VideoAccepted>("/api/v1/videos", { method: "POST", body: input });
+}
+
+/** Estimate the credits a request would consume — shown in the 确定生成 dialog. */
+export function estimateVideo(input: CreateVideoRequest): Promise<EstimateResponse> {
+  return apiFetch<EstimateResponse>("/api/v1/videos/estimate", { method: "POST", body: input });
 }
 
 /** Authoritative record for one video (status + playback/download URLs). */

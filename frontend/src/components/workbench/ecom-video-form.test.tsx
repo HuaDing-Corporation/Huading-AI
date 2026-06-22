@@ -3,10 +3,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const taskMocks = vi.hoisted(() => ({ createAndTrack: vi.fn() }));
 const uploadMock = vi.hoisted(() => ({ mutateAsync: vi.fn() }));
+const estimateMock = vi.hoisted(() => ({ mutate: vi.fn() }));
 
 vi.mock("@/lib/api/hooks", () => ({
   useScriptGenerate: () => ({ mutateAsync: vi.fn().mockResolvedValue({ script: "s" }), isPending: false }),
   useUploadProductImage: () => ({ mutateAsync: uploadMock.mutateAsync, isPending: false }),
+  useEstimateVideo: () => ({
+    mutate: estimateMock.mutate,
+    reset: vi.fn(),
+    isPending: false,
+    data: { estimated_credits: 12, unit: "credits" }
+  }),
   useVoices: () => ({
     data: [
       { id: "v1", provider: "doubao", voice_code: "c", display_name: "豆包女声", gender: null, language: null }
@@ -61,6 +68,7 @@ describe("EcomVideoForm (电商带货 i2v)", () => {
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
 
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     const [request, topic] = taskMocks.createAndTrack.mock.calls[0];
@@ -89,6 +97,7 @@ describe("EcomVideoForm (电商带货 i2v)", () => {
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
 
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0]).toMatchObject({
@@ -115,8 +124,35 @@ describe("EcomVideoForm (电商带货 i2v)", () => {
     fireEvent.change(durationInput, { target: { value: "90" } });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
 
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0]).toMatchObject({ duration_sec: 90 });
+  });
+
+  it("点生成→弹确认窗（请求 estimate），取消则不提交", async () => {
+    render(<EcomVideoForm />);
+    fireEvent.change(screen.getByPlaceholderText(/输入产品卖点/), { target: { value: "保温杯" } });
+    selectProductImage();
+
+    const generate = screen.getByRole("button", { name: /生成视频/ });
+    await waitFor(() => expect(generate).toBeEnabled());
+    fireEvent.click(generate);
+
+    // Confirm dialog appears and the estimate was requested with the i2v body.
+    expect(await screen.findByText("确定生成")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(estimateMock.mutate).toHaveBeenCalledWith(
+        expect.objectContaining({ video_mode: "seedance_i2v", duration_sec: 30 })
+      )
+    );
+    expect(screen.getByText("12")).toBeInTheDocument(); // 预计消耗 12 积分
+    expect(
+      screen.getByText("确定生成即会消耗积分，生成过程中无法取消！")
+    ).toBeInTheDocument();
+
+    // 取消 → no submit (nothing charged).
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(taskMocks.createAndTrack).not.toHaveBeenCalled();
   });
 });

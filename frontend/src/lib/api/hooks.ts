@@ -7,7 +7,7 @@ import { getQuota } from "@/lib/api/quota";
 import { generateScript } from "@/lib/api/scripts";
 import { uploadImage, uploadProductImage } from "@/lib/api/uploads";
 import { listVoices } from "@/lib/api/voices";
-import { createVideo, getVideo, listVideos } from "@/lib/api/videos";
+import { createVideo, estimateVideo, getVideo, listVideos } from "@/lib/api/videos";
 import type { CreateVideoRequest } from "@/lib/api/types";
 import { useAuth } from "@/lib/auth/auth-context";
 
@@ -25,6 +25,9 @@ export function useCreateVideo() {
     mutationFn: (input: CreateVideoRequest) => createVideo(input),
     onSuccess: () => void qc.invalidateQueries({ queryKey: videoKeys.list() })
   });
+}
+export function useEstimateVideo() {
+  return useMutation({ mutationFn: (input: CreateVideoRequest) => estimateVideo(input) });
 }
 export function useUploadImage() {
   return useMutation({ mutationFn: (file: File) => uploadImage(file) });

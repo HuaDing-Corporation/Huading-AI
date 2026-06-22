@@ -15,6 +15,12 @@ vi.mock("@/lib/api/hooks", () => ({
   }),
   useAvatarPresets: () => ({
     data: [{ asset_id: "p1", display_name: "默认主播", thumbnail_url: "https://x/p1.jpg" }]
+  }),
+  useEstimateVideo: () => ({
+    mutate: vi.fn(),
+    reset: vi.fn(),
+    isPending: false,
+    data: { estimated_credits: 10, unit: "credits" }
   })
 }));
 vi.mock("@/lib/videos/tasks-context", () => ({ useVideoTasks: () => taskMocks }));
@@ -23,10 +29,12 @@ import { NewVideoForm } from "./new-video-form";
 
 afterEach(() => vi.clearAllMocks());
 
-function fillAndSubmit() {
+// 生成视频 now opens the 确定生成 dialog; the real submit happens on 确定.
+async function fillAndSubmit() {
   fireEvent.change(screen.getByPlaceholderText(/输入一句话主题/), { target: { value: "咖啡" } });
   fireEvent.click(screen.getByText("默认主播")); // select preset avatar; voice auto-defaults
   fireEvent.click(screen.getByRole("button", { name: /生成视频/ }));
+  fireEvent.click(await screen.findByRole("button", { name: "确定" }));
 }
 
 describe("NewVideoForm error display (P2)", () => {
@@ -35,7 +43,7 @@ describe("NewVideoForm error display (P2)", () => {
       new ApiError("Active subscription not found.", "subscription_not_found", 404)
     );
     render(<NewVideoForm />);
-    fillAndSubmit();
+    await fillAndSubmit();
     await waitFor(() =>
       expect(screen.getByText("Active subscription not found.")).toBeInTheDocument()
     );
@@ -46,7 +54,7 @@ describe("NewVideoForm error display (P2)", () => {
       new ApiError("Insufficient tenant quota.", "tenant_quota_exceeded", 403)
     );
     render(<NewVideoForm />);
-    fillAndSubmit();
+    await fillAndSubmit();
     await waitFor(() =>
       expect(screen.getByText("额度不足，无法生成，请充值或精简任务")).toBeInTheDocument()
     );
