@@ -453,6 +453,13 @@ def _caption_timeline_from_script(script: str, *, step_ms: int = 100):
     )
 
 
+def _timeline_from_spans(spans: list[tuple[int, int]]) -> list[dict[str, int | str]]:
+    return [
+        {"text": f"w{index}", "start_ms": start_ms, "end_ms": end_ms}
+        for index, (start_ms, end_ms) in enumerate(spans)
+    ]
+
+
 def _subtitle_captions_for_script(
     tmp_path: Path,
     *,
@@ -499,6 +506,72 @@ def _subtitle_captions_for_script(
     return captions
 
 
+def test_subtitle_step_does_not_stretch_captions_into_trailing_silence(tmp_path: Path):
+    script = "aaaaaaaaaa;bbbbbbbbbb;cccccccccc;dddddddddd."
+    timeline = _timeline_from_spans(
+        [
+            (
+                round(225 + index * (9235 - 225) / 49),
+                round(225 + (index + 1) * (9235 - 225) / 49),
+            )
+            for index in range(49)
+        ]
+    )
+
+    captions = _subtitle_captions_for_script(
+        tmp_path,
+        script=script,
+        timeline=timeline,
+        duration_sec=10.76,
+    )
+
+    assert [caption[2] for caption in captions] == [
+        "aaaaaaaaaa;",
+        "bbbbbbbbbb;",
+        "cccccccccc;",
+        "dddddddddd.",
+    ]
+    assert captions[-1][1] == 9.235
+    assert captions[-1][1] != 10.76
+    assert all(caption[1] <= 9.235 for caption in captions)
+
+
+def test_subtitle_step_uses_real_token_times_when_counts_differ(tmp_path: Path):
+    script = "aa;bb."
+    timeline = _timeline_from_spans(
+        [
+            (0, 100),
+            (100, 200),
+            (200, 900),
+            (1700, 1800),
+            (1800, 1900),
+            (1900, 2000),
+        ]
+    )
+
+    captions = _subtitle_captions_for_script(
+        tmp_path,
+        script=script,
+        timeline=timeline,
+        duration_sec=2.0,
+    )
+
+    assert captions == [(0.0, 0.9, "aa;"), (1.7, 2.0, "bb.")]
+
+
+def test_subtitle_step_falls_back_when_timeline_has_fewer_items_than_clauses(
+    tmp_path: Path,
+):
+    captions = _subtitle_captions_for_script(
+        tmp_path,
+        script="aa;bb.",
+        timeline=_timeline_from_spans([(1000, 5000)]),
+        duration_sec=5.0,
+    )
+
+    assert captions == [(0.0, 2.5, "aa;"), (2.5, 5.0, "bb.")]
+
+
 def test_subtitle_step_uses_script_punctuation_for_clauses(tmp_path: Path):
     script = "用华鼎AI短视频引擎，一键生成专业级营销视频，让企业内容生产效率提升10倍，效果更精准。"
     timeline = _caption_timeline_from_script(script, step_ms=100)
@@ -524,7 +597,9 @@ def test_subtitle_step_uses_script_punctuation_for_clauses(tmp_path: Path):
     assert captions[-1][1] == timeline[-1]["end_ms"] / 1000
 
 
-def test_subtitle_step_interpolates_when_timeline_length_differs(tmp_path: Path):
+def test_subtitle_step_uses_indexed_token_times_when_timeline_length_differs(
+    tmp_path: Path,
+):
     script = "价格提升10倍，效果更精准。"
     timeline = _word_timeline("价格提升十倍效果更精准", step_ms=200)
     duration_sec = timeline[-1]["end_ms"] / 1000
@@ -540,7 +615,7 @@ def test_subtitle_step_interpolates_when_timeline_length_differs(tmp_path: Path)
     assert captions[0][0] == timeline[0]["start_ms"] / 1000
     assert captions[-1][1] == timeline[-1]["end_ms"] / 1000
     assert captions[0][1] == captions[1][0]
-    assert 1.2 < captions[0][1] < 1.4
+    assert captions[0][1] == timeline[5]["end_ms"] / 1000
 
 
 def test_subtitle_step_distributes_script_clauses_without_timeline(tmp_path: Path):
@@ -655,15 +730,6 @@ def test_caption_position_falls_back_near_bottom_for_full_height_video():
 
     assert position[0] == "center"
     assert 1200 <= position[1] <= 1660
-
-
-def test_timeline_duration_guard_scales_large_drift_only():
-    captions = [(0, 1000, "第一句"), (1000, 2000, "第二句")]
-
-    scaled = avatar_talk._fit_timeline_to_duration(captions, duration_sec=3.0)
-
-    assert scaled == [(0, 1500, "第一句"), (1500, 3000, "第二句")]
-    assert avatar_talk._fit_timeline_to_duration(captions, duration_sec=2.1) == captions
 
 
 def test_caption_word_segmentation_falls_back_when_jieba_fails(monkeypatch):
