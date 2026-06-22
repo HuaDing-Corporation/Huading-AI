@@ -4,12 +4,7 @@ import { useEffect, useState } from "react";
 import { Sparkles } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
-import {
-  useAvatarPresets,
-  useScriptGenerate,
-  useUploadImage,
-  useVoices
-} from "@/lib/api/hooks";
+import { useScriptGenerate, useUploadProductImage, useVoices } from "@/lib/api/hooks";
 import { useTrackedUpload } from "@/lib/api/use-tracked-upload";
 import type { CreateVideoRequest } from "@/lib/api/types";
 import { useVideoTasks } from "@/lib/videos/tasks-context";
@@ -25,19 +20,19 @@ import { copy } from "@/lib/copy";
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 
 /**
- * 数字人口播 (avatar_talk) workbench container — the ONLY hooks caller. Sub-
- * components are pure props; this orchestrates script generation, the avatar
- * image upload (race-safe via useTrackedUpload), voice/avatar selection and
- * assembles the CreateVideoRequest. Errors map through the shared errorText so
- * the backend's real message surfaces (keyed on contract err.code, not status).
+ * 电商带货 (seedance_i2v) workbench container — mirrors NewVideoForm but the
+ * required asset is a PRODUCT IMAGE uploaded via POST /uploads → image_key (not
+ * the avatar's /uploads/images → asset_id), and the submit body carries
+ * video_mode:"seedance_i2v" + image_key. The ONLY hooks caller here; the upload,
+ * error mapping and race-guard are reused (useTrackedUpload / errorText) so this
+ * shares logic with NewVideoForm rather than duplicating it.
  */
-export function NewVideoForm() {
+export function EcomVideoForm() {
   const { createAndTrack } = useVideoTasks();
   const scriptGen = useScriptGenerate();
-  const uploadImg = useUploadImage();
+  const uploadProduct = useUploadProductImage();
   const voices = useVoices();
-  const presets = useAvatarPresets();
-  const avatar = useTrackedUpload(uploadImg.mutateAsync, (r) => r.asset_id);
+  const productImage = useTrackedUpload(uploadProduct.mutateAsync, (r) => r.image_key);
 
   const [topic, setTopic] = useState("");
   const [script, setScript] = useState("");
@@ -46,8 +41,7 @@ export function NewVideoForm() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Default the voice to the first loaded option (once), without clobbering a
-  // user's pick.
+  // Default the voice to the first loaded option (once), without clobbering a pick.
   const voiceList = voices.data;
   useEffect(() => {
     if (!voiceId && voiceList && voiceList.length > 0) setVoiceId(voiceList[0].id);
@@ -67,15 +61,16 @@ export function NewVideoForm() {
 
   const onGenerate = async () => {
     const trimmed = topic.trim();
-    if (!trimmed || !voiceId || !avatar.value || submitting) return;
+    if (!trimmed || !voiceId || !productImage.value || submitting) return;
     setError(null);
     setSubmitting(true);
 
     const request: CreateVideoRequest = {
       topic: trimmed,
       script: script.trim() || undefined,
+      video_mode: "seedance_i2v",
+      image_key: productImage.value,
       voice_id: voiceId,
-      avatar_asset_id: avatar.value,
       speed,
       aspect_ratio: "9:16",
       subtitle_enabled: true
@@ -91,23 +86,28 @@ export function NewVideoForm() {
   };
 
   const generateDisabled =
-    submitting || uploadImg.isPending || !topic.trim() || !voiceId || !avatar.value;
+    submitting || uploadProduct.isPending || !topic.trim() || !voiceId || !productImage.value;
+
+  // Tell the user which required input is still missing (validation feedback).
+  let hint: string | null = null;
+  if (!topic.trim()) hint = copy.workbench.ecomTopicRequired;
+  else if (!productImage.value) hint = copy.workbench.ecomImageRequired;
 
   return (
     <Card animateIn>
-      <CardTitle>新建视频</CardTitle>
-      <CardSubtitle className="mb-[18px] mt-1">输入主题，AI 生成文案，选形象与音色一键成片</CardSubtitle>
+      <CardTitle>{copy.workbench.ecomTitle}</CardTitle>
+      <CardSubtitle className="mb-[18px] mt-1">{copy.workbench.ecomSubtitle}</CardSubtitle>
 
       <div className="mb-[15px]">
-        <label htmlFor="video-topic" className={labelClass}>
-          {copy.workbench.topicLabel}
+        <label htmlFor="ecom-topic" className={labelClass}>
+          {copy.workbench.ecomTopicLabel}
         </label>
         <Input
-          id="video-topic"
-          name="video-topic"
+          id="ecom-topic"
+          name="ecom-topic"
           value={topic}
           onChange={(e) => setTopic(e.target.value)}
-          placeholder={copy.workbench.topicPlaceholder}
+          placeholder={copy.workbench.ecomTopicPlaceholder}
         />
       </div>
 
@@ -120,12 +120,15 @@ export function NewVideoForm() {
       />
 
       <ImagePicker
-        value={avatar.value}
-        onChange={avatar.setValue}
-        presets={presets.data ?? []}
-        uploading={uploadImg.isPending}
-        onUpload={avatar.onUpload}
-        uploadError={avatar.error}
+        value={productImage.value}
+        onChange={productImage.setValue}
+        uploading={uploadProduct.isPending}
+        onUpload={productImage.onUpload}
+        uploadError={productImage.error}
+        label={copy.workbench.productImageLabel}
+        uploadLabel={copy.workbench.productImageUpload}
+        previewAlt={copy.workbench.productImagePreviewAlt}
+        inputId="product-image"
       />
 
       <VoicePicker voices={voiceList ?? []} value={voiceId} onChange={setVoiceId} />
@@ -135,6 +138,12 @@ export function NewVideoForm() {
       {error && (
         <p role="alert" className="mb-3 rounded-field bg-error-bg px-3 py-2 text-[13px] text-error-fg">
           {error}
+        </p>
+      )}
+
+      {hint && !error && (
+        <p className="mb-3 text-[12.5px] text-ink-soft" aria-live="polite">
+          {hint}
         </p>
       )}
 

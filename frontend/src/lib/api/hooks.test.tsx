@@ -8,7 +8,7 @@ vi.mock("@/lib/api/videos", () => ({
   getVideo: vi.fn(),
   createVideo: vi.fn()
 }));
-vi.mock("@/lib/api/uploads", () => ({ uploadImage: vi.fn() }));
+vi.mock("@/lib/api/uploads", () => ({ uploadImage: vi.fn(), uploadProductImage: vi.fn() }));
 vi.mock("@/lib/api/auth", () => ({ fetchMe: vi.fn() }));
 vi.mock("@/lib/api/scripts", () => ({ generateScript: vi.fn() }));
 vi.mock("@/lib/api/voices", () => ({ listVoices: vi.fn().mockResolvedValue([]) }));

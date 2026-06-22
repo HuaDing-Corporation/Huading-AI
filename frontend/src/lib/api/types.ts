@@ -73,10 +73,12 @@ export interface VideoDetail {
 }
 
 export interface CreateVideoRequest {
-  topic: string; // 必填 ≤500
+  topic: string; // 必填 ≤500（电商带货=产品卖点/主题）
   script?: string; // 可选；缺则后端 DeepSeek 生成（前端流程会带）
   voice_id: string; // 必填
-  avatar_asset_id: string; // 必填（上传或预设产出的 asset_id）
+  avatar_asset_id?: string; // 数字人口播必填（上传/预设产出的 asset_id）；i2v 不传
+  video_mode?: string; // 省略=数字人口播 avatar_talk；电商带货传 "seedance_i2v"
+  image_key?: string; // 电商带货 i2v 必填，来自 POST /uploads（不是 /uploads/images）
   speed?: number; // 默认 1.0
   aspect_ratio?: string; // 默认 "9:16"
   subtitle_enabled?: boolean; // 默认 true
@@ -110,6 +112,14 @@ export interface UploadImageResponse {
   type: "avatar_image";
   status: "ready";
   thumbnail_url?: string | null;
+}
+
+// POST /uploads（电商带货 i2v 产品图）：返回的 `key` 即提交体使用的 image_key。
+export interface UploadResponse {
+  key: string;
+  uri?: string;
+  content_type?: string;
+  size?: number;
 }
 
 export interface Quota {

@@ -5,7 +5,7 @@ import { listAvatarPresets } from "@/lib/api/avatars";
 import { avatarPresetsKey, meKey, quotaKey, videoKeys, voicesKey } from "@/lib/api/keys";
 import { getQuota } from "@/lib/api/quota";
 import { generateScript } from "@/lib/api/scripts";
-import { uploadImage } from "@/lib/api/uploads";
+import { uploadImage, uploadProductImage } from "@/lib/api/uploads";
 import { listVoices } from "@/lib/api/voices";
 import { createVideo, getVideo, listVideos } from "@/lib/api/videos";
 import type { CreateVideoRequest } from "@/lib/api/types";
@@ -28,6 +28,9 @@ export function useCreateVideo() {
 }
 export function useUploadImage() {
   return useMutation({ mutationFn: (file: File) => uploadImage(file) });
+}
+export function useUploadProductImage() {
+  return useMutation({ mutationFn: (file: File) => uploadProductImage(file) });
 }
 export function useScriptGenerate() {
   return useMutation({ mutationFn: (topic: string) => generateScript(topic) });
