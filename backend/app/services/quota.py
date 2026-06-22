@@ -14,6 +14,10 @@ from app.db.models import CreditRate, Subscription, UsageRecord
 _SCRIPT_CPS = Decimal("5")
 _MIN_SECONDS = Decimal("3")
 _MAX_SECONDS = Decimal("60")
+_SEEDANCE_I2V_DEFAULT_SECONDS = 15
+_SEEDANCE_I2V_CLIP_SECONDS = 5
+_SEEDANCE_I2V_MIN_SECONDS = 5
+_SEEDANCE_I2V_MAX_SECONDS = 120
 
 
 @dataclass(frozen=True)
@@ -104,6 +108,18 @@ def estimate_seconds(script: str, speed: Decimal | float | int = Decimal("1.0"))
     return int(clamped)
 
 
+def seedance_i2v_target_seconds(value: int | float | None) -> int:
+    if value is None:
+        return _SEEDANCE_I2V_DEFAULT_SECONDS
+    return max(_SEEDANCE_I2V_MIN_SECONDS, min(_SEEDANCE_I2V_MAX_SECONDS, int(value)))
+
+
+def seedance_i2v_billable_seconds(value: int | float | None) -> int:
+    target = seedance_i2v_target_seconds(value)
+    scenes = max(1, int((target + _SEEDANCE_I2V_CLIP_SECONDS - 1) // _SEEDANCE_I2V_CLIP_SECONDS))
+    return scenes * _SEEDANCE_I2V_CLIP_SECONDS
+
+
 def reserve_avatar_talk_quota(
     db: Session,
     *,
@@ -161,9 +177,12 @@ def reserve_seedance_i2v_quota(
     video_task_id: str,
     script: str,
     speed: Decimal | float | int,
+    estimated_seconds: int | None = None,
 ) -> Reservation:
     subscription = active_subscription(db, tenant_id)
-    seconds = estimate_seconds(script, speed)
+    seconds = (
+        estimated_seconds if estimated_seconds is not None else estimate_seconds(script, speed)
+    )
     video_rate = _rate(
         db,
         tenant_id=tenant_id,

@@ -27,7 +27,12 @@ from app.schemas.videos import (
     VideoRead,
 )
 from app.services.progress import ProgressStore
-from app.services.quota import reserve_avatar_talk_quota, reserve_seedance_i2v_quota
+from app.services.quota import (
+    reserve_avatar_talk_quota,
+    reserve_seedance_i2v_quota,
+    seedance_i2v_billable_seconds,
+    seedance_i2v_target_seconds,
+)
 from app.services.storage.base import ObjectStorage
 from app.workers.avatar_talk import generate_avatar_talk_task, generate_seedance_i2v_task
 from app.workers.video_tasks import generate_video_task
@@ -221,6 +226,7 @@ def _create_seedance_i2v_video(
 
     task_id = str(uuid4())
     script = payload.script
+    target_duration_sec = seedance_i2v_target_seconds(payload.duration_sec)
     task = VideoTask(
         id=task_id,
         tenant_id=user.tenant_id,
@@ -235,8 +241,10 @@ def _create_seedance_i2v_video(
         speed=Decimal(str(payload.speed)),
         aspect_ratio=payload.aspect_ratio,
         subtitle_enabled=payload.subtitle_enabled,
+        duration_sec=target_duration_sec,
         params={
             "image_key": payload.image_key,
+            "duration_sec": target_duration_sec,
             "estimated": True,
         },
     )
@@ -248,6 +256,7 @@ def _create_seedance_i2v_video(
         video_task_id=task.id,
         script=script or payload.topic,
         speed=payload.speed,
+        estimated_seconds=seedance_i2v_billable_seconds(target_duration_sec),
     )
     db.commit()
     _video_task_tenants[task_id] = user.tenant_id

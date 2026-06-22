@@ -20,16 +20,24 @@ class DeepSeekProvider:
         topic = str(payload.get("topic") or "").strip()
         if not topic:
             raise ValueError("topic is required.")
+        system_prompt = str(
+            payload.get("system_prompt")
+            or "Write concise spoken-video scripts for ecommerce presenters."
+        )
+        user_prompt = str(
+            payload.get("user_prompt")
+            or f"Create a short digital-human spoken script about: {topic}"
+        )
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=[
                 {
                     "role": "system",
-                    "content": "Write concise spoken-video scripts for ecommerce presenters.",
+                    "content": system_prompt,
                 },
                 {
                     "role": "user",
-                    "content": f"Create a short digital-human spoken script about: {topic}",
+                    "content": user_prompt,
                 },
             ],
             temperature=0.7,
