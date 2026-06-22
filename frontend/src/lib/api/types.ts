@@ -79,6 +79,7 @@ export interface CreateVideoRequest {
   avatar_asset_id?: string; // 数字人口播必填（上传/预设产出的 asset_id）；i2v 不传
   video_mode?: string; // 省略=数字人口播 avatar_talk；电商带货传 "seedance_i2v"
   image_key?: string; // 电商带货 i2v 必填，来自 POST /uploads（不是 /uploads/images）
+  duration_sec?: number; // 电商带货 i2v 目标时长（秒，5–120，默认 30），与后端 clamp 对齐
   speed?: number; // 默认 1.0
   aspect_ratio?: string; // 默认 "9:16"
   subtitle_enabled?: boolean; // 默认 true

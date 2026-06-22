@@ -29,7 +29,15 @@ export const copy = {
     ecomImageRequired: "请上传产品图后再生成",
     productImageLabel: "产品图（必填）",
     productImageUpload: "上传产品图（JPG / PNG / WebP，≤10MB）",
-    productImagePreviewAlt: "产品图预览"
+    productImagePreviewAlt: "产品图预览",
+    // 电商带货：视频时长选择器
+    durationLabel: "视频时长",
+    durationSeconds: (s: number) => `${s} 秒`,
+    durationCustom: "自定义",
+    durationCustomLabel: "自定义时长（秒）",
+    durationCustomPlaceholder: "5–120",
+    durationRange: "请输入 5–120 秒",
+    durationHint: "时长越长，生成越慢、消耗额度越多"
   },
   errors: {
     quota: "额度不足，无法生成，请充值或精简任务",
