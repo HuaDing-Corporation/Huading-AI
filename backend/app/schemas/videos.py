@@ -93,8 +93,11 @@ class VideoGenerateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_i2v_has_image(self) -> "VideoGenerateRequest":
-        if self.video_mode == "seedance_i2v" and not self.image_key:
-            raise ValueError("seedance_i2v requires image_key (upload an image first)")
+        if self.video_mode == "seedance_i2v":
+            if not self.image_key:
+                raise ValueError("seedance_i2v requires image_key (upload an image first)")
+            if not self.voice_id:
+                raise ValueError("seedance_i2v requires voice_id")
         if self.video_mode == "avatar_talk":
             if not self.voice_id:
                 raise ValueError("avatar_talk requires voice_id")

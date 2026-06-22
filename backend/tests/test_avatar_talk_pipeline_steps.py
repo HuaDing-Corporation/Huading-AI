@@ -182,6 +182,145 @@ def test_default_avatar_talk_steps_create_assets_and_final_video(monkeypatch, tm
         Base.metadata.drop_all(engine)
 
 
+def test_seedance_i2v_step_generates_clip_from_product_image(monkeypatch, tmp_path: Path):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-i2v-step"
+    unit_id = "i2v-step-job"
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="i2v-step", name="I2V Step"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic="soft scarf for winter gifting",
+                script="soft scarf script",
+                params={"image_key": "uploads/product.png"},
+            )
+        )
+        db.commit()
+
+        image_path = tmp_path / "product.png"
+        image_path.write_bytes(b"PNG")
+        calls: dict[str, object] = {}
+
+        def fake_generate(cfg, prompt, **kwargs):
+            calls["cfg"] = cfg
+            calls["prompt"] = prompt
+            calls["kwargs"] = kwargs
+            kwargs["progress_callback"]({"poll_count": 4})
+            Path(kwargs["save_path"]).write_bytes(b"SEEDANCE-MP4")
+
+        monkeypatch.setattr(avatar_talk, "_resolve_i2v_image", lambda params: str(image_path))
+        monkeypatch.setattr(avatar_talk, "_seedance_engine_config", lambda: object())
+        monkeypatch.setattr(avatar_talk, "generate_seedance_video", fake_generate)
+
+        store = _Store()
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=store,
+            storage=_Storage(),
+            duration_sec=8.2,
+        )
+
+        result = avatar_talk.seedance_i2v_step(ctx)
+
+        assert result.base_video_bytes == b"SEEDANCE-MP4"
+        assert result.use_tts_audio is True
+        assert calls["prompt"] == (
+            "soft scarf for winter gifting。产品展示，镜头平稳推进，明亮商业棚拍，干净背景，"
+            "突出商品材质与卖点，9:16竖屏电商带货短视频。"
+        )
+        assert calls["kwargs"]["image_path"] == str(image_path)
+        assert calls["kwargs"]["image_role"] == "first_frame"
+        assert calls["kwargs"]["ratio"] == "9:16"
+        assert calls["kwargs"]["resolution"] == "720p"
+        assert calls["kwargs"]["generate_audio"] is False
+        assert calls["kwargs"]["duration"] == 9
+        assert any(event[1].get("stage") == "seedance_generating" for event in store.events)
+
+    Base.metadata.drop_all(engine)
+
+
+def test_seedance_i2v_runner_releases_quota_on_failure(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-i2v-fail"
+    unit_id = "i2v-fail-job"
+    store = _Store()
+    storage = _Storage()
+    now = datetime.now(UTC)
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="i2v-fail", name="I2V Fail"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="queued",
+                topic="product",
+                params={"image_key": "uploads/product.png"},
+            )
+        )
+        sub = Subscription(
+            id="sub-i2v-fail",
+            tenant_id=tenant_id,
+            plan_id="plan-i2v-fail",
+            status="active",
+            period_start=now - timedelta(days=1),
+            period_end=now + timedelta(days=30),
+            quota_credits_total=100,
+            quota_credits_reserved=10,
+        )
+        db.add(sub)
+        db.add(
+            UsageRecord(
+                tenant_id=tenant_id,
+                subscription_id=sub.id,
+                video_task_id=unit_id,
+                capability="video",
+                provider="seedance",
+                model="doubao-seedance-2-0-260128",
+                unit="second",
+                quantity=Decimal("5"),
+                credits=Decimal("10.00"),
+                cost_cents=0,
+                status="reserved",
+            )
+        )
+        db.commit()
+
+    def fail_step(ctx):
+        raise TimeoutError("Seedance timed out after 600s")
+
+    monkeypatch.setattr(avatar_talk, "SessionLocal", SessionTesting)
+    monkeypatch.setattr(avatar_talk, "build_progress_store", lambda _url: store)
+    monkeypatch.setattr(avatar_talk, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(avatar_talk, "ECOM_I2V_STEPS", [("seedance", 80, fail_step)])
+
+    try:
+        with pytest.raises(TimeoutError, match="Seedance timed out"):
+            avatar_talk.run_seedance_i2v_pipeline(tenant_id=tenant_id, task_id=unit_id)
+
+        with SessionTesting() as db:
+            task = db.get(VideoTask, unit_id)
+            sub = db.get(Subscription, "sub-i2v-fail")
+            usage = db.query(UsageRecord).filter_by(video_task_id=unit_id).one()
+            assert task.status == "failed"
+            assert task.error_code == "SEEDANCE_I2V_FAILED"
+            assert "Seedance timed out" in task.error_message
+            assert sub.quota_credits_reserved == 0
+            assert usage.status == "released"
+        assert store.events[-1][1]["status"] == "failed"
+        assert store.events[-1][1]["error_code"] == "SEEDANCE_I2V_FAILED"
+    finally:
+        Base.metadata.drop_all(engine)
+
+
 def test_script_step_generates_missing_script_with_deepseek(monkeypatch):
     SessionTesting, engine = _session()
     tenant_id = "tenant-script"
@@ -1290,6 +1429,236 @@ def test_burn_subtitles_trims_tail_and_applies_audio_fadeout(monkeypatch, tmp_pa
     assert label["is_ai_generated"] is True
     assert label["content_id"] == "video-alpha"
     assert label["propagate_id"] == "tenant-alpha"
+
+
+def test_burn_subtitles_uses_external_tts_audio_and_freezes_video_tail(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import moviepy.editor as moviepy_editor
+
+    calls: dict[str, object] = {}
+
+    class _ExternalAudio:
+        duration = 3.0
+
+        def fx(self, effect, duration):
+            calls["fadeout_duration"] = duration
+            return self
+
+        def close(self):
+            calls["audio_closed"] = True
+
+    class _Video:
+        w = 720
+        h = 1280
+        duration = 1.0
+        audio = None
+
+        def __init__(self, _path=None):
+            pass
+
+        def fx(self, effect, **kwargs):
+            calls["freeze_effect"] = getattr(effect, "__name__", str(effect))
+            calls["freeze_kwargs"] = kwargs
+            self.duration += float(kwargs["freeze_duration"])
+            return self
+
+        def resize(self, _scale):
+            return self
+
+        def set_position(self, _position):
+            return self
+
+        def close(self):
+            calls["video_closed"] = True
+
+    class _ColorClip:
+        def __init__(self, _size, *, color, duration):
+            calls["canvas_duration"] = duration
+
+    class _ImageClip:
+        def __init__(self, _array, *, transparent):
+            self.transparent = transparent
+
+        def set_start(self, start):
+            self.start = start
+            return self
+
+        def set_duration(self, duration):
+            self.duration = duration
+            return self
+
+        def set_position(self, position):
+            self.position = position
+            return self
+
+    class _CompositeVideoClip:
+        def __init__(self, clips, *, size):
+            self.audio = None
+            self.duration = None
+
+        def set_duration(self, duration):
+            self.duration = duration
+            calls["final_duration"] = duration
+            return self
+
+        def set_audio(self, audio):
+            self.audio = audio
+            calls["set_audio"] = audio
+            return self
+
+        def subclip(self, start, end):
+            calls["subclip"] = (start, end)
+            self.duration = end - start
+            return self
+
+        def write_videofile(self, path, **kwargs):
+            calls["write_kwargs"] = kwargs
+
+        def close(self):
+            calls["final_closed"] = True
+
+    monkeypatch.setattr(moviepy_editor, "VideoFileClip", _Video)
+    monkeypatch.setattr(moviepy_editor, "AudioFileClip", lambda _path: _ExternalAudio())
+    monkeypatch.setattr(moviepy_editor, "ColorClip", _ColorClip)
+    monkeypatch.setattr(moviepy_editor, "ImageClip", _ImageClip)
+    monkeypatch.setattr(moviepy_editor, "CompositeVideoClip", _CompositeVideoClip)
+
+    base = tmp_path / "seedance.mp4"
+    subtitle = tmp_path / "caption.srt"
+    audio = tmp_path / "doubao.mp3"
+    output = tmp_path / "burned.mp4"
+    base.write_bytes(b"MP4")
+    audio.write_bytes(b"MP3")
+    subtitle.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nVISIBLE CAPTION\n",
+        encoding="utf-8",
+    )
+
+    avatar_talk._burn_subtitles(
+        base,
+        subtitle,
+        output,
+        audio_path=audio,
+        task_id="video-alpha",
+        producer="Huading",
+        propagate_id="tenant-alpha",
+    )
+
+    assert calls["freeze_kwargs"]["freeze_duration"] == pytest.approx(2.0)
+    assert calls["canvas_duration"] == pytest.approx(3.0)
+    assert calls["final_duration"] == pytest.approx(3.0)
+    assert calls["set_audio"].duration == pytest.approx(3.0)
+    assert calls["fadeout_duration"] == pytest.approx(0.3)
+    assert calls["write_kwargs"]["audio"] is True
+    assert calls["write_kwargs"]["codec"] == "libx264"
+    assert calls["write_kwargs"]["audio_codec"] == "aac"
+    assert calls["write_kwargs"]["audio_bitrate"] == "192k"
+    assert "aigc_label=" in " ".join(calls["write_kwargs"]["ffmpeg_params"])
+    assert calls["audio_closed"] is True
+
+
+def test_burn_subtitles_uses_external_tts_audio_duration_when_video_is_longer(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import moviepy.editor as moviepy_editor
+
+    calls: dict[str, object] = {}
+
+    class _ExternalAudio:
+        duration = 2.0
+
+        def fx(self, effect, duration):
+            calls["fadeout_duration"] = duration
+            return self
+
+        def close(self):
+            calls["audio_closed"] = True
+
+    class _Video:
+        w = 720
+        h = 1280
+        duration = 5.0
+        audio = None
+
+        def __init__(self, _path=None):
+            pass
+
+        def fx(self, effect, **kwargs):
+            calls["freeze_kwargs"] = kwargs
+            return self
+
+        def resize(self, _scale):
+            return self
+
+        def set_position(self, _position):
+            return self
+
+        def close(self):
+            calls["video_closed"] = True
+
+    class _ColorClip:
+        def __init__(self, _size, *, color, duration):
+            calls["canvas_duration"] = duration
+
+    class _ImageClip:
+        def __init__(self, _array, *, transparent):
+            pass
+
+        def set_start(self, start):
+            return self
+
+        def set_duration(self, duration):
+            return self
+
+        def set_position(self, position):
+            return self
+
+    class _CompositeVideoClip:
+        def __init__(self, clips, *, size):
+            self.audio = None
+
+        def set_duration(self, duration):
+            calls["final_duration"] = duration
+            return self
+
+        def set_audio(self, audio):
+            self.audio = audio
+            return self
+
+        def write_videofile(self, path, **kwargs):
+            calls["write_kwargs"] = kwargs
+
+        def close(self):
+            calls["final_closed"] = True
+
+    monkeypatch.setattr(moviepy_editor, "VideoFileClip", _Video)
+    monkeypatch.setattr(moviepy_editor, "AudioFileClip", lambda _path: _ExternalAudio())
+    monkeypatch.setattr(moviepy_editor, "ColorClip", _ColorClip)
+    monkeypatch.setattr(moviepy_editor, "ImageClip", _ImageClip)
+    monkeypatch.setattr(moviepy_editor, "CompositeVideoClip", _CompositeVideoClip)
+
+    base = tmp_path / "seedance.mp4"
+    subtitle = tmp_path / "caption.srt"
+    audio = tmp_path / "doubao.mp3"
+    output = tmp_path / "burned.mp4"
+    base.write_bytes(b"MP4")
+    audio.write_bytes(b"MP3")
+    subtitle.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nVISIBLE CAPTION\n",
+        encoding="utf-8",
+    )
+
+    avatar_talk._burn_subtitles(base, subtitle, output, audio_path=audio)
+
+    assert "freeze_kwargs" not in calls
+    assert calls["canvas_duration"] == pytest.approx(2.0)
+    assert calls["final_duration"] == pytest.approx(2.0)
+    assert calls["fadeout_duration"] == pytest.approx(0.3)
+    assert calls["write_kwargs"]["audio"] is True
+    assert calls["audio_closed"] is True
 
 
 def test_burn_subtitles_writes_9x16_video_with_visible_caption(tmp_path: Path):

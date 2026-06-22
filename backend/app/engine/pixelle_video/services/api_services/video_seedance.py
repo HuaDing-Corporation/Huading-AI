@@ -31,7 +31,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import requests
 
@@ -106,6 +106,7 @@ class SeedanceVideoClient:
         seed: Optional[int] = None,
         watermark: Optional[bool] = None,
         generate_audio: Optional[bool] = None,
+        progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
         **extra: Any,
     ) -> SeedanceResult:
         """Run a Seedance task end to end.
@@ -133,7 +134,7 @@ class SeedanceVideoClient:
             generate_audio=generate_audio,
             extra=extra,
         )
-        video_url = self._poll_until_done(task_id)
+        video_url = self._poll_until_done(task_id, progress_callback=progress_callback)
         if save_path:
             self._download_video(video_url, save_path)
         return SeedanceResult(task_id=task_id, video_url=video_url, save_path=save_path)
@@ -217,14 +218,28 @@ class SeedanceVideoClient:
             raise RuntimeError(f"Seedance: no task id in response: {resp.text[:300]}")
         return task_id
 
-    def _poll_until_done(self, task_id: str) -> str:
+    def _poll_until_done(
+        self,
+        task_id: str,
+        *,
+        progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+    ) -> str:
         url = f"{self.base_url}/contents/generations/tasks/{task_id}"
         deadline = time.monotonic() + self.max_poll_seconds
+        poll_count = 0
         while time.monotonic() < deadline:
+            poll_count += 1
             resp = self._request_with_retry("GET", url, timeout=self.timeout)
             resp.raise_for_status()
             data = resp.json() or {}
             status = (data.get("status") or "").lower()
+            if progress_callback is not None:
+                try:
+                    progress_callback(
+                        {"task_id": task_id, "status": status, "poll_count": poll_count}
+                    )
+                except Exception:
+                    logger.warning("Seedance progress callback failed", exc_info=True)
 
             if status == "succeeded":
                 video_url = (data.get("content") or {}).get("video_url") or data.get("video_url")
