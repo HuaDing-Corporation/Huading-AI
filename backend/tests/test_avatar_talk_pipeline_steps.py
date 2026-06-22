@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -160,7 +161,7 @@ def test_default_avatar_talk_steps_create_assets_and_final_video(monkeypatch, tm
     monkeypatch.setattr(
         avatar_talk,
         "_burn_subtitles",
-        lambda _base, _srt, output, target_size=(1080, 1920): output.write_bytes(
+        lambda _base, _srt, output, target_size=(1080, 1920), **_kwargs: output.write_bytes(
             b"COMPOSED-MP4"
         ),
     )
@@ -1170,6 +1171,65 @@ def test_compose_end_time_trims_only_long_trailing_silence():
     assert avatar_talk._compose_end_time(10.0, 9.9) >= 9.9
 
 
+def test_aigc_metadata_params_include_comment_and_json_label():
+    params = avatar_talk._aigc_metadata_params(
+        task_id="video-alpha",
+        producer="Huading",
+        propagate_id="tenant-alpha",
+    )
+
+    assert params[:2] == [
+        "-metadata",
+        "comment=本视频由AI生成合成（AIGC）。生成服务：Huading；内容编号：video-alpha",
+    ]
+    assert "description=AI-generated content (AIGC)" in params
+    label_value = next(item for item in params if item.startswith("aigc_label="))
+    label = json.loads(label_value.removeprefix("aigc_label="))
+    assert label == {
+        "is_ai_generated": True,
+        "producer": "Huading",
+        "content_id": "video-alpha",
+        "propagate_id": "tenant-alpha",
+    }
+
+
+def test_compose_step_passes_aigc_metadata_context(monkeypatch, tmp_path: Path):
+    storage = _Storage()
+    subtitle_key = "tenants/tenant-alpha/videos/video-alpha/subtitle.srt"
+    storage.objects[subtitle_key] = b"1\n00:00:00,000 --> 00:00:01,000\nCAPTION\n"
+    ctx = avatar_talk.AvatarTalkContext(
+        task_id="video-alpha",
+        tenant_id="tenant-alpha",
+        db=None,
+        store=_Store(),
+        storage=storage,
+    )
+    ctx.base_video_bytes = b"MP4"
+    ctx.subtitle_key = subtitle_key
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(avatar_talk.settings, "engine_aigc_producer", "Settings Producer")
+    monkeypatch.setattr(avatar_talk, "_work_dir", lambda _task_id: tmp_path)
+
+    def fake_burn_subtitles(base, subtitle, output, **kwargs):
+        calls["base"] = base
+        calls["subtitle"] = subtitle
+        calls["output"] = output
+        calls["kwargs"] = kwargs
+        output.write_bytes(b"FINAL")
+
+    monkeypatch.setattr(avatar_talk, "_burn_subtitles", fake_burn_subtitles)
+
+    result = avatar_talk.compose_step(ctx)
+
+    assert result.final_video_bytes == b"FINAL"
+    assert calls["kwargs"] == {
+        "task_id": "video-alpha",
+        "producer": "Settings Producer",
+        "propagate_id": "tenant-alpha",
+    }
+
+
 def test_burn_subtitles_trims_tail_and_applies_audio_fadeout(monkeypatch, tmp_path: Path):
     import moviepy.editor as moviepy_editor
 
@@ -1262,13 +1322,33 @@ def test_burn_subtitles_trims_tail_and_applies_audio_fadeout(monkeypatch, tmp_pa
         encoding="utf-8",
     )
 
-    avatar_talk._burn_subtitles(base, subtitle, output)
+    avatar_talk._burn_subtitles(
+        base,
+        subtitle,
+        output,
+        task_id="video-alpha",
+        producer="Huading",
+        propagate_id="tenant-alpha",
+    )
 
     assert calls["subclip"] == (0, pytest.approx(9.735))
     assert calls["fadeout_duration"] == pytest.approx(0.3)
+    assert calls["write_kwargs"]["codec"] == "libx264"
+    assert calls["write_kwargs"]["audio_codec"] == "aac"
     assert calls["write_kwargs"]["audio_bitrate"] == "192k"
     assert calls["write_kwargs"]["audio_fps"] == 44100
     assert calls["write_kwargs"]["audio"] is True
+    ffmpeg_params = calls["write_kwargs"]["ffmpeg_params"]
+    assert ffmpeg_params[:2] == [
+        "-metadata",
+        "comment=本视频由AI生成合成（AIGC）。生成服务：Huading；内容编号：video-alpha",
+    ]
+    assert "description=AI-generated content (AIGC)" in ffmpeg_params
+    label_value = next(item for item in ffmpeg_params if item.startswith("aigc_label="))
+    label = json.loads(label_value.removeprefix("aigc_label="))
+    assert label["is_ai_generated"] is True
+    assert label["content_id"] == "video-alpha"
+    assert label["propagate_id"] == "tenant-alpha"
 
 
 def test_burn_subtitles_writes_9x16_video_with_visible_caption(tmp_path: Path):

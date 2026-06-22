@@ -82,3 +82,17 @@ def test_doubao_seed_tts_watermark_defaults_to_true(monkeypatch) -> None:
     s = Settings(_env_file=None, jwt_secret_key=_JWT)
 
     assert s.engine_doubao_tts_aigc_watermark is True
+
+
+def test_aigc_producer_settings_are_env_driven(monkeypatch) -> None:
+    monkeypatch.setenv("ENGINE_AIGC_PRODUCER", "Huading")
+    s = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    assert s.engine_aigc_producer == "Huading"
+
+
+def test_aigc_producer_has_default(monkeypatch) -> None:
+    monkeypatch.delenv("ENGINE_AIGC_PRODUCER", raising=False)
+    s = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    assert s.engine_aigc_producer

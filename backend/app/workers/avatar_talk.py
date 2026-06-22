@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import tempfile
 from dataclasses import dataclass
@@ -722,7 +723,14 @@ def compose_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     output_path = work_dir / "final.mp4"
     base_path.write_bytes(base_video_bytes)
     subtitle_path.write_bytes(ctx.storage.get_bytes(subtitle_key))
-    _burn_subtitles(base_path, subtitle_path, output_path)
+    _burn_subtitles(
+        base_path,
+        subtitle_path,
+        output_path,
+        task_id=ctx.task_id,
+        producer=settings.engine_aigc_producer,
+        propagate_id=ctx.tenant_id,
+    )
     ctx.final_video_bytes = output_path.read_bytes()
     return ctx
 
@@ -844,6 +852,31 @@ def _compose_end_time(video_duration: float, last_caption_end: float | None) -> 
     )
 
 
+def _aigc_metadata_params(*, task_id: str, producer: str, propagate_id: str) -> list[str]:
+    content_id = _metadata_text(task_id)
+    producer_text = _metadata_text(producer)
+    propagate = _metadata_text(propagate_id)
+    label = {
+        "is_ai_generated": True,
+        "producer": producer_text,
+        "content_id": content_id,
+        "propagate_id": propagate,
+    }
+    return [
+        "-metadata",
+        f"comment=本视频由AI生成合成（AIGC）。生成服务：{producer_text}；内容编号：{content_id}",
+        "-metadata",
+        "description=AI-generated content (AIGC)",
+        "-metadata",
+        "aigc_label="
+        + json.dumps(label, ensure_ascii=False, separators=(",", ":")),
+    ]
+
+
+def _metadata_text(value: str) -> str:
+    return re.sub(r"[\x00-\x1f\x7f]+", " ", str(value)).strip()
+
+
 def _subtitle_image(text: str, *, width: int, height: int):
     from PIL import Image, ImageDraw
 
@@ -877,6 +910,9 @@ def _burn_subtitles(
     output: Path,
     *,
     target_size: tuple[int, int] = (1080, 1920),
+    task_id: str | None = None,
+    producer: str | None = None,
+    propagate_id: str | None = None,
 ) -> None:
     import numpy as np
     from moviepy.audio.fx.audio_fadeout import audio_fadeout
@@ -946,6 +982,13 @@ def _burn_subtitles(
             audio_bitrate="192k",
             audio_fps=44100,
             audio=video.audio is not None,
+            ffmpeg_params=_aigc_metadata_params(
+                task_id=task_id,
+                producer=producer or settings.engine_aigc_producer,
+                propagate_id=propagate_id or "",
+            )
+            if task_id
+            else [],
             logger=None,
         )
         final.close()
