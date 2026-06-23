@@ -133,7 +133,7 @@ export interface Quota {
 // SSE 新枚举帧（§8）+ 旧帧兜底字段
 export interface VideoEvent {
   status?: VideoStatus | string;
-  progress?: number; // 新帧 0..100 int；旧帧 0..1 小数
+  progress?: number; // 新帧 0..100 number；旧帧 0..1 小数
   step?: string | null; // tts|avatar|subtitle|compose|upload
   playback_url?: string | null;
   download_url?: string | null;

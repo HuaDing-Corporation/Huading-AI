@@ -484,6 +484,92 @@ def test_seedance_i2v_long_single_scene_polling_does_not_trip_watchdog(
     Base.metadata.drop_all(engine)
 
 
+def test_seedance_i2v_24_scene_progress_keeps_watchdog_alive(
+    monkeypatch,
+    tmp_path: Path,
+):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-i2v-max-progress"
+    unit_id = "i2v-max-progress-job"
+    poll_interval_seconds = 5
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="i2v-max-progress", name="I2V Max Progress"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic="soft scarf for winter gifting",
+                script="soft scarf script",
+                duration_sec=120,
+                params={"image_key": "uploads/product.png", "duration_sec": 120},
+            )
+        )
+        db.commit()
+
+        image_path = tmp_path / "product.png"
+        image_path.write_bytes(b"PNG")
+        elapsed_seconds = 0
+
+        def fake_generate(cfg, prompt, **kwargs):
+            nonlocal elapsed_seconds
+            for poll_count in range(1, 121):
+                elapsed_seconds += poll_interval_seconds
+                kwargs["progress_callback"](
+                    {
+                        "poll_count": poll_count,
+                        "status": "running",
+                        "step_elapsed_seconds": elapsed_seconds,
+                    }
+                )
+            Path(kwargs["save_path"]).write_bytes(b"SCENE-MP4")
+
+        def fake_concat(scene_paths, output_path):
+            Path(output_path).write_bytes(b"CONCAT-SEEDANCE-MP4")
+
+        monkeypatch.setattr(avatar_talk, "_resolve_i2v_image", lambda params: str(image_path))
+        monkeypatch.setattr(avatar_talk, "_seedance_engine_config", lambda: object())
+        monkeypatch.setattr(
+            avatar_talk,
+            "_plan_seedance_i2v_scenes",
+            lambda ctx, scene_count, clip_duration: [
+                f"visual prompt {index + 1}" for index in range(scene_count)
+            ],
+        )
+        monkeypatch.setattr(avatar_talk, "generate_seedance_video", fake_generate)
+        monkeypatch.setattr(avatar_talk, "concat_seedance_clips", fake_concat)
+
+        store = _Store()
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=store,
+            storage=_Storage(),
+            duration_sec=120,
+        )
+
+        avatar_talk.seedance_i2v_step(ctx)
+
+        progresses = [
+            event[1]["progress"]
+            for event in store.events
+            if event[1].get("stage") == "seedance_generating"
+        ]
+
+        assert len(progresses) == 24 * 120
+        assert _max_same_value_stall_seconds(
+            progresses,
+            poll_interval_seconds=poll_interval_seconds,
+        ) < 120
+        assert progresses == sorted(progresses)
+        assert max(progresses) < 88
+
+    Base.metadata.drop_all(engine)
+
+
 def test_seedance_i2v_scene_planner_requests_visual_prompts(monkeypatch):
     SessionTesting, engine = _session()
     tenant_id = "tenant-i2v-scenes"

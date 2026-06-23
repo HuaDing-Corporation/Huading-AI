@@ -516,6 +516,21 @@ def test_video_progress_snapshot_accepts_percent_and_legacy_fraction() -> None:
     assert videos_route._sse_progress({"progress": 0.1}) == 10
 
 
+def test_video_sse_payload_preserves_fractional_progress_for_watchdog() -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    payload = videos_route._sse_payload(
+        "fractional-progress-task",
+        {
+            "status": "running",
+            "progress": 25.125,
+            "step": "seedance",
+        },
+    )
+
+    assert payload["progress"] == 25.125
+
+
 def test_video_sse_emits_new_enum_terminal_frame(auth_context, auth_db) -> None:
     store = _MemProgressStore()
     storage = _FakeStorage()

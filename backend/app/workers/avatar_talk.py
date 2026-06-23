@@ -5,7 +5,6 @@ import json
 import math
 import re
 import tempfile
-import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +42,8 @@ _SEEDANCE_I2V_MAX_DURATION_SEC = 120
 _SEEDANCE_I2V_CLIP_DURATION_SEC = 5
 _SEEDANCE_I2V_PROGRESS_START = 25
 _SEEDANCE_I2V_PROGRESS_END = 88
+_SEEDANCE_I2V_PROGRESS_POLL_RATE = 0.02
+_SEEDANCE_I2V_PROGRESS_EPSILON = 0.001
 _SEEDANCE_I2V_PROMPT_SUFFIX = (
     "产品展示，镜头平稳推进，明亮商业棚拍，干净背景，"
     "突出商品材质与卖点，9:16竖屏电商带货短视频。"
@@ -121,17 +122,13 @@ def _seedance_i2v_billable_duration(duration_sec: float | int | None) -> int:
 
 def _seedance_i2v_poll_progress(
     *,
-    elapsed_seconds: float,
-    scene_count: int,
-) -> int:
-    safe_scene_count = max(1, scene_count)
-    safe_elapsed = max(0.0, float(elapsed_seconds))
-    seedance_timeout_seconds = max(1.0, float(settings.engine_seedance_timeout_seconds))
-    expected_total_seconds = safe_scene_count * seedance_timeout_seconds
+    poll_tick: int,
+) -> float:
+    safe_poll_tick = max(0, poll_tick)
     span = _SEEDANCE_I2V_PROGRESS_END - _SEEDANCE_I2V_PROGRESS_START
-    ratio = min(safe_elapsed / expected_total_seconds, 0.999)
-    progress = _SEEDANCE_I2V_PROGRESS_START + int(math.floor(span * ratio))
-    return min(_SEEDANCE_I2V_PROGRESS_END - 1, progress)
+    ratio = 1 - (1 / (1 + safe_poll_tick * _SEEDANCE_I2V_PROGRESS_POLL_RATE))
+    progress = _SEEDANCE_I2V_PROGRESS_START + span * ratio
+    return min(_SEEDANCE_I2V_PROGRESS_END - _SEEDANCE_I2V_PROGRESS_EPSILON, progress)
 
 
 def _seedance_engine_config() -> Any:
@@ -508,8 +505,8 @@ def seedance_i2v_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     clip_duration = _SEEDANCE_I2V_CLIP_DURATION_SEC
     scene_prompts = _plan_seedance_i2v_scenes(ctx, scene_count, clip_duration)
     scene_paths: list[str] = []
-    seedance_started_at = time.monotonic()
-    last_seedance_progress = _SEEDANCE_I2V_PROGRESS_START
+    seedance_poll_ticks = 0
+    last_seedance_progress = float(_SEEDANCE_I2V_PROGRESS_START)
 
     try:
         cfg = _seedance_engine_config()
@@ -517,17 +514,9 @@ def seedance_i2v_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
             save_path = work_dir / f"seedance_scene_{index:02d}.mp4"
 
             def on_seedance_progress(event: dict[str, Any], scene_index: int = index) -> None:
-                nonlocal last_seedance_progress
-                step_elapsed = event.get("step_elapsed_seconds")
-                elapsed_seconds = (
-                    float(step_elapsed)
-                    if step_elapsed is not None
-                    else time.monotonic() - seedance_started_at
-                )
-                progress = _seedance_i2v_poll_progress(
-                    elapsed_seconds=elapsed_seconds,
-                    scene_count=scene_count,
-                )
+                nonlocal last_seedance_progress, seedance_poll_ticks
+                seedance_poll_ticks += 1
+                progress = _seedance_i2v_poll_progress(poll_tick=seedance_poll_ticks)
                 progress = max(last_seedance_progress, progress)
                 last_seedance_progress = progress
                 ctx.store.update(

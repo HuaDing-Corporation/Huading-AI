@@ -72,17 +72,17 @@ export interface ProgressSnapshot {
 }
 
 export function progressFields(status: UiStatus, pct: number, step?: string | null): ProgressSnapshot {
-  return { status, progress: status === "done" ? 100 : pct, statusLabel: labelFor(status, pct, step) };
+  return { status, progress: status === "done" ? 100 : pct, statusLabel: labelFor(status, Math.round(pct), step) };
 }
 
-// New frame: progress is 0..100 int (trust it). Old frame (UPPERCASE status):
+// New frame: progress is a 0..100 number (trust it). Old frame (UPPERCASE status):
 // progress is 0..1 → rescale. Gate ONLY on the status casing, never the value,
 // so a new {status:"running",progress:1} stays 1% (sse-1).
 export function eventToProgress(event: VideoEvent): ProgressSnapshot | null {
   if (event.stage === "sse_timeout") return null;
   const raw = event.progress ?? 0;
   const isOld = typeof event.status === "string" && OLD_UPPER.test(event.status);
-  const pct = isOld ? Math.round(raw * 100) : Math.round(raw);
+  const pct = isOld ? Math.round(raw * 100) : raw;
   const status = mapSseStatus(event.status);
   return { ...progressFields(status, pct, event.step), error: event.error_message ?? event.error ?? undefined };
 }
