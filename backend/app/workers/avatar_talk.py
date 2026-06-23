@@ -49,12 +49,23 @@ _SEEDANCE_I2V_PROMPT_SUFFIX = (
     "突出商品材质与卖点，9:16竖屏电商带货短视频。"
 )
 _ECOMMERCE_SCRIPT_SYSTEM_PROMPT = (
-    "你是电商带货短视频编导。输出自然口语化中文口播，突出产品卖点、"
-    "使用场景和行动号召，适合竖屏短视频配音。"
+    "你是电商带货短视频口播文案策划。只输出可直接朗读的中文卖货口播正文，"
+    "围绕产品卖点、使用场景、购买理由和自然行动号召展开。"
+    "禁止写镜头/运镜/画面/景别描述，禁止写数字人/出镜/微笑致意等人物舞台提示，"
+    "禁止 Markdown、标题、编号、旁白标注或括号说明。"
 )
 _SEEDANCE_SCENE_SYSTEM_PROMPT = (
     "你是电商图生视频的视觉分镜导演。输出 Seedance i2v 视觉分镜提示词，"
     "每条提示词都以同一张产品图作为 first_frame，并给出不同运镜、角度和卖点。"
+)
+_ECOMMERCE_SCRIPT_FORBIDDEN_TERMS = (
+    "镜头",
+    "运镜",
+    "画面",
+    "景别",
+    "数字人",
+    "出镜",
+    "微笑致意",
 )
 
 
@@ -248,6 +259,56 @@ def _add_asset(
     return asset
 
 
+def _strip_script_noise(text: str) -> str:
+    cleaned = _strip_markdown_fence(text)
+    cleaned = re.sub(r"[#*_`]+", "", cleaned)
+    pieces = re.split(r"(?<=[。！？.!?])", cleaned)
+    kept: list[str] = []
+    for piece in pieces:
+        item = re.sub(r"^\s*(?:[-+>]|\d+[.)、])\s*", "", piece).strip()
+        item = re.sub(r"^(?:旁白|文案|口播|镜头|画面|数字人)\s*[:：]\s*", "", item)
+        if not item:
+            continue
+        if any(term in item for term in _ECOMMERCE_SCRIPT_FORBIDDEN_TERMS):
+            continue
+        kept.append(item)
+    if not kept:
+        fallback = re.sub(r"^\s*(?:[-+>]|\d+[.)、])\s*", "", cleaned).strip()
+        for term in _ECOMMERCE_SCRIPT_FORBIDDEN_TERMS:
+            fallback = fallback.replace(term, "")
+        return re.sub(r"\s+", " ", fallback).strip()
+    return re.sub(r"\s+", " ", "".join(kept)).strip()
+
+
+def _scene_prompt_source(task: VideoTask) -> str:
+    params = task.params or {}
+    raw_scene_prompt = params.get("scene_prompt")
+    if isinstance(raw_scene_prompt, str) and raw_scene_prompt.strip():
+        return raw_scene_prompt.strip()
+    return str(task.topic or "").strip() or "product"
+
+
+def build_seedance_scene_prompt_payload(
+    topic: str,
+    *,
+    duration_sec: float | int | None = None,
+) -> dict[str, Any]:
+    target_duration = _seedance_i2v_target_duration(duration_sec)
+    topic_text = str(topic or "").strip()
+    return {
+        "topic": topic_text,
+        "video_mode": "seedance_i2v",
+        "target_duration_sec": target_duration,
+        "system_prompt": _SEEDANCE_SCENE_SYSTEM_PROMPT,
+        "user_prompt": (
+            "请根据产品主题生成一段整体画面提示词，供电商图生视频使用。"
+            "只描述产品视觉氛围、场景、光线、材质、构图和商业质感；"
+            "不要写口播台词、字幕、旁白、人物出镜或 Markdown。"
+            f"目标视频时长约{target_duration}秒。\n产品主题：{topic_text}"
+        ),
+    }
+
+
 def _script_generation_payload(task: VideoTask) -> dict[str, Any]:
     topic = task.topic or ""
     if (task.video_mode or task.mode) != "seedance_i2v":
@@ -267,7 +328,8 @@ def _script_generation_payload(task: VideoTask) -> dict[str, Any]:
             f"请基于以下产品卖点生成一段约{target_duration}秒的电商带货口播文案。"
             f"字数控制在{target_chars_min}-{target_chars_max}字，语言口语化，"
             "突出卖点、使用场景、购买理由，并在结尾加入自然行动号召。"
-            "只输出文案正文，不要标题、编号或 Markdown。\n"
+            "只输出可直接朗读的卖货正文，不要标题、编号或 Markdown。"
+            "严禁出现镜头/运镜/画面/景别描述，严禁出现数字人、出镜、微笑致意、旁白标注。\n"
             f"产品卖点：{topic}"
         ),
     }
@@ -294,6 +356,8 @@ def script_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
             )
         )
         script = str(result.get("text") or "").strip()
+        if (task.video_mode or task.mode) == "seedance_i2v":
+            script = _strip_script_noise(script)
         if not script:
             raise RuntimeError("DeepSeek returned an empty avatar_talk script.")
         task.script = script
@@ -413,12 +477,10 @@ def _strip_markdown_fence(text: str) -> str:
 
 
 def _fallback_scene_prompt(task: VideoTask, index: int, total: int) -> str:
-    topic = str(task.topic or "").strip() or "产品"
-    script = _clean_caption_text(str(task.script or ""))[:120]
+    scene_prompt = _scene_prompt_source(task)
     return (
-        f"{topic}。第{index + 1}/{total}个镜头，产品图作为first_frame，"
+        f"{scene_prompt}。第{index + 1}/{total}个镜头，产品图作为first_frame，"
         "9:16竖屏，商业棚拍质感，镜头缓慢运动，突出不同卖点和使用场景。"
-        f"{script}"
     )
 
 
@@ -460,9 +522,10 @@ def _plan_seedance_i2v_scenes(
     task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
     provider = resolve(ctx.db, tenant_id=ctx.tenant_id, capability="llm")
     target_duration = scene_count * clip_duration
+    scene_prompt = _scene_prompt_source(task)
     payload = {
         "topic": task.topic or "",
-        "script": task.script or "",
+        "scene_prompt": scene_prompt,
         "video_mode": "seedance_i2v",
         "scene_count": scene_count,
         "clip_duration_sec": clip_duration,
@@ -473,7 +536,7 @@ def _plan_seedance_i2v_scenes(
             f"{clip_duration}秒，全部使用同一张产品图作为first_frame，但运镜、"
             "角度、光线、卖点呈现要有变化。输出 JSON 字符串数组，数组长度必须等于"
             f"{scene_count}，每项只写 Seedance 可用的中文视觉提示词。\n"
-            f"产品卖点：{task.topic or ''}\n口播文案：{task.script or ''}"
+            f"产品主题：{task.topic or ''}\n整体画面提示词：{scene_prompt}"
         ),
     }
     result = asyncio.run(

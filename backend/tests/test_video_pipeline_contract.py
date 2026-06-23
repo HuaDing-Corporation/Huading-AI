@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 
 from app.api.deps import get_object_storage, get_progress_store
 from app.db.models import Asset, CreditRate, Plan, Subscription, UsageRecord, VideoTask, Voice
@@ -339,6 +340,7 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
             "video_mode": "seedance_i2v",
             "image_key": "uploads/product.png",
             "voice_id": voice_id,
+            "scene_prompt": "hero product on a bright kitchen counter",
             "duration_sec": 30,
             "speed": 1.0,
             "aspect_ratio": "9:16",
@@ -353,6 +355,7 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
     assert enqueued["queue"] == "avatar"
     assert enqueued["args"][0]["video_mode"] == "seedance_i2v"
     assert enqueued["args"][0]["image_key"] == "uploads/product.png"
+    assert enqueued["args"][0]["scene_prompt"] == "hero product on a bright kitchen counter"
     assert enqueued["args"][0]["duration_sec"] == 30
     with auth_db() as db:
         task = db.get(VideoTask, data["id"])
@@ -361,6 +364,7 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
         assert task.video_mode == "seedance_i2v"
         assert task.voice_id == voice_id
         assert task.params["image_key"] == "uploads/product.png"
+        assert task.params["scene_prompt"] == "hero product on a bright kitchen counter"
         assert task.params["duration_sec"] == 30
         assert task.duration_sec == 30
         subscription = db.get(Subscription, subscription_id)
@@ -670,6 +674,111 @@ def test_video_list_uses_limit_offset_and_returns_items_total(
     assert set(data) == {"items", "total"}
     assert data["total"] == 3
     assert [item["id"] for item in data["items"]] == ["list-task-1"]
+
+
+def test_video_list_filters_by_mode_and_keeps_pagination(
+    auth_context,
+    auth_db,
+) -> None:
+    store = _MemProgressStore()
+    storage = _FakeStorage()
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+    with auth_db() as db:
+        rows = [
+            ("history-avatar-a", "avatar_talk", 0),
+            ("history-i2v-a", "seedance_i2v", 1),
+            ("history-i2v-b", "seedance_i2v", 2),
+        ]
+        for item_id, mode, minutes in rows:
+            db.add(
+                VideoTask(
+                    id=item_id,
+                    tenant_id=auth_context["tenant_id"],
+                    created_by_user_id=auth_context["user_id"],
+                    mode=mode,
+                    video_mode=mode,
+                    status="done",
+                    progress=100,
+                    topic=f"topic-{item_id}",
+                    script=f"script-{item_id}",
+                    created_at=base_time + timedelta(minutes=minutes),
+                )
+            )
+        db.commit()
+
+    app.dependency_overrides[get_progress_store] = lambda: store
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        client = TestClient(app)
+        resp = client.get(
+            "/api/v1/videos?mode=seedance_i2v&limit=1&offset=1",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_progress_store, None)
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["total"] == 2
+    assert [item["id"] for item in data["items"]] == ["history-i2v-a"]
+    assert all(item["mode"] == "seedance_i2v" for item in data["items"])
+
+
+def test_scene_prompt_endpoint_generates_visual_prompt_without_creating_video(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    payloads: list[dict] = []
+
+    class _FakeDeepSeek:
+        async def generate_text(self, payload: dict):
+            payloads.append(payload)
+            return {"text": "Bright tabletop product video with slow push-in."}
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route.settings, "engine_llm_api_key", "k")
+    monkeypatch.setattr(videos_route.settings, "engine_llm_base_url", "https://deepseek.test")
+    monkeypatch.setattr(videos_route.settings, "engine_llm_model", "m")
+    monkeypatch.setattr(
+        videos_route,
+        "resolve",
+        lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
+    )
+    with auth_db() as db:
+        before = db.scalar(select(func.count()).select_from(VideoTask))
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/videos/scene-prompt",
+        json={"topic": "premium ceramic mug", "duration_sec": 30},
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["data"] == {
+        "scene_prompt": "Bright tabletop product video with slow push-in."
+    }
+    assert payloads[0]["video_mode"] == "seedance_i2v"
+    assert payloads[0]["target_duration_sec"] == 30
+    assert "script" not in payloads[0]
+    assert "不要写口播台词" in payloads[0]["user_prompt"]
+    with auth_db() as db:
+        after = db.scalar(select(func.count()).select_from(VideoTask))
+    assert after == before
+
+
+def test_scene_prompt_endpoint_requires_auth(auth_context) -> None:
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/v1/videos/scene-prompt",
+        json={"topic": "premium ceramic mug"},
+    )
+
+    assert resp.status_code == 401
 
 
 def test_video_schema_rejects_invalid_aspect_ratio_before_db_check() -> None:

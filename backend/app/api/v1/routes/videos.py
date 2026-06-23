@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
@@ -19,8 +19,11 @@ from app.api.deps import (
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.db.models import Asset, TaskAsset, User, VideoTask, Voice
+from app.providers.base import invoke, resolve
 from app.schemas.response import ApiResponse, ok
 from app.schemas.videos import (
+    ScenePromptRequest,
+    ScenePromptResponse,
     VideoAccepted,
     VideoEstimateResponse,
     VideoGenerateRequest,
@@ -38,7 +41,11 @@ from app.services.quota import (
     seedance_i2v_target_seconds,
 )
 from app.services.storage.base import ObjectStorage
-from app.workers.avatar_talk import generate_avatar_talk_task, generate_seedance_i2v_task
+from app.workers.avatar_talk import (
+    build_seedance_scene_prompt_payload,
+    generate_avatar_talk_task,
+    generate_seedance_i2v_task,
+)
 from app.workers.video_tasks import generate_video_task
 
 router = APIRouter()
@@ -184,10 +191,13 @@ def list_videos(
     db: Session = DbSessionDependency,
     store: ProgressStore = ProgressStoreDependency,
     storage: ObjectStorage = ObjectStorageDependency,
+    mode: str | None = Query(default=None, pattern="^(avatar_talk|seedance_i2v)$"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> ApiResponse[VideoListResponse]:
     query = select(VideoTask).where(VideoTask.tenant_id == user.tenant_id)
+    if mode is not None:
+        query = query.where(or_(VideoTask.mode == mode, VideoTask.video_mode == mode))
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
     tasks = list(
         db.scalars(query.order_by(VideoTask.created_at.desc()).offset(offset).limit(limit))
@@ -298,6 +308,7 @@ def _create_seedance_i2v_video(
         duration_sec=target_duration_sec,
         params={
             "image_key": payload.image_key,
+            "scene_prompt": payload.scene_prompt,
             "duration_sec": target_duration_sec,
             "estimated": True,
         },
@@ -315,6 +326,50 @@ def _create_seedance_i2v_video(
     db.commit()
     _video_task_tenants[task_id] = user.tenant_id
     return task_id
+
+
+@router.post("/scene-prompt", response_model=ApiResponse[ScenePromptResponse])
+def generate_scene_prompt(
+    request: Request,
+    payload: ScenePromptRequest,
+    user: User = CurrentUserDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[ScenePromptResponse]:
+    if not (
+        settings.engine_llm_api_key
+        and settings.engine_llm_base_url
+        and settings.engine_llm_model
+    ):
+        raise AppError(
+            "DeepSeek is not configured.",
+            code="LLM_NOT_CONFIGURED",
+            status_code=503,
+        )
+
+    provider = resolve(db, tenant_id=user.tenant_id, capability="llm")
+    result = asyncio.run(
+        invoke(
+            db,
+            tenant_id=user.tenant_id,
+            capability="llm",
+            provider=provider.__class__.__name__,
+            operation=lambda: provider.generate_text(
+                build_seedance_scene_prompt_payload(
+                    payload.topic,
+                    duration_sec=payload.duration_sec,
+                )
+            ),
+            timeout_seconds=30.0,
+        )
+    )
+    scene_prompt = str(result.get("text") or "").strip()
+    if not scene_prompt:
+        raise AppError(
+            "DeepSeek returned an empty scene prompt.",
+            code="LLM_EMPTY_RESULT",
+            status_code=502,
+        )
+    return ok(request, ScenePromptResponse(scene_prompt=scene_prompt))
 
 
 @router.post("/estimate", response_model=ApiResponse[VideoEstimateResponse])

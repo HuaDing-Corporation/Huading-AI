@@ -47,6 +47,11 @@ class VideoGenerateRequest(BaseModel):
         default=None,
         description="Tenant-relative upload key from POST /uploads (seedance_i2v input)",
     )
+    scene_prompt: str | None = Field(
+        default=None,
+        max_length=4000,
+        description="Overall visual prompt for seedance_i2v scene planning.",
+    )
     duration_sec: int | None = Field(
         default=None,
         description="Target seedance_i2v duration in seconds; clamped to 5..120.",
@@ -130,6 +135,24 @@ class VideoEstimateResponse(BaseModel):
     estimated_credits: int
     unit: Literal["credits"] = "credits"
     note: str | None = None
+
+
+class ScenePromptRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    topic: str = Field(min_length=1, max_length=2000)
+    duration_sec: int | None = Field(default=None)
+
+    @field_validator("duration_sec")
+    @classmethod
+    def _clamp_duration(cls, v: int | None) -> int | None:
+        if v is None:
+            return v
+        return max(_MIN_DURATION_SEC, min(_MAX_DURATION_SEC, int(v)))
+
+
+class ScenePromptResponse(BaseModel):
+    scene_prompt: str
 
 
 class VideoTaskStatus(BaseModel):
