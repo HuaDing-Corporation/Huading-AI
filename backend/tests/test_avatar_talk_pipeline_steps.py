@@ -638,6 +638,118 @@ def test_seedance_i2v_scene_planner_requests_visual_prompts(monkeypatch):
     Base.metadata.drop_all(engine)
 
 
+def test_seedance_i2v_scene_planner_uses_scene_prompt_not_script(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-i2v-visual"
+    unit_id = "i2v-visual-unit"
+    payloads: list[dict] = []
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="i2v-visual", name="I2V Visual"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic="premium ceramic mug",
+                script="spoken copy that must never drive the visual plan",
+                duration_sec=10,
+                params={
+                    "duration_sec": 10,
+                    "scene_prompt": "sunlit tabletop product video with steam",
+                },
+            )
+        )
+        db.commit()
+
+        class _FakeDeepSeek:
+            async def generate_text(self, payload: dict):
+                payloads.append(payload)
+                return {"text": json.dumps(["visual scene one", "visual scene two"])}
+
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
+        )
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=_Storage(),
+            duration_sec=10,
+        )
+
+        prompts = avatar_talk._plan_seedance_i2v_scenes(ctx, scene_count=2, clip_duration=5)
+
+        payload = payloads[0]
+        serialized_payload = json.dumps(payload, ensure_ascii=False)
+        assert payload["scene_prompt"] == "sunlit tabletop product video with steam"
+        assert payload["topic"] == "premium ceramic mug"
+        assert "script" not in payload
+        assert "spoken copy that must never drive the visual plan" not in serialized_payload
+        assert prompts == ["visual scene one", "visual scene two"]
+
+    Base.metadata.drop_all(engine)
+
+
+def test_seedance_i2v_scene_planner_falls_back_to_topic_without_script_leak(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-i2v-topic"
+    unit_id = "i2v-topic-unit"
+    payloads: list[dict] = []
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="i2v-topic", name="I2V Topic"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic="minimalist travel bottle",
+                script="voiceover copy should stay out of fallback prompts",
+                duration_sec=10,
+                params={"duration_sec": 10, "scene_prompt": "  "},
+            )
+        )
+        db.commit()
+
+        class _FakeDeepSeek:
+            async def generate_text(self, payload: dict):
+                payloads.append(payload)
+                return {"text": ""}
+
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
+        )
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=_Storage(),
+            duration_sec=10,
+        )
+
+        prompts = avatar_talk._plan_seedance_i2v_scenes(ctx, scene_count=2, clip_duration=5)
+
+        serialized_payload = json.dumps(payloads[0], ensure_ascii=False)
+        assert payloads[0]["scene_prompt"] == "minimalist travel bottle"
+        assert "voiceover copy should stay out of fallback prompts" not in serialized_payload
+        assert all("minimalist travel bottle" in prompt for prompt in prompts)
+        assert all(
+            "voiceover copy should stay out of fallback prompts" not in prompt
+            for prompt in prompts
+        )
+
+    Base.metadata.drop_all(engine)
+
+
 def test_seedance_i2v_runner_releases_quota_on_failure(monkeypatch):
     SessionTesting, engine = _session()
     tenant_id = "tenant-i2v-fail"
@@ -868,6 +980,63 @@ def test_script_step_uses_ecommerce_prompt_and_duration_budget(monkeypatch):
         assert "行动号召" in payload["user_prompt"]
         assert "30秒" in payload["user_prompt"]
         assert db.get(VideoTask, unit_id).script.startswith("这只陶瓷碗")
+
+    Base.metadata.drop_all(engine)
+
+
+def test_script_step_cleans_seedance_i2v_copy_to_spoken_sales_text(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-script-clean"
+    unit_id = "script-clean-ecom"
+    payloads: list[dict] = []
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="script-clean", name="Script Clean"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic="premium ceramic mug",
+                script=None,
+                duration_sec=15,
+                params={"duration_sec": 15},
+            )
+        )
+        db.commit()
+
+        class _FakeDeepSeek:
+            async def generate_text(self, payload: dict):
+                payloads.append(payload)
+                return {
+                    "text": "# 1. 镜头推进，数字人微笑致意。**这款杯子保温耐用，办公送礼都合适。**"
+                }
+
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_api_key", "k")
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_base_url", "https://deepseek.test")
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_model", "m")
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
+        )
+
+        avatar_talk.script_step(
+            avatar_talk.AvatarTalkContext(
+                task_id=unit_id,
+                tenant_id=tenant_id,
+                db=db,
+                store=_Store(),
+                storage=_Storage(),
+            )
+        )
+
+        stored = db.get(VideoTask, unit_id).script
+        assert stored == "这款杯子保温耐用，办公送礼都合适。"
+        assert all(token not in stored for token in ("#", "*", "镜头", "数字人"))
+        assert "镜头/运镜/画面" in payloads[0]["user_prompt"]
+        assert "Markdown" in payloads[0]["user_prompt"]
 
     Base.metadata.drop_all(engine)
 
