@@ -31,6 +31,7 @@ export const copy = {
     productImagePreviewAlt: "产品图预览",
     // 电商带货：视频时长选择器
     durationLabel: "视频时长",
+    durationLabelAligned: "视频时长（与文案、字幕一致）",
     durationSeconds: (s: number) => `${s} 秒`,
     durationCustom: "自定义",
     durationCustomLabel: "自定义时长（秒）",

@@ -69,7 +69,11 @@ export function EcomVideoForm() {
     if (!trimmed || scriptGen.isPending) return;
     setError(null);
     try {
-      const res = await scriptGen.mutateAsync(trimmed);
+      const res = await scriptGen.mutateAsync({
+        topic: trimmed,
+        video_mode: "seedance_i2v",
+        duration_sec: durationSec
+      });
       setScript(res.script);
     } catch (err) {
       setError(errorText(err));
@@ -147,6 +151,12 @@ export function EcomVideoForm() {
         label={copy.workbench.ecomScriptLabel}
       />
 
+      <DurationPicker
+        value={durationSec}
+        onChange={setDurationSec}
+        label={copy.workbench.durationLabelAligned}
+      />
+
       <AiTextField
         id="scene-prompt"
         label={copy.workbench.scenePromptLabel}
@@ -174,8 +184,6 @@ export function EcomVideoForm() {
       />
 
       <VoicePicker voices={voiceList ?? []} value={voiceId} onChange={setVoiceId} />
-
-      <DurationPicker value={durationSec} onChange={setDurationSec} />
 
       <MoreSettings speed={speed} onSpeedChange={setSpeed} />
 
