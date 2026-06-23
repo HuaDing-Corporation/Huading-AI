@@ -373,6 +373,183 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
         assert reserved.credits == Decimal("60.00")
 
 
+def test_video_estimate_seedance_i2v_matches_reserved_quota_with_tenant_rate(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(db, auth_context["tenant_id"])
+        subscription.quota_credits_total = 500
+        db.add(
+            CreditRate(
+                tenant_id=auth_context["tenant_id"],
+                capability="video",
+                unit="second",
+                credits_per_unit=Decimal("3.0000"),
+            )
+        )
+        voice, _avatar = _seed_voice_and_avatar(db, auth_context["tenant_id"])
+        voice_id = voice.id
+        subscription_id = subscription.id
+        reserved_before = subscription.quota_credits_reserved
+        db.commit()
+
+    class _FakeI2VTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            return type("Result", (), {"status": "PENDING"})()
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route, "generate_seedance_i2v_task", _FakeI2VTask())
+    client = TestClient(app)
+    payload = {
+        "topic": "premium scarf product benefits",
+        "video_mode": "seedance_i2v",
+        "image_key": "uploads/product.png",
+        "voice_id": voice_id,
+        "duration_sec": 30,
+    }
+
+    estimate_resp = client.post(
+        "/api/v1/videos/estimate",
+        json=payload,
+        headers=auth_context["headers"],
+    )
+    create_resp = client.post(
+        "/api/v1/videos",
+        json=payload,
+        headers=auth_context["headers"],
+    )
+
+    assert estimate_resp.status_code == 200
+    assert estimate_resp.json()["data"] == {
+        "estimated_credits": 90,
+        "unit": "credits",
+        "note": "Estimated reservation; final settlement uses actual generated duration.",
+    }
+    assert create_resp.status_code == 202
+    with auth_db() as db:
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved - reserved_before == 90
+        reserved = db.query(UsageRecord).filter_by(
+            video_task_id=create_resp.json()["data"]["id"]
+        ).one()
+        assert reserved.quantity == Decimal("30")
+        assert reserved.credits == Decimal("90.00")
+
+
+def test_video_estimate_avatar_uses_existing_script_duration_and_tenant_rates(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        _seed_billing(db, auth_context["tenant_id"])
+        db.add_all(
+            [
+                CreditRate(
+                    tenant_id=auth_context["tenant_id"],
+                    capability="avatar",
+                    unit="second",
+                    credits_per_unit=Decimal("1.5000"),
+                ),
+                CreditRate(
+                    tenant_id=auth_context["tenant_id"],
+                    capability="tts",
+                    unit="second",
+                    credits_per_unit=Decimal("0.5000"),
+                ),
+            ]
+        )
+        voice, avatar = _seed_voice_and_avatar(db, auth_context["tenant_id"])
+        voice_id = voice.id
+        avatar_id = avatar.id
+        db.commit()
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/videos/estimate",
+        json={
+            "topic": "cashmere coat",
+            "script": "x" * 20,
+            "voice_id": voice_id,
+            "avatar_asset_id": avatar_id,
+            "video_mode": "avatar_talk",
+            "speed": 1.0,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["estimated_credits"] == 8
+    assert data["unit"] == "credits"
+
+
+def test_video_estimate_is_read_only_no_task_usage_or_reserved_change(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(db, auth_context["tenant_id"])
+        voice, _avatar = _seed_voice_and_avatar(db, auth_context["tenant_id"])
+        voice_id = voice.id
+        subscription_id = subscription.id
+        before_reserved = subscription.quota_credits_reserved
+        before_tasks = db.query(VideoTask).count()
+        before_usage = db.query(UsageRecord).count()
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/videos/estimate",
+        json={
+            "topic": "premium scarf product benefits",
+            "video_mode": "seedance_i2v",
+            "image_key": "uploads/product.png",
+            "voice_id": voice_id,
+            "duration_sec": 15,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 200
+    with auth_db() as db:
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved == before_reserved
+        assert db.query(VideoTask).count() == before_tasks
+        assert db.query(UsageRecord).count() == before_usage
+
+
+def test_video_estimate_uses_video_generate_validation(auth_context) -> None:
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/videos/estimate",
+        json={
+            "topic": "premium scarf product benefits",
+            "video_mode": "seedance_i2v",
+            "image_key": "uploads/product.png",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 422
+
+
+def test_video_estimate_implicit_avatar_requires_avatar_asset_id(auth_context) -> None:
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/videos/estimate",
+        json={
+            "topic": "cashmere coat",
+            "voice_id": "voice-only",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
 def test_seedance_i2v_order_requires_voice(auth_context) -> None:
     client = TestClient(app)
     resp = client.post(

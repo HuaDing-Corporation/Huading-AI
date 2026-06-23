@@ -21,6 +21,15 @@ _SEEDANCE_I2V_MAX_SECONDS = 120
 
 
 @dataclass(frozen=True)
+class QuotaEstimate:
+    estimated_seconds: int
+    estimated_credits: Decimal
+    reservation_units: int
+    capability: str
+    unit: str
+
+
+@dataclass(frozen=True)
 class Reservation:
     subscription: Subscription
     usage_record: UsageRecord
@@ -120,15 +129,17 @@ def seedance_i2v_billable_seconds(value: int | float | None) -> int:
     return scenes * _SEEDANCE_I2V_CLIP_SECONDS
 
 
-def reserve_avatar_talk_quota(
+def _credit_units(value: Decimal) -> int:
+    return int(Decimal(value).to_integral_value(rounding=ROUND_CEILING))
+
+
+def estimate_avatar_talk_quota(
     db: Session,
     *,
     tenant_id: str,
-    video_task_id: str,
     script: str,
     speed: Decimal | float | int,
-) -> Reservation:
-    subscription = active_subscription(db, tenant_id)
+) -> QuotaEstimate:
     seconds = estimate_seconds(script, speed)
     avatar_rate = _rate(
         db,
@@ -145,14 +156,65 @@ def reserve_avatar_talk_quota(
         default=Decimal("0.2000"),
     )
     credits = (Decimal(seconds) * (avatar_rate + tts_rate)).quantize(Decimal("0.01"))
-    reservation_units = int(credits.to_integral_value(rounding=ROUND_CEILING))
-    if remaining_credits(subscription) < reservation_units:
+    return QuotaEstimate(
+        estimated_seconds=seconds,
+        estimated_credits=credits,
+        reservation_units=_credit_units(credits),
+        capability="avatar",
+        unit="second",
+    )
+
+
+def estimate_seedance_i2v_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    script: str,
+    speed: Decimal | float | int,
+    estimated_seconds: int | None = None,
+) -> QuotaEstimate:
+    seconds = (
+        estimated_seconds if estimated_seconds is not None else estimate_seconds(script, speed)
+    )
+    video_rate = _rate(
+        db,
+        tenant_id=tenant_id,
+        capability="video",
+        unit="second",
+        default=Decimal("2.0000"),
+    )
+    credits = (Decimal(seconds) * video_rate).quantize(Decimal("0.01"))
+    return QuotaEstimate(
+        estimated_seconds=seconds,
+        estimated_credits=credits,
+        reservation_units=_credit_units(credits),
+        capability="video",
+        unit="second",
+    )
+
+
+def reserve_avatar_talk_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    video_task_id: str,
+    script: str,
+    speed: Decimal | float | int,
+) -> Reservation:
+    subscription = active_subscription(db, tenant_id)
+    estimate = estimate_avatar_talk_quota(
+        db,
+        tenant_id=tenant_id,
+        script=script,
+        speed=speed,
+    )
+    if remaining_credits(subscription) < estimate.reservation_units:
         raise AppError(
             "Insufficient tenant quota.",
             code="TENANT_QUOTA_EXCEEDED",
             status_code=403,
         )
-    subscription.quota_credits_reserved += reservation_units
+    subscription.quota_credits_reserved += estimate.reservation_units
     usage_record = UsageRecord(
         tenant_id=tenant_id,
         subscription_id=subscription.id,
@@ -161,13 +223,18 @@ def reserve_avatar_talk_quota(
         provider="omnihuman",
         model="jimeng_realman_avatar_picture_omni_v15",
         unit="second",
-        quantity=Decimal(seconds),
-        credits=credits,
+        quantity=Decimal(estimate.estimated_seconds),
+        credits=estimate.estimated_credits,
         cost_cents=0,
         status="reserved",
     )
     db.add(usage_record)
-    return Reservation(subscription, usage_record, seconds, credits)
+    return Reservation(
+        subscription,
+        usage_record,
+        estimate.estimated_seconds,
+        estimate.estimated_credits,
+    )
 
 
 def reserve_seedance_i2v_quota(
@@ -180,25 +247,20 @@ def reserve_seedance_i2v_quota(
     estimated_seconds: int | None = None,
 ) -> Reservation:
     subscription = active_subscription(db, tenant_id)
-    seconds = (
-        estimated_seconds if estimated_seconds is not None else estimate_seconds(script, speed)
-    )
-    video_rate = _rate(
+    estimate = estimate_seedance_i2v_quota(
         db,
         tenant_id=tenant_id,
-        capability="video",
-        unit="second",
-        default=Decimal("2.0000"),
+        script=script,
+        speed=speed,
+        estimated_seconds=estimated_seconds,
     )
-    credits = (Decimal(seconds) * video_rate).quantize(Decimal("0.01"))
-    reservation_units = int(credits.to_integral_value(rounding=ROUND_CEILING))
-    if remaining_credits(subscription) < reservation_units:
+    if remaining_credits(subscription) < estimate.reservation_units:
         raise AppError(
             "Insufficient tenant quota.",
             code="TENANT_QUOTA_EXCEEDED",
             status_code=403,
         )
-    subscription.quota_credits_reserved += reservation_units
+    subscription.quota_credits_reserved += estimate.reservation_units
     usage_record = UsageRecord(
         tenant_id=tenant_id,
         subscription_id=subscription.id,
@@ -207,13 +269,18 @@ def reserve_seedance_i2v_quota(
         provider="seedance",
         model=settings.engine_seedance_model,
         unit="second",
-        quantity=Decimal(seconds),
-        credits=credits,
+        quantity=Decimal(estimate.estimated_seconds),
+        credits=estimate.estimated_credits,
         cost_cents=0,
         status="reserved",
     )
     db.add(usage_record)
-    return Reservation(subscription, usage_record, seconds, credits)
+    return Reservation(
+        subscription,
+        usage_record,
+        estimate.estimated_seconds,
+        estimate.estimated_credits,
+    )
 
 
 def _reserved_record(db: Session, *, tenant_id: str, video_task_id: str) -> UsageRecord | None:
@@ -224,10 +291,6 @@ def _reserved_record(db: Session, *, tenant_id: str, video_task_id: str) -> Usag
             UsageRecord.status == "reserved",
         )
     )
-
-
-def _credit_units(value: Decimal) -> int:
-    return int(Decimal(value).to_integral_value(rounding=ROUND_CEILING))
 
 
 def release_reserved_quota(db: Session, *, tenant_id: str, video_task_id: str) -> None:

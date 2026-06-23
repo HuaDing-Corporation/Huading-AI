@@ -126,6 +126,12 @@ class VideoAccepted(BaseModel):
     status: str
 
 
+class VideoEstimateResponse(BaseModel):
+    estimated_credits: int
+    unit: Literal["credits"] = "credits"
+    note: str | None = None
+
+
 class VideoTaskStatus(BaseModel):
     task_id: str
     status: str  # PENDING / STARTED / PROGRESS / SUCCESS / FAILURE
