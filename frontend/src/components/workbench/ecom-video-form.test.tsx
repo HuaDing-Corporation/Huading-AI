@@ -42,6 +42,16 @@ function selectProductImage() {
 }
 
 describe("EcomVideoForm (电商带货 i2v)", () => {
+  it("renders 视频时长 above the 主题/卖点 input (duration-first layout)", () => {
+    render(<EcomVideoForm />);
+    const durationLegend = screen.getByText("视频时长（与文案、字幕一致）");
+    const topicInput = screen.getByPlaceholderText(/输入产品卖点/);
+    // DurationPicker must come before the topic input in document order.
+    expect(
+      durationLegend.compareDocumentPosition(topicInput) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+  });
+
   it("disables 生成 with a hint until both 卖点 and 产品图 are provided", async () => {
     render(<EcomVideoForm />);
     const generate = screen.getByRole("button", { name: /生成视频/ });

@@ -129,6 +129,13 @@ export function EcomVideoForm() {
       <CardTitle>{copy.workbench.ecomTitle}</CardTitle>
       <CardSubtitle className="mb-[18px] mt-1">{copy.workbench.ecomSubtitle}</CardSubtitle>
 
+      {/* 视频时长置顶：先定时长 → 再写贴合时长的文案（同一 durationSec 驱动文案/视频/字幕）。 */}
+      <DurationPicker
+        value={durationSec}
+        onChange={setDurationSec}
+        label={copy.workbench.durationLabelAligned}
+      />
+
       <div className="mb-[15px]">
         <label htmlFor="ecom-topic" className={labelClass}>
           {copy.workbench.ecomTopicLabel}
@@ -149,12 +156,6 @@ export function EcomVideoForm() {
         loading={scriptGen.isPending}
         speed={speed}
         label={copy.workbench.ecomScriptLabel}
-      />
-
-      <DurationPicker
-        value={durationSec}
-        onChange={setDurationSec}
-        label={copy.workbench.durationLabelAligned}
       />
 
       <AiTextField
