@@ -36,7 +36,13 @@ export const copy = {
     durationCustomLabel: "自定义时长（秒）",
     durationCustomPlaceholder: "5–120",
     durationRange: "请输入 5–120 秒",
-    durationHint: "时长越长，生成越慢、消耗额度越多"
+    durationHint: "时长越长，生成越慢、消耗额度越多",
+    // 文案/画面解耦（电商带货）
+    ecomScriptLabel: "AI 口播文案（仅配音）",
+    scenePromptLabel: "画面提示词",
+    scenePromptGenerate: "AI 生成画面",
+    scenePromptPlaceholder: "描述想要的产品画面 / 场景 / 镜头，可点「AI 生成画面」自动生成，也可手动编辑",
+    scenePromptHint: "画面与口播已解耦：此处只描述画面，不影响配音文案"
   },
   confirm: {
     title: "确定生成",
@@ -58,10 +64,24 @@ export const copy = {
     generic: "操作失败，请重试"
   },
   tasks: {
+    title: "生成任务",
     empty: "暂无任务，输入主题开始生成。",
     retry: "重试",
     retryUnavailable: "请到工作台重新发起",
-    open: "查看详情"
+    open: "查看详情",
+    moreInHistory: "更多任务见下方「历史生成」"
+  },
+  history: {
+    title: "历史生成",
+    tabAvatar: "数字人视频历史",
+    tabEcom: "电商视频历史",
+    tabPhoto: "照片历史",
+    empty: "暂无历史记录",
+    loading: "加载中…",
+    error: "加载失败，请重试",
+    retry: "重试",
+    loadMore: "加载更多",
+    photoComingSoon: "照片生成功能即将上线，敬请期待"
   },
   detail: { notFound: "视频不存在或无权访问", back: "返回", download: "下载 MP4" },
   status: { queued: "排队中", failed: "失败", done: "已完成" }

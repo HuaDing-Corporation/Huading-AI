@@ -1,6 +1,6 @@
 import { API_BASE_URL, ApiError, apiFetch, authHeaders } from "@/lib/api/client";
 import { authStore } from "@/lib/auth/store";
-import type { CreateVideoRequest, EstimateResponse, VideoAccepted, VideoDetail, VideoEvent, VideoListItem, VideoListResponse } from "@/lib/api/types";
+import type { CreateVideoRequest, EstimateResponse, ScenePromptResponse, VideoAccepted, VideoDetail, VideoEvent, VideoListItem, VideoListResponse } from "@/lib/api/types";
 
 export function createVideo(input: CreateVideoRequest): Promise<VideoAccepted> {
   return apiFetch<VideoAccepted>("/api/v1/videos", { method: "POST", body: input });
@@ -9,6 +9,12 @@ export function createVideo(input: CreateVideoRequest): Promise<VideoAccepted> {
 /** Estimate the credits a request would consume — shown in the 确定生成 dialog. */
 export function estimateVideo(input: CreateVideoRequest): Promise<EstimateResponse> {
   return apiFetch<EstimateResponse>("/api/v1/videos/estimate", { method: "POST", body: input });
+}
+
+/** Generate a 画面提示词 (scene prompt) for 电商带货 i2v from the topic — decoupled
+ *  from the 口播 script so editing one never changes the other. */
+export function generateScenePrompt(topic: string): Promise<ScenePromptResponse> {
+  return apiFetch<ScenePromptResponse>("/api/v1/videos/scene-prompt", { method: "POST", body: { topic } });
 }
 
 /** Authoritative record for one video (status + playback/download URLs). */
@@ -20,6 +26,19 @@ export function getVideo(id: string): Promise<VideoDetail> {
 export async function listVideos(): Promise<VideoListItem[]> {
   const res = await apiFetch<VideoListResponse>("/api/v1/videos", { method: "GET" });
   return res?.items ?? [];
+}
+
+/** One page of videos, optionally filtered by mode — backs the 历史生成 tabs
+ *  (returns total so the caller can paginate via offset). */
+export function listVideosPage(
+  params: { mode?: string; limit?: number; offset?: number } = {}
+): Promise<VideoListResponse> {
+  const query = new URLSearchParams();
+  if (params.mode) query.set("mode", params.mode);
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
+  return apiFetch<VideoListResponse>(`/api/v1/videos${qs ? `?${qs}` : ""}`, { method: "GET" });
 }
 
 /**

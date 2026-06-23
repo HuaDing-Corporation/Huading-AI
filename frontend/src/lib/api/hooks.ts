@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { fetchMe } from "@/lib/api/auth";
 import { listAvatarPresets } from "@/lib/api/avatars";
@@ -7,13 +7,26 @@ import { getQuota } from "@/lib/api/quota";
 import { generateScript } from "@/lib/api/scripts";
 import { uploadImage, uploadProductImage } from "@/lib/api/uploads";
 import { listVoices } from "@/lib/api/voices";
-import { createVideo, estimateVideo, getVideo, listVideos } from "@/lib/api/videos";
+import { createVideo, estimateVideo, generateScenePrompt, getVideo, listVideos, listVideosPage } from "@/lib/api/videos";
 import type { CreateVideoRequest } from "@/lib/api/types";
 import { useAuth } from "@/lib/auth/auth-context";
 
 export function useVideos() {
   const { session } = useAuth();
   return useQuery({ queryKey: videoKeys.list(), queryFn: listVideos, enabled: !!session });
+}
+export function useVideoHistory(mode: string) {
+  const { session } = useAuth();
+  return useInfiniteQuery({
+    queryKey: videoKeys.history(mode),
+    queryFn: ({ pageParam }) => listVideosPage({ mode, limit: 10, offset: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) => {
+      const loaded = allPages.reduce((sum, page) => sum + page.items.length, 0);
+      return loaded < lastPage.total ? loaded : undefined;
+    },
+    enabled: !!session
+  });
 }
 export function useVideo(id: string | undefined) {
   const { session } = useAuth();
@@ -37,6 +50,9 @@ export function useUploadProductImage() {
 }
 export function useScriptGenerate() {
   return useMutation({ mutationFn: (topic: string) => generateScript(topic) });
+}
+export function useScenePromptGenerate() {
+  return useMutation({ mutationFn: (topic: string) => generateScenePrompt(topic) });
 }
 export function useVoices() {
   const { session } = useAuth();

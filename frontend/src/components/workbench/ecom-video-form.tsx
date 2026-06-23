@@ -4,13 +4,14 @@ import { useEffect, useState } from "react";
 import { Sparkles } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
-import { useScriptGenerate, useUploadProductImage, useVoices } from "@/lib/api/hooks";
+import { useScenePromptGenerate, useScriptGenerate, useUploadProductImage, useVoices } from "@/lib/api/hooks";
 import { useGenerateConfirm } from "@/lib/api/use-generate-confirm";
 import { useTrackedUpload } from "@/lib/api/use-tracked-upload";
 import type { CreateVideoRequest } from "@/lib/api/types";
 import { useVideoTasks } from "@/lib/videos/tasks-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
+import { AiTextField } from "@/components/workbench/ai-text-field";
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
 import { Input } from "@/components/ui/input";
 import { DurationPicker, isValidDuration } from "@/components/workbench/duration-picker";
@@ -33,12 +34,14 @@ const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 export function EcomVideoForm() {
   const { createAndTrack } = useVideoTasks();
   const scriptGen = useScriptGenerate();
+  const scenePromptGen = useScenePromptGenerate();
   const uploadProduct = useUploadProductImage();
   const voices = useVoices();
   const productImage = useTrackedUpload(uploadProduct.mutateAsync, (r) => r.image_key);
 
   const [topic, setTopic] = useState("");
   const [script, setScript] = useState("");
+  const [scenePrompt, setScenePrompt] = useState("");
   const [voiceId, setVoiceId] = useState("");
   const [durationSec, setDurationSec] = useState(30);
   const [speed, setSpeed] = useState(1);
@@ -73,6 +76,19 @@ export function EcomVideoForm() {
     }
   };
 
+  // 画面提示词 AI 生成 — decoupled from 口播 (separate endpoint + state).
+  const onGenerateScenePrompt = async () => {
+    const trimmed = topic.trim();
+    if (!trimmed || scenePromptGen.isPending) return;
+    setError(null);
+    try {
+      const res = await scenePromptGen.mutateAsync(trimmed);
+      setScenePrompt(res.scene_prompt);
+    } catch (err) {
+      setError(errorText(err));
+    }
+  };
+
   // Run existing validation, then open the confirm dialog instead of submitting.
   const onGenerate = () => {
     const trimmed = topic.trim();
@@ -84,6 +100,7 @@ export function EcomVideoForm() {
       video_mode: "seedance_i2v",
       image_key: productImage.value,
       voice_id: voiceId,
+      scene_prompt: scenePrompt.trim() || undefined,
       duration_sec: durationSec,
       speed,
       aspect_ratio: "9:16",
@@ -127,6 +144,21 @@ export function EcomVideoForm() {
         onRegenerate={onGenerateScript}
         loading={scriptGen.isPending}
         speed={speed}
+        label={copy.workbench.ecomScriptLabel}
+      />
+
+      <AiTextField
+        id="scene-prompt"
+        label={copy.workbench.scenePromptLabel}
+        value={scenePrompt}
+        onChange={setScenePrompt}
+        onAction={onGenerateScenePrompt}
+        actionLabel={copy.workbench.scenePromptGenerate}
+        actionIcon="generate"
+        loading={scenePromptGen.isPending}
+        rows={3}
+        placeholder={copy.workbench.scenePromptPlaceholder}
+        footer={copy.workbench.scenePromptHint}
       />
 
       <ImagePicker
