@@ -259,26 +259,37 @@ def _add_asset(
     return asset
 
 
-def _strip_script_noise(text: str) -> str:
-    cleaned = _strip_markdown_fence(text)
-    cleaned = re.sub(r"[#*_`]+", "", cleaned)
-    pieces = re.split(r"(?<=[。！？.!?])", cleaned)
-    kept: list[str] = []
-    for piece in pieces:
-        item = re.sub(r"^\s*(?:[-+>]|\d+[.)、])\s*", "", piece).strip()
-        item = re.sub(r"^(?:旁白|文案|口播|镜头|画面|数字人)\s*[:：]\s*", "", item)
-        if not item:
+def clean_spoken_script(text: str) -> str:
+    cleaned = _strip_markdown_fence(str(text or ""))
+    cleaned = re.sub(r"【[^】]*】", "", cleaned)
+    cleaned = re.sub(r"\[[^\]]*\]", "", cleaned)
+    lines: list[str] = []
+    for raw_line in cleaned.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line:
             continue
-        if any(term in item for term in _ECOMMERCE_SCRIPT_FORBIDDEN_TERMS):
+        line = re.sub(r"^\s{0,3}#{1,6}\s*", "", line)
+        line = re.sub(r"^\s*(?:[-+*]|\d+[.)、])\s*", "", line)
+        line = re.sub(r"^\s*>\s*", "", line)
+        line = re.sub(r"`([^`]*)`", r"\1", line)
+        line = re.sub(r"(\*\*|__)(.*?)\1", r"\2", line)
+        line = re.sub(r"(?<!\w)(\*|_)([^*_]+)\1(?!\w)", r"\2", line)
+        line = re.sub(r"[`*_#]+", "", line).strip()
+        if re.fullmatch(r"[（(][^（）()]*[）)]", line):
             continue
-        kept.append(item)
-    if not kept:
-        fallback = re.sub(r"^\s*(?:[-+>]|\d+[.)、])\s*", "", cleaned).strip()
-        for term in _ECOMMERCE_SCRIPT_FORBIDDEN_TERMS:
-            fallback = fallback.replace(term, "")
-        return re.sub(r"\s+", " ", fallback).strip()
-    return re.sub(r"\s+", " ", "".join(kept)).strip()
-
+        line = re.sub(
+            r"^(?:数字人主播脚本|主播脚本|口播脚本|脚本|标题|文案)\s*[:：]?\s*",
+            "",
+            line,
+        ).strip()
+        if re.fullmatch(r"[（(][^（）()]*[）)]", line):
+            continue
+        if line:
+            for piece in re.split(r"(?<=[。！？.!?])", line):
+                piece = piece.strip()
+                if piece and not any(term in piece for term in _ECOMMERCE_SCRIPT_FORBIDDEN_TERMS):
+                    lines.append(piece)
+    return re.sub(r"\s+", " ", " ".join(lines)).strip()
 
 def _scene_prompt_source(task: VideoTask) -> str:
     params = task.params or {}
@@ -309,16 +320,21 @@ def build_seedance_scene_prompt_payload(
     }
 
 
-def _script_generation_payload(task: VideoTask) -> dict[str, Any]:
-    topic = task.topic or ""
-    if (task.video_mode or task.mode) != "seedance_i2v":
-        return {"topic": topic}
+def build_script_payload(
+    topic: str,
+    *,
+    video_mode: str | None = None,
+    duration_sec: float | int | None = None,
+) -> dict[str, Any]:
+    topic_text = str(topic or "")
+    if video_mode != "seedance_i2v":
+        return {"topic": topic_text}
 
-    target_duration = _task_target_duration_sec(task)
+    target_duration = _seedance_i2v_target_duration(duration_sec)
     target_chars_min = target_duration * 5
     target_chars_max = target_duration * 6
     return {
-        "topic": topic,
+        "topic": topic_text,
         "video_mode": "seedance_i2v",
         "target_duration_sec": target_duration,
         "target_chars_min": target_chars_min,
@@ -330,9 +346,17 @@ def _script_generation_payload(task: VideoTask) -> dict[str, Any]:
             "突出卖点、使用场景、购买理由，并在结尾加入自然行动号召。"
             "只输出可直接朗读的卖货正文，不要标题、编号或 Markdown。"
             "严禁出现镜头/运镜/画面/景别描述，严禁出现数字人、出镜、微笑致意、旁白标注。\n"
-            f"产品卖点：{topic}"
+            f"产品卖点：{topic_text}"
         ),
     }
+
+
+def _script_generation_payload(task: VideoTask) -> dict[str, Any]:
+    return build_script_payload(
+        task.topic or "",
+        video_mode=task.video_mode or task.mode,
+        duration_sec=_task_target_duration_sec(task),
+    )
 
 
 def script_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
@@ -355,9 +379,7 @@ def script_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
                 timeout_seconds=30.0,
             )
         )
-        script = str(result.get("text") or "").strip()
-        if (task.video_mode or task.mode) == "seedance_i2v":
-            script = _strip_script_noise(script)
+        script = clean_spoken_script(str(result.get("text") or ""))
         if not script:
             raise RuntimeError("DeepSeek returned an empty avatar_talk script.")
         task.script = script
@@ -627,7 +649,7 @@ def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
     timeline = getattr(ctx, "timeline", []) or []
     duration_sec = float(ctx.duration_sec or 1)
-    script = str(task.script or task.topic or "")
+    script = clean_spoken_script(str(task.script or task.topic or ""))
     captions, source, clause_count = _script_timed_captions(
         script,
         timeline,
@@ -889,6 +911,7 @@ def _fallback_captions(text: str, *, duration_sec: float) -> list[tuple[int, int
 
 
 def _clean_caption_text(text: str) -> str:
+    text = clean_spoken_script(text)
     text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.M)
     text = re.sub(r"`([^`]*)`", r"\1", text)
     text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text)

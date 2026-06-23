@@ -10,6 +10,7 @@ from app.db.models import User
 from app.providers.base import invoke, resolve
 from app.schemas.response import ApiResponse, ok
 from app.schemas.scripts import ScriptGenerateRequest, ScriptGenerateResponse
+from app.workers.avatar_talk import build_script_payload, clean_spoken_script
 
 router = APIRouter()
 
@@ -39,11 +40,17 @@ def generate_script(
             tenant_id=user.tenant_id,
             capability="llm",
             provider=provider.__class__.__name__,
-            operation=lambda: provider.generate_text({"topic": topic}),
+            operation=lambda: provider.generate_text(
+                build_script_payload(
+                    topic,
+                    video_mode=payload.video_mode,
+                    duration_sec=payload.duration_sec,
+                )
+            ),
             timeout_seconds=30.0,
         )
     )
-    script = str(result.get("text") or "").strip()
+    script = clean_spoken_script(str(result.get("text") or ""))
     if not script:
         raise AppError(
             "DeepSeek returned an empty script.",
