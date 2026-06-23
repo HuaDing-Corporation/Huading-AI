@@ -5,11 +5,13 @@ import { Sparkles } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
 import { useScriptGenerate, useUploadProductImage, useVoices } from "@/lib/api/hooks";
+import { useGenerateConfirm } from "@/lib/api/use-generate-confirm";
 import { useTrackedUpload } from "@/lib/api/use-tracked-upload";
 import type { CreateVideoRequest } from "@/lib/api/types";
 import { useVideoTasks } from "@/lib/videos/tasks-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
+import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
 import { Input } from "@/components/ui/input";
 import { DurationPicker, isValidDuration } from "@/components/workbench/duration-picker";
 import { ImagePicker } from "@/components/workbench/image-picker";
@@ -40,8 +42,18 @@ export function EcomVideoForm() {
   const [voiceId, setVoiceId] = useState("");
   const [durationSec, setDurationSec] = useState(30);
   const [speed, setSpeed] = useState(1);
-  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Actual submit — runs only after the 确定生成 confirmation; owns its own errors.
+  const submit = async (req: CreateVideoRequest) => {
+    setError(null);
+    try {
+      await createAndTrack(req, req.topic);
+    } catch (err) {
+      setError(errorText(err));
+    }
+  };
+  const confirm = useGenerateConfirm(submit);
 
   // Default the voice to the first loaded option (once), without clobbering a pick.
   const voiceList = voices.data;
@@ -61,14 +73,12 @@ export function EcomVideoForm() {
     }
   };
 
-  const onGenerate = async () => {
+  // Run existing validation, then open the confirm dialog instead of submitting.
+  const onGenerate = () => {
     const trimmed = topic.trim();
-    if (!trimmed || !voiceId || !productImage.value || !isValidDuration(durationSec) || submitting)
-      return;
+    if (!trimmed || !voiceId || !productImage.value || !isValidDuration(durationSec)) return;
     setError(null);
-    setSubmitting(true);
-
-    const request: CreateVideoRequest = {
+    confirm.requestConfirm({
       topic: trimmed,
       script: script.trim() || undefined,
       video_mode: "seedance_i2v",
@@ -78,19 +88,10 @@ export function EcomVideoForm() {
       speed,
       aspect_ratio: "9:16",
       subtitle_enabled: true
-    };
-
-    try {
-      await createAndTrack(request, trimmed);
-    } catch (err) {
-      setError(errorText(err));
-    } finally {
-      setSubmitting(false);
-    }
+    });
   };
 
   const generateDisabled =
-    submitting ||
     uploadProduct.isPending ||
     !topic.trim() ||
     !voiceId ||
@@ -165,8 +166,16 @@ export function EcomVideoForm() {
         onClick={onGenerate}
         disabled={generateDisabled}
       >
-        <Sparkles size={18} strokeWidth={1.8} /> {submitting ? copy.workbench.generating : copy.workbench.generate}
+        <Sparkles size={18} strokeWidth={1.8} /> {copy.workbench.generate}
       </Button>
+
+      <ConfirmGenerateDialog
+        open={confirm.open}
+        request={confirm.request}
+        submitting={confirm.submitting}
+        onConfirm={confirm.confirm}
+        onCancel={confirm.cancel}
+      />
     </Card>
   );
 }

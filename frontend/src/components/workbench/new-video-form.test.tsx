@@ -18,7 +18,8 @@ vi.mock("@/lib/api/hooks", () => ({
       { id: "v1", provider: "edge_tts", voice_code: "c", display_name: "声", gender: null, language: null }
     ]
   }),
-  useAvatarPresets: () => ({ data: [] })
+  useAvatarPresets: () => ({ data: [] }),
+  useEstimateVideo: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, data: undefined })
 }));
 vi.mock("@/lib/videos/tasks-context", () => ({ useVideoTasks: () => ({ createAndTrack: vi.fn() }) }));
 

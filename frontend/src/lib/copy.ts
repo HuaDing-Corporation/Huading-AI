@@ -12,7 +12,6 @@ export const copy = {
     aspectLocked: "9:16 竖屏（锁定）",
     subtitleLocked: "字幕已开启（锁定）",
     generate: "生成视频",
-    generating: "提交中…",
     scriptTooLong: (s: number) => `预计 ${s}s，将截断到 60s，建议精简文案`,
     // 生成模式切换（数字人口播 / 电商带货）
     modeGroupLabel: "生成模式",
@@ -38,6 +37,18 @@ export const copy = {
     durationCustomPlaceholder: "5–120",
     durationRange: "请输入 5–120 秒",
     durationHint: "时长越长，生成越慢、消耗额度越多"
+  },
+  confirm: {
+    title: "确定生成",
+    estimating: "估算中…",
+    estimatePrefix: "预计消耗 ",
+    estimateSuffix: " 积分",
+    estimateNote: "按实际生成时长结算",
+    estimateUnavailable: "暂无法预估，按实际结算",
+    warning: "确定生成即会消耗积分，生成过程中无法取消！",
+    confirm: "确定",
+    confirming: "提交中…",
+    cancel: "取消"
   },
   errors: {
     quota: "额度不足，无法生成，请充值或精简任务",

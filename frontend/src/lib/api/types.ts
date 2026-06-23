@@ -89,6 +89,13 @@ export interface VideoAccepted {
   status: string;
 }
 
+// POST /videos/estimate → 预计积分（"确定生成"确认窗用）；请求体同 CreateVideoRequest。
+export interface EstimateResponse {
+  estimated_credits: number;
+  unit: string;
+  note?: string;
+}
+
 export interface Voice {
   id: string;
   provider: string;
