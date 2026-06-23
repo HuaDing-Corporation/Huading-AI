@@ -361,6 +361,7 @@ def _script_generation_payload(task: VideoTask) -> dict[str, Any]:
 
 def script_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
+    generated_script = False
     if not task.script:
         if not (
             settings.engine_llm_api_key
@@ -379,10 +380,16 @@ def script_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
                 timeout_seconds=30.0,
             )
         )
-        script = clean_spoken_script(str(result.get("text") or ""))
-        if not script:
+        task.script = str(result.get("text") or "")
+        generated_script = True
+
+    script = clean_spoken_script(str(task.script or ""))
+    if not script:
+        if generated_script:
             raise RuntimeError("DeepSeek returned an empty avatar_talk script.")
-        task.script = script
+        raise RuntimeError("Avatar talk script is empty after cleanup.")
+    task.script = script
+    ctx.db.flush()
     return ctx
 
 

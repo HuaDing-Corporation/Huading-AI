@@ -1112,6 +1112,87 @@ def test_script_step_cleans_user_bad_sample_before_tts(monkeypatch):
     Base.metadata.drop_all(engine)
 
 
+def test_script_step_cleans_existing_bad_script_before_tts(monkeypatch, tmp_path: Path):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-existing-script"
+    unit_id = "existing-script-unit"
+    expected_script = avatar_talk.clean_spoken_script(BAD_SCRIPT_SAMPLE)
+    captured_tts_payloads: list[dict] = []
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="existing-script", name="Existing Script"))
+        voice = Voice(
+            id="voice-existing-script",
+            provider="doubao-seed-tts",
+            voice_code="BV001",
+            display_name="Seed TTS",
+        )
+        db.add(voice)
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic="pants product",
+                script=BAD_SCRIPT_SAMPLE,
+                voice_id=voice.id,
+                duration_sec=10,
+                params={"duration_sec": 10},
+            )
+        )
+        db.commit()
+
+        class _FakeTTS:
+            async def synthesize_speech(self, payload: dict):
+                captured_tts_payloads.append(dict(payload))
+                audio = tmp_path / "existing-script.mp3"
+                audio.write_bytes(b"MP3")
+                return {
+                    "audio_path": str(audio),
+                    "timeline": [{"text": expected_script, "start_ms": 0, "end_ms": 1000}],
+                    "duration_ms": 1000,
+                    "mime_type": "audio/mpeg",
+                    "size_bytes": 3,
+                }
+
+        def fake_resolve(_db, *, tenant_id: str, capability: str):
+            assert tenant_id == "tenant-existing-script"
+            if capability == "tts":
+                return _FakeTTS()
+            raise AssertionError("existing script must not resolve an LLM provider")
+
+        monkeypatch.setattr(avatar_talk, "resolve", fake_resolve)
+        monkeypatch.setattr(avatar_talk, "_work_dir", lambda _unit_id: tmp_path)
+        monkeypatch.setattr(avatar_talk, "_audio_duration_sec", lambda _path: 1.0)
+
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=_Storage(),
+        )
+
+        avatar_talk.script_step(ctx)
+        db.flush()
+        assert db.get(VideoTask, unit_id).script == expected_script
+
+        avatar_talk.script_step(ctx)
+        db.flush()
+        assert db.get(VideoTask, unit_id).script == expected_script
+
+        avatar_talk.tts_step(ctx)
+
+        assert captured_tts_payloads[0]["text"] == expected_script
+        assert all(
+            token not in captured_tts_payloads[0]["text"]
+            for token in ("#", "*", "銆?", "锛?", "鏁板瓧浜?", "鑴氭湰")
+        )
+
+    Base.metadata.drop_all(engine)
+
+
 def test_script_step_resolves_llm_provider_from_registry(monkeypatch):
     SessionTesting, engine = _session()
     tenant_id = "tenant-script-registry"
