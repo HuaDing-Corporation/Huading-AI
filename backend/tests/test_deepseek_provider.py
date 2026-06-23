@@ -109,3 +109,53 @@ def test_scripts_generate_route_uses_provider_registry(monkeypatch, auth_context
 
     assert resp.status_code == 200
     assert resp.json()["data"]["script"] == "DeepSeek script"
+
+
+def test_scripts_generate_seedance_i2v_uses_ecommerce_payload_and_cleans(
+    monkeypatch, auth_context
+) -> None:
+    from app.api.v1.routes import scripts as scripts_route
+    from app.main import app
+
+    payloads: list[dict] = []
+
+    class _FakeDeepSeek:
+        async def generate_text(self, payload: dict):
+            payloads.append(payload)
+            return {
+                "text": (
+                    "【数字人主播脚本】\n"
+                    "（微笑，自然站姿，手持或展示裤子）\n"
+                    "**姐妹们，这条裤子显瘦又舒服，现在下单更划算。**"
+                )
+            }
+
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_api_key", "k")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_base_url", "https://deepseek.test")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_model", "m")
+    monkeypatch.setattr(
+        scripts_route,
+        "resolve",
+        lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
+        raising=False,
+    )
+
+    resp = TestClient(app).post(
+        "/api/v1/scripts/generate",
+        json={
+            "topic": "高腰阔腿裤，显瘦，通勤休闲都能穿",
+            "video_mode": "seedance_i2v",
+            "duration_sec": 10,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["script"] == "姐妹们，这条裤子显瘦又舒服，现在下单更划算。"
+    payload = payloads[0]
+    assert payload["video_mode"] == "seedance_i2v"
+    assert payload["target_duration_sec"] == 10
+    assert payload["target_chars_min"] == 50
+    assert payload["target_chars_max"] == 60
+    assert "system_prompt" in payload
+    assert "user_prompt" in payload

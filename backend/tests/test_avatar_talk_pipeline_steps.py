@@ -48,6 +48,14 @@ class _Storage:
         return f"https://storage.test/{key}"
 
 
+BAD_SCRIPT_SAMPLE = (
+    "【数字人主播脚本】\n"
+    "（微笑，自然站姿，手持或展示裤子）\n"
+    "# 标题\n"
+    "> 口播脚本：**姐妹们，这条裤子显瘦又舒服，现在下单更划算。**"
+)
+
+
 def _max_same_value_stall_seconds(
     values: list[int],
     *,
@@ -76,6 +84,20 @@ def _session():
     )
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine, autoflush=False, autocommit=False), engine
+
+
+def test_clean_spoken_script_removes_non_spoken_bad_sample():
+    cleaned = avatar_talk.clean_spoken_script(BAD_SCRIPT_SAMPLE)
+
+    assert cleaned == "姐妹们，这条裤子显瘦又舒服，现在下单更划算。"
+    assert "【" not in cleaned
+    assert "】" not in cleaned
+    assert "（" not in cleaned
+    assert "）" not in cleaned
+    assert "数字人" not in cleaned
+    assert "脚本" not in cleaned
+    assert "*" not in cleaned
+    assert "#" not in cleaned
 
 
 def test_default_avatar_talk_steps_create_assets_and_final_video(monkeypatch, tmp_path: Path):
@@ -1041,6 +1063,136 @@ def test_script_step_cleans_seedance_i2v_copy_to_spoken_sales_text(monkeypatch):
     Base.metadata.drop_all(engine)
 
 
+def test_script_step_cleans_user_bad_sample_before_tts(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-script-bad"
+    unit_id = "script-bad-ecom"
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="script-bad", name="Script Bad"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic="pants product",
+                script=None,
+                duration_sec=10,
+                params={"duration_sec": 10},
+            )
+        )
+        db.commit()
+
+        class _FakeDeepSeek:
+            async def generate_text(self, payload: dict):
+                return {"text": BAD_SCRIPT_SAMPLE}
+
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_api_key", "k")
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_base_url", "https://deepseek.test")
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_model", "m")
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
+        )
+
+        avatar_talk.script_step(
+            avatar_talk.AvatarTalkContext(
+                task_id=unit_id,
+                tenant_id=tenant_id,
+                db=db,
+                store=_Store(),
+                storage=_Storage(),
+            )
+        )
+
+        assert db.get(VideoTask, unit_id).script == "姐妹们，这条裤子显瘦又舒服，现在下单更划算。"
+
+    Base.metadata.drop_all(engine)
+
+
+def test_script_step_cleans_existing_bad_script_before_tts(monkeypatch, tmp_path: Path):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-existing-script"
+    unit_id = "existing-script-unit"
+    expected_script = avatar_talk.clean_spoken_script(BAD_SCRIPT_SAMPLE)
+    captured_tts_payloads: list[dict] = []
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="existing-script", name="Existing Script"))
+        voice = Voice(
+            id="voice-existing-script",
+            provider="doubao-seed-tts",
+            voice_code="BV001",
+            display_name="Seed TTS",
+        )
+        db.add(voice)
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic="pants product",
+                script=BAD_SCRIPT_SAMPLE,
+                voice_id=voice.id,
+                duration_sec=10,
+                params={"duration_sec": 10},
+            )
+        )
+        db.commit()
+
+        class _FakeTTS:
+            async def synthesize_speech(self, payload: dict):
+                captured_tts_payloads.append(dict(payload))
+                audio = tmp_path / "existing-script.mp3"
+                audio.write_bytes(b"MP3")
+                return {
+                    "audio_path": str(audio),
+                    "timeline": [{"text": expected_script, "start_ms": 0, "end_ms": 1000}],
+                    "duration_ms": 1000,
+                    "mime_type": "audio/mpeg",
+                    "size_bytes": 3,
+                }
+
+        def fake_resolve(_db, *, tenant_id: str, capability: str):
+            assert tenant_id == "tenant-existing-script"
+            if capability == "tts":
+                return _FakeTTS()
+            raise AssertionError("existing script must not resolve an LLM provider")
+
+        monkeypatch.setattr(avatar_talk, "resolve", fake_resolve)
+        monkeypatch.setattr(avatar_talk, "_work_dir", lambda _unit_id: tmp_path)
+        monkeypatch.setattr(avatar_talk, "_audio_duration_sec", lambda _path: 1.0)
+
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=_Storage(),
+        )
+
+        avatar_talk.script_step(ctx)
+        db.flush()
+        assert db.get(VideoTask, unit_id).script == expected_script
+
+        avatar_talk.script_step(ctx)
+        db.flush()
+        assert db.get(VideoTask, unit_id).script == expected_script
+
+        avatar_talk.tts_step(ctx)
+
+        assert captured_tts_payloads[0]["text"] == expected_script
+        assert all(
+            token not in captured_tts_payloads[0]["text"]
+            for token in ("#", "*", "銆?", "锛?", "鏁板瓧浜?", "鑴氭湰")
+        )
+
+    Base.metadata.drop_all(engine)
+
+
 def test_script_step_resolves_llm_provider_from_registry(monkeypatch):
     SessionTesting, engine = _session()
     tenant_id = "tenant-script-registry"
@@ -1573,6 +1725,48 @@ def test_subtitle_step_strips_markdown_from_script_text(tmp_path: Path):
         srt_path.write_text(storage.objects[subtitle_key].decode("utf-8"), encoding="utf-8")
         captions = avatar_talk._parse_srt(srt_path)
         assert captions == [(0.0, 2.0, "真实 字幕")]
+
+    Base.metadata.drop_all(engine)
+
+
+def test_subtitle_step_cleans_user_bad_sample_from_srt(tmp_path: Path):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-caption-bad"
+    unit_id = "caption-bad-job"
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="caption-bad", name="Caption Bad"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic="caption bad",
+                script=BAD_SCRIPT_SAMPLE,
+            )
+        )
+        db.commit()
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=storage,
+            duration_sec=3.0,
+        )
+        ctx.timeline = []
+
+        avatar_talk.subtitle_step(ctx)
+
+        subtitle_key = f"tenants/{tenant_id}/videos/{unit_id}/subtitle.srt"
+        srt_path = tmp_path / "subtitle.srt"
+        srt_path.write_text(storage.objects[subtitle_key].decode("utf-8"), encoding="utf-8")
+        captions = avatar_talk._parse_srt(srt_path)
+        text = " ".join(caption[2] for caption in captions)
+        assert text.replace(" ", "") == "姐妹们，这条裤子显瘦又舒服，现在下单更划算。"
+        assert all(token not in text for token in ("【", "】", "（", "）", "#", "*", "脚本"))
 
     Base.metadata.drop_all(engine)
 
