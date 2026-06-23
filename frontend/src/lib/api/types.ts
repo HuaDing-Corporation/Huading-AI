@@ -112,6 +112,12 @@ export interface AvatarPreset {
   thumbnail_url: string | null; // backend str|None (P2-3)
 }
 
+export interface ScriptGenerateRequest {
+  topic: string;
+  video_mode?: string; // 电商带货传 "seedance_i2v"；让文案口径/长度随模式
+  duration_sec?: number; // 目标时长（秒）：文案长度随之，与视频/字幕对齐
+}
+
 export interface ScriptGenerateResponse {
   script: string;
 }

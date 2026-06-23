@@ -8,7 +8,7 @@ import { generateScript } from "@/lib/api/scripts";
 import { uploadImage, uploadProductImage } from "@/lib/api/uploads";
 import { listVoices } from "@/lib/api/voices";
 import { createVideo, estimateVideo, generateScenePrompt, getVideo, listVideos, listVideosPage } from "@/lib/api/videos";
-import type { CreateVideoRequest } from "@/lib/api/types";
+import type { CreateVideoRequest, ScriptGenerateRequest } from "@/lib/api/types";
 import { useAuth } from "@/lib/auth/auth-context";
 
 export function useVideos() {
@@ -49,7 +49,7 @@ export function useUploadProductImage() {
   return useMutation({ mutationFn: (file: File) => uploadProductImage(file) });
 }
 export function useScriptGenerate() {
-  return useMutation({ mutationFn: (topic: string) => generateScript(topic) });
+  return useMutation({ mutationFn: (params: ScriptGenerateRequest) => generateScript(params) });
 }
 export function useScenePromptGenerate() {
   return useMutation({ mutationFn: (topic: string) => generateScenePrompt(topic) });

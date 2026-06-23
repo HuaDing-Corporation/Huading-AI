@@ -70,7 +70,7 @@ export function NewVideoForm() {
     if (!trimmed || scriptGen.isPending) return;
     setError(null);
     try {
-      const res = await scriptGen.mutateAsync(trimmed);
+      const res = await scriptGen.mutateAsync({ topic: trimmed });
       setScript(res.script);
     } catch (err) {
       setError(errorText(err));

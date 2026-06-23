@@ -8,7 +8,7 @@ afterEach(() => vi.clearAllMocks());
 describe("DurationPicker (电商带货 视频时长)", () => {
   it("renders the gears + 自定义 and reflects the selected preset", () => {
     render(<DurationPicker value={30} onChange={vi.fn()} />);
-    for (const s of [15, 30, 45, 60]) {
+    for (const s of [10, 15, 30, 45, 60]) {
       expect(screen.getByRole("button", { name: `${s} 秒` })).toBeInTheDocument();
     }
     expect(screen.getByRole("button", { name: "30 秒" })).toHaveAttribute("aria-pressed", "true");
