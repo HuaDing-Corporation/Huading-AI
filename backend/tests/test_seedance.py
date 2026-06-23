@@ -86,6 +86,21 @@ def test_t2v_payload_and_flow(patched, tmp_path):
     assert patched["poll_count"] == 3  # queued, running, succeeded
 
 
+def test_seedance_progress_callback_runs_for_every_poll(patched, tmp_path):
+    client = SeedanceVideoClient(api_key="k", base_url="https://ark.example/api/v3")
+    events = []
+
+    client.generate_video(
+        "hello world",
+        save_path=str(tmp_path / "t2v.mp4"),
+        progress_callback=events.append,
+    )
+
+    assert [event["status"] for event in events] == ["queued", "running", "succeeded"]
+    assert [event["poll_count"] for event in events] == [1, 2, 3]
+    assert {event["task_id"] for event in events} == {"cgt-123"}
+
+
 def test_i2v_with_local_path_base64(patched, tmp_path):
     img = tmp_path / "in.png"
     img.write_bytes(b"\x89PNG\r\n")

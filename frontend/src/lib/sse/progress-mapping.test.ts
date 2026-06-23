@@ -17,6 +17,12 @@ describe("progress-mapping", () => {
     expect(p?.progress).toBe(1); // must be 1%, not 100%
   });
 
+  it("preserves fractional new-frame progress for the watchdog and rounds only the label", () => {
+    const p = eventToProgress({ status: "running", progress: 25.125, step: "seedance" });
+    expect(p?.progress).toBe(25.125);
+    expect(p?.statusLabel).toContain("25%");
+  });
+
   it("old uppercase frame rescales 0..1 progress", () => {
     const p = eventToProgress({ status: "PROGRESS", progress: 0.5 });
     expect(p?.progress).toBe(50);

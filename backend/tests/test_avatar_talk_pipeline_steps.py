@@ -48,6 +48,26 @@ class _Storage:
         return f"https://storage.test/{key}"
 
 
+def _max_same_value_stall_seconds(
+    values: list[int],
+    *,
+    poll_interval_seconds: int,
+) -> int:
+    longest = 0
+    stalled_for = 0
+    previous = None
+    for value in values:
+        if previous is None or value > previous:
+            stalled_for = 0
+        elif value == previous:
+            stalled_for += poll_interval_seconds
+            longest = max(longest, stalled_for)
+        else:
+            raise AssertionError("progress must not go backwards")
+        previous = value
+    return longest
+
+
 def _session():
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
@@ -278,6 +298,274 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
             2,
             3,
         ]
+
+    Base.metadata.drop_all(engine)
+
+
+def test_seedance_i2v_progress_advances_on_every_poll_without_stalling(
+    monkeypatch,
+    tmp_path: Path,
+):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-i2v-progress"
+    unit_id = "i2v-progress-job"
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="i2v-progress", name="I2V Progress"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic="soft scarf for winter gifting",
+                script="soft scarf script",
+                duration_sec=15,
+                params={"image_key": "uploads/product.png", "duration_sec": 15},
+            )
+        )
+        db.commit()
+
+        image_path = tmp_path / "product.png"
+        image_path.write_bytes(b"PNG")
+        elapsed_seconds = 0
+        poll_interval_seconds = 5
+
+        def fake_generate(cfg, prompt, **kwargs):
+            nonlocal elapsed_seconds
+            for poll_count in range(1, 9):
+                elapsed_seconds += poll_interval_seconds
+                kwargs["progress_callback"](
+                    {
+                        "poll_count": poll_count,
+                        "status": "running",
+                        "step_elapsed_seconds": elapsed_seconds,
+                    }
+                )
+            Path(kwargs["save_path"]).write_bytes(b"SCENE-MP4")
+
+        def fake_concat(scene_paths, output_path):
+            Path(output_path).write_bytes(b"CONCAT-SEEDANCE-MP4")
+
+        monkeypatch.setattr(avatar_talk, "_resolve_i2v_image", lambda params: str(image_path))
+        monkeypatch.setattr(avatar_talk, "_seedance_engine_config", lambda: object())
+        monkeypatch.setattr(
+            avatar_talk,
+            "_plan_seedance_i2v_scenes",
+            lambda ctx, scene_count, clip_duration: [
+                f"visual prompt {index + 1}" for index in range(scene_count)
+            ],
+        )
+        monkeypatch.setattr(avatar_talk, "generate_seedance_video", fake_generate)
+        monkeypatch.setattr(avatar_talk, "concat_seedance_clips", fake_concat)
+
+        store = _Store()
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=store,
+            storage=_Storage(),
+            duration_sec=15,
+        )
+
+        avatar_talk.seedance_i2v_step(ctx)
+
+        seedance_events = [
+            event[1]
+            for event in store.events
+            if event[1].get("stage") == "seedance_generating"
+        ]
+        progresses = [event["progress"] for event in seedance_events]
+        frame_pairs = [
+            (event["frame_current"], event["frame_total"]) for event in seedance_events
+        ]
+
+        assert len(progresses) == 24
+        assert progresses == sorted(progresses)
+        assert len(set(progresses)) > 1
+        assert _max_same_value_stall_seconds(
+            progresses,
+            poll_interval_seconds=poll_interval_seconds,
+        ) < 120
+        assert min(progresses) >= 25
+        assert max(progresses) <= 88
+        assert frame_pairs == [(1, 3)] * 8 + [(2, 3)] * 8 + [(3, 3)] * 8
+
+    Base.metadata.drop_all(engine)
+
+
+def test_seedance_i2v_long_single_scene_polling_does_not_trip_watchdog(
+    monkeypatch,
+    tmp_path: Path,
+):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-i2v-long-progress"
+    unit_id = "i2v-long-progress-job"
+    poll_interval_seconds = 5
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="i2v-long-progress", name="I2V Long Progress"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic="soft scarf for winter gifting",
+                script="soft scarf script",
+                duration_sec=15,
+                params={"image_key": "uploads/product.png", "duration_sec": 15},
+            )
+        )
+        db.commit()
+
+        image_path = tmp_path / "product.png"
+        image_path.write_bytes(b"PNG")
+        elapsed_seconds = 0
+        generate_calls = 0
+
+        def fake_generate(cfg, prompt, **kwargs):
+            nonlocal elapsed_seconds, generate_calls
+            generate_calls += 1
+            poll_total = 120 if generate_calls == 1 else 1
+            for poll_count in range(1, poll_total + 1):
+                elapsed_seconds += poll_interval_seconds
+                kwargs["progress_callback"](
+                    {
+                        "poll_count": poll_count,
+                        "status": "running",
+                        "step_elapsed_seconds": elapsed_seconds,
+                    }
+                )
+            Path(kwargs["save_path"]).write_bytes(b"SCENE-MP4")
+
+        def fake_concat(scene_paths, output_path):
+            Path(output_path).write_bytes(b"CONCAT-SEEDANCE-MP4")
+
+        monkeypatch.setattr(avatar_talk, "_resolve_i2v_image", lambda params: str(image_path))
+        monkeypatch.setattr(avatar_talk, "_seedance_engine_config", lambda: object())
+        monkeypatch.setattr(
+            avatar_talk,
+            "_plan_seedance_i2v_scenes",
+            lambda ctx, scene_count, clip_duration: [
+                f"visual prompt {index + 1}" for index in range(scene_count)
+            ],
+        )
+        monkeypatch.setattr(avatar_talk, "generate_seedance_video", fake_generate)
+        monkeypatch.setattr(avatar_talk, "concat_seedance_clips", fake_concat)
+
+        store = _Store()
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=store,
+            storage=_Storage(),
+            duration_sec=15,
+        )
+
+        avatar_talk.seedance_i2v_step(ctx)
+
+        progresses = [
+            event[1]["progress"]
+            for event in store.events
+            if event[1].get("stage") == "seedance_generating"
+        ]
+
+        assert len(progresses) == 122
+        assert _max_same_value_stall_seconds(
+            progresses,
+            poll_interval_seconds=poll_interval_seconds,
+        ) < 120
+        assert progresses == sorted(progresses)
+        assert max(progresses) < 88
+
+    Base.metadata.drop_all(engine)
+
+
+def test_seedance_i2v_24_scene_progress_keeps_watchdog_alive(
+    monkeypatch,
+    tmp_path: Path,
+):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-i2v-max-progress"
+    unit_id = "i2v-max-progress-job"
+    poll_interval_seconds = 5
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="i2v-max-progress", name="I2V Max Progress"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic="soft scarf for winter gifting",
+                script="soft scarf script",
+                duration_sec=120,
+                params={"image_key": "uploads/product.png", "duration_sec": 120},
+            )
+        )
+        db.commit()
+
+        image_path = tmp_path / "product.png"
+        image_path.write_bytes(b"PNG")
+        elapsed_seconds = 0
+
+        def fake_generate(cfg, prompt, **kwargs):
+            nonlocal elapsed_seconds
+            for poll_count in range(1, 121):
+                elapsed_seconds += poll_interval_seconds
+                kwargs["progress_callback"](
+                    {
+                        "poll_count": poll_count,
+                        "status": "running",
+                        "step_elapsed_seconds": elapsed_seconds,
+                    }
+                )
+            Path(kwargs["save_path"]).write_bytes(b"SCENE-MP4")
+
+        def fake_concat(scene_paths, output_path):
+            Path(output_path).write_bytes(b"CONCAT-SEEDANCE-MP4")
+
+        monkeypatch.setattr(avatar_talk, "_resolve_i2v_image", lambda params: str(image_path))
+        monkeypatch.setattr(avatar_talk, "_seedance_engine_config", lambda: object())
+        monkeypatch.setattr(
+            avatar_talk,
+            "_plan_seedance_i2v_scenes",
+            lambda ctx, scene_count, clip_duration: [
+                f"visual prompt {index + 1}" for index in range(scene_count)
+            ],
+        )
+        monkeypatch.setattr(avatar_talk, "generate_seedance_video", fake_generate)
+        monkeypatch.setattr(avatar_talk, "concat_seedance_clips", fake_concat)
+
+        store = _Store()
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=store,
+            storage=_Storage(),
+            duration_sec=120,
+        )
+
+        avatar_talk.seedance_i2v_step(ctx)
+
+        progresses = [
+            event[1]["progress"]
+            for event in store.events
+            if event[1].get("stage") == "seedance_generating"
+        ]
+
+        assert len(progresses) == 24 * 120
+        assert _max_same_value_stall_seconds(
+            progresses,
+            poll_interval_seconds=poll_interval_seconds,
+        ) < 120
+        assert progresses == sorted(progresses)
+        assert max(progresses) < 88
 
     Base.metadata.drop_all(engine)
 

@@ -40,6 +40,10 @@ _SEEDANCE_I2V_DEFAULT_DURATION_SEC = 15
 _SEEDANCE_I2V_MIN_DURATION_SEC = 5
 _SEEDANCE_I2V_MAX_DURATION_SEC = 120
 _SEEDANCE_I2V_CLIP_DURATION_SEC = 5
+_SEEDANCE_I2V_PROGRESS_START = 25
+_SEEDANCE_I2V_PROGRESS_END = 88
+_SEEDANCE_I2V_PROGRESS_POLL_RATE = 0.02
+_SEEDANCE_I2V_PROGRESS_EPSILON = 0.001
 _SEEDANCE_I2V_PROMPT_SUFFIX = (
     "产品展示，镜头平稳推进，明亮商业棚拍，干净背景，"
     "突出商品材质与卖点，9:16竖屏电商带货短视频。"
@@ -114,6 +118,17 @@ def _seedance_i2v_scene_count(duration_sec: float | int | None) -> int:
 
 def _seedance_i2v_billable_duration(duration_sec: float | int | None) -> int:
     return _seedance_i2v_scene_count(duration_sec) * _SEEDANCE_I2V_CLIP_DURATION_SEC
+
+
+def _seedance_i2v_poll_progress(
+    *,
+    poll_tick: int,
+) -> float:
+    safe_poll_tick = max(0, poll_tick)
+    span = _SEEDANCE_I2V_PROGRESS_END - _SEEDANCE_I2V_PROGRESS_START
+    ratio = 1 - (1 / (1 + safe_poll_tick * _SEEDANCE_I2V_PROGRESS_POLL_RATE))
+    progress = _SEEDANCE_I2V_PROGRESS_START + span * ratio
+    return min(_SEEDANCE_I2V_PROGRESS_END - _SEEDANCE_I2V_PROGRESS_EPSILON, progress)
 
 
 def _seedance_engine_config() -> Any:
@@ -490,6 +505,8 @@ def seedance_i2v_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     clip_duration = _SEEDANCE_I2V_CLIP_DURATION_SEC
     scene_prompts = _plan_seedance_i2v_scenes(ctx, scene_count, clip_duration)
     scene_paths: list[str] = []
+    seedance_poll_ticks = 0
+    last_seedance_progress = float(_SEEDANCE_I2V_PROGRESS_START)
 
     try:
         cfg = _seedance_engine_config()
@@ -497,9 +514,11 @@ def seedance_i2v_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
             save_path = work_dir / f"seedance_scene_{index:02d}.mp4"
 
             def on_seedance_progress(event: dict[str, Any], scene_index: int = index) -> None:
-                poll_count = int(event.get("poll_count") or 1)
-                per_scene = 54 / max(1, scene_count)
-                progress = min(79, int(25 + per_scene * scene_index + min(poll_count, 5)))
+                nonlocal last_seedance_progress, seedance_poll_ticks
+                seedance_poll_ticks += 1
+                progress = _seedance_i2v_poll_progress(poll_tick=seedance_poll_ticks)
+                progress = max(last_seedance_progress, progress)
+                last_seedance_progress = progress
                 ctx.store.update(
                     _scoped_id(ctx.tenant_id, ctx.task_id),
                     status="running",
@@ -1215,8 +1234,8 @@ AVATAR_TALK_STEPS = [
 ECOM_I2V_STEPS = [
     ("script", 10, script_step),
     ("tts", 25, tts_step),
-    ("seedance", 80, seedance_i2v_step),
-    ("subtitle", 88, subtitle_step),
+    ("seedance", 88, seedance_i2v_step),
+    ("subtitle", 90, subtitle_step),
     ("compose", 95, compose_step),
     ("upload", 98, upload_step),
 ]
