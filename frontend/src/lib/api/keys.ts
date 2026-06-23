@@ -1,7 +1,8 @@
 export const videoKeys = {
   all: ["videos"] as const,
   list: () => [...videoKeys.all, "list"] as const,
-  detail: (id: string) => [...videoKeys.all, "detail", id] as const
+  detail: (id: string) => [...videoKeys.all, "detail", id] as const,
+  history: (mode: string) => [...videoKeys.all, "history", mode] as const
 };
 
 export const meKey = ["me"] as const;

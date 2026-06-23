@@ -40,3 +40,6 @@ coverage/
 infra/postgres-data/
 infra/redis-data/
 .gstack/
+
+# Task planning scratch (Planning-with-files) — never committed
+.planning/

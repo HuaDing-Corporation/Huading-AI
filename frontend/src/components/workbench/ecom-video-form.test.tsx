@@ -4,9 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const taskMocks = vi.hoisted(() => ({ createAndTrack: vi.fn() }));
 const uploadMock = vi.hoisted(() => ({ mutateAsync: vi.fn() }));
 const estimateMock = vi.hoisted(() => ({ mutate: vi.fn() }));
+const scenePromptMock = vi.hoisted(() => ({ mutateAsync: vi.fn() }));
 
 vi.mock("@/lib/api/hooks", () => ({
   useScriptGenerate: () => ({ mutateAsync: vi.fn().mockResolvedValue({ script: "s" }), isPending: false }),
+  useScenePromptGenerate: () => ({ mutateAsync: scenePromptMock.mutateAsync, isPending: false }),
   useUploadProductImage: () => ({ mutateAsync: uploadMock.mutateAsync, isPending: false }),
   useEstimateVideo: () => ({
     mutate: estimateMock.mutate,
@@ -28,6 +30,7 @@ beforeEach(() => {
   URL.createObjectURL = vi.fn(() => "blob:mock");
   URL.revokeObjectURL = vi.fn();
   uploadMock.mutateAsync.mockResolvedValue({ image_key: "uploads/abc123.png" });
+  scenePromptMock.mutateAsync.mockResolvedValue({ scene_prompt: "明亮影棚，产品特写旋转" });
 });
 afterEach(() => vi.clearAllMocks());
 
@@ -154,5 +157,28 @@ describe("EcomVideoForm (电商带货 i2v)", () => {
     // 取消 → no submit (nothing charged).
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(taskMocks.createAndTrack).not.toHaveBeenCalled();
+  });
+
+  it("AI 生成画面 calls /videos/scene-prompt, fills the box, and submits scene_prompt", async () => {
+    render(<EcomVideoForm />);
+    fireEvent.change(screen.getByPlaceholderText(/输入产品卖点/), { target: { value: "保温杯" } });
+
+    // 画面提示词 AI generate — decoupled endpoint, fills its own textarea.
+    fireEvent.click(screen.getByRole("button", { name: /AI 生成画面/ }));
+    await waitFor(() => expect(scenePromptMock.mutateAsync).toHaveBeenCalledWith("保温杯"));
+    expect(await screen.findByDisplayValue("明亮影棚，产品特写旋转")).toBeInTheDocument();
+
+    // Submit carries scene_prompt alongside the i2v body.
+    selectProductImage();
+    const generate = screen.getByRole("button", { name: /生成视频/ });
+    await waitFor(() => expect(generate).toBeEnabled());
+    fireEvent.click(generate);
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    expect(taskMocks.createAndTrack.mock.calls[0][0]).toMatchObject({
+      video_mode: "seedance_i2v",
+      scene_prompt: "明亮影棚，产品特写旋转"
+    });
   });
 });

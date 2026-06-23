@@ -12,6 +12,9 @@ vi.mock("@/components/workbench/new-video-form", () => ({
 vi.mock("@/components/workbench/ecom-video-form", () => ({
   EcomVideoForm: () => <div data-testid="ecom-form" />
 }));
+vi.mock("@/components/tasks/generation-history", () => ({
+  GenerationHistory: () => <div data-testid="history" />
+}));
 
 import Home from "./page";
 

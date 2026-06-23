@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 
 import { EcomVideoForm } from "@/components/workbench/ecom-video-form";
 import { NewVideoForm } from "@/components/workbench/new-video-form";
+import { GenerationHistory } from "@/components/tasks/generation-history";
 import { Sidebar } from "@/components/layout/sidebar";
 import { TaskList } from "@/components/tasks/task-list";
 import { TopBar } from "@/components/layout/top-bar";
@@ -31,7 +32,7 @@ export default function Home() {
 
   return (
     <main className="min-h-screen p-5 md:p-7">
-      <div className="mx-auto grid max-w-[1280px] grid-cols-1 grid-rows-[auto_1fr] gap-5 md:grid-cols-[248px_minmax(0,1fr)]">
+      <div className="mx-auto grid max-w-[1600px] grid-cols-1 grid-rows-[auto_1fr] gap-5 md:grid-cols-[248px_minmax(0,1fr)]">
         <TopBar />
         <Sidebar />
 
@@ -84,11 +85,13 @@ export default function Home() {
             </div>
           </header>
 
-          {/* B1: form column ~320px (min 300), task list takes the rest; stacks on narrow */}
-          <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(300px,340px)_minmax(0,1fr)]">
+          {/* Form column + task list; both widen on large screens, stack on narrow. */}
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(320px,400px)_minmax(0,1fr)]">
             {mode === "avatar_talk" ? <NewVideoForm /> : <EcomVideoForm />}
             <TaskList />
           </div>
+
+          <GenerationHistory />
         </section>
       </div>
     </main>
