@@ -309,7 +309,7 @@ class Asset(Base):
     __table_args__ = (
         CheckConstraint(
             "type IN ('avatar_image', 'audio', 'subtitle', 'video', 'bgm', 'cover', "
-            "'product_image')",
+            "'product_image', 'generated_image')",
             name="ck_assets_type",
         ),
         CheckConstraint(
@@ -395,7 +395,8 @@ class TaskAsset(Base):
             name="uq_task_assets_task_asset_role",
         ),
         CheckConstraint(
-            "role IN ('input_avatar', 'output_audio', 'output_subtitle', 'output_video')",
+            "role IN ('input_avatar', 'output_audio', 'output_subtitle', 'output_video', "
+            "'output_image')",
             name="ck_task_assets_role",
         ),
         Index("ix_task_assets_video_task_id", "video_task_id"),

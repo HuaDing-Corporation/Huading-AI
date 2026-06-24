@@ -12,7 +12,7 @@ uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 ```powershell
 cd backend
-uv run celery -A app.workers.celery_app.celery_app worker --loglevel=info
+uv run celery -A app.workers.celery_app.celery_app worker --loglevel=info --pool=solo -Q default,avatar,image
 ```
 
 ## Frontend

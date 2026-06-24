@@ -34,8 +34,10 @@ from app.services.progress import ProgressStore
 from app.services.quota import (
     QuotaEstimate,
     estimate_avatar_talk_quota,
+    estimate_image_generation_quota,
     estimate_seedance_i2v_quota,
     reserve_avatar_talk_quota,
+    reserve_image_generation_quota,
     reserve_seedance_i2v_quota,
     seedance_i2v_billable_seconds,
     seedance_i2v_target_seconds,
@@ -46,6 +48,7 @@ from app.workers.avatar_talk import (
     generate_avatar_talk_task,
     generate_seedance_i2v_task,
 )
+from app.workers.image_gen import generate_image_task
 from app.workers.video_tasks import generate_video_task
 
 router = APIRouter()
@@ -61,6 +64,8 @@ _ESTIMATE_NOTE = "Estimated reservation; final settlement uses actual generated 
 
 
 def _is_avatar_talk_requested(payload: VideoGenerateRequest) -> bool:
+    if payload.video_mode == "photo":
+        return False
     return (
         payload.video_mode == "avatar_talk"
         or bool(payload.voice_id)
@@ -74,6 +79,13 @@ def _quota_estimate_for_payload(
     tenant_id: str,
     db: Session,
 ) -> QuotaEstimate | None:
+    if payload.video_mode == "photo":
+        return estimate_image_generation_quota(
+            db,
+            tenant_id=tenant_id,
+            quality=payload.image_quality,
+            n=1,
+        )
     if payload.video_mode == "seedance_i2v":
         target_duration_sec = seedance_i2v_target_seconds(payload.duration_sec)
         return estimate_seedance_i2v_quota(
@@ -143,6 +155,7 @@ def _video_read(
     playback_url = None
     download_url = None
     thumbnail_url = None
+    mode = task.mode or task.video_mode
     if status_value == "done" and task.storage_key:
         playback_url = storage.presign_get_url(
             task.storage_key, expires_in=settings.engine_s3_presign_ttl
@@ -150,17 +163,19 @@ def _video_read(
         download_url = storage.presign_get_url(
             task.storage_key,
             expires_in=settings.engine_s3_presign_ttl,
-            download_filename=f"{task.id}.mp4",
+            download_filename=f"{task.id}.png" if mode == "photo" else f"{task.id}.mp4",
         )
+        if mode == "photo":
+            thumbnail_url = playback_url
     if task.thumbnail_key:
         thumbnail_url = storage.presign_get_url(
             task.thumbnail_key, expires_in=settings.engine_s3_presign_ttl
         )
     return VideoRead(
         id=task.id,
-        title=(task.topic or "Untitled video")[:80],
+        title=(task.topic or ("Untitled image" if mode == "photo" else "Untitled video"))[:80],
         prompt=task.topic or "",
-        mode=task.mode or task.video_mode,
+        mode=mode,
         status=status_value,
         progress=_progress(task, snapshot),
         topic=task.topic,
@@ -191,7 +206,7 @@ def list_videos(
     db: Session = DbSessionDependency,
     store: ProgressStore = ProgressStoreDependency,
     storage: ObjectStorage = ObjectStorageDependency,
-    mode: str | None = Query(default=None, pattern="^(avatar_talk|seedance_i2v)$"),
+    mode: str | None = Query(default=None, pattern="^(avatar_talk|seedance_i2v|photo)$"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> ApiResponse[VideoListResponse]:
@@ -328,6 +343,45 @@ def _create_seedance_i2v_video(
     return task_id
 
 
+def _create_photo_video(
+    payload: VideoGenerateRequest,
+    *,
+    user: User,
+    db: Session,
+) -> str:
+    task_id = str(uuid4())
+    task = VideoTask(
+        id=task_id,
+        tenant_id=user.tenant_id,
+        created_by_user_id=user.id,
+        status="queued",
+        topic=payload.topic,
+        script=payload.script,
+        mode="photo",
+        video_mode="photo",
+        progress=0,
+        aspect_ratio=payload.aspect_ratio,
+        params={
+            "image_key": payload.image_key,
+            "image_size": payload.image_size,
+            "image_quality": payload.image_quality,
+            "estimated": True,
+        },
+    )
+    db.add(task)
+    db.flush()
+    reserve_image_generation_quota(
+        db,
+        tenant_id=user.tenant_id,
+        video_task_id=task.id,
+        quality=payload.image_quality,
+        n=1,
+    )
+    db.commit()
+    _video_task_tenants[task_id] = user.tenant_id
+    return task_id
+
+
 @router.post("/scene-prompt", response_model=ApiResponse[ScenePromptResponse])
 def generate_scene_prompt(
     request: Request,
@@ -397,6 +451,14 @@ def create_video(
     user: User = CreateVideoPermissionDependency,
     db: Session = DbSessionDependency,
 ) -> ApiResponse[VideoAccepted]:
+    if payload.video_mode == "photo":
+        task_id = _create_photo_video(payload, user=user, db=db)
+        params = payload.model_dump()
+        params["tenant_id"] = user.tenant_id
+        params["video_task_id"] = task_id
+        generate_image_task.apply_async(args=[params], task_id=task_id, queue="image")
+        return ok(request, VideoAccepted(id=task_id, task_id=task_id, status="queued"))
+
     if payload.video_mode == "seedance_i2v":
         task_id = _create_seedance_i2v_video(payload, user=user, db=db)
         params = payload.model_dump()

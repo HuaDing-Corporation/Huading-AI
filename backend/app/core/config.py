@@ -92,6 +92,12 @@ class Settings(BaseSettings):
     engine_doubao_tts_endpoint: str = "https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse"
     engine_doubao_tts_request_timeout_seconds: float = 60.0
     engine_doubao_tts_aigc_watermark: bool = True
+    # OpenAI Images for the photo pipeline. Credentials stay env-only.
+    openai_api_key: str = ""
+    openai_base_url: str = ""
+    openai_image_model: str = "gpt-image-2"
+    openai_local_proxy: str = ""
+    openai_image_timeout: float = 120.0
     engine_subtitle_font_path: str = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
     engine_default_template: str = "1080x1920/static_default.html"
     # Playwright browser channel for frame rendering: "chrome"/"msedge" to use a

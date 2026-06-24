@@ -49,7 +49,7 @@ JWT_SECRET_KEY=<32+ chars> uv run uvicorn app.main:app --port 8000 &
 # single-config / single-process worker:
 JWT_SECRET_KEY=<...> ENGINE_LLM_API_KEY=<...> ENGINE_LLM_BASE_URL=<...> ENGINE_LLM_MODEL=<...> \
   ENGINE_BROWSER_CHANNEL=chrome \
-  uv run celery -A app.workers.celery_app.celery_app worker --pool=solo -c 1 -Q default &
+  uv run celery -A app.workers.celery_app.celery_app worker --pool=solo -c 1 -Q default,avatar,image &
 
 # 3. Seed a tenant + admin
 curl -X POST http://localhost:8000/api/v1/auth/register-tenant \

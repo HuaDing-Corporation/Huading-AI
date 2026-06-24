@@ -6,7 +6,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 _ALLOWED_PIPELINES = {"standard", "custom"}
 _ALLOWED_MODES = {"generate", "fixed"}
-_ALLOWED_VIDEO_MODES = {"static_template", "seedance_t2v", "seedance_i2v", "avatar_talk"}
+_ALLOWED_VIDEO_MODES = {
+    "static_template",
+    "seedance_t2v",
+    "seedance_i2v",
+    "avatar_talk",
+    "photo",
+}
 _MIN_DURATION_SEC = 5
 _MAX_DURATION_SEC = 120
 # e.g. "1080x1920/static_default.html" — size dir + html file, no path traversal.
@@ -41,11 +47,19 @@ class VideoGenerateRequest(BaseModel):
     # pipeline's script handling (generate|fixed); this selects the flow itself.
     video_mode: str = Field(
         default="static_template",
-            description="static_template | seedance_t2v | seedance_i2v | avatar_talk",
+        description="static_template | seedance_t2v | seedance_i2v | avatar_talk | photo",
     )
     image_key: str | None = Field(
         default=None,
-        description="Tenant-relative upload key from POST /uploads (seedance_i2v input)",
+        description="Tenant-relative upload key from POST /uploads (seedance_i2v/photo input)",
+    )
+    image_size: Literal["1024x1024", "1536x1024", "1024x1536"] = Field(
+        default="1024x1024",
+        description="OpenAI photo output size.",
+    )
+    image_quality: Literal["low", "medium", "high"] = Field(
+        default="medium",
+        description="OpenAI photo quality tier.",
     )
     scene_prompt: str | None = Field(
         default=None,
@@ -69,6 +83,14 @@ class VideoGenerateRequest(BaseModel):
         if v not in _ALLOWED_PIPELINES:
             raise ValueError(f"pipeline must be one of {sorted(_ALLOWED_PIPELINES)}")
         return v
+
+    @field_validator("topic")
+    @classmethod
+    def _check_topic_not_blank(cls, v: str) -> str:
+        text = v.strip()
+        if not text:
+            raise ValueError("topic must not be blank")
+        return text
 
     @field_validator("mode")
     @classmethod
