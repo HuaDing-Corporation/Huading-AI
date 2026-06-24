@@ -45,7 +45,7 @@ describe("GenerationHistory (历史生成 tabs)", () => {
     render(<GenerationHistory />);
     expect(screen.getByRole("tab", { name: /数字人视频历史/ })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /电商视频历史/ })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /照片历史/ })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /图片历史/ })).toBeInTheDocument();
     // default tab pulls the avatar_talk history
     expect(historyMock.fn).toHaveBeenCalledWith("avatar_talk");
     expect(screen.getByText("avatar_talk 视频")).toBeInTheDocument();

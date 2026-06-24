@@ -12,6 +12,7 @@ export const copy = {
     aspectLocked: "9:16 竖屏（锁定）",
     subtitleLocked: "字幕已开启（锁定）",
     generate: "生成视频",
+    generatePhoto: "生成图片",
     scriptTooLong: (s: number) => `预计 ${s}s，将截断到 60s，建议精简文案`,
     // 生成模式切换（数字人口播 / 电商带货）
     modeGroupLabel: "生成模式",
@@ -44,9 +45,9 @@ export const copy = {
     scenePromptGenerate: "AI 生成画面",
     scenePromptPlaceholder: "描述想要的产品画面 / 场景 / 镜头，可点「AI 生成画面」自动生成，也可手动编辑",
     scenePromptHint: "画面与口播已解耦：此处只描述画面，不影响配音文案",
-    // 照片 / AI 图
-    modePhoto: "照片 / AI 图",
-    photoTitle: "照片 / AI 图",
+    // 图片生成 / 修改（mode 值仍为 photo，仅显示文案）
+    modePhoto: "图片生成 / 修改",
+    photoTitle: "图片生成 / 修改",
     photoSubtitle: "一句话生成图片，或上传参考图换背景 / 修图",
     photoPromptLabel: "提示词",
     photoPromptPlaceholder: "描述想要的图片，如：白色大理石台面上的香水瓶，柔光氛围，高级质感",
@@ -92,7 +93,7 @@ export const copy = {
     title: "历史生成",
     tabAvatar: "数字人视频历史",
     tabEcom: "电商视频历史",
-    tabPhoto: "照片历史",
+    tabPhoto: "图片历史",
     empty: "暂无历史记录",
     loading: "加载中…",
     error: "加载失败，请重试",
