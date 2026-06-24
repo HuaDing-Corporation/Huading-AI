@@ -43,7 +43,23 @@ export const copy = {
     scenePromptLabel: "画面提示词",
     scenePromptGenerate: "AI 生成画面",
     scenePromptPlaceholder: "描述想要的产品画面 / 场景 / 镜头，可点「AI 生成画面」自动生成，也可手动编辑",
-    scenePromptHint: "画面与口播已解耦：此处只描述画面，不影响配音文案"
+    scenePromptHint: "画面与口播已解耦：此处只描述画面，不影响配音文案",
+    // 照片 / AI 图
+    modePhoto: "照片 / AI 图",
+    photoTitle: "照片 / AI 图",
+    photoSubtitle: "一句话生成图片，或上传参考图换背景 / 修图",
+    photoPromptLabel: "提示词",
+    photoPromptPlaceholder: "描述想要的图片，如：白色大理石台面上的香水瓶，柔光氛围，高级质感",
+    photoPromptRequired: "请先输入提示词",
+    photoRefLabel: "参考图（可选）",
+    photoRefUpload: "上传参考图（JPG / PNG / WebP，≤10MB）",
+    photoRefPreviewAlt: "参考图预览",
+    photoRefHint: "上传参考图做换背景 / 修图；留空则纯文生图",
+    photoSizeLabel: "尺寸",
+    photoQualityLabel: "质量",
+    photoQuality: { low: "低", medium: "中", high: "高" },
+    photoQualityHint: "质量越高，图片越精细、消耗积分越多",
+    photoResultAlt: "生成的图片"
   },
   confirm: {
     title: "确定生成",
@@ -81,9 +97,8 @@ export const copy = {
     loading: "加载中…",
     error: "加载失败，请重试",
     retry: "重试",
-    loadMore: "加载更多",
-    photoComingSoon: "照片生成功能即将上线，敬请期待"
+    loadMore: "加载更多"
   },
-  detail: { notFound: "视频不存在或无权访问", back: "返回", download: "下载 MP4" },
+  detail: { notFound: "视频不存在或无权访问", back: "返回", download: "下载 MP4", downloadImage: "下载图片" },
   status: { queued: "排队中", failed: "失败", done: "已完成" }
 } as const;

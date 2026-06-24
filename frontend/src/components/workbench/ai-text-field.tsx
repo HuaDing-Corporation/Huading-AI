@@ -10,11 +10,11 @@ export interface AiTextFieldProps {
   label: string;
   value: string;
   onChange: (value: string) => void;
-  /** AI 生成/重写 action. */
-  onAction: () => void;
-  actionLabel: string;
+  /** AI 生成/重写 action — omit (with actionLabel) for a plain labeled textarea. */
+  onAction?: () => void;
+  actionLabel?: string;
   actionIcon?: "regenerate" | "generate";
-  loading: boolean;
+  loading?: boolean;
   rows?: number;
   placeholder?: string;
   /** Footer line under the textarea (char count / hint). */
@@ -36,7 +36,7 @@ export function AiTextField({
   onAction,
   actionLabel,
   actionIcon = "regenerate",
-  loading,
+  loading = false,
   rows = 5,
   placeholder,
   footer
@@ -48,10 +48,12 @@ export function AiTextField({
         <label htmlFor={id} className={labelClass}>
           {label}
         </label>
-        <Button type="button" variant="soft" size="sm" onClick={onAction} disabled={loading}>
-          <Icon size={14} strokeWidth={2} className={loading ? "animate-spin" : undefined} />
-          {actionLabel}
-        </Button>
+        {onAction ? (
+          <Button type="button" variant="soft" size="sm" onClick={onAction} disabled={loading}>
+            <Icon size={14} strokeWidth={2} className={loading ? "animate-spin" : undefined} />
+            {actionLabel}
+          </Button>
+        ) : null}
       </div>
 
       <textarea

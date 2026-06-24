@@ -208,6 +208,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
         {
           taskId: accepted.id,
           topic,
+          mode: req.video_mode ?? null,
           status: "queued",
           progress: 0,
           statusLabel: "排队中",

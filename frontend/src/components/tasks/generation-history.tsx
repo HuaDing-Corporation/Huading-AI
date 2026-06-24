@@ -49,7 +49,8 @@ export function HistoryList({ mode }: { mode: string }) {
       {items.map((item) => (
         <TaskCard
           key={item.id}
-          task={fromVideoRead(item)}
+          // The tab's mode is authoritative for this list → photo items render <img>.
+          task={{ ...fromVideoRead(item), mode }}
           onOpen={(id) => router.push(`/videos/${id}`)}
           onRetry={() => undefined}
           onUrlError={() => void query.refetch()}
@@ -71,16 +72,7 @@ export function HistoryList({ mode }: { mode: string }) {
   );
 }
 
-export function PhotoComingSoon() {
-  return (
-    <div className="flex flex-col items-center gap-2 py-12 text-center">
-      <Images size={26} strokeWidth={1.6} className="text-ink-faint" />
-      <p className="text-[13px] text-ink-soft">{copy.history.photoComingSoon}</p>
-    </div>
-  );
-}
-
-/** 历史生成 — 3 tabs: 数字人 (avatar_talk) / 电商 (seedance_i2v) / 照片 (placeholder). */
+/** 历史生成 — 3 tabs: 数字人 (avatar_talk) / 电商 (seedance_i2v) / 照片 (photo). */
 export function GenerationHistory() {
   return (
     <Card animateIn>
@@ -108,7 +100,7 @@ export function GenerationHistory() {
           <HistoryList mode="seedance_i2v" />
         </TabsContent>
         <TabsContent value="photo" className="outline-none">
-          <PhotoComingSoon />
+          <HistoryList mode="photo" />
         </TabsContent>
       </Tabs>
     </Card>

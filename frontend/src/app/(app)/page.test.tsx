@@ -12,6 +12,9 @@ vi.mock("@/components/workbench/new-video-form", () => ({
 vi.mock("@/components/workbench/ecom-video-form", () => ({
   EcomVideoForm: () => <div data-testid="ecom-form" />
 }));
+vi.mock("@/components/workbench/photo-image-form", () => ({
+  PhotoImageForm: () => <div data-testid="photo-form" />
+}));
 vi.mock("@/components/tasks/generation-history", () => ({
   GenerationHistory: () => <div data-testid="history" />
 }));
@@ -36,5 +39,10 @@ describe("Workbench mode switch (数字人口播 / 电商带货)", () => {
     fireEvent.click(screen.getByRole("button", { name: /数字人口播/ }));
     expect(screen.getByTestId("avatar-form")).toBeInTheDocument();
     expect(screen.queryByTestId("ecom-form")).not.toBeInTheDocument();
+
+    // Switch to 照片 / AI 图 → photo form (third mode).
+    fireEvent.click(screen.getByRole("button", { name: /照片/ }));
+    expect(screen.getByTestId("photo-form")).toBeInTheDocument();
+    expect(screen.queryByTestId("avatar-form")).not.toBeInTheDocument();
   });
 });
