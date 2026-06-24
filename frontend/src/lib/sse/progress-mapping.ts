@@ -8,6 +8,8 @@ export interface TrackedTask {
   status: UiStatus;
   progress: number;
   statusLabel: string;
+  /** Generation mode — "photo" renders an <img> result; videos render <video>. */
+  mode?: string | null;
   playbackUrl?: string | null;
   downloadUrl?: string | null;
   thumbnailUrl?: string | null;
@@ -96,6 +98,7 @@ export function fromVideoRead(read: VideoDetail | VideoListItem): TrackedTask {
     status: read.status,
     progress: pct,
     statusLabel: labelFor(read.status, pct),
+    mode: read.mode ?? null,
     playbackUrl: detail.playback_url ?? null,
     downloadUrl: detail.download_url ?? null,
     thumbnailUrl: read.thumbnail_url ?? null,

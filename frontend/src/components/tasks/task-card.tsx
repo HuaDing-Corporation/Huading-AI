@@ -58,6 +58,7 @@ export interface TaskCardProps {
 export function TaskCard({ task, onOpen, onRetry, onUrlError }: TaskCardProps) {
   const Icon = thumbIcon[task.status];
   const showPlayer = task.status === "done" && !!task.playbackUrl;
+  const isImage = task.mode === "photo";
 
   // Fire onUrlError at most once per playback URL (mirrors VideoPlayer); reset
   // the guard when the URL changes so a refreshed URL can error once again (P2-2).
@@ -125,14 +126,25 @@ export function TaskCard({ task, onOpen, onRetry, onUrlError }: TaskCardProps) {
       ) : showPlayer ? (
         /* Done + playback URL: thumbnail player + open-detail + download */
         <div className="mt-3 px-2">
-          <video
-            controls
-            preload="metadata"
-            poster={task.thumbnailUrl ?? undefined}
-            src={task.playbackUrl ?? undefined}
-            onError={handleVideoError}
-            className="max-h-[320px] w-full rounded-field border border-line-gold bg-black/5"
-          />
+          {isImage ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={task.playbackUrl ?? undefined}
+              alt={task.topic}
+              loading="lazy"
+              onError={handleVideoError}
+              className="max-h-[320px] w-full rounded-field border border-line-gold bg-black/5 object-contain"
+            />
+          ) : (
+            <video
+              controls
+              preload="metadata"
+              poster={task.thumbnailUrl ?? undefined}
+              src={task.playbackUrl ?? undefined}
+              onError={handleVideoError}
+              className="max-h-[320px] w-full rounded-field border border-line-gold bg-black/5"
+            />
+          )}
           <div className="mt-2 flex items-center gap-2">
             <button
               type="button"
@@ -147,7 +159,7 @@ export function TaskCard({ task, onOpen, onRetry, onUrlError }: TaskCardProps) {
                 download
                 className="inline-flex items-center gap-1.5 rounded-field border border-line-gold bg-glass-fill px-3 py-1.5 text-[12.5px] text-gold-deep transition-colors hover:bg-glass-hover"
               >
-                <Download size={14} strokeWidth={2} /> {copy.detail.download}
+                <Download size={14} strokeWidth={2} /> {isImage ? copy.detail.downloadImage : copy.detail.download}
               </a>
             )}
           </div>

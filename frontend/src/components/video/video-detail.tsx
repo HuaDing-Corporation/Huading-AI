@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronLeft } from "lucide-react";
+import { ChevronLeft, Download } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 import { ApiError } from "@/lib/api/client";
@@ -129,12 +129,33 @@ export function VideoDetail({ id }: VideoDetailProps) {
 
       {/* Player — only when done and URL is available */}
       {data.status === "done" && data.playback_url ? (
-        <VideoPlayer
-          playbackUrl={data.playback_url}
-          downloadUrl={data.download_url}
-          poster={data.thumbnail_url}
-          onUrlExpired={handleUrlExpired}
-        />
+        data.mode === "photo" ? (
+          <div className="flex flex-col gap-3">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={data.playback_url}
+              alt={data.topic ?? copy.workbench.photoResultAlt}
+              onError={handleUrlExpired}
+              className="w-full rounded-field border border-line-gold bg-black/5 object-contain"
+            />
+            {data.download_url && (
+              <a
+                href={data.download_url}
+                download
+                className="inline-flex w-fit items-center gap-1.5 rounded-field border border-line-gold bg-glass-fill px-4 py-2 text-[13px] text-gold-deep transition-colors hover:bg-glass-hover"
+              >
+                <Download size={15} strokeWidth={2} /> {copy.detail.downloadImage}
+              </a>
+            )}
+          </div>
+        ) : (
+          <VideoPlayer
+            playbackUrl={data.playback_url}
+            downloadUrl={data.download_url}
+            poster={data.thumbnail_url}
+            onUrlExpired={handleUrlExpired}
+          />
+        )
       ) : (
         <div className="flex min-h-[160px] items-center justify-center rounded-field border border-line-gold bg-glass-fill">
           <span className="text-[13px] text-ink-soft">{statusLabel[data.status] ?? data.status}</span>

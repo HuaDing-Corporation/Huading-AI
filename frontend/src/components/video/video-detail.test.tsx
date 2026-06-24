@@ -77,6 +77,31 @@ describe("VideoDetail", () => {
     expect(screen.getByText(copy.detail.download)).toBeInTheDocument();
   });
 
+  it("renders an <img> result for a photo task (mode=photo) with a download link", () => {
+    (useVideo as Mock).mockReturnValue({
+      data: {
+        id: "p1",
+        status: "done",
+        progress: 100,
+        mode: "photo",
+        topic: "白色大理石上的香水瓶",
+        script: null,
+        voice_id: null,
+        aspect_ratio: null,
+        subtitle_enabled: null,
+        playback_url: "https://mock.local/p.png",
+        download_url: "https://mock.local/p.png?dl=1",
+        thumbnail_url: null,
+        created_at: "2026-06-23T00:00:00Z"
+      },
+      error: null,
+      isLoading: false
+    });
+    render(<VideoDetail id="p1" />, { wrapper });
+    expect(screen.getByRole("img")).toHaveAttribute("src", "https://mock.local/p.png");
+    expect(screen.getByText(copy.detail.downloadImage)).toBeInTheDocument();
+  });
+
   it("P2-3: renders without crashing when backend nullable fields are null", () => {
     (useVideo as Mock).mockReturnValue({
       data: {

@@ -43,6 +43,7 @@ export interface VideoListItem {
   status: VideoStatus;
   progress: number; // 0..100
   topic: string;
+  mode?: string | null; // avatar_talk | seedance_i2v | photo —结果渲染：视频 vs 图
   thumbnail_url?: string | null;
   created_at: string;
 }
@@ -55,6 +56,7 @@ export interface VideoDetail {
   id: string;
   status: VideoStatus;
   progress: number;
+  mode?: string | null; // avatar_talk | seedance_i2v | photo（photo → 渲染 <img>）
   // Backend VideoRead leaves these nullable (e.g. before the script step runs);
   // align the types so consumers null-handle rather than assume present (P2-3).
   topic: string | null;
@@ -75,12 +77,14 @@ export interface VideoDetail {
 export interface CreateVideoRequest {
   topic: string; // 必填 ≤500（电商带货=产品卖点/主题）
   script?: string; // 可选；缺则后端 DeepSeek 生成（前端流程会带）
-  voice_id: string; // 必填
+  voice_id?: string; // 数字人口播 / 电商带货必填；照片 photo 不传（无配音）
   avatar_asset_id?: string; // 数字人口播必填（上传/预设产出的 asset_id）；i2v 不传
   video_mode?: string; // 省略=数字人口播 avatar_talk；电商带货传 "seedance_i2v"
-  image_key?: string; // 电商带货 i2v 必填，来自 POST /uploads（不是 /uploads/images）
+  image_key?: string; // 电商带货 i2v 必填 / 照片 photo 可选参考图，来自 POST /uploads
   scene_prompt?: string; // 电商带货 i2v 画面提示词（与口播解耦，可 AI 生成）；空则后端回退 topic
   duration_sec?: number; // 电商带货 i2v 目标时长（秒，5–120，默认 30），与后端 clamp 对齐
+  image_size?: string; // 照片 photo：1024x1024 / 1536x1024 / 1024x1536
+  image_quality?: string; // 照片 photo：low / medium / high（影响积分）
   speed?: number; // 默认 1.0
   aspect_ratio?: string; // 默认 "9:16"
   subtitle_enabled?: boolean; // 默认 true

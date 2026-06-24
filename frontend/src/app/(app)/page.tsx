@@ -1,24 +1,25 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronLeft, Store, UserRound, type LucideIcon } from "lucide-react";
+import { ChevronLeft, ImagePlus, Store, UserRound, type LucideIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 import { EcomVideoForm } from "@/components/workbench/ecom-video-form";
 import { NewVideoForm } from "@/components/workbench/new-video-form";
+import { PhotoImageForm } from "@/components/workbench/photo-image-form";
 import { GenerationHistory } from "@/components/tasks/generation-history";
 import { Sidebar } from "@/components/layout/sidebar";
 import { TaskList } from "@/components/tasks/task-list";
 import { TopBar } from "@/components/layout/top-bar";
 import { copy } from "@/lib/copy";
 
-type WorkbenchMode = "avatar_talk" | "seedance_i2v";
+type WorkbenchMode = "avatar_talk" | "seedance_i2v" | "photo";
 
-// Workbench generation modes. avatar_talk renders the existing NewVideoForm;
-// seedance_i2v renders the 电商带货 product image-to-video form.
+// Workbench generation modes: 数字人口播 (video) / 电商带货 i2v (video) / 照片·AI 图 (image).
 const MODES: { id: WorkbenchMode; label: string; Icon: LucideIcon }[] = [
   { id: "avatar_talk", label: copy.workbench.modeAvatar, Icon: UserRound },
-  { id: "seedance_i2v", label: copy.workbench.modeEcom, Icon: Store }
+  { id: "seedance_i2v", label: copy.workbench.modeEcom, Icon: Store },
+  { id: "photo", label: copy.workbench.modePhoto, Icon: ImagePlus }
 ];
 
 export default function Home() {
@@ -79,15 +80,23 @@ export default function Home() {
                   );
                 })}
               </div>
-              <span className="rounded-pill border border-line-gold bg-glass-soft px-3.5 py-2 text-[12.5px] text-ink-soft">
-                {copy.workbench.aspectBadge}
-              </span>
+              {mode !== "photo" && (
+                <span className="rounded-pill border border-line-gold bg-glass-soft px-3.5 py-2 text-[12.5px] text-ink-soft">
+                  {copy.workbench.aspectBadge}
+                </span>
+              )}
             </div>
           </header>
 
           {/* Form column + task list; both widen on large screens, stack on narrow. */}
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(320px,400px)_minmax(0,1fr)]">
-            {mode === "avatar_talk" ? <NewVideoForm /> : <EcomVideoForm />}
+            {mode === "avatar_talk" ? (
+              <NewVideoForm />
+            ) : mode === "seedance_i2v" ? (
+              <EcomVideoForm />
+            ) : (
+              <PhotoImageForm />
+            )}
             <TaskList />
           </div>
 

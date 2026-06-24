@@ -12,7 +12,15 @@ vi.mock("@/lib/api/hooks", () => ({
         pages: [
           {
             items: [
-              { id: `v-${mode}`, status: "done", progress: 100, topic: `${mode} 视频`, created_at: "" }
+              {
+                id: `v-${mode}`,
+                status: "done",
+                progress: 100,
+                topic: `${mode} 视频`,
+                created_at: "",
+                playback_url: `https://mock.local/${mode}.png`,
+                download_url: `https://mock.local/${mode}.png?dl=1`
+              }
             ],
             total: 1
           }
@@ -28,7 +36,7 @@ vi.mock("@/lib/api/hooks", () => ({
   }
 }));
 
-import { GenerationHistory, HistoryList, PhotoComingSoon } from "./generation-history";
+import { GenerationHistory, HistoryList } from "./generation-history";
 
 afterEach(() => vi.clearAllMocks());
 
@@ -55,9 +63,10 @@ describe("GenerationHistory (历史生成 tabs)", () => {
     expect(screen.getByText("seedance_i2v 视频")).toBeInTheDocument();
   });
 
-  it("照片历史 is a coming-soon placeholder (no history request)", () => {
-    render(<PhotoComingSoon />);
-    expect(screen.getByText("照片生成功能即将上线，敬请期待")).toBeInTheDocument();
-    expect(historyMock.fn).not.toHaveBeenCalled();
+  it("照片 history pulls GET /videos?mode=photo and renders an <img> result", () => {
+    render(<HistoryList mode="photo" />);
+    expect(historyMock.fn).toHaveBeenCalledWith("photo");
+    // photo results render as <img> (not <video>), alt = the topic.
+    expect(screen.getByRole("img")).toHaveAttribute("alt", "photo 视频");
   });
 });
