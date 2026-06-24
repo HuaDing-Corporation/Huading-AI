@@ -37,6 +37,7 @@ def _seed_subscription(db, tenant_id: str, *, total: int, used: int = 0, reserve
         [
             CreditRate(capability="avatar", unit="second", credits_per_unit=Decimal("1.0000")),
             CreditRate(capability="tts", unit="second", credits_per_unit=Decimal("0.2000")),
+            CreditRate(capability="image", unit="image", credits_per_unit=Decimal("5.0000")),
         ]
     )
     db.commit()
@@ -169,3 +170,66 @@ def test_settle_reserved_quota_moves_reserved_to_used(auth_context, auth_db) -> 
         assert record.quantity == Decimal("8.000")
         assert record.cost_cents == 800
         assert record.settled_at is not None
+
+
+def test_image_generation_quota_uses_quality_multipliers(auth_context, auth_db) -> None:
+    with auth_db() as db:
+        _seed_subscription(db, auth_context["tenant_id"], total=100)
+
+        low = quota.estimate_image_generation_quota(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            quality="low",
+        )
+        medium = quota.estimate_image_generation_quota(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            quality="medium",
+        )
+        high = quota.estimate_image_generation_quota(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            quality="high",
+        )
+
+    assert low.capability == "image"
+    assert low.unit == "image"
+    assert low.reservation_units == 5
+    assert low.estimated_credits == Decimal("5.00")
+    assert medium.reservation_units == 20
+    assert medium.estimated_credits == Decimal("20.00")
+    assert high.reservation_units == 75
+    assert high.estimated_credits == Decimal("75.00")
+
+
+def test_reserve_image_generation_quota_creates_reserved_usage(auth_context, auth_db) -> None:
+    with auth_db() as db:
+        sub = _seed_subscription(db, auth_context["tenant_id"], total=100)
+        db.add(
+            VideoTask(
+                id="photo-reserve-unit",
+                tenant_id=auth_context["tenant_id"],
+                status="queued",
+            )
+        )
+        db.flush()
+
+        reservation = quota.reserve_image_generation_quota(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            video_task_id="photo-reserve-unit",
+            quality="medium",
+        )
+        db.commit()
+
+        record = db.query(UsageRecord).filter_by(video_task_id="photo-reserve-unit").one()
+        reserved = sub.quota_credits_reserved
+
+    assert reservation.estimated_seconds == 1
+    assert reservation.estimated_credits == Decimal("20.00")
+    assert reserved == 20
+    assert record.status == "reserved"
+    assert record.capability == "image"
+    assert record.provider == "openai"
+    assert record.unit == "image"
+    assert record.quantity == Decimal("1.000")

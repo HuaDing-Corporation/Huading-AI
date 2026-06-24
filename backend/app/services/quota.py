@@ -18,6 +18,11 @@ _SEEDANCE_I2V_DEFAULT_SECONDS = 15
 _SEEDANCE_I2V_CLIP_SECONDS = 5
 _SEEDANCE_I2V_MIN_SECONDS = 5
 _SEEDANCE_I2V_MAX_SECONDS = 120
+_IMAGE_QUALITY_MULTIPLIERS = {
+    "low": Decimal("1"),
+    "medium": Decimal("4"),
+    "high": Decimal("15"),
+}
 
 
 @dataclass(frozen=True)
@@ -193,6 +198,34 @@ def estimate_seedance_i2v_quota(
     )
 
 
+def estimate_image_generation_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    quality: str,
+    n: int = 1,
+) -> QuotaEstimate:
+    multiplier = _IMAGE_QUALITY_MULTIPLIERS.get(quality)
+    if multiplier is None:
+        raise AppError("Invalid image quality.", code="VALIDATION_ERROR", status_code=422)
+    count = max(1, int(n))
+    image_rate = _rate(
+        db,
+        tenant_id=tenant_id,
+        capability="image",
+        unit="image",
+        default=Decimal("5.0000"),
+    )
+    credits = (Decimal(count) * image_rate * multiplier).quantize(Decimal("0.01"))
+    return QuotaEstimate(
+        estimated_seconds=count,
+        estimated_credits=credits,
+        reservation_units=_credit_units(credits),
+        capability="image",
+        unit="image",
+    )
+
+
 def reserve_avatar_talk_quota(
     db: Session,
     *,
@@ -269,6 +302,50 @@ def reserve_seedance_i2v_quota(
         provider="seedance",
         model=settings.engine_seedance_model,
         unit="second",
+        quantity=Decimal(estimate.estimated_seconds),
+        credits=estimate.estimated_credits,
+        cost_cents=0,
+        status="reserved",
+    )
+    db.add(usage_record)
+    return Reservation(
+        subscription,
+        usage_record,
+        estimate.estimated_seconds,
+        estimate.estimated_credits,
+    )
+
+
+def reserve_image_generation_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    video_task_id: str,
+    quality: str,
+    n: int = 1,
+) -> Reservation:
+    subscription = active_subscription(db, tenant_id)
+    estimate = estimate_image_generation_quota(
+        db,
+        tenant_id=tenant_id,
+        quality=quality,
+        n=n,
+    )
+    if remaining_credits(subscription) < estimate.reservation_units:
+        raise AppError(
+            "Insufficient tenant quota.",
+            code="TENANT_QUOTA_EXCEEDED",
+            status_code=403,
+        )
+    subscription.quota_credits_reserved += estimate.reservation_units
+    usage_record = UsageRecord(
+        tenant_id=tenant_id,
+        subscription_id=subscription.id,
+        video_task_id=video_task_id,
+        capability="image",
+        provider="openai",
+        model=settings.openai_image_model,
+        unit="image",
         quantity=Decimal(estimate.estimated_seconds),
         credits=estimate.estimated_credits,
         cost_cents=0,

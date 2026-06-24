@@ -91,6 +91,12 @@ def _seed_billing(db, tenant_id: str) -> Subscription:
                 unit="second",
                 credits_per_unit=Decimal("2.0000"),
             ),
+            CreditRate(
+                tenant_id=None,
+                capability="image",
+                unit="image",
+                credits_per_unit=Decimal("5.0000"),
+            ),
         ]
     )
     db.commit()
@@ -220,6 +226,7 @@ def test_avatar_talk_order_reserves_quota_and_returns_queued_id(
 ) -> None:
     with auth_db() as db:
         subscription = _seed_billing(db, auth_context["tenant_id"])
+        subscription.quota_credits_total = 200
         voice, avatar = _seed_voice_and_avatar(db, auth_context["tenant_id"])
         voice_id = voice.id
         avatar_id = avatar.id
@@ -377,6 +384,76 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
         assert reserved.credits == Decimal("60.00")
 
 
+def test_photo_order_routes_before_avatar_when_voice_is_present(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(db, auth_context["tenant_id"])
+        subscription.quota_credits_total = 200
+        voice, avatar = _seed_voice_and_avatar(db, auth_context["tenant_id"])
+        voice_id = voice.id
+        avatar_id = avatar.id
+        subscription_id = subscription.id
+
+    enqueued: dict[str, object] = {}
+
+    class _FakeImageTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            enqueued.update({"args": args, "task_id": task_id, "queue": queue})
+            return type("Result", (), {"status": "PENDING"})()
+
+    class _UnexpectedAvatarTask:
+        def apply_async(self, **_kwargs):  # pragma: no cover
+            raise AssertionError("photo must route before avatar_talk")
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route, "generate_image_task", _FakeImageTask())
+    monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _UnexpectedAvatarTask())
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/videos",
+        json={
+            "topic": "luxury leather handbag product photo",
+            "video_mode": "photo",
+            "image_key": "uploads/product.png",
+            "image_size": "1536x1024",
+            "image_quality": "high",
+            "voice_id": voice_id,
+            "avatar_asset_id": avatar_id,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 202
+    data = resp.json()["data"]
+    assert enqueued["task_id"] == data["id"]
+    assert enqueued["queue"] == "image"
+    assert enqueued["args"][0]["video_mode"] == "photo"
+    assert enqueued["args"][0]["image_key"] == "uploads/product.png"
+    assert enqueued["args"][0]["image_size"] == "1536x1024"
+    assert enqueued["args"][0]["image_quality"] == "high"
+    with auth_db() as db:
+        task = db.get(VideoTask, data["id"])
+        assert task is not None
+        assert task.mode == "photo"
+        assert task.video_mode == "photo"
+        assert task.params["image_key"] == "uploads/product.png"
+        assert task.params["image_size"] == "1536x1024"
+        assert task.params["image_quality"] == "high"
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved == 80
+        reserved = db.query(UsageRecord).filter_by(video_task_id=data["id"]).one()
+        assert reserved.status == "reserved"
+        assert reserved.capability == "image"
+        assert reserved.provider == "openai"
+        assert reserved.quantity == Decimal("1.000")
+        assert reserved.credits == Decimal("75.00")
+
+
 def test_video_estimate_seedance_i2v_matches_reserved_quota_with_tenant_rate(
     monkeypatch,
     auth_context,
@@ -441,6 +518,69 @@ def test_video_estimate_seedance_i2v_matches_reserved_quota_with_tenant_rate(
         ).one()
         assert reserved.quantity == Decimal("30")
         assert reserved.credits == Decimal("90.00")
+
+
+def test_video_estimate_photo_matches_reserved_quota_with_quality_rate(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(db, auth_context["tenant_id"])
+        db.add(
+            CreditRate(
+                tenant_id=auth_context["tenant_id"],
+                capability="image",
+                unit="image",
+                credits_per_unit=Decimal("2.0000"),
+            )
+        )
+        subscription_id = subscription.id
+        reserved_before = subscription.quota_credits_reserved
+        db.commit()
+
+    class _FakeImageTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            return type("Result", (), {"status": "PENDING"})()
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route, "generate_image_task", _FakeImageTask())
+    client = TestClient(app)
+    payload = {
+        "topic": "premium mug on a clean studio table",
+        "video_mode": "photo",
+        "image_quality": "medium",
+    }
+
+    estimate_resp = client.post(
+        "/api/v1/videos/estimate",
+        json=payload,
+        headers=auth_context["headers"],
+    )
+    create_resp = client.post(
+        "/api/v1/videos",
+        json=payload,
+        headers=auth_context["headers"],
+    )
+
+    assert estimate_resp.status_code == 200
+    assert estimate_resp.json()["data"] == {
+        "estimated_credits": 8,
+        "unit": "credits",
+        "note": "Estimated reservation; final settlement uses actual generated duration.",
+    }
+    assert create_resp.status_code == 202
+    with auth_db() as db:
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved - reserved_before == 8
+        reserved = db.query(UsageRecord).filter_by(
+            video_task_id=create_resp.json()["data"]["id"]
+        ).one()
+        assert reserved.capability == "image"
+        assert reserved.unit == "image"
+        assert reserved.quantity == Decimal("1.000")
+        assert reserved.credits == Decimal("8.00")
 
 
 def test_video_estimate_avatar_uses_existing_script_duration_and_tenant_rates(
@@ -537,6 +677,33 @@ def test_video_estimate_uses_video_generate_validation(auth_context) -> None:
     )
 
     assert resp.status_code == 422
+
+
+def test_photo_schema_validates_topic_size_and_quality() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    request = VideoGenerateRequest.model_validate(
+        {
+            "topic": "premium mug product image",
+            "video_mode": "photo",
+        }
+    )
+
+    assert request.video_mode == "photo"
+    assert request.image_size == "1024x1024"
+    assert request.image_quality == "medium"
+    assert request.voice_id is None
+    assert request.avatar_asset_id is None
+
+    invalid_cases = [
+        {"topic": "premium mug", "video_mode": "photo", "image_size": "2048x2048"},
+        {"topic": "premium mug", "video_mode": "photo", "image_quality": "ultra"},
+        {"topic": "   ", "video_mode": "photo"},
+    ]
+    for payload in invalid_cases:
+        with pytest.raises(ValidationError):
+            VideoGenerateRequest.model_validate(payload)
 
 
 def test_video_estimate_implicit_avatar_requires_avatar_asset_id(auth_context) -> None:
@@ -723,6 +890,64 @@ def test_video_list_filters_by_mode_and_keeps_pagination(
     assert data["total"] == 2
     assert [item["id"] for item in data["items"]] == ["history-i2v-a"]
     assert all(item["mode"] == "seedance_i2v" for item in data["items"])
+
+
+def test_video_list_filters_photo_and_returns_image_urls(
+    auth_context,
+    auth_db,
+) -> None:
+    store = _MemProgressStore()
+    storage = _FakeStorage()
+    with auth_db() as db:
+        db.add_all(
+            [
+                VideoTask(
+                    id="history-photo-a",
+                    tenant_id=auth_context["tenant_id"],
+                    created_by_user_id=auth_context["user_id"],
+                    mode="photo",
+                    video_mode="photo",
+                    status="done",
+                    progress=100,
+                    topic="premium mug",
+                    storage_key=f"tenants/{auth_context['tenant_id']}/photos/history-photo-a/output.png",
+                    content_type="image/png",
+                ),
+                VideoTask(
+                    id="history-avatar-b",
+                    tenant_id=auth_context["tenant_id"],
+                    created_by_user_id=auth_context["user_id"],
+                    mode="avatar_talk",
+                    video_mode="avatar_talk",
+                    status="done",
+                    progress=100,
+                    topic="avatar",
+                ),
+            ]
+        )
+        db.commit()
+
+    app.dependency_overrides[get_progress_store] = lambda: store
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        client = TestClient(app)
+        resp = client.get(
+            "/api/v1/videos?mode=photo",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_progress_store, None)
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["total"] == 1
+    item = data["items"][0]
+    assert item["id"] == "history-photo-a"
+    assert item["mode"] == "photo"
+    assert item["playback_url"].endswith("/output.png?ttl=3600")
+    assert item["download_url"].endswith("/output.png?ttl=3600&download=1")
+    assert item["thumbnail_url"] == item["playback_url"]
 
 
 def test_scene_prompt_endpoint_generates_visual_prompt_without_creating_video(
