@@ -145,9 +145,10 @@ services:
       ENGINE_AIGC_PRODUCER: ${ENGINE_AIGC_PRODUCER:-Huading}
       ENGINE_DOUBAO_TTS_AIGC_WATERMARK: ${ENGINE_DOUBAO_TTS_AIGC_WATERMARK:-true}
     # Single-config / single-process worker (engine config is a process singleton).
-    # It consumes default tasks plus avatar_talk/OmniHuman jobs routed to avatar;
+    # It consumes default tasks plus avatar_talk/OmniHuman jobs routed to avatar
+    # and photo/OpenAI image jobs routed to image;
     # production can split avatar into a dedicated worker if backlog isolation is needed.
-    command: celery -A app.workers.celery_app.celery_app worker --pool=solo --concurrency=1 -Q default,avatar --loglevel=info
+    command: celery -A app.workers.celery_app.celery_app worker --pool=solo --concurrency=1 -Q default,avatar,image --loglevel=info
     volumes:
       - media:/app/.local-storage
     depends_on:

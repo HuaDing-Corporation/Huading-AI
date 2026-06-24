@@ -94,7 +94,7 @@ done
 
 log "starting Celery worker (-c 1, solo pool) ..."
 uv run celery -A app.workers.celery_app.celery_app worker \
-  --pool=solo --concurrency=1 -Q default --loglevel=info >"$WORKER_LOG" 2>&1 &
+  --pool=solo --concurrency=1 -Q default,avatar,image --loglevel=info >"$WORKER_LOG" 2>&1 &
 WORKER_PID=$!
 sleep 4  # let the worker register before we submit
 

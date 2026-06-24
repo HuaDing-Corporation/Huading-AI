@@ -20,7 +20,7 @@ docker compose -f ../infra/docker-compose.yml up -d redis postgres
 ## Worker
 
 ```powershell
-uv run celery -A app.workers.celery_app.celery_app worker --loglevel=info --pool=solo -Q default
+uv run celery -A app.workers.celery_app.celery_app worker --loglevel=info --pool=solo -Q default,avatar,image
 ```
 
 ## Demo Task
@@ -81,7 +81,7 @@ The engine configuration is a **process-wide singleton** (`config_manager` +
 worker single-process so concurrent tasks can't race on shared config:
 
 ```powershell
-uv run celery -A app.workers.celery_app.celery_app worker --loglevel=info --pool=solo --concurrency=1 -Q default
+uv run celery -A app.workers.celery_app.celery_app worker --loglevel=info --pool=solo --concurrency=1 -Q default,avatar,image
 ```
 
 Single-tenant only for now; multi-tenant key resolution is M2.
@@ -103,8 +103,8 @@ ENGINE_BROWSER_CHANNEL=chrome \
 What it does:
 - `infra/docker-compose.yml` → starts the `redis` service (ports 6379).
 - Launches `uvicorn app.main:app` and `celery -A app.workers.celery_app.celery_app
-  worker --pool=solo -c 1` as separate host processes (true distributed path,
-  not eager).
+  worker --pool=solo -c 1 -Q default,avatar,image` as separate host processes
+  (true distributed path, not eager).
 - `scripts/e2e_distributed_driver.py` submits a job over HTTP, prints SSE +
   polled progress, and verifies the returned `video_url` (and the on-disk
   artifact for local storage). Exit code 0 = pass.
