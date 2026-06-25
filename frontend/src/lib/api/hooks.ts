@@ -26,11 +26,11 @@ export function useVideos() {
   const { session } = useAuth();
   return useQuery({ queryKey: videoKeys.list(), queryFn: listVideos, enabled: !!session });
 }
-export function useVideoHistory(mode: string, kind?: string) {
+export function useVideoHistory(mode: string) {
   const { session } = useAuth();
   return useInfiniteQuery({
-    queryKey: videoKeys.history(mode, kind),
-    queryFn: ({ pageParam }) => listVideosPage({ mode, kind, limit: 10, offset: pageParam }),
+    queryKey: videoKeys.history(mode),
+    queryFn: ({ pageParam }) => listVideosPage({ mode, limit: 10, offset: pageParam }),
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) => {
       const loaded = allPages.reduce((sum, page) => sum + page.items.length, 0);
@@ -79,12 +79,8 @@ export function useFrameCandidates(videoTaskId: string | undefined, count = 5) {
   });
 }
 export function useCoverFromFrame() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: CoverFromFrameRequest) => createCoverFromFrame(body),
-    // 封面入图片历史 → 失效 photo 历史(任意 kind 前缀)使其刷新
-    onSuccess: () => void qc.invalidateQueries({ queryKey: [...videoKeys.all, "history", "photo"] })
-  });
+  // 截帧封面是 Asset 挂口播任务，不进 photo VideoTask 历史，故不失效图片历史(FIX1)。
+  return useMutation({ mutationFn: (body: CoverFromFrameRequest) => createCoverFromFrame(body) });
 }
 // ── 文案仿写 + 标题/话题生成 (COPY-UI-0001) — 同步 mutation；草稿列表 infinite query ──
 export function useRewriteCopy() {

@@ -1,15 +1,13 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const historyMock = vi.hoisted(() => ({ fn: vi.fn() }));
-const kindMock = vi.hoisted(() => ({ fn: vi.fn() }));
 const draftsMock = vi.hoisted(() => ({ fn: vi.fn() }));
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("@/lib/api/hooks", () => ({
-  useVideoHistory: (mode: string, kind?: string) => {
+  useVideoHistory: (mode: string) => {
     historyMock.fn(mode);
-    kindMock.fn(kind);
     return {
       data: {
         pages: [
@@ -69,7 +67,7 @@ vi.mock("@/lib/api/hooks", () => ({
 }));
 
 import { CopyDraftList } from "./copy-draft-list";
-import { GenerationHistory, HistoryList, PhotoHistory } from "./generation-history";
+import { GenerationHistory, HistoryList } from "./generation-history";
 
 afterEach(() => vi.clearAllMocks());
 
@@ -112,15 +110,4 @@ describe("GenerationHistory (历史生成 tabs)", () => {
     expect(screen.getByText("#话题Y")).toBeInTheDocument();
   });
 
-  it("图片历史 kind 筛：默认全部(undefined)，点「仅封面」→ kind=cover，切回「全部图片」→ undefined", () => {
-    render(<PhotoHistory />);
-    expect(historyMock.fn).toHaveBeenCalledWith("photo");
-    expect(kindMock.fn).toHaveBeenLastCalledWith(undefined);
-
-    fireEvent.click(screen.getByRole("button", { name: "仅封面" }));
-    expect(kindMock.fn).toHaveBeenLastCalledWith("cover");
-
-    fireEvent.click(screen.getByRole("button", { name: "全部图片" }));
-    expect(kindMock.fn).toHaveBeenLastCalledWith(undefined);
-  });
 });

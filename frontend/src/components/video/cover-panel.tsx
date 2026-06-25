@@ -27,8 +27,8 @@ function titleFontValid(n: number): boolean {
   return Number.isFinite(n) && n >= TITLE_FONT_MIN && n <= TITLE_FONT_MAX;
 }
 
-/** 封面预览 + 下载 + 已存历史提示（截帧 / AI 共用）。 */
-function CoverResult({ imageUrl, downloadUrl }: { imageUrl: string; downloadUrl?: string | null }) {
+/** 封面预览 + 下载（截帧 / AI 共用；note 按来源不同：截帧封面是 Asset 不入历史、AI 封面入「全部图片」）。 */
+function CoverResult({ imageUrl, downloadUrl, note }: { imageUrl: string; downloadUrl?: string | null; note: string }) {
   return (
     <div className="mt-4 flex flex-col gap-2">
       {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -38,7 +38,7 @@ function CoverResult({ imageUrl, downloadUrl }: { imageUrl: string; downloadUrl?
         className="w-full rounded-field border border-line-gold bg-black/5 object-contain"
       />
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[12px] text-ink-faint">{copy.cover.savedToHistory}</span>
+        <span className="text-[12px] text-ink-faint">{note}</span>
         <a
           href={downloadUrl ?? imageUrl}
           download
@@ -171,7 +171,7 @@ export function FrameCoverTab({ videoTaskId }: { videoTaskId: string }) {
         <Scissors size={18} strokeWidth={1.8} /> {coverGen.isPending ? copy.cover.generatingFrame : copy.cover.generateFrame}
       </Button>
 
-      {cover && <CoverResult imageUrl={cover.image_url} />}
+      {cover && <CoverResult imageUrl={cover.image_url} note={copy.cover.frameSaved} />}
     </div>
   );
 }
@@ -191,7 +191,7 @@ export function AiCoverTab() {
   const pending = submitting || (!!coverTask && !done && !failed);
   const generateDisabled = !prompt.trim() || pending;
 
-  // AI 封面完成 → 失效图片历史(photo,含 kind=cover 前缀)，与截帧 useCoverFromFrame 刷新行为对齐。
+  // AI 封面是 photo VideoTask，完成 → 失效 photo 图片历史使「全部图片」刷新出新封面。
   useEffect(() => {
     if (done) qc.invalidateQueries({ queryKey: [...videoKeys.all, "history", "photo"] });
   }, [done, qc]);
@@ -246,7 +246,7 @@ export function AiCoverTab() {
         </p>
       )}
       {done && coverTask?.playbackUrl && (
-        <CoverResult imageUrl={coverTask.playbackUrl} downloadUrl={coverTask.downloadUrl} />
+        <CoverResult imageUrl={coverTask.playbackUrl} downloadUrl={coverTask.downloadUrl} note={copy.cover.savedToHistory} />
       )}
       {done && !coverTask?.playbackUrl && (
         <p role="status" aria-live="polite" className="mt-3 text-center text-[13px] text-ink-soft">
@@ -266,7 +266,7 @@ export interface CoverPanelProps {
 /**
  * 封面面板(口播视频产物附属，ORAL-PROD-UI-0001) — Dialog 弹层，双 tab 二选一：
  * 截帧(候选帧 + 标题叠加 → /covers/from-frame) / AI 封面(复用 0003 文生图 purpose=cover)。
- * 封面产物均入图片历史(kind=cover)。非独立工作台模式。
+ * AI 封面进图片历史(作为 photo)；截帧封面是 Asset 挂口播任务，当前图片历史看不到。非独立工作台模式。
  */
 export function CoverPanel({ videoTaskId, open, onOpenChange }: CoverPanelProps) {
   return (

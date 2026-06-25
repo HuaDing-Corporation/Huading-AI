@@ -151,9 +151,7 @@ export const copy = {
     loading: "加载中…",
     error: "加载失败，请重试",
     retry: "重试",
-    loadMore: "加载更多",
-    filterAllImages: "全部图片",
-    filterCovers: "仅封面"
+    loadMore: "加载更多"
   },
   detail: { notFound: "视频不存在或无权访问", back: "返回", download: "下载 MP4", downloadImage: "下载图片" },
   status: { queued: "排队中", failed: "失败", done: "已完成" },
@@ -184,6 +182,7 @@ export const copy = {
     aiDoneNoUrl: "已生成，请到图片历史查看",
     resultAlt: "封面预览",
     download: "下载封面",
+    frameSaved: "封面已生成，可下载",
     savedToHistory: "已存入图片历史",
     retry: "重试"
   }

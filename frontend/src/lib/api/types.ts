@@ -44,7 +44,6 @@ export interface VideoListItem {
   progress: number; // 0..100
   topic: string;
   mode?: string | null; // avatar_talk | seedance_i2v | photo —结果渲染：视频 vs 图
-  kind?: string | null; // 图片细分：如 "cover"（封面，进图片历史可筛；ORAL-PROD-UI-0001）
   error_code?: string | null; // 图片失败时映射友好文案（friendlyImageError）
   thumbnail_url?: string | null;
   created_at: string;
@@ -91,7 +90,7 @@ export interface CreateVideoRequest {
   aspect_ratio?: string; // 默认 "9:16"
   subtitle_enabled?: boolean; // 默认 true
   subtitle_style?: SubtitleStyle; // 数字人口播：字幕样式覆盖（ORAL-PROD-UI-0001）；缺省=与 0001 默认烧入一致（不回归）
-  purpose?: string; // 照片/封面：用途标识，如 "cover"（AI 封面 → 图片历史 kind=cover）
+  purpose?: string; // 照片/封面：用途标识，如 "cover"（AI 封面复用 0003 文生图标识；进图片历史作为 photo）
 }
 export interface VideoAccepted {
   id: string;

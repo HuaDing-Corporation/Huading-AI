@@ -91,17 +91,13 @@ export const handlers = [
   http.post(`${BASE}/api/v1/videos`, async ({ request }) => {
     const body = (await request.json()) as { topic: string; video_mode?: string };
     const id = `mock-${videos.size + 1}`;
-    // 记 mode(默认 avatar_talk)，让 GET /videos 的 mode/kind 筛能忠实回放
+    // 记 mode(默认 avatar_talk)，让 GET /videos 的 mode 筛能忠实回放
     videos.set(id, { id, status: "queued", progress: 0, topic: body.topic, mode: body.video_mode ?? "avatar_talk", created_at: new Date(0).toISOString(), script: body.topic, voice_id: "v-zhixing", aspect_ratio: "9:16", subtitle_enabled: true });
     return HttpResponse.json({ data: { id, status: "queued" }, error: null, request_id: "mock-req" }, { status: 202 });
   }),
   http.get(`${BASE}/api/v1/videos`, ({ request }) => {
-    const sp = new URL(request.url).searchParams;
-    const mode = sp.get("mode");
-    const kind = sp.get("kind");
-    const items = [...videos.values()].filter(
-      (v) => (!mode || v.mode === mode) && (!kind || v.kind === kind)
-    );
+    const mode = new URL(request.url).searchParams.get("mode");
+    const items = [...videos.values()].filter((v) => !mode || v.mode === mode);
     return ok({ items, total: items.length });
   }),
   http.get(`${BASE}/api/v1/videos/:id`, ({ params }) => {
@@ -163,14 +159,8 @@ export const handlers = [
       }))
     });
   }),
-  http.post(`${BASE}/api/v1/covers/from-frame`, async () => {
-    const id = `cover-${videos.size + 1}`;
-    // 封面入图片历史(kind=cover)：塞进 videos store 让 photo 历史可见
-    videos.set(id, {
-      id, status: "done", progress: 100, topic: "封面（mock）", mode: "photo", kind: "cover",
-      created_at: new Date(0).toISOString(), playback_url: "https://mock.local/cover.png",
-      download_url: "https://mock.local/cover.png?dl=1", thumbnail_url: "https://mock.local/cover.png"
-    });
-    return ok({ cover: { id, image_url: "https://mock.local/cover.png", width: 1280, height: 720 } });
-  })
+  http.post(`${BASE}/api/v1/covers/from-frame`, () =>
+    // 截帧封面是 Asset 挂口播任务，不进 photo VideoTask 历史(真链路)；故不塞 videos store(FIX1)
+    ok({ cover: { id: "cover-mock", image_url: "https://mock.local/cover.png", width: 1280, height: 720 } })
+  )
 ];

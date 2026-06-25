@@ -21,7 +21,7 @@ export async function getFrameCandidates(videoTaskId: string, count = 5): Promis
   return res?.frames ?? [];
 }
 
-/** 截帧 + 标题叠加 → 封面（同步；产物入图片存储/历史 kind=cover）。 */
+/** 截帧 + 标题叠加 → 封面（同步；产物是 Asset 挂口播任务，当前不进 photo 图片历史）。 */
 export function createCoverFromFrame(body: CoverFromFrameRequest): Promise<CoverFromFrameResponse> {
   return apiFetch<CoverFromFrameResponse>("/api/v1/covers/from-frame", { method: "POST", body });
 }

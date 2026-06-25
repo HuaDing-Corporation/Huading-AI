@@ -1,12 +1,10 @@
 "use client";
 
-import { useState } from "react";
 import { Clapperboard, FileText, Images, Store, UserRound } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
-import { Chip } from "@/components/ui/chip";
 import { Tabs, TabsContent, TabsList, TabsTrigger, tabTriggerClass } from "@/components/ui/tabs";
 import { CopyDraftList } from "@/components/tasks/copy-draft-list";
 import { TaskCard } from "@/components/tasks/task-card";
@@ -18,9 +16,9 @@ import { copy } from "@/lib/copy";
  *  TaskCard (list items mapped through fromVideoRead). Loading/error/empty states.
  *  Exported for direct unit testing per mode (Radix tab activation is unreliable
  *  to drive in jsdom). */
-export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
+export function HistoryList({ mode }: { mode: string }) {
   const router = useRouter();
-  const query = useVideoHistory(mode, kind);
+  const query = useVideoHistory(mode);
   const items = query.data?.pages.flatMap((page) => page.items) ?? [];
 
   if (query.isLoading) {
@@ -72,25 +70,7 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
   );
 }
 
-/** 图片历史(photo) + kind 筛：全部图片 / 仅封面(kind=cover)。封面经 /covers/* 入图片历史。Exported 供单测。 */
-export function PhotoHistory() {
-  const [coverOnly, setCoverOnly] = useState(false);
-  return (
-    <div>
-      <div className="mb-3 flex gap-1.5">
-        <Chip selected={!coverOnly} onClick={() => setCoverOnly(false)} className="px-3 py-1.5 text-[12.5px]">
-          {copy.history.filterAllImages}
-        </Chip>
-        <Chip selected={coverOnly} onClick={() => setCoverOnly(true)} className="px-3 py-1.5 text-[12.5px]">
-          {copy.history.filterCovers}
-        </Chip>
-      </div>
-      <HistoryList mode="photo" kind={coverOnly ? "cover" : undefined} />
-    </div>
-  );
-}
-
-/** 历史生成 — 4 tabs: 数字人 / 电商 / 照片(+封面筛) + 文案. */
+/** 历史生成 — 4 tabs: 数字人 / 电商 / 照片 + 文案. */
 export function GenerationHistory() {
   return (
     <Card animateIn>
@@ -121,7 +101,7 @@ export function GenerationHistory() {
           <HistoryList mode="seedance_i2v" />
         </TabsContent>
         <TabsContent value="photo" className="outline-none">
-          <PhotoHistory />
+          <HistoryList mode="photo" />
         </TabsContent>
         <TabsContent value="copywriting" className="outline-none">
           <CopyDraftList />
