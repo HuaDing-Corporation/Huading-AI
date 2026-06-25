@@ -73,6 +73,25 @@ def _is_avatar_talk_requested(payload: VideoGenerateRequest) -> bool:
     )
 
 
+def _worker_params(payload: VideoGenerateRequest) -> dict:
+    params = payload.model_dump()
+    if payload.subtitle_style is None:
+        params.pop("subtitle_style", None)
+    else:
+        params["subtitle_style"] = payload.subtitle_style.model_dump(exclude_none=True)
+    if payload.purpose is None:
+        params.pop("purpose", None)
+    if payload.kind is None:
+        params.pop("kind", None)
+    return params
+
+
+def _subtitle_style_params(payload: VideoGenerateRequest) -> dict | None:
+    if payload.subtitle_style is None:
+        return None
+    return payload.subtitle_style.model_dump(exclude_none=True)
+
+
 def _quota_estimate_for_payload(
     payload: VideoGenerateRequest,
     *,
@@ -253,6 +272,13 @@ def _create_avatar_talk_video(
 
     task_id = str(uuid4())
     script = payload.script
+    params = {
+        "avatar_asset_id": payload.avatar_asset_id,
+        "estimated": True,
+    }
+    subtitle_style = _subtitle_style_params(payload)
+    if subtitle_style is not None:
+        params["subtitle_style"] = subtitle_style
     task = VideoTask(
         id=task_id,
         tenant_id=user.tenant_id,
@@ -267,10 +293,7 @@ def _create_avatar_talk_video(
         speed=Decimal(str(payload.speed)),
         aspect_ratio=payload.aspect_ratio,
         subtitle_enabled=payload.subtitle_enabled,
-        params={
-            "avatar_asset_id": payload.avatar_asset_id,
-            "estimated": True,
-        },
+        params=params,
     )
     # Persist the parent video_task BEFORE inserting rows that FK-reference it
     # (task_asset, and the usage_record created in reserve_*). Without this flush
@@ -306,6 +329,15 @@ def _create_seedance_i2v_video(
     task_id = str(uuid4())
     script = payload.script
     target_duration_sec = seedance_i2v_target_seconds(payload.duration_sec)
+    params = {
+        "image_key": payload.image_key,
+        "scene_prompt": payload.scene_prompt,
+        "duration_sec": target_duration_sec,
+        "estimated": True,
+    }
+    subtitle_style = _subtitle_style_params(payload)
+    if subtitle_style is not None:
+        params["subtitle_style"] = subtitle_style
     task = VideoTask(
         id=task_id,
         tenant_id=user.tenant_id,
@@ -321,12 +353,7 @@ def _create_seedance_i2v_video(
         aspect_ratio=payload.aspect_ratio,
         subtitle_enabled=payload.subtitle_enabled,
         duration_sec=target_duration_sec,
-        params={
-            "image_key": payload.image_key,
-            "scene_prompt": payload.scene_prompt,
-            "duration_sec": target_duration_sec,
-            "estimated": True,
-        },
+        params=params,
     )
     db.add(task)
     db.flush()
@@ -350,6 +377,16 @@ def _create_photo_video(
     db: Session,
 ) -> str:
     task_id = str(uuid4())
+    params = {
+        "image_key": payload.image_key,
+        "image_size": payload.image_size,
+        "image_quality": payload.image_quality,
+        "estimated": True,
+    }
+    if payload.purpose is not None:
+        params["purpose"] = payload.purpose
+    if payload.kind is not None:
+        params["kind"] = payload.kind
     task = VideoTask(
         id=task_id,
         tenant_id=user.tenant_id,
@@ -361,12 +398,7 @@ def _create_photo_video(
         video_mode="photo",
         progress=0,
         aspect_ratio=payload.aspect_ratio,
-        params={
-            "image_key": payload.image_key,
-            "image_size": payload.image_size,
-            "image_quality": payload.image_quality,
-            "estimated": True,
-        },
+        params=params,
     )
     db.add(task)
     db.flush()
@@ -453,7 +485,7 @@ def create_video(
 ) -> ApiResponse[VideoAccepted]:
     if payload.video_mode == "photo":
         task_id = _create_photo_video(payload, user=user, db=db)
-        params = payload.model_dump()
+        params = _worker_params(payload)
         params["tenant_id"] = user.tenant_id
         params["video_task_id"] = task_id
         generate_image_task.apply_async(args=[params], task_id=task_id, queue="image")
@@ -461,7 +493,7 @@ def create_video(
 
     if payload.video_mode == "seedance_i2v":
         task_id = _create_seedance_i2v_video(payload, user=user, db=db)
-        params = payload.model_dump()
+        params = _worker_params(payload)
         params["tenant_id"] = user.tenant_id
         params["video_task_id"] = task_id
         generate_seedance_i2v_task.apply_async(args=[params], task_id=task_id, queue="avatar")
@@ -469,7 +501,7 @@ def create_video(
 
     if _is_avatar_talk_requested(payload):
         task_id = _create_avatar_talk_video(payload, user=user, db=db)
-        params = payload.model_dump()
+        params = _worker_params(payload)
         params["tenant_id"] = user.tenant_id
         params["video_task_id"] = task_id
         generate_avatar_talk_task.apply_async(args=[params], task_id=task_id, queue="avatar")
@@ -487,7 +519,7 @@ def create_video(
     )
     db.add(task)
     db.commit()
-    params = payload.model_dump()
+    params = _worker_params(payload)
     params["tenant_id"] = user.tenant_id
     params["video_task_id"] = task_id
     result = generate_video_task.apply_async(args=[params], task_id=task_id)

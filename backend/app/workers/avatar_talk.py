@@ -5,6 +5,7 @@ import json
 import math
 import re
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ from app.services.progress import ProgressStore, build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
 from app.services.storage.base import ObjectStorage
 from app.services.storage.factory import create_object_storage
+from app.services.subtitle_styles import resolve_subtitle_style
 from app.workers.celery_app import celery_app
 
 logger = get_logger(__name__)
@@ -992,11 +994,24 @@ def compose_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         "producer": settings.engine_aigc_producer,
         "propagate_id": ctx.tenant_id,
     }
+    subtitle_style = _task_subtitle_style(ctx)
+    if subtitle_style is not None:
+        burn_kwargs["subtitle_style"] = subtitle_style
     if external_audio_path is not None:
         burn_kwargs["audio_path"] = external_audio_path
     _burn_subtitles(base_path, subtitle_path, output_path, **burn_kwargs)
     ctx.final_video_bytes = output_path.read_bytes()
     return ctx
+
+
+def _task_subtitle_style(ctx: AvatarTalkContext) -> dict[str, object] | None:
+    if ctx.db is None:
+        return None
+    task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
+    raw_style = (task.params or {}).get("subtitle_style")
+    if not isinstance(raw_style, Mapping):
+        return None
+    return resolve_subtitle_style(raw_style)
 
 
 def _parse_srt_time(value: str) -> float:
@@ -1033,10 +1048,13 @@ def _parse_srt(path: Path) -> list[tuple[float, float, str]]:
     return captions
 
 
-def _font(size: int):
+def _font(size: int, family: str | None = None):
     from PIL import ImageFont
 
-    for name in _font_candidates():
+    candidates = _font_candidates()
+    if family:
+        candidates = (family, *candidates)
+    for name in candidates:
         try:
             return ImageFont.truetype(name, size=size)
         except OSError:
@@ -1085,8 +1103,17 @@ def _caption_position(
     video_h: int,
     target_size: tuple[int, int],
     band_height: int,
+    position: str | None = None,
 ) -> tuple[str, int]:
     width, height = target_size
+    if position is not None:
+        margin = max(24, int(height * 0.06))
+        if position == "top":
+            return ("center", min(max(0, height - band_height), margin))
+        if position == "center":
+            return ("center", max(0, (height - band_height) // 2))
+        return ("center", max(0, height - margin - band_height))
+
     if video_w <= 0 or video_h <= 0 or band_height <= 0:
         return ("center", max(0, min(height, int(height * 0.72))))
 
@@ -1141,8 +1168,17 @@ def _metadata_text(value: str) -> str:
     return re.sub(r"[\x00-\x1f\x7f]+", " ", str(value)).strip()
 
 
-def _subtitle_image(text: str, *, width: int, height: int):
+def _subtitle_image(
+    text: str,
+    *,
+    width: int,
+    height: int,
+    style: Mapping[str, object] | None = None,
+):
     from PIL import Image, ImageDraw
+
+    if style is not None:
+        return _styled_subtitle_image(text, width=width, height=height, style=style)
 
     font_size = max(18, int(height * 0.045))
     font = _font(font_size)
@@ -1168,6 +1204,70 @@ def _subtitle_image(text: str, *, width: int, height: int):
     return image
 
 
+def _styled_subtitle_image(
+    text: str,
+    *,
+    width: int,
+    height: int,
+    style: Mapping[str, object],
+):
+    from PIL import Image, ImageDraw
+
+    font_size = int(style.get("font_size") or max(18, int(height * 0.045)))
+    font = _font(font_size, family=str(style.get("font_family") or ""))
+    image = Image.new("RGBA", (width, int(height * 0.24)), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    lines = _wrap_text(text, max_width=int(width * 0.82), draw=draw, font=font)
+    line_gap = max(4, int(font_size * 0.25))
+    line_heights = []
+    line_widths = []
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_widths.append(bbox[2] - bbox[0])
+        line_heights.append(bbox[3] - bbox[1])
+    text_h = sum(line_heights) + line_gap * max(0, len(lines) - 1)
+    vertical_padding = max(8, int(font_size * 0.35))
+    y = max(0, (image.height - text_h) // 2)
+    background = style.get("background")
+    if background:
+        band_top = max(0, y - vertical_padding)
+        band_bottom = min(image.height, y + text_h + vertical_padding)
+        draw.rectangle(
+            (0, band_top, width, band_bottom),
+            fill=_rgba(str(background)),
+        )
+    fill = _rgba(str(style.get("color") or "#FFFFFF"))
+    stroke_color = style.get("stroke_color")
+    stroke_width = int(style.get("stroke_width") or 0)
+    stroke_fill = _rgba(str(stroke_color)) if stroke_color else None
+    for line, line_w, line_h in zip(lines, line_widths, line_heights, strict=False):
+        x = (width - line_w) // 2
+        draw.text(
+            (x, y),
+            line,
+            font=font,
+            fill=fill,
+            stroke_width=stroke_width,
+            stroke_fill=stroke_fill,
+        )
+        y += line_h + line_gap
+    return image
+
+
+def _rgba(value: str) -> tuple[int, int, int, int]:
+    raw = value.strip().lstrip("#")
+    if len(raw) not in {6, 8}:
+        return (255, 255, 255, 255)
+    try:
+        red = int(raw[0:2], 16)
+        green = int(raw[2:4], 16)
+        blue = int(raw[4:6], 16)
+        alpha = int(raw[6:8], 16) if len(raw) == 8 else 255
+        return (red, green, blue, alpha)
+    except ValueError:
+        return (255, 255, 255, 255)
+
+
 def _burn_subtitles(
     base_video: Path,
     subtitle_file: Path,
@@ -1178,6 +1278,7 @@ def _burn_subtitles(
     task_id: str | None = None,
     producer: str | None = None,
     propagate_id: str | None = None,
+    subtitle_style: Mapping[str, object] | None = None,
 ) -> None:
     import numpy as np
     from moviepy.audio.fx.audio_fadeout import audio_fadeout
@@ -1239,7 +1340,12 @@ def _burn_subtitles(
                 continue
             caption_start = max(0, start)
             caption_end = min(end, compose_end)
-            subtitle_image = _subtitle_image(text, width=width, height=height)
+            subtitle_image = _subtitle_image(
+                text,
+                width=width,
+                height=height,
+                style=subtitle_style,
+            )
             caption = ImageClip(
                 np.array(subtitle_image),
                 transparent=True,
@@ -1253,6 +1359,11 @@ def _burn_subtitles(
                         video_h=video.h,
                         target_size=target_size,
                         band_height=subtitle_image.height,
+                        position=(
+                            str(subtitle_style.get("position"))
+                            if subtitle_style is not None
+                            else None
+                        ),
                     )
                 )
             )

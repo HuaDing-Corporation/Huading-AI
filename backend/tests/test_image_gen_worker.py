@@ -246,6 +246,42 @@ def test_image_worker_text_to_image_finishes_and_settles_quota(
     ]
 
 
+def test_image_worker_marks_generated_image_as_cover_when_requested(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    task_id = "photo-cover-unit"
+    with auth_db() as db:
+        _seed_reserved_photo(
+            db,
+            auth_context["tenant_id"],
+            auth_context["user_id"],
+            task_id,
+        )
+    storage = _FakeStorage()
+    store = _MemProgressStore()
+    provider = _FakeProvider(image_bytes=b"cover-png")
+    image_gen = _patch_worker(monkeypatch, auth_db, storage, store, provider)
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": "AI cover prompt",
+            "purpose": "cover",
+        }
+    )
+
+    assert result["status"] == "SUCCESS"
+    output_key = f"tenants/{auth_context['tenant_id']}/photos/{task_id}/output.png"
+    with auth_db() as db:
+        asset = db.scalars(select(Asset).where(Asset.storage_key == output_key)).one()
+
+    assert asset.metadata_["purpose"] == "cover"
+    assert asset.metadata_["kind"] == "cover"
+
+
 def test_image_worker_edit_resolves_tenant_upload_and_cleans_temp_file(
     monkeypatch,
     auth_context,
