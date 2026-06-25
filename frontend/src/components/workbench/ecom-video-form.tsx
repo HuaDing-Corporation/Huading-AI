@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Sparkles } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
@@ -31,7 +31,10 @@ const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
  * error mapping and race-guard are reused (useTrackedUpload / errorText) so this
  * shares logic with NewVideoForm rather than duplicating it.
  */
-export function EcomVideoForm() {
+export function EcomVideoForm({
+  initialScript,
+  onPrefillConsumed
+}: { initialScript?: string; onPrefillConsumed?: () => void } = {}) {
   const { createAndTrack } = useVideoTasks();
   const scriptGen = useScriptGenerate();
   const scenePromptGen = useScenePromptGenerate();
@@ -40,12 +43,20 @@ export function EcomVideoForm() {
   const productImage = useTrackedUpload(uploadProduct.mutateAsync, (r) => r.image_key);
 
   const [topic, setTopic] = useState("");
-  const [script, setScript] = useState("");
+  // 文案模式「用此文案」一次性 prefill：惰性消费 initialScript，mount 后回调 page 清空。
+  const [script, setScript] = useState(() => initialScript ?? "");
   const [scenePrompt, setScenePrompt] = useState("");
   const [voiceId, setVoiceId] = useState("");
   const [durationSec, setDurationSec] = useState(30);
   const [speed, setSpeed] = useState(1);
   const [error, setError] = useState<string | null>(null);
+  const prefillConsumed = useRef(false);
+  useEffect(() => {
+    if (!prefillConsumed.current && initialScript !== undefined) {
+      prefillConsumed.current = true;
+      onPrefillConsumed?.();
+    }
+  }, [initialScript, onPrefillConsumed]);
 
   // Actual submit — runs only after the 确定生成 confirmation; owns its own errors.
   const submit = async (req: CreateVideoRequest) => {

@@ -9,6 +9,8 @@ const err = (status: number, code: string, message: string) =>
 
 // in-memory store so list/detail/SSE stay consistent within a session
 const videos = new Map<string, Record<string, unknown>>();
+// 文案草稿内存 store（newest first），供 POST/GET /copy/drafts 一致回放
+const copyDrafts: Record<string, unknown>[] = [];
 
 function sseStream(id: string, fail = false): Response {
   const enc = new TextEncoder();
@@ -101,5 +103,35 @@ export const handlers = [
   }),
   http.get(`${BASE}/api/v1/videos/:id/events`, ({ params, request }) =>
     sseStream(String(params.id), new URL(request.url).searchParams.get("fail") === "1")
-  )
+  ),
+
+  // ── 文案仿写 + 标题/话题生成 (COPY-UI-0001) — 同步 REST mock ──
+  http.post(`${BASE}/api/v1/copy/rewrite`, async ({ request }) => {
+    const body = (await request.json()) as { source_text: string; mode: string; n?: number };
+    const base = (body.source_text ?? "").trim();
+    if (body.mode === "auto") {
+      const n = Math.min(5, Math.max(1, body.n ?? 3));
+      return ok({
+        results: Array.from({ length: n }, (_, i) => ({ text: `【版本 ${i + 1}】${base}（mock 改写，可编辑）` }))
+      });
+    }
+    return ok({ results: [{ text: `${base}（mock 改写，可编辑）` }] });
+  }),
+  http.post(`${BASE}/api/v1/copy/titles`, async ({ request }) => {
+    const body = (await request.json()) as { n?: number };
+    const n = body.n ?? 5;
+    return ok({ titles: Array.from({ length: n }, (_, i) => `mock 标题候选 ${i + 1}`) });
+  }),
+  http.post(`${BASE}/api/v1/copy/topics`, async ({ request }) => {
+    const body = (await request.json()) as { n?: number };
+    const n = body.n ?? 5;
+    return ok({ topics: Array.from({ length: n }, (_, i) => `#mock话题${i + 1}`) });
+  }),
+  http.post(`${BASE}/api/v1/copy/drafts`, async ({ request }) => {
+    const body = (await request.json()) as Record<string, unknown>;
+    const draft = { id: `draft-${copyDrafts.length + 1}`, created_at: new Date(0).toISOString(), ...body };
+    copyDrafts.unshift(draft);
+    return HttpResponse.json({ data: draft, error: null, request_id: "mock-req" }, { status: 201 });
+  }),
+  http.get(`${BASE}/api/v1/copy/drafts`, () => ok({ items: copyDrafts, total: copyDrafts.length }))
 ];

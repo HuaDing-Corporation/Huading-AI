@@ -1,30 +1,41 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronLeft, ImagePlus, Store, UserRound, type LucideIcon } from "lucide-react";
+import { ChevronLeft, ImagePlus, PenLine, Store, UserRound, type LucideIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 import { EcomVideoForm } from "@/components/workbench/ecom-video-form";
 import { NewVideoForm } from "@/components/workbench/new-video-form";
 import { PhotoImageForm } from "@/components/workbench/photo-image-form";
+import { CopywritingForm } from "@/components/workbench/copywriting-form";
 import { GenerationHistory } from "@/components/tasks/generation-history";
 import { Sidebar } from "@/components/layout/sidebar";
 import { TaskList } from "@/components/tasks/task-list";
 import { TopBar } from "@/components/layout/top-bar";
 import { copy } from "@/lib/copy";
 
-type WorkbenchMode = "avatar_talk" | "seedance_i2v" | "photo";
+type WorkbenchMode = "avatar_talk" | "seedance_i2v" | "photo" | "copywriting";
+type VideoMode = "avatar_talk" | "seedance_i2v";
 
-// Workbench generation modes: 数字人口播 (video) / 电商带货 i2v (video) / 照片·AI 图 (image).
+// Workbench modes: 数字人口播 (video) / 电商带货 i2v (video) / 照片·AI 图 (image) / 文案仿写 (text).
 const MODES: { id: WorkbenchMode; label: string; Icon: LucideIcon }[] = [
   { id: "avatar_talk", label: copy.workbench.modeAvatar, Icon: UserRound },
   { id: "seedance_i2v", label: copy.workbench.modeEcom, Icon: Store },
-  { id: "photo", label: copy.workbench.modePhoto, Icon: ImagePlus }
+  { id: "photo", label: copy.workbench.modePhoto, Icon: ImagePlus },
+  { id: "copywriting", label: copy.workbench.modeCopywriting, Icon: PenLine }
 ];
 
 export default function Home() {
   const router = useRouter();
   const [mode, setMode] = useState<WorkbenchMode>("avatar_talk");
+  // 一次性 prefill：文案模式「用此文案」→ 注入目标视频表单的 script，目标表单 mount 消费后
+  // 回调 clearPrefill 清空，避免口播↔电商来回切 remount 时重复注入旧文案。
+  const [pendingPrefill, setPendingPrefill] = useState<{ target: VideoMode; script: string } | null>(null);
+  const useCopyInVideo = (target: VideoMode, script: string) => {
+    setPendingPrefill({ target, script });
+    setMode(target);
+  };
+  const clearPrefill = () => setPendingPrefill(null);
 
   const onBack = () => {
     if (typeof window !== "undefined" && window.history.length > 1) router.back();
@@ -80,7 +91,7 @@ export default function Home() {
                   );
                 })}
               </div>
-              {mode !== "photo" && (
+              {(mode === "avatar_talk" || mode === "seedance_i2v") && (
                 <span className="rounded-pill border border-line-gold bg-glass-soft px-3.5 py-2 text-[12.5px] text-ink-soft">
                   {copy.workbench.aspectBadge}
                 </span>
@@ -91,9 +102,17 @@ export default function Home() {
           {/* Form column + task list; both widen on large screens, stack on narrow. */}
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(320px,400px)_minmax(0,1fr)]">
             {mode === "avatar_talk" ? (
-              <NewVideoForm />
+              <NewVideoForm
+                initialScript={pendingPrefill?.target === "avatar_talk" ? pendingPrefill.script : undefined}
+                onPrefillConsumed={clearPrefill}
+              />
             ) : mode === "seedance_i2v" ? (
-              <EcomVideoForm />
+              <EcomVideoForm
+                initialScript={pendingPrefill?.target === "seedance_i2v" ? pendingPrefill.script : undefined}
+                onPrefillConsumed={clearPrefill}
+              />
+            ) : mode === "copywriting" ? (
+              <CopywritingForm onUseInVideo={useCopyInVideo} />
             ) : (
               <PhotoImageForm />
             )}
