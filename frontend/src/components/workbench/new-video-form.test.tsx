@@ -19,6 +19,7 @@ vi.mock("@/lib/api/hooks", () => ({
     ]
   }),
   useAvatarPresets: () => ({ data: [] }),
+  useSubtitleTemplates: () => ({ data: [] }),
   useEstimateVideo: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, data: undefined })
 }));
 vi.mock("@/lib/videos/tasks-context", () => ({ useVideoTasks: () => ({ createAndTrack: vi.fn() }) }));

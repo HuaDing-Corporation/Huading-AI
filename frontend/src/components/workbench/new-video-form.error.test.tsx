@@ -16,6 +16,7 @@ vi.mock("@/lib/api/hooks", () => ({
   useAvatarPresets: () => ({
     data: [{ asset_id: "p1", display_name: "默认主播", thumbnail_url: "https://x/p1.jpg" }]
   }),
+  useSubtitleTemplates: () => ({ data: [] }),
   useEstimateVideo: () => ({
     mutate: vi.fn(),
     reset: vi.fn(),

@@ -2,7 +2,14 @@ export const videoKeys = {
   all: ["videos"] as const,
   list: () => [...videoKeys.all, "list"] as const,
   detail: (id: string) => [...videoKeys.all, "detail", id] as const,
-  history: (mode: string) => [...videoKeys.all, "history", mode] as const
+  history: (mode: string, kind?: string) => [...videoKeys.all, "history", mode, kind ?? null] as const
+};
+
+// 口播生产力增强 (ORAL-PROD-UI-0001)
+export const subtitleTemplatesKey = ["oral", "subtitle-templates"] as const;
+export const coverKeys = {
+  all: ["covers"] as const,
+  frameCandidates: (videoTaskId: string, count: number) => [...coverKeys.all, "frames", videoTaskId, count] as const
 };
 
 export const copyKeys = {

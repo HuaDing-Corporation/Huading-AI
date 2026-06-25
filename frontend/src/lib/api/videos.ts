@@ -31,10 +31,11 @@ export async function listVideos(): Promise<VideoListItem[]> {
 /** One page of videos, optionally filtered by mode — backs the 历史生成 tabs
  *  (returns total so the caller can paginate via offset). */
 export function listVideosPage(
-  params: { mode?: string; limit?: number; offset?: number } = {}
+  params: { mode?: string; kind?: string; limit?: number; offset?: number } = {}
 ): Promise<VideoListResponse> {
   const query = new URLSearchParams();
   if (params.mode) query.set("mode", params.mode);
+  if (params.kind) query.set("kind", params.kind); // 图片细分筛（如 kind=cover）
   if (params.limit != null) query.set("limit", String(params.limit));
   if (params.offset != null) query.set("offset", String(params.offset));
   const qs = query.toString();

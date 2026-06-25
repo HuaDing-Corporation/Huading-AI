@@ -1,27 +1,26 @@
 "use client";
 
+import { useState } from "react";
 import { Clapperboard, FileText, Images, Store, UserRound } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Chip } from "@/components/ui/chip";
+import { Tabs, TabsContent, TabsList, TabsTrigger, tabTriggerClass } from "@/components/ui/tabs";
 import { CopyDraftList } from "@/components/tasks/copy-draft-list";
 import { TaskCard } from "@/components/tasks/task-card";
 import { useVideoHistory } from "@/lib/api/hooks";
 import { fromVideoRead } from "@/lib/sse/progress-mapping";
 import { copy } from "@/lib/copy";
 
-const triggerClass =
-  "flex items-center gap-1.5 rounded-pill px-3.5 py-1.5 text-[12.5px] text-ink-soft outline-none transition-colors hover:bg-glass-hover focus-visible:shadow-focus-gold data-[state=active]:bg-chip-sel data-[state=active]:font-medium data-[state=active]:text-gold-deep";
-
 /** One mode's history: paginated GET /videos?mode= via useVideoHistory; reuses
  *  TaskCard (list items mapped through fromVideoRead). Loading/error/empty states.
  *  Exported for direct unit testing per mode (Radix tab activation is unreliable
  *  to drive in jsdom). */
-export function HistoryList({ mode }: { mode: string }) {
+export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
   const router = useRouter();
-  const query = useVideoHistory(mode);
+  const query = useVideoHistory(mode, kind);
   const items = query.data?.pages.flatMap((page) => page.items) ?? [];
 
   if (query.isLoading) {
@@ -73,7 +72,25 @@ export function HistoryList({ mode }: { mode: string }) {
   );
 }
 
-/** 历史生成 — 4 tabs: 数字人 / 电商 / 照片 (videos via HistoryList) + 文案 (copy_drafts via CopyDraftList). */
+/** 图片历史(photo) + kind 筛：全部图片 / 仅封面(kind=cover)。封面经 /covers/* 入图片历史。Exported 供单测。 */
+export function PhotoHistory() {
+  const [coverOnly, setCoverOnly] = useState(false);
+  return (
+    <div>
+      <div className="mb-3 flex gap-1.5">
+        <Chip selected={!coverOnly} onClick={() => setCoverOnly(false)} className="px-3 py-1.5 text-[12.5px]">
+          {copy.history.filterAllImages}
+        </Chip>
+        <Chip selected={coverOnly} onClick={() => setCoverOnly(true)} className="px-3 py-1.5 text-[12.5px]">
+          {copy.history.filterCovers}
+        </Chip>
+      </div>
+      <HistoryList mode="photo" kind={coverOnly ? "cover" : undefined} />
+    </div>
+  );
+}
+
+/** 历史生成 — 4 tabs: 数字人 / 电商 / 照片(+封面筛) + 文案. */
 export function GenerationHistory() {
   return (
     <Card animateIn>
@@ -83,16 +100,16 @@ export function GenerationHistory() {
           aria-label={copy.history.title}
           className="mb-3 flex flex-wrap gap-1.5 rounded-pill border border-line-gold bg-glass-soft p-1"
         >
-          <TabsTrigger value="avatar_talk" className={triggerClass}>
+          <TabsTrigger value="avatar_talk" className={tabTriggerClass}>
             <UserRound size={14} strokeWidth={1.8} /> {copy.history.tabAvatar}
           </TabsTrigger>
-          <TabsTrigger value="seedance_i2v" className={triggerClass}>
+          <TabsTrigger value="seedance_i2v" className={tabTriggerClass}>
             <Store size={14} strokeWidth={1.8} /> {copy.history.tabEcom}
           </TabsTrigger>
-          <TabsTrigger value="photo" className={triggerClass}>
+          <TabsTrigger value="photo" className={tabTriggerClass}>
             <Images size={14} strokeWidth={1.8} /> {copy.history.tabPhoto}
           </TabsTrigger>
-          <TabsTrigger value="copywriting" className={triggerClass}>
+          <TabsTrigger value="copywriting" className={tabTriggerClass}>
             <FileText size={14} strokeWidth={1.8} /> {copy.history.tabCopy}
           </TabsTrigger>
         </TabsList>
@@ -104,7 +121,7 @@ export function GenerationHistory() {
           <HistoryList mode="seedance_i2v" />
         </TabsContent>
         <TabsContent value="photo" className="outline-none">
-          <HistoryList mode="photo" />
+          <PhotoHistory />
         </TabsContent>
         <TabsContent value="copywriting" className="outline-none">
           <CopyDraftList />

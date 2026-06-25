@@ -1,6 +1,7 @@
 "use client";
 
-import { ChevronLeft, Download } from "lucide-react";
+import { useState } from "react";
+import { ChevronLeft, Download, Image as ImageIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 import { ApiError } from "@/lib/api/client";
@@ -13,6 +14,8 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { SubtitlePreview } from "@/components/video/subtitle-preview";
 import { VideoPlayer } from "@/components/video/video-player";
+import { CoverPanel } from "@/components/video/cover-panel";
+import { Button } from "@/components/ui/button";
 
 export interface VideoDetailProps {
   id: string;
@@ -50,6 +53,7 @@ export function VideoDetail({ id }: VideoDetailProps) {
   const { data, error, isLoading } = useVideo(id);
   const queryClient = useQueryClient();
   const router = useRouter();
+  const [coverOpen, setCoverOpen] = useState(false);
 
   function handleUrlExpired() {
     void queryClient.invalidateQueries({ queryKey: videoKeys.detail(id) });
@@ -160,6 +164,16 @@ export function VideoDetail({ id }: VideoDetailProps) {
       ) : (
         <div className="flex min-h-[160px] items-center justify-center rounded-field border border-line-gold bg-glass-fill">
           <span className="text-[13px] text-ink-soft">{statusLabel[data.status] ?? data.status}</span>
+        </div>
+      )}
+
+      {/* 做封面(ORAL-PROD-UI-0001)：封面是口播视频产物附属，仅完成的口播视频显示入口 */}
+      {data.status === "done" && data.playback_url && (data.mode == null || data.mode === "avatar_talk") && (
+        <div>
+          <Button variant="soft" size="sm" onClick={() => setCoverOpen(true)}>
+            <ImageIcon size={15} strokeWidth={1.8} /> {copy.cover.entry}
+          </Button>
+          <CoverPanel videoTaskId={id} open={coverOpen} onOpenChange={setCoverOpen} />
         </div>
       )}
 

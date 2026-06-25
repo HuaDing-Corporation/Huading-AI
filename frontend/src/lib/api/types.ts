@@ -44,6 +44,7 @@ export interface VideoListItem {
   progress: number; // 0..100
   topic: string;
   mode?: string | null; // avatar_talk | seedance_i2v | photo —结果渲染：视频 vs 图
+  kind?: string | null; // 图片细分：如 "cover"（封面，进图片历史可筛；ORAL-PROD-UI-0001）
   error_code?: string | null; // 图片失败时映射友好文案（friendlyImageError）
   thumbnail_url?: string | null;
   created_at: string;
@@ -89,6 +90,8 @@ export interface CreateVideoRequest {
   speed?: number; // 默认 1.0
   aspect_ratio?: string; // 默认 "9:16"
   subtitle_enabled?: boolean; // 默认 true
+  subtitle_style?: SubtitleStyle; // 数字人口播：字幕样式覆盖（ORAL-PROD-UI-0001）；缺省=与 0001 默认烧入一致（不回归）
+  purpose?: string; // 照片/封面：用途标识，如 "cover"（AI 封面 → 图片历史 kind=cover）
 }
 export interface VideoAccepted {
   id: string;
@@ -234,4 +237,64 @@ export interface CopyDraft {
 export interface CopyDraftListResponse {
   items: CopyDraft[];
   total: number;
+}
+
+// ── 口播生产力增强 v1 (ORAL-PROD-UI-0001) — 字幕样式 + 封面 ──
+export type SubtitlePosition = "top" | "center" | "bottom";
+
+// GET /oral/subtitle-templates 的内层条目（5 套静态预设）
+export interface SubtitleTemplate {
+  id: string;
+  name: string;
+  font_family: string;
+  font_size: number;
+  color: string;
+  stroke_color: string | null;
+  stroke_width: number;
+  background: string | null;
+  position: SubtitlePosition;
+}
+export interface SubtitleTemplatesResponse {
+  templates: SubtitleTemplate[];
+}
+
+// 并入口播生成请求的字幕样式覆盖；template_id 必填，其余覆盖项留空则继承预设
+export interface SubtitleStyle {
+  template_id: string;
+  font_family?: string;
+  font_size?: number; // clamp 16..96
+  color?: string; // #RRGGBB
+  position?: SubtitlePosition;
+}
+
+// GET /covers/frame-candidates?video_task_id=&count= 的内层
+export interface FrameCandidate {
+  timestamp_sec: number;
+  preview_url: string;
+}
+export interface FrameCandidatesResponse {
+  frames: FrameCandidate[];
+}
+
+// POST /covers/from-frame
+export interface CoverTitle {
+  text: string; // 可空 → 纯截帧不叠字
+  font_size?: number; // clamp 24..120
+  color?: string; // #RRGGBB
+  position?: SubtitlePosition;
+}
+export interface CoverFromFrameRequest {
+  video_task_id: string;
+  timestamp_sec: number;
+  title: CoverTitle;
+  layout_template_id?: string; // v1 预留
+}
+export interface Cover {
+  id: string;
+  image_url: string;
+  width: number;
+  height: number;
+}
+export interface CoverFromFrameResponse {
+  cover: Cover;
 }

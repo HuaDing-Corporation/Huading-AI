@@ -2,18 +2,21 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 
 import { fetchMe } from "@/lib/api/auth";
 import { listAvatarPresets } from "@/lib/api/avatars";
-import { avatarPresetsKey, copyKeys, meKey, quotaKey, videoKeys, voicesKey } from "@/lib/api/keys";
+import { avatarPresetsKey, copyKeys, coverKeys, meKey, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
 import { getQuota } from "@/lib/api/quota";
 import { generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
 import { generateScript } from "@/lib/api/scripts";
 import { uploadImage, uploadProductImage } from "@/lib/api/uploads";
 import { listVoices } from "@/lib/api/voices";
+import { listSubtitleTemplates } from "@/lib/api/oral";
+import { createCoverFromFrame, getFrameCandidates } from "@/lib/api/covers";
 import { createVideo, estimateVideo, generateScenePrompt, getVideo, listVideos, listVideosPage } from "@/lib/api/videos";
 import type {
   CopyDraftCreateRequest,
   CopyRewriteRequest,
   CopyTitlesRequest,
   CopyTopicsRequest,
+  CoverFromFrameRequest,
   CreateVideoRequest,
   ScriptGenerateRequest
 } from "@/lib/api/types";
@@ -23,11 +26,11 @@ export function useVideos() {
   const { session } = useAuth();
   return useQuery({ queryKey: videoKeys.list(), queryFn: listVideos, enabled: !!session });
 }
-export function useVideoHistory(mode: string) {
+export function useVideoHistory(mode: string, kind?: string) {
   const { session } = useAuth();
   return useInfiniteQuery({
-    queryKey: videoKeys.history(mode),
-    queryFn: ({ pageParam }) => listVideosPage({ mode, limit: 10, offset: pageParam }),
+    queryKey: videoKeys.history(mode, kind),
+    queryFn: ({ pageParam }) => listVideosPage({ mode, kind, limit: 10, offset: pageParam }),
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) => {
       const loaded = allPages.reduce((sum, page) => sum + page.items.length, 0);
@@ -61,6 +64,27 @@ export function useScriptGenerate() {
 }
 export function useScenePromptGenerate() {
   return useMutation({ mutationFn: (topic: string) => generateScenePrompt(topic) });
+}
+// ── 口播生产力增强 (ORAL-PROD-UI-0001) — 字幕模板 / 封面截帧 ──
+export function useSubtitleTemplates() {
+  const { session } = useAuth();
+  return useQuery({ queryKey: subtitleTemplatesKey, queryFn: listSubtitleTemplates, enabled: !!session });
+}
+export function useFrameCandidates(videoTaskId: string | undefined, count = 5) {
+  const { session } = useAuth();
+  return useQuery({
+    queryKey: coverKeys.frameCandidates(videoTaskId ?? "", count),
+    queryFn: () => getFrameCandidates(videoTaskId as string, count),
+    enabled: !!session && !!videoTaskId
+  });
+}
+export function useCoverFromFrame() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CoverFromFrameRequest) => createCoverFromFrame(body),
+    // 封面入图片历史 → 失效 photo 历史(任意 kind 前缀)使其刷新
+    onSuccess: () => void qc.invalidateQueries({ queryKey: [...videoKeys.all, "history", "photo"] })
+  });
 }
 // ── 文案仿写 + 标题/话题生成 (COPY-UI-0001) — 同步 mutation；草稿列表 infinite query ──
 export function useRewriteCopy() {

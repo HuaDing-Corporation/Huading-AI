@@ -89,14 +89,21 @@ export const handlers = [
     )
   ),
   http.post(`${BASE}/api/v1/videos`, async ({ request }) => {
-    const body = (await request.json()) as { topic: string };
+    const body = (await request.json()) as { topic: string; video_mode?: string };
     const id = `mock-${videos.size + 1}`;
-    videos.set(id, { id, status: "queued", progress: 0, topic: body.topic, created_at: new Date(0).toISOString(), script: body.topic, voice_id: "v-zhixing", aspect_ratio: "9:16", subtitle_enabled: true });
+    // 记 mode(默认 avatar_talk)，让 GET /videos 的 mode/kind 筛能忠实回放
+    videos.set(id, { id, status: "queued", progress: 0, topic: body.topic, mode: body.video_mode ?? "avatar_talk", created_at: new Date(0).toISOString(), script: body.topic, voice_id: "v-zhixing", aspect_ratio: "9:16", subtitle_enabled: true });
     return HttpResponse.json({ data: { id, status: "queued" }, error: null, request_id: "mock-req" }, { status: 202 });
   }),
-  http.get(`${BASE}/api/v1/videos`, () =>
-    ok({ items: [...videos.values()], total: videos.size })
-  ),
+  http.get(`${BASE}/api/v1/videos`, ({ request }) => {
+    const sp = new URL(request.url).searchParams;
+    const mode = sp.get("mode");
+    const kind = sp.get("kind");
+    const items = [...videos.values()].filter(
+      (v) => (!mode || v.mode === mode) && (!kind || v.kind === kind)
+    );
+    return ok({ items, total: items.length });
+  }),
   http.get(`${BASE}/api/v1/videos/:id`, ({ params }) => {
     const v = videos.get(String(params.id));
     return v ? ok(v) : err(404, "not_found", "视频不存在");
@@ -133,5 +140,37 @@ export const handlers = [
     copyDrafts.unshift(draft);
     return HttpResponse.json({ data: draft, error: null, request_id: "mock-req" }, { status: 201 });
   }),
-  http.get(`${BASE}/api/v1/copy/drafts`, () => ok({ items: copyDrafts, total: copyDrafts.length }))
+  http.get(`${BASE}/api/v1/copy/drafts`, () => ok({ items: copyDrafts, total: copyDrafts.length })),
+
+  // ── 口播生产力增强 (ORAL-PROD-UI-0001) — 字幕模板 + 封面截帧 mock ──
+  http.get(`${BASE}/api/v1/oral/subtitle-templates`, () =>
+    ok({
+      templates: [
+        { id: "classic", name: "经典白", font_family: "Noto Sans SC", font_size: 48, color: "#FFFFFF", stroke_color: "#000000", stroke_width: 2, background: null, position: "bottom" },
+        { id: "bold_yellow", name: "醒目黄", font_family: "Noto Sans SC", font_size: 56, color: "#FFE600", stroke_color: "#000000", stroke_width: 3, background: null, position: "bottom" },
+        { id: "boxed", name: "底条黑", font_family: "Noto Sans SC", font_size: 46, color: "#FFFFFF", stroke_color: null, stroke_width: 0, background: "#000000B3", position: "bottom" },
+        { id: "minimal", name: "极简灰", font_family: "Noto Sans SC", font_size: 40, color: "#EAEAEA", stroke_color: null, stroke_width: 0, background: null, position: "bottom" },
+        { id: "top_news", name: "顶部条", font_family: "Noto Sans SC", font_size: 44, color: "#FFFFFF", stroke_color: "#000000", stroke_width: 2, background: "#0A0A0AB3", position: "top" }
+      ]
+    })
+  ),
+  http.get(`${BASE}/api/v1/covers/frame-candidates`, ({ request }) => {
+    const n = Math.min(10, Math.max(1, Number(new URL(request.url).searchParams.get("count")) || 5));
+    return ok({
+      frames: Array.from({ length: n }, (_, i) => ({
+        timestamp_sec: Number((i * 1.5).toFixed(1)),
+        preview_url: `https://mock.local/frame-${i}.jpg`
+      }))
+    });
+  }),
+  http.post(`${BASE}/api/v1/covers/from-frame`, async () => {
+    const id = `cover-${videos.size + 1}`;
+    // 封面入图片历史(kind=cover)：塞进 videos store 让 photo 历史可见
+    videos.set(id, {
+      id, status: "done", progress: 100, topic: "封面（mock）", mode: "photo", kind: "cover",
+      created_at: new Date(0).toISOString(), playback_url: "https://mock.local/cover.png",
+      download_url: "https://mock.local/cover.png?dl=1", thumbnail_url: "https://mock.local/cover.png"
+    });
+    return ok({ cover: { id, image_url: "https://mock.local/cover.png", width: 1280, height: 720 } });
+  })
 ];

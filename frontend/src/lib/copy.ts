@@ -95,7 +95,19 @@ export const copy = {
     copySaving: "保存中…",
     copySaved: "已保存",
     copyUseInAvatar: "用此文案 · 数字人口播",
-    copyUseInEcom: "用此文案 · 电商带货"
+    copyUseInEcom: "用此文案 · 电商带货",
+    // 字幕样式（口播生产力增强 ORAL-PROD-UI-0001）；不选 = 默认烧入（不回归 0001）
+    subtitleStyleLabel: "字幕样式（可选）",
+    subtitleStyleHint: "不选用默认烧入样式；选预设后可微调字号 / 颜色 / 位置",
+    subtitleStyleNone: "跟随默认",
+    subtitleFontSizeLabel: "字号",
+    subtitleColorLabel: "颜色",
+    subtitlePositionLabel: "位置",
+    subtitlePositionTop: "顶部",
+    subtitlePositionCenter: "居中",
+    subtitlePositionBottom: "底部",
+    subtitleFontSizeRange: "字号需在 16–96",
+    subtitlePreviewSample: "字幕预览示例文本"
   },
   confirm: {
     title: "确定生成",
@@ -139,8 +151,40 @@ export const copy = {
     loading: "加载中…",
     error: "加载失败，请重试",
     retry: "重试",
-    loadMore: "加载更多"
+    loadMore: "加载更多",
+    filterAllImages: "全部图片",
+    filterCovers: "仅封面"
   },
   detail: { notFound: "视频不存在或无权访问", back: "返回", download: "下载 MP4", downloadImage: "下载图片" },
-  status: { queued: "排队中", failed: "失败", done: "已完成" }
+  status: { queued: "排队中", failed: "失败", done: "已完成" },
+  // 封面制作（口播视频产物附属 ORAL-PROD-UI-0001）
+  cover: {
+    entry: "做封面",
+    title: "制作封面",
+    subtitle: "从口播视频抽帧叠标题，或用 AI 生成封面",
+    tabFrame: "截帧",
+    tabAi: "AI 封面",
+    frameLoading: "加载候选帧…",
+    frameError: "候选帧加载失败，请重试",
+    frameEmpty: "暂无候选帧",
+    frameLabel: "选择封面帧",
+    titleLabel: "封面标题（可选）",
+    titlePlaceholder: "输入封面标题文字，可留空＝纯截帧",
+    titleFontSizeLabel: "标题字号",
+    titleColorLabel: "标题颜色",
+    titlePositionLabel: "标题位置",
+    titleFontSizeRange: "字号需在 24–120",
+    generateFrame: "生成封面",
+    generatingFrame: "生成中…",
+    aiPromptLabel: "封面描述",
+    aiPromptPlaceholder: "描述想要的封面画面，如：暖光下的咖啡杯特写，高级质感",
+    generateAi: "AI 生成封面",
+    generatingAi: "生成中…",
+    aiPending: "封面生成中，完成后自动展示并存入图片历史…",
+    aiDoneNoUrl: "已生成，请到图片历史查看",
+    resultAlt: "封面预览",
+    download: "下载封面",
+    savedToHistory: "已存入图片历史",
+    retry: "重试"
+  }
 } as const;

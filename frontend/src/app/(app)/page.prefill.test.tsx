@@ -39,6 +39,7 @@ vi.mock("@/lib/api/hooks", () => ({
     data: [{ id: "v1", provider: "edge", voice_code: "x", display_name: "音色1", gender: null, language: null }]
   }),
   useAvatarPresets: () => ({ data: [] }),
+  useSubtitleTemplates: () => ({ data: [] }),
   useEstimateVideo: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, data: { estimated_credits: 8, unit: "credits" } })
 }));
 
