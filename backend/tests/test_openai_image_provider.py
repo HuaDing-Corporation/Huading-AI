@@ -6,6 +6,8 @@ import pytest
 from app.providers.image import openai as openai_provider
 from app.providers.image.openai import OpenAIImageProvider
 
+_DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+
 
 class _FakeOpenAI:
     instances: list["_FakeOpenAI"] = []
@@ -56,7 +58,7 @@ def test_openai_image_provider_uses_sdk_default_http_client_for_proxy(
 
     OpenAIImageProvider(
         api_key="test-key",
-        base_url="https://api.openai.com/v1",
+        base_url="https://openai-proxy.test/v1",
         local_proxy="http://127.0.0.1:7897",
         timeout=12.5,
     )
@@ -68,7 +70,7 @@ def test_openai_image_provider_uses_sdk_default_http_client_for_proxy(
     }
     assert len(_FakeOpenAI.instances) == 1
     assert _FakeOpenAI.instances[0].kwargs["http_client"] is _FakeDefaultHttpxClient.instances[0]
-    assert _FakeOpenAI.instances[0].kwargs["base_url"] == "https://api.openai.com/v1"
+    assert _FakeOpenAI.instances[0].kwargs["base_url"] == "https://openai-proxy.test/v1"
 
 
 def test_openai_image_provider_omits_http_client_without_proxy(monkeypatch) -> None:
@@ -89,6 +91,7 @@ def test_openai_image_provider_omits_http_client_without_proxy(monkeypatch) -> N
     assert _FakeDefaultHttpxClient.instances == []
     assert len(_FakeOpenAI.instances) == 1
     assert "http_client" not in _FakeOpenAI.instances[0].kwargs
+    assert _FakeOpenAI.instances[0].kwargs["base_url"] == _DEFAULT_OPENAI_BASE_URL
 
 
 @pytest.mark.asyncio
