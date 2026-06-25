@@ -102,6 +102,30 @@ describe("VideoDetail", () => {
     expect(screen.getByText(copy.detail.downloadImage)).toBeInTheDocument();
   });
 
+  it("shows friendly copy for a failed photo (never the raw error_message)", () => {
+    (useVideo as Mock).mockReturnValue({
+      data: {
+        id: "p1",
+        status: "failed",
+        progress: 0,
+        mode: "photo",
+        topic: "一只猫",
+        script: null,
+        voice_id: null,
+        aspect_ratio: null,
+        subtitle_enabled: null,
+        error_code: "IMAGE_MODERATION_BLOCKED",
+        error_message: 'Error code: 400 - {"error":{"code":"moderation_blocked"}}',
+        created_at: "2026-06-25T00:00:00Z"
+      },
+      error: null,
+      isLoading: false
+    });
+    render(<VideoDetail id="p1" />, { wrapper });
+    expect(screen.getByText(copy.errors.imageModeration)).toBeInTheDocument();
+    expect(screen.queryByText(/Error code: 400/)).not.toBeInTheDocument();
+  });
+
   it("P2-3: renders without crashing when backend nullable fields are null", () => {
     (useVideo as Mock).mockReturnValue({
       data: {

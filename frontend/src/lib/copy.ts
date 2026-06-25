@@ -79,7 +79,12 @@ export const copy = {
     uploadTooLarge: "图片过大，请控制在 10MB 以内",
     uploadType: "仅支持 JPG / PNG / WebP 图片",
     network: "网络连接失败，请检查后端服务是否在线",
-    generic: "操作失败，请重试"
+    generic: "操作失败，请重试",
+    // 图片生成错误（按后端 error_code 映射；见 friendlyImageError）
+    imageModeration: "内容被 AI 安全系统拦截，请调整描述后重试（避免敏感或人体性暗示内容）",
+    imageConnection: "网络连接失败，请检查代理 / 网络后重试",
+    imageInvalid: "生成参数有误，请调整尺寸 / 质量或描述后重试",
+    imageGeneric: "图片生成失败，请重试"
   },
   tasks: {
     title: "生成任务",

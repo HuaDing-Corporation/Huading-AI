@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { TrackedTask } from "@/lib/sse/progress-mapping";
+import { copy } from "@/lib/copy";
 
 import { TaskCard } from "./task-card";
 
@@ -52,5 +53,33 @@ describe("TaskCard inline player onError once (P2-2)", () => {
     fireEvent.error(video);
     fireEvent.error(video);
     expect(onUrlError).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("TaskCard photo error friendly (IMAGE-ERROR-FRIENDLY)", () => {
+  it("shows friendly copy for a failed photo task — never the raw error_message", () => {
+    const task: TrackedTask = {
+      ...failed,
+      mode: "photo",
+      errorCode: "IMAGE_MODERATION_BLOCKED",
+      error: 'Error code: 400 - {"error":{"code":"moderation_blocked"}}'
+    };
+    render(<TaskCard task={task} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />);
+    expect(screen.getByText(copy.errors.imageModeration)).toBeInTheDocument();
+    expect(screen.queryByText(/Error code: 400/)).toBeNull();
+    expect(screen.queryByText(/moderation_blocked/)).toBeNull();
+  });
+
+  it("uses a generic friendly line for a failed photo with unknown error_code", () => {
+    const task: TrackedTask = { ...failed, mode: "photo", errorCode: null, error: "Error code: 500 raw" };
+    render(<TaskCard task={task} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />);
+    expect(screen.getByText(copy.errors.imageGeneric)).toBeInTheDocument();
+    expect(screen.queryByText(/Error code/)).toBeNull();
+  });
+
+  it("does NOT change video error display (avatar/i2v keep the original message)", () => {
+    const task: TrackedTask = { ...failed, error: "积分不足，无法生成" };
+    render(<TaskCard task={task} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />);
+    expect(screen.getByText("积分不足，无法生成")).toBeInTheDocument();
   });
 });
