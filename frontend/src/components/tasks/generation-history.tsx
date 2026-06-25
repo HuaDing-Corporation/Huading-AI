@@ -1,11 +1,12 @@
 "use client";
 
-import { Clapperboard, Images, Store, UserRound } from "lucide-react";
+import { Clapperboard, FileText, Images, Store, UserRound } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CopyDraftList } from "@/components/tasks/copy-draft-list";
 import { TaskCard } from "@/components/tasks/task-card";
 import { useVideoHistory } from "@/lib/api/hooks";
 import { fromVideoRead } from "@/lib/sse/progress-mapping";
@@ -72,7 +73,7 @@ export function HistoryList({ mode }: { mode: string }) {
   );
 }
 
-/** 历史生成 — 3 tabs: 数字人 (avatar_talk) / 电商 (seedance_i2v) / 照片 (photo). */
+/** 历史生成 — 4 tabs: 数字人 / 电商 / 照片 (videos via HistoryList) + 文案 (copy_drafts via CopyDraftList). */
 export function GenerationHistory() {
   return (
     <Card animateIn>
@@ -91,6 +92,9 @@ export function GenerationHistory() {
           <TabsTrigger value="photo" className={triggerClass}>
             <Images size={14} strokeWidth={1.8} /> {copy.history.tabPhoto}
           </TabsTrigger>
+          <TabsTrigger value="copywriting" className={triggerClass}>
+            <FileText size={14} strokeWidth={1.8} /> {copy.history.tabCopy}
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="avatar_talk" className="outline-none">
@@ -101,6 +105,9 @@ export function GenerationHistory() {
         </TabsContent>
         <TabsContent value="photo" className="outline-none">
           <HistoryList mode="photo" />
+        </TabsContent>
+        <TabsContent value="copywriting" className="outline-none">
+          <CopyDraftList />
         </TabsContent>
       </Tabs>
     </Card>

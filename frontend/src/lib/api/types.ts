@@ -170,3 +170,68 @@ export interface VideoEvent {
   error?: string | null;
   timeout_seconds?: number;
 }
+
+// ── 文案仿写 + 标题/话题生成 (COPY-UI-0001) ─────────────────────────────
+// 同步 REST（不进 Celery/SSE）；内层 data，外层 M2 封套不变。对齐 seam §2。
+export type CopyMode = "smart" | "custom" | "auto";
+export type CopyPlatform = "douyin" | "xiaohongshu";
+
+// POST /api/v1/copy/rewrite
+export interface CopyRewriteRequest {
+  source_text: string; // 必填非空，≤4000 字（超长 422）
+  mode: CopyMode; // 智能 / 自定义 / 自动
+  instruction?: string; // mode=custom 必填，其余忽略
+  n?: number; // mode=auto 多候选条数，默认 3，clamp 1..5
+  target_platform?: CopyPlatform | null; // 可选，影响风格语气
+  video_mode?: string; // 串联口播/带货时按风格 + clean_spoken_script 清洗
+  duration_sec?: number; // 串联时按时长控字数
+}
+export interface CopyRewriteResult {
+  text: string;
+}
+export interface CopyRewriteResponse {
+  results: CopyRewriteResult[]; // smart/custom 返 1 条；auto 返 n 条
+}
+
+// POST /api/v1/copy/titles
+export interface CopyTitlesRequest {
+  source_text: string;
+  n?: number; // 默认 5
+  style?: string | null; // 短句 / 长句（二字/四字 backlog）
+}
+export interface CopyTitlesResponse {
+  titles: string[];
+}
+
+// POST /api/v1/copy/topics
+export interface CopyTopicsRequest {
+  source_text: string;
+  n?: number; // 默认 5
+}
+export interface CopyTopicsResponse {
+  topics: string[]; // 带 # 标签
+}
+
+// 历史草稿持久化（存历史「文案」tab）
+export interface CopyDraftCreateRequest {
+  source_text: string;
+  result_text: string; // 最终（用户可能手改过的）改写文案
+  titles?: string[];
+  topics?: string[];
+  mode: CopyMode;
+  target_platform?: CopyPlatform | null;
+}
+export interface CopyDraft {
+  id: string;
+  source_text: string;
+  result_text: string;
+  titles?: string[] | null;
+  topics?: string[] | null;
+  mode: CopyMode;
+  target_platform?: string | null;
+  created_at: string;
+}
+export interface CopyDraftListResponse {
+  items: CopyDraft[];
+  total: number;
+}

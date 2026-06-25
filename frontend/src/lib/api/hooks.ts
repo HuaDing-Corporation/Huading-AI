@@ -2,13 +2,21 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 
 import { fetchMe } from "@/lib/api/auth";
 import { listAvatarPresets } from "@/lib/api/avatars";
-import { avatarPresetsKey, meKey, quotaKey, videoKeys, voicesKey } from "@/lib/api/keys";
+import { avatarPresetsKey, copyKeys, meKey, quotaKey, videoKeys, voicesKey } from "@/lib/api/keys";
 import { getQuota } from "@/lib/api/quota";
+import { generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
 import { generateScript } from "@/lib/api/scripts";
 import { uploadImage, uploadProductImage } from "@/lib/api/uploads";
 import { listVoices } from "@/lib/api/voices";
 import { createVideo, estimateVideo, generateScenePrompt, getVideo, listVideos, listVideosPage } from "@/lib/api/videos";
-import type { CreateVideoRequest, ScriptGenerateRequest } from "@/lib/api/types";
+import type {
+  CopyDraftCreateRequest,
+  CopyRewriteRequest,
+  CopyTitlesRequest,
+  CopyTopicsRequest,
+  CreateVideoRequest,
+  ScriptGenerateRequest
+} from "@/lib/api/types";
 import { useAuth } from "@/lib/auth/auth-context";
 
 export function useVideos() {
@@ -53,6 +61,36 @@ export function useScriptGenerate() {
 }
 export function useScenePromptGenerate() {
   return useMutation({ mutationFn: (topic: string) => generateScenePrompt(topic) });
+}
+// ── 文案仿写 + 标题/话题生成 (COPY-UI-0001) — 同步 mutation；草稿列表 infinite query ──
+export function useRewriteCopy() {
+  return useMutation({ mutationFn: (params: CopyRewriteRequest) => rewriteCopy(params) });
+}
+export function useGenerateTitles() {
+  return useMutation({ mutationFn: (params: CopyTitlesRequest) => generateTitles(params) });
+}
+export function useGenerateTopics() {
+  return useMutation({ mutationFn: (params: CopyTopicsRequest) => generateTopics(params) });
+}
+export function useSaveCopyDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (params: CopyDraftCreateRequest) => saveCopyDraft(params),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: copyKeys.drafts() })
+  });
+}
+export function useCopyDrafts() {
+  const { session } = useAuth();
+  return useInfiniteQuery({
+    queryKey: copyKeys.drafts(),
+    queryFn: ({ pageParam }) => listCopyDraftsPage({ limit: 10, offset: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) => {
+      const loaded = allPages.reduce((sum, page) => sum + page.items.length, 0);
+      return loaded < lastPage.total ? loaded : undefined;
+    },
+    enabled: !!session
+  });
 }
 export function useVoices() {
   const { session } = useAuth();
