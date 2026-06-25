@@ -30,12 +30,14 @@ function uploadReferenceImage() {
   fireEvent.change(input, { target: { files: [new File(["x"], "r.png", { type: "image/png" })] } });
 }
 
-describe("PhotoImageForm (照片 / AI 图)", () => {
+describe("PhotoImageForm (图片生成 / 修改)", () => {
   it("disables 生成 with a hint until a prompt is entered", () => {
     render(<PhotoImageForm />);
-    const generate = screen.getByRole("button", { name: /生成视频/ });
+    const generate = screen.getByRole("button", { name: /生成图片/ });
     expect(generate).toBeDisabled();
     expect(screen.getByText("请先输入提示词")).toBeInTheDocument();
+    // module renamed → card title is 图片生成 / 修改; button verb is 生成图片 (queried above)
+    expect(screen.getByText("图片生成 / 修改")).toBeInTheDocument();
 
     fireEvent.change(screen.getByPlaceholderText(/描述想要的图片/), { target: { value: "一只橘猫" } });
     expect(generate).toBeEnabled();
@@ -44,7 +46,7 @@ describe("PhotoImageForm (照片 / AI 图)", () => {
   it("文生图: submits the photo body without image_key when no reference image", async () => {
     render(<PhotoImageForm />);
     fireEvent.change(screen.getByPlaceholderText(/描述想要的图片/), { target: { value: "一只橘猫" } });
-    fireEvent.click(screen.getByRole("button", { name: /生成视频/ }));
+    fireEvent.click(screen.getByRole("button", { name: /生成图片/ }));
     fireEvent.click(await screen.findByRole("button", { name: "确定" }));
 
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
@@ -67,7 +69,7 @@ describe("PhotoImageForm (照片 / AI 图)", () => {
     uploadReferenceImage();
     await waitFor(() => expect(uploadMock.mutateAsync).toHaveBeenCalledTimes(1));
 
-    const generate = screen.getByRole("button", { name: /生成视频/ });
+    const generate = screen.getByRole("button", { name: /生成图片/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
     fireEvent.click(await screen.findByRole("button", { name: "确定" }));

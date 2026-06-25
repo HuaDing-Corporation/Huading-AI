@@ -29,7 +29,7 @@ const PHOTO_SIZES = ["1024x1024", "1536x1024", "1024x1536"] as const;
 const PHOTO_QUALITIES = ["low", "medium", "high"] as const;
 
 /**
- * 照片 / AI 图 (video_mode="photo") workbench container — the third mode. Mirrors
+ * 图片生成 / 修改 (video_mode="photo") workbench container — the third mode. Mirrors
  * the ecom form's reuse (useTrackedUpload / ConfirmGenerateDialog / errorText) but
  * the asset is an OPTIONAL reference image (upload = 换背景/修图; empty = 文生图)
  * and the submit body carries image_size + image_quality. The result is an image,
@@ -151,7 +151,7 @@ export function PhotoImageForm() {
         onClick={onGenerate}
         disabled={generateDisabled}
       >
-        <Sparkles size={18} strokeWidth={1.8} /> {copy.workbench.generate}
+        <Sparkles size={18} strokeWidth={1.8} /> {copy.workbench.generatePhoto}
       </Button>
 
       <ConfirmGenerateDialog

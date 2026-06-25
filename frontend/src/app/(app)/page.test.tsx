@@ -40,8 +40,8 @@ describe("Workbench mode switch (数字人口播 / 电商带货)", () => {
     expect(screen.getByTestId("avatar-form")).toBeInTheDocument();
     expect(screen.queryByTestId("ecom-form")).not.toBeInTheDocument();
 
-    // Switch to 照片 / AI 图 → photo form (third mode).
-    fireEvent.click(screen.getByRole("button", { name: /照片/ }));
+    // Switch to 图片生成 / 修改 → photo form (third mode).
+    fireEvent.click(screen.getByRole("button", { name: /图片生成/ }));
     expect(screen.getByTestId("photo-form")).toBeInTheDocument();
     expect(screen.queryByTestId("avatar-form")).not.toBeInTheDocument();
   });
