@@ -15,6 +15,7 @@ from app.providers.base import register_provider
 _DEFAULT_MODEL = "gpt-image-2"
 _DEFAULT_SIZE = "1024x1024"
 _DEFAULT_QUALITY = "medium"
+_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 
 class OpenAIImageProviderError(RuntimeError):
@@ -52,8 +53,7 @@ class OpenAIImageProvider:
         timeout: float,
     ) -> OpenAI:
         kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout}
-        if base_url:
-            kwargs["base_url"] = base_url
+        kwargs["base_url"] = base_url or _DEFAULT_BASE_URL
         if local_proxy:
             kwargs["http_client"] = DefaultHttpxClient(proxy=local_proxy, timeout=timeout)
         return OpenAI(**kwargs)
