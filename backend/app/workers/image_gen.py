@@ -76,6 +76,10 @@ def _photo_storage_key(tenant_id: str, task_id: str) -> str:
     return f"tenants/{_safe_task_id(tenant_id)}/photos/{_safe_task_id(task_id)}/output.png"
 
 
+def _is_cover_request(params: Mapping[str, Any]) -> bool:
+    return params.get("purpose") == "cover" or params.get("kind") == "cover"
+
+
 def _write_temp_input_image(
     storage: ObjectStorage,
     *,
@@ -232,6 +236,15 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                 progress=90,
             )
             storage.put_bytes(output_key, image_bytes, content_type="image/png")
+            metadata = {
+                "model": result.get("model") or settings.openai_image_model,
+                "size": provider_payload["size"],
+                "quality": provider_payload["quality"],
+                "mode": result.get("mode") or ("edit" if input_path else "generate"),
+            }
+            if _is_cover_request(params):
+                metadata["purpose"] = "cover"
+                metadata["kind"] = "cover"
 
             asset = Asset(
                 tenant_id=tenant_id,
@@ -242,12 +255,7 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                 mime_type="image/png",
                 size_bytes=len(image_bytes),
                 status="ready",
-                metadata_={
-                    "model": result.get("model") or settings.openai_image_model,
-                    "size": provider_payload["size"],
-                    "quality": provider_payload["quality"],
-                    "mode": result.get("mode") or ("edit" if input_path else "generate"),
-                },
+                metadata_=metadata,
             )
             db.add(asset)
             db.flush()

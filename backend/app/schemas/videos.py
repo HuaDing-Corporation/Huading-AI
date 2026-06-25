@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.services.subtitle_styles import SUBTITLE_TEMPLATE_IDS, clamp_subtitle_font_size
+
 _ALLOWED_PIPELINES = {"standard", "custom"}
 _ALLOWED_MODES = {"generate", "fixed"}
 _ALLOWED_VIDEO_MODES = {
@@ -19,6 +21,40 @@ _MAX_DURATION_SEC = 120
 _TEMPLATE_RE = re.compile(r"^[A-Za-z0-9_]+x[A-Za-z0-9_]+/[A-Za-z0-9_.\-]+\.html$")
 # Tenant-relative upload key as returned by POST /api/v1/uploads.
 _IMAGE_KEY_RE = re.compile(r"^uploads/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|webp)$")
+_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+class SubtitleStyleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    template_id: str
+    font_family: str | None = Field(default=None, max_length=100)
+    font_size: int | None = None
+    color: str | None = None
+    position: Literal["top", "center", "bottom"] | None = None
+
+    @field_validator("template_id")
+    @classmethod
+    def _check_template_id(cls, value: str) -> str:
+        if value not in SUBTITLE_TEMPLATE_IDS:
+            raise ValueError("unknown subtitle template_id")
+        return value
+
+    @field_validator("font_size")
+    @classmethod
+    def _clamp_font_size(cls, value: int | None) -> int | None:
+        if value is None:
+            return value
+        return clamp_subtitle_font_size(value)
+
+    @field_validator("color")
+    @classmethod
+    def _check_color(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if not _HEX_COLOR_RE.match(value):
+            raise ValueError("color must be #RRGGBB")
+        return value.upper()
 
 
 class VideoGenerateRequest(BaseModel):
@@ -41,6 +77,7 @@ class VideoGenerateRequest(BaseModel):
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
     aspect_ratio: Literal["9:16", "16:9", "1:1"] = Field(default="9:16")
     subtitle_enabled: bool = True
+    subtitle_style: SubtitleStyleRequest | None = None
     pipeline: str = Field(default="standard")
     mode: str = Field(default="generate", description="'generate' (LLM) or 'fixed' (use script)")
     # Which generation flow to run. 'mode' above is kept for the static-template
@@ -60,6 +97,14 @@ class VideoGenerateRequest(BaseModel):
     image_quality: Literal["low", "medium", "high"] = Field(
         default="medium",
         description="OpenAI photo quality tier.",
+    )
+    purpose: Literal["cover"] | None = Field(
+        default=None,
+        description="Optional photo generation purpose marker; cover reuses the photo pipeline.",
+    )
+    kind: Literal["cover"] | None = Field(
+        default=None,
+        description="Optional photo generation kind marker; cover reuses the photo pipeline.",
     )
     scene_prompt: str | None = Field(
         default=None,
@@ -133,6 +178,8 @@ class VideoGenerateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_i2v_has_image(self) -> "VideoGenerateRequest":
+        if (self.purpose == "cover" or self.kind == "cover") and self.video_mode != "photo":
+            raise ValueError("cover purpose/kind requires video_mode=photo")
         if self.video_mode == "seedance_i2v":
             if not self.image_key:
                 raise ValueError("seedance_i2v requires image_key (upload an image first)")

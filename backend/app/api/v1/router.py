@@ -4,7 +4,9 @@ from app.api.v1.routes import (
     auth,
     avatars,
     copy,
+    covers,
     health,
+    oral,
     quota,
     scripts,
     storage,
@@ -22,6 +24,8 @@ api_router.include_router(quota.router, prefix="/quota", tags=["quota"])
 api_router.include_router(voices.router, prefix="/voices", tags=["voices"])
 api_router.include_router(avatars.router, prefix="/avatars", tags=["avatars"])
 api_router.include_router(copy.router, prefix="/copy", tags=["copy"])
+api_router.include_router(oral.router, prefix="/oral", tags=["oral"])
+api_router.include_router(covers.router, prefix="/covers", tags=["covers"])
 api_router.include_router(scripts.router, prefix="/scripts", tags=["scripts"])
 api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
 api_router.include_router(storage.router, prefix="/storage", tags=["storage"])
