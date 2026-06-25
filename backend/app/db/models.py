@@ -183,6 +183,27 @@ class VideoTask(TenantScopedMixin, Base):
     )
 
 
+class CopyDraft(TenantScopedMixin, Base):
+    __tablename__ = "copy_drafts"
+    __table_args__ = (
+        CheckConstraint(
+            "mode IN ('smart', 'custom', 'auto')",
+            name="ck_copy_drafts_mode",
+        ),
+        Index("ix_copy_drafts_tenant_created_at", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    source_text: Mapped[str] = mapped_column(Text)
+    result_text: Mapped[str] = mapped_column(Text)
+    titles: Mapped[list[str] | None] = mapped_column(_json_type(), default=None)
+    topics: Mapped[list[str] | None] = mapped_column(_json_type(), default=None)
+    mode: Mapped[str] = mapped_column(String(16))
+    target_platform: Mapped[str | None] = mapped_column(String(32), default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+
 class BrandAsset(TenantScopedMixin, Base):
     __tablename__ = "brand_assets"
 
