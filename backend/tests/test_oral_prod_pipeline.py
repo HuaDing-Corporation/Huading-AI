@@ -335,16 +335,92 @@ def test_compose_step_passes_resolved_subtitle_style(monkeypatch, auth_db, tmp_p
     }
 
 
-def test_subtitle_image_default_path_stays_byte_identical() -> None:
-    image_a = avatar_talk._subtitle_image("VISIBLE CAPTION", width=360, height=640)
-    image_b = avatar_talk._subtitle_image(
-        "VISIBLE CAPTION",
-        width=360,
-        height=640,
-        style=None,
-    )
+def test_default_subtitle_rendering_contract_stays_frozen(monkeypatch) -> None:
+    from PIL import ImageDraw
 
-    assert image_a.tobytes() == image_b.tobytes()
+    font_calls: list[dict[str, object]] = []
+    text_calls: list[dict[str, object]] = []
+    textbbox_calls: list[dict[str, object]] = []
+    font_object = object()
+
+    def fake_font(size: int, family: str | None = None):
+        font_calls.append({"size": size, "family": family})
+        return font_object
+
+    class _RecordingDraw:
+        def __init__(self, _image) -> None:
+            pass
+
+        def textbbox(self, xy, text, *, font):
+            textbbox_calls.append({"xy": xy, "text": text, "font": font})
+            return (0, 0, 144, 20)
+
+        def text(self, xy, text, *, font, fill, **kwargs):
+            text_calls.append(
+                {
+                    "xy": xy,
+                    "text": text,
+                    "font": font,
+                    "fill": fill,
+                    "kwargs": kwargs,
+                }
+            )
+
+    monkeypatch.setattr(avatar_talk, "_font", fake_font)
+    monkeypatch.setattr(ImageDraw, "Draw", _RecordingDraw)
+
+    image = avatar_talk._subtitle_image("VISIBLE CAPTION", width=360, height=640)
+
+    assert image.size == (360, 153)
+    assert font_calls == [{"size": 28, "family": None}]
+    assert textbbox_calls == [
+        {"xy": (0, 0), "text": "VISIBLE", "font": font_object},
+        {"xy": (0, 0), "text": "VISIBLE CAPTION", "font": font_object},
+        {"xy": (0, 0), "text": "VISIBLE CAPTION", "font": font_object},
+    ]
+    assert text_calls == [
+        {
+            "xy": (106, 124),
+            "text": "VISIBLE CAPTION",
+            "font": font_object,
+            "fill": (0, 0, 0, 230),
+            "kwargs": {},
+        },
+        {
+            "xy": (110, 124),
+            "text": "VISIBLE CAPTION",
+            "font": font_object,
+            "fill": (0, 0, 0, 230),
+            "kwargs": {},
+        },
+        {
+            "xy": (108, 122),
+            "text": "VISIBLE CAPTION",
+            "font": font_object,
+            "fill": (0, 0, 0, 230),
+            "kwargs": {},
+        },
+        {
+            "xy": (108, 126),
+            "text": "VISIBLE CAPTION",
+            "font": font_object,
+            "fill": (0, 0, 0, 230),
+            "kwargs": {},
+        },
+        {
+            "xy": (108, 124),
+            "text": "VISIBLE CAPTION",
+            "font": font_object,
+            "fill": (255, 255, 255, 255),
+            "kwargs": {},
+        },
+    ]
+    assert avatar_talk._caption_position(
+        video_w=360,
+        video_h=640,
+        target_size=(360, 640),
+        band_height=image.height,
+    ) == ("center", 449)
 
 
 def test_frame_candidates_clamp_count_and_store_previews(
