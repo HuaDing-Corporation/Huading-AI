@@ -42,6 +42,7 @@ def test_db_schema_0001_metadata_contains_target_tables() -> None:
         "platform_accounts",
         "publish_jobs",
         "payment_orders",
+        "copy_drafts",
     }
 
     assert expected_tables <= set(Base.metadata.tables)
@@ -84,6 +85,7 @@ def test_db_schema_0001_core_indexes_and_constraints_are_declared() -> None:
     assets = Base.metadata.tables["assets"]
     task_assets = Base.metadata.tables["task_assets"]
     usage_records = Base.metadata.tables["usage_records"]
+    copy_drafts = Base.metadata.tables["copy_drafts"]
 
     assert {"ix_video_tasks_tenant_created_at", "ix_video_tasks_tenant_status"} <= {
         index.name for index in video_tasks.indexes
@@ -103,6 +105,32 @@ def test_db_schema_0001_core_indexes_and_constraints_are_declared() -> None:
         for constraint in Base.metadata.tables["templates"].constraints
         if isinstance(constraint, CheckConstraint)
     }
+    assert "ix_copy_drafts_tenant_created_at" in {index.name for index in copy_drafts.indexes}
+    assert "ck_copy_drafts_mode" in {
+        constraint.name
+        for constraint in copy_drafts.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+
+def test_db_schema_0001_copy_drafts_contract() -> None:
+    copy_drafts = Base.metadata.tables["copy_drafts"]
+
+    assert {
+        "id",
+        "tenant_id",
+        "source_text",
+        "result_text",
+        "titles",
+        "topics",
+        "mode",
+        "target_platform",
+        "created_at",
+        "deleted_at",
+    } <= set(copy_drafts.c.keys())
+    assert copy_drafts.c.tenant_id.nullable is False
+    assert copy_drafts.c.source_text.nullable is False
+    assert copy_drafts.c.result_text.nullable is False
 
 
 def test_db_schema_0001_usage_record_money_and_credit_columns() -> None:
