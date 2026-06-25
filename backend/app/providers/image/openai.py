@@ -113,7 +113,6 @@ class OpenAIImageProvider:
                 size=size,
                 quality=quality,
                 n=1,
-                input_fidelity="high",
             )
 
     def _decode_b64_response(self, response) -> bytes:
