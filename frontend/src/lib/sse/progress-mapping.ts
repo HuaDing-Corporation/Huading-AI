@@ -15,6 +15,8 @@ export interface TrackedTask {
   thumbnailUrl?: string | null;
   durationSec?: number | null;
   error?: string | null;
+  /** Backend error_code (photo tasks) → friendly text via friendlyImageError. */
+  errorCode?: string | null;
   /**
    * True only for tasks this session created via createAndTrack (we hold their
    * original request and can re-submit). Hydrated-from-list tasks omit it, so
@@ -71,6 +73,7 @@ export interface ProgressSnapshot {
   progress: number;
   statusLabel: string;
   error?: string | null;
+  errorCode?: string | null;
 }
 
 export function progressFields(status: UiStatus, pct: number, step?: string | null): ProgressSnapshot {
@@ -86,7 +89,11 @@ export function eventToProgress(event: VideoEvent): ProgressSnapshot | null {
   const isOld = typeof event.status === "string" && OLD_UPPER.test(event.status);
   const pct = isOld ? Math.round(raw * 100) : raw;
   const status = mapSseStatus(event.status);
-  return { ...progressFields(status, pct, event.step), error: event.error_message ?? event.error ?? undefined };
+  return {
+    ...progressFields(status, pct, event.step),
+    error: event.error_message ?? event.error ?? undefined,
+    errorCode: event.error_code ?? null
+  };
 }
 
 export function fromVideoRead(read: VideoDetail | VideoListItem): TrackedTask {
@@ -103,6 +110,7 @@ export function fromVideoRead(read: VideoDetail | VideoListItem): TrackedTask {
     downloadUrl: detail.download_url ?? null,
     thumbnailUrl: read.thumbnail_url ?? null,
     durationSec: detail.duration_ms != null ? detail.duration_ms / 1000 : null,
-    error: detail.error_message ?? null
+    error: detail.error_message ?? null,
+    errorCode: read.error_code ?? null
   };
 }

@@ -12,6 +12,7 @@ import {
 
 import { Progress } from "@/components/ui/progress";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { friendlyImageError } from "@/lib/api/image-error";
 import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
 import type { TrackedTask, UiStatus } from "@/lib/sse/progress-mapping";
@@ -59,6 +60,8 @@ export function TaskCard({ task, onOpen, onRetry, onUrlError }: TaskCardProps) {
   const Icon = thumbIcon[task.status];
   const showPlayer = task.status === "done" && !!task.playbackUrl;
   const isImage = task.mode === "photo";
+  // photo 失败映射友好文案（不露原始 JSON）；视频沿用原始 message（不破）。
+  const failureText = isImage ? friendlyImageError(task.errorCode) : task.error;
 
   // Fire onUrlError at most once per playback URL (mirrors VideoPlayer); reset
   // the guard when the URL changes so a refreshed URL can error once again (P2-2).
@@ -103,9 +106,12 @@ export function TaskCard({ task, onOpen, onRetry, onUrlError }: TaskCardProps) {
       {/* Body: state-specific content */}
       {task.status === "failed" ? (
         <div className="mt-2 px-2">
-          {task.error ? (
-            <p className="mb-1.5 text-[12px] text-error-fg" title={task.error}>
-              {task.error}
+          {failureText ? (
+            <p
+              className="mb-1.5 text-[12px] text-error-fg"
+              title={isImage ? undefined : task.error ?? undefined}
+            >
+              {failureText}
             </p>
           ) : null}
           {/* Only offer retry when we hold the original request (this-session

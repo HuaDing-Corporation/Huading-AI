@@ -44,6 +44,7 @@ export interface VideoListItem {
   progress: number; // 0..100
   topic: string;
   mode?: string | null; // avatar_talk | seedance_i2v | photo —结果渲染：视频 vs 图
+  error_code?: string | null; // 图片失败时映射友好文案（friendlyImageError）
   thumbnail_url?: string | null;
   created_at: string;
 }

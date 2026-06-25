@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { ApiError } from "@/lib/api/client";
 import { useVideo } from "@/lib/api/hooks";
 import { videoKeys } from "@/lib/api/keys";
+import { friendlyImageError } from "@/lib/api/image-error";
 import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
@@ -183,10 +184,12 @@ export function VideoDetail({ id }: VideoDetailProps) {
           <dt className="text-ink-faint">创建时间</dt>
           <dd className="text-ink">{formatDate(data.created_at)}</dd>
         </div>
-        {data.error_message && (
+        {(data.mode === "photo" ? data.status === "failed" : !!data.error_message) && (
           <div className="col-span-full">
             <dt className="text-ink-faint">错误信息</dt>
-            <dd className="text-error-fg">{data.error_message}</dd>
+            <dd className="text-error-fg">
+              {data.mode === "photo" ? friendlyImageError(data.error_code) : data.error_message}
+            </dd>
           </div>
         )}
       </dl>
