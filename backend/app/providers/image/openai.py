@@ -6,8 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-import httpx
-from openai import OpenAI
+from openai import DefaultHttpxClient, OpenAI
 
 from app.core.config import settings
 from app.db.models import ProviderConfig
@@ -56,7 +55,7 @@ class OpenAIImageProvider:
         if base_url:
             kwargs["base_url"] = base_url
         if local_proxy:
-            kwargs["http_client"] = httpx.Client(proxy=local_proxy, timeout=timeout)
+            kwargs["http_client"] = DefaultHttpxClient(proxy=local_proxy, timeout=timeout)
         return OpenAI(**kwargs)
 
     async def generate_image(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -90,7 +89,6 @@ class OpenAIImageProvider:
                 size=size,
                 quality=quality,
                 n=1,
-                response_format="b64_json",
             )
             mode = "generate"
 
@@ -116,7 +114,6 @@ class OpenAIImageProvider:
                 quality=quality,
                 n=1,
                 input_fidelity="high",
-                response_format="b64_json",
             )
 
     def _decode_b64_response(self, response) -> bytes:

@@ -3,7 +3,24 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.providers.image import openai as openai_provider
 from app.providers.image.openai import OpenAIImageProvider
+
+
+class _FakeOpenAI:
+    instances: list["_FakeOpenAI"] = []
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        _FakeOpenAI.instances.append(self)
+
+
+class _FakeDefaultHttpxClient:
+    instances: list["_FakeDefaultHttpxClient"] = []
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        _FakeDefaultHttpxClient.instances.append(self)
 
 
 class _FakeImages:
@@ -25,6 +42,53 @@ class _FakeImages:
 class _FakeClient:
     def __init__(self) -> None:
         self.images = _FakeImages()
+
+
+def test_openai_image_provider_uses_sdk_default_http_client_for_proxy(
+    monkeypatch,
+) -> None:
+    _FakeOpenAI.instances.clear()
+    _FakeDefaultHttpxClient.instances.clear()
+    monkeypatch.setattr(openai_provider, "OpenAI", _FakeOpenAI)
+    monkeypatch.setattr(
+        openai_provider, "DefaultHttpxClient", _FakeDefaultHttpxClient, raising=False
+    )
+
+    OpenAIImageProvider(
+        api_key="test-key",
+        base_url="https://api.openai.com/v1",
+        local_proxy="http://127.0.0.1:7897",
+        timeout=12.5,
+    )
+
+    assert len(_FakeDefaultHttpxClient.instances) == 1
+    assert _FakeDefaultHttpxClient.instances[0].kwargs == {
+        "proxy": "http://127.0.0.1:7897",
+        "timeout": 12.5,
+    }
+    assert len(_FakeOpenAI.instances) == 1
+    assert _FakeOpenAI.instances[0].kwargs["http_client"] is _FakeDefaultHttpxClient.instances[0]
+    assert _FakeOpenAI.instances[0].kwargs["base_url"] == "https://api.openai.com/v1"
+
+
+def test_openai_image_provider_omits_http_client_without_proxy(monkeypatch) -> None:
+    _FakeOpenAI.instances.clear()
+    _FakeDefaultHttpxClient.instances.clear()
+    monkeypatch.setattr(openai_provider, "OpenAI", _FakeOpenAI)
+    monkeypatch.setattr(
+        openai_provider, "DefaultHttpxClient", _FakeDefaultHttpxClient, raising=False
+    )
+
+    OpenAIImageProvider(
+        api_key="test-key",
+        base_url="",
+        local_proxy="",
+        timeout=12.5,
+    )
+
+    assert _FakeDefaultHttpxClient.instances == []
+    assert len(_FakeOpenAI.instances) == 1
+    assert "http_client" not in _FakeOpenAI.instances[0].kwargs
 
 
 @pytest.mark.asyncio
@@ -55,7 +119,6 @@ async def test_openai_image_provider_generates_text_to_image() -> None:
             "size": "1536x1024",
             "quality": "high",
             "n": 1,
-            "response_format": "b64_json",
         }
     ]
 
@@ -90,7 +153,7 @@ async def test_openai_image_provider_edits_with_high_input_fidelity(tmp_path) ->
     assert call["quality"] == "medium"
     assert call["n"] == 1
     assert call["input_fidelity"] == "high"
-    assert call["response_format"] == "b64_json"
+    assert "response_format" not in call
     image_files = call["image"]
     assert len(image_files) == 1
     assert image_files[0].name == str(image_path)
