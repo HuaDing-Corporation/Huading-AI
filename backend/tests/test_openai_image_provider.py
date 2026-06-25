@@ -127,7 +127,9 @@ async def test_openai_image_provider_generates_text_to_image() -> None:
 
 
 @pytest.mark.asyncio
-async def test_openai_image_provider_edits_with_high_input_fidelity(tmp_path) -> None:
+async def test_openai_image_provider_edits_without_unsupported_input_fidelity(
+    tmp_path,
+) -> None:
     image_path = tmp_path / "input.png"
     image_path.write_bytes(b"source-png")
     client = _FakeClient()
@@ -155,7 +157,7 @@ async def test_openai_image_provider_edits_with_high_input_fidelity(tmp_path) ->
     assert call["size"] == "1024x1536"
     assert call["quality"] == "medium"
     assert call["n"] == 1
-    assert call["input_fidelity"] == "high"
+    assert "input_fidelity" not in call
     assert "response_format" not in call
     image_files = call["image"]
     assert len(image_files) == 1
