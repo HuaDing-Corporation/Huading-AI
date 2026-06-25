@@ -109,4 +109,5 @@ describe("GenerationHistory (历史生成 tabs)", () => {
     expect(screen.getByText("标题X")).toBeInTheDocument();
     expect(screen.getByText("#话题Y")).toBeInTheDocument();
   });
+
 });

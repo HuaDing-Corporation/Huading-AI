@@ -7,12 +7,13 @@ import { errorText } from "@/lib/api/error-text";
 import {
   useAvatarPresets,
   useScriptGenerate,
+  useSubtitleTemplates,
   useUploadImage,
   useVoices
 } from "@/lib/api/hooks";
 import { useGenerateConfirm } from "@/lib/api/use-generate-confirm";
 import { useTrackedUpload } from "@/lib/api/use-tracked-upload";
-import type { CreateVideoRequest } from "@/lib/api/types";
+import type { CreateVideoRequest, SubtitleStyle } from "@/lib/api/types";
 import { useVideoTasks } from "@/lib/videos/tasks-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
@@ -22,6 +23,7 @@ import { ImagePicker } from "@/components/workbench/image-picker";
 import { MoreSettings } from "@/components/workbench/more-settings";
 import { ScriptReview } from "@/components/workbench/script-review";
 import { VoicePicker } from "@/components/workbench/voice-picker";
+import { SubtitleStylePicker, isSubtitleStyleValid } from "@/components/workbench/subtitle-style-picker";
 import { copy } from "@/lib/copy";
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
@@ -42,6 +44,7 @@ export function NewVideoForm({
   const uploadImg = useUploadImage();
   const voices = useVoices();
   const presets = useAvatarPresets();
+  const subtitleTemplates = useSubtitleTemplates();
   const avatar = useTrackedUpload(uploadImg.mutateAsync, (r) => r.asset_id);
 
   const [topic, setTopic] = useState("");
@@ -49,6 +52,8 @@ export function NewVideoForm({
   const [script, setScript] = useState(() => initialScript ?? "");
   const [voiceId, setVoiceId] = useState("");
   const [speed, setSpeed] = useState(1);
+  // 字幕样式(ORAL-PROD-UI-0001)：undefined = 不传 subtitle_style → 默认烧入(不回归 0001)
+  const [subtitleStyle, setSubtitleStyle] = useState<SubtitleStyle | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const prefillConsumed = useRef(false);
   useEffect(() => {
@@ -100,12 +105,13 @@ export function NewVideoForm({
       avatar_asset_id: avatar.value,
       speed,
       aspect_ratio: "9:16",
-      subtitle_enabled: true
+      subtitle_enabled: true,
+      subtitle_style: subtitleStyle // 不选 = undefined → JSON.stringify 丢弃 → 不回归 0001
     });
   };
 
   const generateDisabled =
-    uploadImg.isPending || !topic.trim() || !voiceId || !avatar.value;
+    uploadImg.isPending || !topic.trim() || !voiceId || !avatar.value || !isSubtitleStyleValid(subtitleStyle);
 
   return (
     <Card animateIn>
@@ -143,6 +149,12 @@ export function NewVideoForm({
       />
 
       <VoicePicker voices={voiceList ?? []} value={voiceId} onChange={setVoiceId} />
+
+      <SubtitleStylePicker
+        templates={subtitleTemplates.data ?? []}
+        value={subtitleStyle}
+        onChange={setSubtitleStyle}
+      />
 
       <MoreSettings speed={speed} onSpeedChange={setSpeed} />
 

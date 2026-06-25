@@ -5,15 +5,12 @@ import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsContent, TabsList, TabsTrigger, tabTriggerClass } from "@/components/ui/tabs";
 import { CopyDraftList } from "@/components/tasks/copy-draft-list";
 import { TaskCard } from "@/components/tasks/task-card";
 import { useVideoHistory } from "@/lib/api/hooks";
 import { fromVideoRead } from "@/lib/sse/progress-mapping";
 import { copy } from "@/lib/copy";
-
-const triggerClass =
-  "flex items-center gap-1.5 rounded-pill px-3.5 py-1.5 text-[12.5px] text-ink-soft outline-none transition-colors hover:bg-glass-hover focus-visible:shadow-focus-gold data-[state=active]:bg-chip-sel data-[state=active]:font-medium data-[state=active]:text-gold-deep";
 
 /** One mode's history: paginated GET /videos?mode= via useVideoHistory; reuses
  *  TaskCard (list items mapped through fromVideoRead). Loading/error/empty states.
@@ -73,7 +70,7 @@ export function HistoryList({ mode }: { mode: string }) {
   );
 }
 
-/** 历史生成 — 4 tabs: 数字人 / 电商 / 照片 (videos via HistoryList) + 文案 (copy_drafts via CopyDraftList). */
+/** 历史生成 — 4 tabs: 数字人 / 电商 / 照片 + 文案. */
 export function GenerationHistory() {
   return (
     <Card animateIn>
@@ -83,16 +80,16 @@ export function GenerationHistory() {
           aria-label={copy.history.title}
           className="mb-3 flex flex-wrap gap-1.5 rounded-pill border border-line-gold bg-glass-soft p-1"
         >
-          <TabsTrigger value="avatar_talk" className={triggerClass}>
+          <TabsTrigger value="avatar_talk" className={tabTriggerClass}>
             <UserRound size={14} strokeWidth={1.8} /> {copy.history.tabAvatar}
           </TabsTrigger>
-          <TabsTrigger value="seedance_i2v" className={triggerClass}>
+          <TabsTrigger value="seedance_i2v" className={tabTriggerClass}>
             <Store size={14} strokeWidth={1.8} /> {copy.history.tabEcom}
           </TabsTrigger>
-          <TabsTrigger value="photo" className={triggerClass}>
+          <TabsTrigger value="photo" className={tabTriggerClass}>
             <Images size={14} strokeWidth={1.8} /> {copy.history.tabPhoto}
           </TabsTrigger>
-          <TabsTrigger value="copywriting" className={triggerClass}>
+          <TabsTrigger value="copywriting" className={tabTriggerClass}>
             <FileText size={14} strokeWidth={1.8} /> {copy.history.tabCopy}
           </TabsTrigger>
         </TabsList>
