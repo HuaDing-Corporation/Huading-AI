@@ -2,6 +2,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
+import openai
 from sqlalchemy import select
 
 from app.db.models import Asset, Plan, Subscription, TaskAsset, UsageRecord, VideoTask
@@ -44,9 +46,16 @@ class _MemProgressStore:
 
 
 class _FakeProvider:
-    def __init__(self, *, image_bytes: bytes = b"photo-png", fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        image_bytes: bytes = b"photo-png",
+        fail: bool = False,
+        failure: Exception | None = None,
+    ) -> None:
         self.image_bytes = image_bytes
         self.fail = fail
+        self.failure = failure
         self.payloads: list[dict] = []
         self.input_path: str | None = None
 
@@ -54,7 +63,7 @@ class _FakeProvider:
         self.payloads.append(payload)
         self.input_path = payload.get("input_image_path")
         if self.fail:
-            raise RuntimeError("image provider failed")
+            raise self.failure or RuntimeError("image provider failed")
         if self.input_path:
             with open(self.input_path, "rb") as handle:
                 assert handle.read() == b"input-image"
@@ -63,6 +72,15 @@ class _FakeProvider:
             "mime_type": "image/png",
             "model": "gpt-image-2",
         }
+
+
+def _openai_request() -> httpx.Request:
+    return httpx.Request("POST", "https://api.openai.com/v1/images")
+
+
+def _bad_request(message: str, body: dict) -> openai.BadRequestError:
+    response = httpx.Response(400, request=_openai_request(), json=body)
+    return openai.BadRequestError(message, response=response, body=body)
 
 
 def _seed_reserved_photo(db, tenant_id: str, user_id: str, task_id: str) -> str:
@@ -128,6 +146,34 @@ def _patch_worker(monkeypatch, auth_db, storage: _FakeStorage, store: _MemProgre
     monkeypatch.setattr(image_gen, "create_object_storage", lambda _settings: storage)
     monkeypatch.setattr(image_gen, "resolve", lambda _db, *, tenant_id, capability: provider)
     return image_gen
+
+
+def test_classify_image_error_returns_stable_codes() -> None:
+    from app.workers import image_gen
+
+    moderation_error = _bad_request(
+        "request blocked",
+        {"error": {"code": "moderation_blocked", "message": "request blocked"}},
+    )
+    safety_error = _bad_request(
+        "blocked by safety system",
+        {"error": {"message": "blocked by safety system"}},
+    )
+    invalid_request_error = _bad_request(
+        "invalid image size",
+        {"error": {"code": "invalid_image_size", "message": "invalid image size"}},
+    )
+
+    cases = [
+        (openai.APIConnectionError(request=_openai_request()), "IMAGE_CONNECTION_ERROR"),
+        (moderation_error, "IMAGE_MODERATION_BLOCKED"),
+        (safety_error, "IMAGE_MODERATION_BLOCKED"),
+        (invalid_request_error, "IMAGE_INVALID_REQUEST"),
+        (RuntimeError("provider crashed"), "IMAGE_GEN_FAILED"),
+    ]
+
+    for exc, expected_code in cases:
+        assert image_gen.classify_image_error(exc) == expected_code
 
 
 def test_image_worker_text_to_image_finishes_and_settles_quota(
@@ -276,3 +322,58 @@ def test_image_worker_failure_marks_failed_and_releases_quota(
     scoped_id = f"{auth_context['tenant_id']}:{task_id}"
     assert store.data[scoped_id]["status"] == "failed"
     assert store.data[scoped_id]["error_code"] == "IMAGE_GEN_FAILED"
+
+
+def test_image_worker_failure_uses_classified_moderation_error_code(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    task_id = "photo-moderation-unit"
+    with auth_db() as db:
+        subscription_id = _seed_reserved_photo(
+            db,
+            auth_context["tenant_id"],
+            auth_context["user_id"],
+            task_id,
+        )
+    storage = _FakeStorage()
+    store = _MemProgressStore()
+    provider = _FakeProvider(
+        fail=True,
+        failure=_bad_request(
+            "request rejected by safety system",
+            {
+                "error": {
+                    "code": "moderation_blocked",
+                    "message": "request rejected by safety system",
+                }
+            },
+        ),
+    )
+    image_gen = _patch_worker(monkeypatch, auth_db, storage, store, provider)
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": "premium product photo",
+        }
+    )
+
+    assert result["status"] == "FAILURE"
+    assert result["error_code"] == "IMAGE_MODERATION_BLOCKED"
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        subscription = db.get(Subscription, subscription_id)
+        usage = db.scalars(select(UsageRecord).where(UsageRecord.video_task_id == task_id)).one()
+
+    assert task.status == "failed"
+    assert task.error_code == "IMAGE_MODERATION_BLOCKED"
+    assert "safety system" in task.error_message
+    assert usage.status == "released"
+    assert subscription.quota_credits_reserved == 0
+    assert subscription.quota_credits_used == 10
+    scoped_id = f"{auth_context['tenant_id']}:{task_id}"
+    assert store.data[scoped_id]["status"] == "failed"
+    assert store.data[scoped_id]["error_code"] == "IMAGE_MODERATION_BLOCKED"

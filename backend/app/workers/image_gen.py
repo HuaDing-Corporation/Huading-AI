@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import openai
+
 from app.api.deps import scoped_task_id
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -25,6 +27,49 @@ from app.workers.video_tasks import _safe_task_id, _tenant_upload_storage_key
 logger = get_logger(__name__)
 
 _ERROR_CODE = "IMAGE_GEN_FAILED"
+_CONNECTION_ERROR_CODE = "IMAGE_CONNECTION_ERROR"
+_MODERATION_ERROR_CODE = "IMAGE_MODERATION_BLOCKED"
+_INVALID_REQUEST_ERROR_CODE = "IMAGE_INVALID_REQUEST"
+
+
+def _error_text(exc: Exception) -> str:
+    parts: list[str] = []
+    for attr in ("code", "type", "message"):
+        value = getattr(exc, attr, None)
+        if value:
+            parts.append(str(value))
+
+    body = getattr(exc, "body", None)
+    if isinstance(body, Mapping):
+        error = body.get("error")
+        if isinstance(error, Mapping):
+            for key in ("code", "type", "message"):
+                value = error.get(key)
+                if value:
+                    parts.append(str(value))
+        parts.append(str(body))
+    elif body:
+        parts.append(str(body))
+
+    if str(exc):
+        parts.append(str(exc))
+    return " ".join(parts).lower()
+
+
+def classify_image_error(exc: Exception) -> str:
+    cause = exc.__cause__
+    if cause is not None and cause is not exc:
+        cause_code = classify_image_error(cause)
+        if cause_code != _ERROR_CODE:
+            return cause_code
+    if isinstance(exc, openai.APIConnectionError):
+        return _CONNECTION_ERROR_CODE
+    if isinstance(exc, openai.BadRequestError):
+        text = _error_text(exc)
+        if "moderation" in text or "safety system" in text:
+            return _MODERATION_ERROR_CODE
+        return _INVALID_REQUEST_ERROR_CODE
+    return _ERROR_CODE
 
 
 def _photo_storage_key(tenant_id: str, task_id: str) -> str:
@@ -78,7 +123,14 @@ def _failure_message(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
 
-def _mark_failed(*, tenant_id: str, task_id: str, error_message: str, store) -> None:
+def _mark_failed(
+    *,
+    tenant_id: str,
+    task_id: str,
+    error_message: str,
+    error_code: str,
+    store,
+) -> None:
     with SessionLocal() as db:
         task = db.get(VideoTask, task_id)
         if task is None or task.tenant_id != tenant_id:
@@ -86,7 +138,7 @@ def _mark_failed(*, tenant_id: str, task_id: str, error_message: str, store) -> 
         task.status = "failed"
         task.progress = max(int(task.progress or 0), 1)
         task.error = error_message
-        task.error_code = _ERROR_CODE
+        task.error_code = error_code
         task.error_message = error_message
         task.finished_at = datetime.now(UTC)
         release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
@@ -96,7 +148,7 @@ def _mark_failed(*, tenant_id: str, task_id: str, error_message: str, store) -> 
         status="failed",
         stage="failed",
         error=error_message,
-        error_code=_ERROR_CODE,
+        error_code=error_code,
         error_message=error_message,
     )
 
@@ -248,16 +300,24 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             }
     except Exception as exc:
         error_message = _failure_message(exc)
+        error_code = classify_image_error(exc)
         logger.warning(
             "image_generation_failed",
             tenant_id=tenant_id,
             task_id=task_id,
+            error_code=error_code,
             error=error_message,
         )
-        _mark_failed(tenant_id=tenant_id, task_id=task_id, error_message=error_message, store=store)
+        _mark_failed(
+            tenant_id=tenant_id,
+            task_id=task_id,
+            error_message=error_message,
+            error_code=error_code,
+            store=store,
+        )
         return {
             "status": "FAILURE",
-            "error_code": _ERROR_CODE,
+            "error_code": error_code,
             "error_message": error_message,
         }
     finally:
