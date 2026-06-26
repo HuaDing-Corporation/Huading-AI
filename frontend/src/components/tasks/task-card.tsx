@@ -7,6 +7,7 @@ import {
   Clapperboard,
   Clock,
   Download,
+  Trash2,
   type LucideIcon
 } from "lucide-react";
 
@@ -43,6 +44,10 @@ export interface TaskCardProps {
   onRetry: (id: string) => void;
   /** Presigned URL has expired — refresh from the server. */
   onUrlError: (id: string) => void;
+  /** 历史项删除(trash)；仅历史列表传入，live 任务列表不传(不显删除)。HIST-UI-0001。 */
+  onDelete?: (id: string) => void;
+  /** 删除请求中(防连点)。 */
+  deleting?: boolean;
 }
 
 // ── Pure presentational TaskCard ─────────────────────────────────────────────
@@ -56,7 +61,7 @@ export interface TaskCardProps {
  *  - failed   → error message + retry button
  *  - done     → thumbnail + "open detail" button + inline video player
  */
-export function TaskCard({ task, onOpen, onRetry, onUrlError }: TaskCardProps) {
+export function TaskCard({ task, onOpen, onRetry, onUrlError, onDelete, deleting }: TaskCardProps) {
   const Icon = thumbIcon[task.status];
   const showPlayer = task.status === "done" && !!task.playbackUrl;
   const isImage = task.mode === "photo";
@@ -101,6 +106,18 @@ export function TaskCard({ task, onOpen, onRetry, onUrlError }: TaskCardProps) {
         </div>
 
         <StatusBadge status={task.status}>{task.statusLabel}</StatusBadge>
+        {onDelete && (
+          <button
+            type="button"
+            onClick={() => onDelete(task.taskId)}
+            disabled={deleting}
+            aria-label={copy.history.deleteItem}
+            title={copy.history.deleteItem}
+            className="flex h-8 w-8 flex-none items-center justify-center rounded-field text-ink-faint transition-colors hover:bg-error-bg hover:text-error-fg focus-visible:shadow-focus-gold disabled:pointer-events-none disabled:opacity-50"
+          >
+            <Trash2 size={15} strokeWidth={1.8} />
+          </button>
+        )}
       </div>
 
       {/* Body: state-specific content */}

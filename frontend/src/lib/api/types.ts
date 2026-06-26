@@ -44,6 +44,7 @@ export interface VideoListItem {
   progress: number; // 0..100
   topic: string;
   mode?: string | null; // avatar_talk | seedance_i2v | photo —结果渲染：视频 vs 图
+  kind?: string | null; // 图片细分：如 "cover"（封面 photo task；HIST kind 筛真后端支持）
   error_code?: string | null; // 图片失败时映射友好文案（friendlyImageError）
   thumbnail_url?: string | null;
   created_at: string;
@@ -296,4 +297,12 @@ export interface Cover {
 }
 export interface CoverFromFrameResponse {
   cover: Cover;
+}
+
+// 历史删除 / 清空 (HIST-UI-0001)
+export interface DeleteResult {
+  deleted: boolean;
+}
+export interface ClearResult {
+  deleted_count: number;
 }

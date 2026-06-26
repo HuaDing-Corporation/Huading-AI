@@ -1,4 +1,5 @@
 export const copy = {
+  common: { cancel: "取消", processing: "处理中…" },
   workbench: {
     topicLabel: "视频主题",
     topicPlaceholder: "输入一句话主题，如：三分钟看懂咖啡的起源",
@@ -151,7 +152,22 @@ export const copy = {
     loading: "加载中…",
     error: "加载失败，请重试",
     retry: "重试",
-    loadMore: "加载更多"
+    loadMore: "加载更多",
+    filterAllImages: "全部图片",
+    filterCovers: "仅封面",
+    deleteItem: "删除",
+    clearAll: "清空",
+    deleteConfirmTitle: "删除这条记录？",
+    deleteConfirmHard: "将永久删除，不可恢复。",
+    deleteConfirmSoft: "将从历史移除（可恢复）。",
+    deleteConfirmBtn: "确认删除",
+    clearConfirmTitle: "清空该历史？",
+    clearConfirmHard: "将永久删除此模块全部记录，不可恢复。",
+    clearConfirmPhotoHard: "将清空全部图片（含封面），硬删不可恢复；不受当前「仅封面」筛选影响（始终删除全部图片）。",
+    clearConfirmSoft: "将清空此模块全部草稿（可恢复）。",
+    clearConfirmBtn: "确认清空",
+    deleteFailed: "删除失败，请重试",
+    clearFailed: "清空失败，请重试"
   },
   detail: { notFound: "视频不存在或无权访问", back: "返回", download: "下载 MP4", downloadImage: "下载图片" },
   status: { queued: "排队中", failed: "失败", done: "已完成" },

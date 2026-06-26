@@ -11,6 +11,9 @@ const err = (status: number, code: string, message: string) =>
 const videos = new Map<string, Record<string, unknown>>();
 // 文案草稿内存 store（newest first），供 POST/GET /copy/drafts 一致回放
 const copyDrafts: Record<string, unknown>[] = [];
+// 单调递增 id 计数器：删后重建不复用 id（videos+covers 共享 Map 故共用一个），避免碰撞/重复(HIST-UI-0001 RV)
+let videoSeq = 0;
+let draftSeq = 0;
 
 function sseStream(id: string, fail = false): Response {
   const enc = new TextEncoder();
@@ -89,15 +92,18 @@ export const handlers = [
     )
   ),
   http.post(`${BASE}/api/v1/videos`, async ({ request }) => {
-    const body = (await request.json()) as { topic: string; video_mode?: string };
-    const id = `mock-${videos.size + 1}`;
-    // 记 mode(默认 avatar_talk)，让 GET /videos 的 mode 筛能忠实回放
-    videos.set(id, { id, status: "queued", progress: 0, topic: body.topic, mode: body.video_mode ?? "avatar_talk", created_at: new Date(0).toISOString(), script: body.topic, voice_id: "v-zhixing", aspect_ratio: "9:16", subtitle_enabled: true });
+    const body = (await request.json()) as { topic: string; video_mode?: string; purpose?: string };
+    const id = `mock-${++videoSeq}`;
+    // 记 mode + kind(AI 封面 purpose=cover → kind=cover)，让 GET /videos 的 mode/kind 筛忠实回放
+    videos.set(id, { id, status: "queued", progress: 0, topic: body.topic, mode: body.video_mode ?? "avatar_talk", kind: body.purpose === "cover" ? "cover" : null, created_at: new Date(0).toISOString(), script: body.topic, voice_id: "v-zhixing", aspect_ratio: "9:16", subtitle_enabled: true });
     return HttpResponse.json({ data: { id, status: "queued" }, error: null, request_id: "mock-req" }, { status: 202 });
   }),
   http.get(`${BASE}/api/v1/videos`, ({ request }) => {
-    const mode = new URL(request.url).searchParams.get("mode");
-    const items = [...videos.values()].filter((v) => !mode || v.mode === mode);
+    const sp = new URL(request.url).searchParams;
+    const mode = sp.get("mode");
+    const kind = sp.get("kind");
+    // 忠实后端 mode+kind 真过滤(kind=cover → 仅封面 photo task)；不伪造记录(HIST-UI-0001)
+    const items = [...videos.values()].filter((v) => (!mode || v.mode === mode) && (!kind || v.kind === kind));
     return ok({ items, total: items.length });
   }),
   http.get(`${BASE}/api/v1/videos/:id`, ({ params }) => {
@@ -107,6 +113,26 @@ export const handlers = [
   http.get(`${BASE}/api/v1/videos/:id/events`, ({ params, request }) =>
     sseStream(String(params.id), new URL(request.url).searchParams.get("fail") === "1")
   ),
+  // ── 历史删除 / 清空 (HIST-UI-0001) — 硬删，真从 store 删 ──
+  // 清空(DELETE /videos?mode=) 必须先于 /videos/:id 注册，避免无 id 时被 :id 误捕。
+  http.delete(`${BASE}/api/v1/videos`, ({ request }) => {
+    const mode = new URL(request.url).searchParams.get("mode");
+    if (!mode) return err(422, "mode_required", "mode 必填");
+    let count = 0;
+    for (const [id, v] of [...videos.entries()]) {
+      if (v.mode === mode) {
+        videos.delete(id);
+        count++;
+      }
+    }
+    return ok({ deleted_count: count });
+  }),
+  http.delete(`${BASE}/api/v1/videos/:id`, ({ params }) => {
+    const id = String(params.id);
+    if (!videos.has(id)) return err(404, "not_found", "记录不存在");
+    videos.delete(id);
+    return ok({ deleted: true });
+  }),
 
   // ── 文案仿写 + 标题/话题生成 (COPY-UI-0001) — 同步 REST mock ──
   http.post(`${BASE}/api/v1/copy/rewrite`, async ({ request }) => {
@@ -132,11 +158,23 @@ export const handlers = [
   }),
   http.post(`${BASE}/api/v1/copy/drafts`, async ({ request }) => {
     const body = (await request.json()) as Record<string, unknown>;
-    const draft = { id: `draft-${copyDrafts.length + 1}`, created_at: new Date(0).toISOString(), ...body };
+    const draft = { id: `draft-${++draftSeq}`, created_at: new Date(0).toISOString(), ...body };
     copyDrafts.unshift(draft);
     return HttpResponse.json({ data: draft, error: null, request_id: "mock-req" }, { status: 201 });
   }),
   http.get(`${BASE}/api/v1/copy/drafts`, () => ok({ items: copyDrafts, total: copyDrafts.length })),
+  // 文案删除 / 清空 (HIST-UI-0001) — 软删(mock 从可见列表移除)
+  http.delete(`${BASE}/api/v1/copy/drafts`, () => {
+    const count = copyDrafts.length;
+    copyDrafts.length = 0;
+    return ok({ deleted_count: count });
+  }),
+  http.delete(`${BASE}/api/v1/copy/drafts/:id`, ({ params }) => {
+    const i = copyDrafts.findIndex((d) => d.id === String(params.id));
+    if (i < 0) return err(404, "not_found", "草稿不存在");
+    copyDrafts.splice(i, 1);
+    return ok({ deleted: true });
+  }),
 
   // ── 口播生产力增强 (ORAL-PROD-UI-0001) — 字幕模板 + 封面截帧 mock ──
   http.get(`${BASE}/api/v1/oral/subtitle-templates`, () =>
@@ -159,8 +197,15 @@ export const handlers = [
       }))
     });
   }),
-  http.post(`${BASE}/api/v1/covers/from-frame`, () =>
-    // 截帧封面是 Asset 挂口播任务，不进 photo VideoTask 历史(真链路)；故不塞 videos store(FIX1)
-    ok({ cover: { id: "cover-mock", image_url: "https://mock.local/cover.png", width: 1280, height: 720 } })
-  )
+  http.post(`${BASE}/api/v1/covers/from-frame`, () => {
+    // seam §1：截帧封面建成 photo VideoTask(kind=cover, done) → 忠实进图片历史 + kind 筛筛出。
+    // (与 FIX1 不同：那时后端不支持、mock 伪造掩盖断链；现 HIST 后端真建 photo task，故塞真记录。)
+    const id = `cover-${++videoSeq}`;
+    videos.set(id, {
+      id, status: "done", progress: 100, topic: "封面", mode: "photo", kind: "cover",
+      created_at: new Date(0).toISOString(), playback_url: "https://mock.local/cover.png",
+      download_url: "https://mock.local/cover.png?dl=1", thumbnail_url: "https://mock.local/cover.png"
+    });
+    return ok({ cover: { id, image_url: "https://mock.local/cover.png", width: 1280, height: 720 } });
+  })
 ];

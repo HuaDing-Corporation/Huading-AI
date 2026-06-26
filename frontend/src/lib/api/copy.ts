@@ -1,5 +1,6 @@
 import { apiFetch } from "@/lib/api/client";
 import type {
+  ClearResult,
   CopyDraft,
   CopyDraftCreateRequest,
   CopyDraftListResponse,
@@ -8,7 +9,8 @@ import type {
   CopyTitlesRequest,
   CopyTitlesResponse,
   CopyTopicsRequest,
-  CopyTopicsResponse
+  CopyTopicsResponse,
+  DeleteResult
 } from "@/lib/api/types";
 
 /**
@@ -47,4 +49,14 @@ export function listCopyDraftsPage(
   if (params.offset != null) query.set("offset", String(params.offset));
   const qs = query.toString();
   return apiFetch<CopyDraftListResponse>(`/api/v1/copy/drafts${qs ? `?${qs}` : ""}`, { method: "GET" });
+}
+
+/** 软删单条草稿(deleted_at；现有行为不变，HIST-UI-0001)。 */
+export function deleteCopyDraft(id: string): Promise<DeleteResult> {
+  return apiFetch<DeleteResult>(`/api/v1/copy/drafts/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+/** 清空全部草稿(软删该租户全部未删草稿)。 */
+export function clearCopyDrafts(): Promise<ClearResult> {
+  return apiFetch<ClearResult>("/api/v1/copy/drafts", { method: "DELETE" });
 }
