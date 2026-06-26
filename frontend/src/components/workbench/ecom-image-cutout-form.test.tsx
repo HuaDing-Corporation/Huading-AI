@@ -135,4 +135,25 @@ describe("EcomImageCutoutForm (电商图 · 白底图/抠图)", () => {
     render(<EcomImageCutoutForm />);
     expect(screen.getByRole("button", { name: "生成中…" })).toBeDisabled();
   });
+
+  it("批量下载防连点：快速连点 2 次仍只触发一批下载（FIX1 P2-2）", async () => {
+    tasksMock.tasks = [doneTask("t-1", "https://mock.local/1.png"), doneTask("t-2", "https://mock.local/2.png")];
+    render(<EcomImageCutoutForm />);
+    fireEvent.click(screen.getByRole("button", { name: "批量" }));
+    fireEvent.change(document.querySelector("#ecom-cutout-batch")!, {
+      target: { files: [png("a.png"), png("b.png")] }
+    });
+    await waitFor(() => expect(uploadMock.mutateAsync).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: "生成" }));
+    await waitFor(() => expect(cutoutBatchMock.mutateAsync).toHaveBeenCalled());
+
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const btn = await screen.findByRole("button", { name: /批量下载/ });
+    fireEvent.click(btn);
+    fireEvent.click(btn); // 第二次（防连点）应被 ref 锁拦截
+    // 2 个 done → 仅 1 批 = 2 次下载，而非 2 批 4 次。
+    expect(clickSpy).toHaveBeenCalledTimes(2);
+    expect(btn).toBeDisabled(); // 下载中视觉反馈
+    clickSpy.mockRestore();
+  });
 });

@@ -67,12 +67,13 @@ export default function Home() {
           <header className="flex flex-wrap items-end gap-3.5 px-1">
             <h1 className="text-[27px] font-semibold tracking-[1px] text-ink">工作台</h1>
             <p className="mb-1 text-[13.5px] text-ink-soft">输入主题，一键生成成片</p>
-            <div className="ml-auto flex items-center gap-2">
-              {/* 生成模式切换：数字人口播 / 电商带货 */}
+            <div className="ml-auto flex min-w-0 items-center gap-2">
+              {/* 生成模式切换：5 模式 chip。窄屏(~375/390px)横向滚动而非撑破页面，
+                  桌面单行容纳→无滚动条、布局不变（FIX1 P1）。 */}
               <div
                 role="group"
                 aria-label={copy.workbench.modeGroupLabel}
-                className="flex gap-1 rounded-pill border border-line-gold bg-glass-soft p-1"
+                className="flex min-w-0 gap-1 overflow-x-auto rounded-pill border border-line-gold bg-glass-soft p-1"
               >
                 {MODES.map(({ id, label, Icon }) => {
                   const active = mode === id;
@@ -82,7 +83,7 @@ export default function Home() {
                       type="button"
                       onClick={() => setMode(id)}
                       aria-pressed={active}
-                      className={`flex items-center gap-1.5 rounded-pill px-3 py-1.5 text-[12.5px] outline-none transition-colors focus-visible:shadow-focus-gold ${
+                      className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-pill px-3 py-1.5 text-[12.5px] outline-none transition-colors focus-visible:shadow-focus-gold ${
                         active
                           ? "bg-chip-sel font-medium text-gold-deep"
                           : "text-ink-soft hover:bg-glass-hover"
@@ -94,7 +95,7 @@ export default function Home() {
                 })}
               </div>
               {(mode === "avatar_talk" || mode === "seedance_i2v") && (
-                <span className="rounded-pill border border-line-gold bg-glass-soft px-3.5 py-2 text-[12.5px] text-ink-soft">
+                <span className="shrink-0 rounded-pill border border-line-gold bg-glass-soft px-3.5 py-2 text-[12.5px] text-ink-soft">
                   {copy.workbench.aspectBadge}
                 </span>
               )}

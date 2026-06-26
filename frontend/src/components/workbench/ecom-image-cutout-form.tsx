@@ -105,14 +105,25 @@ export function EcomImageCutoutForm() {
   const [batchItems, setBatchItems] = useState<{ assetId: string; preview: string }[]>([]);
   const [submittedIds, setSubmittedIds] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [downloadingAll, setDownloadingAll] = useState(false);
   const batchInputRef = useRef<HTMLInputElement>(null);
+  // 同步锁：fireEvent / 快速连点会绕过 disabled，靠 ref 保证一次只触发一批下载（防连点）。
+  const downloadingAllRef = useRef(false);
+  const downloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // 卸载时释放残留批量预览的 object URL(切走工作台模式即卸载),对齐 ImagePicker 防泄漏。
+  // 卸载时释放残留批量预览的 object URL(切走工作台模式即卸载),对齐 ImagePicker 防泄漏；
+  // 并清掉批量下载复位定时器，避免卸载后 setState。
   const batchItemsRef = useRef(batchItems);
   useEffect(() => {
     batchItemsRef.current = batchItems;
   }, [batchItems]);
-  useEffect(() => () => batchItemsRef.current.forEach((it) => URL.revokeObjectURL(it.preview)), []);
+  useEffect(
+    () => () => {
+      batchItemsRef.current.forEach((it) => URL.revokeObjectURL(it.preview));
+      if (downloadTimerRef.current) clearTimeout(downloadTimerRef.current);
+    },
+    []
+  );
 
   const submitting = cutout.isPending || cutoutBatch.isPending;
 
@@ -190,6 +201,18 @@ export function EcomImageCutoutForm() {
     .filter((t): t is TrackedTask => Boolean(t));
   const transparent = submittedBg === "transparent";
   const downloadable = resultTasks.filter((t) => t.status === "done" && (t.downloadUrl ?? t.playbackUrl));
+
+  // 批量下载防连点：ref 同步锁→一次只触发一批；1.2s 后复位（disabled 提供视觉反馈）。
+  const onDownloadAll = () => {
+    if (downloadingAllRef.current) return;
+    downloadingAllRef.current = true;
+    setDownloadingAll(true);
+    downloadable.forEach((t) => triggerDownload(t.downloadUrl ?? (t.playbackUrl as string)));
+    downloadTimerRef.current = setTimeout(() => {
+      downloadingAllRef.current = false;
+      setDownloadingAll(false);
+    }, 1200);
+  };
 
   return (
     <Card animateIn>
@@ -304,11 +327,7 @@ export function EcomImageCutoutForm() {
           <div className="mb-3 flex items-center justify-between">
             <label className={labelClass + " mb-0"}>{copy.workbench.ecomResultsLabel}</label>
             {submittedIds.length > 1 && downloadable.length > 0 && (
-              <Button
-                variant="soft"
-                size="sm"
-                onClick={() => downloadable.forEach((t) => triggerDownload(t.downloadUrl ?? (t.playbackUrl as string)))}
-              >
+              <Button variant="soft" size="sm" onClick={onDownloadAll} disabled={downloadingAll}>
                 <Download size={14} strokeWidth={2} /> {copy.workbench.ecomDownloadAll}
               </Button>
             )}

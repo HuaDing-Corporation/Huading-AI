@@ -9,6 +9,14 @@ describe("friendlyImageError", () => {
     expect(friendlyImageError("IMAGE_CONNECTION_ERROR")).toBe(copy.errors.imageConnection);
     expect(friendlyImageError("IMAGE_INVALID_REQUEST")).toBe(copy.errors.imageInvalid);
     expect(friendlyImageError("IMAGE_GEN_FAILED")).toBe(copy.errors.imageGeneric);
+    expect(friendlyImageError("IMAGE_ALPHA_MISSING")).toBe(copy.errors.imageAlphaMissing);
+  });
+
+  it("IMAGE_ALPHA_MISSING 落专属可操作文案，不落通用兜底（FIX1 P2-1）", () => {
+    const result = friendlyImageError("IMAGE_ALPHA_MISSING");
+    expect(result).toBe(copy.errors.imageAlphaMissing);
+    expect(result).not.toBe(copy.errors.imageGeneric);
+    expect(result).toContain("白底"); // 给出「改用白底」可操作出路
   });
 
   it("falls back to a generic friendly line for unknown / missing codes", () => {

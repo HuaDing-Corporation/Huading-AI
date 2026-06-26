@@ -61,4 +61,16 @@ describe("Workbench mode switch (数字人口播 / 电商带货)", () => {
     expect(screen.getByTestId("ecom-image-form")).toBeInTheDocument();
     expect(screen.queryByTestId("copywriting-form")).not.toBeInTheDocument();
   });
+
+  // FIX1 P1：5 模式 chip 容器需有窄屏溢出保护（横向滚动 + chip 不压缩），
+  // 否则 ~375/390px 撑破页面。jsdom 无布局，断结构性保护类。
+  it("模式 chip 容器有窄屏溢出保护（overflow-x-auto + chip shrink-0）", () => {
+    render(<Home />);
+    const group = screen.getByRole("group", { name: "生成模式" });
+    expect(group).toHaveClass("overflow-x-auto");
+    // 每个 chip 不被压缩、文字不换行，滚动时保持原尺寸。
+    const chip = screen.getByRole("button", { name: /电商图/ });
+    expect(chip).toHaveClass("shrink-0");
+    expect(chip).toHaveClass("whitespace-nowrap");
+  });
 });

@@ -151,7 +151,9 @@ export const copy = {
     imageModeration: "内容被 AI 安全系统拦截，请调整描述后重试（避免敏感或人体性暗示内容）",
     imageConnection: "网络连接失败，请检查代理 / 网络后重试",
     imageInvalid: "生成参数有误，请调整尺寸 / 质量或描述后重试",
-    imageGeneric: "图片生成失败，请重试"
+    imageGeneric: "图片生成失败，请重试",
+    // 抠图透明底专属（IMAGE_ALPHA_MISSING）：可操作文案，不落通用兜底
+    imageAlphaMissing: "透明底生成失败：未返回透明像素，请重试或改用白底"
   },
   tasks: {
     title: "生成任务",
