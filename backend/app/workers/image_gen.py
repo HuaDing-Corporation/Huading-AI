@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import tempfile
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import openai
+from PIL import Image, UnidentifiedImageError
 
 from app.api.deps import scoped_task_id
 from app.core.config import settings
@@ -31,6 +34,15 @@ _ERROR_CODE = "IMAGE_GEN_FAILED"
 _CONNECTION_ERROR_CODE = "IMAGE_CONNECTION_ERROR"
 _MODERATION_ERROR_CODE = "IMAGE_MODERATION_BLOCKED"
 _INVALID_REQUEST_ERROR_CODE = "IMAGE_INVALID_REQUEST"
+_ALPHA_MISSING_ERROR_CODE = "IMAGE_ALPHA_MISSING"
+_ECOM_CUTOUT_KIND = "ecom_cutout"
+_SOURCE_IMAGE_STORAGE_KEY_RE = re.compile(
+    r"^tenants/[A-Za-z0-9_-]+/[A-Za-z0-9_./-]+\.(?:jpg|jpeg|png|webp)$"
+)
+
+
+class TransparentAlphaMissingError(RuntimeError):
+    pass
 
 
 def _error_text(exc: Exception) -> str:
@@ -70,6 +82,8 @@ def classify_image_error(exc: Exception) -> str:
         if "moderation" in text or "safety system" in text:
             return _MODERATION_ERROR_CODE
         return _INVALID_REQUEST_ERROR_CODE
+    if isinstance(exc, TransparentAlphaMissingError):
+        return _ALPHA_MISSING_ERROR_CODE
     return _ERROR_CODE
 
 
@@ -79,6 +93,58 @@ def _photo_storage_key(tenant_id: str, task_id: str) -> str:
 
 def _is_cover_request(params: Mapping[str, Any]) -> bool:
     return params.get("purpose") == "cover" or params.get("kind") == "cover"
+
+
+def _is_ecom_cutout_request(params: Mapping[str, Any]) -> bool:
+    return params.get("kind") == _ECOM_CUTOUT_KIND
+
+
+def _ecom_cutout_background(params: Mapping[str, Any]) -> str:
+    return "transparent" if params.get("background") == "transparent" else "white"
+
+
+def _ecom_cutout_prompt(prompt: str, *, background: str) -> str:
+    if background == "transparent":
+        instruction = (
+            "Remove the full background and return a PNG with real transparent alpha around "
+            "the unchanged product. Preserve product shape, color, logos, material, and "
+            "proportions. Do not add shadows, text, props, people, or extra product details."
+        )
+    else:
+        instruction = (
+            "Replace the background with a clean pure white studio background while preserving "
+            "the unchanged product shape, color, logos, material, and proportions. Do not add "
+            "text, props, people, or extra product details."
+        )
+    return f"{prompt}\n\nE-commerce cutout instructions: {instruction}"
+
+
+def _validate_source_storage_key(tenant_id: str, storage_key: str) -> str:
+    safe_tenant_id = _safe_task_id(tenant_id)
+    if (
+        not storage_key.startswith(f"tenants/{safe_tenant_id}/")
+        or ".." in storage_key
+        or "\\" in storage_key
+        or not _SOURCE_IMAGE_STORAGE_KEY_RE.match(storage_key)
+    ):
+        raise ValueError(f"unsafe source_storage_key: {storage_key!r}")
+    return storage_key
+
+
+def _write_temp_source_image(
+    storage: ObjectStorage,
+    *,
+    tenant_id: str,
+    source_storage_key: str,
+    temp_paths: list[Path],
+) -> Path:
+    storage_key = _validate_source_storage_key(tenant_id, source_storage_key)
+    suffix = Path(storage_key).suffix or ".png"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
+        handle.write(storage.get_bytes(storage_key))
+        path = Path(handle.name)
+    temp_paths.append(path)
+    return path
 
 
 def _write_temp_input_image(
@@ -107,6 +173,32 @@ def _image_bytes(result: Mapping[str, Any]) -> bytes:
     if isinstance(b64_json, str):
         return base64.b64decode(b64_json)
     raise ValueError("Image provider returned no image bytes.")
+
+
+def _png_from_image(image: Image.Image) -> bytes:
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _normalize_ecom_cutout_image(image_bytes: bytes, *, background: str) -> bytes:
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            if background == "transparent":
+                rgba = image.convert("RGBA")
+                alpha_min, _alpha_max = rgba.getchannel("A").getextrema()
+                if alpha_min >= 255:
+                    raise TransparentAlphaMissingError(
+                        "Transparent cutout output must include transparent alpha pixels."
+                    )
+                return _png_from_image(rgba)
+
+            rgba = image.convert("RGBA")
+            white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+            white.alpha_composite(rgba)
+            return _png_from_image(white.convert("RGB"))
+    except UnidentifiedImageError as exc:
+        raise ValueError("Image provider returned invalid PNG bytes.") from exc
 
 
 def _update_progress(db, store, *, tenant_id: str, task: VideoTask, stage: str, progress: int):
@@ -179,6 +271,10 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
         prompt = str(params.get("script") or params.get("topic") or "").strip()
         if not prompt:
             raise ValueError("Image prompt is required.")
+        ecom_cutout = _is_ecom_cutout_request(params)
+        ecom_background = _ecom_cutout_background(params)
+        if ecom_cutout:
+            prompt = _ecom_cutout_prompt(prompt, background=ecom_background)
 
         with SessionLocal() as db:
             task = db.get(VideoTask, task_id)
@@ -196,7 +292,14 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             )
 
             input_path = None
-            if params.get("image_key"):
+            if params.get("source_storage_key"):
+                input_path = _write_temp_source_image(
+                    storage,
+                    tenant_id=tenant_id,
+                    source_storage_key=str(params["source_storage_key"]),
+                    temp_paths=temp_paths,
+                )
+            elif params.get("image_key"):
                 input_path = _write_temp_input_image(
                     storage,
                     tenant_id=tenant_id,
@@ -233,6 +336,11 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             )
 
             image_bytes = _image_bytes(result)
+            if ecom_cutout:
+                image_bytes = _normalize_ecom_cutout_image(
+                    image_bytes,
+                    background=ecom_background,
+                )
             _update_progress(db, store, tenant_id=tenant_id, task=task, stage="got", progress=80)
 
             output_key = _photo_storage_key(tenant_id, task_id)
@@ -254,6 +362,11 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             if _is_cover_request(params):
                 metadata["purpose"] = "cover"
                 metadata["kind"] = "cover"
+            if ecom_cutout:
+                metadata["kind"] = _ECOM_CUTOUT_KIND
+                metadata["background"] = ecom_background
+                if params.get("source_asset_id"):
+                    metadata["source_asset_id"] = str(params["source_asset_id"])
 
             asset = Asset(
                 tenant_id=tenant_id,

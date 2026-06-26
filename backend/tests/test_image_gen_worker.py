@@ -1,9 +1,11 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from io import BytesIO
 from pathlib import Path
 
 import httpx
 import openai
+from PIL import Image
 from sqlalchemy import select
 
 from app.db.models import Asset, Plan, Subscription, TaskAsset, UsageRecord, VideoTask
@@ -86,6 +88,22 @@ def _openai_request() -> httpx.Request:
 def _bad_request(message: str, body: dict) -> openai.BadRequestError:
     response = httpx.Response(400, request=_openai_request(), json=body)
     return openai.BadRequestError(message, response=response, body=body)
+
+
+def _png_bytes(mode: str) -> bytes:
+    image_mode = "RGBA" if mode == "transparent" else "RGB"
+    image = Image.new(image_mode, (2, 2), (255, 255, 255, 0) if mode == "transparent" else "white")
+    if mode == "transparent":
+        image.putpixel((0, 0), (220, 30, 30, 255))
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _alpha_extrema(content: bytes) -> tuple[int, int]:
+    image = Image.open(BytesIO(content))
+    assert image.mode == "RGBA"
+    return image.getchannel("A").getextrema()
 
 
 def _seed_reserved_photo(db, tenant_id: str, user_id: str, task_id: str) -> str:
@@ -457,3 +475,91 @@ def test_image_worker_failure_uses_classified_moderation_error_code(
     scoped_id = f"{auth_context['tenant_id']}:{task_id}"
     assert store.data[scoped_id]["status"] == "failed"
     assert store.data[scoped_id]["error_code"] == "IMAGE_MODERATION_BLOCKED"
+
+
+def test_image_worker_ecom_transparent_cutout_uses_source_asset_and_keeps_alpha(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    task_id = "ecom-alpha-unit"
+    source_key = f"tenants/{auth_context['tenant_id']}/uploads/product.png"
+    with auth_db() as db:
+        _seed_reserved_photo(db, auth_context["tenant_id"], auth_context["user_id"], task_id)
+    storage = _FakeStorage()
+    storage.saved[source_key] = (b"input-image", "image/png")
+    store = _MemProgressStore()
+    provider = _FakeProvider(image_bytes=_png_bytes("transparent"))
+    image_gen = _patch_worker(monkeypatch, auth_db, storage, store, provider)
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": "cut out the product",
+            "kind": "ecom_cutout",
+            "background": "transparent",
+            "source_asset_id": "product-alpha-source",
+            "source_storage_key": source_key,
+        }
+    )
+
+    assert result["status"] == "SUCCESS"
+    output_key = f"tenants/{auth_context['tenant_id']}/photos/{task_id}/output.png"
+    payload = provider.payloads[0]
+    assert payload["input_image_path"] == provider.input_path
+    assert "transparent" in payload["prompt"].lower()
+    assert "alpha" in payload["prompt"].lower()
+    assert "background" not in payload
+    assert "response_format" not in payload
+    assert "input_fidelity" not in payload
+    saved_bytes = storage.saved[output_key][0]
+    assert _alpha_extrema(saved_bytes)[0] < 255
+    with auth_db() as db:
+        asset = db.scalars(select(Asset).where(Asset.storage_key == output_key)).one()
+    assert asset.metadata_["kind"] == "ecom_cutout"
+    assert asset.metadata_["background"] == "transparent"
+    assert asset.metadata_["source_asset_id"] == "product-alpha-source"
+
+
+def test_image_worker_ecom_transparent_cutout_fails_when_provider_returns_opaque_png(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    task_id = "ecom-opaque-unit"
+    source_key = f"tenants/{auth_context['tenant_id']}/uploads/product.png"
+    with auth_db() as db:
+        subscription_id = _seed_reserved_photo(
+            db,
+            auth_context["tenant_id"],
+            auth_context["user_id"],
+            task_id,
+        )
+    storage = _FakeStorage()
+    storage.saved[source_key] = (b"input-image", "image/png")
+    store = _MemProgressStore()
+    provider = _FakeProvider(image_bytes=_png_bytes("opaque"))
+    image_gen = _patch_worker(monkeypatch, auth_db, storage, store, provider)
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": "cut out the product",
+            "kind": "ecom_cutout",
+            "background": "transparent",
+            "source_storage_key": source_key,
+        }
+    )
+
+    assert result["status"] == "FAILURE"
+    assert result["error_code"] == "IMAGE_ALPHA_MISSING"
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        subscription = db.get(Subscription, subscription_id)
+        usage = db.scalars(select(UsageRecord).where(UsageRecord.video_task_id == task_id)).one()
+    assert task.status == "failed"
+    assert task.error_code == "IMAGE_ALPHA_MISSING"
+    assert usage.status == "released"
+    assert subscription.quota_credits_reserved == 0
