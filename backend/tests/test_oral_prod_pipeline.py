@@ -962,6 +962,7 @@ def test_prune_photo_history_after_create_keeps_newest_20(
     auth_db,
 ) -> None:
     from app.api.v1.routes import videos as videos_route
+    from app.workers import image_gen
 
     with auth_db() as db:
         _seed_billing(db, auth_context["tenant_id"])
@@ -980,12 +981,34 @@ def test_prune_photo_history_after_create_keeps_newest_20(
             )
         db.commit()
 
+    class _ImmediatePhotoProvider:
+        async def generate_image(self, _payload: dict) -> dict:
+            return {
+                "image_bytes": b"new-photo",
+                "mime_type": "image/png",
+                "model": "gpt-image-2",
+            }
+
+    class _ProgressSink:
+        def update(self, *_args, **_kwargs) -> None:
+            return None
+
     class _FakeImageTask:
         def apply_async(self, *, args, task_id, queue=None):
-            return type("Result", (), {"status": "PENDING"})()
+            assert queue == "image"
+            assert task_id == args[0]["video_task_id"]
+            image_gen.run_image_generation(args[0])
+            return type("Result", (), {"status": "SUCCESS"})()
+
+    def resolve_photo_provider(_db, *, tenant_id, capability):
+        return _ImmediatePhotoProvider()
 
     storage = _FakeStorage()
     monkeypatch.setattr(videos_route, "generate_image_task", _FakeImageTask())
+    monkeypatch.setattr(image_gen, "SessionLocal", auth_db)
+    monkeypatch.setattr(image_gen, "build_progress_store", lambda _redis_url: _ProgressSink())
+    monkeypatch.setattr(image_gen, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(image_gen, "resolve", resolve_photo_provider)
     app.dependency_overrides[get_object_storage] = lambda: storage
     try:
         resp = TestClient(app).post(
@@ -1001,12 +1024,13 @@ def test_prune_photo_history_after_create_keeps_newest_20(
         photo_ids = {
             task.id for task in db.scalars(select(VideoTask).where(VideoTask.mode == "photo"))
         }
-    assert len(photo_ids) == 21
+    assert len(photo_ids) == 20
     assert "old-photo-00" not in photo_ids
-    assert "old-photo-01" in photo_ids
+    assert "old-photo-01" not in photo_ids
     assert resp.json()["data"]["id"] in photo_ids
     assert storage.deleted == [
-        f"tenants/{auth_context['tenant_id']}/photos/old-00.png"
+        f"tenants/{auth_context['tenant_id']}/photos/old-00.png",
+        f"tenants/{auth_context['tenant_id']}/photos/old-01.png",
     ]
 
 

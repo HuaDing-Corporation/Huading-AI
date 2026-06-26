@@ -24,6 +24,7 @@ from app.providers.url_guard import (
     object_storage_public_hosts,
     parse_host_suffixes,
 )
+from app.services.history import prune_video_history_best_effort
 from app.services.progress import ProgressStore, build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
 from app.services.storage.base import ObjectStorage
@@ -1490,6 +1491,14 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 cost_cents=max(1, int(round(ctx.duration_sec or 1))) * 100,
             )
             db.commit()
+            output_storage_key = task.storage_key
+            prune_video_history_best_effort(
+                db,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                storage=storage,
+                keep=20,
+            )
             store.update(
                 scoped_id,
                 status="done",
@@ -1497,19 +1506,19 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 step="done",
                 playback_url=(
                     storage.presign_get_url(
-                        task.storage_key,
+                        output_storage_key,
                         expires_in=settings.engine_s3_presign_ttl,
                     )
-                    if task.storage_key
+                    if output_storage_key
                     else None
                 ),
                 download_url=(
                     storage.presign_get_url(
-                        task.storage_key,
+                        output_storage_key,
                         expires_in=settings.engine_s3_presign_ttl,
                         download_filename=f"{task.id}.mp4",
                     )
-                    if task.storage_key
+                    if output_storage_key
                     else None
                 ),
             )
@@ -1522,10 +1531,18 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
             task.finished_at = datetime.now(UTC)
             release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
             db.commit()
+            failed_progress = task.progress or 0
+            prune_video_history_best_effort(
+                db,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                storage=storage,
+                keep=20,
+            )
             store.update(
                 scoped_id,
                 status="failed",
-                progress=task.progress or 0,
+                progress=failed_progress,
                 step="failed",
                 error_code="AVATAR_TALK_FAILED",
                 error_message=str(exc),
@@ -1582,6 +1599,14 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
                 cost_cents=actual_seconds * 200,
             )
             db.commit()
+            output_storage_key = task.storage_key
+            prune_video_history_best_effort(
+                db,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                storage=storage,
+                keep=20,
+            )
             store.update(
                 scoped_id,
                 status="done",
@@ -1589,19 +1614,19 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
                 step="done",
                 playback_url=(
                     storage.presign_get_url(
-                        task.storage_key,
+                        output_storage_key,
                         expires_in=settings.engine_s3_presign_ttl,
                     )
-                    if task.storage_key
+                    if output_storage_key
                     else None
                 ),
                 download_url=(
                     storage.presign_get_url(
-                        task.storage_key,
+                        output_storage_key,
                         expires_in=settings.engine_s3_presign_ttl,
                         download_filename=f"{task.id}.mp4",
                     )
-                    if task.storage_key
+                    if output_storage_key
                     else None
                 ),
             )
@@ -1614,10 +1639,18 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
             task.finished_at = datetime.now(UTC)
             release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
             db.commit()
+            failed_progress = task.progress or 0
+            prune_video_history_best_effort(
+                db,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                storage=storage,
+                keep=20,
+            )
             store.update(
                 scoped_id,
                 status="failed",
-                progress=task.progress or 0,
+                progress=failed_progress,
                 step="failed",
                 error_code="SEEDANCE_I2V_FAILED",
                 error_message=str(exc),

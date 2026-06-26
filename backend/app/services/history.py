@@ -193,3 +193,29 @@ def prune_video_history(
         )
     )
     return _hard_delete_tasks(db, tasks=tasks[keep:], storage=storage)
+
+
+def prune_video_history_best_effort(
+    db: Session,
+    *,
+    tenant_id: str,
+    mode: str,
+    storage: ObjectStorage,
+    keep: int = HISTORY_KEEP_LIMIT,
+) -> int:
+    try:
+        return prune_video_history(
+            db,
+            tenant_id=tenant_id,
+            mode=mode,
+            storage=storage,
+            keep=keep,
+        )
+    except Exception as exc:  # pragma: no cover - non-blocking cleanup guard
+        logger.warning(
+            "video_history_prune_failed",
+            tenant_id=tenant_id,
+            mode=mode,
+            error=str(exc),
+        )
+        return 0

@@ -13,6 +13,7 @@ class _FakeStorage:
     def __init__(self) -> None:
         self.bucket = "photo-test-bucket"
         self.saved: dict[str, tuple[bytes, str]] = {}
+        self.deleted: list[str] = []
 
     def put_bytes(self, key: str, content: bytes, *, content_type: str) -> str:
         self.saved[key] = (content, content_type)
@@ -30,6 +31,10 @@ class _FakeStorage:
     ) -> str:
         suffix = "&download=1" if download_filename else ""
         return f"https://storage.test/{key}?ttl={expires_in}{suffix}"
+
+    def delete_object(self, key: str) -> None:
+        self.deleted.append(key)
+        self.saved.pop(key, None)
 
 
 class _MemProgressStore:
@@ -136,6 +141,33 @@ def _seed_reserved_photo(db, tenant_id: str, user_id: str, task_id: str) -> str:
     )
     db.commit()
     return subscription.id
+
+
+def _seed_terminal_photo_history(
+    db,
+    *,
+    tenant_id: str,
+    prefix: str,
+    count: int = 20,
+) -> list[str]:
+    storage_keys: list[str] = []
+    for index in range(count):
+        storage_key = f"tenants/{tenant_id}/photos/{prefix}-{index:02d}.png"
+        storage_keys.append(storage_key)
+        db.add(
+            VideoTask(
+                id=f"{prefix}-{index:02d}",
+                tenant_id=tenant_id,
+                mode="photo",
+                video_mode="photo",
+                status="done",
+                progress=100,
+                storage_key=storage_key,
+                created_at=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=index),
+            )
+        )
+    db.commit()
+    return storage_keys
 
 
 def _patch_worker(monkeypatch, auth_db, storage: _FakeStorage, store: _MemProgressStore, provider):
@@ -330,6 +362,11 @@ def test_image_worker_failure_marks_failed_and_releases_quota(
             auth_context["user_id"],
             task_id,
         )
+        old_storage_keys = _seed_terminal_photo_history(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            prefix="photo-failure-history",
+        )
     storage = _FakeStorage()
     store = _MemProgressStore()
     provider = _FakeProvider(fail=True)
@@ -348,6 +385,9 @@ def test_image_worker_failure_marks_failed_and_releases_quota(
         task = db.get(VideoTask, task_id)
         subscription = db.get(Subscription, subscription_id)
         usage = db.scalars(select(UsageRecord).where(UsageRecord.video_task_id == task_id)).one()
+        photo_ids = {
+            row.id for row in db.scalars(select(VideoTask).where(VideoTask.mode == "photo"))
+        }
 
     assert task.status == "failed"
     assert task.error_code == "IMAGE_GEN_FAILED"
@@ -355,6 +395,10 @@ def test_image_worker_failure_marks_failed_and_releases_quota(
     assert usage.status == "released"
     assert subscription.quota_credits_reserved == 0
     assert subscription.quota_credits_used == 10
+    assert len(photo_ids) == 20
+    assert "photo-failure-history-00" not in photo_ids
+    assert task_id in photo_ids
+    assert storage.deleted == [old_storage_keys[0]]
     scoped_id = f"{auth_context['tenant_id']}:{task_id}"
     assert store.data[scoped_id]["status"] == "failed"
     assert store.data[scoped_id]["error_code"] == "IMAGE_GEN_FAILED"
