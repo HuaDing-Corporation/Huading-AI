@@ -114,6 +114,14 @@ describe("GenerationHistory (历史 tabs + 删除/清空/仅封面)", () => {
     await waitFor(() => expect(clearVideosMock.mutateAsync).toHaveBeenCalledWith("seedance_i2v"));
   });
 
+  it("图片清空：确认文案明确「全部图片(含封面)、硬删、不受仅封面筛选影响」(P2)", () => {
+    render(<HistoryList mode="photo" />);
+    fireEvent.click(screen.getByRole("button", { name: /清空/ }));
+    expect(
+      screen.getByText("将清空全部图片（含封面），硬删不可恢复；不受当前「仅封面」筛选影响（始终删除全部图片）。")
+    ).toBeInTheDocument();
+  });
+
   it("防连点：删除 pending 时该条 trash 禁用", () => {
     deleteVideoMock.isPending = true;
     deleteVideoMock.variables = "v-avatar_talk";

@@ -133,7 +133,7 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
       <ConfirmDialog
         open={confirmClear}
         title={copy.history.clearConfirmTitle}
-        message={copy.history.clearConfirmHard}
+        message={mode === "photo" ? copy.history.clearConfirmPhotoHard : copy.history.clearConfirmHard}
         confirmLabel={copy.history.clearConfirmBtn}
         danger
         submitting={clearVideos.isPending}

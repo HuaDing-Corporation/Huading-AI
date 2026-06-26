@@ -163,6 +163,7 @@ export const copy = {
     deleteConfirmBtn: "确认删除",
     clearConfirmTitle: "清空该历史？",
     clearConfirmHard: "将永久删除此模块全部记录，不可恢复。",
+    clearConfirmPhotoHard: "将清空全部图片（含封面），硬删不可恢复；不受当前「仅封面」筛选影响（始终删除全部图片）。",
     clearConfirmSoft: "将清空此模块全部草稿（可恢复）。",
     clearConfirmBtn: "确认清空",
     deleteFailed: "删除失败，请重试",
