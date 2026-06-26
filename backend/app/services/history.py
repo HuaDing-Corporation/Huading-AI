@@ -1,4 +1,5 @@
 from collections.abc import Iterable
+from typing import Literal
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -10,12 +11,14 @@ from app.services.storage.base import ObjectStorage
 logger = get_logger(__name__)
 
 HISTORY_KEEP_LIMIT = 20
+TERMINAL_HISTORY_STATUSES = {"done", "succeeded", "failed"}
 _OUTPUT_ASSET_ROLES = {
     "output_audio",
     "output_subtitle",
     "output_video",
     "output_image",
 }
+DeleteVideoResult = Literal["deleted", "missing", "skipped"]
 
 
 def history_kind(task: VideoTask) -> str | None:
@@ -30,6 +33,14 @@ def history_kind(task: VideoTask) -> str | None:
 
 def video_mode_filter(mode: str):
     return or_(VideoTask.mode == mode, VideoTask.video_mode == mode)
+
+
+def terminal_history_filter():
+    return func.lower(VideoTask.status).in_(TERMINAL_HISTORY_STATUSES)
+
+
+def is_terminal_history_task(task: VideoTask) -> bool:
+    return str(task.status or "").lower() in TERMINAL_HISTORY_STATUSES
 
 
 def _unique(items: Iterable[str | None]) -> list[str]:
@@ -81,6 +92,7 @@ def _hard_delete_tasks(
     tasks: list[VideoTask],
     storage: ObjectStorage,
 ) -> int:
+    tasks = [task for task in tasks if is_terminal_history_task(task)]
     if not tasks:
         return 0
 
@@ -127,7 +139,7 @@ def delete_video_task(
     tenant_id: str,
     task_id: str,
     storage: ObjectStorage,
-) -> bool:
+) -> DeleteVideoResult:
     task = db.scalar(
         select(VideoTask).where(
             VideoTask.id == task_id,
@@ -135,9 +147,11 @@ def delete_video_task(
         )
     )
     if task is None:
-        return False
+        return "missing"
+    if not is_terminal_history_task(task):
+        return "skipped"
     _hard_delete_tasks(db, tasks=[task], storage=storage)
-    return True
+    return "deleted"
 
 
 def clear_video_history(
@@ -152,6 +166,7 @@ def clear_video_history(
             select(VideoTask).where(
                 VideoTask.tenant_id == tenant_id,
                 video_mode_filter(mode),
+                terminal_history_filter(),
             )
         )
     )
@@ -169,7 +184,11 @@ def prune_video_history(
     tasks = list(
         db.scalars(
             select(VideoTask)
-            .where(VideoTask.tenant_id == tenant_id, video_mode_filter(mode))
+            .where(
+                VideoTask.tenant_id == tenant_id,
+                video_mode_filter(mode),
+                terminal_history_filter(),
+            )
             .order_by(VideoTask.created_at.desc(), VideoTask.id.desc())
         )
     )

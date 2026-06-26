@@ -14,6 +14,7 @@ from app.db.models import (
     Subscription,
     TaskAsset,
     Tenant,
+    UsageRecord,
     VideoTask,
     Voice,
 )
@@ -106,6 +107,77 @@ def _seed_billing(db, tenant_id: str) -> None:
         ]
     )
     db.commit()
+
+
+def _active_subscription(db, tenant_id: str) -> Subscription:
+    subscription = db.scalar(
+        select(Subscription)
+        .where(
+            Subscription.tenant_id == tenant_id,
+            Subscription.status == "active",
+        )
+        .order_by(Subscription.period_end.desc())
+    )
+    assert subscription is not None
+    return subscription
+
+
+def _seed_reserved_photo_task(
+    db,
+    *,
+    tenant_id: str,
+    task_id: str,
+    status: str = "queued",
+    created_at: datetime | None = None,
+) -> None:
+    task = VideoTask(
+        id=task_id,
+        tenant_id=tenant_id,
+        mode="photo",
+        video_mode="photo",
+        status=status,
+        progress=100 if status in {"done", "failed"} else 0,
+        storage_key=f"tenants/{tenant_id}/photos/{task_id}/output.png",
+        created_at=created_at or datetime.now(UTC),
+    )
+    db.add(task)
+    db.flush()
+    subscription = _active_subscription(db, tenant_id)
+    subscription.quota_credits_reserved += 20
+    db.add(
+        UsageRecord(
+            tenant_id=tenant_id,
+            subscription_id=subscription.id,
+            video_task_id=task.id,
+            capability="image",
+            provider="openai",
+            model="gpt-image-2",
+            unit="image",
+            quantity=Decimal("1"),
+            credits=Decimal("20.00"),
+            cost_cents=0,
+            status="reserved",
+        )
+    )
+    db.commit()
+
+
+def _assert_reserved_photo_still_linked(
+    db,
+    *,
+    tenant_id: str,
+    task_id: str,
+    expected_reserved: int,
+) -> None:
+    task = db.get(VideoTask, task_id)
+    usage = db.scalars(
+        select(UsageRecord).where(UsageRecord.video_task_id == task_id)
+    ).one()
+    subscription = _active_subscription(db, tenant_id)
+
+    assert task is not None
+    assert usage.status == "reserved"
+    assert subscription.quota_credits_reserved == expected_reserved
 
 
 def _seed_voice_and_avatar(db, tenant_id: str) -> tuple[str, str]:
@@ -705,6 +777,39 @@ def test_delete_video_hard_deletes_task_assets_and_media(auth_context, auth_db) 
         assert deleted_links == []
 
 
+def test_delete_video_skips_reserved_inflight_task_without_leaking_quota(
+    auth_context,
+    auth_db,
+) -> None:
+    storage = _FakeStorage()
+    with auth_db() as db:
+        _seed_reserved_photo_task(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            task_id="reserved-delete-photo",
+        )
+
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        resp = TestClient(app).delete(
+            "/api/v1/videos/reserved-delete-photo",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 200
+    assert resp.json()["data"] == {"deleted": False}
+    assert storage.deleted == []
+    with auth_db() as db:
+        _assert_reserved_photo_still_linked(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            task_id="reserved-delete-photo",
+            expected_reserved=20,
+        )
+
+
 def test_delete_video_is_tenant_scoped_and_media_delete_best_effort(
     auth_context,
     auth_db,
@@ -768,6 +873,8 @@ def test_clear_videos_requires_mode_and_deletes_only_that_mode(
                     tenant_id=auth_context["tenant_id"],
                     mode="photo",
                     video_mode="photo",
+                    status="done",
+                    progress=100,
                     storage_key=f"tenants/{auth_context['tenant_id']}/photos/1/output.png",
                 ),
                 VideoTask(
@@ -800,6 +907,55 @@ def test_clear_videos_requires_mode_and_deletes_only_that_mode(
         assert db.get(VideoTask, "avatar-keep") is not None
 
 
+def test_clear_videos_skips_reserved_inflight_task_without_leaking_quota(
+    auth_context,
+    auth_db,
+) -> None:
+    storage = _FakeStorage()
+    with auth_db() as db:
+        _seed_reserved_photo_task(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            task_id="reserved-clear-photo",
+        )
+        db.add(
+            VideoTask(
+                id="done-clear-photo",
+                tenant_id=auth_context["tenant_id"],
+                mode="photo",
+                video_mode="photo",
+                status="done",
+                progress=100,
+                storage_key=f"tenants/{auth_context['tenant_id']}/photos/done/output.png",
+            )
+        )
+        db.commit()
+
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        resp = TestClient(app).delete(
+            "/api/v1/videos?mode=photo",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 200
+    assert resp.json()["data"] == {"deleted_count": 1}
+    assert storage.deleted == [
+        f"tenants/{auth_context['tenant_id']}/photos/done/output.png"
+    ]
+    with auth_db() as db:
+        done_task = db.get(VideoTask, "done-clear-photo")
+        _assert_reserved_photo_still_linked(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            task_id="reserved-clear-photo",
+            expected_reserved=20,
+        )
+    assert done_task is None
+
+
 def test_prune_photo_history_after_create_keeps_newest_20(
     monkeypatch,
     auth_context,
@@ -809,7 +965,7 @@ def test_prune_photo_history_after_create_keeps_newest_20(
 
     with auth_db() as db:
         _seed_billing(db, auth_context["tenant_id"])
-        for index in range(20):
+        for index in range(21):
             db.add(
                 VideoTask(
                     id=f"old-photo-{index:02d}",
@@ -845,12 +1001,121 @@ def test_prune_photo_history_after_create_keeps_newest_20(
         photo_ids = {
             task.id for task in db.scalars(select(VideoTask).where(VideoTask.mode == "photo"))
         }
-    assert len(photo_ids) == 20
+    assert len(photo_ids) == 21
     assert "old-photo-00" not in photo_ids
+    assert "old-photo-01" in photo_ids
     assert resp.json()["data"]["id"] in photo_ids
     assert storage.deleted == [
         f"tenants/{auth_context['tenant_id']}/photos/old-00.png"
     ]
+
+
+def test_prune_photo_history_skips_reserved_inflight_task_without_leaking_quota(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    with auth_db() as db:
+        _seed_billing(db, auth_context["tenant_id"])
+        _seed_reserved_photo_task(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            task_id="reserved-prune-photo",
+            created_at=datetime(2025, 12, 31, tzinfo=UTC),
+        )
+        for index in range(21):
+            db.add(
+                VideoTask(
+                    id=f"terminal-prune-photo-{index:02d}",
+                    tenant_id=auth_context["tenant_id"],
+                    mode="photo",
+                    video_mode="photo",
+                    status="done",
+                    progress=100,
+                    storage_key=(
+                        f"tenants/{auth_context['tenant_id']}/photos/"
+                        f"terminal-{index:02d}.png"
+                    ),
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=index),
+                )
+            )
+        db.commit()
+
+    class _FakeImageTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            return type("Result", (), {"status": "PENDING"})()
+
+    storage = _FakeStorage()
+    monkeypatch.setattr(videos_route, "generate_image_task", _FakeImageTask())
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        resp = TestClient(app).post(
+            "/api/v1/videos",
+            json={"topic": "new photo", "video_mode": "photo"},
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 202
+    with auth_db() as db:
+        oldest_terminal = db.get(VideoTask, "terminal-prune-photo-00")
+        _assert_reserved_photo_still_linked(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            task_id="reserved-prune-photo",
+            expected_reserved=40,
+        )
+    assert oldest_terminal is None
+    assert storage.deleted == [
+        f"tenants/{auth_context['tenant_id']}/photos/terminal-00.png"
+    ]
+
+
+def test_delete_done_video_does_not_release_unrelated_reserved_quota(
+    auth_context,
+    auth_db,
+) -> None:
+    storage = _FakeStorage()
+    with auth_db() as db:
+        _seed_reserved_photo_task(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            task_id="reserved-other-photo",
+        )
+        db.add(
+            VideoTask(
+                id="done-delete-no-release",
+                tenant_id=auth_context["tenant_id"],
+                mode="photo",
+                video_mode="photo",
+                status="done",
+                progress=100,
+                storage_key=f"tenants/{auth_context['tenant_id']}/photos/done-delete.png",
+            )
+        )
+        db.commit()
+
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        resp = TestClient(app).delete(
+            "/api/v1/videos/done-delete-no-release",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 200
+    assert resp.json()["data"] == {"deleted": True}
+    with auth_db() as db:
+        _assert_reserved_photo_still_linked(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            task_id="reserved-other-photo",
+            expected_reserved=20,
+        )
 
 
 def test_cover_from_frame_returns_friendly_timestamp_error(

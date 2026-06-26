@@ -595,15 +595,15 @@ def delete_video(
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[VideoDeletedResponse]:
-    deleted = delete_video_task(
+    delete_result = delete_video_task(
         db,
         tenant_id=user.tenant_id,
         task_id=task_id,
         storage=storage,
     )
-    if not deleted:
+    if delete_result == "missing":
         raise AppError("Video task not found.", code="VIDEO_TASK_NOT_FOUND", status_code=404)
-    return ok(request, VideoDeletedResponse(deleted=True))
+    return ok(request, VideoDeletedResponse(deleted=delete_result == "deleted"))
 
 
 @router.get("/{task_id}", response_model=ApiResponse[VideoRead])
