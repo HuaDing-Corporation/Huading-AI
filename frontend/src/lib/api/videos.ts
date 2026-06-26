@@ -1,6 +1,6 @@
 import { API_BASE_URL, ApiError, apiFetch, authHeaders } from "@/lib/api/client";
 import { authStore } from "@/lib/auth/store";
-import type { CreateVideoRequest, EstimateResponse, ScenePromptResponse, VideoAccepted, VideoDetail, VideoEvent, VideoListItem, VideoListResponse } from "@/lib/api/types";
+import type { ClearResult, CreateVideoRequest, DeleteResult, EstimateResponse, ScenePromptResponse, VideoAccepted, VideoDetail, VideoEvent, VideoListItem, VideoListResponse } from "@/lib/api/types";
 
 export function createVideo(input: CreateVideoRequest): Promise<VideoAccepted> {
   return apiFetch<VideoAccepted>("/api/v1/videos", { method: "POST", body: input });
@@ -31,14 +31,25 @@ export async function listVideos(): Promise<VideoListItem[]> {
 /** One page of videos, optionally filtered by mode — backs the 历史生成 tabs
  *  (returns total so the caller can paginate via offset). */
 export function listVideosPage(
-  params: { mode?: string; limit?: number; offset?: number } = {}
+  params: { mode?: string; kind?: string; limit?: number; offset?: number } = {}
 ): Promise<VideoListResponse> {
   const query = new URLSearchParams();
   if (params.mode) query.set("mode", params.mode);
+  if (params.kind) query.set("kind", params.kind); // 图片细分筛（kind=cover 仅封面，真后端）
   if (params.limit != null) query.set("limit", String(params.limit));
   if (params.offset != null) query.set("offset", String(params.offset));
   const qs = query.toString();
   return apiFetch<VideoListResponse>(`/api/v1/videos${qs ? `?${qs}` : ""}`, { method: "GET" });
+}
+
+/** 硬删单条视频/图片(+媒体 best-effort)；跨租户/不存在 → 404(HIST-UI-0001)。 */
+export function deleteVideo(id: string): Promise<DeleteResult> {
+  return apiFetch<DeleteResult>(`/api/v1/videos/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+/** 清空某模块全部视频/图片(mode 必填，硬删 + 媒体 best-effort)。 */
+export function clearVideos(mode: string): Promise<ClearResult> {
+  return apiFetch<ClearResult>(`/api/v1/videos?mode=${encodeURIComponent(mode)}`, { method: "DELETE" });
 }
 
 /**

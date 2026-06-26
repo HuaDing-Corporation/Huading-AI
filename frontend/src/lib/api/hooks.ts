@@ -4,13 +4,13 @@ import { fetchMe } from "@/lib/api/auth";
 import { listAvatarPresets } from "@/lib/api/avatars";
 import { avatarPresetsKey, copyKeys, coverKeys, meKey, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
 import { getQuota } from "@/lib/api/quota";
-import { generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
+import { clearCopyDrafts, deleteCopyDraft, generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
 import { generateScript } from "@/lib/api/scripts";
 import { uploadImage, uploadProductImage } from "@/lib/api/uploads";
 import { listVoices } from "@/lib/api/voices";
 import { listSubtitleTemplates } from "@/lib/api/oral";
 import { createCoverFromFrame, getFrameCandidates } from "@/lib/api/covers";
-import { createVideo, estimateVideo, generateScenePrompt, getVideo, listVideos, listVideosPage } from "@/lib/api/videos";
+import { clearVideos, createVideo, deleteVideo, estimateVideo, generateScenePrompt, getVideo, listVideos, listVideosPage } from "@/lib/api/videos";
 import type {
   CopyDraftCreateRequest,
   CopyRewriteRequest,
@@ -26,11 +26,11 @@ export function useVideos() {
   const { session } = useAuth();
   return useQuery({ queryKey: videoKeys.list(), queryFn: listVideos, enabled: !!session });
 }
-export function useVideoHistory(mode: string) {
+export function useVideoHistory(mode: string, kind?: string) {
   const { session } = useAuth();
   return useInfiniteQuery({
-    queryKey: videoKeys.history(mode),
-    queryFn: ({ pageParam }) => listVideosPage({ mode, limit: 10, offset: pageParam }),
+    queryKey: videoKeys.history(mode, kind),
+    queryFn: ({ pageParam }) => listVideosPage({ mode, kind, limit: 10, offset: pageParam }),
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) => {
       const loaded = allPages.reduce((sum, page) => sum + page.items.length, 0);
@@ -48,6 +48,21 @@ export function useCreateVideo() {
   return useMutation({
     mutationFn: (input: CreateVideoRequest) => createVideo(input),
     onSuccess: () => void qc.invalidateQueries({ queryKey: videoKeys.list() })
+  });
+}
+// ── 历史删除 / 清空 (HIST-UI-0001) — 成功后失效所有 video 查询(前缀)使历史列表刷新 ──
+export function useDeleteVideo() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => deleteVideo(id),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: videoKeys.all })
+  });
+}
+export function useClearVideos() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (mode: string) => clearVideos(mode),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: videoKeys.all })
   });
 }
 export function useEstimateVideo() {
@@ -96,6 +111,20 @@ export function useSaveCopyDraft() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (params: CopyDraftCreateRequest) => saveCopyDraft(params),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: copyKeys.drafts() })
+  });
+}
+export function useDeleteCopyDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => deleteCopyDraft(id),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: copyKeys.drafts() })
+  });
+}
+export function useClearCopyDrafts() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => clearCopyDrafts(),
     onSuccess: () => void qc.invalidateQueries({ queryKey: copyKeys.drafts() })
   });
 }
