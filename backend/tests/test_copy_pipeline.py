@@ -1,7 +1,9 @@
+from datetime import UTC, datetime, timedelta
+
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
-from app.db.models import VideoTask
+from app.db.models import CopyDraft, VideoTask
 from app.main import app
 
 
@@ -329,3 +331,83 @@ def test_copy_drafts_crud_is_tenant_scoped_and_soft_deleted(auth_context) -> Non
     hidden = client.get(f"/api/v1/copy/drafts/{draft_id}", headers=auth_context["headers"])
     assert hidden.status_code == 404
     assert hidden.json()["error"]["code"] == "COPY_DRAFT_NOT_FOUND"
+
+
+def test_copy_drafts_clear_soft_deletes_active_drafts(auth_context, auth_db) -> None:
+    client = TestClient(app)
+    tenant_b = _register_tenant(client, "copy-clear-b")
+    with auth_db() as db:
+        tenant_a_drafts = [
+            CopyDraft(
+                tenant_id=auth_context["tenant_id"],
+                source_text=f"source {index}",
+                result_text=f"result {index}",
+                mode="smart",
+            )
+            for index in range(2)
+        ]
+        other_draft = CopyDraft(
+            tenant_id=tenant_b["tenant_id"],
+            source_text="other source",
+            result_text="other result",
+            mode="smart",
+        )
+        db.add_all([*tenant_a_drafts, other_draft])
+        db.commit()
+        tenant_a_ids = [draft.id for draft in tenant_a_drafts]
+        other_id = other_draft.id
+
+    cleared = client.delete("/api/v1/copy/drafts", headers=auth_context["headers"])
+
+    assert cleared.status_code == 200
+    assert cleared.json()["data"] == {"deleted_count": 2}
+    listing = client.get("/api/v1/copy/drafts", headers=auth_context["headers"])
+    assert listing.status_code == 200
+    assert listing.json()["data"] == {"items": [], "total": 0}
+    with auth_db() as db:
+        tenant_drafts = db.scalars(select(CopyDraft).where(CopyDraft.id.in_(tenant_a_ids))).all()
+        other = db.get(CopyDraft, other_id)
+    assert {draft.id for draft in tenant_drafts} == set(tenant_a_ids)
+    assert all(draft.deleted_at is not None for draft in tenant_drafts)
+    assert other.deleted_at is None
+
+
+def test_copy_draft_create_soft_prunes_active_history_to_20(auth_context, auth_db) -> None:
+    client = TestClient(app)
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+    with auth_db() as db:
+        for index in range(20):
+            db.add(
+                CopyDraft(
+                    id=f"old-copy-{index:02d}",
+                    tenant_id=auth_context["tenant_id"],
+                    source_text=f"old source {index}",
+                    result_text=f"old result {index}",
+                    mode="smart",
+                    created_at=base_time + timedelta(minutes=index),
+                )
+            )
+        db.commit()
+
+    created = client.post(
+        "/api/v1/copy/drafts",
+        json={
+            "source_text": "new source",
+            "result_text": "new result",
+            "mode": "smart",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert created.status_code == 201
+    new_id = created.json()["data"]["id"]
+    listing = client.get("/api/v1/copy/drafts?limit=100", headers=auth_context["headers"])
+    assert listing.status_code == 200
+    active_ids = [item["id"] for item in listing.json()["data"]["items"]]
+    assert len(active_ids) == 20
+    assert new_id in active_ids
+    assert "old-copy-00" not in active_ids
+    with auth_db() as db:
+        oldest = db.get(CopyDraft, "old-copy-00")
+    assert oldest is not None
+    assert oldest.deleted_at is not None

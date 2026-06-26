@@ -17,6 +17,9 @@ class ObjectStorage(Protocol):
     def get_bytes(self, key: str) -> bytes:
         ...
 
+    def delete_object(self, key: str) -> None:
+        ...
+
     def presign_get_url(
         self,
         key: str,

@@ -138,3 +138,7 @@ class CopyDraftListResponse(BaseModel):
 class CopyDraftDeletedResponse(BaseModel):
     id: str
     deleted_at: datetime
+
+
+class CopyDraftClearResponse(BaseModel):
+    deleted_count: int

@@ -19,6 +19,7 @@ from app.schemas.copy import (
 from app.workers.avatar_talk import build_script_payload, clean_spoken_script
 
 _CHAINABLE_VIDEO_MODES = {"avatar_talk", "seedance_i2v"}
+_COPY_DRAFT_KEEP_LIMIT = 20
 
 
 def _ensure_llm_configured() -> None:
@@ -218,9 +219,30 @@ def create_draft(db: Session, *, tenant_id: str, payload: CopyDraftCreateRequest
         target_platform=payload.target_platform,
     )
     db.add(draft)
+    db.flush()
+    _prune_drafts(db, tenant_id=tenant_id)
     db.commit()
     db.refresh(draft)
     return draft
+
+
+def _prune_drafts(
+    db: Session,
+    *,
+    tenant_id: str,
+    keep: int = _COPY_DRAFT_KEEP_LIMIT,
+) -> int:
+    drafts = list(
+        db.scalars(
+            select(CopyDraft)
+            .where(CopyDraft.tenant_id == tenant_id, CopyDraft.deleted_at.is_(None))
+            .order_by(CopyDraft.created_at.desc(), CopyDraft.id.desc())
+        )
+    )
+    now = datetime.now(UTC)
+    for draft in drafts[keep:]:
+        draft.deleted_at = now
+    return len(drafts[keep:])
 
 
 def list_drafts(
@@ -260,3 +282,19 @@ def delete_draft(db: Session, *, tenant_id: str, draft_id: str) -> CopyDraft:
     db.commit()
     db.refresh(draft)
     return draft
+
+
+def clear_drafts(db: Session, *, tenant_id: str) -> int:
+    drafts = list(
+        db.scalars(
+            select(CopyDraft).where(
+                CopyDraft.tenant_id == tenant_id,
+                CopyDraft.deleted_at.is_(None),
+            )
+        )
+    )
+    now = datetime.now(UTC)
+    for draft in drafts:
+        draft.deleted_at = now
+    db.commit()
+    return len(drafts)

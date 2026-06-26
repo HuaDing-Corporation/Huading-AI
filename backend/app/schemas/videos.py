@@ -240,6 +240,7 @@ class VideoRead(BaseModel):
     title: str
     prompt: str
     mode: str
+    kind: str | None = None
     status: str
     progress: int
     topic: str | None = None
@@ -261,3 +262,11 @@ class VideoRead(BaseModel):
 class VideoListResponse(BaseModel):
     items: list[VideoRead]
     total: int | None = None
+
+
+class VideoDeletedResponse(BaseModel):
+    deleted: bool
+
+
+class VideoClearResponse(BaseModel):
+    deleted_count: int

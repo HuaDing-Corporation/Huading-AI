@@ -17,6 +17,7 @@ from app.core.logging import get_logger
 from app.db.models import Asset, TaskAsset, VideoTask
 from app.db.session import SessionLocal
 from app.providers.base import invoke, resolve
+from app.services.history import prune_video_history_best_effort
 from app.services.progress import build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
 from app.services.storage.base import ObjectStorage
@@ -134,6 +135,7 @@ def _mark_failed(
     error_message: str,
     error_code: str,
     store,
+    storage: ObjectStorage,
 ) -> None:
     with SessionLocal() as db:
         task = db.get(VideoTask, task_id)
@@ -147,6 +149,13 @@ def _mark_failed(
         task.finished_at = datetime.now(UTC)
         release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
         db.commit()
+        prune_video_history_best_effort(
+            db,
+            tenant_id=tenant_id,
+            mode="photo",
+            storage=storage,
+            keep=20,
+        )
     store.update(
         scoped_task_id(tenant_id, task_id),
         status="failed",
@@ -281,6 +290,13 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                 cost_cents=0,
             )
             db.commit()
+            prune_video_history_best_effort(
+                db,
+                tenant_id=tenant_id,
+                mode="photo",
+                storage=storage,
+                keep=20,
+            )
 
             playback_url = storage.presign_get_url(
                 output_key,
@@ -322,6 +338,7 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             error_message=error_message,
             error_code=error_code,
             store=store,
+            storage=storage,
         )
         return {
             "status": "FAILURE",

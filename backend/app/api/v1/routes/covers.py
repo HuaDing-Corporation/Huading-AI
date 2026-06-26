@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query, Request, status
@@ -6,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import CurrentUserDependency, DbSessionDependency, get_object_storage
 from app.core.config import settings
 from app.core.exceptions import AppError
+from app.core.logging import get_logger
 from app.db.models import Asset, TaskAsset, User, VideoTask
 from app.schemas.covers import (
     CoverFromFrameRequest,
@@ -23,9 +25,11 @@ from app.services.covers import (
     extract_frame_candidates,
     extract_frame_cover,
 )
+from app.services.history import prune_video_history
 from app.services.storage.base import ObjectStorage
 
 router = APIRouter()
+logger = get_logger(__name__)
 ObjectStorageDependency = Depends(get_object_storage)
 
 
@@ -122,9 +126,35 @@ def cover_from_frame(
             status_code=422,
         ) from exc
 
+    cover_task_id = str(uuid4())
     cover_id = str(uuid4())
-    storage_key = f"tenants/{user.tenant_id}/covers/{task.id}/{cover_id}.png"
+    storage_key = f"tenants/{user.tenant_id}/photos/{cover_task_id}/output.png"
     storage.put_bytes(storage_key, cover.image_bytes, content_type="image/png")
+    cover_task = VideoTask(
+        id=cover_task_id,
+        tenant_id=user.tenant_id,
+        created_by_user_id=user.id,
+        status="done",
+        topic=title["text"] if title else task.topic,
+        script=None,
+        mode="photo",
+        video_mode="photo",
+        progress=100,
+        storage_bucket=storage.bucket,
+        storage_key=storage_key,
+        thumbnail_key=storage_key,
+        content_type="image/png",
+        size_bytes=len(cover.image_bytes),
+        finished_at=datetime.now(UTC),
+        params={
+            "kind": "cover",
+            "purpose": "cover",
+            "source": "frame",
+            "source_video_task_id": task.id,
+            "timestamp_sec": payload.timestamp_sec,
+            "layout_template_id": payload.layout_template_id,
+        },
+    )
     asset = Asset(
         id=cover_id,
         tenant_id=user.tenant_id,
@@ -142,16 +172,25 @@ def cover_from_frame(
             "purpose": "cover",
             "source": "frame",
             "video_task_id": task.id,
+            "source_video_task_id": task.id,
             "timestamp_sec": payload.timestamp_sec,
             "layout_template_id": payload.layout_template_id,
             "title": title,
         },
     )
-    db.add(asset)
+    db.add_all([cover_task, asset])
     db.flush()
-    db.add(TaskAsset(video_task_id=task.id, asset_id=asset.id, role="output_image"))
-    task.thumbnail_key = storage_key
+    db.add(TaskAsset(video_task_id=cover_task.id, asset_id=asset.id, role="output_image"))
     db.commit()
+    try:
+        prune_video_history(db, tenant_id=user.tenant_id, mode="photo", storage=storage)
+    except Exception as exc:  # pragma: no cover - non-blocking cleanup guard
+        logger.warning(
+            "cover_history_prune_failed",
+            tenant_id=user.tenant_id,
+            source_video_task_id=task.id,
+            error=str(exc),
+        )
 
     return ok(
         request,
