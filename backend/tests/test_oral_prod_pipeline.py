@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import select
 
-from app.api.deps import get_object_storage
+from app.api.deps import get_object_storage, get_progress_store
 from app.db.models import (
     Asset,
     CreditRate,
@@ -26,6 +26,8 @@ class _FakeStorage:
     def __init__(self) -> None:
         self.bucket = "cover-test-bucket"
         self.saved: dict[str, tuple[bytes, str]] = {}
+        self.deleted: list[str] = []
+        self.fail_deletes = False
 
     def put_bytes(self, key: str, content: bytes, *, content_type: str) -> str:
         self.saved[key] = (content, content_type)
@@ -43,6 +45,17 @@ class _FakeStorage:
     ) -> str:
         suffix = "&download=1" if download_filename else ""
         return f"https://storage.test/{key}?ttl={expires_in}{suffix}"
+
+    def delete_object(self, key: str) -> None:
+        self.deleted.append(key)
+        if self.fail_deletes:
+            raise RuntimeError("delete failed")
+        self.saved.pop(key, None)
+
+
+class _MemProgressStore:
+    def read(self, _task_id: str) -> dict | None:
+        return None
 
 
 def _seed_billing(db, tenant_id: str) -> None:
@@ -510,7 +523,7 @@ def test_cover_candidates_hide_cross_tenant_and_reject_unfinished(
     assert unfinished.json()["error"]["code"] == "VIDEO_TASK_NOT_READY"
 
 
-def test_cover_from_frame_stores_cover_asset_and_updates_thumbnail(
+def test_cover_from_frame_stores_cover_photo_history_item(
     monkeypatch,
     auth_context,
     auth_db,
@@ -571,14 +584,273 @@ def test_cover_from_frame_stores_cover_asset_and_updates_thumbnail(
     assert storage.saved[storage_key] == (b"cover-png", "image/png")
     with auth_db() as db:
         asset = db.get(Asset, cover["id"])
-        task = db.get(VideoTask, "oral-cover-task")
+        source_task = db.get(VideoTask, "oral-cover-task")
         link = db.scalars(select(TaskAsset).where(TaskAsset.asset_id == cover["id"])).one()
+        cover_task = db.get(VideoTask, link.video_task_id)
     assert asset.type == "generated_image"
     assert asset.metadata_["kind"] == "cover"
     assert asset.metadata_["purpose"] == "cover"
     assert asset.storage_key == storage_key
-    assert task.thumbnail_key == storage_key
+    assert source_task.thumbnail_key is None
+    assert cover_task.mode == "photo"
+    assert cover_task.video_mode == "photo"
+    assert cover_task.status == "done"
+    assert cover_task.params["kind"] == "cover"
+    assert cover_task.params["source_video_task_id"] == "oral-cover-task"
+    assert cover_task.storage_key == storage_key
+    assert cover_task.thumbnail_key == storage_key
     assert link.role == "output_image"
+
+
+def test_video_list_filters_photo_covers_by_kind(auth_context, auth_db) -> None:
+    storage = _FakeStorage()
+    with auth_db() as db:
+        db.add_all(
+            [
+                VideoTask(
+                    id="cover-photo",
+                    tenant_id=auth_context["tenant_id"],
+                    created_by_user_id=auth_context["user_id"],
+                    mode="photo",
+                    video_mode="photo",
+                    status="done",
+                    progress=100,
+                    topic="cover",
+                    storage_key=f"tenants/{auth_context['tenant_id']}/covers/cover-photo.png",
+                    thumbnail_key=f"tenants/{auth_context['tenant_id']}/covers/cover-photo.png",
+                    params={"kind": "cover"},
+                ),
+                VideoTask(
+                    id="plain-photo",
+                    tenant_id=auth_context["tenant_id"],
+                    created_by_user_id=auth_context["user_id"],
+                    mode="photo",
+                    video_mode="photo",
+                    status="done",
+                    progress=100,
+                    topic="plain",
+                    storage_key=f"tenants/{auth_context['tenant_id']}/photos/plain/output.png",
+                    params={},
+                ),
+            ]
+        )
+        db.commit()
+
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    app.dependency_overrides[get_progress_store] = lambda: _MemProgressStore()
+    try:
+        resp = TestClient(app).get(
+            "/api/v1/videos?mode=photo&kind=cover",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+        app.dependency_overrides.pop(get_progress_store, None)
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["total"] == 1
+    assert data["items"][0]["id"] == "cover-photo"
+    assert data["items"][0]["kind"] == "cover"
+
+
+def test_delete_video_hard_deletes_task_assets_and_media(auth_context, auth_db) -> None:
+    storage = _FakeStorage()
+    with auth_db() as db:
+        task = VideoTask(
+            id="delete-photo",
+            tenant_id=auth_context["tenant_id"],
+            created_by_user_id=auth_context["user_id"],
+            mode="photo",
+            video_mode="photo",
+            status="done",
+            progress=100,
+            storage_key=f"tenants/{auth_context['tenant_id']}/photos/delete-photo/output.png",
+            thumbnail_key=f"tenants/{auth_context['tenant_id']}/photos/delete-photo/thumb.png",
+        )
+        asset = Asset(
+            id="delete-asset",
+            tenant_id=auth_context["tenant_id"],
+            type="generated_image",
+            source="generated",
+            storage_key=f"tenants/{auth_context['tenant_id']}/photos/delete-photo/output.png",
+            status="ready",
+        )
+        db.add_all([task, asset])
+        db.flush()
+        db.add(TaskAsset(video_task_id=task.id, asset_id=asset.id, role="output_image"))
+        db.commit()
+
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        resp = TestClient(app).delete(
+            "/api/v1/videos/delete-photo",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 200
+    assert resp.json()["data"] == {"deleted": True}
+    assert sorted(storage.deleted) == [
+        f"tenants/{auth_context['tenant_id']}/photos/delete-photo/output.png",
+        f"tenants/{auth_context['tenant_id']}/photos/delete-photo/thumb.png",
+    ]
+    with auth_db() as db:
+        assert db.get(VideoTask, "delete-photo") is None
+        assert db.get(Asset, "delete-asset") is None
+        deleted_links = db.scalars(
+            select(TaskAsset).where(TaskAsset.video_task_id == "delete-photo")
+        ).all()
+        assert deleted_links == []
+
+
+def test_delete_video_is_tenant_scoped_and_media_delete_best_effort(
+    auth_context,
+    auth_db,
+) -> None:
+    storage = _FakeStorage()
+    storage.fail_deletes = True
+    with auth_db() as db:
+        db.add(Tenant(id="other-tenant", slug="other-history", name="Other History"))
+        db.add(
+            VideoTask(
+                id="other-task",
+                tenant_id="other-tenant",
+                mode="photo",
+                video_mode="photo",
+            )
+        )
+        db.add(
+            VideoTask(
+                id="best-effort-task",
+                tenant_id=auth_context["tenant_id"],
+                mode="photo",
+                video_mode="photo",
+                status="done",
+                storage_key=f"tenants/{auth_context['tenant_id']}/photos/best/output.png",
+            )
+        )
+        db.commit()
+
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        client = TestClient(app)
+        hidden = client.delete("/api/v1/videos/other-task", headers=auth_context["headers"])
+        deleted = client.delete(
+            "/api/v1/videos/best-effort-task",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert hidden.status_code == 404
+    assert hidden.json()["error"]["code"] == "VIDEO_TASK_NOT_FOUND"
+    assert deleted.status_code == 200
+    assert deleted.json()["data"] == {"deleted": True}
+    assert storage.deleted == [
+        f"tenants/{auth_context['tenant_id']}/photos/best/output.png"
+    ]
+    with auth_db() as db:
+        assert db.get(VideoTask, "best-effort-task") is None
+
+
+def test_clear_videos_requires_mode_and_deletes_only_that_mode(
+    auth_context,
+    auth_db,
+) -> None:
+    storage = _FakeStorage()
+    with auth_db() as db:
+        db.add_all(
+            [
+                VideoTask(
+                    id="photo-clear-1",
+                    tenant_id=auth_context["tenant_id"],
+                    mode="photo",
+                    video_mode="photo",
+                    storage_key=f"tenants/{auth_context['tenant_id']}/photos/1/output.png",
+                ),
+                VideoTask(
+                    id="avatar-keep",
+                    tenant_id=auth_context["tenant_id"],
+                    mode="avatar_talk",
+                    video_mode="avatar_talk",
+                    storage_key=f"tenants/{auth_context['tenant_id']}/videos/avatar/final.mp4",
+                ),
+            ]
+        )
+        db.commit()
+
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        client = TestClient(app)
+        missing_mode = client.delete("/api/v1/videos", headers=auth_context["headers"])
+        cleared = client.delete(
+            "/api/v1/videos?mode=photo",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert missing_mode.status_code == 422
+    assert cleared.status_code == 200
+    assert cleared.json()["data"] == {"deleted_count": 1}
+    with auth_db() as db:
+        assert db.get(VideoTask, "photo-clear-1") is None
+        assert db.get(VideoTask, "avatar-keep") is not None
+
+
+def test_prune_photo_history_after_create_keeps_newest_20(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    with auth_db() as db:
+        _seed_billing(db, auth_context["tenant_id"])
+        for index in range(20):
+            db.add(
+                VideoTask(
+                    id=f"old-photo-{index:02d}",
+                    tenant_id=auth_context["tenant_id"],
+                    mode="photo",
+                    video_mode="photo",
+                    status="done",
+                    progress=100,
+                    storage_key=f"tenants/{auth_context['tenant_id']}/photos/old-{index:02d}.png",
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=index),
+                )
+            )
+        db.commit()
+
+    class _FakeImageTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            return type("Result", (), {"status": "PENDING"})()
+
+    storage = _FakeStorage()
+    monkeypatch.setattr(videos_route, "generate_image_task", _FakeImageTask())
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        resp = TestClient(app).post(
+            "/api/v1/videos",
+            json={"topic": "new photo", "video_mode": "photo"},
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 202
+    with auth_db() as db:
+        photo_ids = {
+            task.id for task in db.scalars(select(VideoTask).where(VideoTask.mode == "photo"))
+        }
+    assert len(photo_ids) == 20
+    assert "old-photo-00" not in photo_ids
+    assert resp.json()["data"]["id"] in photo_ids
+    assert storage.deleted == [
+        f"tenants/{auth_context['tenant_id']}/photos/old-00.png"
+    ]
 
 
 def test_cover_from_frame_returns_friendly_timestamp_error(
@@ -648,6 +920,8 @@ def test_photo_request_accepts_cover_purpose_for_ai_cover(
     assert resp.status_code == 202
     task_id = resp.json()["data"]["id"]
     assert enqueued["args"][0]["purpose"] == "cover"
+    assert enqueued["args"][0]["kind"] == "cover"
     with auth_db() as db:
         task = db.get(VideoTask, task_id)
     assert task.params["purpose"] == "cover"
+    assert task.params["kind"] == "cover"

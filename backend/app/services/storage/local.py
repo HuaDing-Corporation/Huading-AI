@@ -30,6 +30,9 @@ class LocalObjectStorage:
             raise FileNotFoundError(f"object not found: {key}")
         return path.read_bytes()
 
+    def delete_object(self, key: str) -> None:
+        self._resolve(key).unlink(missing_ok=True)
+
     def presign_get_url(
         self,
         key: str,

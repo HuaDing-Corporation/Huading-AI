@@ -18,6 +18,7 @@ from app.api.deps import (
 )
 from app.core.config import settings
 from app.core.exceptions import AppError
+from app.core.logging import get_logger
 from app.db.models import Asset, TaskAsset, User, VideoTask, Voice
 from app.providers.base import invoke, resolve
 from app.schemas.response import ApiResponse, ok
@@ -25,10 +26,19 @@ from app.schemas.videos import (
     ScenePromptRequest,
     ScenePromptResponse,
     VideoAccepted,
+    VideoClearResponse,
+    VideoDeletedResponse,
     VideoEstimateResponse,
     VideoGenerateRequest,
     VideoListResponse,
     VideoRead,
+)
+from app.services.history import (
+    clear_video_history,
+    delete_video_task,
+    history_kind,
+    prune_video_history,
+    video_mode_filter,
 )
 from app.services.progress import ProgressStore
 from app.services.quota import (
@@ -52,6 +62,7 @@ from app.workers.image_gen import generate_image_task
 from app.workers.video_tasks import generate_video_task
 
 router = APIRouter()
+logger = get_logger(__name__)
 ProgressStoreDependency = Depends(get_progress_store)
 ObjectStorageDependency = Depends(get_object_storage)
 CreateVideoPermissionDependency = Depends(require_permission("video:create"))
@@ -79,9 +90,11 @@ def _worker_params(payload: VideoGenerateRequest) -> dict:
         params.pop("subtitle_style", None)
     else:
         params["subtitle_style"] = payload.subtitle_style.model_dump(exclude_none=True)
-    if payload.purpose is None:
+    if payload.purpose == "cover" or payload.kind == "cover":
+        params["purpose"] = "cover"
+        params["kind"] = "cover"
+    else:
         params.pop("purpose", None)
-    if payload.kind is None:
         params.pop("kind", None)
     return params
 
@@ -195,6 +208,7 @@ def _video_read(
         title=(task.topic or ("Untitled image" if mode == "photo" else "Untitled video"))[:80],
         prompt=task.topic or "",
         mode=mode,
+        kind=history_kind(task),
         status=status_value,
         progress=_progress(task, snapshot),
         topic=task.topic,
@@ -226,12 +240,20 @@ def list_videos(
     store: ProgressStore = ProgressStoreDependency,
     storage: ObjectStorage = ObjectStorageDependency,
     mode: str | None = Query(default=None, pattern="^(avatar_talk|seedance_i2v|photo)$"),
+    kind: str | None = Query(default=None, pattern="^[A-Za-z0-9_-]{1,40}$"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> ApiResponse[VideoListResponse]:
     query = select(VideoTask).where(VideoTask.tenant_id == user.tenant_id)
     if mode is not None:
-        query = query.where(or_(VideoTask.mode == mode, VideoTask.video_mode == mode))
+        query = query.where(video_mode_filter(mode))
+    if kind is not None:
+        query = query.where(
+            or_(
+                VideoTask.params["kind"].as_string() == kind,
+                VideoTask.params["purpose"].as_string() == kind,
+            )
+        )
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
     tasks = list(
         db.scalars(query.order_by(VideoTask.created_at.desc()).offset(offset).limit(limit))
@@ -383,10 +405,9 @@ def _create_photo_video(
         "image_quality": payload.image_quality,
         "estimated": True,
     }
-    if payload.purpose is not None:
-        params["purpose"] = payload.purpose
-    if payload.kind is not None:
-        params["kind"] = payload.kind
+    if payload.purpose == "cover" or payload.kind == "cover":
+        params["purpose"] = "cover"
+        params["kind"] = "cover"
     task = VideoTask(
         id=task_id,
         tenant_id=user.tenant_id,
@@ -412,6 +433,24 @@ def _create_photo_video(
     db.commit()
     _video_task_tenants[task_id] = user.tenant_id
     return task_id
+
+
+def _prune_after_create(
+    db: Session,
+    *,
+    tenant_id: str,
+    mode: str,
+    storage: ObjectStorage,
+) -> None:
+    try:
+        prune_video_history(db, tenant_id=tenant_id, mode=mode, storage=storage)
+    except Exception as exc:  # pragma: no cover - non-blocking cleanup guard
+        logger.warning(
+            "video_history_prune_failed",
+            tenant_id=tenant_id,
+            mode=mode,
+            error=str(exc),
+        )
 
 
 @router.post("/scene-prompt", response_model=ApiResponse[ScenePromptResponse])
@@ -482,9 +521,11 @@ def create_video(
     payload: VideoGenerateRequest,
     user: User = CreateVideoPermissionDependency,
     db: Session = DbSessionDependency,
+    storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[VideoAccepted]:
     if payload.video_mode == "photo":
         task_id = _create_photo_video(payload, user=user, db=db)
+        _prune_after_create(db, tenant_id=user.tenant_id, mode="photo", storage=storage)
         params = _worker_params(payload)
         params["tenant_id"] = user.tenant_id
         params["video_task_id"] = task_id
@@ -493,6 +534,7 @@ def create_video(
 
     if payload.video_mode == "seedance_i2v":
         task_id = _create_seedance_i2v_video(payload, user=user, db=db)
+        _prune_after_create(db, tenant_id=user.tenant_id, mode="seedance_i2v", storage=storage)
         params = _worker_params(payload)
         params["tenant_id"] = user.tenant_id
         params["video_task_id"] = task_id
@@ -501,6 +543,7 @@ def create_video(
 
     if _is_avatar_talk_requested(payload):
         task_id = _create_avatar_talk_video(payload, user=user, db=db)
+        _prune_after_create(db, tenant_id=user.tenant_id, mode="avatar_talk", storage=storage)
         params = _worker_params(payload)
         params["tenant_id"] = user.tenant_id
         params["video_task_id"] = task_id
@@ -525,6 +568,42 @@ def create_video(
     result = generate_video_task.apply_async(args=[params], task_id=task_id)
     _video_task_tenants[task_id] = user.tenant_id
     return ok(request, VideoAccepted(id=task_id, task_id=task_id, status=result.status))
+
+
+@router.delete("", response_model=ApiResponse[VideoClearResponse])
+def clear_videos(
+    request: Request,
+    user: User = CurrentUserDependency,
+    db: Session = DbSessionDependency,
+    storage: ObjectStorage = ObjectStorageDependency,
+    mode: str = Query(pattern="^(avatar_talk|seedance_i2v|photo)$"),
+) -> ApiResponse[VideoClearResponse]:
+    deleted_count = clear_video_history(
+        db,
+        tenant_id=user.tenant_id,
+        mode=mode,
+        storage=storage,
+    )
+    return ok(request, VideoClearResponse(deleted_count=deleted_count))
+
+
+@router.delete("/{task_id}", response_model=ApiResponse[VideoDeletedResponse])
+def delete_video(
+    request: Request,
+    task_id: str,
+    user: User = CurrentUserDependency,
+    db: Session = DbSessionDependency,
+    storage: ObjectStorage = ObjectStorageDependency,
+) -> ApiResponse[VideoDeletedResponse]:
+    deleted = delete_video_task(
+        db,
+        tenant_id=user.tenant_id,
+        task_id=task_id,
+        storage=storage,
+    )
+    if not deleted:
+        raise AppError("Video task not found.", code="VIDEO_TASK_NOT_FOUND", status_code=404)
+    return ok(request, VideoDeletedResponse(deleted=True))
 
 
 @router.get("/{task_id}", response_model=ApiResponse[VideoRead])

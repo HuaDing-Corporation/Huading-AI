@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import CurrentUserDependency, DbSessionDependency
 from app.db.models import User
 from app.schemas.copy import (
+    CopyDraftClearResponse,
     CopyDraftCreateRequest,
     CopyDraftDeletedResponse,
     CopyDraftListResponse,
@@ -18,6 +19,7 @@ from app.schemas.copy import (
 )
 from app.schemas.response import ApiResponse, ok
 from app.services.copy import (
+    clear_drafts,
     create_draft,
     delete_draft,
     generate_titles,
@@ -108,6 +110,16 @@ def draft_detail(
 ) -> ApiResponse[CopyDraftRead]:
     draft = get_draft(db, tenant_id=user.tenant_id, draft_id=draft_id)
     return ok(request, CopyDraftRead.model_validate(draft))
+
+
+@router.delete("/drafts", response_model=ApiResponse[CopyDraftClearResponse])
+def draft_clear(
+    request: Request,
+    user: User = CurrentUserDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[CopyDraftClearResponse]:
+    deleted_count = clear_drafts(db, tenant_id=user.tenant_id)
+    return ok(request, CopyDraftClearResponse(deleted_count=deleted_count))
 
 
 @router.delete("/drafts/{draft_id}", response_model=ApiResponse[CopyDraftDeletedResponse])

@@ -53,6 +53,9 @@ class S3ObjectStorage:
         response = self.client.get_object(Bucket=self.bucket, Key=key)
         return response["Body"].read()
 
+    def delete_object(self, key: str) -> None:
+        self.client.delete_object(Bucket=self.bucket, Key=key)
+
     def presign_get_url(
         self,
         key: str,
