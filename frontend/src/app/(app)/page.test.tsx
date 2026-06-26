@@ -18,6 +18,9 @@ vi.mock("@/components/workbench/photo-image-form", () => ({
 vi.mock("@/components/workbench/copywriting-form", () => ({
   CopywritingForm: () => <div data-testid="copywriting-form" />
 }));
+vi.mock("@/components/workbench/ecom-image-cutout-form", () => ({
+  EcomImageCutoutForm: () => <div data-testid="ecom-image-form" />
+}));
 vi.mock("@/components/tasks/generation-history", () => ({
   GenerationHistory: () => <div data-testid="history" />
 }));
@@ -52,5 +55,10 @@ describe("Workbench mode switch (数字人口播 / 电商带货)", () => {
     fireEvent.click(screen.getByRole("button", { name: /文案仿写/ }));
     expect(screen.getByTestId("copywriting-form")).toBeInTheDocument();
     expect(screen.queryByTestId("photo-form")).not.toBeInTheDocument();
+
+    // Switch to 电商图 → cutout form (fifth mode).
+    fireEvent.click(screen.getByRole("button", { name: /电商图/ }));
+    expect(screen.getByTestId("ecom-image-form")).toBeInTheDocument();
+    expect(screen.queryByTestId("copywriting-form")).not.toBeInTheDocument();
   });
 });

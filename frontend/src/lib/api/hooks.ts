@@ -10,6 +10,7 @@ import { uploadImage, uploadProductImage } from "@/lib/api/uploads";
 import { listVoices } from "@/lib/api/voices";
 import { listSubtitleTemplates } from "@/lib/api/oral";
 import { createCoverFromFrame, getFrameCandidates } from "@/lib/api/covers";
+import { cutoutImage, cutoutImageBatch } from "@/lib/api/ecom-images";
 import { clearVideos, createVideo, deleteVideo, estimateVideo, generateScenePrompt, getVideo, listVideos, listVideosPage } from "@/lib/api/videos";
 import type {
   CopyDraftCreateRequest,
@@ -18,6 +19,8 @@ import type {
   CopyTopicsRequest,
   CoverFromFrameRequest,
   CreateVideoRequest,
+  CutoutBatchRequest,
+  CutoutRequest,
   ScriptGenerateRequest
 } from "@/lib/api/types";
 import { useAuth } from "@/lib/auth/auth-context";
@@ -96,6 +99,13 @@ export function useFrameCandidates(videoTaskId: string | undefined, count = 5) {
 export function useCoverFromFrame() {
   // 截帧封面是 Asset 挂口播任务，不进 photo VideoTask 历史，故不失效图片历史(FIX1)。
   return useMutation({ mutationFn: (body: CoverFromFrameRequest) => createCoverFromFrame(body) });
+}
+// ── 电商图扩展 Phase1 (ECOM-IMG-UI-0001) — 白底图/抠图(单张 + 批量 fan-out)──
+export function useCutoutImage() {
+  return useMutation({ mutationFn: (body: CutoutRequest) => cutoutImage(body) });
+}
+export function useCutoutBatch() {
+  return useMutation({ mutationFn: (body: CutoutBatchRequest) => cutoutImageBatch(body) });
 }
 // ── 文案仿写 + 标题/话题生成 (COPY-UI-0001) — 同步 mutation；草稿列表 infinite query ──
 export function useRewriteCopy() {

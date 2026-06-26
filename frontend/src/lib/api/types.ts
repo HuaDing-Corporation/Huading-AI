@@ -306,3 +306,34 @@ export interface DeleteResult {
 export interface ClearResult {
   deleted_count: number;
 }
+
+// ── 电商图扩展 Phase1 (ECOM-IMG-UI-0001) — 白底图/抠图(单张 + 批量) ──
+export type CutoutBackground = "white" | "transparent";
+
+// POST /ecom-images/cutout（内部创建 photo VideoTask kind=ecom_cutout，返 task_id 供轮询）
+export interface CutoutRequest {
+  source_asset_id: string;
+  background: CutoutBackground;
+}
+export interface CutoutResponse {
+  task_id: string;
+  status: string;
+}
+
+// POST /ecom-images/cutout/batch（fan-out N clamp 1..20）
+export interface CutoutBatchItem {
+  source_asset_id: string;
+  background: CutoutBackground;
+}
+export interface CutoutBatchRequest {
+  items: CutoutBatchItem[];
+}
+export interface CutoutBatchTask {
+  task_id: string;
+  source_asset_id: string;
+  status: string;
+}
+export interface CutoutBatchResponse {
+  batch_id: string;
+  tasks: CutoutBatchTask[];
+}
