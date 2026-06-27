@@ -127,7 +127,24 @@ export const copy = {
     ecomDownload: "下载",
     ecomDownloadAll: "批量下载",
     ecomBatchOverLimit: "批量最多 20 张，超出部分未添加",
-    removeImage: "移除图片"
+    removeImage: "移除图片",
+    // 电商图 · AI 模特 (ECOM-MODEL-UI-0001) — 子工具切换 + 模特偏好
+    ecomSubToolLabel: "电商图工具",
+    ecomSubToolCutout: "白底图",
+    ecomSubToolModel: "AI 模特",
+    ecomModeGroupLabel: "生成方式",
+    ecomModelTitle: "AI 模特",
+    ecomModelSubtitle: "上传商品图，AI 生成上身模特展示图；支持批量",
+    ecomGenderLabel: "模特性别",
+    ecomGenderFemale: "女",
+    ecomGenderMale: "男",
+    ecomGenderAny: "不限",
+    ecomStyleLabel: "风格预设",
+    ecomStyleLoading: "加载风格预设…",
+    ecomStyleError: "风格预设加载失败，请重试",
+    ecomCustomLabel: "自定义补充（可选）",
+    ecomCustomPlaceholder: "补充场景 / 姿态 / 氛围，如：暖光、街头、微笑站姿（≤200 字）",
+    ecomModelCompliance: "模特图为 AI 生成，商品以实物为准"
   },
   confirm: {
     title: "确定生成",

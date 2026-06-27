@@ -18,8 +18,8 @@ vi.mock("@/components/workbench/photo-image-form", () => ({
 vi.mock("@/components/workbench/copywriting-form", () => ({
   CopywritingForm: () => <div data-testid="copywriting-form" />
 }));
-vi.mock("@/components/workbench/ecom-image-cutout-form", () => ({
-  EcomImageCutoutForm: () => <div data-testid="ecom-image-form" />
+vi.mock("@/components/workbench/ecom-image-workbench", () => ({
+  EcomImageWorkbench: () => <div data-testid="ecom-image-form" />
 }));
 vi.mock("@/components/tasks/generation-history", () => ({
   GenerationHistory: () => <div data-testid="history" />

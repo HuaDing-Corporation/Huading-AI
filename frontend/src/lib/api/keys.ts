@@ -17,6 +17,9 @@ export const copyKeys = {
   drafts: () => [...copyKeys.all, "drafts"] as const
 };
 
+// 电商图扩展 Phase2 (ECOM-MODEL-UI-0001) — AI 模特风格预设
+export const ecomModelStylesKey = ["ecom-images", "model-styles"] as const;
+
 export const meKey = ["me"] as const;
 export const quotaKey = ["quota"] as const;
 export const voicesKey = ["voices"] as const;

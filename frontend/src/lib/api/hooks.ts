@@ -2,7 +2,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 
 import { fetchMe } from "@/lib/api/auth";
 import { listAvatarPresets } from "@/lib/api/avatars";
-import { avatarPresetsKey, copyKeys, coverKeys, meKey, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
+import { avatarPresetsKey, copyKeys, coverKeys, ecomModelStylesKey, meKey, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
 import { getQuota } from "@/lib/api/quota";
 import { clearCopyDrafts, deleteCopyDraft, generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
 import { generateScript } from "@/lib/api/scripts";
@@ -10,7 +10,7 @@ import { uploadImage, uploadProductImage } from "@/lib/api/uploads";
 import { listVoices } from "@/lib/api/voices";
 import { listSubtitleTemplates } from "@/lib/api/oral";
 import { createCoverFromFrame, getFrameCandidates } from "@/lib/api/covers";
-import { cutoutImage, cutoutImageBatch } from "@/lib/api/ecom-images";
+import { cutoutImage, cutoutImageBatch, listModelStyles, modelImage, modelImageBatch } from "@/lib/api/ecom-images";
 import { clearVideos, createVideo, deleteVideo, estimateVideo, generateScenePrompt, getVideo, listVideos, listVideosPage } from "@/lib/api/videos";
 import type {
   CopyDraftCreateRequest,
@@ -21,6 +21,8 @@ import type {
   CreateVideoRequest,
   CutoutBatchRequest,
   CutoutRequest,
+  ModelBatchRequest,
+  ModelRequest,
   ScriptGenerateRequest
 } from "@/lib/api/types";
 import { useAuth } from "@/lib/auth/auth-context";
@@ -106,6 +108,17 @@ export function useCutoutImage() {
 }
 export function useCutoutBatch() {
   return useMutation({ mutationFn: (body: CutoutBatchRequest) => cutoutImageBatch(body) });
+}
+// ── 电商图扩展 Phase2 (ECOM-MODEL-UI-0001) — AI 模特风格预设 + 单张/批量生成 ──
+export function useModelStyles() {
+  const { session } = useAuth();
+  return useQuery({ queryKey: ecomModelStylesKey, queryFn: listModelStyles, enabled: !!session });
+}
+export function useModelImage() {
+  return useMutation({ mutationFn: (body: ModelRequest) => modelImage(body) });
+}
+export function useModelBatch() {
+  return useMutation({ mutationFn: (body: ModelBatchRequest) => modelImageBatch(body) });
 }
 // ── 文案仿写 + 标题/话题生成 (COPY-UI-0001) — 同步 mutation；草稿列表 infinite query ──
 export function useRewriteCopy() {

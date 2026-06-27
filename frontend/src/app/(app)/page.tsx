@@ -8,7 +8,7 @@ import { EcomVideoForm } from "@/components/workbench/ecom-video-form";
 import { NewVideoForm } from "@/components/workbench/new-video-form";
 import { PhotoImageForm } from "@/components/workbench/photo-image-form";
 import { CopywritingForm } from "@/components/workbench/copywriting-form";
-import { EcomImageCutoutForm } from "@/components/workbench/ecom-image-cutout-form";
+import { EcomImageWorkbench } from "@/components/workbench/ecom-image-workbench";
 import { GenerationHistory } from "@/components/tasks/generation-history";
 import { Sidebar } from "@/components/layout/sidebar";
 import { TaskList } from "@/components/tasks/task-list";
@@ -117,7 +117,7 @@ export default function Home() {
             ) : mode === "copywriting" ? (
               <CopywritingForm onUseInVideo={useCopyInVideo} />
             ) : mode === "ecom_image" ? (
-              <EcomImageCutoutForm />
+              <EcomImageWorkbench />
             ) : (
               <PhotoImageForm />
             )}

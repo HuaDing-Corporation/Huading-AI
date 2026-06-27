@@ -249,5 +249,46 @@ export const handlers = [
       return { task_id: id, source_asset_id: it.source_asset_id, status: "queued" };
     });
     return ok({ batch_id: batchId, tasks });
+  }),
+
+  // ── 电商图扩展 Phase2 (ECOM-MODEL-UI-0001) — AI 模特(单张 + 批量) mock ──
+  // 忠实后端：model-styles 返真列表；单张/批量塞真 photo VideoTask(kind=ecom_model, done)进
+  // videos store，使现有 GET /videos/:id 轮询拿到 done + 模特图；批量 N clamp 1..20。非伪造(吸取教训)。
+  // 忠实后端 EcomModelStyle(仅 id+name)与真实预设列表(studio_white/lifestyle/street)，不伪造 thumbnail。
+  http.get(`${BASE}/api/v1/ecom-images/model-styles`, () =>
+    ok({
+      styles: [
+        { id: "studio_white", name: "Studio white" },
+        { id: "lifestyle", name: "Lifestyle" },
+        { id: "street", name: "Street style" }
+      ]
+    })
+  ),
+  http.post(`${BASE}/api/v1/ecom-images/model`, async ({ request }) => {
+    const body = (await request.json()) as { source_asset_id: string; gender: string; style_id: string };
+    const id = `mock-${++videoSeq}`;
+    const url = `https://mock.local/model-${body.style_id || "studio"}.png`;
+    videos.set(id, {
+      id, status: "done", progress: 100, topic: "AI 模特图",
+      mode: "photo", kind: "ecom_model", created_at: new Date(0).toISOString(),
+      playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url
+    });
+    return ok({ task_id: id, status: "queued" });
+  }),
+  http.post(`${BASE}/api/v1/ecom-images/model/batch`, async ({ request }) => {
+    const body = (await request.json()) as { items: { source_asset_id: string; style_id: string }[] };
+    const items = (body.items ?? []).slice(0, 20); // N clamp 上界 20
+    const batchId = `batch-${++videoSeq}`;
+    const tasks = items.map((it) => {
+      const id = `mock-${++videoSeq}`;
+      const url = `https://mock.local/model-${it.style_id || "studio"}.png`;
+      videos.set(id, {
+        id, status: "done", progress: 100, topic: "批量 AI 模特",
+        mode: "photo", kind: "ecom_model", created_at: new Date(0).toISOString(),
+        playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url
+      });
+      return { task_id: id, source_asset_id: it.source_asset_id, status: "queued" };
+    });
+    return ok({ batch_id: batchId, tasks });
   })
 ];
