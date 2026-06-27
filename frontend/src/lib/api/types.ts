@@ -382,3 +382,48 @@ export interface ModelBatchResponse {
   batch_id: string;
   tasks: ModelBatchTask[];
 }
+
+// ── 电商图扩展 Phase3 (ECOM-POSTER-UI-0001) — 营销海报(单张 + 批量) ──
+// 对齐后端 EcomPosterRequest(extra="forbid")：template_id/title/subtitle 字段名与后端一致。
+// title/subtitle 为后端必填 key(str,无 min_length→空串允许)，故前端始终发送字符串(空则 "")，
+// 不可省略 key(否则 422)；UI 上仍可留空(可选填写)。
+// GET /ecom-images/poster-templates（版式预设列表；仅 id+name）
+export interface PosterTemplate {
+  id: string;
+  name: string;
+}
+export interface PosterTemplatesResponse {
+  templates: PosterTemplate[];
+}
+
+// POST /ecom-images/poster（内部创建 photo VideoTask kind=ecom_poster，返 task_id 供轮询）
+export interface PosterRequest {
+  source_asset_id: string;
+  template_id: string; // 版式预设，必选
+  title: string; // 标题，后端必填(空串允许)，前端 UI ≤30
+  subtitle: string; // 自定义一行，后端必填(空串允许)，前端 UI ≤40
+}
+export interface PosterResponse {
+  task_id: string;
+  status: string;
+}
+
+// POST /ecom-images/poster/batch（fan-out N clamp 1..20）
+export interface PosterBatchItem {
+  source_asset_id: string;
+  template_id: string;
+  title: string;
+  subtitle: string;
+}
+export interface PosterBatchRequest {
+  items: PosterBatchItem[];
+}
+export interface PosterBatchTask {
+  task_id: string;
+  source_asset_id: string;
+  status: string;
+}
+export interface PosterBatchResponse {
+  batch_id: string;
+  tasks: PosterBatchTask[];
+}

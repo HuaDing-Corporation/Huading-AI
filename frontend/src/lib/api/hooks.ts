@@ -2,7 +2,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 
 import { fetchMe } from "@/lib/api/auth";
 import { listAvatarPresets } from "@/lib/api/avatars";
-import { avatarPresetsKey, copyKeys, coverKeys, ecomModelStylesKey, meKey, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
+import { avatarPresetsKey, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, meKey, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
 import { getQuota } from "@/lib/api/quota";
 import { clearCopyDrafts, deleteCopyDraft, generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
 import { generateScript } from "@/lib/api/scripts";
@@ -10,7 +10,7 @@ import { uploadImage, uploadProductImage } from "@/lib/api/uploads";
 import { listVoices } from "@/lib/api/voices";
 import { listSubtitleTemplates } from "@/lib/api/oral";
 import { createCoverFromFrame, getFrameCandidates } from "@/lib/api/covers";
-import { cutoutImage, cutoutImageBatch, listModelStyles, modelImage, modelImageBatch } from "@/lib/api/ecom-images";
+import { cutoutImage, cutoutImageBatch, listModelStyles, listPosterTemplates, modelImage, modelImageBatch, posterImage, posterImageBatch } from "@/lib/api/ecom-images";
 import { clearVideos, createVideo, deleteVideo, estimateVideo, generateScenePrompt, getVideo, listVideos, listVideosPage } from "@/lib/api/videos";
 import type {
   CopyDraftCreateRequest,
@@ -23,6 +23,8 @@ import type {
   CutoutRequest,
   ModelBatchRequest,
   ModelRequest,
+  PosterBatchRequest,
+  PosterRequest,
   ScriptGenerateRequest
 } from "@/lib/api/types";
 import { useAuth } from "@/lib/auth/auth-context";
@@ -119,6 +121,17 @@ export function useModelImage() {
 }
 export function useModelBatch() {
   return useMutation({ mutationFn: (body: ModelBatchRequest) => modelImageBatch(body) });
+}
+// ── 电商图扩展 Phase3 (ECOM-POSTER-UI-0001) — 营销海报版式预设 + 单张/批量生成 ──
+export function usePosterTemplates() {
+  const { session } = useAuth();
+  return useQuery({ queryKey: ecomPosterTemplatesKey, queryFn: listPosterTemplates, enabled: !!session });
+}
+export function usePosterImage() {
+  return useMutation({ mutationFn: (body: PosterRequest) => posterImage(body) });
+}
+export function usePosterBatch() {
+  return useMutation({ mutationFn: (body: PosterBatchRequest) => posterImageBatch(body) });
 }
 // ── 文案仿写 + 标题/话题生成 (COPY-UI-0001) — 同步 mutation；草稿列表 infinite query ──
 export function useRewriteCopy() {

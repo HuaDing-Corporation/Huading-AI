@@ -132,6 +132,7 @@ export const copy = {
     ecomSubToolLabel: "电商图工具",
     ecomSubToolCutout: "白底图",
     ecomSubToolModel: "AI 模特",
+    ecomSubToolPoster: "营销海报",
     ecomModeGroupLabel: "生成方式",
     ecomModelTitle: "AI 模特",
     ecomModelSubtitle: "上传商品图，AI 生成上身模特展示图；支持批量",
@@ -144,7 +145,17 @@ export const copy = {
     ecomStyleError: "风格预设加载失败，请重试",
     ecomCustomLabel: "自定义补充（可选）",
     ecomCustomPlaceholder: "补充场景 / 姿态 / 氛围，如：暖光、街头、微笑站姿（≤200 字）",
-    ecomModelCompliance: "模特图为 AI 生成，商品以实物为准"
+    ecomModelCompliance: "模特图为 AI 生成，商品以实物为准",
+    // 电商图 · 营销海报 (ECOM-POSTER-UI-0001)
+    ecomPosterTitle: "营销海报",
+    ecomPosterSubtitle: "上传商品图，套版式 + 标题文案，一键生成营销海报；支持批量",
+    ecomTemplateLabel: "版式预设",
+    ecomTemplateLoading: "加载版式预设…",
+    ecomTemplateError: "版式预设加载失败，请重试",
+    ecomPosterTitleLabel: "标题（可选）",
+    ecomPosterTitlePlaceholder: "海报主标题，如：年中大促 全场 5 折",
+    ecomPosterTaglineLabel: "自定义一行（可选）",
+    ecomPosterTaglinePlaceholder: "副标题 / 卖点一行，如：限时 3 天 错过再等一年"
   },
   confirm: {
     title: "确定生成",
