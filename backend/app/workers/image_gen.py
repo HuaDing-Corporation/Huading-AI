@@ -36,6 +36,7 @@ _MODERATION_ERROR_CODE = "IMAGE_MODERATION_BLOCKED"
 _INVALID_REQUEST_ERROR_CODE = "IMAGE_INVALID_REQUEST"
 _ALPHA_MISSING_ERROR_CODE = "IMAGE_ALPHA_MISSING"
 _ECOM_CUTOUT_KIND = "ecom_cutout"
+_ECOM_MODEL_KIND = "ecom_model"
 _SOURCE_IMAGE_STORAGE_KEY_RE = re.compile(
     r"^tenants/[A-Za-z0-9_-]+/[A-Za-z0-9_./-]+\.(?:jpg|jpeg|png|webp)$"
 )
@@ -97,6 +98,10 @@ def _is_cover_request(params: Mapping[str, Any]) -> bool:
 
 def _is_ecom_cutout_request(params: Mapping[str, Any]) -> bool:
     return params.get("kind") == _ECOM_CUTOUT_KIND
+
+
+def _is_ecom_model_request(params: Mapping[str, Any]) -> bool:
+    return params.get("kind") == _ECOM_MODEL_KIND
 
 
 def _ecom_cutout_background(params: Mapping[str, Any]) -> str:
@@ -272,6 +277,7 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
         if not prompt:
             raise ValueError("Image prompt is required.")
         ecom_cutout = _is_ecom_cutout_request(params)
+        ecom_model = _is_ecom_model_request(params)
         ecom_background = _ecom_cutout_background(params)
         if ecom_cutout:
             prompt = _ecom_cutout_prompt(prompt, background=ecom_background)
@@ -365,6 +371,16 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             if ecom_cutout:
                 metadata["kind"] = _ECOM_CUTOUT_KIND
                 metadata["background"] = ecom_background
+                if params.get("source_asset_id"):
+                    metadata["source_asset_id"] = str(params["source_asset_id"])
+            if ecom_model:
+                metadata["kind"] = _ECOM_MODEL_KIND
+                if params.get("gender"):
+                    metadata["gender"] = str(params["gender"])
+                if params.get("style_id"):
+                    metadata["style_id"] = str(params["style_id"])
+                if params.get("extra_prompt"):
+                    metadata["extra_prompt"] = str(params["extra_prompt"])
                 if params.get("source_asset_id"):
                     metadata["source_asset_id"] = str(params["source_asset_id"])
 
