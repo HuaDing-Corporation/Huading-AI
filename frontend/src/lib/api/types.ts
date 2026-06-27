@@ -337,3 +337,48 @@ export interface CutoutBatchResponse {
   batch_id: string;
   tasks: CutoutBatchTask[];
 }
+
+// ── 电商图扩展 Phase2 (ECOM-MODEL-UI-0001) — AI 模特(单张 + 批量) ──
+export type ModelGender = "female" | "male" | "any";
+
+// GET /ecom-images/model-styles（风格预设列表；后端 EcomModelStyle 仅 id+name）
+export interface ModelStyle {
+  id: string;
+  name: string;
+}
+export interface ModelStylesResponse {
+  styles: ModelStyle[];
+}
+
+// POST /ecom-images/model（内部创建 photo VideoTask kind=ecom_model，返 task_id 供轮询）
+// 字段名对齐后端 EcomModelRequest(extra="forbid")：自定义补充 = extra_prompt（非 custom_prompt，否则 422）。
+export interface ModelRequest {
+  source_asset_id: string;
+  gender: ModelGender;
+  style_id: string;
+  extra_prompt?: string; // 自定义补充（前端 UI ≤200；后端无长度限制）
+}
+export interface ModelResponse {
+  task_id: string;
+  status: string;
+}
+
+// POST /ecom-images/model/batch（fan-out N clamp 1..20）
+export interface ModelBatchItem {
+  source_asset_id: string;
+  gender: ModelGender;
+  style_id: string;
+  extra_prompt?: string;
+}
+export interface ModelBatchRequest {
+  items: ModelBatchItem[];
+}
+export interface ModelBatchTask {
+  task_id: string;
+  source_asset_id: string;
+  status: string;
+}
+export interface ModelBatchResponse {
+  batch_id: string;
+  tasks: ModelBatchTask[];
+}

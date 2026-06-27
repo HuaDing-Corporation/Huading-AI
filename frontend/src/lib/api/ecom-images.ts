@@ -3,7 +3,13 @@ import type {
   CutoutBatchRequest,
   CutoutBatchResponse,
   CutoutRequest,
-  CutoutResponse
+  CutoutResponse,
+  ModelBatchRequest,
+  ModelBatchResponse,
+  ModelRequest,
+  ModelResponse,
+  ModelStyle,
+  ModelStylesResponse
 } from "@/lib/api/types";
 
 /**
@@ -20,4 +26,25 @@ export function cutoutImage(body: CutoutRequest): Promise<CutoutResponse> {
 /** 批量抠图 → fan-out N(clamp 1..20)个 photo 任务,返 { batch_id, tasks:[{task_id,...}] }。 */
 export function cutoutImageBatch(body: CutoutBatchRequest): Promise<CutoutBatchResponse> {
   return apiFetch<CutoutBatchResponse>("/api/v1/ecom-images/cutout/batch", { method: "POST", body });
+}
+
+/**
+ * 电商图扩展 Phase2 (ECOM-MODEL-UI-0001) — AI 模特。单张/批量同样返回已创建 photo
+ * VideoTask(kind=ecom_model)的 task_id,经 tasks-context.trackExisting 轮询。
+ */
+
+/** AI 模特风格预设列表(GET)。 */
+export async function listModelStyles(): Promise<ModelStyle[]> {
+  const res = await apiFetch<ModelStylesResponse>("/api/v1/ecom-images/model-styles", { method: "GET" });
+  return res?.styles ?? [];
+}
+
+/** 单张 AI 模特 → { task_id, status }。 */
+export function modelImage(body: ModelRequest): Promise<ModelResponse> {
+  return apiFetch<ModelResponse>("/api/v1/ecom-images/model", { method: "POST", body });
+}
+
+/** 批量 AI 模特 → fan-out N(clamp 1..20)个 photo 任务,返 { batch_id, tasks:[{task_id,...}] }。 */
+export function modelImageBatch(body: ModelBatchRequest): Promise<ModelBatchResponse> {
+  return apiFetch<ModelBatchResponse>("/api/v1/ecom-images/model/batch", { method: "POST", body });
 }
