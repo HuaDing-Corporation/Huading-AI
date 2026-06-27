@@ -108,7 +108,26 @@ export const copy = {
     subtitlePositionCenter: "居中",
     subtitlePositionBottom: "底部",
     subtitleFontSizeRange: "字号需在 16–96",
-    subtitlePreviewSample: "字幕预览示例文本"
+    subtitlePreviewSample: "字幕预览示例文本",
+    // 电商图 / 白底图抠图 (ECOM-IMG-UI-0001)
+    modeEcomImage: "电商图",
+    ecomCutoutTitle: "白底图 / 抠图",
+    ecomCutoutSubtitle: "上传商品图，抠出商品换白底或透明底；支持批量",
+    ecomModeSingle: "单张",
+    ecomModeBatch: "批量",
+    ecomBgLabel: "背景",
+    ecomBgWhite: "白底",
+    ecomBgTransparent: "透明底",
+    ecomUploadLabel: "商品图",
+    ecomUploadBatchLabel: "商品图（可多选，最多 20 张）",
+    ecomUploadRequired: "请先上传商品图",
+    ecomGenerate: "生成",
+    ecomGenerating: "生成中…",
+    ecomResultsLabel: "结果",
+    ecomDownload: "下载",
+    ecomDownloadAll: "批量下载",
+    ecomBatchOverLimit: "批量最多 20 张，超出部分未添加",
+    removeImage: "移除图片"
   },
   confirm: {
     title: "确定生成",
@@ -132,7 +151,9 @@ export const copy = {
     imageModeration: "内容被 AI 安全系统拦截，请调整描述后重试（避免敏感或人体性暗示内容）",
     imageConnection: "网络连接失败，请检查代理 / 网络后重试",
     imageInvalid: "生成参数有误，请调整尺寸 / 质量或描述后重试",
-    imageGeneric: "图片生成失败，请重试"
+    imageGeneric: "图片生成失败，请重试",
+    // 抠图透明底专属（IMAGE_ALPHA_MISSING）：可操作文案，不落通用兜底
+    imageAlphaMissing: "透明底生成失败：未返回透明像素，请重试或改用白底"
   },
   tasks: {
     title: "生成任务",

@@ -34,6 +34,10 @@ function sseStream(id: string, fail = false): Response {
           thumbnail_url: "https://mock.local/t.jpg"
         }
       ];
+  // 预 seeded 终态(cutout/cover：POST 时已 done + 真实产物 URL)→ SSE done 帧不得用通用
+  // v.mp4 覆盖其 URL，否则轮询 reconcile 会拿到错图(mock 忠实，吸取教训)。
+  const seeded = videos.get(id);
+  const preseeded = !fail && seeded?.status === "done" && Boolean(seeded.playback_url);
   const stream = new ReadableStream({
     start(controller) {
       let i = 0;
@@ -42,12 +46,13 @@ function sseStream(id: string, fail = false): Response {
         const f = frames[i++];
         controller.enqueue(enc.encode(`data: ${JSON.stringify(f)}\n\n`));
         const term = f.status === "done" || f.status === "failed";
-        if (term) {
-          // reflect terminal into the detail store so done-reconcile works
-          videos.set(id, { ...(videos.get(id) ?? {}), ...f, id });
+        if (term && preseeded) {
+          // 仅确认 done，保留 POST 塞入的真实产物 URL(cutout-white/transparent.png)
+          videos.set(id, { ...(videos.get(id) ?? {}), status: "done", progress: 100, id });
           return controller.close();
         }
         videos.set(id, { ...(videos.get(id) ?? {}), ...f, id });
+        if (term) return controller.close();
         setTimeout(push, 120);
       };
       push();
@@ -207,5 +212,42 @@ export const handlers = [
       download_url: "https://mock.local/cover.png?dl=1", thumbnail_url: "https://mock.local/cover.png"
     });
     return ok({ cover: { id, image_url: "https://mock.local/cover.png", width: 1280, height: 720 } });
+  }),
+
+  // ── 电商图扩展 Phase1 (ECOM-IMG-UI-0001) — 白底图/抠图(单张 + 批量) mock ──
+  // 忠实后端：塞真 photo VideoTask(kind=ecom_cutout, done)进 videos store，使现有
+  // GET /videos/:id 轮询拿到 done + 图；批量 N clamp 1..20。非伪造掩盖(吸取历史教训)。
+  http.post(`${BASE}/api/v1/ecom-images/cutout`, async ({ request }) => {
+    const body = (await request.json()) as { source_asset_id: string; background: string };
+    const id = `mock-${++videoSeq}`;
+    const url =
+      body.background === "transparent"
+        ? "https://mock.local/cutout-transparent.png"
+        : "https://mock.local/cutout-white.png";
+    videos.set(id, {
+      id, status: "done", progress: 100, topic: body.background === "transparent" ? "透明底商品图" : "白底商品图",
+      mode: "photo", kind: "ecom_cutout", created_at: new Date(0).toISOString(),
+      playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url
+    });
+    return ok({ task_id: id, status: "queued" });
+  }),
+  http.post(`${BASE}/api/v1/ecom-images/cutout/batch`, async ({ request }) => {
+    const body = (await request.json()) as { items: { source_asset_id: string; background: string }[] };
+    const items = (body.items ?? []).slice(0, 20); // N clamp 上界 20
+    const batchId = `batch-${++videoSeq}`;
+    const tasks = items.map((it) => {
+      const id = `mock-${++videoSeq}`;
+      const url =
+        it.background === "transparent"
+          ? "https://mock.local/cutout-transparent.png"
+          : "https://mock.local/cutout-white.png";
+      videos.set(id, {
+        id, status: "done", progress: 100, topic: "批量抠图",
+        mode: "photo", kind: "ecom_cutout", created_at: new Date(0).toISOString(),
+        playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url
+      });
+      return { task_id: id, source_asset_id: it.source_asset_id, status: "queued" };
+    });
+    return ok({ batch_id: batchId, tasks });
   })
 ];

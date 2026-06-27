@@ -147,7 +147,7 @@ export function ImagePicker({
           <button
             type="button"
             onClick={clearUpload}
-            aria-label="移除图片"
+            aria-label={copy.workbench.removeImage}
             className="flex h-8 w-8 flex-none items-center justify-center rounded-mark text-ink-soft hover:bg-glass-hover"
           >
             <X size={16} strokeWidth={2} />

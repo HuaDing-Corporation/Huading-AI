@@ -26,6 +26,12 @@ interface TasksContextValue {
   /** Re-fetch one video (e.g. to refresh an expired presigned playback URL). */
   refreshTask: (taskId: string) => Promise<void>;
   /**
+   * Track an already-created task by id — e.g. POST /ecom-images/cutout(/batch)
+   * returns task_id(s) for backend-created photo tasks (kind=ecom_cutout). Adds the
+   * task and subscribes to its SSE/poll progress without re-creating via createVideo.
+   */
+  trackExisting: (taskId: string, topic: string, mode?: string | null) => void;
+  /**
    * Re-submit the original request for a failed task, creating a new task.
    * Resolves to the new task id or throws if the original request is unknown.
    */
@@ -222,6 +228,31 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
     [subscribe]
   );
 
+  // Track a backend-created task (cutout/batch) by id — reuse subscribe()'s full
+  // SSE/poll/watchdog/reconcile machinery; product lands in TaskList + image history.
+  const trackExisting = useCallback(
+    (taskId: string, topic: string, mode?: string | null): void => {
+      setTasks((prev) =>
+        prev.some((t) => t.taskId === taskId)
+          ? prev
+          : [
+              {
+                taskId,
+                topic,
+                mode: mode ?? null,
+                status: "queued",
+                progress: 0,
+                statusLabel: "排队中",
+                retryable: false // 无 stored request；重试由各工具自行重新提交
+              },
+              ...prev
+            ]
+      );
+      subscribe(taskId);
+    },
+    [subscribe]
+  );
+
   /**
    * Re-submit the stored original request for a failed task.
    * Looks up the request by `taskId`; if none is found the promise rejects.
@@ -299,7 +330,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <TasksContext.Provider value={{ tasks, createAndTrack, refreshTask, retryTask }}>
+    <TasksContext.Provider value={{ tasks, createAndTrack, trackExisting, refreshTask, retryTask }}>
       {children}
     </TasksContext.Provider>
   );
