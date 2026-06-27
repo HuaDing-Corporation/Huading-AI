@@ -73,3 +73,43 @@ class EcomModelBatchItem(BaseModel):
 class EcomModelBatchAccepted(BaseModel):
     batch_id: str
     tasks: list[EcomModelBatchItem]
+
+
+class EcomPosterTemplate(BaseModel):
+    id: str
+    name: str
+
+
+class EcomPosterTemplatesResponse(BaseModel):
+    templates: list[EcomPosterTemplate]
+
+
+class EcomPosterRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_asset_id: str = Field(min_length=1, max_length=36)
+    template_id: str = Field(min_length=1, max_length=64)
+    title: str
+    subtitle: str
+
+
+class EcomPosterAccepted(BaseModel):
+    task_id: str
+    status: Literal["queued"] = "queued"
+
+
+class EcomPosterBatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[EcomPosterRequest] = Field(min_length=1)
+
+
+class EcomPosterBatchItem(BaseModel):
+    task_id: str
+    source_asset_id: str
+    status: Literal["queued"] = "queued"
+
+
+class EcomPosterBatchAccepted(BaseModel):
+    batch_id: str
+    tasks: list[EcomPosterBatchItem]

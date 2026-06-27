@@ -65,6 +65,216 @@ def _stub_image_task(monkeypatch):
     return enqueued
 
 
+def test_ecom_poster_templates_returns_static_presets(auth_context) -> None:
+    resp = TestClient(app).get(
+        "/api/v1/ecom-images/poster-templates",
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 200
+    templates = resp.json()["data"]["templates"]
+    assert 3 <= len(templates) <= 5
+    assert {template["id"] for template in templates} >= {
+        "promo_bold",
+        "minimal",
+        "festival",
+    }
+    assert all(template["name"] for template in templates)
+
+
+def test_ecom_poster_single_creates_photo_task_clamps_text_without_quota(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    long_title = "限时大促新品热卖全场爆款买一送一今日专享超值优惠"
+    long_subtitle = "官方正品保障极速发货售后无忧门店同款直播间专享福利"
+    with auth_db() as db:
+        source = _seed_source_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="product-poster-source",
+        )
+        subscription_id = db.scalars(select(Subscription.id)).one()
+
+    enqueued = _stub_image_task(monkeypatch)
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        resp = TestClient(app).post(
+            "/api/v1/ecom-images/poster",
+            json={
+                "source_asset_id": source["id"],
+                "template_id": "promo_bold",
+                "title": long_title,
+                "subtitle": long_subtitle,
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 202
+    data = resp.json()["data"]
+    assert data["task_id"]
+    assert data["status"] == "queued"
+    assert len(enqueued) == 1
+    payload = enqueued[0]["args"][0]
+    assert payload["kind"] == "ecom_poster"
+    assert payload["template_id"] == "promo_bold"
+    assert payload["source_asset_id"] == source["id"]
+    assert payload["source_storage_key"] == source["storage_key"]
+    assert payload["video_task_id"] == data["task_id"]
+    assert payload["title"] == long_title[:30]
+    assert payload["subtitle"] == long_subtitle[:40]
+
+    with auth_db() as db:
+        task = db.get(VideoTask, data["task_id"])
+        usage_count = db.scalar(select(func.count()).select_from(UsageRecord))
+        subscription = db.get(Subscription, subscription_id)
+
+    assert task.mode == "photo"
+    assert task.video_mode == "photo"
+    assert task.params["kind"] == "ecom_poster"
+    assert task.params["template_id"] == "promo_bold"
+    assert task.params["title"] == long_title[:30]
+    assert task.params["subtitle"] == long_subtitle[:40]
+    assert usage_count == 0
+    assert subscription.quota_credits_reserved == 0
+
+
+def test_ecom_poster_batch_clamps_to_20_and_fans_out_without_quota(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        sources = [
+            _seed_source_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                asset_id=f"poster-batch-product-{index:02d}",
+            )
+            for index in range(25)
+        ]
+
+    enqueued = _stub_image_task(monkeypatch)
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        resp = TestClient(app).post(
+            "/api/v1/ecom-images/poster/batch",
+            json={
+                "items": [
+                    {
+                        "source_asset_id": source["id"],
+                        "template_id": "minimal" if index % 2 == 0 else "festival",
+                        "title": f"主推单品{index}",
+                        "subtitle": f"今日专享福利{index}",
+                    }
+                    for index, source in enumerate(sources)
+                ]
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 202
+    data = resp.json()["data"]
+    assert data["batch_id"]
+    assert len(data["tasks"]) == 20
+    assert len(enqueued) == 20
+    assert [item["source_asset_id"] for item in data["tasks"]] == [
+        source["id"] for source in sources[:20]
+    ]
+    assert all(item["status"] == "queued" for item in data["tasks"])
+    assert {call["args"][0]["batch_id"] for call in enqueued} == {data["batch_id"]}
+    assert {call["args"][0]["kind"] for call in enqueued} == {"ecom_poster"}
+    assert {call["args"][0]["template_id"] for call in enqueued} == {"minimal", "festival"}
+
+    with auth_db() as db:
+        task_count = db.scalar(
+            select(func.count())
+            .select_from(VideoTask)
+            .where(VideoTask.mode == "photo", VideoTask.params["kind"].as_string() == "ecom_poster")
+        )
+        batch_rows = db.scalar(select(func.count()).select_from(BatchJob))
+        usage_count = db.scalar(select(func.count()).select_from(UsageRecord))
+        subscription = db.scalars(select(Subscription)).one()
+
+    assert task_count == 20
+    assert batch_rows == 0
+    assert usage_count == 0
+    assert subscription.quota_credits_reserved == 0
+
+
+def test_ecom_poster_rejects_unknown_template_id_without_quota(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        source = _seed_source_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="product-poster-template-source",
+        )
+
+    enqueued = _stub_image_task(monkeypatch)
+    resp = TestClient(app).post(
+        "/api/v1/ecom-images/poster",
+        json={
+            "source_asset_id": source["id"],
+            "template_id": "unknown-template",
+            "title": "上新",
+            "subtitle": "今日专享",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "ECOM_POSTER_TEMPLATE_INVALID"
+    assert enqueued == []
+
+    with auth_db() as db:
+        task_count = db.scalar(select(func.count()).select_from(VideoTask))
+        usage_count = db.scalar(select(func.count()).select_from(UsageRecord))
+        subscription = db.scalars(select(Subscription)).one()
+
+    assert task_count == 0
+    assert usage_count == 0
+    assert subscription.quota_credits_reserved == 0
+
+
+def test_ecom_poster_rejects_cross_tenant_source_asset(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        other_tenant = Tenant(id="other-poster-tenant", slug="other-poster", name="Other Poster")
+        db.add(other_tenant)
+        db.flush()
+        _seed_source_asset(db, tenant_id=other_tenant.id, asset_id="foreign-poster-product")
+
+    enqueued = _stub_image_task(monkeypatch)
+    resp = TestClient(app).post(
+        "/api/v1/ecom-images/poster",
+        json={
+            "source_asset_id": "foreign-poster-product",
+            "template_id": "minimal",
+            "title": "上新",
+            "subtitle": "今日专享",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "ECOM_SOURCE_ASSET_NOT_FOUND"
+    assert enqueued == []
+
+
 def test_ecom_model_styles_returns_static_presets(auth_context) -> None:
     resp = TestClient(app).get(
         "/api/v1/ecom-images/model-styles",

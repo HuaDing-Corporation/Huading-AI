@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 import openai
 from PIL import Image
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db.models import Asset, Plan, Subscription, TaskAsset, UsageRecord, VideoTask
 
@@ -100,6 +100,16 @@ def _png_bytes(mode: str) -> bytes:
     return buffer.getvalue()
 
 
+def _product_png_bytes() -> bytes:
+    image = Image.new("RGBA", (80, 60), (0, 0, 0, 0))
+    for x in range(10, 70):
+        for y in range(8, 52):
+            image.putpixel((x, y), (40, 120, 220, 255))
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 def _alpha_extrema(content: bytes) -> tuple[int, int]:
     image = Image.open(BytesIO(content))
     assert image.mode == "RGBA"
@@ -159,6 +169,31 @@ def _seed_reserved_photo(db, tenant_id: str, user_id: str, task_id: str) -> str:
     )
     db.commit()
     return subscription.id
+
+
+def _seed_unreserved_poster_photo(db, tenant_id: str, user_id: str, task_id: str) -> str:
+    source_key = f"tenants/{tenant_id}/uploads/poster-product.png"
+    task = VideoTask(
+        id=task_id,
+        tenant_id=tenant_id,
+        created_by_user_id=user_id,
+        status="queued",
+        mode="photo",
+        video_mode="photo",
+        progress=0,
+        topic="新品上新",
+        params={
+            "kind": "ecom_poster",
+            "template_id": "promo_bold",
+            "title": "新品上新",
+            "subtitle": "今日专享",
+            "source_asset_id": "poster-source",
+            "source_storage_key": source_key,
+        },
+    )
+    db.add(task)
+    db.commit()
+    return source_key
 
 
 def _seed_terminal_photo_history(
@@ -569,6 +604,73 @@ def test_image_worker_ecom_model_uses_source_asset_and_stores_model_metadata(
     assert asset.metadata_["style_id"] == "street"
     assert asset.metadata_["extra_prompt"] == "avoid hats"
     assert asset.metadata_["source_asset_id"] == "product-model-source"
+
+
+def test_image_worker_ecom_poster_composes_locally_without_provider_or_quota(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    task_id = "ecom-poster-unit"
+    with auth_db() as db:
+        source_key = _seed_unreserved_poster_photo(
+            db,
+            auth_context["tenant_id"],
+            auth_context["user_id"],
+            task_id,
+        )
+        subscription_id = db.scalars(select(Subscription.id)).one()
+        used_before = db.get(Subscription, subscription_id).quota_credits_used
+        reserved_before = db.get(Subscription, subscription_id).quota_credits_reserved
+    storage = _FakeStorage()
+    storage.saved[source_key] = (_product_png_bytes(), "image/png")
+    store = _MemProgressStore()
+    provider = _FakeProvider(fail=True, failure=AssertionError("provider should not be called"))
+    image_gen = _patch_worker(monkeypatch, auth_db, storage, store, provider)
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "kind": "ecom_poster",
+            "template_id": "promo_bold",
+            "title": "新品上新",
+            "subtitle": "今日专享",
+            "source_asset_id": "poster-source",
+            "source_storage_key": source_key,
+        }
+    )
+
+    assert result["status"] == "SUCCESS"
+    assert provider.payloads == []
+    output_key = f"tenants/{auth_context['tenant_id']}/photos/{task_id}/output.png"
+    saved_bytes, content_type = storage.saved[output_key]
+    assert content_type == "image/png"
+    image = Image.open(BytesIO(saved_bytes))
+    assert image.size == (1080, 1350)
+    assert image.getbbox() is not None
+
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        asset = db.scalars(select(Asset).where(Asset.storage_key == output_key)).one()
+        usage_count = db.scalar(
+            select(func.count())
+            .select_from(UsageRecord)
+            .where(UsageRecord.video_task_id == task_id)
+        )
+        subscription = db.get(Subscription, subscription_id)
+
+    assert task.status == "done"
+    assert task.progress == 100
+    assert task.storage_key == output_key
+    assert asset.metadata_["kind"] == "ecom_poster"
+    assert asset.metadata_["template_id"] == "promo_bold"
+    assert asset.metadata_["title"] == "新品上新"
+    assert asset.metadata_["subtitle"] == "今日专享"
+    assert asset.metadata_["source_asset_id"] == "poster-source"
+    assert usage_count == 0
+    assert subscription.quota_credits_used == used_before
+    assert subscription.quota_credits_reserved == reserved_before
 
 
 def test_image_worker_ecom_transparent_cutout_fails_when_provider_returns_opaque_png(
