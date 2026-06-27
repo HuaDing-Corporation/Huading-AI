@@ -108,15 +108,18 @@ describe("ecom-images model API ↔ MSW（mock 忠实，Phase2 AI 模特）", ()
 });
 
 describe("ecom-images poster API ↔ MSW（mock 忠实，Phase3 营销海报）", () => {
-  it("poster-templates：返回非空版式预设列表(含 id/name)", async () => {
+  it("poster-templates：返回的版式 ID 逐字对齐后端真实预设(promo_bold/minimal/festival)", async () => {
     const templates = await listPosterTemplates();
     expect(templates.length).toBeGreaterThan(0);
     expect(templates[0]).toHaveProperty("id");
     expect(templates[0]).toHaveProperty("name");
+    // 承重：mock 模板 id 必须与后端逐字一致，否则真后端 422（改回错 id 此断言应红）。
+    const ids = templates.map((t) => t.id);
+    expect(ids).toEqual(["promo_bold", "minimal", "festival"]);
   });
 
   it("单张 poster：塞真 photo task(kind=ecom_poster, done, 海报图 url)，GET /videos/:id 轮询拿到", async () => {
-    const res = await posterImage({ source_asset_id: "a1", template_id: "promo", title: "大促", subtitle: "限时" });
+    const res = await posterImage({ source_asset_id: "a1", template_id: "promo_bold", title: "大促", subtitle: "限时" });
     expect(res.task_id).toBeTruthy();
     const v = await getVideo(res.task_id);
     expect(v.status).toBe("done");
@@ -125,7 +128,7 @@ describe("ecom-images poster API ↔ MSW（mock 忠实，Phase3 营销海报）"
   });
 
   it("SSE 轮询后海报图 URL 不被通用 v.mp4 覆盖(预 seeded 终态保留)", async () => {
-    const res = await posterImage({ source_asset_id: "a1", template_id: "festive", title: "", subtitle: "" });
+    const res = await posterImage({ source_asset_id: "a1", template_id: "festival", title: "", subtitle: "" });
     await streamVideoEvents(res.task_id, () => undefined);
     const v = await getVideo(res.task_id);
     expect(v.playback_url).toContain("poster-");
@@ -133,7 +136,7 @@ describe("ecom-images poster API ↔ MSW（mock 忠实，Phase3 营销海报）"
   });
 
   it("批量 poster：N clamp 上界 20(>20 items → 20 tasks)", async () => {
-    const items = Array.from({ length: 25 }, (_, i) => ({ source_asset_id: `a${i}`, template_id: "promo", title: "", subtitle: "" }));
+    const items = Array.from({ length: 25 }, (_, i) => ({ source_asset_id: `a${i}`, template_id: "promo_bold", title: "", subtitle: "" }));
     const res = await posterImageBatch({ items });
     expect(res.batch_id).toBeTruthy();
     expect(res.tasks).toHaveLength(20);
@@ -142,7 +145,7 @@ describe("ecom-images poster API ↔ MSW（mock 忠实，Phase3 营销海报）"
   it("批量 poster：fan-out 各 task 可轮询到 done + 海报产物", async () => {
     const res = await posterImageBatch({
       items: [
-        { source_asset_id: "a1", template_id: "promo", title: "大促", subtitle: "限时" },
+        { source_asset_id: "a1", template_id: "promo_bold", title: "大促", subtitle: "限时" },
         { source_asset_id: "a2", template_id: "minimal", title: "", subtitle: "" }
       ]
     });

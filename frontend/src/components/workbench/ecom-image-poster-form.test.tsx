@@ -28,8 +28,8 @@ const doneTask = (id: string, url: string) => ({
   playbackUrl: url, downloadUrl: `${url}?dl=1`, topic: "x", mode: "photo", retryable: false
 });
 const TEMPLATES = [
-  { id: "promo", name: "大促爆款" },
-  { id: "festive", name: "节日喜庆" }
+  { id: "promo_bold", name: "大促爆款" },
+  { id: "festival", name: "节日喜庆" }
 ];
 
 beforeEach(() => {
@@ -63,7 +63,7 @@ describe("EcomImagePosterForm (电商图 · 营销海报)", () => {
   });
 
   it("单张：上传 + 选版式 → 生成 → poster 提交 {source_asset_id,template_id} + trackExisting + 结果图", async () => {
-    tasksMock.tasks = [doneTask("t-1", "https://mock.local/poster-promo.png")];
+    tasksMock.tasks = [doneTask("t-1", "https://mock.local/poster-promo_bold.png")];
     render(<EcomImagePosterForm />);
 
     fireEvent.change(document.querySelector("#ecom-poster-source")!, { target: { files: [png("p.png")] } });
@@ -74,7 +74,7 @@ describe("EcomImagePosterForm (电商图 · 营销海报)", () => {
     await waitFor(() =>
       expect(posterMock.mutateAsync).toHaveBeenCalledWith({
         source_asset_id: "asset-1",
-        template_id: "promo",
+        template_id: "promo_bold",
         title: "",
         subtitle: ""
       })
@@ -82,12 +82,12 @@ describe("EcomImagePosterForm (电商图 · 营销海报)", () => {
     expect(trackExistingMock).toHaveBeenCalledWith("t-1", expect.any(String), "photo");
     expect(await screen.findByRole("img", { name: copy.workbench.ecomResultsLabel })).toHaveAttribute(
       "src",
-      "https://mock.local/poster-promo.png"
+      "https://mock.local/poster-promo_bold.png"
     );
   });
 
   it("标题 + 自定义一行：提交带 title / subtitle", async () => {
-    tasksMock.tasks = [doneTask("t-1", "https://mock.local/poster-promo.png")];
+    tasksMock.tasks = [doneTask("t-1", "https://mock.local/poster-promo_bold.png")];
     render(<EcomImagePosterForm />);
 
     fireEvent.change(document.querySelector("#ecom-poster-source")!, { target: { files: [png("p.png")] } });
@@ -100,7 +100,7 @@ describe("EcomImagePosterForm (电商图 · 营销海报)", () => {
     await waitFor(() =>
       expect(posterMock.mutateAsync).toHaveBeenCalledWith({
         source_asset_id: "asset-1",
-        template_id: "promo",
+        template_id: "promo_bold",
         title: "年中大促 全场5折",
         subtitle: "限时3天 错过再等一年"
       })
@@ -108,7 +108,7 @@ describe("EcomImagePosterForm (电商图 · 营销海报)", () => {
   });
 
   it("标题 ≤30 / 一行 ≤40：超长输入被截断", async () => {
-    tasksMock.tasks = [doneTask("t-1", "https://mock.local/poster-promo.png")];
+    tasksMock.tasks = [doneTask("t-1", "https://mock.local/poster-promo_bold.png")];
     render(<EcomImagePosterForm />);
 
     fireEvent.change(document.querySelector("#ecom-poster-source")!, { target: { files: [png("p.png")] } });
@@ -140,8 +140,8 @@ describe("EcomImagePosterForm (电商图 · 营销海报)", () => {
     await waitFor(() => expect(posterBatchMock.mutateAsync).toHaveBeenCalledTimes(1));
     expect(posterBatchMock.mutateAsync.mock.calls[0][0]).toEqual({
       items: [
-        { source_asset_id: "asset-1", template_id: "promo", title: "", subtitle: "" },
-        { source_asset_id: "asset-1", template_id: "promo", title: "", subtitle: "" }
+        { source_asset_id: "asset-1", template_id: "promo_bold", title: "", subtitle: "" },
+        { source_asset_id: "asset-1", template_id: "promo_bold", title: "", subtitle: "" }
       ]
     });
     expect(trackExistingMock).toHaveBeenCalledTimes(2);
