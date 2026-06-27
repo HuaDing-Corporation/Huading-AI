@@ -522,6 +522,55 @@ def test_image_worker_ecom_transparent_cutout_uses_source_asset_and_keeps_alpha(
     assert asset.metadata_["source_asset_id"] == "product-alpha-source"
 
 
+def test_image_worker_ecom_model_uses_source_asset_and_stores_model_metadata(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    task_id = "ecom-model-unit"
+    source_key = f"tenants/{auth_context['tenant_id']}/uploads/model-product.png"
+    with auth_db() as db:
+        _seed_reserved_photo(db, auth_context["tenant_id"], auth_context["user_id"], task_id)
+    storage = _FakeStorage()
+    storage.saved[source_key] = (b"input-image", "image/png")
+    store = _MemProgressStore()
+    provider = _FakeProvider(image_bytes=_png_bytes("opaque"))
+    image_gen = _patch_worker(monkeypatch, auth_db, storage, store, provider)
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": (
+                "Compose the product onto a female AI fashion model in a street fashion "
+                "scene. Preserve the exact product shape, logo, colors, and proportions."
+            ),
+            "kind": "ecom_model",
+            "gender": "female",
+            "style_id": "street",
+            "extra_prompt": "avoid hats",
+            "source_asset_id": "product-model-source",
+            "source_storage_key": source_key,
+        }
+    )
+
+    assert result["status"] == "SUCCESS"
+    output_key = f"tenants/{auth_context['tenant_id']}/photos/{task_id}/output.png"
+    payload = provider.payloads[0]
+    assert payload["input_image_path"] == provider.input_path
+    assert "female ai fashion model" in payload["prompt"].lower()
+    assert "preserve the exact product shape" in payload["prompt"].lower()
+    assert "response_format" not in payload
+    assert "input_fidelity" not in payload
+    with auth_db() as db:
+        asset = db.scalars(select(Asset).where(Asset.storage_key == output_key)).one()
+    assert asset.metadata_["kind"] == "ecom_model"
+    assert asset.metadata_["gender"] == "female"
+    assert asset.metadata_["style_id"] == "street"
+    assert asset.metadata_["extra_prompt"] == "avoid hats"
+    assert asset.metadata_["source_asset_id"] == "product-model-source"
+
+
 def test_image_worker_ecom_transparent_cutout_fails_when_provider_returns_opaque_png(
     monkeypatch,
     auth_context,

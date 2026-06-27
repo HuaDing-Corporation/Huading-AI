@@ -15,6 +15,13 @@ from app.schemas.ecom_images import (
     EcomCutoutBatchItem,
     EcomCutoutBatchRequest,
     EcomCutoutRequest,
+    EcomModelAccepted,
+    EcomModelBatchAccepted,
+    EcomModelBatchItem,
+    EcomModelBatchRequest,
+    EcomModelRequest,
+    EcomModelStyle,
+    EcomModelStylesResponse,
 )
 from app.schemas.response import ApiResponse, ok
 from app.services.history import prune_video_history
@@ -28,11 +35,23 @@ CreateEcomImagePermissionDependency = Depends(require_permission("video:create")
 ObjectStorageDependency = Depends(get_object_storage)
 
 _ECOM_CUTOUT_KIND = "ecom_cutout"
+_ECOM_MODEL_KIND = "ecom_model"
 _BATCH_LIMIT = 20
 _SOURCE_IMAGE_TYPES = {"avatar_image", "product_image", "generated_image"}
 _SOURCE_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 _DEFAULT_IMAGE_SIZE = "1024x1024"
 _DEFAULT_IMAGE_QUALITY = "medium"
+_MODEL_STYLES: tuple[EcomModelStyle, ...] = (
+    EcomModelStyle(id="studio_white", name="Studio white"),
+    EcomModelStyle(id="lifestyle", name="Lifestyle"),
+    EcomModelStyle(id="street", name="Street style"),
+)
+_MODEL_STYLE_PROMPTS = {
+    "studio_white": "a clean studio white product catalog scene with controlled lighting",
+    "lifestyle": "a natural lifestyle scene with realistic everyday styling",
+    "street": "a modern street fashion scene with editorial styling",
+}
+_EXTRA_PROMPT_LIMIT = 200
 
 
 def _is_valid_source_image(asset: Asset) -> bool:
@@ -88,6 +107,35 @@ def _cutout_prompt(background: str) -> str:
     )
 
 
+def _model_style_prompt_or_raise(style_id: str) -> str:
+    prompt = _MODEL_STYLE_PROMPTS.get(style_id)
+    if prompt is None:
+        raise AppError(
+            "Unknown AI model style.",
+            code="ECOM_MODEL_STYLE_INVALID",
+            status_code=422,
+        )
+    return prompt
+
+
+def _clamp_extra_prompt(extra_prompt: str | None) -> str | None:
+    if extra_prompt is None:
+        return None
+    return extra_prompt[:_EXTRA_PROMPT_LIMIT]
+
+
+def _model_prompt(*, gender: str, style_id: str, extra_prompt: str | None) -> str:
+    style_prompt = _model_style_prompt_or_raise(style_id)
+    gender_phrase = "" if gender == "any" else f" Use a {gender} fashion model."
+    extra = f" Additional direction: {extra_prompt}" if extra_prompt else ""
+    return (
+        "Compose the input product image onto an AI fashion model for an e-commerce product "
+        f"image in {style_prompt}.{gender_phrase} Preserve the exact product shape, logo, "
+        "colors, materials, proportions, and visible details. Do not alter the product design, "
+        f"brand marks, text, or colorway.{extra}"
+    )
+
+
 def _task_params(
     payload: EcomCutoutRequest,
     *,
@@ -103,6 +151,30 @@ def _task_params(
         "image_quality": _DEFAULT_IMAGE_QUALITY,
         "estimated": True,
     }
+    if batch_id is not None:
+        params["batch_id"] = batch_id
+    return params
+
+
+def _model_task_params(
+    payload: EcomModelRequest,
+    *,
+    source: Asset,
+    extra_prompt: str | None,
+    batch_id: str | None = None,
+) -> dict[str, object]:
+    params: dict[str, object] = {
+        "kind": _ECOM_MODEL_KIND,
+        "gender": payload.gender,
+        "style_id": payload.style_id,
+        "source_asset_id": source.id,
+        "source_storage_key": source.storage_key,
+        "image_size": _DEFAULT_IMAGE_SIZE,
+        "image_quality": _DEFAULT_IMAGE_QUALITY,
+        "estimated": True,
+    }
+    if extra_prompt:
+        params["extra_prompt"] = extra_prompt
     if batch_id is not None:
         params["batch_id"] = batch_id
     return params
@@ -139,6 +211,47 @@ def _create_cutout_task(
     return task
 
 
+def _create_model_task(
+    db: Session,
+    *,
+    user: User,
+    payload: EcomModelRequest,
+    source: Asset,
+    batch_id: str | None = None,
+) -> VideoTask:
+    extra_prompt = _clamp_extra_prompt(payload.extra_prompt)
+    task = VideoTask(
+        id=str(uuid4()),
+        tenant_id=user.tenant_id,
+        created_by_user_id=user.id,
+        status="queued",
+        topic=_model_prompt(
+            gender=payload.gender,
+            style_id=payload.style_id,
+            extra_prompt=extra_prompt,
+        ),
+        mode="photo",
+        video_mode="photo",
+        progress=0,
+        params=_model_task_params(
+            payload,
+            source=source,
+            extra_prompt=extra_prompt,
+            batch_id=batch_id,
+        ),
+    )
+    db.add(task)
+    db.flush()
+    reserve_image_generation_quota(
+        db,
+        tenant_id=user.tenant_id,
+        video_task_id=task.id,
+        quality=_DEFAULT_IMAGE_QUALITY,
+        n=1,
+    )
+    return task
+
+
 def _worker_payload(task: VideoTask) -> dict[str, object]:
     params = dict(task.params or {})
     params["tenant_id"] = task.tenant_id
@@ -147,7 +260,7 @@ def _worker_payload(task: VideoTask) -> dict[str, object]:
     return params
 
 
-def _enqueue_cutout(task: VideoTask) -> None:
+def _enqueue_image_task(task: VideoTask) -> None:
     generate_image_task.apply_async(args=[_worker_payload(task)], task_id=task.id, queue="image")
 
 
@@ -161,6 +274,88 @@ def _prune_photo_history_best_effort(
         prune_video_history(db, tenant_id=tenant_id, mode="photo", storage=storage)
     except Exception as exc:  # pragma: no cover - cleanup must not block enqueue
         logger.warning("ecom_image_history_prune_failed", tenant_id=tenant_id, error=str(exc))
+
+
+@router.get(
+    "/model-styles",
+    response_model=ApiResponse[EcomModelStylesResponse],
+)
+def list_model_styles(
+    request: Request,
+    _user: User = CreateEcomImagePermissionDependency,
+) -> ApiResponse[EcomModelStylesResponse]:
+    return ok(request, EcomModelStylesResponse(styles=list(_MODEL_STYLES)))
+
+
+@router.post(
+    "/model",
+    response_model=ApiResponse[EcomModelAccepted],
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_model_image(
+    request: Request,
+    payload: EcomModelRequest,
+    user: User = CreateEcomImagePermissionDependency,
+    db: Session = DbSessionDependency,
+    storage: ObjectStorage = ObjectStorageDependency,
+) -> ApiResponse[EcomModelAccepted]:
+    source = _source_asset_or_raise(
+        db,
+        tenant_id=user.tenant_id,
+        source_asset_id=payload.source_asset_id,
+    )
+    task = _create_model_task(db, user=user, payload=payload, source=source)
+    db.commit()
+    _prune_photo_history_best_effort(db, tenant_id=user.tenant_id, storage=storage)
+    _enqueue_image_task(task)
+    return ok(request, EcomModelAccepted(task_id=task.id))
+
+
+@router.post(
+    "/model/batch",
+    response_model=ApiResponse[EcomModelBatchAccepted],
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_model_image_batch(
+    request: Request,
+    payload: EcomModelBatchRequest,
+    user: User = CreateEcomImagePermissionDependency,
+    db: Session = DbSessionDependency,
+    storage: ObjectStorage = ObjectStorageDependency,
+) -> ApiResponse[EcomModelBatchAccepted]:
+    selected_items = payload.items[:_BATCH_LIMIT]
+    sources = [
+        _source_asset_or_raise(
+            db,
+            tenant_id=user.tenant_id,
+            source_asset_id=item.source_asset_id,
+        )
+        for item in selected_items
+    ]
+    batch_id = str(uuid4())
+    tasks = [
+        _create_model_task(
+            db,
+            user=user,
+            payload=item,
+            source=source,
+            batch_id=batch_id,
+        )
+        for item, source in zip(selected_items, sources, strict=True)
+    ]
+    db.commit()
+    _prune_photo_history_best_effort(db, tenant_id=user.tenant_id, storage=storage)
+    for task in tasks:
+        _enqueue_image_task(task)
+
+    response_tasks = [
+        EcomModelBatchItem(
+            task_id=task.id,
+            source_asset_id=str(task.params["source_asset_id"]),
+        )
+        for task in tasks
+    ]
+    return ok(request, EcomModelBatchAccepted(batch_id=batch_id, tasks=response_tasks))
 
 
 @router.post(
@@ -183,7 +378,7 @@ def create_cutout(
     task = _create_cutout_task(db, user=user, payload=payload, source=source)
     db.commit()
     _prune_photo_history_best_effort(db, tenant_id=user.tenant_id, storage=storage)
-    _enqueue_cutout(task)
+    _enqueue_image_task(task)
     return ok(request, EcomCutoutAccepted(task_id=task.id))
 
 
@@ -222,7 +417,7 @@ def create_cutout_batch(
     db.commit()
     _prune_photo_history_best_effort(db, tenant_id=user.tenant_id, storage=storage)
     for task in tasks:
-        _enqueue_cutout(task)
+        _enqueue_image_task(task)
 
     response_tasks = [
         EcomCutoutBatchItem(
