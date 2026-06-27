@@ -9,7 +9,13 @@ import type {
   ModelRequest,
   ModelResponse,
   ModelStyle,
-  ModelStylesResponse
+  ModelStylesResponse,
+  PosterBatchRequest,
+  PosterBatchResponse,
+  PosterRequest,
+  PosterResponse,
+  PosterTemplate,
+  PosterTemplatesResponse
 } from "@/lib/api/types";
 
 /**
@@ -47,4 +53,25 @@ export function modelImage(body: ModelRequest): Promise<ModelResponse> {
 /** 批量 AI 模特 → fan-out N(clamp 1..20)个 photo 任务,返 { batch_id, tasks:[{task_id,...}] }。 */
 export function modelImageBatch(body: ModelBatchRequest): Promise<ModelBatchResponse> {
   return apiFetch<ModelBatchResponse>("/api/v1/ecom-images/model/batch", { method: "POST", body });
+}
+
+/**
+ * 电商图扩展 Phase3 (ECOM-POSTER-UI-0001) — 营销海报。单张/批量返回已创建 photo
+ * VideoTask(kind=ecom_poster)的 task_id,经 tasks-context.trackExisting 轮询。
+ */
+
+/** 营销海报版式预设列表(GET)。 */
+export async function listPosterTemplates(): Promise<PosterTemplate[]> {
+  const res = await apiFetch<PosterTemplatesResponse>("/api/v1/ecom-images/poster-templates", { method: "GET" });
+  return res?.templates ?? [];
+}
+
+/** 单张营销海报 → { task_id, status }。 */
+export function posterImage(body: PosterRequest): Promise<PosterResponse> {
+  return apiFetch<PosterResponse>("/api/v1/ecom-images/poster", { method: "POST", body });
+}
+
+/** 批量营销海报 → fan-out N(clamp 1..20)个 photo 任务,返 { batch_id, tasks:[{task_id,...}] }。 */
+export function posterImageBatch(body: PosterBatchRequest): Promise<PosterBatchResponse> {
+  return apiFetch<PosterBatchResponse>("/api/v1/ecom-images/poster/batch", { method: "POST", body });
 }

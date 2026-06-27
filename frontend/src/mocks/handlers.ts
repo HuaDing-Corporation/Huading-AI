@@ -290,5 +290,47 @@ export const handlers = [
       return { task_id: id, source_asset_id: it.source_asset_id, status: "queued" };
     });
     return ok({ batch_id: batchId, tasks });
+  }),
+
+  // ── 电商图扩展 Phase3 (ECOM-POSTER-UI-0001) — 营销海报(单张 + 批量) mock ──
+  // 忠实后端：poster-templates 返列表(仅 id+name)；单张/批量塞真 photo VideoTask(kind=ecom_poster, done)
+  // 进 videos store，GET /videos/:id 轮询拿到 done + 海报图；批量 N clamp 1..20。非伪造(吸取教训)。
+  // 模板 id 逐字对齐后端真实预设(promo_bold/minimal/festival，ecom_images.py)，name 用中文展示名；
+  // 真列表运行时来自 API，此处仅 dev/test 回放，不得用错 id 掩盖契约偏移(否则真后端 422)。
+  http.get(`${BASE}/api/v1/ecom-images/poster-templates`, () =>
+    ok({
+      templates: [
+        { id: "promo_bold", name: "大促爆款" },
+        { id: "minimal", name: "简约高级" },
+        { id: "festival", name: "节日喜庆" }
+      ]
+    })
+  ),
+  http.post(`${BASE}/api/v1/ecom-images/poster`, async ({ request }) => {
+    const body = (await request.json()) as { source_asset_id: string; template_id: string };
+    const id = `mock-${++videoSeq}`;
+    const url = `https://mock.local/poster-${body.template_id || "promo_bold"}.png`;
+    videos.set(id, {
+      id, status: "done", progress: 100, topic: "营销海报",
+      mode: "photo", kind: "ecom_poster", created_at: new Date(0).toISOString(),
+      playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url
+    });
+    return ok({ task_id: id, status: "queued" });
+  }),
+  http.post(`${BASE}/api/v1/ecom-images/poster/batch`, async ({ request }) => {
+    const body = (await request.json()) as { items: { source_asset_id: string; template_id: string }[] };
+    const items = (body.items ?? []).slice(0, 20); // N clamp 上界 20
+    const batchId = `batch-${++videoSeq}`;
+    const tasks = items.map((it) => {
+      const id = `mock-${++videoSeq}`;
+      const url = `https://mock.local/poster-${it.template_id || "promo_bold"}.png`;
+      videos.set(id, {
+        id, status: "done", progress: 100, topic: "批量营销海报",
+        mode: "photo", kind: "ecom_poster", created_at: new Date(0).toISOString(),
+        playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url
+      });
+      return { task_id: id, source_asset_id: it.source_asset_id, status: "queued" };
+    });
+    return ok({ batch_id: batchId, tasks });
   })
 ];
