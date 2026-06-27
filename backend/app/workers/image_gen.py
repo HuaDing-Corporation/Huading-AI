@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import openai
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 
 from app.api.deps import scoped_task_id
 from app.core.config import settings
@@ -37,9 +37,43 @@ _INVALID_REQUEST_ERROR_CODE = "IMAGE_INVALID_REQUEST"
 _ALPHA_MISSING_ERROR_CODE = "IMAGE_ALPHA_MISSING"
 _ECOM_CUTOUT_KIND = "ecom_cutout"
 _ECOM_MODEL_KIND = "ecom_model"
+_ECOM_POSTER_KIND = "ecom_poster"
 _SOURCE_IMAGE_STORAGE_KEY_RE = re.compile(
     r"^tenants/[A-Za-z0-9_-]+/[A-Za-z0-9_./-]+\.(?:jpg|jpeg|png|webp)$"
 )
+_POSTER_SIZE = (1080, 1350)
+_POSTER_TEMPLATES = {
+    "promo_bold": {
+        "background": (244, 48, 58),
+        "panel": (255, 244, 232),
+        "accent": (255, 210, 74),
+        "title": (255, 255, 255),
+        "subtitle": (70, 20, 20),
+        "product_box": (110, 350, 970, 1015),
+        "title_box": (80, 90, 1000, 260),
+        "subtitle_box": (130, 1090, 950, 1190),
+    },
+    "minimal": {
+        "background": (246, 248, 245),
+        "panel": (255, 255, 255),
+        "accent": (31, 31, 31),
+        "title": (22, 25, 27),
+        "subtitle": (89, 92, 95),
+        "product_box": (150, 330, 930, 980),
+        "title_box": (100, 100, 980, 240),
+        "subtitle_box": (130, 1060, 950, 1160),
+    },
+    "festival": {
+        "background": (142, 27, 39),
+        "panel": (255, 238, 204),
+        "accent": (249, 191, 76),
+        "title": (255, 245, 210),
+        "subtitle": (255, 238, 204),
+        "product_box": (120, 360, 960, 1010),
+        "title_box": (90, 100, 990, 250),
+        "subtitle_box": (130, 1090, 950, 1190),
+    },
+}
 
 
 class TransparentAlphaMissingError(RuntimeError):
@@ -102,6 +136,10 @@ def _is_ecom_cutout_request(params: Mapping[str, Any]) -> bool:
 
 def _is_ecom_model_request(params: Mapping[str, Any]) -> bool:
     return params.get("kind") == _ECOM_MODEL_KIND
+
+
+def _is_ecom_poster_request(params: Mapping[str, Any]) -> bool:
+    return params.get("kind") == _ECOM_POSTER_KIND
 
 
 def _ecom_cutout_background(params: Mapping[str, Any]) -> str:
@@ -184,6 +222,145 @@ def _png_from_image(image: Image.Image) -> bytes:
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+def _poster_font(size: int):
+    candidates = [
+        settings.engine_subtitle_font_path,
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/simsun.ttc",
+        "arial.ttf",
+        "DejaVuSans.ttf",
+    ]
+    for name in dict.fromkeys(item for item in candidates if item):
+        try:
+            return ImageFont.truetype(name, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _wrap_poster_text(text: str, *, max_width: int, draw: ImageDraw.ImageDraw, font) -> list[str]:
+    units = text.split() if any(char.isspace() for char in text) else list(text)
+    separator = " " if any(char.isspace() for char in text) else ""
+    if not units:
+        return [text]
+    lines: list[str] = []
+    current = ""
+    for unit in units:
+        candidate = f"{current}{separator}{unit}".strip()
+        bbox = draw.textbbox((0, 0), candidate, font=font)
+        if bbox[2] - bbox[0] <= max_width or not current:
+            current = candidate
+        else:
+            lines.append(current)
+            current = unit
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _draw_poster_text(
+    draw: ImageDraw.ImageDraw,
+    *,
+    box: tuple[int, int, int, int],
+    text: str,
+    font_size: int,
+    fill: tuple[int, int, int],
+    stroke_fill: tuple[int, int, int] | None = None,
+) -> None:
+    if not text:
+        return
+    font = _poster_font(font_size)
+    left, top, right, bottom = box
+    max_width = right - left
+    lines = _wrap_poster_text(text, max_width=max_width, draw=draw, font=font)
+    line_gap = max(6, int(font_size * 0.18))
+    text_boxes = [draw.textbbox((0, 0), line, font=font, stroke_width=2) for line in lines]
+    text_height = sum(item[3] - item[1] for item in text_boxes) + line_gap * max(
+        0, len(lines) - 1
+    )
+    y = top + max(0, (bottom - top - text_height) // 2)
+    for line, text_box in zip(lines, text_boxes, strict=True):
+        line_width = text_box[2] - text_box[0]
+        x = left + max(0, (max_width - line_width) // 2)
+        draw.text(
+            (x, y),
+            line,
+            font=font,
+            fill=fill,
+            stroke_width=2 if stroke_fill else 0,
+            stroke_fill=stroke_fill or fill,
+        )
+        y += text_box[3] - text_box[1] + line_gap
+
+
+def _fit_product_to_box(product: Image.Image, box: tuple[int, int, int, int]) -> Image.Image:
+    left, top, right, bottom = box
+    max_width = right - left
+    max_height = bottom - top
+    product_rgba = product.convert("RGBA")
+    scale = min(max_width / product_rgba.width, max_height / product_rgba.height)
+    size = (
+        max(1, int(product_rgba.width * scale)),
+        max(1, int(product_rgba.height * scale)),
+    )
+    return product_rgba.resize(size, Image.Resampling.LANCZOS)
+
+
+def _compose_ecom_poster(
+    source_image_bytes: bytes,
+    *,
+    template_id: str,
+    title: str,
+    subtitle: str,
+) -> bytes:
+    template = _POSTER_TEMPLATES.get(template_id)
+    if template is None:
+        raise ValueError(f"Unknown poster template: {template_id}")
+    try:
+        with Image.open(BytesIO(source_image_bytes)) as source_image:
+            canvas = Image.new("RGB", _POSTER_SIZE, template["background"])
+            draw = ImageDraw.Draw(canvas)
+            product_box = template["product_box"]
+            panel_margin = 34
+            panel_box = (
+                product_box[0] - panel_margin,
+                product_box[1] - panel_margin,
+                product_box[2] + panel_margin,
+                product_box[3] + panel_margin,
+            )
+            draw.rounded_rectangle(panel_box, radius=42, fill=template["panel"])
+            draw.rounded_rectangle(
+                (84, 1048, 996, 1214),
+                radius=30,
+                fill=template["accent"],
+            )
+            product = _fit_product_to_box(source_image, product_box)
+            x = product_box[0] + (product_box[2] - product_box[0] - product.width) // 2
+            y = product_box[1] + (product_box[3] - product_box[1] - product.height) // 2
+            canvas.paste(product, (x, y), product)
+            _draw_poster_text(
+                draw,
+                box=template["title_box"],
+                text=title,
+                font_size=76,
+                fill=template["title"],
+                stroke_fill=(80, 20, 20),
+            )
+            _draw_poster_text(
+                draw,
+                box=template["subtitle_box"],
+                text=subtitle,
+                font_size=42,
+                fill=template["subtitle"],
+            )
+            return _png_from_image(canvas)
+    except UnidentifiedImageError as exc:
+        raise ValueError("Poster source image is invalid.") from exc
 
 
 def _normalize_ecom_cutout_image(image_bytes: bytes, *, background: str) -> bytes:
@@ -273,8 +450,9 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
     temp_paths: list[Path] = []
 
     try:
+        ecom_poster = _is_ecom_poster_request(params)
         prompt = str(params.get("script") or params.get("topic") or "").strip()
-        if not prompt:
+        if not prompt and not ecom_poster:
             raise ValueError("Image prompt is required.")
         ecom_cutout = _is_ecom_cutout_request(params)
         ecom_model = _is_ecom_model_request(params)
@@ -298,55 +476,74 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             )
 
             input_path = None
-            if params.get("source_storage_key"):
-                input_path = _write_temp_source_image(
-                    storage,
-                    tenant_id=tenant_id,
-                    source_storage_key=str(params["source_storage_key"]),
-                    temp_paths=temp_paths,
-                )
-            elif params.get("image_key"):
-                input_path = _write_temp_input_image(
-                    storage,
-                    tenant_id=tenant_id,
-                    image_key=str(params["image_key"]),
-                    temp_paths=temp_paths,
-                )
+            if not ecom_poster:
+                if params.get("source_storage_key"):
+                    input_path = _write_temp_source_image(
+                        storage,
+                        tenant_id=tenant_id,
+                        source_storage_key=str(params["source_storage_key"]),
+                        temp_paths=temp_paths,
+                    )
+                elif params.get("image_key"):
+                    input_path = _write_temp_input_image(
+                        storage,
+                        tenant_id=tenant_id,
+                        image_key=str(params["image_key"]),
+                        temp_paths=temp_paths,
+                    )
 
             _update_progress(
                 db,
                 store,
                 tenant_id=tenant_id,
                 task=task,
-                stage="generating",
+                stage="composing" if ecom_poster else "generating",
                 progress=30,
             )
-            provider = resolve(db, tenant_id=tenant_id, capability="image")
-            provider_payload: dict[str, Any] = {
-                "prompt": prompt,
-                "size": params.get("image_size") or "1024x1024",
-                "quality": params.get("image_quality") or "medium",
-                "n": 1,
-            }
-            if input_path is not None:
-                provider_payload["input_image_path"] = str(input_path)
-            result = asyncio.run(
-                invoke(
+            provider_payload: dict[str, Any] = {}
+            if ecom_poster:
+                source_storage_key = _validate_source_storage_key(
+                    tenant_id,
+                    str(params["source_storage_key"]),
+                )
+                image_bytes = _compose_ecom_poster(
+                    storage.get_bytes(source_storage_key),
+                    template_id=str(params.get("template_id") or ""),
+                    title=str(params.get("title") or ""),
+                    subtitle=str(params.get("subtitle") or ""),
+                )
+                result: Mapping[str, Any] = {
+                    "model": "local-pil",
+                    "size": f"{_POSTER_SIZE[0]}x{_POSTER_SIZE[1]}",
+                    "quality": "local",
+                    "mode": "compose",
+                }
+            else:
+                provider = resolve(db, tenant_id=tenant_id, capability="image")
+                provider_payload = {
+                    "prompt": prompt,
+                    "size": params.get("image_size") or "1024x1024",
+                    "quality": params.get("image_quality") or "medium",
+                    "n": 1,
+                }
+                if input_path is not None:
+                    provider_payload["input_image_path"] = str(input_path)
+                result = asyncio.run(
+                    invoke(
                     db,
                     tenant_id=tenant_id,
                     capability="image",
                     provider=provider.__class__.__name__,
                     operation=lambda: provider.generate_image(provider_payload),
                     timeout_seconds=settings.openai_image_timeout,
+                    )
                 )
-            )
-
-            image_bytes = _image_bytes(result)
-            if ecom_cutout:
-                image_bytes = _normalize_ecom_cutout_image(
-                    image_bytes,
-                    background=ecom_background,
-                )
+                image_bytes = _image_bytes(result)
+                if ecom_cutout:
+                    image_bytes = _normalize_ecom_cutout_image(
+                        image_bytes,
+                        background=ecom_background,
+                    )
             _update_progress(db, store, tenant_id=tenant_id, task=task, stage="got", progress=80)
 
             output_key = _photo_storage_key(tenant_id, task_id)
@@ -361,8 +558,8 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             storage.put_bytes(output_key, image_bytes, content_type="image/png")
             metadata = {
                 "model": result.get("model") or settings.openai_image_model,
-                "size": provider_payload["size"],
-                "quality": provider_payload["quality"],
+                "size": result.get("size") or provider_payload["size"],
+                "quality": result.get("quality") or provider_payload["quality"],
                 "mode": result.get("mode") or ("edit" if input_path else "generate"),
             }
             if _is_cover_request(params):
@@ -383,12 +580,22 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                     metadata["extra_prompt"] = str(params["extra_prompt"])
                 if params.get("source_asset_id"):
                     metadata["source_asset_id"] = str(params["source_asset_id"])
+            if ecom_poster:
+                metadata["kind"] = _ECOM_POSTER_KIND
+                if params.get("template_id"):
+                    metadata["template_id"] = str(params["template_id"])
+                if params.get("title"):
+                    metadata["title"] = str(params["title"])
+                if params.get("subtitle"):
+                    metadata["subtitle"] = str(params["subtitle"])
+                if params.get("source_asset_id"):
+                    metadata["source_asset_id"] = str(params["source_asset_id"])
 
             asset = Asset(
                 tenant_id=tenant_id,
                 type="generated_image",
                 source="generated",
-                provider="openai",
+                provider="local" if ecom_poster else "openai",
                 storage_key=output_key,
                 mime_type="image/png",
                 size_bytes=len(image_bytes),
@@ -411,13 +618,14 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             task.error = None
             task.error_code = None
             task.error_message = None
-            settle_reserved_quota(
-                db,
-                tenant_id=tenant_id,
-                video_task_id=task_id,
-                actual_seconds=1,
-                cost_cents=0,
-            )
+            if not ecom_poster:
+                settle_reserved_quota(
+                    db,
+                    tenant_id=tenant_id,
+                    video_task_id=task_id,
+                    actual_seconds=1,
+                    cost_cents=0,
+                )
             db.commit()
             prune_video_history_best_effort(
                 db,

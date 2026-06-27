@@ -22,6 +22,13 @@ from app.schemas.ecom_images import (
     EcomModelRequest,
     EcomModelStyle,
     EcomModelStylesResponse,
+    EcomPosterAccepted,
+    EcomPosterBatchAccepted,
+    EcomPosterBatchItem,
+    EcomPosterBatchRequest,
+    EcomPosterRequest,
+    EcomPosterTemplate,
+    EcomPosterTemplatesResponse,
 )
 from app.schemas.response import ApiResponse, ok
 from app.services.history import prune_video_history
@@ -36,6 +43,7 @@ ObjectStorageDependency = Depends(get_object_storage)
 
 _ECOM_CUTOUT_KIND = "ecom_cutout"
 _ECOM_MODEL_KIND = "ecom_model"
+_ECOM_POSTER_KIND = "ecom_poster"
 _BATCH_LIMIT = 20
 _SOURCE_IMAGE_TYPES = {"avatar_image", "product_image", "generated_image"}
 _SOURCE_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
@@ -52,6 +60,14 @@ _MODEL_STYLE_PROMPTS = {
     "street": "a modern street fashion scene with editorial styling",
 }
 _EXTRA_PROMPT_LIMIT = 200
+_POSTER_TITLE_LIMIT = 30
+_POSTER_SUBTITLE_LIMIT = 40
+_POSTER_TEMPLATES: tuple[EcomPosterTemplate, ...] = (
+    EcomPosterTemplate(id="promo_bold", name="Promo bold"),
+    EcomPosterTemplate(id="minimal", name="Minimal"),
+    EcomPosterTemplate(id="festival", name="Festival"),
+)
+_POSTER_TEMPLATE_IDS = {template.id for template in _POSTER_TEMPLATES}
 
 
 def _is_valid_source_image(asset: Asset) -> bool:
@@ -124,6 +140,10 @@ def _clamp_extra_prompt(extra_prompt: str | None) -> str | None:
     return extra_prompt[:_EXTRA_PROMPT_LIMIT]
 
 
+def _clamp_text(text: str, *, limit: int) -> str:
+    return text[:limit]
+
+
 def _model_prompt(*, gender: str, style_id: str, extra_prompt: str | None) -> str:
     style_prompt = _model_style_prompt_or_raise(style_id)
     gender_phrase = "" if gender == "any" else f" Use a {gender} fashion model."
@@ -134,6 +154,16 @@ def _model_prompt(*, gender: str, style_id: str, extra_prompt: str | None) -> st
         "colors, materials, proportions, and visible details. Do not alter the product design, "
         f"brand marks, text, or colorway.{extra}"
     )
+
+
+def _poster_template_or_raise(template_id: str) -> str:
+    if template_id not in _POSTER_TEMPLATE_IDS:
+        raise AppError(
+            "Unknown poster template.",
+            code="ECOM_POSTER_TEMPLATE_INVALID",
+            status_code=422,
+        )
+    return template_id
 
 
 def _task_params(
@@ -150,6 +180,27 @@ def _task_params(
         "image_size": _DEFAULT_IMAGE_SIZE,
         "image_quality": _DEFAULT_IMAGE_QUALITY,
         "estimated": True,
+    }
+    if batch_id is not None:
+        params["batch_id"] = batch_id
+    return params
+
+
+def _poster_task_params(
+    payload: EcomPosterRequest,
+    *,
+    source: Asset,
+    title: str,
+    subtitle: str,
+    batch_id: str | None = None,
+) -> dict[str, object]:
+    params: dict[str, object] = {
+        "kind": _ECOM_POSTER_KIND,
+        "template_id": payload.template_id,
+        "title": title,
+        "subtitle": subtitle,
+        "source_asset_id": source.id,
+        "source_storage_key": source.storage_key,
     }
     if batch_id is not None:
         params["batch_id"] = batch_id
@@ -208,6 +259,39 @@ def _create_cutout_task(
         quality=_DEFAULT_IMAGE_QUALITY,
         n=1,
     )
+    return task
+
+
+def _create_poster_task(
+    db: Session,
+    *,
+    user: User,
+    payload: EcomPosterRequest,
+    source: Asset,
+    batch_id: str | None = None,
+) -> VideoTask:
+    _poster_template_or_raise(payload.template_id)
+    title = _clamp_text(payload.title, limit=_POSTER_TITLE_LIMIT)
+    subtitle = _clamp_text(payload.subtitle, limit=_POSTER_SUBTITLE_LIMIT)
+    task = VideoTask(
+        id=str(uuid4()),
+        tenant_id=user.tenant_id,
+        created_by_user_id=user.id,
+        status="queued",
+        topic=title,
+        mode="photo",
+        video_mode="photo",
+        progress=0,
+        params=_poster_task_params(
+            payload,
+            source=source,
+            title=title,
+            subtitle=subtitle,
+            batch_id=batch_id,
+        ),
+    )
+    db.add(task)
+    db.flush()
     return task
 
 
@@ -285,6 +369,88 @@ def list_model_styles(
     _user: User = CreateEcomImagePermissionDependency,
 ) -> ApiResponse[EcomModelStylesResponse]:
     return ok(request, EcomModelStylesResponse(styles=list(_MODEL_STYLES)))
+
+
+@router.get(
+    "/poster-templates",
+    response_model=ApiResponse[EcomPosterTemplatesResponse],
+)
+def list_poster_templates(
+    request: Request,
+    _user: User = CreateEcomImagePermissionDependency,
+) -> ApiResponse[EcomPosterTemplatesResponse]:
+    return ok(request, EcomPosterTemplatesResponse(templates=list(_POSTER_TEMPLATES)))
+
+
+@router.post(
+    "/poster",
+    response_model=ApiResponse[EcomPosterAccepted],
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_poster(
+    request: Request,
+    payload: EcomPosterRequest,
+    user: User = CreateEcomImagePermissionDependency,
+    db: Session = DbSessionDependency,
+    storage: ObjectStorage = ObjectStorageDependency,
+) -> ApiResponse[EcomPosterAccepted]:
+    source = _source_asset_or_raise(
+        db,
+        tenant_id=user.tenant_id,
+        source_asset_id=payload.source_asset_id,
+    )
+    task = _create_poster_task(db, user=user, payload=payload, source=source)
+    db.commit()
+    _prune_photo_history_best_effort(db, tenant_id=user.tenant_id, storage=storage)
+    _enqueue_image_task(task)
+    return ok(request, EcomPosterAccepted(task_id=task.id))
+
+
+@router.post(
+    "/poster/batch",
+    response_model=ApiResponse[EcomPosterBatchAccepted],
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_poster_batch(
+    request: Request,
+    payload: EcomPosterBatchRequest,
+    user: User = CreateEcomImagePermissionDependency,
+    db: Session = DbSessionDependency,
+    storage: ObjectStorage = ObjectStorageDependency,
+) -> ApiResponse[EcomPosterBatchAccepted]:
+    selected_items = payload.items[:_BATCH_LIMIT]
+    sources = [
+        _source_asset_or_raise(
+            db,
+            tenant_id=user.tenant_id,
+            source_asset_id=item.source_asset_id,
+        )
+        for item in selected_items
+    ]
+    batch_id = str(uuid4())
+    tasks = [
+        _create_poster_task(
+            db,
+            user=user,
+            payload=item,
+            source=source,
+            batch_id=batch_id,
+        )
+        for item, source in zip(selected_items, sources, strict=True)
+    ]
+    db.commit()
+    _prune_photo_history_best_effort(db, tenant_id=user.tenant_id, storage=storage)
+    for task in tasks:
+        _enqueue_image_task(task)
+
+    response_tasks = [
+        EcomPosterBatchItem(
+            task_id=task.id,
+            source_asset_id=str(task.params["source_asset_id"]),
+        )
+        for task in tasks
+    ]
+    return ok(request, EcomPosterBatchAccepted(batch_id=batch_id, tasks=response_tasks))
 
 
 @router.post(
