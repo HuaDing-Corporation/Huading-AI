@@ -625,6 +625,11 @@ def test_cover_from_frame_stores_cover_photo_history_item(
     from app.api.v1.routes import covers as covers_route
 
     monkeypatch.setattr(covers_route, "extract_frame_cover", fake_extract_frame_cover)
+    monkeypatch.setattr(
+        covers_route,
+        "label_artifact_bytes",
+        lambda content, **_kwargs: content + b"|LABEL",
+    )
     app.dependency_overrides[get_object_storage] = lambda: storage
     try:
         client = TestClient(app)
@@ -653,7 +658,7 @@ def test_cover_from_frame_stores_cover_photo_history_item(
     assert calls["title"]["font_size"] == 120
     assert len(storage.saved) == 1
     storage_key = next(iter(storage.saved))
-    assert storage.saved[storage_key] == (b"cover-png", "image/png")
+    assert storage.saved[storage_key] == (b"cover-png|LABEL", "image/png")
     with auth_db() as db:
         asset = db.get(Asset, cover["id"])
         source_task = db.get(VideoTask, "oral-cover-task")
@@ -662,6 +667,8 @@ def test_cover_from_frame_stores_cover_photo_history_item(
     assert asset.type == "generated_image"
     assert asset.metadata_["kind"] == "cover"
     assert asset.metadata_["purpose"] == "cover"
+    assert asset.metadata_["synthetic_label"]["aigc_label"] == "AI_GENERATED_SYNTHETIC"
+    assert asset.metadata_["synthetic_label"]["aigc_content_id"] == cover_task.id
     assert asset.storage_key == storage_key
     assert source_task.thumbnail_key is None
     assert cover_task.mode == "photo"

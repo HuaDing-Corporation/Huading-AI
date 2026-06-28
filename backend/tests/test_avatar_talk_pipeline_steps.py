@@ -48,6 +48,10 @@ class _Storage:
         return f"https://storage.test/{key}"
 
 
+def _passthrough_label(content: bytes, **_kwargs) -> bytes:
+    return content
+
+
 BAD_SCRIPT_SAMPLE = (
     "【数字人主播脚本】\n"
     "（微笑，自然站姿，手持或展示裤子）\n"
@@ -103,7 +107,7 @@ def test_clean_spoken_script_removes_non_spoken_bad_sample():
 def test_default_avatar_talk_steps_create_assets_and_final_video(monkeypatch, tmp_path: Path):
     SessionTesting, engine = _session()
     tenant_id = "tenant-pipeline"
-    task_id = "task-pipeline"
+    task_id = "unit-pipeline"
     storage = _Storage()
     storage.objects[f"tenants/{tenant_id}/uploads/avatar.png"] = b"PNG"
     now = datetime.now(UTC)
@@ -208,6 +212,7 @@ def test_default_avatar_talk_steps_create_assets_and_final_video(monkeypatch, tm
         ),
     )
     monkeypatch.setattr(avatar_talk, "_work_dir", lambda _task_id: tmp_path)
+    monkeypatch.setattr(avatar_talk, "label_artifact_bytes", _passthrough_label)
 
     try:
         result = avatar_talk.run_avatar_talk_pipeline(tenant_id=tenant_id, task_id=task_id)
@@ -850,7 +855,7 @@ def test_seedance_i2v_runner_releases_quota_on_failure(monkeypatch):
 def test_script_step_generates_missing_script_with_deepseek(monkeypatch):
     SessionTesting, engine = _session()
     tenant_id = "tenant-script"
-    task_id = "task-script"
+    task_id = "unit-script"
     with SessionTesting() as db:
         db.add(Tenant(id=tenant_id, slug="script", name="Script"))
         db.add(
@@ -1165,6 +1170,7 @@ def test_script_step_cleans_existing_bad_script_before_tts(monkeypatch, tmp_path
         monkeypatch.setattr(avatar_talk, "resolve", fake_resolve)
         monkeypatch.setattr(avatar_talk, "_work_dir", lambda _unit_id: tmp_path)
         monkeypatch.setattr(avatar_talk, "_audio_duration_sec", lambda _path: 1.0)
+        monkeypatch.setattr(avatar_talk, "label_artifact_bytes", _passthrough_label)
 
         ctx = avatar_talk.AvatarTalkContext(
             task_id=unit_id,
@@ -1196,7 +1202,7 @@ def test_script_step_cleans_existing_bad_script_before_tts(monkeypatch, tmp_path
 def test_script_step_resolves_llm_provider_from_registry(monkeypatch):
     SessionTesting, engine = _session()
     tenant_id = "tenant-script-registry"
-    task_id = "task-script-registry"
+    task_id = "unit-script-registry"
     with SessionTesting() as db:
         db.add(Tenant(id=tenant_id, slug="script-registry", name="Script Registry"))
         db.add(
@@ -1298,7 +1304,7 @@ def test_subtitle_step_falls_back_to_script_when_timeline_is_empty(tmp_path: Pat
 def test_subtitle_step_falls_back_when_timeline_has_no_effective_text(tmp_path: Path):
     SessionTesting, engine = _session()
     tenant_id = "tenant-subtitle-blank"
-    task_id = "task-subtitle-blank"
+    task_id = "unit-subtitle-blank"
     storage = _Storage()
     with SessionTesting() as db:
         db.add(Tenant(id=tenant_id, slug="subtitle-blank", name="Subtitle Blank"))
@@ -1882,6 +1888,7 @@ def test_tts_step_uses_audio_file_duration_when_timeline_is_empty(monkeypatch, t
             lambda _db, *, tenant_id, capability: _TTSNoTimeline(),
         )
         monkeypatch.setattr(avatar_talk, "_audio_duration_sec", lambda _path: 9.8, raising=False)
+        monkeypatch.setattr(avatar_talk, "label_artifact_bytes", _passthrough_label)
         ctx = avatar_talk.AvatarTalkContext(
             task_id=unit_id,
             tenant_id=tenant_id,

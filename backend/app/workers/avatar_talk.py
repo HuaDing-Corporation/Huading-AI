@@ -30,6 +30,10 @@ from app.services.quota import release_reserved_quota, settle_reserved_quota
 from app.services.storage.base import ObjectStorage
 from app.services.storage.factory import create_object_storage
 from app.services.subtitle_styles import resolve_subtitle_style
+from app.services.synthetic_label import (
+    label_artifact_bytes,
+    synthetic_label_context,
+)
 from app.workers.celery_app import celery_app
 
 logger = get_logger(__name__)
@@ -244,6 +248,7 @@ def _add_asset(
     mime_type: str,
     size_bytes: int | None = None,
     duration_ms: int | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> Asset:
     asset = Asset(
         tenant_id=ctx.tenant_id,
@@ -255,11 +260,36 @@ def _add_asset(
         size_bytes=size_bytes,
         duration_ms=duration_ms,
         status="ready",
+        metadata_=metadata or {},
     )
     ctx.db.add(asset)
     ctx.db.flush()
     ctx.db.add(TaskAsset(video_task_id=ctx.task_id, asset_id=asset.id, role=role))
     return asset
+
+
+def _apply_synthetic_label(
+    ctx: AvatarTalkContext,
+    content: bytes,
+    *,
+    kind: str,
+    suffix: str,
+) -> tuple[bytes, dict[str, object]]:
+    label_settings, meta, payload = synthetic_label_context(
+        ctx.db,
+        tenant_id=ctx.tenant_id,
+        content_id=ctx.task_id,
+    )
+    return (
+        label_artifact_bytes(
+            content,
+            kind=kind,
+            settings=label_settings,
+            meta=meta,
+            suffix=suffix,
+        ),
+        payload,
+    )
 
 
 def clean_spoken_script(text: str) -> str:
@@ -420,6 +450,12 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         )
     )
     audio_bytes = Path(str(result["audio_path"])).read_bytes()
+    audio_bytes, label_metadata = _apply_synthetic_label(
+        ctx,
+        audio_bytes,
+        kind="audio",
+        suffix=".mp3",
+    )
     audio_key = f"tenants/{ctx.tenant_id}/videos/{ctx.task_id}/audio.mp3"
     ctx.storage.put_bytes(audio_key, audio_bytes, content_type="audio/mpeg")
     detected_duration_sec = _audio_duration_sec(Path(str(result["audio_path"])))
@@ -435,6 +471,7 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         mime_type="audio/mpeg",
         size_bytes=len(audio_bytes),
         duration_ms=duration_ms,
+        metadata={"synthetic_label": label_metadata},
     )
     ctx.audio_key = audio_key
     ctx.timeline = result.get("timeline") or []
@@ -1433,6 +1470,12 @@ def _burn_subtitles(
 
 def upload_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     final_bytes = getattr(ctx, "final_video_bytes", b"")
+    final_bytes, label_metadata = _apply_synthetic_label(
+        ctx,
+        final_bytes,
+        kind="video",
+        suffix=".mp4",
+    )
     final_key = f"tenants/{ctx.tenant_id}/videos/{ctx.task_id}/final.mp4"
     ctx.storage.put_bytes(final_key, final_bytes, content_type="video/mp4")
     _add_asset(
@@ -1443,6 +1486,7 @@ def upload_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         mime_type="video/mp4",
         size_bytes=len(final_bytes),
         duration_ms=int((ctx.duration_sec or 0) * 1000),
+        metadata={"synthetic_label": label_metadata},
     )
     ctx.storage_key = final_key
     ctx.size_bytes = len(final_bytes)

@@ -73,6 +73,24 @@ class Tenant(Base):
     organizations: Mapped[list["Organization"]] = relationship(back_populates="tenant")
 
 
+class TenantLabelSettings(Base):
+    __tablename__ = "tenant_label_settings"
+    __table_args__ = (
+        CheckConstraint(
+            "position IN ('br', 'bl', 'tr', 'tl', 'bc')",
+            name="ck_tenant_label_settings_position",
+        ),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    position: Mapped[str] = mapped_column(String(2), default="br")
+    text: Mapped[str] = mapped_column(String(20), default="AI 生成")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class User(TenantScopedMixin, Base):
     __tablename__ = "users"
     __table_args__ = (

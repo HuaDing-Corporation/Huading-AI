@@ -13,6 +13,7 @@ from app.api.v1.routes import (
     scripts,
     storage,
     tasks,
+    tenant,
     uploads,
     videos,
     voices,
@@ -32,6 +33,7 @@ api_router.include_router(covers.router, prefix="/covers", tags=["covers"])
 api_router.include_router(ecom_images.router, prefix="/ecom-images", tags=["ecom-images"])
 api_router.include_router(scripts.router, prefix="/scripts", tags=["scripts"])
 api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
+api_router.include_router(tenant.router, prefix="/tenant", tags=["tenant"])
 api_router.include_router(storage.router, prefix="/storage", tags=["storage"])
 api_router.include_router(uploads.router, prefix="/uploads", tags=["uploads"])
 api_router.include_router(videos.router, prefix="/videos", tags=["videos"])
