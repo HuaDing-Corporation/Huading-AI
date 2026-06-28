@@ -70,6 +70,10 @@ class _Store:
         return None
 
 
+def _passthrough_label(content: bytes, **_kwargs) -> bytes:
+    return content
+
+
 def _active_subscription(db, tenant_id: str) -> Subscription:
     subscription = db.scalar(
         select(Subscription)
@@ -543,6 +547,7 @@ def test_avatar_talk_accepts_brand_voice_and_worker_uses_speaker_id(
         )
         monkeypatch.setattr(avatar_talk, "_work_dir", lambda _unit_id: tmp_path)
         monkeypatch.setattr(avatar_talk, "_audio_duration_sec", lambda _path: 1.0)
+        monkeypatch.setattr(avatar_talk, "label_artifact_bytes", _passthrough_label)
 
         ctx = avatar_talk.AvatarTalkContext(
             task_id=unit_id,
@@ -608,6 +613,7 @@ def test_avatar_talk_preset_voice_still_uses_voice_code(
         )
         monkeypatch.setattr(avatar_talk, "_work_dir", lambda _unit_id: tmp_path)
         monkeypatch.setattr(avatar_talk, "_audio_duration_sec", lambda _path: 1.0)
+        monkeypatch.setattr(avatar_talk, "label_artifact_bytes", _passthrough_label)
 
         ctx = avatar_talk.AvatarTalkContext(
             task_id=unit_id,

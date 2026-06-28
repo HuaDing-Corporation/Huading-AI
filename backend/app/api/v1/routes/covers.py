@@ -27,10 +27,38 @@ from app.services.covers import (
 )
 from app.services.history import prune_video_history
 from app.services.storage.base import ObjectStorage
+from app.services.synthetic_label import (
+    label_artifact_bytes,
+    synthetic_label_context,
+)
 
 router = APIRouter()
 logger = get_logger(__name__)
 ObjectStorageDependency = Depends(get_object_storage)
+
+
+def _apply_synthetic_cover_label(
+    db: Session,
+    *,
+    tenant_id: str,
+    content_id: str,
+    image_bytes: bytes,
+) -> tuple[bytes, dict[str, object]]:
+    label_settings, meta, payload = synthetic_label_context(
+        db,
+        tenant_id=tenant_id,
+        content_id=content_id,
+    )
+    return (
+        label_artifact_bytes(
+            image_bytes,
+            kind="image",
+            settings=label_settings,
+            meta=meta,
+            suffix=".png",
+        ),
+        payload,
+    )
 
 
 def _oral_task_or_error(db: Session, *, tenant_id: str, task_id: str) -> VideoTask:
@@ -129,7 +157,13 @@ def cover_from_frame(
     cover_task_id = str(uuid4())
     cover_id = str(uuid4())
     storage_key = f"tenants/{user.tenant_id}/photos/{cover_task_id}/output.png"
-    storage.put_bytes(storage_key, cover.image_bytes, content_type="image/png")
+    cover_bytes, label_metadata = _apply_synthetic_cover_label(
+        db,
+        tenant_id=user.tenant_id,
+        content_id=cover_task_id,
+        image_bytes=cover.image_bytes,
+    )
+    storage.put_bytes(storage_key, cover_bytes, content_type="image/png")
     cover_task = VideoTask(
         id=cover_task_id,
         tenant_id=user.tenant_id,
@@ -144,7 +178,7 @@ def cover_from_frame(
         storage_key=storage_key,
         thumbnail_key=storage_key,
         content_type="image/png",
-        size_bytes=len(cover.image_bytes),
+        size_bytes=len(cover_bytes),
         finished_at=datetime.now(UTC),
         params={
             "kind": "cover",
@@ -163,7 +197,7 @@ def cover_from_frame(
         provider="frame",
         storage_key=storage_key,
         mime_type="image/png",
-        size_bytes=len(cover.image_bytes),
+        size_bytes=len(cover_bytes),
         width=cover.width,
         height=cover.height,
         status="ready",
@@ -176,6 +210,7 @@ def cover_from_frame(
             "timestamp_sec": payload.timestamp_sec,
             "layout_template_id": payload.layout_template_id,
             "title": title,
+            "synthetic_label": label_metadata,
         },
     )
     db.add_all([cover_task, asset])

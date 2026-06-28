@@ -25,6 +25,10 @@ from app.services.progress import build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
 from app.services.storage.base import ObjectStorage
 from app.services.storage.factory import create_object_storage
+from app.services.synthetic_label import (
+    label_artifact_bytes,
+    synthetic_label_context,
+)
 from app.workers.celery_app import celery_app
 from app.workers.video_tasks import _safe_task_id, _tenant_upload_storage_key
 
@@ -216,6 +220,30 @@ def _image_bytes(result: Mapping[str, Any]) -> bytes:
     if isinstance(b64_json, str):
         return base64.b64decode(b64_json)
     raise ValueError("Image provider returned no image bytes.")
+
+
+def _apply_synthetic_image_label(
+    db,
+    *,
+    tenant_id: str,
+    task_id: str,
+    image_bytes: bytes,
+) -> tuple[bytes, dict[str, object]]:
+    label_settings, meta, payload = synthetic_label_context(
+        db,
+        tenant_id=tenant_id,
+        content_id=task_id,
+    )
+    return (
+        label_artifact_bytes(
+            image_bytes,
+            kind="image",
+            settings=label_settings,
+            meta=meta,
+            suffix=".png",
+        ),
+        payload,
+    )
 
 
 def _png_from_image(image: Image.Image) -> bytes:
@@ -555,7 +583,6 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                 stage="uploading",
                 progress=90,
             )
-            storage.put_bytes(output_key, image_bytes, content_type="image/png")
             metadata = {
                 "model": result.get("model") or settings.openai_image_model,
                 "size": result.get("size") or provider_payload["size"],
@@ -590,6 +617,16 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                     metadata["subtitle"] = str(params["subtitle"])
                 if params.get("source_asset_id"):
                     metadata["source_asset_id"] = str(params["source_asset_id"])
+
+            image_bytes, label_metadata = _apply_synthetic_image_label(
+                db,
+                tenant_id=tenant_id,
+                task_id=task_id,
+                image_bytes=image_bytes,
+            )
+            metadata["synthetic_label"] = label_metadata
+
+            storage.put_bytes(output_key, image_bytes, content_type="image/png")
 
             asset = Asset(
                 tenant_id=tenant_id,

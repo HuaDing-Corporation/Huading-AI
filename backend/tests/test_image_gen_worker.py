@@ -230,6 +230,7 @@ def _patch_worker(monkeypatch, auth_db, storage: _FakeStorage, store: _MemProgre
     monkeypatch.setattr(image_gen, "build_progress_store", lambda _redis_url: store)
     monkeypatch.setattr(image_gen, "create_object_storage", lambda _settings: storage)
     monkeypatch.setattr(image_gen, "resolve", lambda _db, *, tenant_id, capability: provider)
+    monkeypatch.setattr(image_gen, "label_artifact_bytes", lambda content, **_kwargs: content)
     return image_gen
 
 

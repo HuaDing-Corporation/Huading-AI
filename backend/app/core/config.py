@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     engine_s3_addressing_style: str = "path"
     engine_s3_presign_ttl: int = 3600
     engine_aigc_producer: str = "Huading"
+    engine_label_provider_code: str = ""
 
     # ---- Video engine ----
     # Keys are injected from the platform/environment, never hardcoded (#002-FIX-1).
@@ -115,7 +116,7 @@ class Settings(BaseSettings):
     engine_browser_channel: str = ""
     # Resource root (templates/bgm/workflows/output). None -> app/engine/runtime.
     engine_runtime_root: str | None = None
-    # Object-storage key prefix for generated videos (task-isolated under it).
+    # Object-storage key prefix for generated videos (isolated per task under it).
     engine_output_prefix: str = "videos"
 
     @field_validator("cors_origins", mode="before")

@@ -2,7 +2,7 @@
 
 Flow: build EngineConfig from platform-injected settings (no hardcoded keys,
 #002-FIX-1) -> run the standard pipeline -> publish progress to Redis -> upload
-the finished mp4 to object storage under a task-isolated key -> return the URL.
+the finished mp4 to object storage under a per-task key -> return the URL.
 
 Concurrency: the engine config is a process-wide singleton, so this worker must
 run single-config / single-process (e.g. `celery ... worker -c 1`). See the
@@ -22,6 +22,12 @@ from app.db.models import VideoTask
 from app.db.session import SessionLocal
 from app.services.progress import build_progress_store
 from app.services.storage.factory import create_object_storage
+from app.services.synthetic_label import (
+    LabelSettings,
+    build_synthetic_label_meta,
+    label_artifact_bytes,
+    label_settings_for_tenant,
+)
 from app.workers.celery_app import celery_app
 
 logger = get_logger(__name__)
@@ -51,7 +57,7 @@ def _safe_prefix(prefix: str) -> str:
 
 
 def _storage_key(task_id: str, tenant_id: str) -> str:
-    """Task-isolated object-storage key. No user input flows in here (#002-RV P2)."""
+    """Per-task object-storage key. No user input flows in here (#002-RV P2)."""
     return (
         f"tenants/{_safe_task_id(tenant_id)}/"
         f"{_safe_prefix(settings.engine_output_prefix)}/{_safe_task_id(task_id)}/output.mp4"
@@ -72,6 +78,28 @@ def _tenant_upload_storage_key(tenant_id: str, image_key: str) -> str:
     if not _TENANT_UPLOAD_OBJECT_KEY_RE.match(storage_key):
         raise ValueError(f"unsafe image_key: {image_key!r}")
     return storage_key
+
+
+def _apply_synthetic_video_label(*, tenant_id: str, task_id: str, video_bytes: bytes) -> bytes:
+    try:
+        with SessionLocal() as db:
+            label_settings = label_settings_for_tenant(db, tenant_id=tenant_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "synthetic_label.settings_failed",
+            tenant_id=tenant_id,
+            task_id=task_id,
+            error=str(exc),
+        )
+        label_settings = LabelSettings()
+    meta = build_synthetic_label_meta(content_id=task_id)
+    return label_artifact_bytes(
+        video_bytes,
+        kind="video",
+        settings=label_settings,
+        meta=meta,
+        suffix=".mp4",
+    )
 
 
 def _update_video_task(
@@ -251,6 +279,11 @@ def generate_video_task(self, params: dict[str, Any]) -> dict[str, Any]:
         else:
             result = asyncio.run(_generate_with_engine(params, progress_cb))
         video_bytes = Path(result["video_path"]).read_bytes()
+        video_bytes = _apply_synthetic_video_label(
+            tenant_id=tenant_id,
+            task_id=task_id,
+            video_bytes=video_bytes,
+        )
         storage = create_object_storage(settings)
         storage_bucket = getattr(storage, "bucket", settings.engine_s3_bucket)
         storage_key = _storage_key(task_id, tenant_id)
@@ -262,7 +295,7 @@ def generate_video_task(self, params: dict[str, Any]) -> dict[str, Any]:
             thumbnail_key = _thumbnail_key(task_id, tenant_id)
             storage.put_bytes(thumbnail_key, thumbnail_bytes, content_type="image/jpeg")
         duration = result.get("duration")
-        file_size = int(result.get("file_size") or len(video_bytes))
+        file_size = len(video_bytes)
         _update_video_task(
             task_id,
             tenant_id,

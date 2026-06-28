@@ -73,6 +73,7 @@ def test_video_generation_end_to_end_eager(
     monkeypatch.setattr(video_tasks, "build_progress_store", lambda url: store)
     monkeypatch.setattr(video_tasks, "create_object_storage", lambda settings: storage)
     monkeypatch.setattr(video_tasks, "SessionLocal", auth_db)
+    monkeypatch.setattr(video_tasks, "label_artifact_bytes", lambda content, **_kwargs: content)
     app.dependency_overrides[get_progress_store] = lambda: store
     app.dependency_overrides[get_object_storage] = lambda: storage
 

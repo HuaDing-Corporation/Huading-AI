@@ -136,6 +136,7 @@ def test_worker_routes_seedance_modes(monkeypatch, tmp_path):
     monkeypatch.setattr(video_tasks, "_generate_with_seedance", fake_seedance)
     monkeypatch.setattr(video_tasks, "_generate_with_engine", fail_engine)
     monkeypatch.setattr(video_tasks, "build_progress_store", lambda url: _Store())
+    monkeypatch.setattr(video_tasks, "label_artifact_bytes", lambda content, **_kwargs: content)
     monkeypatch.setattr(
         video_tasks, "create_object_storage", lambda settings: _FakeStorage()
     )
