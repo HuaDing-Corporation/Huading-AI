@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronLeft, Eraser, ImagePlus, Mic, PenLine, Store, UserRound, type LucideIcon } from "lucide-react";
+import { ChevronLeft, Eraser, ImagePlus, Mic, PenLine, ShieldCheck, Store, UserRound, type LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
@@ -68,6 +68,12 @@ export default function Home() {
               className="ml-auto inline-flex items-center gap-1 rounded-field px-2 py-1 text-gold-deep outline-none transition-colors hover:bg-glass-soft focus-visible:shadow-focus-gold"
             >
               <Mic size={14} strokeWidth={2} /> {copy.brandVoice.entry}
+            </Link>
+            <Link
+              href="/label-settings"
+              className="inline-flex items-center gap-1 rounded-field px-2 py-1 text-gold-deep outline-none transition-colors hover:bg-glass-soft focus-visible:shadow-focus-gold"
+            >
+              <ShieldCheck size={14} strokeWidth={2} /> {copy.label.entry}
             </Link>
           </nav>
 

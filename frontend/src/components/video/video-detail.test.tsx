@@ -75,6 +75,8 @@ describe("VideoDetail", () => {
     expect(screen.getByText("测试视频")).toBeInTheDocument();
     expect(screen.getByText("今天的主题是测试")).toBeInTheDocument();
     expect(screen.getByText(copy.detail.download)).toBeInTheDocument();
+    // LABEL-UI-0001：完成产物处显示「已含 AI 生成标识」知情提示。
+    expect(screen.getByText(copy.label.productNotice)).toBeInTheDocument();
   });
 
   it("renders an <img> result for a photo task (mode=photo) with a download link", () => {
@@ -146,5 +148,7 @@ describe("VideoDetail", () => {
     render(<VideoDetail id="v2" />, { wrapper });
     // null topic falls back to a placeholder; no crash, no subtitle block.
     expect(screen.getByText("未命名视频")).toBeInTheDocument();
+    // LABEL-UI-0001 负向：未完成(running)无产物 → 不显「已含 AI 生成标识」(锁住条件分支)。
+    expect(screen.queryByText(copy.label.productNotice)).not.toBeInTheDocument();
   });
 });

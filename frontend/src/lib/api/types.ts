@@ -464,3 +464,19 @@ export interface CreateBrandVoiceInput {
   audio: Blob; // 录音 MediaRecorder 产物 或 上传的音频文件
   consentConfirmed: boolean;
 }
+
+// ── 深度合成标识设置 (LABEL-UI-0001) ──
+// 注：后端 LABEL-PIPELINE 未实现，契约据 seam §3/§5 推断，待对冻结 seam + 真栈校验。
+export type LabelPosition = "br" | "bl" | "tr" | "tl" | "bc"; // 右下/左下/右上/左上/底部居中
+
+// GET/PUT /tenant/label-settings；enabled 只读恒真（合规：显式标识不可关闭）。
+export interface LabelSettings {
+  position: LabelPosition;
+  text: string; // 1–20 非空
+  enabled: boolean; // 恒 true，只读
+}
+// PUT 仅发可编辑字段（position/text）；enabled 由后端强制为 true，client 不发 → 结构上无法关闭。
+export interface LabelSettingsUpdate {
+  position: LabelPosition;
+  text: string;
+}

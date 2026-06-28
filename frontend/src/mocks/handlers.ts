@@ -32,6 +32,10 @@ const brandVoices = new Map<string, MockBrandVoice>([
 let brandVoiceSeq = 0;
 let audioAssetSeq = 0;
 
+// ── 深度合成标识设置 (LABEL-UI-0001) mock store ──
+// 忠实契约：enabled 只读恒真(合规不可关)；PUT 校验 text 非空 ≤20(否则 422)；非伪造。
+const labelSettings = { position: "br", text: "AI 生成", enabled: true };
+
 function sseStream(id: string, fail = false): Response {
   const enc = new TextEncoder();
   const frames = fail
@@ -390,5 +394,26 @@ export const handlers = [
     if (!brandVoices.has(id)) return err(404, "BRAND_VOICE_NOT_FOUND", "品牌音色不存在");
     brandVoices.delete(id);
     return ok({ deleted: true });
+  }),
+
+  // ── 深度合成标识设置 (LABEL-UI-0001) ──
+  // 忠实契约：GET 返 {position,text,enabled:true}；PUT 仅收 {position,text}，校验 text 非空 ≤20
+  // (否则 422)；enabled 恒强制 true(client 无法关闭)。非伪造。
+  http.get(`${BASE}/api/v1/tenant/label-settings`, () => ok({ ...labelSettings })),
+  http.put(`${BASE}/api/v1/tenant/label-settings`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as { position?: string; text?: string };
+    const text = (body.text ?? "").trim();
+    if (!text || text.length > 20) {
+      return err(422, "LABEL_TEXT_INVALID", "标识文案需为 1–20 个非空字符");
+    }
+    // position 必填 + 枚举校验，逐字对齐后端 TenantLabelSettingsUpdate.position(Literal，必填)：
+    // 缺失/空/非法均 422(不放宽“present 才校验”，避免 mock 掩盖前端漏发 position 的回归)。
+    if (!body.position || !["br", "bl", "tr", "tl", "bc"].includes(body.position)) {
+      return err(422, "LABEL_POSITION_INVALID", "标识位置非法或缺失");
+    }
+    labelSettings.position = body.position; // 校验后必有，直接赋值
+    labelSettings.text = text;
+    labelSettings.enabled = true; // 合规：强制恒真，忽略任何关闭意图
+    return ok({ ...labelSettings });
   })
 ];

@@ -61,6 +61,7 @@ vi.mock("@/lib/api/hooks", () => ({
 
 import { CopyDraftList } from "./copy-draft-list";
 import { GenerationHistory, HistoryList, PhotoHistory } from "./generation-history";
+import { copy } from "@/lib/copy";
 
 beforeEach(() => {
   deleteVideoMock.isPending = false;
@@ -83,6 +84,8 @@ describe("GenerationHistory (历史 tabs + 删除/清空/仅封面)", () => {
     expect(screen.getByRole("tab", { name: /图片历史/ })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /文案历史/ })).toBeInTheDocument();
     expect(historyMock.fn).toHaveBeenCalledWith("avatar_talk");
+    // LABEL-UI-0001：历史区显示「已含 AI 生成标识」知情提示。
+    expect(screen.getByText(copy.label.productNotice)).toBeInTheDocument();
   });
 
   it("照片 history pulls GET /videos?mode=photo and renders an <img>", () => {

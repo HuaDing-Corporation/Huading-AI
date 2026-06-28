@@ -15,6 +15,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { SubtitlePreview } from "@/components/video/subtitle-preview";
 import { VideoPlayer } from "@/components/video/video-player";
 import { CoverPanel } from "@/components/video/cover-panel";
+import { AiLabelNotice } from "@/components/label/ai-label-notice";
 import { Button } from "@/components/ui/button";
 
 export interface VideoDetailProps {
@@ -166,6 +167,9 @@ export function VideoDetail({ id }: VideoDetailProps) {
           <span className="text-[13px] text-ink-soft">{statusLabel[data.status] ?? data.status}</span>
         </div>
       )}
+
+      {/* 产物知情提示：已含 AI 生成标识(不可去除)。仅完成产物显示。(LABEL-UI-0001) */}
+      {data.status === "done" && data.playback_url && <AiLabelNotice className="w-fit" />}
 
       {/* 做封面(ORAL-PROD-UI-0001)：封面是口播视频产物附属，仅完成的口播视频显示入口 */}
       {data.status === "done" && data.playback_url && (data.mode == null || data.mode === "avatar_talk") && (
