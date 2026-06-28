@@ -301,5 +301,30 @@ export const copy = {
     // 口播 picker 分组
     pickerBrandGroup: "我的品牌音色",
     pickerStandardGroup: "系统音色"
+  },
+  // 深度合成标识设置 (LABEL-UI-0001)
+  label: {
+    entry: "标识设置",
+    pageTitle: "深度合成标识",
+    pageSubtitle: "设置 AI 生成内容的显式水印标识（位置 / 文案）",
+    settingsTitle: "标识水印",
+    positionLabel: "标识位置",
+    posBr: "右下",
+    posBl: "左下",
+    posTr: "右上",
+    posTl: "左上",
+    posBc: "底部居中",
+    textLabel: "标识文案",
+    textPlaceholder: "如：AI 生成（≤20 字，必填）",
+    textRequired: "标识文案不能为空",
+    previewLabel: "实时预览",
+    // 合规：不可关闭明示
+    lockedTitle: "显式标识已开启，不可关闭",
+    lockedHint: "根据深度合成合规要求，AI 生成内容必须带显式标识，无法关闭。",
+    save: "保存",
+    saving: "保存中…",
+    saved: "已保存",
+    // 产物处知情提示
+    productNotice: "已含 AI 生成标识"
   }
 } as const;
