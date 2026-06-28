@@ -105,6 +105,8 @@ export interface EstimateResponse {
   note?: string;
 }
 
+// 音色来源 (BRAND-VOICE-UI-0001 §8)：系统预设 / 品牌音色(声音克隆)。
+export type VoiceSource = "preset" | "brand_voice";
 export interface Voice {
   id: string;
   provider: string;
@@ -113,9 +115,8 @@ export interface Voice {
   gender: string | null;
   language: string | null;
   sample_url?: string | null;
-  // 品牌音色(声音克隆)标记 (BRAND-VOICE-UI-0001)：ready 克隆音色在 /voices 里带此标，
-  // 口播 picker 据此分组「我的品牌音色」。flag：待 seam 校验(真后端或用 provider 区分)。
-  is_brand_voice?: boolean;
+  // VoiceRead.source：口播 picker 按 source==="brand_voice" 分组「我的品牌音色」(对齐后端 §8)。
+  source?: VoiceSource;
 }
 export interface AvatarPreset {
   asset_id: string;
@@ -431,24 +432,35 @@ export interface PosterBatchResponse {
   tasks: PosterBatchTask[];
 }
 
-// ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001) ──
-// 注：后端 BRAND-VOICE-PIPELINE 未实现，契约据 seam §5 推断，待 Codex B 对冻结 seam 校验。
+// ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001，FIX1 对齐后端 §8 真契约) ──
 export type BrandVoiceStatus = "processing" | "ready" | "failed"; // 处理中 / 可用 / 失败
 
+// BrandVoiceRead：后端仅返 id/name/status/created_at（无 sample_url/error_message）。
 export interface BrandVoice {
   id: string;
   name: string;
   status: BrandVoiceStatus;
-  sample_url?: string | null; // ready 时可试听
-  error_message?: string | null; // failed 时友好原因
   created_at: string;
 }
 export interface BrandVoiceListResponse {
   items: BrandVoice[];
   total: number;
 }
-// POST /brand-voices 经 multipart FormData 发送(name + audio Blob)；UI 侧入参形状。
+
+// 创建三段式（§8）：先 POST /uploads/audio(multipart file) 取 asset_id，再 JSON POST /brand-voices。
+// POST /uploads/audio → { asset_id }（asset type=audio）。
+export interface AudioUploadResponse {
+  asset_id: string;
+}
+// POST /brand-voices = JSON(extra=forbid)：consent_confirmed 必须进 body(StrictBool true，否则 422)。
+export interface BrandVoiceCreateBody {
+  name: string; // 1–30 非空
+  source_audio_asset_id: string;
+  consent_confirmed: boolean;
+}
+// UI 侧入参（组件持有 Blob + 名称 + 授权勾选）；经 createBrandVoiceFromAudio 编排上传→创建。
 export interface CreateBrandVoiceInput {
   name: string;
   audio: Blob; // 录音 MediaRecorder 产物 或 上传的音频文件
+  consentConfirmed: boolean;
 }

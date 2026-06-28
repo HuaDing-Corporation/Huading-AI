@@ -11,7 +11,7 @@ import { listVoices } from "@/lib/api/voices";
 import { listSubtitleTemplates } from "@/lib/api/oral";
 import { createCoverFromFrame, getFrameCandidates } from "@/lib/api/covers";
 import { cutoutImage, cutoutImageBatch, listModelStyles, listPosterTemplates, modelImage, modelImageBatch, posterImage, posterImageBatch } from "@/lib/api/ecom-images";
-import { createBrandVoice, deleteBrandVoice, listBrandVoices } from "@/lib/api/brand-voices";
+import { createBrandVoiceFromAudio, deleteBrandVoice, listBrandVoices } from "@/lib/api/brand-voices";
 import { clearVideos, createVideo, deleteVideo, estimateVideo, generateScenePrompt, getVideo, listVideos, listVideosPage } from "@/lib/api/videos";
 import type {
   CopyDraftCreateRequest,
@@ -149,7 +149,8 @@ export function useBrandVoices() {
 export function useCreateBrandVoice() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: CreateBrandVoiceInput) => createBrandVoice(input),
+    // 三段式编排：上传音频 → JSON 创建(带 consent_confirmed)。
+    mutationFn: (input: CreateBrandVoiceInput) => createBrandVoiceFromAudio(input),
     // 新建后失效品牌音色列表 + voices(ready 克隆音色会进口播 picker)。
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: brandVoiceKeys.all });

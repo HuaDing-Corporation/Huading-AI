@@ -46,7 +46,9 @@ describe("BrandVoiceCreate (品牌音色创建)", () => {
     fireEvent.click(screen.getByRole("checkbox"));
     fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
 
-    await waitFor(() => expect(createMock.mutateAsync).toHaveBeenCalledWith({ name: "我的音", audio: file }));
+    await waitFor(() =>
+      expect(createMock.mutateAsync).toHaveBeenCalledWith({ name: "我的音", audio: file, consentConfirmed: true })
+    );
   });
 
   it("无音频：提示先录制/上传，不发请求", () => {
@@ -74,6 +76,17 @@ describe("BrandVoiceCreate (品牌音色创建)", () => {
     expect(screen.getByText(copy.errors.audioTooLarge)).toBeInTheDocument();
     // 未载入：无试听音频元素
     expect(screen.queryByLabelText(copy.brandVoice.previewAria)).not.toBeInTheDocument();
+  });
+
+  it("名称 ≤30：超长输入截断到 30，提交 name 长度封顶 30（对齐后端 max_length=30）", async () => {
+    const file = mp3();
+    render(<BrandVoiceCreate />);
+    uploadAudio(file);
+    fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "名".repeat(50) } });
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
+    await waitFor(() => expect(createMock.mutateAsync).toHaveBeenCalled());
+    expect(createMock.mutateAsync.mock.calls[0][0].name).toHaveLength(30);
   });
 
   it("防连点：创建中按钮显「创建中…」并禁用", () => {

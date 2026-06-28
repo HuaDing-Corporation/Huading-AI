@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Loader2, Play, Trash2 } from "lucide-react";
+import { Loader2, Trash2 } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
 import { useBrandVoices, useDeleteBrandVoice } from "@/lib/api/hooks";
@@ -21,14 +21,6 @@ const STATUS_CLASS: Record<BrandVoiceStatus, string> = {
   ready: "border-line-sel bg-chip-sel text-gold-deep",
   failed: "border-line-gold bg-error-bg text-error-fg"
 };
-
-function playSample(url: string) {
-  try {
-    void new Audio(url).play();
-  } catch {
-    // best-effort
-  }
-}
 
 function StatusBadge({ status }: { status: BrandVoiceStatus }) {
   return (
@@ -93,20 +85,9 @@ export function BrandVoiceList() {
                 {v.status === "processing" && (
                   <p className="mt-0.5 text-[11.5px] text-ink-faint">{copy.brandVoice.processingHint}</p>
                 )}
-                {v.status === "failed" && v.error_message && (
-                  <p className="mt-0.5 text-[11.5px] text-error-fg">{v.error_message}</p>
-                )}
+                {/* §8：失败态仅徽章「失败」，后端不返 error_message，不显额外原因。 */}
               </div>
-              {v.status === "ready" && v.sample_url && (
-                <button
-                  type="button"
-                  onClick={() => playSample(v.sample_url as string)}
-                  aria-label={`${copy.brandVoice.play} ${v.name}`}
-                  className="flex h-8 w-8 flex-none items-center justify-center rounded-mark text-gold-deep hover:bg-glass-hover"
-                >
-                  <Play size={15} strokeWidth={2} />
-                </button>
-              )}
+              {/* §8 v1：列表不试听克隆音色(后端不返 sample)；创建前的本地录音试听保留在创建区。 */}
               <button
                 type="button"
                 onClick={() => {

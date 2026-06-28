@@ -14,7 +14,7 @@ vi.mock("@/lib/api/hooks", () => ({
 import { BrandVoiceList } from "./brand-voice-list";
 
 const bv = (id: string, name: string, status: string, extra: Record<string, unknown> = {}) => ({
-  id, name, status, sample_url: null, error_message: null, created_at: "", ...extra
+  id, name, status, created_at: "", ...extra
 });
 
 beforeEach(() => {
@@ -27,18 +27,15 @@ beforeEach(() => {
 afterEach(() => vi.clearAllMocks());
 
 describe("BrandVoiceList (品牌音色列表)", () => {
-  it("三种 status 各出对应徽章 + 处理中提示 + 失败原因", () => {
-    listMock.data = [
-      bv("a", "处理音", "processing"),
-      bv("b", "可用音", "ready", { sample_url: "https://mock.local/r.mp3" }),
-      bv("c", "失败音", "failed", { error_message: "底噪过大" })
-    ];
+  it("三种 status 各出对应徽章 + 处理中提示（§8：失败仅徽章无 message、不试听）", () => {
+    listMock.data = [bv("a", "处理音", "processing"), bv("b", "可用音", "ready"), bv("c", "失败音", "failed")];
     render(<BrandVoiceList />);
     expect(screen.getByText(copy.brandVoice.statusProcessing)).toBeInTheDocument();
     expect(screen.getByText(copy.brandVoice.statusReady)).toBeInTheDocument();
     expect(screen.getByText(copy.brandVoice.statusFailed)).toBeInTheDocument();
     expect(screen.getByText(copy.brandVoice.processingHint)).toBeInTheDocument();
-    expect(screen.getByText("底噪过大")).toBeInTheDocument();
+    // §8：列表不试听克隆音色（无任何「试听」按钮，仅删除）
+    expect(screen.queryByRole("button", { name: /试听/ })).not.toBeInTheDocument();
   });
 
   it("空态：提示去创建", () => {
@@ -48,7 +45,7 @@ describe("BrandVoiceList (品牌音色列表)", () => {
   });
 
   it("删除：点删除→确认弹窗→确认调用 deleteBrandVoice(id)", async () => {
-    listMock.data = [bv("a", "可用音", "ready", { sample_url: "https://mock.local/r.mp3" })];
+    listMock.data = [bv("a", "可用音", "ready")];
     render(<BrandVoiceList />);
 
     fireEvent.click(screen.getByRole("button", { name: `${copy.brandVoice.delete} 可用音` }));

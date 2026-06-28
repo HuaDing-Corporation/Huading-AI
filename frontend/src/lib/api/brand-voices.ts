@@ -1,10 +1,18 @@
 import { apiFetch, multipartFetch } from "@/lib/api/client";
-import type { BrandVoice, BrandVoiceListResponse, CreateBrandVoiceInput, DeleteResult } from "@/lib/api/types";
+import type {
+  AudioUploadResponse,
+  BrandVoice,
+  BrandVoiceCreateBody,
+  BrandVoiceListResponse,
+  CreateBrandVoiceInput,
+  DeleteResult
+} from "@/lib/api/types";
 
 /**
- * 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001) 数据层。列表/删除走 apiFetch(JSON)；创建含音频 Blob
- * 故走 multipartFetch(FormData，复用 client 的鉴权/401/封套实现，不重复造)。契约据 seam §5 推断，
- * 待对冻结 seam 校验。
+ * 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001，FIX1 对齐后端 §8) 数据层。
+ * 创建为三段式：① 音频 → POST /uploads/audio(multipart file) 取 asset_id；② JSON POST /brand-voices
+ * { name, source_audio_asset_id, consent_confirmed:true }（extra=forbid，consent 非 true → 422）。
+ * 列表/删除走 apiFetch(JSON)。音频上传复用 client.multipartFetch（鉴权/401/封套单一实现，零裸 fetch）。
  */
 
 /** 品牌音色列表（status: processing/ready/failed；处理中前端轮询）。 */
@@ -13,15 +21,25 @@ export async function listBrandVoices(): Promise<BrandVoice[]> {
   return res?.items ?? [];
 }
 
-/** 创建品牌音色 → multipart(name + audio) → 返回 processing 记录。 */
-export function createBrandVoice({ name, audio }: CreateBrandVoiceInput): Promise<BrandVoice> {
+/** ① 上传待克隆音频 → { asset_id }（asset type=audio）。 */
+export function uploadAudio(audio: Blob): Promise<AudioUploadResponse> {
   const form = new FormData();
-  form.append("name", name);
-  form.append("audio", audio);
-  return multipartFetch<BrandVoice>("/api/v1/brand-voices", form, {
-    defaultErrorMessage: "创建失败",
-    defaultErrorCode: "BRAND_VOICE_CREATE_ERROR"
+  form.append("file", audio);
+  return multipartFetch<AudioUploadResponse>("/api/v1/uploads/audio", form, {
+    defaultErrorMessage: "音频上传失败",
+    defaultErrorCode: "AUDIO_UPLOAD_ERROR"
   });
+}
+
+/** ② JSON 创建品牌音色（consent_confirmed 必须进 body）。 */
+export function createBrandVoice(body: BrandVoiceCreateBody): Promise<BrandVoice> {
+  return apiFetch<BrandVoice>("/api/v1/brand-voices", { method: "POST", body });
+}
+
+/** 三段式编排：上传音频拿 asset_id → JSON 创建（带 consent_confirmed）。 */
+export async function createBrandVoiceFromAudio({ name, audio, consentConfirmed }: CreateBrandVoiceInput): Promise<BrandVoice> {
+  const { asset_id } = await uploadAudio(audio);
+  return createBrandVoice({ name, source_audio_asset_id: asset_id, consent_confirmed: consentConfirmed });
 }
 
 /** 删除品牌音色。 */

@@ -63,6 +63,8 @@ describe("BrandVoiceCreate · 录音态（mock useAudioRecorder）", () => {
     fireEvent.click(screen.getByRole("checkbox"));
     fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
 
-    await waitFor(() => expect(createMock.mutateAsync).toHaveBeenCalledWith({ name: "录音音色", audio: blob }));
+    await waitFor(() =>
+      expect(createMock.mutateAsync).toHaveBeenCalledWith({ name: "录音音色", audio: blob, consentConfirmed: true })
+    );
   });
 });

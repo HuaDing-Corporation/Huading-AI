@@ -15,22 +15,22 @@ const copyDrafts: Record<string, unknown>[] = [];
 let videoSeq = 0;
 let draftSeq = 0;
 
-// ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001) mock store ──
-// 忠实契约：CRUD + status(processing→ready 轮询模拟) + voices 含 ready 克隆；非伪造。
+// ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001，FIX1 对齐后端 §8) mock store ──
+// 忠实真契约：BrandVoiceRead 仅 {id,name,status,created_at}(无 sample_url/error_message)；CRUD +
+// status(processing→ready 轮询模拟) + /voices 项带 source。非伪造。
 interface MockBrandVoice {
   id: string;
   name: string;
   status: "processing" | "ready" | "failed";
-  sample_url: string | null;
-  error_message: string | null;
   created_at: string;
   _polls: number; // GET 轮询计数：processing 第 2 次轮询后翻 ready，模拟异步克隆完成
 }
 const brandVoices = new Map<string, MockBrandVoice>([
-  ["bv-ready-1", { id: "bv-ready-1", name: "我的主播音", status: "ready", sample_url: "https://mock.local/bv-ready.mp3", error_message: null, created_at: new Date(0).toISOString(), _polls: 99 }],
-  ["bv-failed-1", { id: "bv-failed-1", name: "失败样例", status: "failed", sample_url: null, error_message: "音频时长不足或底噪过大，请重录", created_at: new Date(0).toISOString(), _polls: 99 }]
+  ["bv-ready-1", { id: "bv-ready-1", name: "我的主播音", status: "ready", created_at: new Date(0).toISOString(), _polls: 99 }],
+  ["bv-failed-1", { id: "bv-failed-1", name: "失败样例", status: "failed", created_at: new Date(0).toISOString(), _polls: 99 }]
 ]);
 let brandVoiceSeq = 0;
+let audioAssetSeq = 0;
 
 function sseStream(id: string, fail = false): Response {
   const enc = new TextEncoder();
@@ -93,12 +93,12 @@ export const handlers = [
   ),
   http.get(`${BASE}/api/v1/quota`, () => ok({ total: 1000, used: 120, reserved: 36, remaining: 844 })),
   http.get(`${BASE}/api/v1/voices`, () => {
-    // 系统音色 + ready 克隆音色(is_brand_voice，对应 brand-voices ready 记录)，供口播 picker 分组。
+    // 系统音色(source:preset) + ready 克隆音色(source:brand_voice，对应 brand-voices ready 记录)，供 picker 分组(§8)。
     const clones = [...brandVoices.values()]
       .filter((v) => v.status === "ready")
-      .map((v) => ({ id: `clone-${v.id}`, provider: "clone", voice_code: v.id, display_name: v.name, gender: null, language: "zh-CN", sample_url: v.sample_url, is_brand_voice: true }));
+      .map((v) => ({ id: v.id, provider: "clone", voice_code: v.id, display_name: v.name, gender: "neutral", language: "zh-CN", sample_url: null, source: "brand_voice" }));
     const items = [
-      { id: "v-zhixing", provider: "edge_tts", voice_code: "zh-CN-XiaoxiaoNeural", display_name: "知性女声", gender: "female", language: "zh-CN", sample_url: null },
+      { id: "v-zhixing", provider: "edge_tts", voice_code: "zh-CN-XiaoxiaoNeural", display_name: "知性女声", gender: "female", language: "zh-CN", sample_url: null, source: "preset" },
       ...clones
     ];
     return ok({ items, total: items.length });
@@ -354,46 +354,41 @@ export const handlers = [
     return ok({ batch_id: batchId, tasks });
   }),
 
-  // ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001) — CRUD mock ──
-  // 忠实契约：列表带 status(processing/ready/failed)，processing 轮询 2 次后翻 ready(模拟克隆完成)；
-  // 创建经 multipart(name+audio)；删除移除。非伪造(record 真实可用)。
+  // ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001，FIX1 §8) — 三段式 CRUD mock ──
+  // 忠实真契约：① /uploads/audio(multipart file)→{asset_id}；② /brand-voices = JSON(extra=forbid)
+  // 校验 consent_confirmed:true + source_audio_asset_id(缺/false→422)→{id,name,status,created_at}；
+  // GET 列表 processing 轮询 2 次后翻 ready；DELETE→{deleted}。BrandVoiceRead 不含 sample_url/error_message。
+  http.post(`${BASE}/api/v1/uploads/audio`, () => ok({ asset_id: `audio-asset-${++audioAssetSeq}` })),
   http.get(`${BASE}/api/v1/brand-voices`, () => {
     const items = [...brandVoices.values()].map((v) => {
       if (v.status === "processing") {
         v._polls += 1;
-        if (v._polls >= 2) {
-          v.status = "ready";
-          v.sample_url = `https://mock.local/bv-${v.id}.mp3`;
-        }
+        if (v._polls >= 2) v.status = "ready";
       }
-      const { _polls, ...rest } = v;
-      void _polls;
-      return rest;
+      return { id: v.id, name: v.name, status: v.status, created_at: v.created_at };
     });
     return ok({ items, total: items.length });
   }),
   http.post(`${BASE}/api/v1/brand-voices`, async ({ request }) => {
-    // 解析 multipart 取 name（jsdom 测试环境的 FormData↔fetch 偶有不互通，容错回退占位名；
-    // FE 实际发送的 name+audio 形状由 brand-voices.test.ts 的 fetch-spy 单测精确守护）。
-    let name = "未命名品牌音色";
-    try {
-      const form = await request.formData();
-      name = (form.get("name") as string) || name;
-    } catch {
-      // 保留回退名
+    const body = (await request.json().catch(() => ({}))) as {
+      name?: string;
+      source_audio_asset_id?: string;
+      consent_confirmed?: boolean;
+    };
+    // 真后端 extra=forbid + consent 校验：缺 source_audio_asset_id 或 consent_confirmed!==true → 422。
+    if (!body.source_audio_asset_id || body.consent_confirmed !== true) {
+      // 错误码逐字对齐后端 routes/brand_voices.py(BRAND_VOICE_CONSENT_REQUIRED)。
+      return err(422, "BRAND_VOICE_CONSENT_REQUIRED", "需确认授权并提供音频资源");
     }
     const id = `bv-${++brandVoiceSeq}`;
-    const record: MockBrandVoice = {
-      id, name, status: "processing", sample_url: null, error_message: null,
-      created_at: new Date(0).toISOString(), _polls: 0
-    };
-    brandVoices.set(id, record);
-    const { _polls, ...rest } = record;
-    void _polls;
-    return ok(rest);
+    brandVoices.set(id, { id, name: body.name || "未命名品牌音色", status: "processing", created_at: new Date(0).toISOString(), _polls: 0 });
+    return ok({ id, name: body.name || "未命名品牌音色", status: "processing", created_at: new Date(0).toISOString() });
   }),
   http.delete(`${BASE}/api/v1/brand-voices/:id`, ({ params }) => {
-    brandVoices.delete(params.id as string);
+    const id = params.id as string;
+    // 未知 id → 404，与同仓 videos/copy-drafts DELETE 一致，忠实后端 NOT_FOUND 语义。
+    if (!brandVoices.has(id)) return err(404, "BRAND_VOICE_NOT_FOUND", "品牌音色不存在");
+    brandVoices.delete(id);
     return ok({ deleted: true });
   })
 ];

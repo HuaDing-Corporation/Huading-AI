@@ -285,7 +285,6 @@ export const copy = {
     creating: "创建中…",
     createNeedAudio: "请先录制或上传一段音频",
     createNeedName: "请填写音色名称",
-    createFailed: "创建失败，请重试",
     // 列表
     listTitle: "我的品牌音色",
     listLoading: "加载中…",
@@ -295,12 +294,10 @@ export const copy = {
     statusReady: "可用",
     statusFailed: "失败",
     processingHint: "声音克隆处理中，完成后即可在口播选用",
-    play: "试听",
     delete: "删除",
     deleteConfirmTitle: "删除该品牌音色？",
     deleteConfirmMessage: "将永久删除，不可恢复；已生成的视频不受影响。",
     deleteConfirmBtn: "确认删除",
-    deleteFailed: "删除失败，请重试",
     // 口播 picker 分组
     pickerBrandGroup: "我的品牌音色",
     pickerStandardGroup: "系统音色"

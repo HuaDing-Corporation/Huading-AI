@@ -71,7 +71,8 @@ export function BrandVoiceCreate() {
       return;
     }
     try {
-      await create.mutateAsync({ name: name.trim(), audio: recorder.blob });
+      // 三段式：上传音频→JSON 创建；consent_confirmed 进 body（勾选才到此，恒 true）。
+      await create.mutateAsync({ name: name.trim(), audio: recorder.blob, consentConfirmed: consent });
       // 成功：清空，回到初始态。
       recorder.reset();
       setName("");
@@ -170,8 +171,8 @@ export function BrandVoiceCreate() {
         <Input
           id="brand-voice-name"
           value={name}
-          maxLength={40}
-          onChange={(e) => setName(e.target.value)}
+          maxLength={30}
+          onChange={(e) => setName(e.target.value.slice(0, 30))}
           placeholder={copy.brandVoice.namePlaceholder}
         />
       </div>

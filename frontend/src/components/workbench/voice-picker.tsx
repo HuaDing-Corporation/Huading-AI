@@ -59,12 +59,13 @@ function VoiceOption({ voice, selected, onSelect }: { voice: Voice; selected: bo
 
 /**
  * Voice picker — 每个音色一个 SelectableOption（可试听）。纯 props。
- * 品牌音色(声音克隆，is_brand_voice)单独分组「我的品牌音色」置顶；无品牌音色时退化为单一扁平
+ * 品牌音色(声音克隆，source==="brand_voice")单独分组「我的品牌音色」置顶；无品牌音色时退化为单一扁平
  * 列表(与历史行为一致，不破现有 new/ecom-video-form)。(BRAND-VOICE-UI-0001)
  */
 export function VoicePicker({ voices, value, onChange }: VoicePickerProps) {
-  const brand = voices.filter((v) => v.is_brand_voice);
-  const standard = voices.filter((v) => !v.is_brand_voice);
+  // 按后端 VoiceRead.source 分组（§8）：brand_voice → 我的品牌音色；其余(preset)→ 系统音色。
+  const brand = voices.filter((v) => v.source === "brand_voice");
+  const standard = voices.filter((v) => v.source !== "brand_voice");
   const grouped = brand.length > 0;
   const gridClass = "grid grid-cols-1 gap-2 sm:grid-cols-2";
 
