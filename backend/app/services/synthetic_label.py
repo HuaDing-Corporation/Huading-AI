@@ -257,7 +257,7 @@ def _label_video_bytes(
             "-c:a",
             "copy",
             "-movflags",
-            "+faststart",
+            "+faststart+use_metadata_tags",
             str(output),
         ]
         _run_ffmpeg(cmd)

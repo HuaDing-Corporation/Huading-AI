@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from io import BytesIO
 from pathlib import Path
 
@@ -8,7 +10,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from sqlalchemy import select
 
-from app.db.models import Asset, Tenant, VideoTask, Voice
+from app.db.models import Asset, Tenant, TenantLabelSettings, VideoTask, Voice
 from app.main import app
 from app.workers import avatar_talk, image_gen, video_tasks
 
@@ -107,6 +109,62 @@ def _assert_bottom_center_has_visible_label(image_bytes: bytes) -> None:
         pixels = [pixel for pixel in crop.getdata() if pixel[3] > 0]
     assert any(sum(pixel[:3]) > 735 for pixel in pixels)
     assert any(sum(pixel[:3]) < 240 for pixel in pixels)
+
+
+def _mp4_bytes(tmp_path: Path, *, name: str = "source") -> bytes:
+    output = tmp_path / f"{name}.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=160x120:d=0.5:r=10",
+            "-an",
+            "-pix_fmt",
+            "yuv420p",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return output.read_bytes()
+
+
+def _ffprobe_format_tags(video_bytes: bytes, tmp_path: Path, *, name: str = "probe") -> dict:
+    video_path = tmp_path / f"{name}.mp4"
+    video_path.write_bytes(video_bytes)
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format_tags",
+            "-of",
+            "json",
+            str(video_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout).get("format", {}).get("tags", {})
+
+
+def _assert_mp4_has_synthetic_metadata(
+    video_bytes: bytes,
+    tmp_path: Path,
+    *,
+    content_id: str,
+) -> dict:
+    tags = _ffprobe_format_tags(video_bytes, tmp_path, name=f"probe-{content_id}")
+    assert tags["aigc_label"] == "AI_GENERATED_SYNTHETIC"
+    assert tags["aigc_provider_name"] == "Huading"
+    assert "aigc_provider_code" in tags
+    assert tags["aigc_content_id"] == content_id
+    return tags
 
 
 def _seed_photo_task(db, *, tenant_id: str, user_id: str, task_id: str) -> None:
@@ -240,6 +298,31 @@ def test_image_label_util_writes_visible_watermark_and_png_metadata() -> None:
 
     _assert_png_has_synthetic_metadata(labeled, content_id="asset-label-unit")
     _assert_bottom_center_has_visible_label(labeled)
+
+
+def test_video_label_util_writes_ffprobe_readable_mp4_metadata(tmp_path: Path) -> None:
+    from app.services.synthetic_label import LabelSettings, SyntheticLabelMeta, label_artifact_bytes
+
+    source = _mp4_bytes(tmp_path, name="label-source")
+
+    labeled = label_artifact_bytes(
+        source,
+        kind="video",
+        settings=LabelSettings(position="br", text="LABEL"),
+        meta=SyntheticLabelMeta(
+            content_id="video-label-unit",
+            provider_name="Huading",
+            provider_code="provider-pending",
+        ),
+        suffix=".mp4",
+    )
+
+    tags = _assert_mp4_has_synthetic_metadata(
+        labeled,
+        tmp_path,
+        content_id="video-label-unit",
+    )
+    assert tags["aigc_provider_code"] == "provider-pending"
 
 
 @pytest.mark.parametrize(
@@ -394,9 +477,15 @@ def test_legacy_video_worker_labels_output_before_storage(
     task_id = "label-static-video"
     storage = _Storage()
     store = _Store()
-    calls: list[dict[str, object]] = []
 
     with auth_db() as db:
+        db.add(
+            TenantLabelSettings(
+                tenant_id=auth_context["tenant_id"],
+                position="br",
+                text="LABEL",
+            )
+        )
         db.add(
             VideoTask(
                 id=task_id,
@@ -413,18 +502,13 @@ def test_legacy_video_worker_labels_output_before_storage(
 
     async def fake_engine(_params, _progress_cb):
         output = tmp_path / "static.mp4"
-        output.write_bytes(b"STATIC-MP4")
-        return {"video_path": str(output), "duration": 2.0, "file_size": 10}
-
-    def fake_label_artifact_bytes(content: bytes, **kwargs) -> bytes:
-        calls.append(kwargs)
-        return content + b"|LABEL"
+        output.write_bytes(_mp4_bytes(tmp_path, name="static-source"))
+        return {"video_path": str(output), "duration": 2.0, "file_size": output.stat().st_size}
 
     monkeypatch.setattr(video_tasks, "SessionLocal", auth_db)
     monkeypatch.setattr(video_tasks, "_generate_with_engine", fake_engine)
     monkeypatch.setattr(video_tasks, "build_progress_store", lambda _url: store)
     monkeypatch.setattr(video_tasks, "create_object_storage", lambda _settings: storage)
-    monkeypatch.setattr(video_tasks, "label_artifact_bytes", fake_label_artifact_bytes)
 
     result = video_tasks.generate_video_task.apply(
         args=[
@@ -438,15 +522,14 @@ def test_legacy_video_worker_labels_output_before_storage(
     ).get()
 
     output_key = f"tenants/{auth_context['tenant_id']}/videos/{task_id}/output.mp4"
-    assert storage.saved[output_key] == (b"STATIC-MP4|LABEL", "video/mp4")
-    assert calls[0]["kind"] == "video"
-    assert calls[0]["suffix"] == ".mp4"
-    assert calls[0]["meta"].content_id == task_id
-    assert result["file_size"] == len(b"STATIC-MP4|LABEL")
+    saved_bytes, content_type = storage.saved[output_key]
+    assert content_type == "video/mp4"
+    _assert_mp4_has_synthetic_metadata(saved_bytes, tmp_path, content_id=task_id)
+    assert result["file_size"] == len(saved_bytes)
     with auth_db() as db:
         task = db.get(VideoTask, task_id)
         assert task.status == "done"
-        assert task.size_bytes == len(b"STATIC-MP4|LABEL")
+        assert task.size_bytes == len(saved_bytes)
 
 
 @pytest.mark.parametrize("mode", ["avatar_talk", "seedance_i2v"])
