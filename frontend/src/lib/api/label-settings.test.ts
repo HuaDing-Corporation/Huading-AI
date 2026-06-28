@@ -52,4 +52,27 @@ describe("label-settings API ↔ MSW（mock 忠实，§5）", () => {
     });
     expect(s.enabled).toBe(true);
   });
+
+  // 承重(FIX1)：position 必填，对齐后端 Literal——缺失/空/非法均 422，mock 不放宽(不掩盖前端漏发 position)。
+  it("PUT 漏 position → 422（mock 不放宽，对齐后端必填 Literal）", async () => {
+    let caught: unknown;
+    try {
+      await apiFetch<LabelSettings>("/api/v1/tenant/label-settings", { method: "PUT", body: { text: "x" } });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ApiError);
+    expect((caught as ApiError).status).toBe(422);
+  });
+
+  it("PUT 非法 position(center) → 422", async () => {
+    let caught: unknown;
+    try {
+      await apiFetch<LabelSettings>("/api/v1/tenant/label-settings", { method: "PUT", body: { position: "center", text: "x" } });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ApiError);
+    expect((caught as ApiError).status).toBe(422);
+  });
 });

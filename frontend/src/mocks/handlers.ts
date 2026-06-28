@@ -406,11 +406,12 @@ export const handlers = [
     if (!text || text.length > 20) {
       return err(422, "LABEL_TEXT_INVALID", "标识文案需为 1–20 个非空字符");
     }
-    // position 枚举校验，对齐后端 Literal(不放宽，避免 mock 掩盖契约)。
-    if (body.position && !["br", "bl", "tr", "tl", "bc"].includes(body.position)) {
-      return err(422, "LABEL_POSITION_INVALID", "标识位置非法");
+    // position 必填 + 枚举校验，逐字对齐后端 TenantLabelSettingsUpdate.position(Literal，必填)：
+    // 缺失/空/非法均 422(不放宽“present 才校验”，避免 mock 掩盖前端漏发 position 的回归)。
+    if (!body.position || !["br", "bl", "tr", "tl", "bc"].includes(body.position)) {
+      return err(422, "LABEL_POSITION_INVALID", "标识位置非法或缺失");
     }
-    if (body.position) labelSettings.position = body.position;
+    labelSettings.position = body.position; // 校验后必有，直接赋值
     labelSettings.text = text;
     labelSettings.enabled = true; // 合规：强制恒真，忽略任何关闭意图
     return ok({ ...labelSettings });
