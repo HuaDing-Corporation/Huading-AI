@@ -92,3 +92,45 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
 
   return (payload?.data as T) ?? (null as T);
 }
+
+export interface MultipartOptions {
+  defaultErrorMessage?: string;
+  defaultErrorCode?: string;
+}
+
+/**
+ * POST a multipart FormData (file/audio 上传) 并解包 ApiResponse 封套。与 apiFetch 分开：body 是
+ * FormData，须由浏览器自行设 multipart Content-Type/boundary，故只附鉴权头。鉴权/401/封套/网络错误
+ * 逻辑集中于此，供 uploads.ts(图片) 与 brand-voices.ts(音频) 复用(单一实现，DRY)。
+ */
+export async function multipartFetch<T>(path: string, form: FormData, opts: MultipartOptions = {}): Promise<T> {
+  const headers = authHeaders();
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}${path}`, { method: "POST", headers, body: form });
+  } catch {
+    throw new ApiError("网络连接失败，请检查后端服务是否在线。", "NETWORK_ERROR", 0);
+  }
+
+  // 仅当请求实际携带 token 的 401 才清会话（与 apiFetch 一致，避免无 token 的 401 误登出）。
+  if (res.status === 401 && headers.Authorization !== undefined) handleUnauthorized();
+
+  let payload: ApiResponse<T> | null = null;
+  try {
+    payload = (await res.json()) as ApiResponse<T>;
+  } catch {
+    payload = null;
+  }
+
+  if (!res.ok || payload?.error) {
+    const err = payload?.error;
+    throw new ApiError(
+      err?.message ?? `${opts.defaultErrorMessage ?? "请求失败"}（${res.status}）`,
+      err?.code ?? opts.defaultErrorCode ?? "HTTP_ERROR",
+      res.status,
+      err?.detail
+    );
+  }
+
+  return (payload?.data as T) ?? (null as T);
+}

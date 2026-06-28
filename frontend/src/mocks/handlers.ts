@@ -15,6 +15,23 @@ const copyDrafts: Record<string, unknown>[] = [];
 let videoSeq = 0;
 let draftSeq = 0;
 
+// ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001，FIX1 对齐后端 §8) mock store ──
+// 忠实真契约：BrandVoiceRead 仅 {id,name,status,created_at}(无 sample_url/error_message)；CRUD +
+// status(processing→ready 轮询模拟) + /voices 项带 source。非伪造。
+interface MockBrandVoice {
+  id: string;
+  name: string;
+  status: "processing" | "ready" | "failed";
+  created_at: string;
+  _polls: number; // GET 轮询计数：processing 第 2 次轮询后翻 ready，模拟异步克隆完成
+}
+const brandVoices = new Map<string, MockBrandVoice>([
+  ["bv-ready-1", { id: "bv-ready-1", name: "我的主播音", status: "ready", created_at: new Date(0).toISOString(), _polls: 99 }],
+  ["bv-failed-1", { id: "bv-failed-1", name: "失败样例", status: "failed", created_at: new Date(0).toISOString(), _polls: 99 }]
+]);
+let brandVoiceSeq = 0;
+let audioAssetSeq = 0;
+
 function sseStream(id: string, fail = false): Response {
   const enc = new TextEncoder();
   const frames = fail
@@ -75,14 +92,17 @@ export const handlers = [
     })
   ),
   http.get(`${BASE}/api/v1/quota`, () => ok({ total: 1000, used: 120, reserved: 36, remaining: 844 })),
-  http.get(`${BASE}/api/v1/voices`, () =>
-    ok({
-      items: [
-        { id: "v-zhixing", provider: "edge_tts", voice_code: "zh-CN-XiaoxiaoNeural", display_name: "知性女声", gender: "female", language: "zh-CN", sample_url: null }
-      ],
-      total: 1
-    })
-  ),
+  http.get(`${BASE}/api/v1/voices`, () => {
+    // 系统音色(source:preset) + ready 克隆音色(source:brand_voice，对应 brand-voices ready 记录)，供 picker 分组(§8)。
+    const clones = [...brandVoices.values()]
+      .filter((v) => v.status === "ready")
+      .map((v) => ({ id: v.id, provider: "clone", voice_code: v.id, display_name: v.name, gender: "neutral", language: "zh-CN", sample_url: null, source: "brand_voice" }));
+    const items = [
+      { id: "v-zhixing", provider: "edge_tts", voice_code: "zh-CN-XiaoxiaoNeural", display_name: "知性女声", gender: "female", language: "zh-CN", sample_url: null, source: "preset" },
+      ...clones
+    ];
+    return ok({ items, total: items.length });
+  }),
   http.get(`${BASE}/api/v1/avatars/presets`, () =>
     ok({ items: [{ asset_id: "preset-1", display_name: "默认主播", thumbnail_url: "https://mock.local/p1.jpg" }], total: 1 })
   ),
@@ -332,5 +352,43 @@ export const handlers = [
       return { task_id: id, source_asset_id: it.source_asset_id, status: "queued" };
     });
     return ok({ batch_id: batchId, tasks });
+  }),
+
+  // ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001，FIX1 §8) — 三段式 CRUD mock ──
+  // 忠实真契约：① /uploads/audio(multipart file)→{asset_id}；② /brand-voices = JSON(extra=forbid)
+  // 校验 consent_confirmed:true + source_audio_asset_id(缺/false→422)→{id,name,status,created_at}；
+  // GET 列表 processing 轮询 2 次后翻 ready；DELETE→{deleted}。BrandVoiceRead 不含 sample_url/error_message。
+  http.post(`${BASE}/api/v1/uploads/audio`, () => ok({ asset_id: `audio-asset-${++audioAssetSeq}` })),
+  http.get(`${BASE}/api/v1/brand-voices`, () => {
+    const items = [...brandVoices.values()].map((v) => {
+      if (v.status === "processing") {
+        v._polls += 1;
+        if (v._polls >= 2) v.status = "ready";
+      }
+      return { id: v.id, name: v.name, status: v.status, created_at: v.created_at };
+    });
+    return ok({ items, total: items.length });
+  }),
+  http.post(`${BASE}/api/v1/brand-voices`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as {
+      name?: string;
+      source_audio_asset_id?: string;
+      consent_confirmed?: boolean;
+    };
+    // 真后端 extra=forbid + consent 校验：缺 source_audio_asset_id 或 consent_confirmed!==true → 422。
+    if (!body.source_audio_asset_id || body.consent_confirmed !== true) {
+      // 错误码逐字对齐后端 routes/brand_voices.py(BRAND_VOICE_CONSENT_REQUIRED)。
+      return err(422, "BRAND_VOICE_CONSENT_REQUIRED", "需确认授权并提供音频资源");
+    }
+    const id = `bv-${++brandVoiceSeq}`;
+    brandVoices.set(id, { id, name: body.name || "未命名品牌音色", status: "processing", created_at: new Date(0).toISOString(), _polls: 0 });
+    return ok({ id, name: body.name || "未命名品牌音色", status: "processing", created_at: new Date(0).toISOString() });
+  }),
+  http.delete(`${BASE}/api/v1/brand-voices/:id`, ({ params }) => {
+    const id = params.id as string;
+    // 未知 id → 404，与同仓 videos/copy-drafts DELETE 一致，忠实后端 NOT_FOUND 语义。
+    if (!brandVoices.has(id)) return err(404, "BRAND_VOICE_NOT_FOUND", "品牌音色不存在");
+    brandVoices.delete(id);
+    return ok({ deleted: true });
   })
 ];
