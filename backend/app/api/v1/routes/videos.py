@@ -19,7 +19,7 @@ from app.api.deps import (
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
-from app.db.models import Asset, TaskAsset, User, VideoTask, Voice
+from app.db.models import Asset, BrandVoice, TaskAsset, User, VideoTask, Voice
 from app.providers.base import invoke, resolve
 from app.schemas.response import ApiResponse, ok
 from app.schemas.videos import (
@@ -103,6 +103,27 @@ def _subtitle_style_params(payload: VideoGenerateRequest) -> dict | None:
     if payload.subtitle_style is None:
         return None
     return payload.subtitle_style.model_dump(exclude_none=True)
+
+
+def _resolve_avatar_talk_voice(
+    db: Session,
+    *,
+    tenant_id: str,
+    voice_id: str,
+) -> tuple[Voice | None, BrandVoice | None]:
+    voice = db.get(Voice, voice_id)
+    if voice is not None and voice.is_active:
+        return voice, None
+    brand_voice = db.get(BrandVoice, voice_id)
+    if (
+        brand_voice is not None
+        and brand_voice.tenant_id == tenant_id
+        and brand_voice.deleted_at is None
+        and brand_voice.status == "ready"
+        and brand_voice.speaker_id
+    ):
+        return None, brand_voice
+    raise AppError("Voice not found.", code="VOICE_NOT_FOUND", status_code=404)
 
 
 def _quota_estimate_for_payload(
@@ -279,9 +300,11 @@ def _create_avatar_talk_video(
             code="VALIDATION_ERROR",
             status_code=422,
         )
-    voice = db.get(Voice, payload.voice_id)
-    if voice is None or not voice.is_active:
-        raise AppError("Voice not found.", code="VOICE_NOT_FOUND", status_code=404)
+    voice, brand_voice = _resolve_avatar_talk_voice(
+        db,
+        tenant_id=user.tenant_id,
+        voice_id=payload.voice_id,
+    )
     avatar = db.get(Asset, payload.avatar_asset_id)
     if (
         avatar is None
@@ -298,6 +321,14 @@ def _create_avatar_talk_video(
         "avatar_asset_id": payload.avatar_asset_id,
         "estimated": True,
     }
+    if brand_voice is not None:
+        params.update(
+            {
+                "voice_source": "brand_voice",
+                "brand_voice_id": brand_voice.id,
+                "tts_speaker_id": brand_voice.speaker_id,
+            }
+        )
     subtitle_style = _subtitle_style_params(payload)
     if subtitle_style is not None:
         params["subtitle_style"] = subtitle_style
@@ -311,7 +342,8 @@ def _create_avatar_talk_video(
         mode="avatar_talk",
         video_mode="avatar_talk",
         progress=0,
-        voice_id=payload.voice_id,
+        voice_id=voice.id if voice is not None else None,
+        brand_voice_id=brand_voice.id if brand_voice is not None else None,
         speed=Decimal(str(payload.speed)),
         aspect_ratio=payload.aspect_ratio,
         subtitle_enabled=payload.subtitle_enabled,

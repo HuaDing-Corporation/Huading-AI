@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -9,6 +11,7 @@ class VoiceRead(BaseModel):
     gender: str
     language: str
     sample_url: str | None = None
+    source: Literal["preset", "brand_voice"] = "preset"
 
 
 class VoiceListResponse(BaseModel):

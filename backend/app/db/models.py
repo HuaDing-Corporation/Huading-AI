@@ -153,6 +153,9 @@ class VideoTask(TenantScopedMixin, Base):
     voice_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("voices.id", ondelete="SET NULL"), nullable=True
     )
+    brand_voice_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("brand_voices.id", ondelete="SET NULL"), nullable=True
+    )
     speed: Mapped[Decimal] = mapped_column(Numeric(3, 1), default=Decimal("1.0"))
     aspect_ratio: Mapped[str] = mapped_column(String(8), default="9:16")
     subtitle_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -284,7 +287,8 @@ class CreditRate(Base):
     __tablename__ = "credit_rates"
     __table_args__ = (
         CheckConstraint(
-            "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', 'publish')",
+            "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
+            "'publish', 'voice_clone')",
             name="ck_credit_rates_capability",
         ),
         CheckConstraint(
@@ -323,6 +327,36 @@ class Voice(Base):
     language: Mapped[str] = mapped_column(String(16), default="zh-CN")
     sample_url: Mapped[str | None] = mapped_column(String(500), default=None)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class BrandVoice(TenantScopedMixin, Base):
+    __tablename__ = "brand_voices"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('processing', 'ready', 'failed')",
+            name="ck_brand_voices_status",
+        ),
+        Index("ix_brand_voices_tenant_status", "tenant_id", "status"),
+        Index("ix_brand_voices_tenant_created_at", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(30))
+    source_audio_asset_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("assets.id", ondelete="SET NULL"), nullable=True
+    )
+    provider: Mapped[str] = mapped_column(String(40), default="doubao-voice-clone")
+    speaker_id: Mapped[str | None] = mapped_column(String(160), default=None)
+    status: Mapped[str] = mapped_column(String(32), default="processing")
+    consent_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    consent_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    error_code: Mapped[str | None] = mapped_column(String(40), default=None)
+    error_message: Mapped[str | None] = mapped_column(Text, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
 
 class Asset(Base):
@@ -434,7 +468,8 @@ class ProviderConfig(Base):
     __tablename__ = "provider_configs"
     __table_args__ = (
         CheckConstraint(
-            "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', 'publish')",
+            "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
+            "'publish', 'voice_clone')",
             name="ck_provider_configs_capability",
         ),
         Index(
@@ -468,7 +503,8 @@ class UsageRecord(Base):
     __tablename__ = "usage_records"
     __table_args__ = (
         CheckConstraint(
-            "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', 'publish')",
+            "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
+            "'publish', 'voice_clone')",
             name="ck_usage_records_capability",
         ),
         CheckConstraint(
