@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.db.models import Asset, TaskAsset, VideoTask, Voice
+from app.db.models import Asset, BrandVoice, TaskAsset, VideoTask, Voice
 from app.db.session import SessionLocal
 from app.providers.base import invoke, resolve
 from app.providers.url_guard import (
@@ -398,9 +398,7 @@ def script_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
 
 def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
-    voice = ctx.db.get(Voice, task.voice_id) if task.voice_id else None
-    if voice is None:
-        raise RuntimeError("Voice not found for avatar_talk.")
+    voice_code, voice_source = _tts_voice_for_task(ctx.db, task, tenant_id=ctx.tenant_id)
     provider = resolve(ctx.db, tenant_id=ctx.tenant_id, capability="tts")
     result = asyncio.run(
         invoke(
@@ -411,7 +409,8 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
             operation=lambda: provider.synthesize_speech(
                 {
                     "text": task.script or task.topic or "",
-                    "voice": voice.voice_code,
+                    "voice": voice_code,
+                    "voice_source": voice_source,
                     "speed": float(task.speed or 1.0),
                     "task_id": ctx.task_id,
                     "output_dir": str(_work_dir(ctx.task_id)),
@@ -448,6 +447,30 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         duration_sec=ctx.duration_sec,
     )
     return ctx
+
+
+def _tts_voice_for_task(db: Session, task: VideoTask, *, tenant_id: str) -> tuple[str, str]:
+    params = task.params or {}
+    brand_voice_id = task.brand_voice_id or str(params.get("brand_voice_id") or "")
+    if brand_voice_id:
+        speaker_id = str(params.get("tts_speaker_id") or "").strip()
+        if not speaker_id:
+            brand_voice = db.get(BrandVoice, brand_voice_id)
+            if (
+                brand_voice is not None
+                and brand_voice.tenant_id == tenant_id
+                and brand_voice.deleted_at is None
+                and brand_voice.status == "ready"
+            ):
+                speaker_id = str(brand_voice.speaker_id or "").strip()
+        if not speaker_id:
+            raise RuntimeError("Brand voice speaker not found for avatar_talk.")
+        return speaker_id, "brand_voice"
+
+    voice = db.get(Voice, task.voice_id) if task.voice_id else None
+    if voice is None:
+        raise RuntimeError("Voice not found for avatar_talk.")
+    return voice.voice_code, "preset"
 
 
 def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:

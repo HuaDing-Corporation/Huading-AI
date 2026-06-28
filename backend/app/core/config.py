@@ -92,6 +92,16 @@ class Settings(BaseSettings):
     engine_doubao_tts_endpoint: str = "https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse"
     engine_doubao_tts_request_timeout_seconds: float = 60.0
     engine_doubao_tts_aigc_watermark: bool = True
+    # Volcengine Doubao voice clone. These default to the same Seed-TTS account
+    # values when clone-specific env vars are absent.
+    engine_doubao_voice_clone_appid: str = ""
+    engine_doubao_voice_clone_access_token: str = ""
+    engine_doubao_voice_clone_api_key: str = ""
+    engine_doubao_voice_clone_resource_id: str = "seed-icl-2.0"
+    engine_doubao_voice_clone_endpoint: str = (
+        "https://openspeech.bytedance.com/api/v3/voice-clone"
+    )
+    engine_doubao_voice_clone_request_timeout_seconds: float = 60.0
     # OpenAI Images for the photo pipeline. Credentials stay env-only.
     openai_api_key: str = ""
     openai_base_url: str = ""

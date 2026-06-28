@@ -84,6 +84,25 @@ def test_doubao_seed_tts_watermark_defaults_to_true(monkeypatch) -> None:
     assert s.engine_doubao_tts_aigc_watermark is True
 
 
+def test_doubao_voice_clone_settings_are_env_driven(monkeypatch) -> None:
+    monkeypatch.setenv("ENGINE_DOUBAO_VOICE_CLONE_APPID", "clone-appid")
+    monkeypatch.setenv("ENGINE_DOUBAO_VOICE_CLONE_ACCESS_TOKEN", "clone-token")
+    monkeypatch.setenv("ENGINE_DOUBAO_VOICE_CLONE_RESOURCE_ID", "seed-icl-2.0")
+    monkeypatch.setenv(
+        "ENGINE_DOUBAO_VOICE_CLONE_ENDPOINT",
+        "https://openspeech.bytedance.com/api/v3/voice-clone",
+    )
+    s = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    assert s.engine_doubao_voice_clone_appid == "clone-appid"
+    assert s.engine_doubao_voice_clone_access_token == "clone-token"
+    assert s.engine_doubao_voice_clone_resource_id == "seed-icl-2.0"
+    assert s.engine_doubao_voice_clone_endpoint == (
+        "https://openspeech.bytedance.com/api/v3/voice-clone"
+    )
+    assert s.engine_doubao_voice_clone_request_timeout_seconds > 0
+
+
 def test_aigc_producer_settings_are_env_driven(monkeypatch) -> None:
     monkeypatch.setenv("ENGINE_AIGC_PRODUCER", "Huading")
     s = Settings(_env_file=None, jwt_secret_key=_JWT)

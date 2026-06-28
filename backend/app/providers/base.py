@@ -14,7 +14,16 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.models import ProviderConfig, UsageRecord
 
-Capability = Literal["llm", "tts", "avatar", "video", "image", "asr", "publish"]
+Capability = Literal[
+    "llm",
+    "tts",
+    "avatar",
+    "video",
+    "image",
+    "asr",
+    "publish",
+    "voice_clone",
+]
 T = TypeVar("T")
 
 
@@ -53,6 +62,13 @@ class PublishProvider(Protocol):
     async def publish(self, payload: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
 
+@runtime_checkable
+class VoiceCloneProvider(Protocol):
+    async def clone_voice(self, payload: Mapping[str, Any]) -> Mapping[str, Any]: ...
+
+    async def delete_voice(self, payload: Mapping[str, Any]) -> Mapping[str, Any]: ...
+
+
 Provider = (
     LLMProvider
     | TTSProvider
@@ -61,6 +77,7 @@ Provider = (
     | ImageProvider
     | ASRProvider
     | PublishProvider
+    | VoiceCloneProvider
 )
 ProviderFactory = Callable[[ProviderConfig], Provider]
 Operation = Callable[[], T | Awaitable[T]]
