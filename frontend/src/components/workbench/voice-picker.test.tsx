@@ -1,0 +1,36 @@
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+
+import { copy } from "@/lib/copy";
+import type { Voice } from "@/lib/api/types";
+import { VoicePicker } from "./voice-picker";
+
+const voice = (id: string, display_name: string, extra: Partial<Voice> = {}): Voice => ({
+  id, provider: "edge_tts", voice_code: id, display_name, gender: null, language: "zh-CN", sample_url: null, ...extra
+});
+
+describe("VoicePicker (口播音色 · 品牌音色分组)", () => {
+  it("无品牌音色：扁平列表，不出分组标题（不破现有）", () => {
+    render(<VoicePicker voices={[voice("v1", "知性女声"), voice("v2", "磁性男声")]} value="v1" onChange={() => {}} />);
+    expect(screen.getByText("知性女声")).toBeInTheDocument();
+    expect(screen.getByText("磁性男声")).toBeInTheDocument();
+    expect(screen.queryByText(copy.brandVoice.pickerBrandGroup)).not.toBeInTheDocument();
+    expect(screen.queryByText(copy.brandVoice.pickerStandardGroup)).not.toBeInTheDocument();
+  });
+
+  it("含品牌音色：出「我的品牌音色 / 系统音色」分组，品牌音色可见可选", () => {
+    const onChange = vi.fn();
+    render(
+      <VoicePicker
+        voices={[voice("v1", "知性女声"), voice("c1", "我的主播音", { is_brand_voice: true, provider: "clone" })]}
+        value="v1"
+        onChange={onChange}
+      />
+    );
+    expect(screen.getByText(copy.brandVoice.pickerBrandGroup)).toBeInTheDocument();
+    expect(screen.getByText(copy.brandVoice.pickerStandardGroup)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("我的主播音"));
+    expect(onChange).toHaveBeenCalledWith("c1");
+  });
+});

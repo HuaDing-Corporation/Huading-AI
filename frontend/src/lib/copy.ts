@@ -181,7 +181,11 @@ export const copy = {
     imageInvalid: "生成参数有误，请调整尺寸 / 质量或描述后重试",
     imageGeneric: "图片生成失败，请重试",
     // 抠图透明底专属（IMAGE_ALPHA_MISSING）：可操作文案，不落通用兜底
-    imageAlphaMissing: "透明底生成失败：未返回透明像素，请重试或改用白底"
+    imageAlphaMissing: "透明底生成失败：未返回透明像素，请重试或改用白底",
+    // 品牌音色音频上传/录音 (BRAND-VOICE-UI-0001)
+    audioType: "仅支持 WAV / MP3 / M4A 音频",
+    audioTooLarge: "音频过大，请控制在 20MB 以内",
+    audioTooShort: "音频时长需至少 5 秒，请重录或换更长的音频"
   },
   tasks: {
     title: "生成任务",
@@ -250,5 +254,55 @@ export const copy = {
     frameSaved: "封面已生成，可下载",
     savedToHistory: "已存入图片历史",
     retry: "重试"
+  },
+  // 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001)
+  brandVoice: {
+    entry: "我的品牌音色",
+    pageTitle: "品牌音色",
+    pageSubtitle: "录制或上传一段音频，克隆成你的专属口播音色",
+    // 创建
+    createTitle: "新建品牌音色",
+    createSubtitle: "录一段或上传音频 → 试听 → 授权 → 创建",
+    recordPrompt: "请用自然的语速朗读：「大家好，欢迎来到我的直播间，今天给大家带来一款超值好物。」",
+    recordHint: "在安静环境录制，时长至少 5 秒，吐字清晰效果更好",
+    recordStart: "开始录音",
+    recordStop: "停止录音",
+    recording: "录音中…",
+    recordAgain: "重新录制",
+    recordPermissionDenied: "麦克风权限被拒绝，请在浏览器允许后重试，或改用上传",
+    recordUnsupported: "当前浏览器不支持录音，请改用上传音频",
+    orUpload: "或上传音频",
+    uploadAudio: "上传音频（WAV / MP3 / M4A，≤20MB）",
+    audioReady: "音频已就绪，可试听",
+    previewAria: "试听待克隆音频",
+    removeAudio: "移除音频",
+    nameLabel: "音色名称",
+    namePlaceholder: "给你的品牌音色起个名字，如：我的主播音",
+    consentLabel: "我已获得被克隆人的授权，并知悉生成内容为 AI 深度合成，将合法合规使用",
+    consentRequired: "请先勾选授权声明后再创建",
+    complianceHint: "未经授权克隆他人声音可能违法；请确保已获授权，生成内容为 AI 深度合成",
+    create: "创建品牌音色",
+    creating: "创建中…",
+    createNeedAudio: "请先录制或上传一段音频",
+    createNeedName: "请填写音色名称",
+    createFailed: "创建失败，请重试",
+    // 列表
+    listTitle: "我的品牌音色",
+    listLoading: "加载中…",
+    listError: "加载失败，请重试",
+    listEmpty: "还没有品牌音色，录制或上传一段音频来创建",
+    statusProcessing: "处理中",
+    statusReady: "可用",
+    statusFailed: "失败",
+    processingHint: "声音克隆处理中，完成后即可在口播选用",
+    play: "试听",
+    delete: "删除",
+    deleteConfirmTitle: "删除该品牌音色？",
+    deleteConfirmMessage: "将永久删除，不可恢复；已生成的视频不受影响。",
+    deleteConfirmBtn: "确认删除",
+    deleteFailed: "删除失败，请重试",
+    // 口播 picker 分组
+    pickerBrandGroup: "我的品牌音色",
+    pickerStandardGroup: "系统音色"
   }
 } as const;

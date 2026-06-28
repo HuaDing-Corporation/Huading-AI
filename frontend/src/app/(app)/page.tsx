@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronLeft, Eraser, ImagePlus, PenLine, Store, UserRound, type LucideIcon } from "lucide-react";
+import { ChevronLeft, Eraser, ImagePlus, Mic, PenLine, Store, UserRound, type LucideIcon } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { EcomVideoForm } from "@/components/workbench/ecom-video-form";
@@ -62,6 +63,12 @@ export default function Home() {
             </button>
             <span className="text-ink-faint">/</span>
             <span className="text-ink-soft">工作台</span>
+            <Link
+              href="/brand-voices"
+              className="ml-auto inline-flex items-center gap-1 rounded-field px-2 py-1 text-gold-deep outline-none transition-colors hover:bg-glass-soft focus-visible:shadow-focus-gold"
+            >
+              <Mic size={14} strokeWidth={2} /> {copy.brandVoice.entry}
+            </Link>
           </nav>
 
           <header className="flex flex-wrap items-end gap-3.5 px-1">

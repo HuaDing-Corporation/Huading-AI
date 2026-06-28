@@ -113,6 +113,9 @@ export interface Voice {
   gender: string | null;
   language: string | null;
   sample_url?: string | null;
+  // 品牌音色(声音克隆)标记 (BRAND-VOICE-UI-0001)：ready 克隆音色在 /voices 里带此标，
+  // 口播 picker 据此分组「我的品牌音色」。flag：待 seam 校验(真后端或用 provider 区分)。
+  is_brand_voice?: boolean;
 }
 export interface AvatarPreset {
   asset_id: string;
@@ -426,4 +429,26 @@ export interface PosterBatchTask {
 export interface PosterBatchResponse {
   batch_id: string;
   tasks: PosterBatchTask[];
+}
+
+// ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001) ──
+// 注：后端 BRAND-VOICE-PIPELINE 未实现，契约据 seam §5 推断，待 Codex B 对冻结 seam 校验。
+export type BrandVoiceStatus = "processing" | "ready" | "failed"; // 处理中 / 可用 / 失败
+
+export interface BrandVoice {
+  id: string;
+  name: string;
+  status: BrandVoiceStatus;
+  sample_url?: string | null; // ready 时可试听
+  error_message?: string | null; // failed 时友好原因
+  created_at: string;
+}
+export interface BrandVoiceListResponse {
+  items: BrandVoice[];
+  total: number;
+}
+// POST /brand-voices 经 multipart FormData 发送(name + audio Blob)；UI 侧入参形状。
+export interface CreateBrandVoiceInput {
+  name: string;
+  audio: Blob; // 录音 MediaRecorder 产物 或 上传的音频文件
 }

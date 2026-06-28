@@ -22,6 +22,12 @@ export const ecomModelStylesKey = ["ecom-images", "model-styles"] as const;
 // 电商图扩展 Phase3 (ECOM-POSTER-UI-0001) — 营销海报版式预设
 export const ecomPosterTemplatesKey = ["ecom-images", "poster-templates"] as const;
 
+// 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001)
+export const brandVoiceKeys = {
+  all: ["brand-voices"] as const,
+  list: () => [...brandVoiceKeys.all, "list"] as const
+};
+
 export const meKey = ["me"] as const;
 export const quotaKey = ["quota"] as const;
 export const voicesKey = ["voices"] as const;

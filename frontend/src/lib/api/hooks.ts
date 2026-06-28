@@ -2,7 +2,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 
 import { fetchMe } from "@/lib/api/auth";
 import { listAvatarPresets } from "@/lib/api/avatars";
-import { avatarPresetsKey, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, meKey, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
+import { avatarPresetsKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, meKey, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
 import { getQuota } from "@/lib/api/quota";
 import { clearCopyDrafts, deleteCopyDraft, generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
 import { generateScript } from "@/lib/api/scripts";
@@ -11,6 +11,7 @@ import { listVoices } from "@/lib/api/voices";
 import { listSubtitleTemplates } from "@/lib/api/oral";
 import { createCoverFromFrame, getFrameCandidates } from "@/lib/api/covers";
 import { cutoutImage, cutoutImageBatch, listModelStyles, listPosterTemplates, modelImage, modelImageBatch, posterImage, posterImageBatch } from "@/lib/api/ecom-images";
+import { createBrandVoice, deleteBrandVoice, listBrandVoices } from "@/lib/api/brand-voices";
 import { clearVideos, createVideo, deleteVideo, estimateVideo, generateScenePrompt, getVideo, listVideos, listVideosPage } from "@/lib/api/videos";
 import type {
   CopyDraftCreateRequest,
@@ -19,6 +20,7 @@ import type {
   CopyTopicsRequest,
   CoverFromFrameRequest,
   CreateVideoRequest,
+  CreateBrandVoiceInput,
   CutoutBatchRequest,
   CutoutRequest,
   ModelBatchRequest,
@@ -132,6 +134,38 @@ export function usePosterImage() {
 }
 export function usePosterBatch() {
   return useMutation({ mutationFn: (body: PosterBatchRequest) => posterImageBatch(body) });
+}
+// ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001) ──
+// 列表：有 processing 项时每 3s 轮询，全部终态(ready/failed)则停轮询。
+export function useBrandVoices() {
+  const { session } = useAuth();
+  return useQuery({
+    queryKey: brandVoiceKeys.list(),
+    queryFn: listBrandVoices,
+    enabled: !!session,
+    refetchInterval: (query) => (query.state.data?.some((v) => v.status === "processing") ? 3000 : false)
+  });
+}
+export function useCreateBrandVoice() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: CreateBrandVoiceInput) => createBrandVoice(input),
+    // 新建后失效品牌音色列表 + voices(ready 克隆音色会进口播 picker)。
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: brandVoiceKeys.all });
+      void qc.invalidateQueries({ queryKey: voicesKey });
+    }
+  });
+}
+export function useDeleteBrandVoice() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => deleteBrandVoice(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: brandVoiceKeys.all });
+      void qc.invalidateQueries({ queryKey: voicesKey });
+    }
+  });
 }
 // ── 文案仿写 + 标题/话题生成 (COPY-UI-0001) — 同步 mutation；草稿列表 infinite query ──
 export function useRewriteCopy() {
