@@ -30,6 +30,9 @@ class LocalObjectStorage:
             raise FileNotFoundError(f"object not found: {key}")
         return path.read_bytes()
 
+    def object_exists(self, key: str) -> bool:
+        return self._resolve(key).is_file()
+
     def delete_object(self, key: str) -> None:
         self._resolve(key).unlink(missing_ok=True)
 

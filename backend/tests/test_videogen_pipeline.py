@@ -233,14 +233,11 @@ def test_bgm_library_returns_seeded_royalty_free_tracks(auth_context) -> None:
 
     assert resp.status_code == 200
     items = resp.json()["data"]["items"]
-    assert len(items) >= 3
-    assert {item["track_id"] for item in items} >= {
-        "ambient-soft-loop",
-        "bright-product-pop",
-        "calm-tech-pulse",
-    }
+    assert len(items) == 10
+    assert all(item["track_id"].startswith("mixkit-") for item in items)
     assert all(item["preview_url"].startswith("https://storage.test/") for item in items)
-    assert all("royalty-free" in item["license"].lower() for item in items)
+    assert all("platform/bgm/" in item["preview_url"] for item in items)
+    assert all(item["license"] == "Mixkit License" for item in items)
 
 
 def test_video_gen_schema_requires_reference_images_and_duration_enum() -> None:
