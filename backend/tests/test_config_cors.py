@@ -35,8 +35,23 @@ def test_json_array(monkeypatch) -> None:
 
 def test_default_when_unset(monkeypatch) -> None:
     monkeypatch.delenv("CORS_ORIGINS", raising=False)
+    monkeypatch.delenv("ENGINE_CORS_ORIGINS", raising=False)
     s = Settings(_env_file=None, jwt_secret_key=_JWT)
     assert "http://localhost:3000" in s.cors_origins
+
+
+def test_engine_cors_origins_override_legacy_cors_env(monkeypatch) -> None:
+    monkeypatch.setenv("CORS_ORIGINS", "http://localhost:3000")
+    monkeypatch.setenv(
+        "ENGINE_CORS_ORIGINS",
+        "https://huadingai.cn, https://www.huadingai.cn",
+    )
+    s = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    assert s.effective_cors_origins == [
+        "https://huadingai.cn",
+        "https://www.huadingai.cn",
+    ]
 
 
 @pytest.mark.parametrize("raw", ["", "   "])

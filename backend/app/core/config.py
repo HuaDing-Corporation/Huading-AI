@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000"]
     )
+    engine_cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
     database_url: str = "postgresql+psycopg://huading:huading@localhost:5432/huading"
     redis_url: str = "redis://localhost:6379/0"
@@ -126,7 +127,11 @@ class Settings(BaseSettings):
     # store social credentials here.
     publish_platforms_json: str = ""
 
-    @field_validator("cors_origins", mode="before")
+    @property
+    def effective_cors_origins(self) -> list[str]:
+        return self.engine_cors_origins or self.cors_origins
+
+    @field_validator("cors_origins", "engine_cors_origins", mode="before")
     @classmethod
     def split_cors_origins(cls, value: str | list[str]) -> list[str]:
         # Accept a JSON array, a comma-separated string, or a single URL.

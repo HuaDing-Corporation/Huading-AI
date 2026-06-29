@@ -17,7 +17,9 @@ RUN pnpm install --frozen-lockfile
 # reach the backend via the published host port (default http://localhost:8000),
 # not the internal service name.
 ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+ARG NEXT_PUBLIC_USE_MOCK=0
 ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
+ENV NEXT_PUBLIC_USE_MOCK=$NEXT_PUBLIC_USE_MOCK
 RUN pnpm --filter @huading/frontend build
 
 WORKDIR /repo/frontend
