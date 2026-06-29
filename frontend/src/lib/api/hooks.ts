@@ -2,11 +2,13 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 
 import { fetchMe } from "@/lib/api/auth";
 import { listAvatarPresets } from "@/lib/api/avatars";
-import { avatarPresetsKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, labelSettingsKey, meKey, publishKeys, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
+import { avatarPresetsKey, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, labelSettingsKey, meKey, publishKeys, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
 import { getQuota } from "@/lib/api/quota";
 import { clearCopyDrafts, deleteCopyDraft, generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
 import { generateScript } from "@/lib/api/scripts";
 import { uploadImage, uploadProductImage } from "@/lib/api/uploads";
+import { listBgmLibrary } from "@/lib/api/bgm";
+import { uploadAudio } from "@/lib/api/brand-voices";
 import { listVoices } from "@/lib/api/voices";
 import { listSubtitleTemplates } from "@/lib/api/oral";
 import { createCoverFromFrame, getFrameCandidates } from "@/lib/api/covers";
@@ -87,6 +89,10 @@ export function useUploadImage() {
 }
 export function useUploadProductImage() {
   return useMutation({ mutationFn: (file: File) => uploadProductImage(file) });
+}
+// 视频生成 BGM 上传（VIDEOGEN-UI-0001）：复用 /uploads/audio（声音克隆已建）→ asset_id。
+export function useUploadAudio() {
+  return useMutation({ mutationFn: (audio: Blob) => uploadAudio(audio) });
 }
 export function useScriptGenerate() {
   return useMutation({ mutationFn: (params: ScriptGenerateRequest) => generateScript(params) });
@@ -263,6 +269,11 @@ export function useCopyDrafts() {
 export function useVoices() {
   const { session } = useAuth();
   return useQuery({ queryKey: voicesKey, queryFn: listVoices, enabled: !!session });
+}
+// 配乐库（VIDEOGEN-UI-0001）：登录后拉取，供视频生成 BGM 选择 + 试听。
+export function useBgmLibrary() {
+  const { session } = useAuth();
+  return useQuery({ queryKey: bgmLibraryKey, queryFn: listBgmLibrary, enabled: !!session });
 }
 export function useAvatarPresets() {
   const { session } = useAuth();

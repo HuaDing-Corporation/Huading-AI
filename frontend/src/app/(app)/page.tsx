@@ -1,11 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronLeft, Eraser, ImagePlus, Mic, PenLine, Share2, ShieldCheck, Store, UserRound, type LucideIcon } from "lucide-react";
+import { ChevronLeft, Clapperboard, Eraser, ImagePlus, Mic, PenLine, Share2, ShieldCheck, Store, UserRound, type LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { EcomVideoForm } from "@/components/workbench/ecom-video-form";
+import { VideoGenForm } from "@/components/workbench/video-gen-form";
 import { NewVideoForm } from "@/components/workbench/new-video-form";
 import { PhotoImageForm } from "@/components/workbench/photo-image-form";
 import { CopywritingForm } from "@/components/workbench/copywriting-form";
@@ -16,13 +17,14 @@ import { TaskList } from "@/components/tasks/task-list";
 import { TopBar } from "@/components/layout/top-bar";
 import { copy } from "@/lib/copy";
 
-type WorkbenchMode = "avatar_talk" | "seedance_i2v" | "photo" | "copywriting" | "ecom_image";
+type WorkbenchMode = "avatar_talk" | "seedance_i2v" | "video_gen" | "photo" | "copywriting" | "ecom_image";
 type VideoMode = "avatar_talk" | "seedance_i2v";
 
-// Workbench modes: 数字人口播 (video) / 电商带货 i2v (video) / 照片·AI 图 (image) / 文案仿写 (text) / 电商图·白底图 (image).
+// Workbench modes: 数字人口播 (video) / 电商带货 i2v (video) / 视频生成 i2v (video) / 照片·AI 图 (image) / 文案仿写 (text) / 电商图·白底图 (image).
 const MODES: { id: WorkbenchMode; label: string; Icon: LucideIcon }[] = [
   { id: "avatar_talk", label: copy.workbench.modeAvatar, Icon: UserRound },
   { id: "seedance_i2v", label: copy.workbench.modeEcom, Icon: Store },
+  { id: "video_gen", label: copy.workbench.modeVideoGen, Icon: Clapperboard },
   { id: "photo", label: copy.workbench.modePhoto, Icon: ImagePlus },
   { id: "copywriting", label: copy.workbench.modeCopywriting, Icon: PenLine },
   { id: "ecom_image", label: copy.workbench.modeEcomImage, Icon: Eraser }
@@ -133,6 +135,8 @@ export default function Home() {
                 initialScript={pendingPrefill?.target === "seedance_i2v" ? pendingPrefill.script : undefined}
                 onPrefillConsumed={clearPrefill}
               />
+            ) : mode === "video_gen" ? (
+              <VideoGenForm />
             ) : mode === "copywriting" ? (
               <CopywritingForm onUseInVideo={useCopyInVideo} />
             ) : mode === "ecom_image" ? (
