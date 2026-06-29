@@ -17,6 +17,9 @@ class ObjectStorage(Protocol):
     def get_bytes(self, key: str) -> bytes:
         ...
 
+    def object_exists(self, key: str) -> bool:
+        ...
+
     def delete_object(self, key: str) -> None:
         ...
 

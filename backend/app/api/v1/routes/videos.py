@@ -515,8 +515,13 @@ def _video_gen_bgm_upload_or_404(
     return asset
 
 
-def _video_gen_library_track_or_404(db: Session, *, track_id: str) -> BgmLibraryTrack:
-    ensure_default_bgm_tracks(db)
+def _video_gen_library_track_or_404(
+    db: Session,
+    *,
+    track_id: str,
+    storage: ObjectStorage,
+) -> BgmLibraryTrack:
+    ensure_default_bgm_tracks(db, storage=storage)
     track = db.get(BgmLibraryTrack, track_id)
     if track is None or not track.is_active:
         raise AppError("BGM track not found.", code="BGM_TRACK_NOT_FOUND", status_code=404)
@@ -528,6 +533,7 @@ def _create_video_gen_video(
     *,
     user: User,
     db: Session,
+    storage: ObjectStorage,
 ) -> str:
     reference_assets = _video_gen_reference_assets_or_404(
         db,
@@ -542,7 +548,11 @@ def _create_video_gen_video(
             asset_id=str(payload.bgm.asset_id),
         )
     if payload.bgm is not None and payload.bgm.source == "library":
-        _video_gen_library_track_or_404(db, track_id=str(payload.bgm.track_id))
+        _video_gen_library_track_or_404(
+            db,
+            track_id=str(payload.bgm.track_id),
+            storage=storage,
+        )
 
     task_id = str(uuid4())
     params = _video_gen_worker_params(payload)
@@ -728,7 +738,7 @@ def create_video(
         return ok(request, VideoAccepted(id=task_id, task_id=task_id, status="queued"))
 
     if payload.video_mode == "video_gen":
-        task_id = _create_video_gen_video(payload, user=user, db=db)
+        task_id = _create_video_gen_video(payload, user=user, db=db, storage=storage)
         _prune_after_create(db, tenant_id=user.tenant_id, mode="video_gen", storage=storage)
         params = _video_gen_worker_params(payload)
         params["tenant_id"] = user.tenant_id

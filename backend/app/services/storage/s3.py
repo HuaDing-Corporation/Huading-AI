@@ -53,6 +53,19 @@ class S3ObjectStorage:
         response = self.client.get_object(Bucket=self.bucket, Key=key)
         return response["Body"].read()
 
+    def object_exists(self, key: str) -> bool:
+        from botocore.exceptions import ClientError
+
+        try:
+            self.client.head_object(Bucket=self.bucket, Key=key)
+        except ClientError as exc:
+            status_code = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            error_code = exc.response.get("Error", {}).get("Code")
+            if status_code == 404 or error_code in {"404", "NoSuchKey", "NotFound"}:
+                return False
+            raise
+        return True
+
     def delete_object(self, key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=key)
 

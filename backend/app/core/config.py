@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     storage_access_key_id: str | None = None
     storage_secret_access_key: str | None = None
 
+    engine_bgm_seed_on_startup: bool = True
     engine_s3_endpoint: str | None = None
     engine_s3_public_endpoint: str | None = None
     engine_s3_access_key: str | None = None
