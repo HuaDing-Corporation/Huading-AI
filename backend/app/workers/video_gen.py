@@ -50,7 +50,7 @@ class VideoGenContext:
 
 
 def get_object_storage() -> ObjectStorage:
-    return create_object_storage()
+    return create_object_storage(settings)
 
 
 def _task_or_raise(db: Session, *, tenant_id: str, task_id: str) -> VideoTask:
@@ -279,24 +279,44 @@ def _store_output(ctx: VideoGenContext, video_bytes: bytes) -> str:
     return key
 
 
-def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
-    storage = get_object_storage()
-    store = build_progress_store(settings.redis_url)
-    with SessionLocal() as db:
-        ctx = _load_context(
-            db=db,
-            tenant_id=tenant_id,
-            task_id=task_id,
-            storage=storage,
-            store=store,
-        )
-        task = ctx.task
-        task.status = "running"
-        task.started_at = datetime.now(UTC)
-        task.progress = 5
-        db.commit()
+def _mark_video_gen_failed(
+    db: Session,
+    *,
+    tenant_id: str,
+    task_id: str,
+    error_message: str,
+) -> int:
+    task = db.get(VideoTask, task_id)
+    if task is None or task.tenant_id != tenant_id or task.video_mode != "video_gen":
+        return 100
+    task.status = "failed"
+    task.error_code = "VIDEO_GEN_FAILED"
+    task.error_message = error_message
+    task.error = error_message
+    task.finished_at = datetime.now(UTC)
+    return int(task.progress or 100)
 
+
+def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
+    storage: ObjectStorage | None = None
+    store: ProgressStore | None = None
+    with SessionLocal() as db:
         try:
+            storage = get_object_storage()
+            store = build_progress_store(settings.redis_url)
+            ctx = _load_context(
+                db=db,
+                tenant_id=tenant_id,
+                task_id=task_id,
+                storage=storage,
+                store=store,
+            )
+            task = ctx.task
+            task.status = "running"
+            task.started_at = datetime.now(UTC)
+            task.progress = 5
+            db.commit()
+
             _update_progress(ctx, progress=15, step="seedance")
             video_bytes = _generate_seedance_mini_video(ctx)
             bgm = _bgm_bytes(ctx)
@@ -352,27 +372,33 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
             }
         except Exception as exc:
             logger.exception("video_gen.failed", task_id=task_id, tenant_id=tenant_id)
-            task.status = "failed"
-            task.error_code = "VIDEO_GEN_FAILED"
-            task.error_message = str(exc)
-            task.finished_at = datetime.now(UTC)
-            release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
-            db.commit()
-            prune_video_history_best_effort(
+            db.rollback()
+            error_message = str(exc)
+            failed_progress = _mark_video_gen_failed(
                 db,
                 tenant_id=tenant_id,
-                mode="video_gen",
-                storage=storage,
+                task_id=task_id,
+                error_message=error_message,
             )
-            _store_progress(
-                store,
-                scoped_task_id(tenant_id, task_id),
-                status="failed",
-                progress=100,
-                step="failed",
-                error_code="VIDEO_GEN_FAILED",
-                error_message=str(exc),
-            )
+            release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
+            db.commit()
+            if storage is not None:
+                prune_video_history_best_effort(
+                    db,
+                    tenant_id=tenant_id,
+                    mode="video_gen",
+                    storage=storage,
+                )
+            if store is not None:
+                _store_progress(
+                    store,
+                    scoped_task_id(tenant_id, task_id),
+                    status="failed",
+                    progress=failed_progress,
+                    step="failed",
+                    error_code="VIDEO_GEN_FAILED",
+                    error_message=error_message,
+                )
             raise
 
 

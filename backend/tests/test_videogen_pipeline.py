@@ -7,11 +7,19 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.api.deps import get_object_storage, get_progress_store
-from app.db.models import Asset, Subscription, TaskAsset, UsageRecord, VideoTask
+from app.db.models import (
+    Asset,
+    BgmLibraryTrack,
+    Subscription,
+    TaskAsset,
+    UsageRecord,
+    VideoTask,
+)
 from app.main import app
 from app.schemas.videos import VideoGenerateRequest
 
@@ -101,6 +109,115 @@ def _reset_subscription_quota(db, tenant_id: str) -> Subscription:
     subscription.quota_credits_used = 0
     subscription.quota_credits_reserved = 0
     return subscription
+
+
+def _add_video_gen_task(
+    db,
+    *,
+    tenant_id: str,
+    user_id: str,
+    task_id: str,
+    params: dict[str, Any],
+) -> VideoTask:
+    task = VideoTask(
+        id=task_id,
+        tenant_id=tenant_id,
+        created_by_user_id=user_id,
+        status="queued",
+        mode="video_gen",
+        video_mode="video_gen",
+        topic="A clean product video",
+        duration_sec=5,
+        params=params,
+    )
+    db.add(task)
+    db.flush()
+    return task
+
+
+def _add_reserved_video_gen_usage(
+    db,
+    *,
+    tenant_id: str,
+    subscription: Subscription,
+    task_id: str,
+) -> None:
+    db.add(
+        UsageRecord(
+            tenant_id=tenant_id,
+            subscription_id=subscription.id,
+            video_task_id=task_id,
+            capability="video_gen",
+            provider="seedance",
+            model="doubao-seedance-2-0-mini-pending",
+            unit="second",
+            quantity=Decimal("5"),
+            credits=Decimal("10.00"),
+            cost_cents=0,
+            status="reserved",
+        )
+    )
+    subscription.quota_credits_reserved = 10
+
+
+def _write_test_video(path: Path) -> bytes:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=160x90:d=1:r=24",
+            "-an",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return path.read_bytes()
+
+
+def _write_test_wav(path: Path) -> bytes:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2",
+            "-c:a",
+            "pcm_s16le",
+            str(path),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return path.read_bytes()
+
+
+def _probe_stream_types(path: Path) -> set[str]:
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_streams",
+            "-print_format",
+            "json",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    streams = json.loads(probe.stdout)["streams"]
+    return {stream["codec_type"] for stream in streams}
 
 
 def test_bgm_library_returns_seeded_royalty_free_tracks(auth_context) -> None:
@@ -339,41 +456,24 @@ def test_video_gen_pipeline_settles_quota_stores_labeled_output_and_history(
         subscription = _reset_subscription_quota(db, auth_context["tenant_id"])
         ref = _seed_image_asset(db, tenant_id=auth_context["tenant_id"], asset_id="asset-ref-a")
         storage.objects[ref.storage_key] = (b"PNGDATA", "image/png")
-        db.add(
-            VideoTask(
-                id=task_id,
-                tenant_id=auth_context["tenant_id"],
-                created_by_user_id=auth_context["user_id"],
-                status="queued",
-                mode="video_gen",
-                video_mode="video_gen",
-                topic="A clean product video",
-                duration_sec=5,
-                params={
-                    "reference_image_asset_ids": [ref.id],
-                    "duration_sec": 5,
-                    "resolution": "720p",
-                },
-            )
+        _add_video_gen_task(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            user_id=auth_context["user_id"],
+            task_id=task_id,
+            params={
+                "reference_image_asset_ids": [ref.id],
+                "duration_sec": 5,
+                "resolution": "720p",
+            },
         )
-        db.flush()
         db.add(TaskAsset(video_task_id=task_id, asset_id=ref.id, role="input_reference_image"))
-        db.add(
-            UsageRecord(
-                tenant_id=auth_context["tenant_id"],
-                subscription_id=subscription.id,
-                video_task_id=task_id,
-                capability="video_gen",
-                provider="seedance",
-                model="doubao-seedance-2-0-mini-pending",
-                unit="second",
-                quantity=Decimal("5"),
-                credits=Decimal("10.00"),
-                cost_cents=0,
-                status="reserved",
-            )
+        _add_reserved_video_gen_usage(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            subscription=subscription,
+            task_id=task_id,
         )
-        subscription.quota_credits_reserved = 10
         db.commit()
 
     provider_payloads: list[dict[str, Any]] = []
@@ -396,7 +496,7 @@ def test_video_gen_pipeline_settles_quota_stores_labeled_output_and_history(
         )
         return content + b"|LABEL"
 
-    monkeypatch.setattr(video_gen, "get_object_storage", lambda: storage)
+    monkeypatch.setattr(video_gen, "create_object_storage", lambda _settings: storage)
     monkeypatch.setattr(video_gen, "SessionLocal", auth_db)
     monkeypatch.setattr(video_gen, "build_progress_store", lambda _url: _MemProgressStore())
     monkeypatch.setattr(video_gen, "_generate_seedance_mini_video", fake_generate)
@@ -430,64 +530,158 @@ def test_video_gen_pipeline_settles_quota_stores_labeled_output_and_history(
         assert subscription.quota_credits_used == 10
 
 
+def test_video_gen_pipeline_setup_failure_marks_failed_and_releases_reserved(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.workers import video_gen
+
+    task_id = "video-gen-setup-failure"
+    with auth_db() as db:
+        subscription = _reset_subscription_quota(db, auth_context["tenant_id"])
+        _add_video_gen_task(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            user_id=auth_context["user_id"],
+            task_id=task_id,
+            params={
+                "reference_image_asset_ids": ["asset-ref-a"],
+                "duration_sec": 5,
+                "resolution": "720p",
+            },
+        )
+        _add_reserved_video_gen_usage(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            subscription=subscription,
+            task_id=task_id,
+        )
+        db.commit()
+
+    seen_settings: list[object] = []
+
+    def broken_create_object_storage(config: object):
+        seen_settings.append(config)
+        raise RuntimeError("storage boot failed")
+
+    monkeypatch.setattr(video_gen, "SessionLocal", auth_db)
+    monkeypatch.setattr(video_gen, "create_object_storage", broken_create_object_storage)
+    monkeypatch.setattr(video_gen, "build_progress_store", lambda _url: _MemProgressStore())
+
+    with pytest.raises(RuntimeError, match="storage boot failed"):
+        video_gen.run_video_gen_pipeline(
+            tenant_id=auth_context["tenant_id"],
+            task_id=task_id,
+        )
+
+    assert seen_settings == [video_gen.settings]
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        assert task is not None
+        assert task.status == "failed"
+        assert task.error_code == "VIDEO_GEN_FAILED"
+        assert task.error_message == "storage boot failed"
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
+        assert usage is not None
+        assert usage.status == "released"
+        subscription = _subscription(db, auth_context["tenant_id"])
+        assert subscription.quota_credits_reserved == 0
+        assert subscription.quota_credits_used == 0
+
+
+def test_video_gen_pipeline_mixes_library_bgm_from_track_storage(
+    monkeypatch,
+    tmp_path: Path,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.workers import video_gen
+
+    storage = _Storage()
+    task_id = "video-gen-library-bgm"
+    generated_video = _write_test_video(tmp_path / "generated.mp4")
+    library_audio = _write_test_wav(tmp_path / "library.wav")
+    library_key = "library/bgm/ambient-soft-loop.wav"
+    storage.objects[library_key] = (library_audio, "audio/wav")
+
+    with auth_db() as db:
+        subscription = _reset_subscription_quota(db, auth_context["tenant_id"])
+        ref = _seed_image_asset(db, tenant_id=auth_context["tenant_id"], asset_id="asset-ref-a")
+        storage.objects[ref.storage_key] = (b"PNGDATA", "image/png")
+        db.add(
+            BgmLibraryTrack(
+                track_id="ambient-soft-loop",
+                name="Ambient Soft Loop",
+                duration_sec=2,
+                storage_key=library_key,
+                preview_storage_key=library_key,
+                license="royalty-free",
+                is_active=True,
+            )
+        )
+        _add_video_gen_task(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            user_id=auth_context["user_id"],
+            task_id=task_id,
+            params={
+                "reference_image_asset_ids": [ref.id],
+                "duration_sec": 5,
+                "resolution": "720p",
+                "bgm": {"source": "library", "track_id": "ambient-soft-loop"},
+            },
+        )
+        db.add(TaskAsset(video_task_id=task_id, asset_id=ref.id, role="input_reference_image"))
+        _add_reserved_video_gen_usage(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            subscription=subscription,
+            task_id=task_id,
+        )
+        db.commit()
+
+    monkeypatch.setattr(video_gen, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(video_gen, "SessionLocal", auth_db)
+    monkeypatch.setattr(video_gen, "build_progress_store", lambda _url: _MemProgressStore())
+    monkeypatch.setattr(video_gen, "_generate_seedance_mini_video", lambda _ctx: generated_video)
+    monkeypatch.setattr(video_gen, "label_artifact_bytes", lambda content, **_kwargs: content)
+
+    result = video_gen.run_video_gen_pipeline(
+        tenant_id=auth_context["tenant_id"],
+        task_id=task_id,
+    )
+
+    output_key = result["storage_key"]
+    output_path = tmp_path / "worker-library-mixed.mp4"
+    output_path.write_bytes(storage.objects[output_key][0])
+    assert _probe_stream_types(output_path) >= {"video", "audio"}
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        assert task is not None
+        assert task.status == "done"
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
+        assert usage is not None
+        assert usage.status == "settled"
+        subscription = _subscription(db, auth_context["tenant_id"])
+        assert subscription.quota_credits_reserved == 0
+        assert subscription.quota_credits_used == 10
+
+
 def test_video_gen_bgm_mixing_adds_audio_stream(tmp_path: Path) -> None:
     from app.workers import video_gen
 
     video_path = tmp_path / "base.mp4"
     audio_path = tmp_path / "bgm.wav"
     mixed_path = tmp_path / "mixed.mp4"
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=black:s=160x90:d=1:r=24",
-            "-an",
-            "-pix_fmt",
-            "yuv420p",
-            str(video_path),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:duration=2",
-            "-c:a",
-            "pcm_s16le",
-            str(audio_path),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
 
-    mixed = video_gen._mix_bgm_bytes(video_path.read_bytes(), audio_path.read_bytes(), ".wav")
-    mixed_path.write_bytes(mixed)
-    probe = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_streams",
-            "-print_format",
-            "json",
-            str(mixed_path),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
+    mixed = video_gen._mix_bgm_bytes(
+        _write_test_video(video_path),
+        _write_test_wav(audio_path),
+        ".wav",
     )
-    streams = json.loads(probe.stdout)["streams"]
-    assert {stream["codec_type"] for stream in streams} >= {"video", "audio"}
+    mixed_path.write_bytes(mixed)
+    assert _probe_stream_types(mixed_path) >= {"video", "audio"}
 
 
 def test_video_gen_list_filter_keeps_new_mode_isolated(auth_context, auth_db) -> None:
