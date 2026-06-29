@@ -36,6 +36,18 @@ let audioAssetSeq = 0;
 // 忠实契约：enabled 只读恒真(合规不可关)；PUT 校验 text 非空 ≤20(否则 422)；非伪造。
 const labelSettings = { position: "br", text: "AI 生成", enabled: true };
 
+// ── 发布中心 (PUBLISH-UI-0001) mock store ──
+// 忠实契约：platforms 5、drafts 按平台生成记录、records 列表、PATCH 标记已发布、DELETE 移除；状态枚举 draft/published；非伪造。
+const PUBLISH_PLATFORMS = [
+  { id: "douyin", name: "抖音" },
+  { id: "kuaishou", name: "快手" },
+  { id: "wechat_channels", name: "视频号" },
+  { id: "xiaohongshu", name: "小红书" },
+  { id: "bilibili", name: "B站" }
+];
+const publishRecords = new Map<string, Record<string, unknown>>();
+let publishSeq = 0;
+
 function sseStream(id: string, fail = false): Response {
   const enc = new TextEncoder();
   const frames = fail
@@ -415,5 +427,61 @@ export const handlers = [
     labelSettings.text = text;
     labelSettings.enabled = true; // 合规：强制恒真，忽略任何关闭意图
     return ok({ ...labelSettings });
+  }),
+
+  // ── 发布中心 (PUBLISH-UI-0001) ──
+  http.get(`${BASE}/api/v1/publish/platforms`, () => ok({ items: PUBLISH_PLATFORMS })),
+  http.post(`${BASE}/api/v1/publish/drafts`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as {
+      source_kind?: string;
+      source_task_id?: string;
+      platforms?: string[];
+    };
+    const ids = body.platforms ?? [];
+    // 严格枚举(对齐后端 Literal)：缺产物、空平台、或含非法平台 id 均 422(不静默丢弃未知 id)。
+    if (!body.source_task_id || ids.length === 0 || ids.some((p) => !PUBLISH_PLATFORMS.some((x) => x.id === p))) {
+      return err(422, "PUBLISH_DRAFT_INVALID", "需提供产物与合法平台");
+    }
+    const drafts = ids.map((pid) => {
+      const name = PUBLISH_PLATFORMS.find((x) => x.id === pid)?.name ?? pid;
+      const id = `pub-${++publishSeq}`;
+      const rec = {
+        id,
+        platform: pid,
+        source_kind: body.source_kind ?? "video",
+        source_task_id: body.source_task_id,
+        title: `${name}·AI 短视频`,
+        text: `适配${name}的发布文案，记得带上话题哦～`,
+        topics: ["#AI生成", "#好物推荐"],
+        cover_url: "https://mock.local/cover.png",
+        video_url: "https://mock.local/v.mp4",
+        publish_url: `https://mock.local/publish/${pid}`,
+        status: "draft",
+        created_at: new Date(0).toISOString()
+      };
+      publishRecords.set(id, rec);
+      return rec;
+    });
+    return ok({ drafts });
+  }),
+  http.get(`${BASE}/api/v1/publish/records`, () => {
+    const items = [...publishRecords.values()];
+    return ok({ items, total: items.length });
+  }),
+  http.patch(`${BASE}/api/v1/publish/records/:id`, async ({ request, params }) => {
+    const rec = publishRecords.get(params.id as string);
+    if (!rec) return err(404, "PUBLISH_RECORD_NOT_FOUND", "发布记录不存在");
+    const body = (await request.json().catch(() => ({}))) as { status?: string };
+    if (body.status !== "published" && body.status !== "draft") {
+      return err(422, "PUBLISH_STATUS_INVALID", "状态非法");
+    }
+    rec.status = body.status;
+    return ok({ ...rec });
+  }),
+  http.delete(`${BASE}/api/v1/publish/records/:id`, ({ params }) => {
+    const id = params.id as string;
+    if (!publishRecords.has(id)) return err(404, "PUBLISH_RECORD_NOT_FOUND", "发布记录不存在");
+    publishRecords.delete(id);
+    return ok({ deleted: true });
   })
 ];

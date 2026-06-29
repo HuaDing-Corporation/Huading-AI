@@ -480,3 +480,51 @@ export interface LabelSettingsUpdate {
   position: LabelPosition;
   text: string;
 }
+
+// ── 发布中心 (PUBLISH-UI-0001) ──
+// 注：后端 PUBLISH-PIPELINE 未实现，契约据 seam §1-5 推断，待对冻结 seam + 真栈校验。
+export type PublishPlatformId = "douyin" | "kuaishou" | "wechat_channels" | "xiaohongshu" | "bilibili";
+export type PublishStatus = "draft" | "published"; // 草稿 / 已发布
+
+// GET /publish/platforms
+export interface PublishPlatform {
+  id: PublishPlatformId;
+  name: string;
+}
+export interface PublishPlatformsResponse {
+  items: PublishPlatform[];
+}
+
+// 发布记录(draft 即记录的初始态)：产物→平台→状态 + 平台定制文案/产物/公开发布 URL。
+export interface PublishRecord {
+  id: string;
+  platform: PublishPlatformId;
+  source_kind: string; // 产物类型：video / photo
+  source_task_id: string;
+  title: string;
+  text: string; // 文案
+  topics: string[]; // 话题
+  cover_url?: string | null;
+  video_url?: string | null; // 成片
+  publish_url: string; // 「去XX发布」window.open 的公开上传页 URL
+  status: PublishStatus;
+  created_at: string;
+}
+
+// POST /publish/drafts：按所选平台各生成一条 draft 记录。
+export interface CreateDraftsRequest {
+  source_kind: string;
+  source_task_id: string;
+  platforms: PublishPlatformId[];
+}
+export interface CreateDraftsResponse {
+  drafts: PublishRecord[];
+}
+export interface PublishRecordsResponse {
+  items: PublishRecord[];
+  total: number;
+}
+// PATCH /publish/records/{id}：仅标记已发布(status)。
+export interface MarkPublishedRequest {
+  status: PublishStatus;
+}
