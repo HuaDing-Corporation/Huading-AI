@@ -19,7 +19,15 @@ from app.api.deps import (
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
-from app.db.models import Asset, BrandVoice, TaskAsset, User, VideoTask, Voice
+from app.db.models import (
+    Asset,
+    BgmLibraryTrack,
+    BrandVoice,
+    TaskAsset,
+    User,
+    VideoTask,
+    Voice,
+)
 from app.providers.base import invoke, resolve
 from app.schemas.response import ApiResponse, ok
 from app.schemas.videos import (
@@ -33,6 +41,7 @@ from app.schemas.videos import (
     VideoListResponse,
     VideoRead,
 )
+from app.services.bgm_library import ensure_default_bgm_tracks
 from app.services.history import (
     clear_video_history,
     delete_video_task,
@@ -46,9 +55,11 @@ from app.services.quota import (
     estimate_avatar_talk_quota,
     estimate_image_generation_quota,
     estimate_seedance_i2v_quota,
+    estimate_video_gen_quota,
     reserve_avatar_talk_quota,
     reserve_image_generation_quota,
     reserve_seedance_i2v_quota,
+    reserve_video_gen_quota,
     seedance_i2v_billable_seconds,
     seedance_i2v_target_seconds,
 )
@@ -59,6 +70,7 @@ from app.workers.avatar_talk import (
     generate_seedance_i2v_task,
 )
 from app.workers.image_gen import generate_image_task
+from app.workers.video_gen import generate_video_gen_task
 from app.workers.video_tasks import generate_video_task
 
 router = APIRouter()
@@ -72,6 +84,8 @@ _video_task_tenants: dict[str, str] = {}
 _TERMINAL = {"SUCCESS", "FAILURE"}
 _SSE_INTERVAL_S = 1.0
 _ESTIMATE_NOTE = "Estimated reservation; final settlement uses actual generated duration."
+_VIDEO_HISTORY_MODE_PATTERN = "^(avatar_talk|seedance_i2v|photo|video_gen)$"
+_VIDEO_GEN_IMAGE_TYPES = {"avatar_image", "product_image", "generated_image", "cover"}
 
 
 def _is_avatar_talk_requested(payload: VideoGenerateRequest) -> bool:
@@ -96,6 +110,20 @@ def _worker_params(payload: VideoGenerateRequest) -> dict:
     else:
         params.pop("purpose", None)
         params.pop("kind", None)
+    return params
+
+
+def _video_gen_worker_params(payload: VideoGenerateRequest) -> dict:
+    params = {
+        "video_mode": "video_gen",
+        "prompt": payload.topic,
+        "topic": payload.topic,
+        "reference_image_asset_ids": list(payload.reference_image_asset_ids),
+        "duration_sec": int(payload.duration_sec or 5),
+        "resolution": payload.resolution,
+    }
+    if payload.bgm is not None:
+        params["bgm"] = payload.bgm.model_dump(exclude_none=True)
     return params
 
 
@@ -147,6 +175,13 @@ def _quota_estimate_for_payload(
             script=payload.script or payload.topic,
             speed=payload.speed,
             estimated_seconds=seedance_i2v_billable_seconds(target_duration_sec),
+        )
+    if payload.video_mode == "video_gen":
+        return estimate_video_gen_quota(
+            db,
+            tenant_id=tenant_id,
+            duration_sec=int(payload.duration_sec or 5),
+            resolution=payload.resolution,
         )
     if _is_avatar_talk_requested(payload):
         if not payload.voice_id:
@@ -260,7 +295,7 @@ def list_videos(
     db: Session = DbSessionDependency,
     store: ProgressStore = ProgressStoreDependency,
     storage: ObjectStorage = ObjectStorageDependency,
-    mode: str | None = Query(default=None, pattern="^(avatar_talk|seedance_i2v|photo)$"),
+    mode: str | None = Query(default=None, pattern=_VIDEO_HISTORY_MODE_PATTERN),
     kind: str | None = Query(default=None, pattern="^[A-Za-z0-9_-]{1,40}$"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -424,6 +459,125 @@ def _create_seedance_i2v_video(
     return task_id
 
 
+def _video_gen_reference_assets_or_404(
+    db: Session,
+    *,
+    tenant_id: str,
+    asset_ids: list[str],
+) -> list[Asset]:
+    assets = list(
+        db.scalars(
+            select(Asset).where(
+                Asset.id.in_(asset_ids),
+                Asset.tenant_id == tenant_id,
+                Asset.status == "ready",
+                Asset.deleted_at.is_(None),
+            )
+        )
+    )
+    by_id = {asset.id: asset for asset in assets}
+    ordered = [by_id.get(asset_id) for asset_id in asset_ids]
+    if any(asset is None for asset in ordered):
+        raise AppError(
+            "Reference image not found.",
+            code="REFERENCE_IMAGE_NOT_FOUND",
+            status_code=404,
+        )
+    resolved = [asset for asset in ordered if asset is not None]
+    if any(
+        asset.type not in _VIDEO_GEN_IMAGE_TYPES
+        or not str(asset.mime_type or "image/").startswith("image/")
+        for asset in resolved
+    ):
+        raise AppError(
+            "Reference image not found.",
+            code="REFERENCE_IMAGE_NOT_FOUND",
+            status_code=404,
+        )
+    return resolved
+
+
+def _video_gen_bgm_upload_or_404(
+    db: Session,
+    *,
+    tenant_id: str,
+    asset_id: str,
+) -> Asset:
+    asset = db.get(Asset, asset_id)
+    if (
+        asset is None
+        or asset.tenant_id != tenant_id
+        or asset.type not in {"audio", "bgm"}
+        or asset.status != "ready"
+        or asset.deleted_at is not None
+    ):
+        raise AppError("BGM asset not found.", code="BGM_ASSET_NOT_FOUND", status_code=404)
+    return asset
+
+
+def _video_gen_library_track_or_404(db: Session, *, track_id: str) -> BgmLibraryTrack:
+    ensure_default_bgm_tracks(db)
+    track = db.get(BgmLibraryTrack, track_id)
+    if track is None or not track.is_active:
+        raise AppError("BGM track not found.", code="BGM_TRACK_NOT_FOUND", status_code=404)
+    return track
+
+
+def _create_video_gen_video(
+    payload: VideoGenerateRequest,
+    *,
+    user: User,
+    db: Session,
+) -> str:
+    reference_assets = _video_gen_reference_assets_or_404(
+        db,
+        tenant_id=user.tenant_id,
+        asset_ids=list(payload.reference_image_asset_ids),
+    )
+    bgm_asset: Asset | None = None
+    if payload.bgm is not None and payload.bgm.source == "upload":
+        bgm_asset = _video_gen_bgm_upload_or_404(
+            db,
+            tenant_id=user.tenant_id,
+            asset_id=str(payload.bgm.asset_id),
+        )
+    if payload.bgm is not None and payload.bgm.source == "library":
+        _video_gen_library_track_or_404(db, track_id=str(payload.bgm.track_id))
+
+    task_id = str(uuid4())
+    params = _video_gen_worker_params(payload)
+    task = VideoTask(
+        id=task_id,
+        tenant_id=user.tenant_id,
+        created_by_user_id=user.id,
+        status="queued",
+        topic=payload.topic,
+        script=payload.script,
+        mode="video_gen",
+        video_mode="video_gen",
+        progress=0,
+        aspect_ratio=payload.aspect_ratio,
+        duration_sec=float(payload.duration_sec or 5),
+        params=params,
+    )
+    db.add(task)
+    db.flush()
+    for asset in reference_assets:
+        db.add(TaskAsset(video_task_id=task.id, asset_id=asset.id, role="input_reference_image"))
+    if bgm_asset is not None:
+        db.add(TaskAsset(video_task_id=task.id, asset_id=bgm_asset.id, role="input_bgm"))
+    reserve_video_gen_quota(
+        db,
+        tenant_id=user.tenant_id,
+        video_task_id=task.id,
+        duration_sec=int(payload.duration_sec or 5),
+        resolution=payload.resolution,
+    )
+    db.commit()
+    _video_task_tenants[task_id] = user.tenant_id
+    return task_id
+
+
 def _create_photo_video(
     payload: VideoGenerateRequest,
     *,
@@ -573,6 +727,15 @@ def create_video(
         generate_seedance_i2v_task.apply_async(args=[params], task_id=task_id, queue="avatar")
         return ok(request, VideoAccepted(id=task_id, task_id=task_id, status="queued"))
 
+    if payload.video_mode == "video_gen":
+        task_id = _create_video_gen_video(payload, user=user, db=db)
+        _prune_after_create(db, tenant_id=user.tenant_id, mode="video_gen", storage=storage)
+        params = _video_gen_worker_params(payload)
+        params["tenant_id"] = user.tenant_id
+        params["video_task_id"] = task_id
+        generate_video_gen_task.apply_async(args=[params], task_id=task_id, queue="avatar")
+        return ok(request, VideoAccepted(id=task_id, task_id=task_id, status="queued"))
+
     if _is_avatar_talk_requested(payload):
         task_id = _create_avatar_talk_video(payload, user=user, db=db)
         _prune_after_create(db, tenant_id=user.tenant_id, mode="avatar_talk", storage=storage)
@@ -608,7 +771,7 @@ def clear_videos(
     user: User = CurrentUserDependency,
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
-    mode: str = Query(pattern="^(avatar_talk|seedance_i2v|photo)$"),
+    mode: str = Query(pattern=_VIDEO_HISTORY_MODE_PATTERN),
 ) -> ApiResponse[VideoClearResponse]:
     deleted_count = clear_video_history(
         db,

@@ -248,6 +248,22 @@ class PublishRecord(TenantScopedMixin, Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
 
+class BgmLibraryTrack(Base):
+    __tablename__ = "bgm_library_tracks"
+    __table_args__ = (
+        Index("ix_bgm_library_tracks_active", "is_active", "track_id"),
+    )
+
+    track_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    duration_sec: Mapped[int] = mapped_column(Integer)
+    storage_key: Mapped[str] = mapped_column(String(400))
+    preview_storage_key: Mapped[str | None] = mapped_column(String(400), default=None)
+    license: Mapped[str] = mapped_column(String(160))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class BrandAsset(TenantScopedMixin, Base):
     __tablename__ = "brand_assets"
 
@@ -329,7 +345,7 @@ class CreditRate(Base):
     __table_args__ = (
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
-            "'publish', 'voice_clone')",
+            "'publish', 'voice_clone', 'video_gen')",
             name="ck_credit_rates_capability",
         ),
         CheckConstraint(
@@ -492,7 +508,7 @@ class TaskAsset(Base):
         ),
         CheckConstraint(
             "role IN ('input_avatar', 'output_audio', 'output_subtitle', 'output_video', "
-            "'output_image')",
+            "'output_image', 'input_reference_image', 'input_bgm')",
             name="ck_task_assets_role",
         ),
         Index("ix_task_assets_video_task_id", "video_task_id"),
@@ -545,7 +561,7 @@ class UsageRecord(Base):
     __table_args__ = (
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
-            "'publish', 'voice_clone')",
+            "'publish', 'voice_clone', 'video_gen')",
             name="ck_usage_records_capability",
         ),
         CheckConstraint(
