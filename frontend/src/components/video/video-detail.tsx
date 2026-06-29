@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronLeft, Download, Image as ImageIcon } from "lucide-react";
+import { ChevronLeft, Download, Image as ImageIcon, Share2 } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { ApiError } from "@/lib/api/client";
@@ -168,8 +169,19 @@ export function VideoDetail({ id }: VideoDetailProps) {
         </div>
       )}
 
-      {/* 产物知情提示：已含 AI 生成标识(不可去除)。仅完成产物显示。(LABEL-UI-0001) */}
-      {data.status === "done" && data.playback_url && <AiLabelNotice className="w-fit" />}
+      {/* 产物知情提示 + 发布入口：仅完成产物显示。(LABEL-UI-0001 / PUBLISH-UI-0001) */}
+      {data.status === "done" && data.playback_url && (
+        <div className="flex flex-wrap items-center gap-2">
+          <AiLabelNotice className="w-fit" />
+          {/* 发布入口：带 source_kind+source_task_id 跳发布中心(不在此发布，仅引导)。 */}
+          <Link
+            href={`/publish?source_kind=${data.mode === "photo" ? "image" : "video"}&source_task_id=${id}`}
+            className="inline-flex items-center gap-1.5 rounded-field border border-line-gold bg-glass-fill px-3 py-1 text-[12px] text-gold-deep transition-colors hover:bg-glass-hover"
+          >
+            <Share2 size={13} strokeWidth={2} /> {copy.publish.entry}
+          </Link>
+        </div>
+      )}
 
       {/* 做封面(ORAL-PROD-UI-0001)：封面是口播视频产物附属，仅完成的口播视频显示入口 */}
       {data.status === "done" && data.playback_url && (data.mode == null || data.mode === "avatar_talk") && (

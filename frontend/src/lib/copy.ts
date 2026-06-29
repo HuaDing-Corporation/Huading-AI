@@ -326,5 +326,51 @@ export const copy = {
     saved: "已保存",
     // 产物处知情提示
     productNotice: "已含 AI 生成标识"
+  },
+  // 发布中心 (PUBLISH-UI-0001)
+  publish: {
+    entry: "发布",
+    pageTitle: "发布中心",
+    pageSubtitle: "选平台生成各平台文案，一键复制 / 下载 / 去发布",
+    platformLabel: "选择发布平台（可多选）",
+    noSourceHint: "从「历史」或成片详情点「发布」进入，选择要发布的产物",
+    generateDrafts: "生成各平台草稿",
+    generating: "生成中…",
+    selectAtLeastOne: "请至少选择一个平台",
+    // 草稿卡
+    cardTitleLabel: "标题",
+    cardTextLabel: "文案",
+    cardTopicsLabel: "话题（空格分隔）",
+    coverAlt: "封面预览",
+    copyText: "一键复制文案",
+    copied: "已复制",
+    copyFailed: "复制失败，请手动选择文案",
+    download: "下载成片",
+    goPublish: "去发布",
+    goPublishAt: (name: string) => `去${name}发布`,
+    markPublished: "标记已发布",
+    marking: "标记中…",
+    marked: "已发布",
+    markFailed: "标记失败，请重试",
+    // 记录
+    recordsTitle: "发布记录",
+    recordsLoading: "加载中…",
+    recordsError: "加载失败，请重试",
+    recordsEmpty: "暂无发布记录",
+    statusDraft: "草稿",
+    statusCopied: "已复制",
+    statusPublished: "已发布",
+    sourceVideo: "视频",
+    sourceImage: "图片",
+    deleteRecord: "删除",
+    deleteConfirmTitle: "删除该发布记录？",
+    deleteConfirmMessage: "将从发布记录移除，不影响已发布的内容。",
+    deleteConfirmBtn: "确认删除",
+    // 平台名（与后端 platforms 接口一致；此处为兜底展示）
+    platformDouyin: "抖音",
+    platformKuaishou: "快手",
+    platformWechat: "视频号",
+    platformXiaohongshu: "小红书",
+    platformBilibili: "B站"
   }
 } as const;

@@ -77,6 +77,11 @@ describe("VideoDetail", () => {
     expect(screen.getByText(copy.detail.download)).toBeInTheDocument();
     // LABEL-UI-0001：完成产物处显示「已含 AI 生成标识」知情提示。
     expect(screen.getByText(copy.label.productNotice)).toBeInTheDocument();
+    // PUBLISH-UI-0001：成片处「发布」入口 → /publish 带 source_kind+source_task_id。
+    expect(screen.getByRole("link", { name: new RegExp(copy.publish.entry) })).toHaveAttribute(
+      "href",
+      "/publish?source_kind=video&source_task_id=v1"
+    );
   });
 
   it("renders an <img> result for a photo task (mode=photo) with a download link", () => {

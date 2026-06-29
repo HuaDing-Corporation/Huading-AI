@@ -36,6 +36,21 @@ let audioAssetSeq = 0;
 // 忠实契约：enabled 只读恒真(合规不可关)；PUT 校验 text 非空 ≤20(否则 422)；非伪造。
 const labelSettings = { position: "br", text: "AI 生成", enabled: true };
 
+// ── 发布中心 (PUBLISH-UI-0001) mock store ── 逐字对齐后端 schemas/publish.py。
+// platforms(id/name/title_max/publish_url/cover_ratio/notes)、drafts(返 {id,items})、records(嵌套
+// {id,source,platforms[]{platform_id,status}})、PATCH 标记单平台已发布、DELETE；status draft/copied/published。
+const PUBLISH_PLATFORMS = [
+  { id: "douyin", name: "抖音", title_max: 55, body_max: 1000, hashtag_max: 5, publish_url: "https://creator.douyin.com/", cover_ratio: "3:4", notes: "标题控制在55字以内，建议3-5个话题。" },
+  { id: "kuaishou", name: "快手", title_max: 50, body_max: 1000, hashtag_max: 5, publish_url: "https://cp.kuaishou.com/", cover_ratio: "3:4", notes: "标题简短直接，建议3-5个话题。" },
+  { id: "wxchannels", name: "视频号", title_max: 30, body_max: 1000, hashtag_max: 3, publish_url: "https://channels.weixin.qq.com/", cover_ratio: "3:4", notes: "短标题、少量话题，表达克制。" },
+  { id: "xiaohongshu", name: "小红书", title_max: 20, body_max: 1000, hashtag_max: 10, publish_url: "https://creator.xiaohongshu.com/", cover_ratio: "3:4", notes: "标题20字以内，正文更完整，话题更丰富。" },
+  { id: "bilibili", name: "B站", title_max: 80, body_max: 2000, hashtag_max: 5, publish_url: "https://member.bilibili.com/platform/upload/video/frame", cover_ratio: "16:9", notes: "标题可更完整，正文适合补充分区与简介信息。" }
+];
+const PUBLISH_IDS = PUBLISH_PLATFORMS.map((p) => p.id);
+// 记录：嵌套模型(id + 产物 + platforms[]{platform_id,status})。
+const publishRecords = new Map<string, { id: string; source_kind: string; source_task_id: string; created_at: string; platforms: { platform_id: string; status: string }[] }>();
+let publishSeq = 0;
+
 function sseStream(id: string, fail = false): Response {
   const enc = new TextEncoder();
   const frames = fail
@@ -415,5 +430,78 @@ export const handlers = [
     labelSettings.text = text;
     labelSettings.enabled = true; // 合规：强制恒真，忽略任何关闭意图
     return ok({ ...labelSettings });
+  }),
+
+  // ── 发布中心 (PUBLISH-UI-0001) ──
+  http.get(`${BASE}/api/v1/publish/platforms`, () => ok({ items: PUBLISH_PLATFORMS })),
+  http.post(`${BASE}/api/v1/publish/drafts`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as {
+      source_kind?: string;
+      source_task_id?: string;
+      platforms?: string[];
+    };
+    const ids = body.platforms ?? [];
+    const sk = body.source_kind;
+    const taskId = (body.source_task_id ?? "").trim();
+    const unique = new Set(ids).size === ids.length;
+    // 对齐后端：source_kind∈video|image、source_task_id 1–80 非空、platforms 1–5 合法且唯一，否则 422。
+    if (
+      (sk !== "video" && sk !== "image") ||
+      !taskId ||
+      taskId.length > 80 ||
+      ids.length < 1 ||
+      ids.length > 5 ||
+      !unique ||
+      ids.some((p) => !PUBLISH_IDS.includes(p))
+    ) {
+      return err(422, "PUBLISH_DRAFT_INVALID", "请求参数非法");
+    }
+    const recordId = `pub-${++publishSeq}`;
+    publishRecords.set(recordId, {
+      id: recordId,
+      source_kind: sk,
+      source_task_id: taskId,
+      created_at: new Date(0).toISOString(),
+      platforms: ids.map((pid) => ({ platform_id: pid, status: "draft" }))
+    });
+    // 返回各平台可编辑内容(PublishDraftItem)。
+    const items = ids.map((pid) => {
+      const plat = PUBLISH_PLATFORMS.find((x) => x.id === pid);
+      const name = plat?.name ?? pid;
+      return {
+        platform_id: pid,
+        title: `${name}·AI 短视频`,
+        body: `适配${name}的发布文案，记得带上话题哦～`,
+        hashtags: ["#AI生成", "#好物推荐"],
+        cover_url: "https://mock.local/cover.png",
+        media_url: "https://mock.local/v.mp4",
+        // 去发布开的是平台官方创作页(对齐真后端 draft item.publish_url)。
+        publish_url: plat?.publish_url ?? `https://mock.local/publish/${pid}`
+      };
+    });
+    return ok({ id: recordId, items });
+  }),
+  http.get(`${BASE}/api/v1/publish/records`, () => {
+    const items = [...publishRecords.values()];
+    return ok({ items, total: items.length });
+  }),
+  http.patch(`${BASE}/api/v1/publish/records/:id`, async ({ request, params }) => {
+    const rec = publishRecords.get(params.id as string);
+    if (!rec) return err(404, "PUBLISH_RECORD_NOT_FOUND", "发布记录不存在");
+    const body = (await request.json().catch(() => ({}))) as { platform_id?: string; status?: string };
+    // 对齐后端 PublishRecordPatchRequest：platform_id 合法 + status 仅 "published"，否则 422。
+    if (!body.platform_id || !PUBLISH_IDS.includes(body.platform_id) || body.status !== "published") {
+      return err(422, "PUBLISH_PATCH_INVALID", "请求参数非法");
+    }
+    const target = rec.platforms.find((p) => p.platform_id === body.platform_id);
+    if (!target) return err(404, "PUBLISH_PLATFORM_NOT_FOUND", "平台不在该记录内");
+    target.status = "published";
+    return ok({ ...rec });
+  }),
+  http.delete(`${BASE}/api/v1/publish/records/:id`, ({ params }) => {
+    const id = params.id as string;
+    if (!publishRecords.has(id)) return err(404, "PUBLISH_RECORD_NOT_FOUND", "发布记录不存在");
+    publishRecords.delete(id);
+    return ok({ id, deleted_at: new Date(0).toISOString() });
   })
 ];

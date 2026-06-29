@@ -480,3 +480,65 @@ export interface LabelSettingsUpdate {
   position: LabelPosition;
   text: string;
 }
+
+// ── 发布中心 (PUBLISH-UI-0001) — 逐字对齐后端 backend/app/schemas/publish.py ──
+export type PublishPlatformId = "douyin" | "kuaishou" | "wxchannels" | "xiaohongshu" | "bilibili";
+export type PublishSourceKind = "video" | "image"; // 产物类型(后端 Literal)
+export type PublishStatus = "draft" | "copied" | "published"; // 草稿 / 已复制 / 已发布
+
+// GET /publish/platforms（后端 PublishPlatformRead）
+export interface PublishPlatform {
+  id: PublishPlatformId;
+  name: string;
+  title_max?: number;
+  body_max?: number;
+  hashtag_max?: number;
+  publish_url?: string;
+  cover_ratio?: string;
+  notes?: string;
+}
+export interface PublishPlatformsResponse {
+  items: PublishPlatform[];
+}
+
+// POST /publish/drafts → { id(记录), items:[单平台可编辑内容] }（后端 PublishDraftCreateResponse）。
+export interface CreateDraftsRequest {
+  source_kind: PublishSourceKind;
+  source_task_id: string; // 1–80 非空
+  platforms: PublishPlatformId[]; // 1–5，唯一
+}
+export interface PublishDraftItem {
+  platform_id: PublishPlatformId;
+  title: string;
+  body: string; // 文案
+  hashtags: string[]; // 话题
+  cover_url: string;
+  media_url: string; // 成片
+  publish_url: string; // 「去XX发布」window.open 的公开上传页 URL
+}
+export interface CreateDraftsResponse {
+  id: string; // 发布记录 id（PATCH 标记单平台用）
+  items: PublishDraftItem[];
+}
+
+// GET /publish/records → 记录为嵌套模型：一条记录(产物) 含多平台 platforms[]{platform_id,status}。
+export interface PublishRecordPlatform {
+  platform_id: PublishPlatformId;
+  status: PublishStatus;
+}
+export interface PublishRecord {
+  id: string;
+  source_kind: PublishSourceKind;
+  source_task_id: string;
+  created_at: string;
+  platforms: PublishRecordPlatform[];
+}
+export interface PublishRecordsResponse {
+  items: PublishRecord[];
+  total: number;
+}
+// PATCH /publish/records/{record_id}：标记某记录下某平台为已发布（status 仅 "published"）。
+export interface MarkPublishedRequest {
+  platform_id: PublishPlatformId;
+  status: "published";
+}

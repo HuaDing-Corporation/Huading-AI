@@ -31,6 +31,13 @@ export const brandVoiceKeys = {
 // 深度合成标识设置 (LABEL-UI-0001)
 export const labelSettingsKey = ["tenant", "label-settings"] as const;
 
+// 发布中心 (PUBLISH-UI-0001)
+export const publishKeys = {
+  all: ["publish"] as const,
+  platforms: () => [...publishKeys.all, "platforms"] as const,
+  records: () => [...publishKeys.all, "records"] as const
+};
+
 export const meKey = ["me"] as const;
 export const quotaKey = ["quota"] as const;
 export const voicesKey = ["voices"] as const;
