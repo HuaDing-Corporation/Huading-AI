@@ -21,7 +21,7 @@ def bgm_library(
     storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[BgmLibraryResponse]:
     items = []
-    for track in list_bgm_tracks(db, storage=storage):
+    for track in list_bgm_tracks(db):
         preview_key = track.preview_storage_key or track.storage_key
         items.append(
             BgmTrackRead(

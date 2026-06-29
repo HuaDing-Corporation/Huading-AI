@@ -18,6 +18,7 @@ from app.main import app
 @pytest.fixture(autouse=True)
 def jwt_test_secret(monkeypatch):
     monkeypatch.setattr(settings, "jwt_secret_key", "test-secret-test-secret-test-secret-32")
+    monkeypatch.setattr(settings, "engine_bgm_seed_on_startup", False)
 
 
 @pytest.fixture

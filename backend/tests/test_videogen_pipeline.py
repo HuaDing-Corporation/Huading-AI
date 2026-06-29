@@ -22,6 +22,7 @@ from app.db.models import (
 )
 from app.main import app
 from app.schemas.videos import VideoGenerateRequest
+from app.services import bgm_library
 
 
 class _Storage:
@@ -220,8 +221,12 @@ def _probe_stream_types(path: Path) -> set[str]:
     return {stream["codec_type"] for stream in streams}
 
 
-def test_bgm_library_returns_seeded_royalty_free_tracks(auth_context) -> None:
+def test_bgm_library_returns_seeded_royalty_free_tracks(auth_context, auth_db) -> None:
     storage = _Storage()
+    with auth_db() as db:
+        bgm_library.ensure_default_bgm_tracks(db, storage=storage)
+        db.commit()
+
     app.dependency_overrides[get_object_storage] = lambda: storage
     try:
         resp = TestClient(app).get(

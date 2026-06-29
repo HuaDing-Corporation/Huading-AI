@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -110,12 +111,23 @@ def ensure_default_bgm_tracks(db: Session, *, storage: ObjectStorage | None = No
     db.flush()
 
 
-def list_bgm_tracks(
-    db: Session,
+def seed_bgm_library(
+    db_factory: Callable[[], Session],
     *,
     storage: ObjectStorage | None = None,
-) -> list[BgmLibraryTrack]:
-    ensure_default_bgm_tracks(db, storage=storage)
+) -> None:
+    db = db_factory()
+    try:
+        ensure_default_bgm_tracks(db, storage=storage)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def list_bgm_tracks(db: Session) -> list[BgmLibraryTrack]:
     return list(
         db.scalars(
             select(BgmLibraryTrack)
