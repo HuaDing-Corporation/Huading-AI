@@ -51,6 +51,17 @@ describe("视频生成 配乐库 + video_gen 校验 ↔ MSW（mock 忠实）", (
     }
   });
 
+  // FIX1 承重：参考图重复 → 422（对齐后端 schemas/videos.py:221 唯一性；mock 不得放宽）。
+  it("video_gen 参考图重复 → 422（唯一性，对齐后端）", async () => {
+    let caught: unknown;
+    try {
+      await createVideo({ ...baseReq, reference_image_asset_ids: ["dup", "dup"] });
+    } catch (e) {
+      caught = e;
+    }
+    expect((caught as ApiError)?.status).toBe(422);
+  });
+
   it("video_gen 上传BGM（asset_id）合法 → 接受", async () => {
     const res = await createVideo({ ...baseReq, bgm: { source: "upload", asset_id: "audio-1" } });
     expect(res.id).toBeTruthy();

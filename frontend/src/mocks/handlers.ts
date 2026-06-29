@@ -31,6 +31,8 @@ const brandVoices = new Map<string, MockBrandVoice>([
 ]);
 let brandVoiceSeq = 0;
 let audioAssetSeq = 0;
+// 图片资产上传序号：每次 /uploads/images 返唯一 asset_id（贴近真后端 uuid），避免多图碰撞同 id。
+let imageUploadSeq = 0;
 
 // ── 深度合成标识设置 (LABEL-UI-0001) mock store ──
 // 忠实契约：enabled 只读恒真(合规不可关)；PUT 校验 text 非空 ≤20(否则 422)；非伪造。
@@ -139,12 +141,13 @@ export const handlers = [
     const body = (await request.json()) as { topic: string };
     return ok({ script: `【${body.topic}】大家好，今天用一分钟带你了解……（mock 文案，可编辑）` });
   }),
-  http.post(`${BASE}/api/v1/uploads/images`, () =>
-    HttpResponse.json(
-      { data: { asset_id: "upload-1", type: "avatar_image", status: "ready", thumbnail_url: "https://mock.local/u1.jpg" }, error: null, request_id: "mock-req" },
+  http.post(`${BASE}/api/v1/uploads/images`, () => {
+    const n = ++imageUploadSeq;
+    return HttpResponse.json(
+      { data: { asset_id: `upload-${n}`, type: "avatar_image", status: "ready", thumbnail_url: `https://mock.local/u${n}.jpg` }, error: null, request_id: "mock-req" },
       { status: 201 }
-    )
-  ),
+    );
+  }),
   http.post(`${BASE}/api/v1/videos`, async ({ request }) => {
     const body = (await request.json()) as {
       topic?: string;
@@ -156,10 +159,12 @@ export const handlers = [
       resolution?: string;
       bgm?: { source?: string; asset_id?: string; track_id?: string };
     };
-    // 视频生成 video_gen 校验（对齐 seam §2：参考图 1–9、prompt 非空、duration 枚举、resolution 枚举、
-    // bgm 二选一可选）→ 非法 422，不伪造放行（吸取发布中心/声音克隆 mock 掩盖契约教训）。
+    // 视频生成 video_gen 校验（逐字对齐后端 schemas/videos.py:213-222：参考图 1–9 且**唯一**、prompt
+    // 非空、duration∈{5,10,15}、resolution∈{480p,720p}、bgm 二选一可选）→ 非法 422，不伪造放行/不放宽
+    // （吸取发布中心/声音克隆 mock 掩盖契约教训）。
     if (body.video_mode === "video_gen") {
       const refs = body.reference_image_asset_ids ?? [];
+      const refsUnique = new Set(refs).size === refs.length; // 对齐后端唯一性校验（重复→422）
       const bgmOk =
         body.bgm === undefined ||
         (body.bgm.source === "upload" && !!body.bgm.asset_id) ||
@@ -168,6 +173,7 @@ export const handlers = [
         !Array.isArray(refs) ||
         refs.length < 1 ||
         refs.length > 9 ||
+        !refsUnique ||
         !body.prompt ||
         !body.prompt.trim() ||
         !VIDEO_GEN_DURATIONS.includes(body.duration_sec as number) ||

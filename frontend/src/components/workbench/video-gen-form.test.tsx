@@ -41,7 +41,7 @@ const setPrompt = (v: string) => fireEvent.change(screen.getByPlaceholderText(co
 const generateBtn = () => screen.getByRole("button", { name: copy.workbench.generate });
 
 beforeEach(() => {
-  taskMocks.createAndTrack.mockResolvedValue("task-1");
+  taskMocks.createAndTrack.mockResolvedValue("vid-1");
 });
 afterEach(() => vi.clearAllMocks());
 

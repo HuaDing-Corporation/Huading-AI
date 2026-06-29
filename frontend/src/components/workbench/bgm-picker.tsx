@@ -113,7 +113,6 @@ export function BgmPicker({
           {uploaded && (
             <div className="mt-2 flex items-center gap-2">
               <span className="text-[12px] text-ink-soft">{copy.workbench.vgBgmUploaded}</span>
-              {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
               <audio controls src={uploaded.url} aria-label={copy.workbench.vgBgmUploadedPreview} className="h-8 max-w-full flex-1" />
             </div>
           )}
@@ -146,7 +145,6 @@ export function BgmPicker({
                   >
                     <span className="text-[13px] text-ink">{t.name}</span>
                     <span className="text-[11.5px] text-ink-faint">{copy.workbench.durationSeconds(t.duration_sec)}</span>
-                    {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
                     <audio controls src={t.preview_url} aria-label={copy.workbench.vgBgmPreviewLabel(t.name)} className="h-8 min-w-0 flex-1" />
                     <button
                       type="button"
