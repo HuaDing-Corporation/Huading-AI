@@ -185,7 +185,12 @@ export const copy = {
     vgBgmSelect: "选用",
     vgBgmSelected: "已选用",
     vgBgmPreviewLabel: (name: string) => `试听 ${name}`,
-    vgGenerating: "生成中…"
+    vgGenerating: "生成中…",
+    // BGM 波形播放器 (BGM-WAVEFORM-UI-0001)
+    wfPlay: "播放",
+    wfPause: "暂停",
+    wfSeek: "拖动或点击波形跳转播放位置",
+    wfLoading: "加载波形…"
   },
   confirm: {
     title: "确定生成",
