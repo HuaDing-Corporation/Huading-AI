@@ -14,9 +14,11 @@ _ALLOWED_VIDEO_MODES = {
     "seedance_i2v",
     "avatar_talk",
     "photo",
+    "video_gen",
 }
 _MIN_DURATION_SEC = 5
 _MAX_DURATION_SEC = 120
+_VIDEO_GEN_DURATIONS = {5, 10, 15}
 # e.g. "1080x1920/static_default.html" — size dir + html file, no path traversal.
 _TEMPLATE_RE = re.compile(r"^[A-Za-z0-9_]+x[A-Za-z0-9_]+/[A-Za-z0-9_.\-]+\.html$")
 # Tenant-relative upload key as returned by POST /api/v1/uploads.
@@ -57,6 +59,24 @@ class SubtitleStyleRequest(BaseModel):
         return value.upper()
 
 
+class BgmSelectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["upload", "library"]
+    asset_id: str | None = None
+    track_id: str | None = None
+
+    @model_validator(mode="after")
+    def _check_source_payload(self) -> "BgmSelectionRequest":
+        if self.source == "upload":
+            if not self.asset_id or self.track_id is not None:
+                raise ValueError("upload BGM requires asset_id only")
+        if self.source == "library":
+            if not self.track_id or self.asset_id is not None:
+                raise ValueError("library BGM requires track_id only")
+        return self
+
+
 class VideoGenerateRequest(BaseModel):
     """Request to generate a video from a topic.
 
@@ -70,7 +90,16 @@ class VideoGenerateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    topic: str = Field(min_length=1, max_length=2000, description="Theme/topic or fixed script")
+    topic: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=2000,
+        description="Theme/topic or fixed script",
+    )
+    prompt: str | None = Field(
+        default=None,
+        description="Unlimited prompt for video_gen; stored as topic for history.",
+    )
     script: str | None = Field(default=None, max_length=5000)
     voice_id: str | None = None
     avatar_asset_id: str | None = None
@@ -84,7 +113,9 @@ class VideoGenerateRequest(BaseModel):
     # pipeline's script handling (generate|fixed); this selects the flow itself.
     video_mode: str = Field(
         default="static_template",
-        description="static_template | seedance_t2v | seedance_i2v | avatar_talk | photo",
+        description=(
+            "static_template | seedance_t2v | seedance_i2v | avatar_talk | photo | video_gen"
+        ),
     )
     image_key: str | None = Field(
         default=None,
@@ -113,8 +144,14 @@ class VideoGenerateRequest(BaseModel):
     )
     duration_sec: int | None = Field(
         default=None,
-        description="Target seedance_i2v duration in seconds; clamped to 5..120.",
+        description=(
+            "Target duration in seconds; seedance_i2v clamps 5..120, "
+            "video_gen uses 5/10/15."
+        ),
     )
+    reference_image_asset_ids: list[str] = Field(default_factory=list)
+    resolution: Literal["480p", "720p"] = Field(default="720p")
+    bgm: BgmSelectionRequest | None = None
     n_scenes: int = Field(default=3, ge=1, le=20)
     frame_template: str | None = Field(
         default=None, description="e.g. '1080x1920/static_default.html'; None uses server default"
@@ -129,12 +166,14 @@ class VideoGenerateRequest(BaseModel):
             raise ValueError(f"pipeline must be one of {sorted(_ALLOWED_PIPELINES)}")
         return v
 
-    @field_validator("topic")
+    @field_validator("topic", "prompt")
     @classmethod
-    def _check_topic_not_blank(cls, v: str) -> str:
+    def _strip_optional_text(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
         text = v.strip()
         if not text:
-            raise ValueError("topic must not be blank")
+            return text
         return text
 
     @field_validator("mode")
@@ -160,13 +199,6 @@ class VideoGenerateRequest(BaseModel):
             raise ValueError("invalid image_key (use the key returned by POST /uploads)")
         return v
 
-    @field_validator("duration_sec")
-    @classmethod
-    def _clamp_duration(cls, v: int | None) -> int | None:
-        if v is None:
-            return v
-        return max(_MIN_DURATION_SEC, min(_MAX_DURATION_SEC, int(v)))
-
     @field_validator("frame_template")
     @classmethod
     def _check_template(cls, v: str | None) -> str | None:
@@ -178,9 +210,30 @@ class VideoGenerateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_i2v_has_image(self) -> "VideoGenerateRequest":
+        if self.video_mode == "video_gen":
+            prompt = (self.prompt or self.topic or "").strip()
+            if not prompt:
+                raise ValueError("video_gen prompt must not be blank")
+            self.prompt = prompt
+            self.topic = prompt
+            if not (1 <= len(self.reference_image_asset_ids) <= 9):
+                raise ValueError("video_gen reference_image_asset_ids must contain at most 9 items")
+            if len(set(self.reference_image_asset_ids)) != len(self.reference_image_asset_ids):
+                raise ValueError("video_gen reference_image_asset_ids must be unique")
+            if self.duration_sec not in _VIDEO_GEN_DURATIONS:
+                raise ValueError("video_gen duration_sec must be one of 5, 10, 15")
+            return self
+
+        if not (self.topic or "").strip():
+            raise ValueError("topic must not be blank")
         if (self.purpose == "cover" or self.kind == "cover") and self.video_mode != "photo":
             raise ValueError("cover purpose/kind requires video_mode=photo")
         if self.video_mode == "seedance_i2v":
+            if self.duration_sec is not None:
+                self.duration_sec = max(
+                    _MIN_DURATION_SEC,
+                    min(_MAX_DURATION_SEC, int(self.duration_sec)),
+                )
             if not self.image_key:
                 raise ValueError("seedance_i2v requires image_key (upload an image first)")
             if not self.voice_id:

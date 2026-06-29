@@ -42,6 +42,7 @@ def test_db_schema_0001_metadata_contains_target_tables() -> None:
         "platform_accounts",
         "publish_jobs",
         "publish_records",
+        "bgm_library_tracks",
         "payment_orders",
         "copy_drafts",
     }
@@ -88,6 +89,7 @@ def test_db_schema_0001_core_indexes_and_constraints_are_declared() -> None:
     usage_records = Base.metadata.tables["usage_records"]
     copy_drafts = Base.metadata.tables["copy_drafts"]
     publish_records = Base.metadata.tables["publish_records"]
+    bgm_library_tracks = Base.metadata.tables["bgm_library_tracks"]
 
     assert {"ix_video_tasks_tenant_created_at", "ix_video_tasks_tenant_status"} <= {
         index.name for index in video_tasks.indexes
@@ -120,6 +122,9 @@ def test_db_schema_0001_core_indexes_and_constraints_are_declared() -> None:
         constraint.name
         for constraint in publish_records.constraints
         if isinstance(constraint, CheckConstraint)
+    }
+    assert "ix_bgm_library_tracks_active" in {
+        index.name for index in bgm_library_tracks.indexes
     }
 
 
@@ -160,6 +165,50 @@ def test_db_schema_0001_publish_records_contract() -> None:
     assert publish_records.c.tenant_id.nullable is False
     assert publish_records.c.source_kind.nullable is False
     assert publish_records.c.source_task_id.nullable is False
+
+
+def test_db_schema_0001_bgm_library_tracks_contract() -> None:
+    bgm_library_tracks = Base.metadata.tables["bgm_library_tracks"]
+
+    assert {
+        "track_id",
+        "name",
+        "duration_sec",
+        "storage_key",
+        "preview_storage_key",
+        "license",
+        "is_active",
+        "created_at",
+    } <= set(bgm_library_tracks.c.keys())
+    assert bgm_library_tracks.c.track_id.primary_key is True
+    assert bgm_library_tracks.c.name.nullable is False
+    assert bgm_library_tracks.c.license.nullable is False
+
+
+def test_db_schema_0001_video_gen_capability_and_task_asset_roles() -> None:
+    credit_rates = Base.metadata.tables["credit_rates"]
+    usage_records = Base.metadata.tables["usage_records"]
+    task_assets = Base.metadata.tables["task_assets"]
+
+    assert any(
+        constraint.name == "ck_credit_rates_capability"
+        and "video_gen" in str(constraint.sqltext)
+        for constraint in credit_rates.constraints
+        if isinstance(constraint, CheckConstraint)
+    )
+    assert any(
+        constraint.name == "ck_usage_records_capability"
+        and "video_gen" in str(constraint.sqltext)
+        for constraint in usage_records.constraints
+        if isinstance(constraint, CheckConstraint)
+    )
+    assert any(
+        constraint.name == "ck_task_assets_role"
+        and "input_reference_image" in str(constraint.sqltext)
+        and "input_bgm" in str(constraint.sqltext)
+        for constraint in task_assets.constraints
+        if isinstance(constraint, CheckConstraint)
+    )
 
 
 def test_db_schema_0001_usage_record_money_and_credit_columns() -> None:
