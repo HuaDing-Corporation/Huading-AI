@@ -38,6 +38,9 @@ export const publishKeys = {
   records: () => [...publishKeys.all, "records"] as const
 };
 
+// 视频生成 · 配乐库 (VIDEOGEN-UI-0001)
+export const bgmLibraryKey = ["bgm-library"] as const;
+
 export const meKey = ["me"] as const;
 export const quotaKey = ["quota"] as const;
 export const voicesKey = ["voices"] as const;

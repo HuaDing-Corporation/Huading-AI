@@ -12,6 +12,9 @@ vi.mock("@/components/workbench/new-video-form", () => ({
 vi.mock("@/components/workbench/ecom-video-form", () => ({
   EcomVideoForm: () => <div data-testid="ecom-form" />
 }));
+vi.mock("@/components/workbench/video-gen-form", () => ({
+  VideoGenForm: () => <div data-testid="video-gen-form" />
+}));
 vi.mock("@/components/workbench/photo-image-form", () => ({
   PhotoImageForm: () => <div data-testid="photo-form" />
 }));
@@ -60,6 +63,11 @@ describe("Workbench mode switch (数字人口播 / 电商带货)", () => {
     fireEvent.click(screen.getByRole("button", { name: /电商图/ }));
     expect(screen.getByTestId("ecom-image-form")).toBeInTheDocument();
     expect(screen.queryByTestId("copywriting-form")).not.toBeInTheDocument();
+
+    // Switch to 视频生成 → video-gen form (sixth mode, VIDEOGEN-UI-0001).
+    fireEvent.click(screen.getByRole("button", { name: /视频生成/ }));
+    expect(screen.getByTestId("video-gen-form")).toBeInTheDocument();
+    expect(screen.queryByTestId("ecom-image-form")).not.toBeInTheDocument();
   });
 
   // FIX1 P1：5 模式 chip 容器需有窄屏溢出保护（横向滚动 + chip 不压缩），

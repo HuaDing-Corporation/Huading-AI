@@ -77,14 +77,14 @@ export interface VideoDetail {
 }
 
 export interface CreateVideoRequest {
-  topic: string; // 必填 ≤500（电商带货=产品卖点/主题）
+  topic: string; // 必填 ≤500（电商带货=产品卖点/主题）；视频生成 video_gen 传 prompt 文本作标题
   script?: string; // 可选；缺则后端 DeepSeek 生成（前端流程会带）
   voice_id?: string; // 数字人口播 / 电商带货必填；照片 photo 不传（无配音）
   avatar_asset_id?: string; // 数字人口播必填（上传/预设产出的 asset_id）；i2v 不传
-  video_mode?: string; // 省略=数字人口播 avatar_talk；电商带货传 "seedance_i2v"
+  video_mode?: string; // 省略=数字人口播 avatar_talk；电商带货传 "seedance_i2v"；视频生成传 "video_gen"
   image_key?: string; // 电商带货 i2v 必填 / 照片 photo 可选参考图，来自 POST /uploads
   scene_prompt?: string; // 电商带货 i2v 画面提示词（与口播解耦，可 AI 生成）；空则后端回退 topic
-  duration_sec?: number; // 电商带货 i2v 目标时长（秒，5–120，默认 30），与后端 clamp 对齐
+  duration_sec?: number; // 电商带货 i2v 目标时长（秒，5–120，默认 30）；视频生成限 5/10/15
   image_size?: string; // 照片 photo：1024x1024 / 1536x1024 / 1024x1536
   image_quality?: string; // 照片 photo：low / medium / high（影响积分）
   speed?: number; // 默认 1.0
@@ -92,6 +92,31 @@ export interface CreateVideoRequest {
   subtitle_enabled?: boolean; // 默认 true
   subtitle_style?: SubtitleStyle; // 数字人口播：字幕样式覆盖（ORAL-PROD-UI-0001）；缺省=与 0001 默认烧入一致（不回归）
   purpose?: string; // 照片/封面：用途标识，如 "cover"（AI 封面复用 0003 文生图标识；进图片历史作为 photo）
+  // ── 视频生成 video_gen (VIDEOGEN-UI-0001, seam §2) ──
+  prompt?: string; // 不限字数提示词（seam 字段）；同时 topic 复用此文本作标题/展示
+  reference_image_asset_ids?: string[]; // 参考图 1–9 张（POST /uploads/images → asset_id）
+  resolution?: string; // 视频分辨率 "480p" | "720p"（默认 720p）
+  bgm?: VideoGenBgm; // 可选背景音乐：上传(asset_id) 或 配乐库(track_id)
+}
+
+// 视频生成 BGM（seam §2/§3）：上传(复用 /uploads/audio→asset_id) 或 配乐库(track_id) 二选一。
+export type VideoGenBgm =
+  | { source: "upload"; asset_id: string }
+  | { source: "library"; track_id: string };
+export type VideoGenResolution = "480p" | "720p";
+export const VIDEO_GEN_DURATIONS = [5, 10, 15] as const;
+export type VideoGenDuration = (typeof VIDEO_GEN_DURATIONS)[number];
+
+// GET /bgm-library（seam §3）：平台预置免版权配乐，preview_url 可试听。
+export interface BgmTrack {
+  track_id: string;
+  name: string;
+  duration_sec: number;
+  preview_url: string;
+  license: string;
+}
+export interface BgmLibraryResponse {
+  items: BgmTrack[];
 }
 export interface VideoAccepted {
   id: string;

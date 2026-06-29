@@ -51,6 +51,16 @@ const PUBLISH_IDS = PUBLISH_PLATFORMS.map((p) => p.id);
 const publishRecords = new Map<string, { id: string; source_kind: string; source_task_id: string; created_at: string; platforms: { platform_id: string; status: string }[] }>();
 let publishSeq = 0;
 
+// ── 视频生成 配乐库 (VIDEOGEN-UI-0001) mock ── 对齐 seam §3：免版权预置曲，preview_url 可试听。
+const BGM_LIBRARY = [
+  { track_id: "bgm-uplift", name: "轻快上扬", duration_sec: 30, preview_url: "https://mock.local/bgm/uplift.mp3", license: "CC0" },
+  { track_id: "bgm-calm", name: "舒缓氛围", duration_sec: 45, preview_url: "https://mock.local/bgm/calm.mp3", license: "CC0" },
+  { track_id: "bgm-energetic", name: "动感节奏", duration_sec: 60, preview_url: "https://mock.local/bgm/energetic.mp3", license: "CC0" }
+];
+const BGM_TRACK_IDS = BGM_LIBRARY.map((t) => t.track_id);
+const VIDEO_GEN_DURATIONS = [5, 10, 15];
+const VIDEO_GEN_RESOLUTIONS = ["480p", "720p"];
+
 function sseStream(id: string, fail = false): Response {
   const enc = new TextEncoder();
   const frames = fail
@@ -136,12 +146,45 @@ export const handlers = [
     )
   ),
   http.post(`${BASE}/api/v1/videos`, async ({ request }) => {
-    const body = (await request.json()) as { topic: string; video_mode?: string; purpose?: string };
+    const body = (await request.json()) as {
+      topic?: string;
+      video_mode?: string;
+      purpose?: string;
+      prompt?: string;
+      reference_image_asset_ids?: string[];
+      duration_sec?: number;
+      resolution?: string;
+      bgm?: { source?: string; asset_id?: string; track_id?: string };
+    };
+    // 视频生成 video_gen 校验（对齐 seam §2：参考图 1–9、prompt 非空、duration 枚举、resolution 枚举、
+    // bgm 二选一可选）→ 非法 422，不伪造放行（吸取发布中心/声音克隆 mock 掩盖契约教训）。
+    if (body.video_mode === "video_gen") {
+      const refs = body.reference_image_asset_ids ?? [];
+      const bgmOk =
+        body.bgm === undefined ||
+        (body.bgm.source === "upload" && !!body.bgm.asset_id) ||
+        (body.bgm.source === "library" && !!body.bgm.track_id && BGM_TRACK_IDS.includes(body.bgm.track_id));
+      if (
+        !Array.isArray(refs) ||
+        refs.length < 1 ||
+        refs.length > 9 ||
+        !body.prompt ||
+        !body.prompt.trim() ||
+        !VIDEO_GEN_DURATIONS.includes(body.duration_sec as number) ||
+        !VIDEO_GEN_RESOLUTIONS.includes(body.resolution as string) ||
+        !bgmOk
+      ) {
+        return err(422, "VIDEO_GEN_INVALID", "视频生成参数非法");
+      }
+    }
     const id = `mock-${++videoSeq}`;
-    // 记 mode + kind(AI 封面 purpose=cover → kind=cover)，让 GET /videos 的 mode/kind 筛忠实回放
-    videos.set(id, { id, status: "queued", progress: 0, topic: body.topic, mode: body.video_mode ?? "avatar_talk", kind: body.purpose === "cover" ? "cover" : null, created_at: new Date(0).toISOString(), script: body.topic, voice_id: "v-zhixing", aspect_ratio: "9:16", subtitle_enabled: true });
+    // video_gen 用 prompt 作展示标题；记 mode + kind(AI 封面 purpose=cover → kind=cover)，让 GET /videos 筛忠实回放
+    const displayTopic = body.video_mode === "video_gen" ? (body.prompt ?? "") : (body.topic ?? "");
+    videos.set(id, { id, status: "queued", progress: 0, topic: displayTopic, mode: body.video_mode ?? "avatar_talk", kind: body.purpose === "cover" ? "cover" : null, created_at: new Date(0).toISOString(), script: displayTopic, voice_id: "v-zhixing", aspect_ratio: "9:16", subtitle_enabled: true });
     return HttpResponse.json({ data: { id, status: "queued" }, error: null, request_id: "mock-req" }, { status: 202 });
   }),
+  // 视频生成 配乐库 (VIDEOGEN-UI-0001, seam §3)
+  http.get(`${BASE}/api/v1/bgm-library`, () => ok({ items: BGM_LIBRARY })),
   http.get(`${BASE}/api/v1/videos`, ({ request }) => {
     const sp = new URL(request.url).searchParams;
     const mode = sp.get("mode");

@@ -177,7 +177,7 @@ export function PhotoHistory() {
   );
 }
 
-/** 历史生成 — 4 tabs: 数字人 / 电商 / 照片(+仅封面筛) + 文案. */
+/** 历史生成 — 5 tabs: 数字人 / 电商 / 视频生成 / 照片(+仅封面筛) + 文案. */
 export function GenerationHistory() {
   return (
     <Card animateIn>
@@ -197,6 +197,9 @@ export function GenerationHistory() {
           <TabsTrigger value="seedance_i2v" className={tabTriggerClass}>
             <Store size={14} strokeWidth={1.8} /> {copy.history.tabEcom}
           </TabsTrigger>
+          <TabsTrigger value="video_gen" className={tabTriggerClass}>
+            <Clapperboard size={14} strokeWidth={1.8} /> {copy.history.tabVideoGen}
+          </TabsTrigger>
           <TabsTrigger value="photo" className={tabTriggerClass}>
             <Images size={14} strokeWidth={1.8} /> {copy.history.tabPhoto}
           </TabsTrigger>
@@ -210,6 +213,9 @@ export function GenerationHistory() {
         </TabsContent>
         <TabsContent value="seedance_i2v" className="outline-none">
           <HistoryList mode="seedance_i2v" />
+        </TabsContent>
+        <TabsContent value="video_gen" className="outline-none">
+          <HistoryList mode="video_gen" />
         </TabsContent>
         <TabsContent value="photo" className="outline-none">
           <PhotoHistory />
