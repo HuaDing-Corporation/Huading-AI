@@ -9,6 +9,10 @@ vi.mock("@/lib/api/hooks", () => ({
   useUploadAudio: () => ({ mutateAsync: uploadMock.mutateAsync, isPending: uploadMock.isPending }),
   useBgmLibrary: () => libraryMock
 }));
+// 波形播放器占位为标记（其 seek/play 等有专测；此处只验 bgm-picker 三态编排），保留 ariaLabel 供断言。
+vi.mock("@/components/workbench/waveform-player", () => ({
+  WaveformPlayer: ({ ariaLabel }: { ariaLabel: string }) => <div data-testid="waveform" aria-label={ariaLabel} />
+}));
 
 import { BgmPicker } from "./bgm-picker";
 
@@ -35,13 +39,13 @@ describe("BgmPicker (BGM 三态)", () => {
     expect(onChange).toHaveBeenLastCalledWith(undefined);
   });
 
-  it("配乐库：渲染曲目 + 试听 <audio>，选用 → onChange({source:library, track_id})", async () => {
+  it("配乐库：渲染曲目 + 波形试听播放器，选用 → onChange({source:library, track_id})", async () => {
     const onChange = vi.fn();
     render(<BgmPicker onChange={onChange} />);
     fireEvent.click(screen.getByRole("button", { name: copy.workbench.vgBgmLibrary }));
 
     expect(screen.getByText("轻快上扬")).toBeInTheDocument();
-    // 试听播放器（原生 audio，带 aria-label）。
+    // 波形播放器（占位标记，带 ariaLabel=试听 曲名）。
     expect(screen.getByLabelText(copy.workbench.vgBgmPreviewLabel("轻快上扬"))).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole("button", { name: copy.workbench.vgBgmSelect })[0]);

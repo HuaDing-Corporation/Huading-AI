@@ -7,6 +7,7 @@ import { errorText } from "@/lib/api/error-text";
 import { useBgmLibrary, useUploadAudio } from "@/lib/api/hooks";
 import type { VideoGenBgm } from "@/lib/api/types";
 import { SelectableOption } from "@/components/ui/selectable-option";
+import { WaveformPlayer } from "@/components/workbench/waveform-player";
 import { copy } from "@/lib/copy";
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
@@ -34,6 +35,7 @@ export function BgmPicker({
   const [uploaded, setUploaded] = useState<{ asset_id: string; url: string } | null>(null);
   const [selectedTrackId, setSelectedTrackId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [playingUrl, setPlayingUrl] = useState<string | null>(null); // 同一时刻只播一首：当前活跃试听 url
   const upload = useUploadAudio();
   const library = useBgmLibrary();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -112,8 +114,13 @@ export function BgmPicker({
           </button>
           {uploaded && (
             <div className="mt-2 flex items-center gap-2">
-              <span className="text-[12px] text-ink-soft">{copy.workbench.vgBgmUploaded}</span>
-              <audio controls src={uploaded.url} aria-label={copy.workbench.vgBgmUploadedPreview} className="h-8 max-w-full flex-1" />
+              <span className="flex-none text-[12px] text-ink-soft">{copy.workbench.vgBgmUploaded}</span>
+              <WaveformPlayer
+                url={uploaded.url}
+                ariaLabel={copy.workbench.vgBgmUploadedPreview}
+                isActive={playingUrl === uploaded.url}
+                onPlayStart={() => setPlayingUrl(uploaded.url)}
+              />
             </div>
           )}
         </div>
@@ -144,8 +151,13 @@ export function BgmPicker({
                     }`}
                   >
                     <span className="text-[13px] text-ink">{t.name}</span>
-                    <span className="text-[11.5px] text-ink-faint">{copy.workbench.durationSeconds(t.duration_sec)}</span>
-                    <audio controls src={t.preview_url} aria-label={copy.workbench.vgBgmPreviewLabel(t.name)} className="h-8 min-w-0 flex-1" />
+                    <span className="flex-none text-[11.5px] text-ink-faint">{copy.workbench.durationSeconds(t.duration_sec)}</span>
+                    <WaveformPlayer
+                      url={t.preview_url}
+                      ariaLabel={copy.workbench.vgBgmPreviewLabel(t.name)}
+                      isActive={playingUrl === t.preview_url}
+                      onPlayStart={() => setPlayingUrl(t.preview_url)}
+                    />
                     <button
                       type="button"
                       onClick={() => setSelectedTrackId(t.track_id)}
