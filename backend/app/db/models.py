@@ -225,6 +225,29 @@ class CopyDraft(TenantScopedMixin, Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
 
+class PublishRecord(TenantScopedMixin, Base):
+    __tablename__ = "publish_records"
+    __table_args__ = (
+        CheckConstraint(
+            "source_kind IN ('video', 'image')",
+            name="ck_publish_records_source_kind",
+        ),
+        Index("ix_publish_records_tenant_created_at", "tenant_id", "created_at"),
+        Index("ix_publish_records_tenant_source", "tenant_id", "source_task_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    source_kind: Mapped[str] = mapped_column(String(16))
+    source_task_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("video_tasks.id", ondelete="CASCADE")
+    )
+    items: Mapped[list[dict[str, object]]] = mapped_column(_json_type(), default=list)
+    platforms: Mapped[list[dict[str, str]]] = mapped_column(_json_type(), default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+
 class BrandAsset(TenantScopedMixin, Base):
     __tablename__ = "brand_assets"
 
