@@ -118,6 +118,9 @@ class Settings(BaseSettings):
     engine_runtime_root: str | None = None
     # Object-storage key prefix for generated videos (isolated per task under it).
     engine_output_prefix: str = "videos"
+    # JSON override for public publish platform catalog. Public URLs only; never
+    # store social credentials here.
+    publish_platforms_json: str = ""
 
     @field_validator("cors_origins", mode="before")
     @classmethod

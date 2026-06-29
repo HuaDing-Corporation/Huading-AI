@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -206,6 +207,88 @@ def generate_topics(db: Session, *, tenant_id: str, payload: CopyTopicsRequest) 
     if not topics:
         raise AppError("Copy generation failed.", code="COPY_GEN_FAILED", status_code=502)
     return topics
+
+
+def _publish_copy_payload(
+    *,
+    source_text: str,
+    platform: dict[str, object],
+) -> dict[str, Any]:
+    platform_id = str(platform["id"])
+    title_max = int(platform["title_max"])
+    body_max = int(platform["body_max"])
+    hashtag_min = int(platform.get("hashtag_min") or 0)
+    hashtag_max = int(platform["hashtag_max"])
+    return {
+        "topic": source_text,
+        "platform_id": platform_id,
+        "candidate_count": 1,
+        "system_prompt": (
+            "You rewrite Chinese short-video publishing copy. Return strict JSON "
+            "with keys title, body, hashtags."
+        ),
+        "user_prompt": (
+            f"Platform: {platform['name']} ({platform_id}). "
+            f"Rules: title <= {title_max}; body <= {body_max}; "
+            f"hashtags {hashtag_min}-{hashtag_max}. "
+            "Return only JSON, no markdown. "
+            f"Source: {source_text}"
+        ),
+    }
+
+
+def _trim_text(value: object, limit: int) -> str:
+    return str(value or "").strip()[:limit]
+
+
+def _normalize_publish_hashtag(value: object) -> str:
+    text = str(value or "").strip().lstrip("#＃").strip()
+    return f"#{text}" if text else ""
+
+
+def _publish_copy_from_text(text: str, *, platform: dict[str, object], source_text: str) -> dict:
+    title_max = int(platform["title_max"])
+    body_max = int(platform["body_max"])
+    hashtag_max = int(platform["hashtag_max"])
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = {"title": text, "body": text, "hashtags": []}
+    if not isinstance(parsed, dict):
+        parsed = {"title": text, "body": text, "hashtags": []}
+
+    title = _trim_text(parsed.get("title") or source_text, title_max)
+    body = _trim_text(parsed.get("body") or source_text, body_max)
+    raw_hashtags = parsed.get("hashtags") or []
+    if not isinstance(raw_hashtags, list):
+        raw_hashtags = [raw_hashtags]
+    hashtags: list[str] = []
+    for raw in raw_hashtags:
+        topic = _normalize_publish_hashtag(raw)
+        if topic and topic not in hashtags:
+            hashtags.append(topic)
+        if len(hashtags) >= hashtag_max:
+            break
+    return {"title": title, "body": body, "hashtags": hashtags}
+
+
+def generate_publish_copy(
+    db: Session,
+    *,
+    tenant_id: str,
+    source_text: str,
+    platform: dict[str, object],
+) -> dict:
+    result = _generate_text(
+        db,
+        tenant_id=tenant_id,
+        provider_payload=_publish_copy_payload(source_text=source_text, platform=platform),
+    )
+    return _publish_copy_from_text(
+        _result_text(result),
+        platform=platform,
+        source_text=source_text,
+    )
 
 
 def create_draft(db: Session, *, tenant_id: str, payload: CopyDraftCreateRequest) -> CopyDraft:

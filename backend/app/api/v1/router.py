@@ -9,6 +9,7 @@ from app.api.v1.routes import (
     ecom_images,
     health,
     oral,
+    publish,
     quota,
     scripts,
     storage,
@@ -29,6 +30,7 @@ api_router.include_router(brand_voices.router, prefix="/brand-voices", tags=["br
 api_router.include_router(avatars.router, prefix="/avatars", tags=["avatars"])
 api_router.include_router(copy.router, prefix="/copy", tags=["copy"])
 api_router.include_router(oral.router, prefix="/oral", tags=["oral"])
+api_router.include_router(publish.router, prefix="/publish", tags=["publish"])
 api_router.include_router(covers.router, prefix="/covers", tags=["covers"])
 api_router.include_router(ecom_images.router, prefix="/ecom-images", tags=["ecom-images"])
 api_router.include_router(scripts.router, prefix="/scripts", tags=["scripts"])

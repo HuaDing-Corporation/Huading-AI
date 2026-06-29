@@ -41,6 +41,7 @@ def test_db_schema_0001_metadata_contains_target_tables() -> None:
         "usage_records",
         "platform_accounts",
         "publish_jobs",
+        "publish_records",
         "payment_orders",
         "copy_drafts",
     }
@@ -86,6 +87,7 @@ def test_db_schema_0001_core_indexes_and_constraints_are_declared() -> None:
     task_assets = Base.metadata.tables["task_assets"]
     usage_records = Base.metadata.tables["usage_records"]
     copy_drafts = Base.metadata.tables["copy_drafts"]
+    publish_records = Base.metadata.tables["publish_records"]
 
     assert {"ix_video_tasks_tenant_created_at", "ix_video_tasks_tenant_status"} <= {
         index.name for index in video_tasks.indexes
@@ -111,6 +113,14 @@ def test_db_schema_0001_core_indexes_and_constraints_are_declared() -> None:
         for constraint in copy_drafts.constraints
         if isinstance(constraint, CheckConstraint)
     }
+    assert "ix_publish_records_tenant_created_at" in {
+        index.name for index in publish_records.indexes
+    }
+    assert "ck_publish_records_source_kind" in {
+        constraint.name
+        for constraint in publish_records.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
 
 
 def test_db_schema_0001_copy_drafts_contract() -> None:
@@ -131,6 +141,25 @@ def test_db_schema_0001_copy_drafts_contract() -> None:
     assert copy_drafts.c.tenant_id.nullable is False
     assert copy_drafts.c.source_text.nullable is False
     assert copy_drafts.c.result_text.nullable is False
+
+
+def test_db_schema_0001_publish_records_contract() -> None:
+    publish_records = Base.metadata.tables["publish_records"]
+
+    assert {
+        "id",
+        "tenant_id",
+        "source_kind",
+        "source_task_id",
+        "items",
+        "platforms",
+        "created_at",
+        "updated_at",
+        "deleted_at",
+    } <= set(publish_records.c.keys())
+    assert publish_records.c.tenant_id.nullable is False
+    assert publish_records.c.source_kind.nullable is False
+    assert publish_records.c.source_task_id.nullable is False
 
 
 def test_db_schema_0001_usage_record_money_and_credit_columns() -> None:
@@ -210,7 +239,7 @@ def test_db_schema_0001_mapped_smoke_flow() -> None:
                 tenant_id=tenant.id,
                 type="video",
                 source="generated",
-                storage_key=f"tenants/{tenant.id}/videos/task-1/output.mp4",
+                storage_key=f"tenants/{tenant.id}/videos/unit-1/output.mp4",
                 status="ready",
             )
             task = VideoTask(
