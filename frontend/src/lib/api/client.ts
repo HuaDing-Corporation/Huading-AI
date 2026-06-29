@@ -8,6 +8,13 @@ import type { ApiResponse } from "@/lib/api/types";
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:8000";
 
+export function apiUrl(path: string): string {
+  if (API_BASE_URL.endsWith("/api") && path.startsWith("/api/")) {
+    return `${API_BASE_URL}${path.slice("/api".length)}`;
+  }
+  return `${API_BASE_URL}${path}`;
+}
+
 export class ApiError extends Error {
   code: string;
   status: number;
@@ -60,7 +67,7 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
 
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}${path}`, {
+    res = await fetch(apiUrl(path), {
       ...rest,
       headers: finalHeaders,
       body: body !== undefined ? JSON.stringify(body) : undefined
@@ -107,7 +114,7 @@ export async function multipartFetch<T>(path: string, form: FormData, opts: Mult
   const headers = authHeaders();
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}${path}`, { method: "POST", headers, body: form });
+    res = await fetch(apiUrl(path), { method: "POST", headers, body: form });
   } catch {
     throw new ApiError("网络连接失败，请检查后端服务是否在线。", "NETWORK_ERROR", 0);
   }

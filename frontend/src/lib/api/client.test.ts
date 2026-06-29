@@ -16,6 +16,18 @@ function json401() {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+});
+
+describe("api URL construction", () => {
+  it("does not duplicate /api when NEXT_PUBLIC_API_BASE_URL already ends with /api", async () => {
+    vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "https://huadingai.cn/api");
+    vi.resetModules();
+
+    const { apiUrl } = await import("./client");
+
+    expect(apiUrl("/api/v1/videos")).toBe("https://huadingai.cn/api/v1/videos");
+  });
 });
 
 describe("apiFetch 401 handling", () => {
