@@ -24,6 +24,7 @@ import type {
   CreateVideoRequest,
   CreateBrandVoiceInput,
   CreateDraftsRequest,
+  PublishPlatformId,
   CutoutBatchRequest,
   CutoutRequest,
   LabelSettingsUpdate,
@@ -203,7 +204,8 @@ export function useCreatePublishDrafts() {
 export function useMarkPublished() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => markPublished(id),
+    mutationFn: ({ recordId, platformId }: { recordId: string; platformId: PublishPlatformId }) =>
+      markPublished(recordId, platformId),
     onSuccess: () => void qc.invalidateQueries({ queryKey: publishKeys.records() })
   });
 }

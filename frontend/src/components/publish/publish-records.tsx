@@ -12,25 +12,25 @@ import { copy } from "@/lib/copy";
 
 const STATUS_LABEL: Record<PublishStatus, string> = {
   draft: copy.publish.statusDraft,
+  copied: copy.publish.statusCopied,
   published: copy.publish.statusPublished
 };
 const STATUS_CLASS: Record<PublishStatus, string> = {
   draft: "border-line-gold bg-glass-fill text-ink-soft",
+  copied: "border-line-gold bg-glass-soft text-ink",
   published: "border-line-sel bg-chip-sel text-gold-deep"
 };
-
-/** 平台 id → 展示名(后端 platforms 已带 name；此处兜底，供记录列表无 name 时显示)。 */
 const PLATFORM_NAME: Record<PublishPlatformId, string> = {
   douyin: copy.publish.platformDouyin,
   kuaishou: copy.publish.platformKuaishou,
-  wechat_channels: copy.publish.platformWechat,
+  wxchannels: copy.publish.platformWechat,
   xiaohongshu: copy.publish.platformXiaohongshu,
   bilibili: copy.publish.platformBilibili
 };
 
 /**
- * 发布记录列表（PUBLISH-UI-0001）—— GET /publish/records，产物→平台→状态；删除经 ConfirmDialog
- * (危险确认 + 防连点)。复用 ConfirmDialog/Card。
+ * 发布记录列表（PUBLISH-UI-0001）—— GET /publish/records，嵌套模型：每条记录(产物)含多平台
+ * platforms[]{platform_id,status}。删除整条记录经 ConfirmDialog(危险确认 + 防连点)。
  */
 export function PublishRecords() {
   const { data, isLoading, isError, refetch } = usePublishRecords();
@@ -69,15 +69,21 @@ export function PublishRecords() {
       ) : (
         <ul className="flex flex-col gap-2">
           {items.map((r) => (
-            <li key={r.id} className="flex items-center gap-3 rounded-field border border-line-gold bg-glass-fill px-3 py-2.5">
+            <li key={r.id} className="flex items-start gap-3 rounded-field border border-line-gold bg-glass-fill px-3 py-2.5">
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="truncate text-[13px] text-ink">{r.title}</span>
-                  <span className={`inline-flex flex-none items-center rounded-pill border px-2 py-0.5 text-[11px] ${STATUS_CLASS[r.status]}`}>
-                    {STATUS_LABEL[r.status]}
-                  </span>
+                <span className="text-[12.5px] text-ink-soft">
+                  {r.source_kind === "image" ? copy.publish.sourceImage : copy.publish.sourceVideo} · {r.source_task_id}
+                </span>
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {r.platforms.map((p) => (
+                    <span
+                      key={p.platform_id}
+                      className={`inline-flex items-center gap-1 rounded-pill border px-2 py-0.5 text-[11px] ${STATUS_CLASS[p.status]}`}
+                    >
+                      {PLATFORM_NAME[p.platform_id] ?? p.platform_id} · {STATUS_LABEL[p.status]}
+                    </span>
+                  ))}
                 </div>
-                <p className="mt-0.5 text-[11.5px] text-ink-faint">{PLATFORM_NAME[r.platform] ?? r.platform}</p>
               </div>
               <button
                 type="button"
@@ -85,7 +91,7 @@ export function PublishRecords() {
                   setDeleteError(null);
                   setPendingDelete(r);
                 }}
-                aria-label={`${copy.publish.deleteRecord} ${r.title}`}
+                aria-label={`${copy.publish.deleteRecord} ${r.source_task_id}`}
                 className="flex h-8 w-8 flex-none items-center justify-center rounded-mark text-ink-soft hover:bg-error-bg hover:text-error-fg"
               >
                 <Trash2 size={15} strokeWidth={2} />

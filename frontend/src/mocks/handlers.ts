@@ -36,16 +36,19 @@ let audioAssetSeq = 0;
 // 忠实契约：enabled 只读恒真(合规不可关)；PUT 校验 text 非空 ≤20(否则 422)；非伪造。
 const labelSettings = { position: "br", text: "AI 生成", enabled: true };
 
-// ── 发布中心 (PUBLISH-UI-0001) mock store ──
-// 忠实契约：platforms 5、drafts 按平台生成记录、records 列表、PATCH 标记已发布、DELETE 移除；状态枚举 draft/published；非伪造。
+// ── 发布中心 (PUBLISH-UI-0001) mock store ── 逐字对齐后端 schemas/publish.py。
+// platforms(id/name/title_max/publish_url/cover_ratio/notes)、drafts(返 {id,items})、records(嵌套
+// {id,source,platforms[]{platform_id,status}})、PATCH 标记单平台已发布、DELETE；status draft/copied/published。
 const PUBLISH_PLATFORMS = [
-  { id: "douyin", name: "抖音" },
-  { id: "kuaishou", name: "快手" },
-  { id: "wechat_channels", name: "视频号" },
-  { id: "xiaohongshu", name: "小红书" },
-  { id: "bilibili", name: "B站" }
+  { id: "douyin", name: "抖音", title_max: 55, body_max: 1000, hashtag_max: 5, publish_url: "https://creator.douyin.com/", cover_ratio: "3:4", notes: "标题控制在55字以内，建议3-5个话题。" },
+  { id: "kuaishou", name: "快手", title_max: 50, body_max: 1000, hashtag_max: 5, publish_url: "https://cp.kuaishou.com/", cover_ratio: "3:4", notes: "标题简短直接，建议3-5个话题。" },
+  { id: "wxchannels", name: "视频号", title_max: 30, body_max: 1000, hashtag_max: 3, publish_url: "https://channels.weixin.qq.com/", cover_ratio: "3:4", notes: "短标题、少量话题，表达克制。" },
+  { id: "xiaohongshu", name: "小红书", title_max: 20, body_max: 1000, hashtag_max: 10, publish_url: "https://creator.xiaohongshu.com/", cover_ratio: "3:4", notes: "标题20字以内，正文更完整，话题更丰富。" },
+  { id: "bilibili", name: "B站", title_max: 80, body_max: 2000, hashtag_max: 5, publish_url: "https://member.bilibili.com/platform/upload/video/frame", cover_ratio: "16:9", notes: "标题可更完整，正文适合补充分区与简介信息。" }
 ];
-const publishRecords = new Map<string, Record<string, unknown>>();
+const PUBLISH_IDS = PUBLISH_PLATFORMS.map((p) => p.id);
+// 记录：嵌套模型(id + 产物 + platforms[]{platform_id,status})。
+const publishRecords = new Map<string, { id: string; source_kind: string; source_task_id: string; created_at: string; platforms: { platform_id: string; status: string }[] }>();
 let publishSeq = 0;
 
 function sseStream(id: string, fail = false): Response {
@@ -438,31 +441,45 @@ export const handlers = [
       platforms?: string[];
     };
     const ids = body.platforms ?? [];
-    // 严格枚举(对齐后端 Literal)：缺产物、空平台、或含非法平台 id 均 422(不静默丢弃未知 id)。
-    if (!body.source_task_id || ids.length === 0 || ids.some((p) => !PUBLISH_PLATFORMS.some((x) => x.id === p))) {
-      return err(422, "PUBLISH_DRAFT_INVALID", "需提供产物与合法平台");
+    const sk = body.source_kind;
+    const taskId = (body.source_task_id ?? "").trim();
+    const unique = new Set(ids).size === ids.length;
+    // 对齐后端：source_kind∈video|image、source_task_id 1–80 非空、platforms 1–5 合法且唯一，否则 422。
+    if (
+      (sk !== "video" && sk !== "image") ||
+      !taskId ||
+      taskId.length > 80 ||
+      ids.length < 1 ||
+      ids.length > 5 ||
+      !unique ||
+      ids.some((p) => !PUBLISH_IDS.includes(p))
+    ) {
+      return err(422, "PUBLISH_DRAFT_INVALID", "请求参数非法");
     }
-    const drafts = ids.map((pid) => {
-      const name = PUBLISH_PLATFORMS.find((x) => x.id === pid)?.name ?? pid;
-      const id = `pub-${++publishSeq}`;
-      const rec = {
-        id,
-        platform: pid,
-        source_kind: body.source_kind ?? "video",
-        source_task_id: body.source_task_id,
-        title: `${name}·AI 短视频`,
-        text: `适配${name}的发布文案，记得带上话题哦～`,
-        topics: ["#AI生成", "#好物推荐"],
-        cover_url: "https://mock.local/cover.png",
-        video_url: "https://mock.local/v.mp4",
-        publish_url: `https://mock.local/publish/${pid}`,
-        status: "draft",
-        created_at: new Date(0).toISOString()
-      };
-      publishRecords.set(id, rec);
-      return rec;
+    const recordId = `pub-${++publishSeq}`;
+    publishRecords.set(recordId, {
+      id: recordId,
+      source_kind: sk,
+      source_task_id: taskId,
+      created_at: new Date(0).toISOString(),
+      platforms: ids.map((pid) => ({ platform_id: pid, status: "draft" }))
     });
-    return ok({ drafts });
+    // 返回各平台可编辑内容(PublishDraftItem)。
+    const items = ids.map((pid) => {
+      const plat = PUBLISH_PLATFORMS.find((x) => x.id === pid);
+      const name = plat?.name ?? pid;
+      return {
+        platform_id: pid,
+        title: `${name}·AI 短视频`,
+        body: `适配${name}的发布文案，记得带上话题哦～`,
+        hashtags: ["#AI生成", "#好物推荐"],
+        cover_url: "https://mock.local/cover.png",
+        media_url: "https://mock.local/v.mp4",
+        // 去发布开的是平台官方创作页(对齐真后端 draft item.publish_url)。
+        publish_url: plat?.publish_url ?? `https://mock.local/publish/${pid}`
+      };
+    });
+    return ok({ id: recordId, items });
   }),
   http.get(`${BASE}/api/v1/publish/records`, () => {
     const items = [...publishRecords.values()];
@@ -471,17 +488,20 @@ export const handlers = [
   http.patch(`${BASE}/api/v1/publish/records/:id`, async ({ request, params }) => {
     const rec = publishRecords.get(params.id as string);
     if (!rec) return err(404, "PUBLISH_RECORD_NOT_FOUND", "发布记录不存在");
-    const body = (await request.json().catch(() => ({}))) as { status?: string };
-    if (body.status !== "published" && body.status !== "draft") {
-      return err(422, "PUBLISH_STATUS_INVALID", "状态非法");
+    const body = (await request.json().catch(() => ({}))) as { platform_id?: string; status?: string };
+    // 对齐后端 PublishRecordPatchRequest：platform_id 合法 + status 仅 "published"，否则 422。
+    if (!body.platform_id || !PUBLISH_IDS.includes(body.platform_id) || body.status !== "published") {
+      return err(422, "PUBLISH_PATCH_INVALID", "请求参数非法");
     }
-    rec.status = body.status;
+    const target = rec.platforms.find((p) => p.platform_id === body.platform_id);
+    if (!target) return err(404, "PUBLISH_PLATFORM_NOT_FOUND", "平台不在该记录内");
+    target.status = "published";
     return ok({ ...rec });
   }),
   http.delete(`${BASE}/api/v1/publish/records/:id`, ({ params }) => {
     const id = params.id as string;
     if (!publishRecords.has(id)) return err(404, "PUBLISH_RECORD_NOT_FOUND", "发布记录不存在");
     publishRecords.delete(id);
-    return ok({ deleted: true });
+    return ok({ id, deleted_at: new Date(0).toISOString() });
   })
 ];

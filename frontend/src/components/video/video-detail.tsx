@@ -175,7 +175,7 @@ export function VideoDetail({ id }: VideoDetailProps) {
           <AiLabelNotice className="w-fit" />
           {/* 发布入口：带 source_kind+source_task_id 跳发布中心(不在此发布，仅引导)。 */}
           <Link
-            href={`/publish?source_kind=${data.mode === "photo" ? "photo" : "video"}&source_task_id=${id}`}
+            href={`/publish?source_kind=${data.mode === "photo" ? "image" : "video"}&source_task_id=${id}`}
             className="inline-flex items-center gap-1.5 rounded-field border border-line-gold bg-glass-fill px-3 py-1 text-[12px] text-gold-deep transition-colors hover:bg-glass-hover"
           >
             <Share2 size={13} strokeWidth={2} /> {copy.publish.entry}

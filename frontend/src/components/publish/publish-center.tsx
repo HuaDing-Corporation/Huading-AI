@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 
 import { errorText } from "@/lib/api/error-text";
 import { useCreatePublishDrafts, usePublishPlatforms } from "@/lib/api/hooks";
-import type { PublishPlatformId, PublishRecord } from "@/lib/api/types";
+import type { CreateDraftsResponse, PublishPlatformId } from "@/lib/api/types";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
 import { SelectableOption } from "@/components/ui/selectable-option";
@@ -28,7 +28,7 @@ export function PublishCenter() {
   const createDrafts = useCreatePublishDrafts();
 
   const [selected, setSelected] = useState<Set<PublishPlatformId>>(new Set());
-  const [drafts, setDrafts] = useState<PublishRecord[]>([]);
+  const [created, setCreated] = useState<CreateDraftsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const platformList = platforms.data ?? [];
@@ -51,11 +51,11 @@ export function PublishCenter() {
     }
     try {
       const res = await createDrafts.mutateAsync({
-        source_kind: sourceKind,
+        source_kind: sourceKind === "image" ? "image" : "video",
         source_task_id: sourceTaskId,
         platforms: [...selected]
       });
-      setDrafts(res);
+      setCreated(res);
     } catch (err) {
       setError(errorText(err));
     }
@@ -107,10 +107,10 @@ export function PublishCenter() {
         )}
       </Card>
 
-      {drafts.length > 0 && (
+      {created && created.items.length > 0 && (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          {drafts.map((d) => (
-            <PublishDraftCard key={d.id} record={d} platformName={nameOf(d.platform)} />
+          {created.items.map((it) => (
+            <PublishDraftCard key={it.platform_id} recordId={created.id} item={it} platformName={nameOf(it.platform_id)} />
           ))}
         </div>
       )}

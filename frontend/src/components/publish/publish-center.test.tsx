@@ -25,7 +25,7 @@ import { PublishCenter } from "./publish-center";
 const PLATFORMS = [
   { id: "douyin", name: "抖音" },
   { id: "kuaishou", name: "快手" },
-  { id: "wechat_channels", name: "视频号" },
+  { id: "wxchannels", name: "视频号" },
   { id: "xiaohongshu", name: "小红书" },
   { id: "bilibili", name: "B站" }
 ];
@@ -36,10 +36,13 @@ beforeEach(() => {
   platformsMock.isLoading = false;
   platformsMock.isError = false;
   createMock.isPending = false;
-  createMock.mutateAsync.mockResolvedValue([
-    { id: "pub-1", platform: "douyin", source_kind: "video", source_task_id: "v1", title: "t", text: "x", topics: [], publish_url: "u", status: "draft", created_at: "" },
-    { id: "pub-2", platform: "kuaishou", source_kind: "video", source_task_id: "v1", title: "t", text: "x", topics: [], publish_url: "u", status: "draft", created_at: "" }
-  ]);
+  createMock.mutateAsync.mockResolvedValue({
+    id: "pub-1",
+    items: [
+      { platform_id: "douyin", title: "t", body: "x", hashtags: [], cover_url: "c", media_url: "m", publish_url: "u" },
+      { platform_id: "kuaishou", title: "t", body: "x", hashtags: [], cover_url: "c", media_url: "m", publish_url: "u" }
+    ]
+  });
 });
 afterEach(() => vi.clearAllMocks());
 
