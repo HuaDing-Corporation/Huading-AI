@@ -69,7 +69,8 @@ async def test_apimart_provider_submits_polls_downloads_and_maps_urls() -> None:
             payload={"code": 200, "data": [{"status": "submitted", "task_id": "apimart_img_1"}]}
         ),
         task_responses=[
-            _FakeResponse(payload={"code": 200, "data": {"status": "processing"}}),
+            _FakeResponse(payload={"code": 200, "data": {"status": "submitted"}}),
+            _FakeResponse(payload={"code": 200, "data": {"status": "pending"}}),
             _FakeResponse(
                 payload={
                     "code": 200,
@@ -120,7 +121,7 @@ async def test_apimart_provider_submits_polls_downloads_and_maps_urls() -> None:
     assert result["model"] == "gpt-image-2"
     assert result["mode"] == "edit"
     assert result["task_id"] == "apimart_img_1"
-    assert sleep_calls == [10, 4]
+    assert sleep_calls == [10, 4, 4]
     assert session.post_calls == [
         {
             "url": "https://api.apimart.ai/v1/images/generations",
@@ -152,11 +153,56 @@ async def test_apimart_provider_submits_polls_downloads_and_maps_urls() -> None:
             "timeout": 12.5,
         },
         {
+            "url": "https://api.apimart.ai/v1/tasks/apimart_img_1",
+            "headers": {"Authorization": "Bearer test-apimart-key"},
+            "timeout": 12.5,
+        },
+        {
             "url": "https://upload.apimart.ai/apimart_img_1.png",
             "headers": {},
             "timeout": 12.5,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_apimart_provider_treats_unknown_nonterminal_status_as_processing() -> None:
+    sleep_calls: list[float] = []
+    session = _FakeSession(
+        post_response=_FakeResponse(
+            payload={"code": 200, "data": [{"status": "submitted", "task_id": "apimart_queue"}]}
+        ),
+        task_responses=[
+            _FakeResponse(payload={"code": 200, "data": {"status": "in_queue"}}),
+            _FakeResponse(
+                payload={
+                    "code": 200,
+                    "data": {
+                        "status": "completed",
+                        "result": {
+                            "images": [
+                                {"url": ["https://upload.apimart.ai/apimart_queue.png"]}
+                            ]
+                        },
+                    },
+                }
+            ),
+        ],
+        download_response=_FakeResponse(content=b"queued-png"),
+    )
+    provider = APIMartImageProvider(
+        api_key="test-apimart-key",
+        session=session,
+        sleep_fn=sleep_calls.append,
+        poll_initial_delay=10,
+        poll_interval=4,
+    )
+
+    result = await provider.generate_image({"prompt": "studio product photo"})
+
+    assert result["image_bytes"] == b"queued-png"
+    assert result["task_id"] == "apimart_queue"
+    assert sleep_calls == [10, 4]
 
 
 @pytest.mark.asyncio

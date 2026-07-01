@@ -17,7 +17,16 @@ _DEFAULT_MODEL = "gpt-image-2"
 _DEFAULT_SIZE = "1024x1024"
 _DEFAULT_RESOLUTION = "1k"
 _DEFAULT_QUALITY = "medium"
-_PROCESSING_STATUSES = {"submitted", "queued", "in_progress", "processing", "running"}
+# Known non-terminal statuses. Polling intentionally does not whitelist against this
+# set; any non-completed, non-failed status is treated as still processing.
+_PROCESSING_STATUSES = {
+    "pending",
+    "submitted",
+    "queued",
+    "in_progress",
+    "processing",
+    "running",
+}
 _COMPLETED_STATUSES = {"completed", "succeeded", "success"}
 _FAILED_STATUSES = {"failed", "error", "cancelled", "canceled"}
 
@@ -182,11 +191,6 @@ class APIMartImageProvider:
                 raise APIMartImageProviderError(
                     _payload_message(data, "APIMart image task failed."),
                     error_type="task_failed",
-                )
-            if status and status not in _PROCESSING_STATUSES:
-                raise APIMartImageProviderError(
-                    f"APIMart image task returned unknown status: {status}.",
-                    error_type="unknown_status",
                 )
             self._sleep(self.poll_interval)
 
