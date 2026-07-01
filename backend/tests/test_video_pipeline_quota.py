@@ -27,7 +27,7 @@ def _seed_subscription(db, tenant_id: str, *, total: int, used: int = 0, reserve
         plan_id=plan.id,
         status="active",
         period_start=now - timedelta(days=1),
-        period_end=now + timedelta(days=30),
+        period_end=now + timedelta(days=60),
         quota_credits_total=total,
         quota_credits_used=used,
         quota_credits_reserved=reserved,
@@ -230,6 +230,6 @@ def test_reserve_image_generation_quota_creates_reserved_usage(auth_context, aut
     assert reserved == 20
     assert record.status == "reserved"
     assert record.capability == "image"
-    assert record.provider == "openai"
+    assert record.provider == "apimart"
     assert record.unit == "image"
     assert record.quantity == Decimal("1.000")

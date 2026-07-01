@@ -65,7 +65,7 @@ def _seed_billing(db, tenant_id: str) -> Subscription:
         plan_id=plan.id,
         status="active",
         period_start=now - timedelta(days=1),
-        period_end=now + timedelta(days=30),
+        period_end=now + timedelta(days=60),
         quota_credits_total=100,
         quota_credits_used=25,
         quota_credits_reserved=5,
@@ -449,7 +449,7 @@ def test_photo_order_routes_before_avatar_when_voice_is_present(
         reserved = db.query(UsageRecord).filter_by(video_task_id=data["id"]).one()
         assert reserved.status == "reserved"
         assert reserved.capability == "image"
-        assert reserved.provider == "openai"
+        assert reserved.provider == "apimart"
         assert reserved.quantity == Decimal("1.000")
         assert reserved.credits == Decimal("75.00")
 
