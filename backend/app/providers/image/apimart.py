@@ -16,7 +16,7 @@ _DEFAULT_BASE_URL = "https://api.apimart.ai/v1"
 _DEFAULT_MODEL = "gpt-image-2"
 _DEFAULT_SIZE = "1024x1024"
 _DEFAULT_RESOLUTION = "1k"
-_DEFAULT_QUALITY = "medium"
+_APIMART_IMAGE_QUALITY = "high"
 # Known non-terminal statuses. Polling intentionally does not whitelist against this
 # set; any non-completed, non-failed status is treated as still processing.
 _PROCESSING_STATUSES = {
@@ -105,7 +105,10 @@ class APIMartImageProvider:
             str(payload.get("size") or payload.get("image_size") or _DEFAULT_SIZE),
             payload.get("resolution"),
         )
-        quality = str(payload.get("quality") or payload.get("image_quality") or _DEFAULT_QUALITY)
+        # APIMart's GPT image channels disagree on quality vocabulary; production
+        # smoke confirmed "high" is accepted across the aggregate path, and image
+        # billing is controlled by resolution rather than this quality string.
+        quality = _APIMART_IMAGE_QUALITY
         image_urls = _image_urls(payload)
         if payload.get("input_image_path") and not image_urls:
             raise APIMartImageProviderError(
@@ -122,14 +125,6 @@ class APIMartImageProvider:
         }
         if image_urls:
             body["image_urls"] = image_urls
-        background = str(payload.get("background") or "").strip().lower()
-        if background in {"auto", "opaque"}:
-            body["background"] = background
-        elif background == "transparent":
-            body["background"] = "auto"
-        mask_url = str(payload.get("mask_url") or "").strip()
-        if mask_url:
-            body["mask_url"] = mask_url
         return body, {
             "size": size,
             "resolution": resolution,
