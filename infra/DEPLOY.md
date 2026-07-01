@@ -27,9 +27,11 @@ Edit `infra/.env` and fill real values for:
 - `ENGINE_SEEDANCE_MINI_MODEL` once the production Ark model id is confirmed
 
 Image edit/reference flows send APIMart presigned URLs built from
-`ENGINE_S3_PUBLIC_ENDPOINT`; keep the production value at `https://huadingai.cn/minio`
-or another public endpoint APIMart can fetch. Configure object storage CORS for
-public `GET/HEAD` on generated media and BGM previews.
+`ENGINE_S3_PUBLIC_ENDPOINT`; keep the production value at `https://huadingai.cn`.
+Generated object URLs use the bucket-root path, for example
+`https://huadingai.cn/huading-videos/...`, so nginx preserves the signed object
+path when forwarding to MinIO. Configure object storage CORS for public
+`GET/HEAD` on generated media and BGM previews.
 
 Do not commit `infra/.env`.
 
@@ -99,5 +101,5 @@ Back these up before destructive server maintenance.
 
 - Only nginx publishes ports `80` and `443`.
 - Postgres, Redis, MinIO, backend, and frontend are internal Compose services.
-- MinIO presigned media URLs use `https://huadingai.cn/minio/...`; nginx and MinIO CORS allow cross-origin `GET/HEAD` for the BGM waveform player.
+- MinIO presigned media URLs use `https://huadingai.cn/huading-videos/...`; nginx and MinIO CORS allow cross-origin `GET/HEAD` for the BGM waveform player.
 - `NEXT_PUBLIC_USE_MOCK=0` is baked into the frontend production image.
