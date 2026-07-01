@@ -91,6 +91,9 @@ def test_prod_nginx_enforces_https_and_supports_api_sse_and_minio() -> None:
 
 def test_prod_env_example_and_runbook_have_placeholders_only() -> None:
     env_example = (INFRA / ".env.prod.example").read_text(encoding="utf-8")
+    backend_env_example = (REPO_ROOT / "backend" / ".env.example").read_text(
+        encoding="utf-8"
+    )
     deploy_doc = (INFRA / "DEPLOY.md").read_text(encoding="utf-8")
 
     required_keys = [
@@ -104,6 +107,10 @@ def test_prod_env_example_and_runbook_have_placeholders_only() -> None:
         "ENGINE_OMNIHUMAN_SECRET_KEY=",
         "ENGINE_SEEDANCE_API_KEY=",
         "ENGINE_SEEDANCE_MINI_MODEL=",
+        "ENGINE_APIMART_VIDEO_MODEL=doubao-seedance-2.0",
+        "ENGINE_APIMART_VIDEO_POLL_INITIAL_DELAY_SECONDS=30",
+        "ENGINE_APIMART_VIDEO_POLL_INTERVAL_SECONDS=10",
+        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS=900",
         "ENGINE_DOUBAO_TTS_APPID=",
         "ENGINE_DOUBAO_VOICE_CLONE_APPID=",
         "OPENAI_API_KEY=",
@@ -114,10 +121,25 @@ def test_prod_env_example_and_runbook_have_placeholders_only() -> None:
     for key in required_keys:
         assert key in env_example
 
+    backend_required_keys = [
+        "ENGINE_APIMART_VIDEO_MODEL=doubao-seedance-2.0",
+        "ENGINE_APIMART_VIDEO_POLL_INITIAL_DELAY_SECONDS=30",
+        "ENGINE_APIMART_VIDEO_POLL_INTERVAL_SECONDS=10",
+        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS=900",
+    ]
+    for key in backend_required_keys:
+        assert key in backend_env_example
+
+    assert "video_gen presigned reference URLs use a 7200 second minimum TTL" in env_example
+    assert "ENGINE_S3_PRESIGN_TTL=3600" in env_example
     assert "sk-" not in env_example
     assert "task-" not in env_example
+    assert "sk-" not in backend_env_example
+    assert "task-" not in backend_env_example
     assert "https://huadingai.cn/minio" not in env_example
     assert "docker compose -f infra/docker-compose.prod.yml up -d --build" in deploy_doc
     assert "certbot certonly --webroot" in deploy_doc
+    assert "ENGINE_APIMART_VIDEO_MODEL" in deploy_doc
+    assert "video_gen" in deploy_doc
     assert "https://huadingai.cn/huading-videos/" in deploy_doc
     assert "https://huadingai.cn/minio" not in deploy_doc

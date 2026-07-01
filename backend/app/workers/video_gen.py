@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -33,6 +34,7 @@ from app.workers.celery_app import celery_app
 logger = get_logger(__name__)
 
 _BGM_VOLUME = 0.22
+_APIMART_VIDEO_MIN_PRESIGN_TTL_SECONDS = 7200
 
 
 @dataclass
@@ -121,23 +123,27 @@ def _load_context(
 
 
 def _provider_payload(ctx: VideoGenContext) -> dict[str, Any]:
-    images = []
+    image_urls = []
+    presign_ttl = max(
+        int(settings.engine_s3_presign_ttl),
+        math.ceil(float(settings.engine_apimart_video_timeout_seconds)),
+        _APIMART_VIDEO_MIN_PRESIGN_TTL_SECONDS,
+    )
     for asset in ctx.reference_assets:
-        images.append(
-            {
-                "asset_id": asset.id,
-                "mime_type": asset.mime_type or "image/png",
-                "bytes": ctx.storage.get_bytes(asset.storage_key),
-            }
+        image_urls.append(
+            ctx.storage.presign_get_url(asset.storage_key, expires_in=presign_ttl)
         )
-    return {
-        "model": settings.engine_seedance_mini_model,
+    payload: dict[str, Any] = {
+        "model": settings.engine_apimart_video_model,
         "prompt": ctx.task.topic or "",
-        "duration_sec": ctx.duration_sec,
+        "duration": ctx.duration_sec,
         "resolution": ctx.resolution,
-        "fps": 24,
-        "reference_images": images,
+        "size": "adaptive" if image_urls else "9:16",
+        "generate_audio": False,
     }
+    if image_urls:
+        payload["image_urls"] = image_urls
+    return payload
 
 
 def _generate_seedance_mini_video(ctx: VideoGenContext) -> bytes:
@@ -145,7 +151,7 @@ def _generate_seedance_mini_video(ctx: VideoGenContext) -> bytes:
     result = asyncio.run(provider.generate_video(_provider_payload(ctx)))
     video_bytes = result.get("video_bytes") if isinstance(result, dict) else None
     if not isinstance(video_bytes, bytes) or not video_bytes:
-        raise RuntimeError("Seedance mini provider returned no video bytes.")
+        raise RuntimeError("Video provider returned no video bytes.")
     return video_bytes
 
 
@@ -260,7 +266,7 @@ def _store_output(ctx: VideoGenContext, video_bytes: bytes) -> str:
         tenant_id=ctx.tenant_id,
         type="video",
         source="generated",
-        provider="seedance",
+        provider="apimart",
         storage_key=key,
         mime_type="video/mp4",
         size_bytes=len(video_bytes),
@@ -268,7 +274,7 @@ def _store_output(ctx: VideoGenContext, video_bytes: bytes) -> str:
         status="ready",
         metadata_={
             "video_mode": "video_gen",
-            "model": settings.engine_seedance_mini_model,
+            "model": settings.engine_apimart_video_model,
         },
     )
     ctx.db.add(output_asset)

@@ -5,7 +5,7 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +23,10 @@ from app.db.models import (
 from app.main import app
 from app.schemas.videos import VideoGenerateRequest
 from app.services import bgm_library
+from app.services.quota import (
+    _VIDEO_GEN_RESOLUTION_MULTIPLIERS,
+    estimate_video_gen_quota,
+)
 
 
 class _Storage:
@@ -245,30 +249,22 @@ def test_bgm_library_returns_seeded_royalty_free_tracks(auth_context, auth_db) -
     assert all(item["license"] == "Mixkit License" for item in items)
 
 
-def test_video_gen_schema_requires_reference_images_and_duration_enum() -> None:
+def test_video_gen_schema_allows_t2v_or_i2v_and_keeps_duration_enum() -> None:
     ok = VideoGenerateRequest.model_validate(
         {
             "video_mode": "video_gen",
             "prompt": "A cinematic product reveal",
-            "reference_image_asset_ids": ["asset-ref-a"],
             "duration_sec": 10,
+            "resolution": "1080p",
         }
     )
     assert ok.topic == "A cinematic product reveal"
     assert ok.prompt == "A cinematic product reveal"
     assert ok.duration_sec == 10
-    assert ok.resolution == "720p"
+    assert ok.resolution == "1080p"
+    assert ok.reference_image_asset_ids == []
 
     for payload, expected in [
-        (
-            {
-                "video_mode": "video_gen",
-                "prompt": "x",
-                "reference_image_asset_ids": [],
-                "duration_sec": 10,
-            },
-            "reference_image_asset_ids",
-        ),
         (
             {
                 "video_mode": "video_gen",
@@ -303,6 +299,31 @@ def test_video_gen_schema_requires_reference_images_and_duration_enum() -> None:
             assert expected in str(exc)
         else:  # pragma: no cover - assertion aid
             raise AssertionError(f"payload unexpectedly passed: {payload}")
+
+
+def test_video_gen_schema_resolutions_all_have_quota_multipliers() -> None:
+    schema_resolutions = set(
+        get_args(VideoGenerateRequest.model_fields["resolution"].annotation)
+    )
+
+    assert schema_resolutions == set(_VIDEO_GEN_RESOLUTION_MULTIPLIERS)
+
+
+def test_video_gen_1080p_quota_estimate_uses_resolution_multiplier(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        estimate = estimate_video_gen_quota(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            duration_sec=15,
+            resolution="1080p",
+        )
+
+    assert estimate.estimated_seconds == 15
+    assert estimate.estimated_credits == Decimal("67.50")
+    assert estimate.reservation_units == 68
 
 
 def test_create_video_gen_validates_assets_reserves_quota_and_enqueues(
@@ -385,11 +406,63 @@ def test_create_video_gen_validates_assets_reserves_quota_and_enqueues(
         usage = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
         assert usage is not None
         assert usage.capability == "video_gen"
-        assert usage.provider == "seedance"
+        assert usage.provider == "apimart"
+        assert usage.model == "doubao-seedance-2.0"
         assert usage.status == "reserved"
         subscription = _subscription(db, auth_context["tenant_id"])
         assert subscription.quota_credits_reserved > 0
         assert subscription.quota_credits_used == 0
+
+
+def test_create_video_gen_allows_t2v_without_reference_images(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    enqueued: list[dict[str, Any]] = []
+
+    class _Task:
+        @staticmethod
+        def apply_async(*, args: list[dict[str, Any]], task_id: str, queue: str):
+            enqueued.append({"args": args, "task_id": task_id, "queue": queue})
+
+            class _Result:
+                status = "queued"
+
+            return _Result()
+
+    monkeypatch.setattr(videos_route, "generate_video_gen_task", _Task, raising=False)
+    with auth_db() as db:
+        _reset_subscription_quota(db, auth_context["tenant_id"])
+        db.commit()
+
+    resp = TestClient(app).post(
+        "/api/v1/videos",
+        json={
+            "video_mode": "video_gen",
+            "prompt": "A clean text to video product reveal",
+            "duration_sec": 5,
+            "resolution": "720p",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 202
+    task_id = resp.json()["data"]["id"]
+    assert enqueued[0]["args"][0]["reference_image_asset_ids"] == []
+    assert enqueued[0]["task_id"] == task_id
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        assert task is not None
+        assert task.params["reference_image_asset_ids"] == []
+        roles = list(db.scalars(select(TaskAsset).where(TaskAsset.video_task_id == task_id)))
+        assert roles == []
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
+        assert usage is not None
+        assert usage.provider == "apimart"
+        assert usage.model == "doubao-seedance-2.0"
 
 
 def test_create_video_gen_hides_cross_tenant_reference_and_bgm_assets(
@@ -457,6 +530,7 @@ def test_video_gen_pipeline_settles_quota_stores_labeled_output_and_history(
     with auth_db() as db:
         subscription = _reset_subscription_quota(db, auth_context["tenant_id"])
         ref = _seed_image_asset(db, tenant_id=auth_context["tenant_id"], asset_id="asset-ref-a")
+        ref_storage_key = ref.storage_key
         storage.objects[ref.storage_key] = (b"PNGDATA", "image/png")
         _add_video_gen_task(
             db,
@@ -503,6 +577,7 @@ def test_video_gen_pipeline_settles_quota_stores_labeled_output_and_history(
     monkeypatch.setattr(video_gen, "build_progress_store", lambda _url: _MemProgressStore())
     monkeypatch.setattr(video_gen, "_generate_seedance_mini_video", fake_generate)
     monkeypatch.setattr(video_gen, "label_artifact_bytes", fake_label_artifact_bytes)
+    monkeypatch.setattr(video_gen.settings, "engine_s3_presign_ttl", 60)
 
     result = video_gen.run_video_gen_pipeline(
         tenant_id=auth_context["tenant_id"],
@@ -512,10 +587,15 @@ def test_video_gen_pipeline_settles_quota_stores_labeled_output_and_history(
     output_key = f"tenants/{auth_context['tenant_id']}/videos/{task_id}/final.mp4"
     assert storage.objects[output_key] == (b"MP4|LABEL", "video/mp4")
     assert result["storage_key"] == output_key
-    assert provider_payloads[0]["model"] == "doubao-seedance-2-0-mini-pending"
-    assert provider_payloads[0]["duration_sec"] == 5
+    assert provider_payloads[0]["model"] == "doubao-seedance-2.0"
+    assert provider_payloads[0]["duration"] == 5
     assert provider_payloads[0]["resolution"] == "720p"
-    assert provider_payloads[0]["reference_images"][0]["bytes"] == b"PNGDATA"
+    assert provider_payloads[0]["size"] == "adaptive"
+    assert provider_payloads[0]["image_urls"] == [
+        f"https://storage.test/{ref_storage_key}?ttl=7200"
+    ]
+    assert "reference_images" not in provider_payloads[0]
+    assert "fps" not in provider_payloads[0]
     assert label_calls[0]["kind"] == "video"
     assert label_calls[0]["suffix"] == ".mp4"
     assert label_calls[0]["meta"].content_id == task_id

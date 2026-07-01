@@ -150,7 +150,7 @@ class VideoGenerateRequest(BaseModel):
         ),
     )
     reference_image_asset_ids: list[str] = Field(default_factory=list)
-    resolution: Literal["480p", "720p"] = Field(default="720p")
+    resolution: Literal["480p", "720p", "1080p"] = Field(default="720p")
     bgm: BgmSelectionRequest | None = None
     n_scenes: int = Field(default=3, ge=1, le=20)
     frame_template: str | None = Field(
@@ -216,7 +216,7 @@ class VideoGenerateRequest(BaseModel):
                 raise ValueError("video_gen prompt must not be blank")
             self.prompt = prompt
             self.topic = prompt
-            if not (1 <= len(self.reference_image_asset_ids) <= 9):
+            if not (0 <= len(self.reference_image_asset_ids) <= 9):
                 raise ValueError("video_gen reference_image_asset_ids must contain at most 9 items")
             if len(set(self.reference_image_asset_ids)) != len(self.reference_image_asset_ids):
                 raise ValueError("video_gen reference_image_asset_ids must be unique")

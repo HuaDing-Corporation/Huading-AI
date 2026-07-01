@@ -22,6 +22,7 @@ _VIDEO_GEN_DURATIONS = {5, 10, 15}
 _VIDEO_GEN_RESOLUTION_MULTIPLIERS = {
     "480p": Decimal("1.0000"),
     "720p": Decimal("1.5000"),
+    "1080p": Decimal("2.2500"),
 }
 _IMAGE_QUALITY_MULTIPLIERS = {
     "low": Decimal("1"),
@@ -497,8 +498,8 @@ def reserve_video_gen_quota(
         subscription_id=subscription.id,
         video_task_id=video_task_id,
         capability="video_gen",
-        provider="seedance",
-        model=settings.engine_seedance_mini_model,
+        provider="apimart",
+        model=settings.engine_apimart_video_model,
         unit="second",
         quantity=Decimal(estimate.estimated_seconds),
         credits=estimate.estimated_credits,
