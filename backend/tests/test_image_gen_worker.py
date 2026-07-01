@@ -1,3 +1,4 @@
+import base64
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
@@ -57,10 +58,12 @@ class _FakeProvider:
         self,
         *,
         image_bytes: bytes = b"photo-png",
+        expected_input_bytes: bytes | None = b"input-image",
         fail: bool = False,
         failure: Exception | None = None,
     ) -> None:
         self.image_bytes = image_bytes
+        self.expected_input_bytes = expected_input_bytes
         self.fail = fail
         self.failure = failure
         self.payloads: list[dict] = []
@@ -73,7 +76,9 @@ class _FakeProvider:
             raise self.failure or RuntimeError("image provider failed")
         if self.input_path:
             with open(self.input_path, "rb") as handle:
-                assert handle.read() == b"input-image"
+                content = handle.read()
+            if self.expected_input_bytes is not None:
+                assert content == self.expected_input_bytes
         return {
             "image_bytes": self.image_bytes,
             "mime_type": "image/png",
@@ -124,6 +129,31 @@ def _alpha_extrema(content: bytes) -> tuple[int, int]:
     image = Image.open(BytesIO(content))
     assert image.mode == "RGBA"
     return image.getchannel("A").getextrema()
+
+
+def _decode_data_uri(uri: str) -> tuple[str, bytes]:
+    assert not uri.startswith(("http://", "https://"))
+    header, encoded = uri.split(",", 1)
+    assert header.startswith("data:image/")
+    assert header.endswith(";base64")
+    return header.removeprefix("data:").removesuffix(";base64"), base64.b64decode(encoded)
+
+
+def _noisy_png_bytes(size: int = 96) -> bytes:
+    image = Image.new("RGB", (size, size))
+    for x in range(size):
+        for y in range(size):
+            image.putpixel(
+                (x, y),
+                (
+                    (x * 17 + y * 3) % 256,
+                    (x * 5 + y * 11) % 256,
+                    (x * 7 + y * 13) % 256,
+                ),
+            )
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def _seed_reserved_photo(db, tenant_id: str, user_id: str, task_id: str) -> str:
@@ -409,14 +439,94 @@ def test_image_worker_edit_resolves_tenant_upload_and_cleans_temp_file(
     )
 
     assert provider.payloads[0]["input_image_path"] == provider.input_path
-    assert provider.payloads[0]["input_image_url"].startswith(
-        f"https://storage.test/tenants/{auth_context['tenant_id']}/uploads/product.png"
-    )
+    mime_type, input_bytes = _decode_data_uri(provider.payloads[0]["input_image_url"])
+    assert mime_type == "image/png"
+    assert input_bytes == b"input-image"
     assert provider.payloads[0]["image_urls"] == [provider.payloads[0]["input_image_url"]]
     assert provider.payloads[0]["size"] == "1024x1536"
     assert provider.payloads[0]["quality"] == "high"
     assert provider.input_path is not None
     assert not Path(provider.input_path).exists()
+
+
+def test_image_worker_data_uri_mime_detection_uses_magic_suffix_and_png_default(
+    monkeypatch,
+) -> None:
+    from app.workers import image_gen
+
+    monkeypatch.setattr(image_gen, "_APIMART_INPUT_IMAGE_SAFE_BYTES", 1024 * 1024)
+
+    cases = [
+        ("tenants/t/uploads/product.png", b"\x89PNG\r\n\x1a\npng-data", "image/png"),
+        ("tenants/t/uploads/product.jpg", b"\xff\xd8\xffjpeg-data", "image/jpeg"),
+        ("tenants/t/uploads/product.webp", b"RIFF\x01\x00\x00\x00WEBPwebp-data", "image/webp"),
+        ("tenants/t/uploads/product.unknown", b"plain-bytes", "image/png"),
+        ("tenants/t/uploads/product.jpeg", b"plain-bytes", "image/jpeg"),
+    ]
+
+    for storage_key, content, expected_mime_type in cases:
+        mime_type, decoded = _decode_data_uri(
+            image_gen._input_image_data_uri(storage_key, content)
+        )
+
+        assert mime_type == expected_mime_type
+        assert decoded == content
+
+
+def test_image_worker_converts_all_source_storage_keys_to_data_uris(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    task_id = "photo-multi-unit"
+    first_key = f"tenants/{auth_context['tenant_id']}/uploads/product-a.png"
+    second_key = f"tenants/{auth_context['tenant_id']}/uploads/product-b.jpg"
+    first_bytes = b"first-image"
+    second_bytes = b"\xff\xd8\xffsecond-image"
+    with auth_db() as db:
+        _seed_reserved_photo(db, auth_context["tenant_id"], auth_context["user_id"], task_id)
+    storage = _FakeStorage()
+    storage.saved[first_key] = (first_bytes, "image/png")
+    storage.saved[second_key] = (second_bytes, "image/jpeg")
+    store = _MemProgressStore()
+    provider = _FakeProvider(expected_input_bytes=first_bytes)
+    image_gen = _patch_worker(monkeypatch, auth_db, storage, store, provider)
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": "combine product references",
+            "source_storage_keys": [first_key, second_key],
+        }
+    )
+
+    assert result["status"] == "SUCCESS"
+    payload = provider.payloads[0]
+    assert payload["input_image_url"] == payload["image_urls"][0]
+    assert len(payload["image_urls"]) == 2
+    first_mime, first_decoded = _decode_data_uri(payload["image_urls"][0])
+    second_mime, second_decoded = _decode_data_uri(payload["image_urls"][1])
+    assert first_mime == "image/png"
+    assert first_decoded == first_bytes
+    assert second_mime == "image/jpeg"
+    assert second_decoded == second_bytes
+
+
+def test_image_worker_data_uri_size_guard_compresses_large_inputs(monkeypatch) -> None:
+    from app.workers import image_gen
+
+    source_bytes = _noisy_png_bytes(size=384)
+    monkeypatch.setattr(image_gen, "_APIMART_INPUT_IMAGE_SAFE_BYTES", 8 * 1024)
+
+    mime_type, compressed = _decode_data_uri(
+        image_gen._input_image_data_uri("tenants/t/uploads/large.png", source_bytes)
+    )
+
+    assert len(source_bytes) > 8 * 1024
+    assert mime_type == "image/jpeg"
+    assert len(compressed) <= 8 * 1024
+    Image.open(BytesIO(compressed)).verify()
 
 
 def test_image_worker_failure_marks_failed_and_releases_quota(
@@ -560,9 +670,9 @@ def test_image_worker_ecom_transparent_cutout_uses_source_asset_and_keeps_alpha(
     output_key = f"tenants/{auth_context['tenant_id']}/photos/{task_id}/output.png"
     payload = provider.payloads[0]
     assert payload["input_image_path"] == provider.input_path
-    assert payload["input_image_url"].startswith(
-        f"https://storage.test/tenants/{auth_context['tenant_id']}/uploads/product.png"
-    )
+    mime_type, input_bytes = _decode_data_uri(payload["input_image_url"])
+    assert mime_type == "image/png"
+    assert input_bytes == b"input-image"
     assert payload["image_urls"] == [payload["input_image_url"]]
     assert "transparent" in payload["prompt"].lower()
     assert "alpha" in payload["prompt"].lower()
@@ -614,9 +724,9 @@ def test_image_worker_ecom_model_uses_source_asset_and_stores_model_metadata(
     output_key = f"tenants/{auth_context['tenant_id']}/photos/{task_id}/output.png"
     payload = provider.payloads[0]
     assert payload["input_image_path"] == provider.input_path
-    assert payload["input_image_url"].startswith(
-        f"https://storage.test/tenants/{auth_context['tenant_id']}/uploads/model-product.png"
-    )
+    mime_type, input_bytes = _decode_data_uri(payload["input_image_url"])
+    assert mime_type == "image/png"
+    assert input_bytes == b"input-image"
     assert payload["image_urls"] == [payload["input_image_url"]]
     assert "female ai fashion model" in payload["prompt"].lower()
     assert "preserve the exact product shape" in payload["prompt"].lower()

@@ -42,9 +42,17 @@ _ALPHA_MISSING_ERROR_CODE = "IMAGE_ALPHA_MISSING"
 _ECOM_CUTOUT_KIND = "ecom_cutout"
 _ECOM_MODEL_KIND = "ecom_model"
 _ECOM_POSTER_KIND = "ecom_poster"
+_APIMART_INPUT_IMAGE_SAFE_BYTES = 14 * 1024 * 1024
+_APIMART_INPUT_IMAGE_MAX_EDGE = 2048
 _SOURCE_IMAGE_STORAGE_KEY_RE = re.compile(
     r"^tenants/[A-Za-z0-9_-]+/[A-Za-z0-9_./-]+\.(?:jpg|jpeg|png|webp)$"
 )
+_IMAGE_MIME_BY_SUFFIX = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
 _POSTER_SIZE = (1080, 1350)
 _POSTER_TEMPLATES = {
     "promo_bold": {
@@ -178,43 +186,83 @@ def _validate_source_storage_key(tenant_id: str, storage_key: str) -> str:
     return storage_key
 
 
-def _write_temp_source_image(
-    storage: ObjectStorage,
+def _write_temp_image_bytes(
+    image_bytes: bytes,
     *,
-    tenant_id: str,
-    source_storage_key: str,
+    suffix: str,
     temp_paths: list[Path],
 ) -> Path:
-    storage_key = _validate_source_storage_key(tenant_id, source_storage_key)
-    suffix = Path(storage_key).suffix or ".png"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
-        handle.write(storage.get_bytes(storage_key))
+        handle.write(image_bytes)
         path = Path(handle.name)
     temp_paths.append(path)
     return path
 
 
-def _write_temp_input_image(
-    storage: ObjectStorage,
-    *,
-    tenant_id: str,
-    image_key: str,
-    temp_paths: list[Path],
-) -> Path:
-    storage_key = _tenant_upload_storage_key(tenant_id, image_key)
-    suffix = Path(image_key).suffix or ".png"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
-        handle.write(storage.get_bytes(storage_key))
-        path = Path(handle.name)
-    temp_paths.append(path)
-    return path
+def _source_storage_keys(params: Mapping[str, Any], tenant_id: str) -> list[str]:
+    raw_keys = params.get("source_storage_keys")
+    if raw_keys is not None:
+        if not isinstance(raw_keys, list | tuple):
+            raise ValueError("source_storage_keys must be a list.")
+        return [_validate_source_storage_key(tenant_id, str(key)) for key in raw_keys]
+    if params.get("source_storage_key"):
+        return [_validate_source_storage_key(tenant_id, str(params["source_storage_key"]))]
+    return []
 
 
-def _presigned_input_url(storage: ObjectStorage, storage_key: str) -> str:
-    return storage.presign_get_url(
-        storage_key,
-        expires_in=settings.engine_s3_presign_ttl,
-    )
+def _input_image_mime_type(storage_key: str, image_bytes: bytes) -> str:
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image_bytes.startswith(b"\xff\xd8"):
+        return "image/jpeg"
+    if len(image_bytes) >= 12 and image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    return _IMAGE_MIME_BY_SUFFIX.get(Path(storage_key).suffix.lower(), "image/png")
+
+
+def _apimart_safe_input_image_bytes(
+    image_bytes: bytes,
+    mime_type: str,
+) -> tuple[bytes, str]:
+    if len(image_bytes) <= _APIMART_INPUT_IMAGE_SAFE_BYTES:
+        return image_bytes, mime_type
+
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            image.load()
+            working = image.copy()
+    except UnidentifiedImageError as exc:
+        raise ValueError("Input image is too large and cannot be compressed.") from exc
+
+    if working.mode != "RGB":
+        if "A" in working.getbands():
+            rgba = working.convert("RGBA")
+            background = Image.new("RGB", rgba.size, "white")
+            background.paste(rgba, mask=rgba.getchannel("A"))
+            working = background
+        else:
+            working = working.convert("RGB")
+
+    max_edge = min(_APIMART_INPUT_IMAGE_MAX_EDGE, max(working.size))
+    while max_edge >= 32:
+        candidate = working.copy()
+        candidate.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+        for quality in (85, 75, 65, 55, 45):
+            buffer = BytesIO()
+            candidate.save(buffer, format="JPEG", quality=quality, optimize=True)
+            compressed = buffer.getvalue()
+            if len(compressed) <= _APIMART_INPUT_IMAGE_SAFE_BYTES:
+                return compressed, "image/jpeg"
+        max_edge = int(max_edge * 0.75)
+
+    raise ValueError("Input image is too large after compression.")
+
+
+def _input_image_data_uri(storage_key: str, image_bytes: bytes) -> str:
+    mime_type = _input_image_mime_type(storage_key, image_bytes)
+    safe_bytes, safe_mime_type = _apimart_safe_input_image_bytes(image_bytes, mime_type)
+    encoded = base64.b64encode(safe_bytes).decode("ascii")
+    return f"data:{safe_mime_type};base64,{encoded}"
 
 
 def _image_bytes(result: Mapping[str, Any]) -> bytes:
@@ -524,32 +572,36 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             )
 
             input_path = None
-            input_image_url = None
+            input_image_urls: list[str] = []
             if not ecom_poster:
-                if params.get("source_storage_key"):
-                    input_storage_key = _validate_source_storage_key(
-                        tenant_id,
-                        str(params["source_storage_key"]),
-                    )
-                    input_path = _write_temp_source_image(
-                        storage,
-                        tenant_id=tenant_id,
-                        source_storage_key=input_storage_key,
+                source_storage_keys = _source_storage_keys(params, tenant_id)
+                if source_storage_keys:
+                    input_storage_key = source_storage_keys[0]
+                    input_images = [
+                        (storage_key, storage.get_bytes(storage_key))
+                        for storage_key in source_storage_keys
+                    ]
+                    input_path = _write_temp_image_bytes(
+                        input_images[0][1],
+                        suffix=Path(input_storage_key).suffix or ".png",
                         temp_paths=temp_paths,
                     )
-                    input_image_url = _presigned_input_url(storage, input_storage_key)
+                    input_image_urls = [
+                        _input_image_data_uri(storage_key, image_bytes)
+                        for storage_key, image_bytes in input_images
+                    ]
                 elif params.get("image_key"):
                     input_storage_key = _tenant_upload_storage_key(
                         tenant_id,
                         str(params["image_key"]),
                     )
-                    input_path = _write_temp_input_image(
-                        storage,
-                        tenant_id=tenant_id,
-                        image_key=str(params["image_key"]),
+                    image_bytes = storage.get_bytes(input_storage_key)
+                    input_path = _write_temp_image_bytes(
+                        image_bytes,
+                        suffix=Path(input_storage_key).suffix or ".png",
                         temp_paths=temp_paths,
                     )
-                    input_image_url = _presigned_input_url(storage, input_storage_key)
+                    input_image_urls = [_input_image_data_uri(input_storage_key, image_bytes)]
 
             _update_progress(
                 db,
@@ -587,9 +639,9 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                 }
                 if input_path is not None:
                     provider_payload["input_image_path"] = str(input_path)
-                    if input_image_url:
-                        provider_payload["input_image_url"] = input_image_url
-                        provider_payload["image_urls"] = [input_image_url]
+                    if input_image_urls:
+                        provider_payload["input_image_url"] = input_image_urls[0]
+                        provider_payload["image_urls"] = input_image_urls
                 if ecom_cutout and ecom_background == "white":
                     provider_payload["background"] = "opaque"
                 result = asyncio.run(
