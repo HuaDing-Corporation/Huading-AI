@@ -109,9 +109,10 @@ async def test_apimart_provider_submits_polls_downloads_and_maps_urls() -> None:
         {
             "prompt": "studio product photo",
             "size": "1536x1024",
-            "quality": "high",
+            "quality": "medium",
             "input_image_url": "https://storage.test/tenants/t-1/uploads/product.png?sig=ok",
             "background": "opaque",
+            "mask_url": "https://storage.test/tenants/t-1/uploads/mask.png?sig=ok",
         }
     )
 
@@ -120,6 +121,7 @@ async def test_apimart_provider_submits_polls_downloads_and_maps_urls() -> None:
     assert result["provider"] == "apimart"
     assert result["model"] == "gpt-image-2"
     assert result["mode"] == "edit"
+    assert result["quality"] == "high"
     assert result["task_id"] == "apimart_img_1"
     assert sleep_calls == [10, 4, 4]
     assert session.post_calls == [
@@ -136,7 +138,6 @@ async def test_apimart_provider_submits_polls_downloads_and_maps_urls() -> None:
                 "image_urls": [
                     "https://storage.test/tenants/t-1/uploads/product.png?sig=ok"
                 ],
-                "background": "opaque",
             },
             "timeout": 12.5,
         }
@@ -163,6 +164,52 @@ async def test_apimart_provider_submits_polls_downloads_and_maps_urls() -> None:
             "timeout": 12.5,
         },
     ]
+
+
+@pytest.mark.parametrize("input_quality", ["low", "medium", "high", "auto", "unexpected"])
+@pytest.mark.asyncio
+async def test_apimart_provider_always_sends_high_quality(input_quality: str) -> None:
+    session = _FakeSession(
+        post_response=_FakeResponse(
+            payload={"code": 200, "data": [{"status": "submitted", "task_id": "apimart_quality"}]}
+        ),
+        task_responses=[
+            _FakeResponse(
+                payload={
+                    "code": 200,
+                    "data": {
+                        "status": "completed",
+                        "result": {
+                            "images": [
+                                {"url": ["https://upload.apimart.ai/apimart_quality.png"]}
+                            ]
+                        },
+                    },
+                }
+            )
+        ],
+        download_response=_FakeResponse(content=b"quality-png"),
+    )
+    provider = APIMartImageProvider(
+        api_key="test-apimart-key",
+        session=session,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    result = await provider.generate_image(
+        {
+            "prompt": "studio product photo",
+            "quality": input_quality,
+            "background": "opaque",
+            "mask_url": "https://storage.test/mask.png?sig=ok",
+        }
+    )
+
+    post_body = session.post_calls[0]["json"]
+    assert post_body["quality"] == "high"
+    assert "background" not in post_body
+    assert "mask_url" not in post_body
+    assert result["quality"] == "high"
 
 
 @pytest.mark.asyncio
