@@ -130,3 +130,16 @@ def test_aigc_producer_has_default(monkeypatch) -> None:
     s = Settings(_env_file=None, jwt_secret_key=_JWT)
 
     assert s.engine_aigc_producer
+
+
+def test_apimart_video_settings_are_env_driven(monkeypatch) -> None:
+    monkeypatch.setenv("ENGINE_APIMART_VIDEO_MODEL", "custom-seedance-video")
+    monkeypatch.setenv("ENGINE_APIMART_VIDEO_POLL_INITIAL_DELAY_SECONDS", "31")
+    monkeypatch.setenv("ENGINE_APIMART_VIDEO_POLL_INTERVAL_SECONDS", "11")
+    monkeypatch.setenv("ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS", "901")
+    s = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    assert s.engine_apimart_video_model == "custom-seedance-video"
+    assert s.engine_apimart_video_poll_initial_delay_seconds == 31
+    assert s.engine_apimart_video_poll_interval_seconds == 11
+    assert s.engine_apimart_video_timeout_seconds == 901

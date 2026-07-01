@@ -104,6 +104,10 @@ def test_prod_env_example_and_runbook_have_placeholders_only() -> None:
         "ENGINE_OMNIHUMAN_SECRET_KEY=",
         "ENGINE_SEEDANCE_API_KEY=",
         "ENGINE_SEEDANCE_MINI_MODEL=",
+        "ENGINE_APIMART_VIDEO_MODEL=doubao-seedance-2.0",
+        "ENGINE_APIMART_VIDEO_POLL_INITIAL_DELAY_SECONDS=30",
+        "ENGINE_APIMART_VIDEO_POLL_INTERVAL_SECONDS=10",
+        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS=900",
         "ENGINE_DOUBAO_TTS_APPID=",
         "ENGINE_DOUBAO_VOICE_CLONE_APPID=",
         "OPENAI_API_KEY=",
@@ -119,5 +123,7 @@ def test_prod_env_example_and_runbook_have_placeholders_only() -> None:
     assert "https://huadingai.cn/minio" not in env_example
     assert "docker compose -f infra/docker-compose.prod.yml up -d --build" in deploy_doc
     assert "certbot certonly --webroot" in deploy_doc
+    assert "ENGINE_APIMART_VIDEO_MODEL" in deploy_doc
+    assert "video_gen" in deploy_doc
     assert "https://huadingai.cn/huading-videos/" in deploy_doc
     assert "https://huadingai.cn/minio" not in deploy_doc

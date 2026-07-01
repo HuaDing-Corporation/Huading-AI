@@ -22,16 +22,21 @@ Edit `infra/.env` and fill real values for:
 - `POSTGRES_PASSWORD`
 - `JWT_SECRET_KEY` (32+ characters)
 - `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`
-- `ENGINE_APIMART_API_KEY` and `ENGINE_APIMART_IMAGE_MODEL` for the default image provider
+- `ENGINE_APIMART_API_KEY`, `ENGINE_APIMART_IMAGE_MODEL`, and
+  `ENGINE_APIMART_VIDEO_MODEL` for the default image and video_gen providers
 - Volcengine, OpenAI fallback, and DeepSeek/LLM keys used by enabled features
-- `ENGINE_SEEDANCE_MINI_MODEL` once the production Ark model id is confirmed
+- `ENGINE_SEEDANCE_MINI_MODEL` only if rolling video_gen back to the legacy Ark
+  `seedance-mini` provider
 
-Image edit/reference flows send APIMart presigned URLs built from
-`ENGINE_S3_PUBLIC_ENDPOINT`; keep the production value at `https://huadingai.cn`.
+Image edit/reference and video_gen i2v flows send APIMart presigned URLs built
+from `ENGINE_S3_PUBLIC_ENDPOINT`; keep the production value at
+`https://huadingai.cn`.
 Generated object URLs use the bucket-root path, for example
 `https://huadingai.cn/huading-videos/...`, so nginx preserves the signed object
 path when forwarding to MinIO. Configure object storage CORS for public
 `GET/HEAD` on generated media and BGM previews.
+Video generation defaults to APIMart `doubao-seedance-2.0`; `seedance-mini`
+remains registered only as a database rollback option.
 
 Do not commit `infra/.env`.
 
@@ -73,8 +78,9 @@ curl -N https://huadingai.cn/api/v1/videos/example/events
 ```
 
 Then open `https://huadingai.cn`, register a tenant, log in, and create a small test task.
-For APIMart, run one text-to-image and one image-to-image task after setting a funded
-`ENGINE_APIMART_API_KEY`; no social publishing credentials or raw provider keys are stored.
+For APIMart, run one text-to-image, one image-to-image, and one video_gen task
+after setting a funded `ENGINE_APIMART_API_KEY`; no social publishing credentials
+or raw provider keys are stored.
 
 ## Operations
 
