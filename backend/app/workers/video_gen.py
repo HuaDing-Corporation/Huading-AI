@@ -34,6 +34,7 @@ from app.workers.celery_app import celery_app
 logger = get_logger(__name__)
 
 _BGM_VOLUME = 0.22
+_APIMART_VIDEO_MIN_PRESIGN_TTL_SECONDS = 7200
 
 
 @dataclass
@@ -126,6 +127,7 @@ def _provider_payload(ctx: VideoGenContext) -> dict[str, Any]:
     presign_ttl = max(
         int(settings.engine_s3_presign_ttl),
         math.ceil(float(settings.engine_apimart_video_timeout_seconds)),
+        _APIMART_VIDEO_MIN_PRESIGN_TTL_SECONDS,
     )
     for asset in ctx.reference_assets:
         image_urls.append(

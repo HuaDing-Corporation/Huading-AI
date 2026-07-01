@@ -5,7 +5,7 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +23,10 @@ from app.db.models import (
 from app.main import app
 from app.schemas.videos import VideoGenerateRequest
 from app.services import bgm_library
+from app.services.quota import (
+    _VIDEO_GEN_RESOLUTION_MULTIPLIERS,
+    estimate_video_gen_quota,
+)
 
 
 class _Storage:
@@ -297,6 +301,31 @@ def test_video_gen_schema_allows_t2v_or_i2v_and_keeps_duration_enum() -> None:
             raise AssertionError(f"payload unexpectedly passed: {payload}")
 
 
+def test_video_gen_schema_resolutions_all_have_quota_multipliers() -> None:
+    schema_resolutions = set(
+        get_args(VideoGenerateRequest.model_fields["resolution"].annotation)
+    )
+
+    assert schema_resolutions == set(_VIDEO_GEN_RESOLUTION_MULTIPLIERS)
+
+
+def test_video_gen_1080p_quota_estimate_uses_resolution_multiplier(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        estimate = estimate_video_gen_quota(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            duration_sec=15,
+            resolution="1080p",
+        )
+
+    assert estimate.estimated_seconds == 15
+    assert estimate.estimated_credits == Decimal("67.50")
+    assert estimate.reservation_units == 68
+
+
 def test_create_video_gen_validates_assets_reserves_quota_and_enqueues(
     monkeypatch,
     auth_context,
@@ -563,7 +592,7 @@ def test_video_gen_pipeline_settles_quota_stores_labeled_output_and_history(
     assert provider_payloads[0]["resolution"] == "720p"
     assert provider_payloads[0]["size"] == "adaptive"
     assert provider_payloads[0]["image_urls"] == [
-        f"https://storage.test/{ref_storage_key}?ttl=900"
+        f"https://storage.test/{ref_storage_key}?ttl=7200"
     ]
     assert "reference_images" not in provider_payloads[0]
     assert "fps" not in provider_payloads[0]

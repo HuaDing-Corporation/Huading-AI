@@ -22,6 +22,7 @@ _VIDEO_GEN_DURATIONS = {5, 10, 15}
 _VIDEO_GEN_RESOLUTION_MULTIPLIERS = {
     "480p": Decimal("1.0000"),
     "720p": Decimal("1.5000"),
+    "1080p": Decimal("2.2500"),
 }
 _IMAGE_QUALITY_MULTIPLIERS = {
     "low": Decimal("1"),
