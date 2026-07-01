@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import openai
-from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
+from PIL import Image, ImageChops, ImageDraw, ImageFont, UnidentifiedImageError
 
 from app.api.deps import scoped_task_id
 from app.core.config import settings
@@ -210,6 +210,13 @@ def _write_temp_input_image(
     return path
 
 
+def _presigned_input_url(storage: ObjectStorage, storage_key: str) -> str:
+    return storage.presign_get_url(
+        storage_key,
+        expires_in=settings.engine_s3_presign_ttl,
+    )
+
+
 def _image_bytes(result: Mapping[str, Any]) -> bytes:
     raw = result.get("image_bytes")
     if isinstance(raw, bytes):
@@ -391,6 +398,21 @@ def _compose_ecom_poster(
         raise ValueError("Poster source image is invalid.") from exc
 
 
+def _remove_uniform_background_alpha(rgba: Image.Image) -> Image.Image:
+    background_color = rgba.getpixel((0, 0))[:3]
+    background = Image.new("RGB", rgba.size, background_color)
+    diff = ImageChops.difference(rgba.convert("RGB"), background).convert("L")
+    alpha = diff.point(lambda value: 0 if value <= 18 else 255)
+    result = rgba.copy()
+    result.putalpha(alpha)
+    alpha_min, alpha_max = result.getchannel("A").getextrema()
+    if alpha_min >= 255 or alpha_max <= 0:
+        raise TransparentAlphaMissingError(
+            "Transparent cutout output must include transparent alpha pixels."
+        )
+    return result
+
+
 def _normalize_ecom_cutout_image(image_bytes: bytes, *, background: str) -> bytes:
     try:
         with Image.open(BytesIO(image_bytes)) as image:
@@ -398,9 +420,7 @@ def _normalize_ecom_cutout_image(image_bytes: bytes, *, background: str) -> byte
                 rgba = image.convert("RGBA")
                 alpha_min, _alpha_max = rgba.getchannel("A").getextrema()
                 if alpha_min >= 255:
-                    raise TransparentAlphaMissingError(
-                        "Transparent cutout output must include transparent alpha pixels."
-                    )
+                    rgba = _remove_uniform_background_alpha(rgba)
                 return _png_from_image(rgba)
 
             rgba = image.convert("RGBA")
@@ -504,21 +524,32 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             )
 
             input_path = None
+            input_image_url = None
             if not ecom_poster:
                 if params.get("source_storage_key"):
+                    input_storage_key = _validate_source_storage_key(
+                        tenant_id,
+                        str(params["source_storage_key"]),
+                    )
                     input_path = _write_temp_source_image(
                         storage,
                         tenant_id=tenant_id,
-                        source_storage_key=str(params["source_storage_key"]),
+                        source_storage_key=input_storage_key,
                         temp_paths=temp_paths,
                     )
+                    input_image_url = _presigned_input_url(storage, input_storage_key)
                 elif params.get("image_key"):
+                    input_storage_key = _tenant_upload_storage_key(
+                        tenant_id,
+                        str(params["image_key"]),
+                    )
                     input_path = _write_temp_input_image(
                         storage,
                         tenant_id=tenant_id,
                         image_key=str(params["image_key"]),
                         temp_paths=temp_paths,
                     )
+                    input_image_url = _presigned_input_url(storage, input_storage_key)
 
             _update_progress(
                 db,
@@ -556,14 +587,19 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                 }
                 if input_path is not None:
                     provider_payload["input_image_path"] = str(input_path)
+                    if input_image_url:
+                        provider_payload["input_image_url"] = input_image_url
+                        provider_payload["image_urls"] = [input_image_url]
+                if ecom_cutout and ecom_background == "white":
+                    provider_payload["background"] = "opaque"
                 result = asyncio.run(
                     invoke(
-                    db,
-                    tenant_id=tenant_id,
-                    capability="image",
-                    provider=provider.__class__.__name__,
-                    operation=lambda: provider.generate_image(provider_payload),
-                    timeout_seconds=settings.openai_image_timeout,
+                        db,
+                        tenant_id=tenant_id,
+                        capability="image",
+                        provider=provider.__class__.__name__,
+                        operation=lambda: provider.generate_image(provider_payload),
+                        timeout_seconds=settings.engine_image_provider_timeout_seconds,
                     )
                 )
                 image_bytes = _image_bytes(result)
@@ -584,7 +620,7 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                 progress=90,
             )
             metadata = {
-                "model": result.get("model") or settings.openai_image_model,
+                "model": result.get("model") or settings.engine_apimart_image_model,
                 "size": result.get("size") or provider_payload["size"],
                 "quality": result.get("quality") or provider_payload["quality"],
                 "mode": result.get("mode") or ("edit" if input_path else "generate"),
@@ -632,7 +668,7 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                 tenant_id=tenant_id,
                 type="generated_image",
                 source="generated",
-                provider="local" if ecom_poster else "openai",
+                provider=str(result.get("provider") or ("local" if ecom_poster else "apimart")),
                 storage_key=output_key,
                 mime_type="image/png",
                 size_bytes=len(image_bytes),

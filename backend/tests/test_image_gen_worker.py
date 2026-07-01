@@ -110,6 +110,16 @@ def _product_png_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def _opaque_product_on_white_png() -> bytes:
+    image = Image.new("RGB", (80, 60), "white")
+    for x in range(10, 70):
+        for y in range(8, 52):
+            image.putpixel((x, y), (40, 120, 220))
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 def _alpha_extrema(content: bytes) -> tuple[int, int]:
     image = Image.open(BytesIO(content))
     assert image.mode == "RGBA"
@@ -158,7 +168,7 @@ def _seed_reserved_photo(db, tenant_id: str, user_id: str, task_id: str) -> str:
             subscription_id=subscription.id,
             video_task_id=task_id,
             capability="image",
-            provider="openai",
+            provider="apimart",
             model="gpt-image-2",
             unit="image",
             quantity=Decimal("1"),
@@ -235,6 +245,7 @@ def _patch_worker(monkeypatch, auth_db, storage: _FakeStorage, store: _MemProgre
 
 
 def test_classify_image_error_returns_stable_codes() -> None:
+    from app.providers.image.apimart import APIMartImageProviderError
     from app.workers import image_gen
 
     moderation_error = _bad_request(
@@ -255,6 +266,7 @@ def test_classify_image_error_returns_stable_codes() -> None:
         (moderation_error, "IMAGE_MODERATION_BLOCKED"),
         (safety_error, "IMAGE_MODERATION_BLOCKED"),
         (invalid_request_error, "IMAGE_INVALID_REQUEST"),
+        (APIMartImageProviderError("insufficient balance", status_code=402), "IMAGE_GEN_FAILED"),
         (RuntimeError("provider crashed"), "IMAGE_GEN_FAILED"),
     ]
 
@@ -397,6 +409,10 @@ def test_image_worker_edit_resolves_tenant_upload_and_cleans_temp_file(
     )
 
     assert provider.payloads[0]["input_image_path"] == provider.input_path
+    assert provider.payloads[0]["input_image_url"].startswith(
+        f"https://storage.test/tenants/{auth_context['tenant_id']}/uploads/product.png"
+    )
+    assert provider.payloads[0]["image_urls"] == [provider.payloads[0]["input_image_url"]]
     assert provider.payloads[0]["size"] == "1024x1536"
     assert provider.payloads[0]["quality"] == "high"
     assert provider.input_path is not None
@@ -544,6 +560,10 @@ def test_image_worker_ecom_transparent_cutout_uses_source_asset_and_keeps_alpha(
     output_key = f"tenants/{auth_context['tenant_id']}/photos/{task_id}/output.png"
     payload = provider.payloads[0]
     assert payload["input_image_path"] == provider.input_path
+    assert payload["input_image_url"].startswith(
+        f"https://storage.test/tenants/{auth_context['tenant_id']}/uploads/product.png"
+    )
+    assert payload["image_urls"] == [payload["input_image_url"]]
     assert "transparent" in payload["prompt"].lower()
     assert "alpha" in payload["prompt"].lower()
     assert "background" not in payload
@@ -594,6 +614,10 @@ def test_image_worker_ecom_model_uses_source_asset_and_stores_model_metadata(
     output_key = f"tenants/{auth_context['tenant_id']}/photos/{task_id}/output.png"
     payload = provider.payloads[0]
     assert payload["input_image_path"] == provider.input_path
+    assert payload["input_image_url"].startswith(
+        f"https://storage.test/tenants/{auth_context['tenant_id']}/uploads/model-product.png"
+    )
+    assert payload["image_urls"] == [payload["input_image_url"]]
     assert "female ai fashion model" in payload["prompt"].lower()
     assert "preserve the exact product shape" in payload["prompt"].lower()
     assert "response_format" not in payload
@@ -674,7 +698,7 @@ def test_image_worker_ecom_poster_composes_locally_without_provider_or_quota(
     assert subscription.quota_credits_reserved == reserved_before
 
 
-def test_image_worker_ecom_transparent_cutout_fails_when_provider_returns_opaque_png(
+def test_image_worker_ecom_transparent_cutout_local_alpha_fallback(
     monkeypatch,
     auth_context,
     auth_db,
@@ -691,7 +715,7 @@ def test_image_worker_ecom_transparent_cutout_fails_when_provider_returns_opaque
     storage = _FakeStorage()
     storage.saved[source_key] = (b"input-image", "image/png")
     store = _MemProgressStore()
-    provider = _FakeProvider(image_bytes=_png_bytes("opaque"))
+    provider = _FakeProvider(image_bytes=_opaque_product_on_white_png())
     image_gen = _patch_worker(monkeypatch, auth_db, storage, store, provider)
 
     result = image_gen.run_image_generation(
@@ -705,13 +729,18 @@ def test_image_worker_ecom_transparent_cutout_fails_when_provider_returns_opaque
         }
     )
 
-    assert result["status"] == "FAILURE"
-    assert result["error_code"] == "IMAGE_ALPHA_MISSING"
+    assert result["status"] == "SUCCESS"
+    output_key = f"tenants/{auth_context['tenant_id']}/photos/{task_id}/output.png"
+    saved_bytes = storage.saved[output_key][0]
+    alpha_min, alpha_max = _alpha_extrema(saved_bytes)
+    assert alpha_min == 0
+    assert alpha_max == 255
     with auth_db() as db:
         task = db.get(VideoTask, task_id)
         subscription = db.get(Subscription, subscription_id)
         usage = db.scalars(select(UsageRecord).where(UsageRecord.video_task_id == task_id)).one()
-    assert task.status == "failed"
-    assert task.error_code == "IMAGE_ALPHA_MISSING"
-    assert usage.status == "released"
+    assert task.status == "done"
+    assert task.error_code is None
+    assert usage.status == "settled"
     assert subscription.quota_credits_reserved == 0
+    assert subscription.quota_credits_used == 30

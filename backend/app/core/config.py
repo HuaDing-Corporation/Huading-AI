@@ -115,6 +115,16 @@ class Settings(BaseSettings):
     openai_image_model: str = "gpt-image-2"
     openai_local_proxy: str = ""
     openai_image_timeout: float = 120.0
+    # APIMart Images. APIMart exposes GPT image generation as async tasks and
+    # requires public image URLs for edit-style requests.
+    engine_apimart_api_key: str = ""
+    engine_apimart_base_url: str = "https://api.apimart.ai/v1"
+    engine_apimart_image_model: str = "gpt-image-2"
+    engine_apimart_request_timeout_seconds: float = 60.0
+    engine_apimart_poll_initial_delay_seconds: float = 10.0
+    engine_apimart_poll_interval_seconds: float = 4.0
+    engine_apimart_timeout_seconds: float = 180.0
+    engine_image_provider_timeout_seconds: float = 240.0
     engine_subtitle_font_path: str = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
     engine_default_template: str = "1080x1920/static_default.html"
     # Playwright browser channel for frame rendering: "chrome"/"msedge" to use a

@@ -96,6 +96,7 @@ class OpenAIImageProvider:
         return {
             "image_bytes": image_bytes,
             "mime_type": "image/png",
+            "provider": "openai",
             "model": self.model,
             "size": size,
             "quality": quality,
