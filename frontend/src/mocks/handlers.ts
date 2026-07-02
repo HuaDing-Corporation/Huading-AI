@@ -109,6 +109,59 @@ function sseStream(id: string, fail = false): Response {
   return new Response(stream, { headers: { "Content-Type": "text/event-stream" } });
 }
 
+// ── 批量生产中心 (BATCH-PROD-UI-0001) mock store ── 据 seam 冻结契约；后端合后对齐。
+// per_row 按分辨率(mock 值，真值待后端)；balance 固定便于测 insufficient；detail 轮询状态渐进。
+const BATCH_PER_ROW: Record<string, number> = { "480p": 1, "720p": 2, "1080p": 5 };
+const BATCH_BALANCE = 50; // mock 余额：便于跨小/大批测 充足/不足 边界
+// common extra=forbid 白名单（逐字对齐后端 BatchCommonParams）。
+const BATCH_COMMON_KEYS = ["video_mode", "duration_sec", "resolution", "reference_image_asset_ids", "bgm", "voice_id", "speed", "aspect_ratio", "subtitle_enabled", "apply_visible_label", "size"];
+type MockBatchTask = { task_id: string; row_index: number; status: string; video_url?: string | null; error?: string | null; error_code?: string | null; error_message?: string | null };
+type MockBatch = { id: string; kind: string; status: string; total: number; succeeded: number; failed: number; common_params: Record<string, unknown>; created_at: string; updated_at: string; tasks: MockBatchTask[]; _polls: number; _cancelled: boolean };
+const batchStore = new Map<string, MockBatch>();
+let batchSeq = 0;
+
+function batchPerRow(resolution?: string): number {
+  return BATCH_PER_ROW[resolution ?? "720p"] ?? 2;
+}
+// 行必填校验(对齐后端 services/batches.py)：ecom 行 product_name/selling_points 必填 +
+// image_asset_id 与 image_url **恰好二选一**(都给/都不给=非法)；prompt 行 prompt 必填。→ 非法即 BATCH_ROW_INVALID。
+function invalidBatchRows(kind: string, rows: unknown[]): boolean {
+  if (!Array.isArray(rows) || rows.length < 1 || rows.length > 30) return true;
+  return rows.some((r) => {
+    const row = r as Record<string, unknown>;
+    if (kind === "ecom_table") {
+      if (!row.product_name || !row.selling_points) return true;
+      return Boolean(row.image_asset_id) === Boolean(row.image_url); // XOR：恰好一个
+    }
+    return !row.prompt || String(row.prompt).trim() === "";
+  });
+}
+// common 校验(对齐后端 extra=forbid + video_mode 必填 + kind↔video_mode 强校验)：非法即 FastAPI VALIDATION_ERROR。
+function invalidBatchCommon(kind: string, common: unknown): boolean {
+  const c = (common ?? {}) as Record<string, unknown>;
+  if (Object.keys(c).some((k) => !BATCH_COMMON_KEYS.includes(k))) return true; // 多传字段
+  if (!c.video_mode) return true; // video_mode 必填
+  if (kind === "ecom_table" && c.video_mode !== "seedance_i2v") return true;
+  if (kind === "prompt_set" && c.video_mode !== "video_gen") return true;
+  return false;
+}
+// BatchSummary 形状（逐字对齐后端：含 common_params）。
+function summaryOf(b: MockBatch) {
+  return { id: b.id, kind: b.kind, status: b.status, total: b.total, succeeded: b.succeeded, failed: b.failed, common_params: b.common_params, created_at: b.created_at, updated_at: b.updated_at };
+}
+// 聚合批次状态。
+function aggregateBatchStatus(tasks: MockBatchTask[]): string {
+  const done = tasks.filter((t) => t.status === "done").length;
+  const failed = tasks.filter((t) => t.status === "failed").length;
+  const cancelled = tasks.filter((t) => t.status === "cancelled").length;
+  const active = tasks.some((t) => t.status === "queued" || t.status === "running");
+  if (active) return "running";
+  if (cancelled === tasks.length) return "cancelled";
+  if (failed === 0) return "completed";
+  if (done === 0) return "failed";
+  return "partial_failed";
+}
+
 export const handlers = [
   // Auth = M2 shapes (unchanged). Mocked so the (app) client auth-gate can be
   // passed during the MSW parallel period without a real backend.
@@ -553,5 +606,68 @@ export const handlers = [
     if (!publishRecords.has(id)) return err(404, "PUBLISH_RECORD_NOT_FOUND", "发布记录不存在");
     publishRecords.delete(id);
     return ok({ id, deleted_at: new Date(0).toISOString() });
+  }),
+
+  // ── 批量生产中心 (BATCH-PROD-UI-0001) ── 逐字对齐后端 #103 schema：estimate/create(202)/list/detail/cancel。
+  http.post(`${BASE}/api/v1/batches/estimate`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as { kind?: string; rows?: unknown[]; common?: { resolution?: string } };
+    const rows = body.rows ?? [];
+    if (invalidBatchRows(body.kind ?? "", rows)) return err(422, "BATCH_ROW_INVALID", "批次行校验失败");
+    if (invalidBatchCommon(body.kind ?? "", body.common)) return err(422, "VALIDATION_ERROR", "common 参数非法（多传字段 / video_mode 缺失或不匹配 kind）");
+    const perRow = batchPerRow(body.common?.resolution);
+    const total = perRow * rows.length;
+    return ok({ total_rows: rows.length, per_row_credits: perRow, total_credits: total, insufficient: total > BATCH_BALANCE, balance_credits: BATCH_BALANCE });
+  }),
+  http.post(`${BASE}/api/v1/batches`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as { kind?: string; rows?: unknown[]; common?: Record<string, unknown> };
+    const rows = body.rows ?? [];
+    if (invalidBatchRows(body.kind ?? "", rows)) return err(422, "BATCH_ROW_INVALID", "批次行校验失败");
+    if (invalidBatchCommon(body.kind ?? "", body.common)) return err(422, "VALIDATION_ERROR", "common 参数非法");
+    const total = batchPerRow((body.common?.resolution as string) ?? undefined) * rows.length;
+    if (total > BATCH_BALANCE) return err(422, "INSUFFICIENT_CREDITS", "余额不足，无法提交本批");
+    const id = `batch-${++batchSeq}`;
+    const tasks: MockBatchTask[] = rows.map((_, i) => ({ task_id: `${id}-t${i}`, row_index: i, status: "queued", video_url: null, error: null, error_code: null, error_message: null }));
+    batchStore.set(id, { id, kind: body.kind ?? "ecom_table", status: "running", total: rows.length, succeeded: 0, failed: 0, common_params: body.common ?? {}, created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString(), tasks, _polls: 0, _cancelled: false });
+    // 后端返回 202 ACCEPTED。
+    return HttpResponse.json({ data: { batch_id: id, task_ids: tasks.map((t) => t.task_id) }, error: null, request_id: "mock-req" }, { status: 202 });
+  }),
+  http.get(`${BASE}/api/v1/batches`, () => {
+    const items = [...batchStore.values()].map(summaryOf);
+    return ok({ items, total: items.length });
+  }),
+  http.get(`${BASE}/api/v1/batches/:id`, ({ params }) => {
+    const b = batchStore.get(params.id as string);
+    if (!b) return err(404, "BATCH_NOT_FOUND", "批次不存在");
+    if (!b._cancelled) {
+      // 轮询渐进：queued→running→done；末条(total>1)置 failed 演示 partial(v1 无单条重试端点，仅展示失败原因)。
+      b._polls += 1;
+      b.tasks = b.tasks.map((t, i) => {
+        if (t.status === "cancelled" || t.status === "done" || t.status === "failed") return t;
+        if (b._polls >= i + 2) {
+          const isLastFailing = b.total > 1 && i === b.total - 1;
+          return isLastFailing
+            ? { ...t, status: "failed", error: "生成失败", error_code: "BATCH_IMAGE_DOWNLOAD_FAILED", error_message: "外链图下载失败，请改用本地上传" }
+            : { ...t, status: "done", video_url: "https://mock.local/v.mp4" };
+        }
+        if (b._polls >= i + 1) return { ...t, status: "running" };
+        return t;
+      });
+      b.succeeded = b.tasks.filter((t) => t.status === "done").length;
+      b.failed = b.tasks.filter((t) => t.status === "failed").length;
+      b.status = aggregateBatchStatus(b.tasks);
+      b.updated_at = new Date(0).toISOString();
+    }
+    return ok({ batch: summaryOf(b), tasks: b.tasks });
+  }),
+  http.post(`${BASE}/api/v1/batches/:id/cancel`, ({ params }) => {
+    const b = batchStore.get(params.id as string);
+    if (!b) return err(404, "BATCH_NOT_FOUND", "批次不存在");
+    const cancelled = b.tasks.filter((t) => t.status === "queued").length;
+    const running = b.tasks.filter((t) => t.status === "running").length;
+    b.tasks = b.tasks.map((t) => (t.status === "queued" ? { ...t, status: "cancelled" } : t)); // 已跑不中断(best-effort)
+    b._cancelled = true; // 停止轮询渐进
+    b.status = aggregateBatchStatus(b.tasks);
+    // 后端 BatchCancelResponse = {batch_id, cancelled, running}。
+    return ok({ batch_id: b.id, cancelled, running });
   })
 ];

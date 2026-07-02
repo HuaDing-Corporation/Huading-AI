@@ -2,7 +2,8 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 
 import { fetchMe } from "@/lib/api/auth";
 import { listAvatarPresets } from "@/lib/api/avatars";
-import { avatarPresetsKey, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, labelSettingsKey, meKey, publishKeys, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
+import { avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, labelSettingsKey, meKey, publishKeys, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
+import { cancelBatch, createBatch, estimateBatch, getBatch, listBatches } from "@/lib/api/batches";
 import { getQuota } from "@/lib/api/quota";
 import { clearCopyDrafts, deleteCopyDraft, generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
 import { generateScript } from "@/lib/api/scripts";
@@ -18,6 +19,7 @@ import { getLabelSettings, updateLabelSettings } from "@/lib/api/label-settings"
 import { createPublishDrafts, deletePublishRecord, listPublishPlatforms, listPublishRecords, markPublished } from "@/lib/api/publish";
 import { clearVideos, createVideo, deleteVideo, estimateVideo, generateScenePrompt, getVideo, listVideos, listVideosPage } from "@/lib/api/videos";
 import type {
+  BatchRequest,
   CopyDraftCreateRequest,
   CopyRewriteRequest,
   CopyTitlesRequest,
@@ -286,4 +288,50 @@ export function useMe() {
 export function useQuota() {
   const { session } = useAuth();
   return useQuery({ queryKey: quotaKey, queryFn: getQuota, enabled: !!session });
+}
+
+// ── 批量生产中心 (BATCH-PROD-UI-0001) ──
+export function useEstimateBatch() {
+  return useMutation({ mutationFn: (input: BatchRequest) => estimateBatch(input) });
+}
+export function useCreateBatch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: BatchRequest) => createBatch(input),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: batchKeys.list() })
+  });
+}
+export function useBatches() {
+  const { session } = useAuth();
+  return useQuery({
+    queryKey: batchKeys.list(),
+    queryFn: () => listBatches(),
+    enabled: !!session,
+    // 有进行中批次则轮询(≥5s)，全终态停；后台标签页由 React Query 默认(refetchIntervalInBackground:false)暂停。
+    refetchInterval: (query) => (query.state.data?.some((b) => b.status === "running") ? 5000 : false)
+  });
+}
+export function useBatch(id: string | null) {
+  const { session } = useAuth();
+  return useQuery({
+    queryKey: batchKeys.detail(id ?? ""),
+    queryFn: () => getBatch(id as string),
+    enabled: !!session && !!id,
+    // 组视图轮询：子任务未全终态则每 5s；全 done/failed/cancelled 停。页面不活跃自动暂停。
+    refetchInterval: (query) => {
+      const tasks = query.state.data?.tasks ?? [];
+      const active = tasks.some((t) => t.status === "queued" || t.status === "running");
+      return active ? 5000 : false;
+    }
+  });
+}
+export function useCancelBatch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => cancelBatch(id),
+    onSuccess: (_d, id) => {
+      void qc.invalidateQueries({ queryKey: batchKeys.detail(id) });
+      void qc.invalidateQueries({ queryKey: batchKeys.list() });
+    }
+  });
 }
