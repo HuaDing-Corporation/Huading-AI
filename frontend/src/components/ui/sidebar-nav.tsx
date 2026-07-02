@@ -1,43 +1,63 @@
 "use client";
 
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import type { LucideIcon } from "lucide-react";
 
+import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
 
 export interface NavItem {
   key: string;
   label: string;
   icon: LucideIcon;
+  /** 已开通路由的路径；无 href = 占位项（不导航、不高亮）。 */
+  href?: string;
 }
 
-/** Vertical nav. Active item = gold-gradient fill + white text + lift shadow;
- *  others are transparent with a soft white hover. */
-export function SidebarNav({
-  items,
-  activeKey,
-  onSelect
-}: {
-  items: NavItem[];
-  activeKey: string;
-  onSelect?: (key: string) => void;
-}) {
+const baseClass =
+  "flex items-center gap-3.5 rounded-field px-4 py-3 text-sm outline-none transition-colors focus-visible:shadow-focus-gold";
+const activeClass = "bg-grad-gold text-ink shadow-nav-active";
+const idleClass = "text-ink-soft hover:bg-glass-soft";
+
+/** 当前路径是否命中该导航项：根路径精确匹配，其余匹配自身或子路径（如 /batch 命中 /batch/x）。 */
+function isActive(pathname: string, href: string): boolean {
+  if (href === "/") return pathname === "/";
+  return pathname === href || pathname.startsWith(href + "/");
+}
+
+/**
+ * 侧边栏导航（BATCH-PROD-UI-0001-FIX3）。active 态由 usePathname 推导（直达 /batch 亦正确高亮），不再本地
+ * state。已开通项渲染 Link 真导航；占位项渲染无导航按钮（保留外观 + 悬停「即将上线」，点击不改路由、不高亮）。
+ */
+export function SidebarNav({ items }: { items: NavItem[] }) {
+  const pathname = usePathname() ?? "";
   return (
     <nav className="flex flex-col gap-1">
       {items.map((item) => {
-        const active = item.key === activeKey;
         const Icon = item.icon;
+        if (item.href) {
+          const active = isActive(pathname, item.href);
+          return (
+            <Link
+              key={item.key}
+              href={item.href}
+              aria-current={active ? "page" : undefined}
+              className={cn(baseClass, active ? activeClass : idleClass)}
+            >
+              <Icon size={19} className="w-5 flex-none" strokeWidth={1.8} />
+              <span>{item.label}</span>
+            </Link>
+          );
+        }
+        // 占位项：保留外观，点击不导航、不高亮；悬停提示「即将上线」。
         return (
           <button
             key={item.key}
             type="button"
-            onClick={() => onSelect?.(item.key)}
-            aria-current={active ? "page" : undefined}
-            className={cn(
-              "flex items-center gap-3.5 rounded-field px-4 py-3 text-sm outline-none transition-colors focus-visible:shadow-focus-gold",
-              active
-                ? "bg-grad-gold text-ink shadow-nav-active"
-                : "text-ink-soft hover:bg-glass-soft"
-            )}
+            title={copy.nav.comingSoon}
+            aria-disabled
+            className={cn(baseClass, idleClass, "cursor-default")}
           >
             <Icon size={19} className="w-5 flex-none" strokeWidth={1.8} />
             <span>{item.label}</span>
