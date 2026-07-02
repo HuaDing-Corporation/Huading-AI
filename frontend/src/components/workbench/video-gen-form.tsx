@@ -15,6 +15,8 @@ import { AiTextField } from "@/components/workbench/ai-text-field";
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
 import { ReferenceImagesPicker } from "@/components/workbench/reference-images-picker";
 import { BgmPicker } from "@/components/workbench/bgm-picker";
+import { AiLabelToggle } from "@/components/label/ai-label-toggle";
+import { useLabelTogglePreference } from "@/lib/preferences/label-toggle";
 import { copy } from "@/lib/copy";
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
@@ -33,6 +35,7 @@ export function VideoGenForm() {
   const [durationSec, setDurationSec] = useState<VideoGenDuration>(5);
   const [resolution, setResolution] = useState<VideoGenResolution>("720p");
   const [bgm, setBgm] = useState<VideoGenBgm | undefined>(undefined);
+  const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）
   const [error, setError] = useState<string | null>(null);
 
   // 真正提交（仅「确定生成」后）；自管错误。createAndTrack 第二参为展示标题=prompt。
@@ -58,7 +61,8 @@ export function VideoGenForm() {
       reference_image_asset_ids: refAssetIds,
       duration_sec: durationSec,
       resolution,
-      bgm // undefined 时 JSON 序列化自动省略（bgm 可选）
+      bgm, // undefined 时 JSON 序列化自动省略（bgm 可选）
+      apply_visible_label: applyLabel
     });
   };
 
@@ -110,6 +114,8 @@ export function VideoGenForm() {
       </fieldset>
 
       <BgmPicker onChange={setBgm} />
+
+      <AiLabelToggle checked={applyLabel} onChange={setApplyLabel} />
 
       {error && (
         <p role="alert" className="mb-3 rounded-field bg-error-bg px-3 py-2 text-[13px] text-error-fg">

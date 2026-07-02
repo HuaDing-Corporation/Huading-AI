@@ -26,11 +26,15 @@ vi.mock("@/lib/videos/tasks-context", () => ({ useVideoTasks: () => taskMocks })
 import { NewVideoForm } from "./new-video-form";
 
 beforeEach(() => {
+  window.localStorage.clear(); // 每用例干净起点：AI 标识开关默认关
   URL.createObjectURL = vi.fn(() => "blob:mock");
   URL.revokeObjectURL = vi.fn();
   uploadMock.mutateAsync.mockResolvedValue({ asset_id: "av-1" });
 });
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  vi.clearAllMocks();
+  window.localStorage.clear(); // 清 AI 标识开关记忆，隔离用例
+});
 
 function uploadAvatar() {
   const input = document.querySelector('input[type="file"]') as HTMLInputElement;
@@ -56,8 +60,17 @@ describe("NewVideoForm 字幕样式 (ORAL-PROD-UI-0001)", () => {
     await submit();
     const [req] = taskMocks.createAndTrack.mock.calls[0];
     expect(req.subtitle_style).toBeUndefined();
-    // 仍保留 0001 默认字段
+    // 仍保留 0001 默认字段 + AI 标识默认关(LABEL-TOGGLE-UI-0001)
     expect(req).toMatchObject({ topic: "主题X", voice_id: "v1", avatar_asset_id: "av-1", subtitle_enabled: true });
+    expect(req.apply_visible_label).toBe(false);
+  });
+
+  it("开启 AI 标识开关 → 提交体 apply_visible_label:true（承重）", async () => {
+    render(<NewVideoForm />);
+    await fillRequired();
+    fireEvent.click(screen.getByRole("switch")); // 开启 AI 生成标识
+    await submit();
+    expect(taskMocks.createAndTrack.mock.calls[0][0].apply_visible_label).toBe(true);
   });
 
   it("选字幕预设 → 提交体并入 subtitle_style { template_id }", async () => {

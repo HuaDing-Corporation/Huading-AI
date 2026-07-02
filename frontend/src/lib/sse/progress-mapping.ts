@@ -23,6 +23,8 @@ export interface TrackedTask {
    * the UI hides "retry" instead of calling retryTask and failing silently (P2-1).
    */
   retryable?: boolean;
+  /** 该任务是否带 AI 显式标识（LABEL-TOGGLE-UI-0001）→ 历史卡片徽标数据源。 */
+  applyVisibleLabel?: boolean;
 }
 
 export const TERMINAL: UiStatus[] = ["done", "failed"];
@@ -111,6 +113,7 @@ export function fromVideoRead(read: VideoDetail | VideoListItem): TrackedTask {
     thumbnailUrl: read.thumbnail_url ?? null,
     durationSec: detail.duration_ms != null ? detail.duration_ms / 1000 : null,
     error: detail.error_message ?? null,
-    errorCode: read.error_code ?? null
+    errorCode: read.error_code ?? null,
+    applyVisibleLabel: read.apply_visible_label ?? false
   };
 }

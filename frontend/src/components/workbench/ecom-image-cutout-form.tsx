@@ -42,15 +42,15 @@ export function EcomImageCutoutForm() {
       icon={<Eraser size={18} strokeWidth={1.8} />}
       submitting={cutout.isPending || cutoutBatch.isPending}
       resultDecoration={submittedBg === "transparent" ? checkerStyle : undefined}
-      onSubmitSingle={async (assetId) => {
+      onSubmitSingle={async (assetId, applyVisibleLabel) => {
         setSubmittedBg(background);
-        const res = await cutout.mutateAsync({ source_asset_id: assetId, background });
+        const res = await cutout.mutateAsync({ source_asset_id: assetId, background, apply_visible_label: applyVisibleLabel });
         return [res.task_id];
       }}
-      onSubmitBatch={async (assetIds) => {
+      onSubmitBatch={async (assetIds, applyVisibleLabel) => {
         setSubmittedBg(background);
         const res = await cutoutBatch.mutateAsync({
-          items: assetIds.map((id) => ({ source_asset_id: id, background }))
+          items: assetIds.map((id) => ({ source_asset_id: id, background, apply_visible_label: applyVisibleLabel }))
         });
         return res.tasks.map((t) => t.task_id);
       }}

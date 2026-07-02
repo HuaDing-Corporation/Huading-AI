@@ -41,9 +41,13 @@ const setPrompt = (v: string) => fireEvent.change(screen.getByPlaceholderText(co
 const generateBtn = () => screen.getByRole("button", { name: copy.workbench.generate });
 
 beforeEach(() => {
+  window.localStorage.clear(); // 每用例干净起点：AI 标识开关默认关
   taskMocks.createAndTrack.mockResolvedValue("vid-1");
 });
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  vi.clearAllMocks();
+  window.localStorage.clear(); // 清 AI 标识开关记忆，隔离用例
+});
 
 describe("VideoGenForm (视频生成 编排)", () => {
   it("生成禁用直到 参考图 + prompt 齐全（带分步提示）", () => {
@@ -78,6 +82,27 @@ describe("VideoGenForm (视频生成 编排)", () => {
     });
     expect(request.bgm).toBeUndefined();
     expect(topic).toBe("赛博城市夜景");
+  });
+
+  it("默认关：提交体 apply_visible_label:false（AI 标识默认关）", async () => {
+    render(<VideoGenForm />);
+    fireEvent.click(screen.getByText("set-refs"));
+    setPrompt("p");
+    fireEvent.click(generateBtn());
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    expect(taskMocks.createAndTrack.mock.calls[0][0].apply_visible_label).toBe(false);
+  });
+
+  it("开启 AI 标识开关 → 提交体 apply_visible_label:true（承重）", async () => {
+    render(<VideoGenForm />);
+    fireEvent.click(screen.getByText("set-refs"));
+    setPrompt("p");
+    fireEvent.click(screen.getByRole("switch")); // 开启 AI 生成标识
+    fireEvent.click(generateBtn());
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    expect(taskMocks.createAndTrack.mock.calls[0][0].apply_visible_label).toBe(true);
   });
 
   it("选时长 10 + 分辨率 480p → 提交体随之", async () => {

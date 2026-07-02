@@ -38,6 +38,13 @@ describe("progress-mapping", () => {
     expect(t.status).toBe("done");
   });
 
+  // LABEL-TOGGLE-UI-0001：徽标服务端数据源 apply_visible_label → applyVisibleLabel（两态 + 缺省兜底）。
+  it("maps apply_visible_label → applyVisibleLabel (true/false/缺省→false)", () => {
+    expect(fromVideoRead({ id: "a", status: "done", progress: 100, topic: "T", created_at: "", apply_visible_label: true }).applyVisibleLabel).toBe(true);
+    expect(fromVideoRead({ id: "b", status: "done", progress: 100, topic: "T", created_at: "", apply_visible_label: false }).applyVisibleLabel).toBe(false);
+    expect(fromVideoRead({ id: "c", status: "done", progress: 100, topic: "T", created_at: "" }).applyVisibleLabel).toBe(false);
+  });
+
   it("knows terminal states", () => {
     expect(TERMINAL.includes("done")).toBe(true);
     expect(TERMINAL.includes("running")).toBe(false);

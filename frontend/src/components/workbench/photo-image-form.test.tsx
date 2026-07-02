@@ -56,7 +56,8 @@ describe("PhotoImageForm (图片生成 / 修改)", () => {
       video_mode: "photo",
       image_key: undefined,
       image_size: "1024x1024",
-      image_quality: "medium"
+      image_quality: "medium",
+      apply_visible_label: false
     });
     // photo body never carries the video-only fields.
     expect(request).not.toHaveProperty("voice_id");

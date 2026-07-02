@@ -66,6 +66,7 @@ describe("VideoDetail", () => {
         download_url: "https://mock.local/v.mp4?dl=1",
         thumbnail_url: null,
         duration_ms: 30000,
+        apply_visible_label: true,
         created_at: "2026-06-18T00:00:00Z"
       },
       error: null,

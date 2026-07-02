@@ -361,7 +361,10 @@ export const copy = {
     saving: "保存中…",
     saved: "已保存",
     // 产物处知情提示
-    productNotice: "已含 AI 生成标识"
+    productNotice: "已含 AI 生成标识",
+    // AI 生成标识开关（LABEL-TOGGLE-UI-0001）：六大面板统一，默认关；不弹窗不阻断
+    toggleLabel: "AI 生成标识",
+    toggleHint: "关闭后，发布到抖音/快手等平台请自行完成 AI 内容声明"
   },
   // 发布中心 (PUBLISH-UI-0001)
   publish: {

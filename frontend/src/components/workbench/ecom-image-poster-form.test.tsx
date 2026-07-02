@@ -33,6 +33,7 @@ const TEMPLATES = [
 ];
 
 beforeEach(() => {
+  window.localStorage.clear(); // 每用例干净起点：AI 标识开关默认关
   URL.createObjectURL = vi.fn(() => "blob:mock");
   URL.revokeObjectURL = vi.fn();
   uploadMock.isPending = false;
@@ -52,7 +53,10 @@ beforeEach(() => {
     ]
   });
 });
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  vi.clearAllMocks();
+  window.localStorage.clear(); // 清 AI 标识开关记忆，隔离用例
+});
 
 describe("EcomImagePosterForm (电商图 · 营销海报)", () => {
   it("版式必填门：上传后未选版式仍禁用生成", async () => {
@@ -76,14 +80,35 @@ describe("EcomImagePosterForm (电商图 · 营销海报)", () => {
         source_asset_id: "asset-1",
         template_id: "promo_bold",
         title: "",
-        subtitle: ""
+        subtitle: "",
+        apply_visible_label: false
       })
     );
-    expect(trackExistingMock).toHaveBeenCalledWith("t-1", expect.any(String), "photo");
+    expect(trackExistingMock).toHaveBeenCalledWith("t-1", expect.any(String), "photo", false);
     expect(await screen.findByRole("img", { name: copy.workbench.ecomResultsLabel })).toHaveAttribute(
       "src",
       "https://mock.local/poster-promo_bold.png"
     );
+  });
+
+  it("开启 AI 标识开关 → poster 提交 apply_visible_label:true + trackExisting 第4参 true（承重）", async () => {
+    tasksMock.tasks = [doneTask("t-1", "https://mock.local/poster-promo_bold.png")];
+    render(<EcomImagePosterForm />);
+    fireEvent.change(document.querySelector("#ecom-poster-source")!, { target: { files: [png("p.png")] } });
+    fireEvent.click(screen.getByRole("button", { name: "大促爆款" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "生成" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("switch")); // 开启 AI 生成标识
+    fireEvent.click(screen.getByRole("button", { name: "生成" }));
+    await waitFor(() =>
+      expect(posterMock.mutateAsync).toHaveBeenCalledWith({
+        source_asset_id: "asset-1",
+        template_id: "promo_bold",
+        title: "",
+        subtitle: "",
+        apply_visible_label: true
+      })
+    );
+    expect(trackExistingMock).toHaveBeenCalledWith("t-1", expect.any(String), "photo", true);
   });
 
   it("标题 + 自定义一行：提交带 title / subtitle", async () => {
@@ -102,7 +127,8 @@ describe("EcomImagePosterForm (电商图 · 营销海报)", () => {
         source_asset_id: "asset-1",
         template_id: "promo_bold",
         title: "年中大促 全场5折",
-        subtitle: "限时3天 错过再等一年"
+        subtitle: "限时3天 错过再等一年",
+        apply_visible_label: false
       })
     );
   });
@@ -140,8 +166,8 @@ describe("EcomImagePosterForm (电商图 · 营销海报)", () => {
     await waitFor(() => expect(posterBatchMock.mutateAsync).toHaveBeenCalledTimes(1));
     expect(posterBatchMock.mutateAsync.mock.calls[0][0]).toEqual({
       items: [
-        { source_asset_id: "asset-1", template_id: "promo_bold", title: "", subtitle: "" },
-        { source_asset_id: "asset-1", template_id: "promo_bold", title: "", subtitle: "" }
+        { source_asset_id: "asset-1", template_id: "promo_bold", title: "", subtitle: "", apply_visible_label: false },
+        { source_asset_id: "asset-1", template_id: "promo_bold", title: "", subtitle: "", apply_visible_label: false }
       ]
     });
     expect(trackExistingMock).toHaveBeenCalledTimes(2);

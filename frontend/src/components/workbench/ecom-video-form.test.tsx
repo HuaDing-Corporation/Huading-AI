@@ -96,7 +96,8 @@ describe("EcomVideoForm (电商带货 i2v)", () => {
       duration_sec: 30,
       speed: 1,
       aspect_ratio: "9:16",
-      subtitle_enabled: true
+      subtitle_enabled: true,
+      apply_visible_label: false
     });
     expect(topic).toBe("316 不锈钢保温杯");
     // i2v must NOT carry the avatar field.
