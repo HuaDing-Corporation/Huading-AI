@@ -1,5 +1,6 @@
 import { apiFetch } from "@/lib/api/client";
 import type {
+  BatchCancelResponse,
   BatchCreateResponse,
   BatchDetail,
   BatchEstimateResponse,
@@ -35,16 +36,8 @@ export function getBatch(id: string): Promise<BatchDetail> {
   return apiFetch<BatchDetail>(`/api/v1/batches/${id}`, { method: "GET" });
 }
 
-/** 取消批次：未开跑子任务 cancelled+退分；已跑不中断（best-effort）。 */
-export function cancelBatch(id: string): Promise<BatchDetail> {
-  return apiFetch<BatchDetail>(`/api/v1/batches/${id}/cancel`, { method: "POST" });
+/** 取消批次：未开跑子任务 cancelled+退分；已跑不中断（best-effort）。返回 {batch_id, cancelled, running}。 */
+export function cancelBatch(id: string): Promise<BatchCancelResponse> {
+  return apiFetch<BatchCancelResponse>(`/api/v1/batches/${id}/cancel`, { method: "POST" });
 }
-
-/** 单条重试（seam 未定端点，据「失败可单条重试」推断；flag 待后端核）。 */
-export function retryBatchTask(batchId: string, taskId: string): Promise<BatchTaskRetryResponse> {
-  return apiFetch<BatchTaskRetryResponse>(`/api/v1/batches/${batchId}/tasks/${taskId}/retry`, { method: "POST" });
-}
-export interface BatchTaskRetryResponse {
-  task_id: string;
-  status: string;
-}
+// 注：后端 v1 无「批内单条重试」端点(estimate/create/list/detail/cancel 五端点)；批内重试记 P2 小包。

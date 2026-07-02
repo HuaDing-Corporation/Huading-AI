@@ -594,15 +594,19 @@ export interface PromptSetRow {
 }
 export type BatchRow = EcomTableRow | PromptSetRow;
 
-// 公共参数（common）
+// 公共参数（common）—— 逐字对齐后端 BatchCommonParams(extra=forbid)：仅允许以下 11 字段，多传 422。
 export interface BatchCommon {
-  video_mode?: string; // ecom_table→seedance_i2v / prompt_set→video_gen（seam；flag 待后端核）
+  video_mode?: string; // 必填(提交时)：ecom_table→seedance_i2v / prompt_set→video_gen（后端 model_validator 强校验）
   duration_sec?: number;
-  resolution?: string; // 480p | 720p | 1080p
+  resolution?: string; // 480p | 720p | 1080p（默认 720p）
+  reference_image_asset_ids?: string[]; // prompt_set 参考图
+  bgm?: VideoGenBgm; // 同单条 BgmSelectionRequest 形状
+  voice_id?: string;
+  speed?: number; // 0.5–2.0
+  aspect_ratio?: string; // 9:16 | 16:9 | 1:1（默认 9:16）
+  subtitle_enabled?: boolean; // 默认 true
   apply_visible_label?: boolean; // AI 标识开关（默认关，复用 LABEL-TOGGLE）
-  bgm?: VideoGenBgm;
   size?: string;
-  reference_image_asset_ids?: string[]; // prompt_set 参考图（沿用现有字段）
 }
 
 // POST /batches/estimate + POST /batches 共用请求体
@@ -624,7 +628,7 @@ export interface BatchCreateResponse {
   batch_id: string;
   task_ids: string[];
 }
-// 批次聚合（列表项 + 详情的 batch）
+// 批次聚合（BatchSummary：列表项 + 详情的 batch）—— 逐字对齐后端。
 export interface BatchJob {
   id: string;
   kind: BatchKind;
@@ -632,6 +636,7 @@ export interface BatchJob {
   total: number;
   succeeded: number;
   failed: number;
+  common_params: Record<string, unknown>; // 创建时的 common 快照
   created_at: string;
   updated_at: string;
 }
@@ -646,8 +651,16 @@ export interface BatchTask {
   status: string; // queued | running | done | failed | cancelled
   video_url?: string | null;
   error?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
 }
 export interface BatchDetail {
   batch: BatchJob;
   tasks: BatchTask[];
+}
+// POST /batches/{id}/cancel → 逐字对齐后端 BatchCancelResponse。
+export interface BatchCancelResponse {
+  batch_id: string;
+  cancelled: number;
+  running: number;
 }

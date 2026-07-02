@@ -47,12 +47,15 @@ export async function parseEcomTable(file: File): Promise<EcomRowDraft[]> {
   return parseEcomWorkbook(buf);
 }
 
-/** 单行必填校验（对齐 seam 行契约）：商品名/卖点/图（URL 或已上传 asset_id）。返回错误字段列表。 */
+/**
+ * 单行必填校验（逐字对齐后端 services/batches.py）：商品名/卖点必填；图 = image_asset_id 与 image_url
+ * **恰好二选一**（都给或都不给均非法，对齐后端 XOR + BATCH_ROW_INVALID）。返回错误字段列表。
+ */
 export function validateEcomRow(row: EcomRowDraft): Array<"product_name" | "selling_points" | "image"> {
   const errs: Array<"product_name" | "selling_points" | "image"> = [];
   if (!row.product_name?.trim()) errs.push("product_name");
   if (!row.selling_points?.trim()) errs.push("selling_points");
-  if (!row.image_url?.trim() && !row.image_asset_id) errs.push("image");
+  if (Boolean(row.image_url?.trim()) === Boolean(row.image_asset_id)) errs.push("image"); // XOR：恰好一个
   return errs;
 }
 

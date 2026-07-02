@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ApiError } from "./client";
-import { cancelBatch, createBatch, estimateBatch, getBatch, listBatches, retryBatchTask } from "./batches";
+import { cancelBatch, createBatch, estimateBatch, getBatch, listBatches } from "./batches";
 import type { BatchRequest } from "./types";
 
 const ecomReq = (n: number, resolution = "720p"): BatchRequest => ({
@@ -32,16 +32,37 @@ describe("batches API ↔ MSW（mock 忠实，据 seam 契约）", () => {
     expect(big.insufficient).toBe(true);
   });
 
-  it("estimate/create 422：空 / >30 / 缺必填", async () => {
-    expect(await status(() => estimateBatch({ kind: "ecom_table", rows: [], common: {} }))).toBe(422);
+  it("行校验 422 BATCH_ROW_INVALID：空 / >30 / 缺必填 / 图非二选一(都给或都不给) / 空 prompt", async () => {
+    const codeOf = async (fn: () => Promise<unknown>) => {
+      try {
+        await fn();
+        return "ok";
+      } catch (e) {
+        return (e as ApiError)?.code;
+      }
+    };
+    expect(await status(() => estimateBatch({ kind: "ecom_table", rows: [], common: { video_mode: "seedance_i2v" } }))).toBe(422);
     expect(await status(() => estimateBatch(ecomReq(31)))).toBe(422);
-    expect(
-      await status(() =>
-        createBatch({ kind: "ecom_table", rows: [{ product_name: "", selling_points: "s", image_url: "u" }], common: {} })
-      )
-    ).toBe(422);
-    // prompt_set 空 prompt
-    expect(await status(() => createBatch({ kind: "prompt_set", rows: [{ prompt: "" }], common: {} }))).toBe(422);
+    // 都不给图
+    expect(await codeOf(() => createBatch({ kind: "ecom_table", rows: [{ product_name: "a", selling_points: "s" }], common: { video_mode: "seedance_i2v" } }))).toBe("BATCH_ROW_INVALID");
+    // 都给图（image_asset_id + image_url）→ XOR 违反
+    expect(await codeOf(() => createBatch({ kind: "ecom_table", rows: [{ product_name: "a", selling_points: "s", image_asset_id: "id", image_url: "u" } as never], common: { video_mode: "seedance_i2v" } }))).toBe("BATCH_ROW_INVALID");
+    expect(await codeOf(() => createBatch({ kind: "prompt_set", rows: [{ prompt: "" }], common: { video_mode: "video_gen" } }))).toBe("BATCH_ROW_INVALID");
+  });
+
+  it("common extra=forbid：多传字段 / 缺 video_mode / kind↔video_mode 不匹配 → 422 BATCH_INVALID", async () => {
+    const codeOf = async (fn: () => Promise<unknown>) => {
+      try {
+        await fn();
+        return "ok";
+      } catch (e) {
+        return (e as ApiError)?.code;
+      }
+    };
+    const rows = [{ prompt: "a" }];
+    expect(await codeOf(() => createBatch({ kind: "prompt_set", rows, common: { video_mode: "video_gen", foo: 1 } as never }))).toBe("BATCH_INVALID");
+    expect(await codeOf(() => createBatch({ kind: "prompt_set", rows, common: {} as never }))).toBe("BATCH_INVALID");
+    expect(await codeOf(() => createBatch({ kind: "prompt_set", rows, common: { video_mode: "seedance_i2v" } }))).toBe("BATCH_INVALID");
   });
 
   it("create：充足→{batch_id,task_ids}；余额不足→422 INSUFFICIENT_CREDITS", async () => {
@@ -59,16 +80,17 @@ describe("batches API ↔ MSW（mock 忠实，据 seam 契约）", () => {
     expect((caught as ApiError).code).toBe("INSUFFICIENT_CREDITS");
   });
 
-  it("detail 轮询渐进：多次 GET → 子任务推进到 done，末条 failed(partial_failed)", async () => {
+  it("detail 轮询渐进：多次 GET → done，末条 failed(partial_failed) + error_code/error_message", async () => {
     const { batch_id } = await createBatch(ecomReq(3, "720p"));
     let detail = await getBatch(batch_id);
     expect(detail.tasks).toHaveLength(3);
-    // 多轮询推进到全终态
     for (let i = 0; i < 8 && detail.batch.status === "running"; i++) detail = await getBatch(batch_id);
-    expect(detail.batch.status).toBe("partial_failed"); // 末条 failed，其余 done
+    expect(detail.batch.status).toBe("partial_failed");
+    expect(detail.batch.common_params).toBeTruthy(); // BatchSummary 含 common_params
     expect(detail.tasks.filter((t) => t.status === "done").length).toBe(2);
     const failed = detail.tasks.find((t) => t.status === "failed");
-    expect(failed?.error).toBeTruthy();
+    expect(failed?.error_code).toBe("BATCH_IMAGE_DOWNLOAD_FAILED");
+    expect(failed?.error_message).toBeTruthy();
   });
 
   it("list 含已建批次", async () => {
@@ -77,33 +99,13 @@ describe("batches API ↔ MSW（mock 忠实，据 seam 契约）", () => {
     expect(items.some((b) => b.id === batch_id)).toBe(true);
   });
 
-  it("cancel：未开跑 queued → cancelled", async () => {
+  it("cancel：返回 {batch_id, cancelled, running}（逐字对齐后端）；queued → cancelled", async () => {
     const { batch_id } = await createBatch(ecomReq(3));
-    const after = await cancelBatch(batch_id); // 刚建全 queued → 全 cancelled
+    const res = await cancelBatch(batch_id); // 刚建全 queued → 全 cancelled
+    expect(res).toEqual({ batch_id, cancelled: 3, running: 0 });
+    const after = await getBatch(batch_id);
     expect(after.tasks.every((t) => t.status === "cancelled")).toBe(true);
     expect(after.batch.status).toBe("cancelled");
-  });
-
-  it("retry：failed 子任务 → running", async () => {
-    const { batch_id } = await createBatch(ecomReq(2, "720p"));
-    let detail = await getBatch(batch_id);
-    for (let i = 0; i < 8 && detail.batch.status === "running"; i++) detail = await getBatch(batch_id);
-    const failed = detail.tasks.find((t) => t.status === "failed");
-    expect(failed).toBeTruthy();
-    const r = await retryBatchTask(batch_id, failed!.task_id);
-    expect(r.status).toBe("running");
-  });
-
-  it("retry → 下轮轮询恢复 done → completed（重试可恢复，mock 忠实）", async () => {
-    const { batch_id } = await createBatch(ecomReq(2, "720p"));
-    let detail = await getBatch(batch_id);
-    for (let i = 0; i < 8 && detail.batch.status === "running"; i++) detail = await getBatch(batch_id);
-    const failed = detail.tasks.find((t) => t.status === "failed")!;
-    await retryBatchTask(batch_id, failed.task_id);
-    let after = await getBatch(batch_id);
-    for (let i = 0; i < 6 && after.batch.status !== "completed"; i++) after = await getBatch(batch_id);
-    expect(after.batch.status).toBe("completed");
-    expect(after.tasks.every((t) => t.status === "done")).toBe(true);
   });
 
   it("404：未知批次", async () => {

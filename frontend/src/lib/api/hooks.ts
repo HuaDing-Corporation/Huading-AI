@@ -3,7 +3,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import { fetchMe } from "@/lib/api/auth";
 import { listAvatarPresets } from "@/lib/api/avatars";
 import { avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, labelSettingsKey, meKey, publishKeys, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
-import { cancelBatch, createBatch, estimateBatch, getBatch, listBatches, retryBatchTask } from "@/lib/api/batches";
+import { cancelBatch, createBatch, estimateBatch, getBatch, listBatches } from "@/lib/api/batches";
 import { getQuota } from "@/lib/api/quota";
 import { clearCopyDrafts, deleteCopyDraft, generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
 import { generateScript } from "@/lib/api/scripts";
@@ -333,12 +333,5 @@ export function useCancelBatch() {
       void qc.invalidateQueries({ queryKey: batchKeys.detail(id) });
       void qc.invalidateQueries({ queryKey: batchKeys.list() });
     }
-  });
-}
-export function useRetryBatchTask(batchId: string) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (taskId: string) => retryBatchTask(batchId, taskId),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: batchKeys.detail(batchId) })
   });
 }

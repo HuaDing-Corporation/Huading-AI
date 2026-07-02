@@ -29,10 +29,11 @@ describe("ecom-table 解析 + 校验", () => {
     expect(rows[0]).toMatchObject({ product_name: "Cup", selling_points: "steel", image_url: "http://x/c.png" });
   });
 
-  it("validateEcomRow：必填 商品名/卖点/图（URL 或 asset_id）", () => {
+  it("validateEcomRow：必填 商品名/卖点 + 图恰好二选一(XOR，对齐后端)", () => {
     expect(validateEcomRow({ product_name: "", selling_points: "x", image_url: "u" })).toEqual(["product_name"]);
     expect(validateEcomRow({ product_name: "a", selling_points: "", image_url: "u" })).toEqual(["selling_points"]);
-    expect(validateEcomRow({ product_name: "a", selling_points: "b" })).toEqual(["image"]);
+    expect(validateEcomRow({ product_name: "a", selling_points: "b" })).toEqual(["image"]); // 都不给
+    expect(validateEcomRow({ product_name: "a", selling_points: "b", image_url: "u", image_asset_id: "id" })).toEqual(["image"]); // 都给 → XOR 违反
     expect(validateEcomRow({ product_name: "a", selling_points: "b", image_url: "u" })).toEqual([]);
     expect(validateEcomRow({ product_name: "a", selling_points: "b", image_asset_id: "id" })).toEqual([]);
   });

@@ -1,9 +1,9 @@
 "use client";
 
-import { ChevronLeft, Download, RotateCcw } from "lucide-react";
+import { ChevronLeft, Download } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
-import { useBatch, useCancelBatch, useRetryBatchTask } from "@/lib/api/hooks";
+import { useBatch, useCancelBatch } from "@/lib/api/hooks";
 import type { BatchStatus } from "@/lib/api/types";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
@@ -26,7 +26,6 @@ const TASK_STATUS_LABEL: Record<string, string> = {
 export function BatchDetail({ batchId, onBack }: { batchId: string; onBack: () => void }) {
   const { data, isLoading, isError, refetch } = useBatch(batchId);
   const cancel = useCancelBatch();
-  const retry = useRetryBatchTask(batchId);
   const [error, setError] = useState<string | null>(null);
 
   const batch = data?.batch;
@@ -41,15 +40,6 @@ export function BatchDetail({ batchId, onBack }: { batchId: string; onBack: () =
       setError(errorText(err));
     }
   };
-  const onRetry = async (taskId: string) => {
-    setError(null);
-    try {
-      await retry.mutateAsync(taskId);
-    } catch (err) {
-      setError(errorText(err));
-    }
-  };
-
   return (
     <Card animateIn>
       <div className="mb-[14px] flex flex-wrap items-center justify-between gap-2">
@@ -103,7 +93,9 @@ export function BatchDetail({ batchId, onBack }: { batchId: string; onBack: () =
                   <span className={`text-[12.5px] ${t.status === "failed" ? "text-error-fg" : "text-ink"}`}>
                     {TASK_STATUS_LABEL[t.status] ?? t.status}
                   </span>
-                  {t.status === "failed" && t.error && <p className="mt-0.5 text-[12px] text-error-fg">{t.error}</p>}
+                  {t.status === "failed" && (t.error_message || t.error) && (
+                    <p className="mt-0.5 text-[12px] text-error-fg">{t.error_message || t.error}</p>
+                  )}
                   {t.status === "done" && t.video_url && (
                     <div className="mt-1.5 flex flex-wrap items-center gap-2">
                       <video controls preload="metadata" src={t.video_url} className="max-h-[180px] w-full rounded-field border border-line-gold bg-black/5" />
@@ -113,16 +105,6 @@ export function BatchDetail({ batchId, onBack }: { batchId: string; onBack: () =
                     </div>
                   )}
                 </div>
-                {t.status === "failed" && (
-                  <button
-                    type="button"
-                    onClick={() => void onRetry(t.task_id)}
-                    disabled={retry.isPending}
-                    className="inline-flex flex-none items-center gap-1 rounded-field border border-line-gold bg-glass-fill px-2.5 py-1.5 text-[12px] text-gold-deep transition-colors hover:bg-glass-hover disabled:opacity-50"
-                  >
-                    <RotateCcw size={13} strokeWidth={2} /> {retry.isPending ? copy.batch.taskRetrying : copy.batch.taskRetry}
-                  </button>
-                )}
               </li>
             ))}
           </ul>
