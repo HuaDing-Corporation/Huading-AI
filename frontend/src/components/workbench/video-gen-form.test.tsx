@@ -93,6 +93,21 @@ describe("VideoGenForm (视频生成 编排)", () => {
     expect(taskMocks.createAndTrack.mock.calls[0][0]).toMatchObject({ duration_sec: 10, resolution: "480p" });
   });
 
+  it("选分辨率 1080P → 提交体 resolution:1080p（VIDEO-UI-1080P-0001；默认档不变）", async () => {
+    render(<VideoGenForm />);
+    // 三档均在，默认仍选 720P（不改默认）。
+    expect(screen.getByRole("button", { name: "480P" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "1080P" })).toBeInTheDocument();
+    fireEvent.click(screen.getByText("set-refs"));
+    setPrompt("p");
+    fireEvent.click(screen.getByRole("button", { name: "1080P" }));
+    fireEvent.click(generateBtn());
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    expect(taskMocks.createAndTrack.mock.calls[0][0]).toMatchObject({ resolution: "1080p" });
+  });
+
   it("选配乐库 BGM → 提交体含 bgm{source:library,track_id}", async () => {
     render(<VideoGenForm />);
     fireEvent.click(screen.getByText("set-refs"));

@@ -37,7 +37,7 @@ describe("视频生成 配乐库 + video_gen 校验 ↔ MSW（mock 忠实）", (
       { ...baseReq, prompt: "" },
       { ...baseReq, reference_image_asset_ids: Array.from({ length: 10 }, (_, i) => `a${i}`) },
       { ...baseReq, duration_sec: 7 },
-      { ...baseReq, resolution: "1080p" },
+      { ...baseReq, resolution: "2160p" },
       { ...baseReq, bgm: { source: "library", track_id: "nope" } }
     ];
     for (const bad of bads) {
