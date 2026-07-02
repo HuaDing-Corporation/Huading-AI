@@ -143,7 +143,7 @@ class VideoTask(TenantScopedMixin, Base):
             name="ck_video_tasks_progress_range",
         ),
         CheckConstraint(
-            "status IN ('queued', 'running', 'done', 'failed')",
+            "status IN ('queued', 'running', 'done', 'failed', 'cancelled')",
             name="ck_video_tasks_status",
         ),
         CheckConstraint(
@@ -477,9 +477,12 @@ class Brand(Base):
 class BatchJob(Base):
     __tablename__ = "batch_jobs"
     __table_args__ = (
-        CheckConstraint("source_type IN ('manual', 'csv')", name="ck_batch_jobs_source_type"),
         CheckConstraint(
-            "status IN ('queued', 'running', 'done', 'failed')",
+            "kind IN ('ecom_table', 'prompt_set')",
+            name="ck_batch_jobs_kind",
+        ),
+        CheckConstraint(
+            "status IN ('running', 'completed', 'partial_failed', 'failed', 'cancelled')",
             name="ck_batch_jobs_status",
         ),
         Index("ix_batch_jobs_tenant_id", "tenant_id"),
@@ -487,14 +490,17 @@ class BatchJob(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"))
-    created_by: Mapped[str | None] = mapped_column(
+    user_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
-    source_type: Mapped[str] = mapped_column(String(16), default="manual")
-    status: Mapped[str] = mapped_column(String(32), default="queued")
-    total_count: Mapped[int] = mapped_column(Integer, default=0)
-    done_count: Mapped[int] = mapped_column(Integer, default=0)
+    kind: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32), default="running")
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    succeeded: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    common_params: Mapped[dict[str, object]] = mapped_column(_json_type(), default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class TaskAsset(Base):

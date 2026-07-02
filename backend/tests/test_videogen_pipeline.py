@@ -386,7 +386,7 @@ def test_create_video_gen_validates_assets_reserves_quota_and_enqueues(
                 }
             ],
             "task_id": task_id,
-            "queue": "avatar",
+            "queue": "video",
         }
     ]
     with auth_db() as db:

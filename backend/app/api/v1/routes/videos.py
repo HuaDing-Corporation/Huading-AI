@@ -212,6 +212,8 @@ def _api_status(task: VideoTask, snapshot: dict | None = None) -> str:
         return "done"
     if status_value in {"FAILURE", "FAILED"}:
         return "failed"
+    if status_value == "CANCELLED":
+        return "cancelled"
     if status_value in {"STARTED", "PROGRESS", "RUNNING"}:
         return "running"
     return "queued"
@@ -739,7 +741,7 @@ def create_video(
         params = _worker_params(payload)
         params["tenant_id"] = user.tenant_id
         params["video_task_id"] = task_id
-        generate_seedance_i2v_task.apply_async(args=[params], task_id=task_id, queue="avatar")
+        generate_seedance_i2v_task.apply_async(args=[params], task_id=task_id, queue="video")
         return ok(request, VideoAccepted(id=task_id, task_id=task_id, status="queued"))
 
     if payload.video_mode == "video_gen":
@@ -748,7 +750,7 @@ def create_video(
         params = _video_gen_worker_params(payload)
         params["tenant_id"] = user.tenant_id
         params["video_task_id"] = task_id
-        generate_video_gen_task.apply_async(args=[params], task_id=task_id, queue="avatar")
+        generate_video_gen_task.apply_async(args=[params], task_id=task_id, queue="video")
         return ok(request, VideoAccepted(id=task_id, task_id=task_id, status="queued"))
 
     if _is_avatar_talk_requested(payload):
@@ -886,6 +888,8 @@ def _sse_status(status_value: object) -> str:
         return "done"
     if text in {"FAILURE", "FAILED"}:
         return "failed"
+    if text == "CANCELLED":
+        return "cancelled"
     if text in {"STARTED", "PROGRESS", "RUNNING"}:
         return "running"
     if text == "QUEUED":

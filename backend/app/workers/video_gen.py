@@ -20,6 +20,7 @@ from app.core.logging import get_logger
 from app.db.models import Asset, BgmLibraryTrack, TaskAsset, VideoTask
 from app.db.session import SessionLocal
 from app.providers.base import resolve
+from app.services.batches import refresh_batch_job
 from app.services.history import prune_video_history_best_effort
 from app.services.progress import ProgressStore, build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
@@ -321,6 +322,15 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 store=store,
             )
             task = ctx.task
+            if task.status == "cancelled":
+                _store_progress(
+                    store,
+                    scoped_task_id(tenant_id, task_id),
+                    status="cancelled",
+                    progress=task.progress or 0,
+                    step="cancelled",
+                )
+                return {"task_id": task_id, "status": "cancelled"}
             task.status = "running"
             task.started_at = datetime.now(UTC)
             task.progress = 5
@@ -350,6 +360,7 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 actual_seconds=ctx.duration_sec,
                 cost_cents=0,
             )
+            refresh_batch_job(db, batch_id=task.batch_id)
             db.commit()
             _store_progress(
                 store,
@@ -383,6 +394,12 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
             logger.exception("video_gen.failed", task_id=task_id, tenant_id=tenant_id)
             db.rollback()
             error_message = str(exc)
+            failed_task = db.get(VideoTask, task_id)
+            batch_id = (
+                failed_task.batch_id
+                if failed_task is not None and failed_task.tenant_id == tenant_id
+                else None
+            )
             failed_progress = _mark_video_gen_failed(
                 db,
                 tenant_id=tenant_id,
@@ -390,6 +407,7 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 error_message=error_message,
             )
             release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
+            refresh_batch_job(db, batch_id=batch_id)
             db.commit()
             if storage is not None:
                 prune_video_history_best_effort(
