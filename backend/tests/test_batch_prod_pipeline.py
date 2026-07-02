@@ -1,15 +1,44 @@
 from __future__ import annotations
 
+import socket
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+import requests
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from app.api.deps import get_object_storage
+from app.core.config import settings
 from app.db.models import Asset, BatchJob, Subscription, TaskAsset, UsageRecord, VideoTask, Voice
 from app.main import app
+
+
+class _FakeImageResponse:
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+        chunks: list[bytes] | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.headers = headers or {}
+        self._chunks = chunks or []
+        self.closed = False
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"status {self.status_code}")
+
+    def iter_content(self, chunk_size: int):
+        assert chunk_size > 0
+        yield from self._chunks
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _FakeStorage:
@@ -122,6 +151,167 @@ def _stub_batch_tasks(monkeypatch):
     monkeypatch.setattr(batches_route, "generate_seedance_i2v_task", _SeedanceTask)
     monkeypatch.setattr(batches_route, "generate_video_gen_task", _VideoTask)
     return seedance_calls, video_calls
+
+
+def _mock_dns(monkeypatch, ip_address: str) -> None:
+    def fake_getaddrinfo(host, port, *_args, **_kwargs):
+        family = socket.AF_INET6 if ":" in ip_address else socket.AF_INET
+        return [(family, socket.SOCK_STREAM, 6, "", (ip_address, port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+
+def test_download_image_url_rejects_redirect_to_private_ip(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.services.batches import download_image_url_to_asset
+
+    _mock_dns(monkeypatch, "93.184.216.34")
+    calls: list[str] = []
+
+    def fake_get(url: str, **kwargs):
+        calls.append(url)
+        assert kwargs["allow_redirects"] is False
+        return _FakeImageResponse(
+            status_code=302,
+            headers={"location": "https://169.254.169.254/latest/meta-data"},
+        )
+
+    monkeypatch.setattr("requests.get", fake_get)
+    with auth_db() as db:
+        with pytest.raises(RuntimeError, match="地址不安全|not public"):
+            download_image_url_to_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                image_url="https://images.example/product.png",
+                storage=_FakeStorage(),
+            )
+
+    assert calls == ["https://images.example/product.png"]
+
+
+def test_download_image_url_rejects_dns_private_ip_before_request(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.services.batches import download_image_url_to_asset
+
+    _mock_dns(monkeypatch, "10.0.0.8")
+
+    def fake_get(*_args, **_kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("private DNS target must be rejected before requests.get")
+
+    monkeypatch.setattr("requests.get", fake_get)
+    with auth_db() as db:
+        with pytest.raises(RuntimeError, match="地址不安全|not public"):
+            download_image_url_to_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                image_url="https://cdn.example/product.png",
+                storage=_FakeStorage(),
+            )
+
+
+def test_download_image_url_rejects_content_length_over_limit_before_stream(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.services.batches import download_image_url_to_asset
+
+    _mock_dns(monkeypatch, "93.184.216.34")
+    monkeypatch.setattr(settings, "upload_max_bytes", 8)
+
+    def fake_get(_url: str, **kwargs):
+        assert kwargs["stream"] is True
+        assert kwargs["allow_redirects"] is False
+        return _FakeImageResponse(
+            headers={"content-type": "image/png", "content-length": "9"},
+            chunks=[b"not-read"],
+        )
+
+    monkeypatch.setattr("requests.get", fake_get)
+    with auth_db() as db:
+        with pytest.raises(RuntimeError, match="超大小|exceeds"):
+            download_image_url_to_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                image_url="https://images.example/too-large.png",
+                storage=_FakeStorage(),
+            )
+
+
+def test_download_image_url_stops_when_stream_exceeds_limit(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.services.batches import download_image_url_to_asset
+
+    _mock_dns(monkeypatch, "93.184.216.34")
+    monkeypatch.setattr(settings, "upload_max_bytes", 8)
+    storage = _FakeStorage()
+
+    def fake_get(_url: str, **kwargs):
+        assert kwargs["stream"] is True
+        return _FakeImageResponse(
+            headers={"content-type": "image/png"},
+            chunks=[b"12345", b"6789"],
+        )
+
+    monkeypatch.setattr("requests.get", fake_get)
+    with auth_db() as db:
+        with pytest.raises(RuntimeError, match="超大小|exceeds"):
+            download_image_url_to_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                image_url="https://images.example/stream-large.png",
+                storage=storage,
+            )
+
+    assert storage.saved == {}
+
+
+def test_download_image_url_accepts_public_https_and_stores_asset(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.services.batches import download_image_url_to_asset
+
+    _mock_dns(monkeypatch, "93.184.216.34")
+    monkeypatch.setattr(settings, "upload_max_bytes", 16)
+    storage = _FakeStorage()
+    calls: list[dict[str, object]] = []
+
+    def fake_get(url: str, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return _FakeImageResponse(
+            headers={"content-type": "image/png", "content-length": "7"},
+            chunks=[b"png", b"data"],
+        )
+
+    monkeypatch.setattr("requests.get", fake_get)
+    with auth_db() as db:
+        asset = download_image_url_to_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            image_url="https://images.example/products/good.png?secret=hidden",
+            storage=storage,
+        )
+        storage_key = asset.storage_key
+        metadata = dict(asset.metadata_ or {})
+        db.commit()
+
+    assert calls[0]["url"] == "https://images.example/products/good.png?secret=hidden"
+    assert calls[0]["stream"] is True
+    assert calls[0]["allow_redirects"] is False
+    assert storage_key.startswith(f"tenants/{auth_context['tenant_id']}/uploads/")
+    assert metadata == {"source_url_host": "images.example"}
+    assert list(storage.saved.values()) == [(b"pngdata", "image/png")]
 
 
 def test_batch_estimate_prompt_set_sums_video_gen_quota(
@@ -271,7 +461,9 @@ def test_batch_create_ecom_table_download_failure_marks_one_row_failed_not_whole
         db.commit()
 
     def fake_download(*_args, **_kwargs):
-        raise RuntimeError("download blocked")
+        raise RuntimeError(
+            "timeout fetching https://images.example/private/path.png?token=secret"
+        )
 
     from app.api.v1.routes import batches as batches_route
 
@@ -298,6 +490,7 @@ def test_batch_create_ecom_table_download_failure_marks_one_row_failed_not_whole
                     "video_mode": "seedance_i2v",
                     "voice_id": "voice-batch",
                     "duration_sec": 10,
+                    "speed": 1.25,
                     "apply_visible_label": True,
                 },
             },
@@ -313,6 +506,7 @@ def test_batch_create_ecom_table_download_failure_marks_one_row_failed_not_whole
     assert len(seedance_calls) == 1
     assert seedance_calls[0]["queue"] == "video"
     assert seedance_calls[0]["args"][0]["apply_visible_label"] is True
+    assert seedance_calls[0]["args"][0]["speed"] == 1.25
 
     with auth_db() as db:
         batch = db.get(BatchJob, data["batch_id"])
@@ -324,8 +518,12 @@ def test_batch_create_ecom_table_download_failure_marks_one_row_failed_not_whole
         queued_task = db.get(VideoTask, data["task_ids"][1])
         assert failed_task.status == "failed"
         assert failed_task.error_code == "BATCH_IMAGE_DOWNLOAD_FAILED"
+        assert "http" not in (failed_task.error or "")
+        assert "http" not in (failed_task.error_message or "")
+        assert failed_task.error_message == "参考图下载失败(第1行): 下载失败"
         assert queued_task.status == "queued"
         assert queued_task.params["image_key"].startswith("uploads/")
+        assert queued_task.params["speed"] == 1.25
         assert db.scalar(select(func.count()).select_from(UsageRecord)) == 1
         assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 20
 
@@ -464,6 +662,74 @@ def test_batch_refresh_aggregates_terminal_children_idempotently(
         batch = db.get(BatchJob, "batch-aggregate")
         assert batch.succeeded == 1
         assert batch.failed == 2
+        assert batch.status == "partial_failed"
+
+
+def test_batch_refresh_recomputes_counts_after_interleaved_sessions(
+    auth_context,
+    auth_db,
+) -> None:
+    from app.services.batches import refresh_batch_job
+
+    with auth_db() as db:
+        batch = BatchJob(
+            id="batch-concurrent",
+            tenant_id=auth_context["tenant_id"],
+            user_id=auth_context["user_id"],
+            kind="prompt_set",
+            status="running",
+            total=3,
+            common_params={},
+        )
+        db.add(batch)
+        db.add_all(
+            [
+                VideoTask(
+                    id="batch-concurrent-done-1",
+                    tenant_id=auth_context["tenant_id"],
+                    batch_id=batch.id,
+                    status="queued",
+                    params={"batch_row_index": 0},
+                ),
+                VideoTask(
+                    id="batch-concurrent-failed",
+                    tenant_id=auth_context["tenant_id"],
+                    batch_id=batch.id,
+                    status="queued",
+                    params={"batch_row_index": 1},
+                ),
+                VideoTask(
+                    id="batch-concurrent-done-2",
+                    tenant_id=auth_context["tenant_id"],
+                    batch_id=batch.id,
+                    status="queued",
+                    params={"batch_row_index": 2},
+                ),
+            ]
+        )
+        db.commit()
+
+    done_session = auth_db()
+    failed_session = auth_db()
+    try:
+        done_session.get(VideoTask, "batch-concurrent-done-1").status = "done"
+        done_session.commit()
+
+        failed_session.get(VideoTask, "batch-concurrent-failed").status = "failed"
+        refresh_batch_job(failed_session, batch_id="batch-concurrent")
+        failed_session.commit()
+
+        done_session.get(VideoTask, "batch-concurrent-done-2").status = "done"
+        refresh_batch_job(done_session, batch_id="batch-concurrent")
+        done_session.commit()
+    finally:
+        done_session.close()
+        failed_session.close()
+
+    with auth_db() as db:
+        batch = db.get(BatchJob, "batch-concurrent")
+        assert batch.succeeded == 2
+        assert batch.failed == 1
         assert batch.status == "partial_failed"
 
 

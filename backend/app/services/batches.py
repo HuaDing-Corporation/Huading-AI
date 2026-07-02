@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import ipaddress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 
 import requests
@@ -14,6 +13,7 @@ from app.api.deps import tenant_storage_key
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.db.models import Asset, BatchJob, BgmLibraryTrack, VideoTask, Voice
+from app.providers.url_guard import ProviderUrlError, ensure_public_https_url
 from app.schemas.batches import BatchRequest
 from app.services.bgm_library import ensure_default_bgm_tracks
 from app.services.quota import (
@@ -34,6 +34,14 @@ _IMAGE_MIME_EXTENSIONS = {
 }
 _VIDEO_GEN_IMAGE_TYPES = {"avatar_image", "product_image", "generated_image", "cover"}
 _TERMINAL_TASK_STATUSES = {"done", "failed", "cancelled"}
+_MAX_IMAGE_REDIRECTS = 3
+_DOWNLOAD_CHUNK_SIZE = 64 * 1024
+
+
+class BatchImageDownloadError(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
 
 
 @dataclass(frozen=True)
@@ -243,21 +251,17 @@ def download_image_url_to_asset(
     image_url: str,
     storage: ObjectStorage,
 ) -> Asset:
-    _validate_public_https_image_url(image_url)
-    response = requests.get(
-        image_url,
-        timeout=settings.engine_apimart_request_timeout_seconds,
-    )
-    response.raise_for_status()
-    content_type = str(response.headers.get("content-type") or "").split(";")[0].lower()
-    extension = _IMAGE_MIME_EXTENSIONS.get(content_type)
-    if extension is None:
-        raise RuntimeError(f"Unsupported image content type: {content_type or 'unknown'}")
-    content = bytes(response.content or b"")
-    if not content:
-        raise RuntimeError("Downloaded image is empty.")
-    if len(content) > settings.upload_max_bytes:
-        raise RuntimeError("Downloaded image exceeds upload size limit.")
+    final_url, response = _get_public_image_response(image_url)
+    try:
+        content_type = str(response.headers.get("content-type") or "").split(";")[0].lower()
+        extension = _IMAGE_MIME_EXTENSIONS.get(content_type)
+        if extension is None:
+            raise BatchImageDownloadError("类型不符")
+        content = _read_limited_response(response, max_bytes=settings.upload_max_bytes)
+        if not content:
+            raise BatchImageDownloadError("空文件")
+    finally:
+        _close_response(response)
     storage_key = tenant_storage_key(tenant_id, f"uploads/{uuid4().hex}{extension}")
     storage.put_bytes(storage_key, content, content_type=content_type)
     asset = Asset(
@@ -269,32 +273,90 @@ def download_image_url_to_asset(
         mime_type=content_type,
         size_bytes=len(content),
         status="ready",
-        metadata_={"source_url_host": urlparse(image_url).hostname or ""},
+        metadata_={"source_url_host": urlparse(final_url).hostname or ""},
     )
     db.add(asset)
     db.flush()
     return asset
 
 
-def _validate_public_https_image_url(image_url: str) -> None:
-    parsed = urlparse(image_url)
-    host = parsed.hostname or ""
-    if parsed.scheme != "https" or not host:
-        raise RuntimeError("Image URL must be an HTTPS URL.")
-    if host.lower() in {"localhost", "127.0.0.1", "::1"} or host.lower().endswith(".local"):
-        raise RuntimeError("Image URL host is not public.")
+def _get_public_image_response(image_url: str) -> tuple[str, requests.Response]:
+    current_url = image_url
+    redirects = 0
+    while True:
+        _ensure_batch_public_url(current_url)
+        try:
+            response = requests.get(
+                current_url,
+                timeout=settings.engine_apimart_request_timeout_seconds,
+                stream=True,
+                allow_redirects=False,
+            )
+        except requests.Timeout as exc:
+            raise BatchImageDownloadError("超时") from exc
+        except requests.RequestException as exc:
+            raise BatchImageDownloadError("下载失败") from exc
+
+        if not _is_redirect(response):
+            try:
+                response.raise_for_status()
+            except requests.Timeout as exc:
+                _close_response(response)
+                raise BatchImageDownloadError("超时") from exc
+            except requests.RequestException as exc:
+                _close_response(response)
+                raise BatchImageDownloadError("下载失败") from exc
+            return current_url, response
+
+        location = response.headers.get("location")
+        _close_response(response)
+        if not location:
+            raise BatchImageDownloadError("下载失败")
+        if redirects >= _MAX_IMAGE_REDIRECTS:
+            raise BatchImageDownloadError("重定向过多")
+        current_url = urljoin(current_url, location)
+        _ensure_batch_public_url(current_url)
+        redirects += 1
+
+
+def _ensure_batch_public_url(url: str) -> None:
     try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        return
-    if (
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_multicast
-        or address.is_reserved
-    ):
-        raise RuntimeError("Image URL host is not public.")
+        ensure_public_https_url(url)
+    except ProviderUrlError as exc:
+        raise BatchImageDownloadError("地址不安全") from exc
+
+
+def _is_redirect(response: requests.Response) -> bool:
+    return response.status_code in {301, 302, 303, 307, 308}
+
+
+def _read_limited_response(response: requests.Response, *, max_bytes: int) -> bytes:
+    declared_length = str(response.headers.get("content-length") or "").strip()
+    if declared_length:
+        try:
+            if int(declared_length) > max_bytes:
+                raise BatchImageDownloadError("超大小")
+        except ValueError:
+            pass
+    content = bytearray()
+    try:
+        for chunk in response.iter_content(chunk_size=_DOWNLOAD_CHUNK_SIZE):
+            if not chunk:
+                continue
+            content.extend(chunk)
+            if len(content) > max_bytes:
+                raise BatchImageDownloadError("超大小")
+    except requests.Timeout as exc:
+        raise BatchImageDownloadError("超时") from exc
+    except requests.RequestException as exc:
+        raise BatchImageDownloadError("下载失败") from exc
+    return bytes(content)
+
+
+def _close_response(response: requests.Response) -> None:
+    close = getattr(response, "close", None)
+    if callable(close):
+        close()
 
 
 def refresh_batch_job(db: Session, *, batch_id: str | None) -> BatchJob | None:

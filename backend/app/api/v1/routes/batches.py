@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query, Request, status
@@ -9,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import DbSessionDependency, get_object_storage, require_permission
 from app.core.exceptions import AppError
+from app.core.logging import get_logger
 from app.db.models import BatchJob, TaskAsset, User, VideoTask
 from app.schemas.batches import (
     BatchCancelResponse,
@@ -22,6 +25,7 @@ from app.schemas.batches import (
 )
 from app.schemas.response import ApiResponse, ok
 from app.services.batches import (
+    BatchImageDownloadError,
     batch_row_index,
     bgm_asset_or_track_or_raise,
     download_image_url_to_asset,
@@ -48,8 +52,10 @@ from app.workers.avatar_talk import generate_seedance_i2v_task
 from app.workers.video_gen import generate_video_gen_task
 
 router = APIRouter()
+logger = get_logger(__name__)
 BatchPermissionDependency = Depends(require_permission("video:create"))
 ObjectStorageDependency = Depends(get_object_storage)
+_URL_PATTERN = re.compile(r"(https?)://([^/\s?#]+)[^\s]*")
 
 
 def _insufficient_credits() -> AppError:
@@ -277,14 +283,23 @@ def _create_ecom_table_tasks(
             )
             image_key = tenant_relative_upload_key(source_asset, tenant_id=user.tenant_id)
         except Exception as exc:
+            error_message = _batch_image_download_message(index, exc)
+            logger.warning(
+                "batch_image_download_failed",
+                batch_id=batch.id,
+                tenant_id=user.tenant_id,
+                row_index=index,
+                image_url_host=urlparse(str(row.image_url or "")).hostname,
+                error=_redact_urls(str(exc)),
+            )
             failed = VideoTask(
                 id=task_id,
                 tenant_id=user.tenant_id,
                 created_by_user_id=user.id,
                 status="failed",
-                error=str(exc),
+                error=error_message,
                 error_code="BATCH_IMAGE_DOWNLOAD_FAILED",
-                error_message=str(exc),
+                error_message=error_message,
                 topic=row_topic,
                 mode="seedance_i2v",
                 video_mode="seedance_i2v",
@@ -305,6 +320,7 @@ def _create_ecom_table_tasks(
             "image_key": image_key,
             "scene_prompt": row_topic,
             "duration_sec": target_duration_sec,
+            "speed": common.speed,
             "estimated": True,
             "apply_visible_label": common.apply_visible_label,
             "batch_id": batch.id,
@@ -357,6 +373,18 @@ def _create_ecom_table_tasks(
         queued_payloads.append((task.id, worker_payload, generate_seedance_i2v_task))
         task_ids.append(task.id)
     return task_ids
+
+
+def _batch_image_download_message(index: int, exc: Exception) -> str:
+    reason = exc.reason if isinstance(exc, BatchImageDownloadError) else "下载失败"
+    return f"参考图下载失败(第{index + 1}行): {reason}"
+
+
+def _redact_urls(value: str) -> str:
+    return _URL_PATTERN.sub(
+        lambda match: f"{match.group(1)}://{match.group(2)}/[redacted]",
+        value,
+    )
 
 
 @router.get("", response_model=ApiResponse[BatchListResponse])

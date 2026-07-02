@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ipaddress
+import socket
 from collections.abc import Iterable
 from urllib.parse import urlparse
 
@@ -52,3 +54,42 @@ def ensure_https_url_allowed(
     if parsed.scheme != "https" or (host not in normalized_hosts and not suffix_allowed):
         raise ProviderUrlError(f"Provider URL host is not allowed by whitelist: {host or url}")
     return url
+
+
+def ensure_public_https_url(url: str) -> str:
+    parsed = urlparse(url)
+    host = parsed.hostname.lower() if parsed.hostname else ""
+    if parsed.scheme != "https" or not host:
+        raise ProviderUrlError("URL must be an HTTPS URL.")
+    _ensure_public_host(host, parsed.port or 443)
+    return url
+
+
+def _ensure_public_host(host: str, port: int) -> None:
+    try:
+        _ensure_public_ip(ipaddress.ip_address(host))
+        return
+    except ValueError:
+        pass
+
+    try:
+        results = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ProviderUrlError("URL host could not be resolved.") from exc
+    addresses = {item[4][0] for item in results if item[4]}
+    if not addresses:
+        raise ProviderUrlError("URL host could not be resolved.")
+    for address in addresses:
+        _ensure_public_ip(ipaddress.ip_address(address))
+
+
+def _ensure_public_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
+    if (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    ):
+        raise ProviderUrlError(f"URL host is not public: {address}")
