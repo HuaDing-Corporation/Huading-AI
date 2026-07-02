@@ -6,7 +6,7 @@ import { Check, ImagePlus, Layers, Upload, X } from "lucide-react";
 import { errorText } from "@/lib/api/error-text";
 import { useCreateBatch, useUploadImage } from "@/lib/api/hooks";
 import type { BatchCommon, BatchRequest } from "@/lib/api/types";
-import { BATCH_MAX_ROWS, parseEcomTable, toEcomTableRow, validateEcomRow, type EcomRowDraft } from "@/lib/batch/ecom-table";
+import { BATCH_MAX_ROWS, PARSE_ERR_TOO_LARGE, PARSE_ERR_TOO_MANY_ROWS, parseEcomTable, toEcomTableRow, validateEcomRow, type EcomRowDraft } from "@/lib/batch/ecom-table";
 import { isValidDuration } from "@/components/workbench/duration-picker";
 import { ALLOWED_UPLOAD_TYPES, MAX_UPLOAD_BYTES } from "@/lib/api/uploads";
 import { Button } from "@/components/ui/button";
@@ -28,7 +28,6 @@ export function EcomTableForm({ onCreated }: { onCreated: (batchId: string) => v
   const [rows, setRows] = useState<EcomRowDraft[]>([]);
   const [common, setCommon] = useState<BatchCommon>({});
   const [parseError, setParseError] = useState<string | null>(null);
-  const [overLimit, setOverLimit] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [uploadingRow, setUploadingRow] = useState<number | null>(null);
   const [confirmReq, setConfirmReq] = useState<BatchRequest | null>(null);
@@ -43,11 +42,11 @@ export function EcomTableForm({ onCreated }: { onCreated: (batchId: string) => v
     setParseError(null);
     setError(null);
     try {
-      const parsed = await parseEcomTable(file);
-      setOverLimit(parsed.length > BATCH_MAX_ROWS);
-      setRows(parsed.slice(0, BATCH_MAX_ROWS));
-    } catch {
-      setParseError(copy.batch.ecomParseError);
+      const parsed = await parseEcomTable(file); // 不裁剪：全量保留，>30 由生成门控真拦截
+      setRows(parsed);
+    } catch (err) {
+      const msg = (err as Error)?.message;
+      setParseError(msg === PARSE_ERR_TOO_LARGE ? copy.batch.ecomTooLarge : msg === PARSE_ERR_TOO_MANY_ROWS ? copy.batch.ecomTooManyRows : copy.batch.ecomParseError);
       setRows([]);
     }
     if (fileRef.current) fileRef.current.value = "";
@@ -77,12 +76,13 @@ export function EcomTableForm({ onCreated }: { onCreated: (batchId: string) => v
     rowFileRef.current?.click();
   };
 
-  // 行必填 + 时长合法（电商 i2v 自定义时长可为空/NaN；对齐单条 ecom-video-form 的 isValidDuration 门控）。
+  // 行必填 + 时长合法 + ≤30（>30 真拦截：禁用 + 显式提示，不裁剪；对齐单条 ecom-video-form 的门控）。
   const durationOk = isValidDuration(common.duration_sec ?? NaN);
+  const over = rows.length > BATCH_MAX_ROWS;
   const allValid = rows.length > 0 && rows.every((r) => validateEcomRow(r).length === 0);
 
   const onGenerate = () => {
-    if (!allValid || !durationOk) return;
+    if (!allValid || !durationOk || over) return;
     setError(null);
     setConfirmReq({ kind: "ecom_table", rows: rows.map(toEcomTableRow), common });
   };
@@ -123,7 +123,7 @@ export function EcomTableForm({ onCreated }: { onCreated: (batchId: string) => v
             {parseError}
           </p>
         )}
-        {overLimit && <p className="mt-2 text-[12.5px] text-error-fg">{copy.batch.overLimit}</p>}
+        {over && <p role="alert" className="mt-2 text-[12.5px] text-error-fg">{copy.batch.overLimitN(rows.length)}</p>}
       </div>
 
       {/* 行内图片上传（隐藏 input，按行触发） */}
@@ -196,7 +196,7 @@ export function EcomTableForm({ onCreated }: { onCreated: (batchId: string) => v
         </p>
       )}
 
-      <Button variant="primary" size="lg" className="w-full" onClick={onGenerate} disabled={!allValid || !durationOk || create.isPending}>
+      <Button variant="primary" size="lg" className="w-full" onClick={onGenerate} disabled={!allValid || !durationOk || over || create.isPending}>
         <Layers size={18} strokeWidth={1.8} /> {copy.workbench.generate}
       </Button>
 

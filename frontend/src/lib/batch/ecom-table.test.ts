@@ -1,7 +1,7 @@
 import * as XLSX from "xlsx";
 import { describe, expect, it } from "vitest";
 
-import { parseEcomWorkbook, toEcomTableRow, validateEcomRow } from "./ecom-table";
+import { PARSE_ERR_TOO_LARGE, PARSE_ERR_TOO_MANY_ROWS, parseEcomTable, parseEcomWorkbook, toEcomTableRow, validateEcomRow } from "./ecom-table";
 
 function makeBuf(rows: (string | number)[][]): Uint8Array {
   const ws = XLSX.utils.aoa_to_sheet(rows);
@@ -36,6 +36,18 @@ describe("ecom-table 解析 + 校验", () => {
     expect(validateEcomRow({ product_name: "a", selling_points: "b", image_url: "u", image_asset_id: "id" })).toEqual(["image"]); // 都给 → XOR 违反
     expect(validateEcomRow({ product_name: "a", selling_points: "b", image_url: "u" })).toEqual([]);
     expect(validateEcomRow({ product_name: "a", selling_points: "b", image_asset_id: "id" })).toEqual([]);
+  });
+
+  it("解析防御：>500 行 → 抛 TOO_MANY_ROWS（畸形/超大表拒绝）", () => {
+    const data: (string | number)[][] = [["商品名", "卖点", "商品图"]];
+    for (let i = 0; i < 501; i++) data.push([`p${i}`, "s", "u"]);
+    expect(() => parseEcomWorkbook(makeBuf(data))).toThrow(PARSE_ERR_TOO_MANY_ROWS);
+  });
+
+  it("解析防御：文件 >5MB → 抛 TOO_LARGE（不读内容）", async () => {
+    const f = new File(["x"], "big.xlsx");
+    Object.defineProperty(f, "size", { value: 6 * 1024 * 1024 });
+    await expect(parseEcomTable(f)).rejects.toThrow(PARSE_ERR_TOO_LARGE);
   });
 
   it("toEcomTableRow：image_asset_id 优先于 image_url", () => {

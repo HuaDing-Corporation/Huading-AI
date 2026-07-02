@@ -136,7 +136,7 @@ function invalidBatchRows(kind: string, rows: unknown[]): boolean {
     return !row.prompt || String(row.prompt).trim() === "";
   });
 }
-// common 校验(对齐后端 extra=forbid + video_mode 必填 + kind↔video_mode 强校验)：非法即 BATCH_INVALID。
+// common 校验(对齐后端 extra=forbid + video_mode 必填 + kind↔video_mode 强校验)：非法即 FastAPI VALIDATION_ERROR。
 function invalidBatchCommon(kind: string, common: unknown): boolean {
   const c = (common ?? {}) as Record<string, unknown>;
   if (Object.keys(c).some((k) => !BATCH_COMMON_KEYS.includes(k))) return true; // 多传字段
@@ -613,7 +613,7 @@ export const handlers = [
     const body = (await request.json().catch(() => ({}))) as { kind?: string; rows?: unknown[]; common?: { resolution?: string } };
     const rows = body.rows ?? [];
     if (invalidBatchRows(body.kind ?? "", rows)) return err(422, "BATCH_ROW_INVALID", "批次行校验失败");
-    if (invalidBatchCommon(body.kind ?? "", body.common)) return err(422, "BATCH_INVALID", "common 参数非法（多传字段 / video_mode 缺失或不匹配 kind）");
+    if (invalidBatchCommon(body.kind ?? "", body.common)) return err(422, "VALIDATION_ERROR", "common 参数非法（多传字段 / video_mode 缺失或不匹配 kind）");
     const perRow = batchPerRow(body.common?.resolution);
     const total = perRow * rows.length;
     return ok({ total_rows: rows.length, per_row_credits: perRow, total_credits: total, insufficient: total > BATCH_BALANCE, balance_credits: BATCH_BALANCE });
@@ -622,7 +622,7 @@ export const handlers = [
     const body = (await request.json().catch(() => ({}))) as { kind?: string; rows?: unknown[]; common?: Record<string, unknown> };
     const rows = body.rows ?? [];
     if (invalidBatchRows(body.kind ?? "", rows)) return err(422, "BATCH_ROW_INVALID", "批次行校验失败");
-    if (invalidBatchCommon(body.kind ?? "", body.common)) return err(422, "BATCH_INVALID", "common 参数非法");
+    if (invalidBatchCommon(body.kind ?? "", body.common)) return err(422, "VALIDATION_ERROR", "common 参数非法");
     const total = batchPerRow((body.common?.resolution as string) ?? undefined) * rows.length;
     if (total > BATCH_BALANCE) return err(422, "INSUFFICIENT_CREDITS", "余额不足，无法提交本批");
     const id = `batch-${++batchSeq}`;

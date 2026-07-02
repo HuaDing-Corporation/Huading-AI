@@ -50,7 +50,7 @@ describe("batches API ↔ MSW（mock 忠实，据 seam 契约）", () => {
     expect(await codeOf(() => createBatch({ kind: "prompt_set", rows: [{ prompt: "" }], common: { video_mode: "video_gen" } }))).toBe("BATCH_ROW_INVALID");
   });
 
-  it("common extra=forbid：多传字段 / 缺 video_mode / kind↔video_mode 不匹配 → 422 BATCH_INVALID", async () => {
+  it("common extra=forbid：多传字段 / 缺 video_mode / kind↔video_mode 不匹配 → 422 VALIDATION_ERROR（对齐后端 FastAPI）", async () => {
     const codeOf = async (fn: () => Promise<unknown>) => {
       try {
         await fn();
@@ -60,9 +60,9 @@ describe("batches API ↔ MSW（mock 忠实，据 seam 契约）", () => {
       }
     };
     const rows = [{ prompt: "a" }];
-    expect(await codeOf(() => createBatch({ kind: "prompt_set", rows, common: { video_mode: "video_gen", foo: 1 } as never }))).toBe("BATCH_INVALID");
-    expect(await codeOf(() => createBatch({ kind: "prompt_set", rows, common: {} as never }))).toBe("BATCH_INVALID");
-    expect(await codeOf(() => createBatch({ kind: "prompt_set", rows, common: { video_mode: "seedance_i2v" } }))).toBe("BATCH_INVALID");
+    expect(await codeOf(() => createBatch({ kind: "prompt_set", rows, common: { video_mode: "video_gen", foo: 1 } as never }))).toBe("VALIDATION_ERROR");
+    expect(await codeOf(() => createBatch({ kind: "prompt_set", rows, common: {} as never }))).toBe("VALIDATION_ERROR");
+    expect(await codeOf(() => createBatch({ kind: "prompt_set", rows, common: { video_mode: "seedance_i2v" } }))).toBe("VALIDATION_ERROR");
   });
 
   it("create：充足→{batch_id,task_ids}；余额不足→422 INSUFFICIENT_CREDITS", async () => {

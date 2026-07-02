@@ -31,10 +31,10 @@ export function PromptSetForm({ onCreated }: { onCreated: (batchId: string) => v
 
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean); // 去空行
   const over = lines.length > BATCH_MAX_ROWS;
-  const rows: PromptSetRow[] = lines.slice(0, BATCH_MAX_ROWS).map((prompt) => ({ prompt }));
+  const rows: PromptSetRow[] = lines.map((prompt) => ({ prompt })); // 不裁剪：>30 由生成门控真拦截
 
   const onGenerate = () => {
-    if (rows.length < 1) return;
+    if (rows.length < 1 || over) return; // >30 真拦截，不发请求
     setError(null);
     setConfirmReq({ kind: "prompt_set", rows, common: { ...common, reference_image_asset_ids: refIds } });
   };
@@ -65,9 +65,8 @@ export function PromptSetForm({ onCreated }: { onCreated: (batchId: string) => v
           placeholder={copy.batch.promptPlaceholder}
           className="w-full resize-y rounded-field border border-line-gold bg-glass-fill px-4 py-3 text-sm text-ink outline-none transition-shadow placeholder:text-ink-faint focus:border-line-sel focus:shadow-focus-gold"
         />
-        <p className={`mt-1 text-[12px] ${over ? "text-error-fg" : "text-ink-faint"}`} aria-live="polite">
-          {copy.batch.promptCount(rows.length)}
-          {over ? ` · ${copy.batch.overLimit}` : ""}
+        <p className={`mt-1 text-[12px] ${over ? "text-error-fg" : "text-ink-faint"}`} role={over ? "alert" : undefined} aria-live="polite">
+          {over ? copy.batch.overLimitN(lines.length) : copy.batch.promptCount(rows.length)}
         </p>
       </div>
 
@@ -81,7 +80,7 @@ export function PromptSetForm({ onCreated }: { onCreated: (batchId: string) => v
         </p>
       )}
 
-      <Button variant="primary" size="lg" className="w-full" onClick={onGenerate} disabled={rows.length < 1 || create.isPending}>
+      <Button variant="primary" size="lg" className="w-full" onClick={onGenerate} disabled={rows.length < 1 || over || create.isPending}>
         <Layers size={18} strokeWidth={1.8} /> {copy.workbench.generate}
       </Button>
 

@@ -70,13 +70,14 @@ describe("EcomTableForm (批量·商品表)", () => {
     expect(screen.getByRole("button", { name: copy.workbench.generate })).toBeDisabled();
   });
 
-  it(">30 拦：31 行 → 提示超限 + 预览仅 30 行", async () => {
+  it(">30 真拦截：31 行全部预览(不裁剪) + 显式提示 + 生成禁用（承重）", async () => {
     parseMock.mockResolvedValue(Array.from({ length: 31 }, (_, i) => ({ product_name: `p${i}`, selling_points: "s", image_url: "http://x/1.png" })));
     render(<EcomTableForm onCreated={vi.fn()} />);
     uploadFile();
-    expect(await screen.findByText(copy.batch.overLimit)).toBeInTheDocument();
-    expect(screen.getByText("p29")).toBeInTheDocument();
-    expect(screen.queryByText("p30")).not.toBeInTheDocument();
+    expect(await screen.findByText(copy.batch.overLimitN(31))).toBeInTheDocument();
+    expect(screen.getByText("p30")).toBeInTheDocument(); // 不裁剪，第 31 行也在预览
+    fireEvent.click(screen.getByText("set-common"));
+    expect(screen.getByRole("button", { name: copy.workbench.generate })).toBeDisabled();
   });
 
   it("每行图上传：无 URL 行缺图 → 上传本地图 → asset_id 回填，行变有效（承重）", async () => {

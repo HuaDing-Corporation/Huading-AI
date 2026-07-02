@@ -442,8 +442,10 @@ export const copy = {
     promptEmpty: "请至少输入 1 条提示词",
     // 公共参数
     commonTitle: "公共参数（应用到本批每条）",
-    // 超限
-    overLimit: "单批最多 30 条，超出部分已忽略",
+    // 超限（真拦截：禁用 + 显式提示，不裁剪）
+    overLimitN: (n: number) => `单批最多 30 条，当前 ${n} 条，请删减后再生成`,
+    ecomTooLarge: "文件过大（最多 5MB），请精简后重传",
+    ecomTooManyRows: "表格行数过多（最多 500 行），请拆分后重传",
     // 预估确认
     estimateTitle: "确认批量生产",
     estimateRows: (n: number) => `共 ${n} 条`,

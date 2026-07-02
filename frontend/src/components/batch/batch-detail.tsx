@@ -21,7 +21,7 @@ const TASK_STATUS_LABEL: Record<string, string> = {
 
 /**
  * 批次详情（BATCH-PROD-UI-0001）——轮询 GET /batches/{id}(≥5s，页面不活跃暂停)。每行：序号/状态/成片
- * 可播可下载/失败原因 + 单条重试；顶部 cancel 批次(best-effort)。回列表。
+ * 可播可下载/失败原因(脱敏)；顶部 cancel 批次(best-effort)。回列表。批内单条重试后端 v1 无端点，记 P2。
  */
 export function BatchDetail({ batchId, onBack }: { batchId: string; onBack: () => void }) {
   const { data, isLoading, isError, refetch } = useBatch(batchId);

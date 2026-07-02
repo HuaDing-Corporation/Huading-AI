@@ -41,16 +41,16 @@ describe("PromptSetForm (批量·提示词组)", () => {
     expect(screen.getByText(copy.batch.promptCount(2))).toBeInTheDocument();
   });
 
-  it(">30 拦：31 行 → 提示超限，提交体仅 30 条（承重）", async () => {
-    const onCreated = vi.fn();
-    render(<PromptSetForm onCreated={onCreated} />);
+  it(">30 真拦截：31 行 → 显式提示 + 生成禁用 + 不发请求（承重，不裁剪）", async () => {
+    render(<PromptSetForm onCreated={vi.fn()} />);
     typePrompts(Array.from({ length: 31 }, (_, i) => `p${i}`).join("\n"));
-    expect(screen.getByText(new RegExp(copy.batch.overLimit))).toBeInTheDocument();
+    expect(screen.getByText(copy.batch.overLimitN(31))).toBeInTheDocument();
     fireEvent.click(screen.getByText("set-common"));
-    fireEvent.click(screen.getByRole("button", { name: copy.workbench.generate }));
-    fireEvent.click(await screen.findByText("confirm-batch"));
-    await waitFor(() => expect(createMock.mutateAsync).toHaveBeenCalledTimes(1));
-    expect(createMock.mutateAsync.mock.calls[0][0].rows).toHaveLength(30);
+    const generate = screen.getByRole("button", { name: copy.workbench.generate });
+    expect(generate).toBeDisabled(); // 超限禁用
+    fireEvent.click(generate); // 即便强点也不开确认窗/不发请求
+    expect(screen.queryByText("confirm-batch")).not.toBeInTheDocument();
+    expect(createMock.mutateAsync).not.toHaveBeenCalled();
   });
 
   it("提交体逐字段 + 参考图 + apply_visible_label 透传（承重）", async () => {

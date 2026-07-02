@@ -2,7 +2,13 @@ import * as XLSX from "xlsx";
 
 import type { EcomTableRow } from "@/lib/api/types";
 
-export const BATCH_MAX_ROWS = 30;
+export const BATCH_MAX_ROWS = 30; // 业务上限（单批 ≤30，对齐后端）
+export const BATCH_PARSE_MAX_BYTES = 5 * 1024 * 1024; // 解析防御：文件 ≤5MB
+export const BATCH_PARSE_MAX_ROWS = 500; // 解析防御：行数硬帽，畸形/超大表直接拒
+
+/** 解析防御错误码（form 映射到友好文案）。 */
+export const PARSE_ERR_TOO_LARGE = "BATCH_PARSE_TOO_LARGE";
+export const PARSE_ERR_TOO_MANY_ROWS = "BATCH_PARSE_TOO_MANY_ROWS";
 
 /** 商品表草稿行（预览 + 校验用）：解析后每行；image_asset_id 为本地图上传后回填。 */
 export interface EcomRowDraft {
@@ -28,12 +34,13 @@ function pick(row: Record<string, unknown>, aliases: string[]): string {
   return "";
 }
 
-/** 解析工作簿二进制 → 商品表草稿行（纯函数，可独立测；不依赖 File API）。 */
+/** 解析工作簿二进制 → 商品表草稿行（纯函数，可独立测；不依赖 File API）。仅取首个 sheet；>500 行直接拒。 */
 export function parseEcomWorkbook(data: ArrayBuffer | Uint8Array): EcomRowDraft[] {
   const wb = XLSX.read(data, { type: "array" });
-  const sheetName = wb.SheetNames[0];
+  const sheetName = wb.SheetNames[0]; // 仅取首个工作表（防多 sheet 畸形）
   if (!sheetName) return [];
   const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[sheetName], { defval: "" });
+  if (json.length > BATCH_PARSE_MAX_ROWS) throw new Error(PARSE_ERR_TOO_MANY_ROWS); // 行数硬帽
   return json.map((r) => ({
     product_name: pick(r, COL_ALIASES.product_name),
     selling_points: pick(r, COL_ALIASES.selling_points),
@@ -41,8 +48,9 @@ export function parseEcomWorkbook(data: ArrayBuffer | Uint8Array): EcomRowDraft[
   }));
 }
 
-/** 解析 Excel/CSV 首个工作表 → 商品表草稿行（前端解析，提交结构化 rows JSON）。 */
+/** 解析 Excel/CSV 首个工作表 → 商品表草稿行（前端解析，提交结构化 rows JSON）。文件 ≤5MB。 */
 export async function parseEcomTable(file: File): Promise<EcomRowDraft[]> {
+  if (file.size > BATCH_PARSE_MAX_BYTES) throw new Error(PARSE_ERR_TOO_LARGE); // 文件大小防御
   const buf = await file.arrayBuffer();
   return parseEcomWorkbook(buf);
 }
