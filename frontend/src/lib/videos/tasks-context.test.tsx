@@ -27,6 +27,51 @@ import { listVideos, streamVideoEvents } from "@/lib/api/videos";
 
 import { VideoTasksProvider, useVideoTasks } from "./tasks-context";
 
+// 会话卡即时 AI 标识徽标数据源（LABEL-TOGGLE-UI-0001）：createAndTrack 把 req.apply_visible_label
+// 写入 TrackedTask.applyVisibleLabel，无需等 GET reconcile。
+function LabelHarness({ apply }: { apply: boolean }) {
+  const { tasks, createAndTrack } = useVideoTasks();
+  return (
+    <div>
+      <button onClick={() => void createAndTrack({ topic: "x", apply_visible_label: apply }, "x")}>go</button>
+      <span data-testid="label">{String(tasks[0]?.applyVisibleLabel ?? "none")}</span>
+    </div>
+  );
+}
+
+describe("tasks-context 会话卡即时 AI 标识徽标数据源 (LABEL-TOGGLE-UI-0001)", () => {
+  beforeEach(() => {
+    mockSession = { token: "t" };
+    // 流挂起不产生终态/reconcile，确保断言的是 createAndTrack 写入的即时值。
+    (streamVideoEvents as Mock).mockImplementation(() => new Promise<void>(() => {}));
+  });
+  afterEach(() => vi.clearAllMocks());
+
+  it("createAndTrack({apply_visible_label:true}) → 会话卡 applyVisibleLabel=true（承重）", async () => {
+    const { getByText, getByTestId } = render(
+      <VideoTasksProvider>
+        <LabelHarness apply />
+      </VideoTasksProvider>
+    );
+    await act(async () => {
+      getByText("go").click();
+    });
+    await waitFor(() => expect(getByTestId("label").textContent).toBe("true"));
+  });
+
+  it("默认关 apply_visible_label:false → 会话卡 applyVisibleLabel=false", async () => {
+    const { getByText, getByTestId } = render(
+      <VideoTasksProvider>
+        <LabelHarness apply={false} />
+      </VideoTasksProvider>
+    );
+    await act(async () => {
+      getByText("go").click();
+    });
+    await waitFor(() => expect(getByTestId("label").textContent).toBe("false"));
+  });
+});
+
 describe("VideoTasksProvider hydrate gating", () => {
   beforeEach(() => {
     mockSession = null;

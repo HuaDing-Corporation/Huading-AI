@@ -14,6 +14,8 @@ import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { SelectableOption } from "@/components/ui/selectable-option";
 import { ImagePicker } from "@/components/workbench/image-picker";
+import { AiLabelToggle } from "@/components/label/ai-label-toggle";
+import { useLabelTogglePreference } from "@/lib/preferences/label-toggle";
 import { copy } from "@/lib/copy";
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
@@ -86,10 +88,10 @@ export interface EcomImageToolProps {
   submitting: boolean;
   /** 工具侧附加校验门（如风格必填）；缺省 true。 */
   extraValid?: boolean;
-  /** 单张提交：工具调用自身 mutation，返回已创建 task_id 列表。 */
-  onSubmitSingle: (assetId: string) => Promise<string[]>;
-  /** 批量提交：返回已创建 task_id 列表。 */
-  onSubmitBatch: (assetIds: string[]) => Promise<string[]>;
+  /** 单张提交：工具调用自身 mutation，返回已创建 task_id 列表。applyVisibleLabel = AI 标识开关值。 */
+  onSubmitSingle: (assetId: string, applyVisibleLabel: boolean) => Promise<string[]>;
+  /** 批量提交：返回已创建 task_id 列表。applyVisibleLabel 贯穿每项。 */
+  onSubmitBatch: (assetIds: string[], applyVisibleLabel: boolean) => Promise<string[]>;
   /** 完成结果瓦片可选装饰（白底图透明→棋盘格）。 */
   resultDecoration?: CSSProperties;
 }
@@ -116,6 +118,7 @@ export function EcomImageTool({
   const { tasks, trackExisting } = useVideoTasks();
   const uploadImg = useUploadImage();
   const source = useTrackedUpload(uploadImg.mutateAsync, (r) => r.asset_id);
+  const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）
 
   const [mode, setMode] = useState<EcomMode>("single");
   const [batchItems, setBatchItems] = useState<{ assetId: string; preview: string }[]>([]);
@@ -183,8 +186,8 @@ export function EcomImageTool({
     // 提交不完整请求（对齐 new-video-form/ecom-video-form 在 onGenerate 顶部复核完整门）。
     if (!extraValid) return;
     try {
-      const ids = mode === "single" ? await onSubmitSingle(assetIds[0]) : await onSubmitBatch(assetIds);
-      ids.forEach((id) => trackExisting(id, title, "photo"));
+      const ids = mode === "single" ? await onSubmitSingle(assetIds[0], applyLabel) : await onSubmitBatch(assetIds, applyLabel);
+      ids.forEach((id) => trackExisting(id, title, "photo", applyLabel));
       setSubmittedIds(ids);
     } catch (err) {
       setError(errorText(err));
@@ -300,6 +303,8 @@ export function EcomImageTool({
       {children}
 
       {complianceHint && <p className="mb-3 text-[12px] text-ink-faint">{complianceHint}</p>}
+
+      <AiLabelToggle checked={applyLabel} onChange={setApplyLabel} />
 
       {error && (
         <p role="alert" className="mb-3 rounded-field bg-error-bg px-3 py-2 text-[13px] text-error-fg">

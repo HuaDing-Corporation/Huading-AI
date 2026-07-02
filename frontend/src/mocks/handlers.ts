@@ -158,6 +158,7 @@ export const handlers = [
       duration_sec?: number;
       resolution?: string;
       bgm?: { source?: string; asset_id?: string; track_id?: string };
+      apply_visible_label?: boolean;
     };
     // 视频生成 video_gen 校验（逐字对齐后端 schemas/videos.py:213-222：参考图 1–9 且**唯一**、prompt
     // 非空、duration∈{5,10,15}、resolution∈{480p,720p,1080p}、bgm 二选一可选）→ 非法 422，不伪造放行/不放宽
@@ -186,7 +187,7 @@ export const handlers = [
     const id = `mock-${++videoSeq}`;
     // video_gen 用 prompt 作展示标题；记 mode + kind(AI 封面 purpose=cover → kind=cover)，让 GET /videos 筛忠实回放
     const displayTopic = body.video_mode === "video_gen" ? (body.prompt ?? "") : (body.topic ?? "");
-    videos.set(id, { id, status: "queued", progress: 0, topic: displayTopic, mode: body.video_mode ?? "avatar_talk", kind: body.purpose === "cover" ? "cover" : null, created_at: new Date(0).toISOString(), script: displayTopic, voice_id: "v-zhixing", aspect_ratio: "9:16", subtitle_enabled: true });
+    videos.set(id, { id, status: "queued", progress: 0, topic: displayTopic, mode: body.video_mode ?? "avatar_talk", kind: body.purpose === "cover" ? "cover" : null, created_at: new Date(0).toISOString(), script: displayTopic, voice_id: "v-zhixing", aspect_ratio: "9:16", subtitle_enabled: true, apply_visible_label: body.apply_visible_label ?? false });
     return HttpResponse.json({ data: { id, status: "queued" }, error: null, request_id: "mock-req" }, { status: 202 });
   }),
   // 视频生成 配乐库 (VIDEOGEN-UI-0001, seam §3)
@@ -306,7 +307,7 @@ export const handlers = [
   // 忠实后端：塞真 photo VideoTask(kind=ecom_cutout, done)进 videos store，使现有
   // GET /videos/:id 轮询拿到 done + 图；批量 N clamp 1..20。非伪造掩盖(吸取历史教训)。
   http.post(`${BASE}/api/v1/ecom-images/cutout`, async ({ request }) => {
-    const body = (await request.json()) as { source_asset_id: string; background: string };
+    const body = (await request.json()) as { source_asset_id: string; background: string; apply_visible_label?: boolean };
     const id = `mock-${++videoSeq}`;
     const url =
       body.background === "transparent"
@@ -315,12 +316,12 @@ export const handlers = [
     videos.set(id, {
       id, status: "done", progress: 100, topic: body.background === "transparent" ? "透明底商品图" : "白底商品图",
       mode: "photo", kind: "ecom_cutout", created_at: new Date(0).toISOString(),
-      playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url
+      playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url, apply_visible_label: body.apply_visible_label ?? false
     });
     return ok({ task_id: id, status: "queued" });
   }),
   http.post(`${BASE}/api/v1/ecom-images/cutout/batch`, async ({ request }) => {
-    const body = (await request.json()) as { items: { source_asset_id: string; background: string }[] };
+    const body = (await request.json()) as { items: { source_asset_id: string; background: string; apply_visible_label?: boolean }[] };
     const items = (body.items ?? []).slice(0, 20); // N clamp 上界 20
     const batchId = `batch-${++videoSeq}`;
     const tasks = items.map((it) => {
@@ -332,7 +333,7 @@ export const handlers = [
       videos.set(id, {
         id, status: "done", progress: 100, topic: "批量抠图",
         mode: "photo", kind: "ecom_cutout", created_at: new Date(0).toISOString(),
-        playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url
+        playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url, apply_visible_label: it.apply_visible_label ?? false
       });
       return { task_id: id, source_asset_id: it.source_asset_id, status: "queued" };
     });
@@ -353,18 +354,18 @@ export const handlers = [
     })
   ),
   http.post(`${BASE}/api/v1/ecom-images/model`, async ({ request }) => {
-    const body = (await request.json()) as { source_asset_id: string; gender: string; style_id: string };
+    const body = (await request.json()) as { source_asset_id: string; gender: string; style_id: string; apply_visible_label?: boolean };
     const id = `mock-${++videoSeq}`;
     const url = `https://mock.local/model-${body.style_id || "studio"}.png`;
     videos.set(id, {
       id, status: "done", progress: 100, topic: "AI 模特图",
       mode: "photo", kind: "ecom_model", created_at: new Date(0).toISOString(),
-      playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url
+      playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url, apply_visible_label: body.apply_visible_label ?? false
     });
     return ok({ task_id: id, status: "queued" });
   }),
   http.post(`${BASE}/api/v1/ecom-images/model/batch`, async ({ request }) => {
-    const body = (await request.json()) as { items: { source_asset_id: string; style_id: string }[] };
+    const body = (await request.json()) as { items: { source_asset_id: string; style_id: string; apply_visible_label?: boolean }[] };
     const items = (body.items ?? []).slice(0, 20); // N clamp 上界 20
     const batchId = `batch-${++videoSeq}`;
     const tasks = items.map((it) => {
@@ -373,7 +374,7 @@ export const handlers = [
       videos.set(id, {
         id, status: "done", progress: 100, topic: "批量 AI 模特",
         mode: "photo", kind: "ecom_model", created_at: new Date(0).toISOString(),
-        playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url
+        playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url, apply_visible_label: it.apply_visible_label ?? false
       });
       return { task_id: id, source_asset_id: it.source_asset_id, status: "queued" };
     });
@@ -395,18 +396,18 @@ export const handlers = [
     })
   ),
   http.post(`${BASE}/api/v1/ecom-images/poster`, async ({ request }) => {
-    const body = (await request.json()) as { source_asset_id: string; template_id: string };
+    const body = (await request.json()) as { source_asset_id: string; template_id: string; apply_visible_label?: boolean };
     const id = `mock-${++videoSeq}`;
     const url = `https://mock.local/poster-${body.template_id || "promo_bold"}.png`;
     videos.set(id, {
       id, status: "done", progress: 100, topic: "营销海报",
       mode: "photo", kind: "ecom_poster", created_at: new Date(0).toISOString(),
-      playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url
+      playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url, apply_visible_label: body.apply_visible_label ?? false
     });
     return ok({ task_id: id, status: "queued" });
   }),
   http.post(`${BASE}/api/v1/ecom-images/poster/batch`, async ({ request }) => {
-    const body = (await request.json()) as { items: { source_asset_id: string; template_id: string }[] };
+    const body = (await request.json()) as { items: { source_asset_id: string; template_id: string; apply_visible_label?: boolean }[] };
     const items = (body.items ?? []).slice(0, 20); // N clamp 上界 20
     const batchId = `batch-${++videoSeq}`;
     const tasks = items.map((it) => {
@@ -415,7 +416,7 @@ export const handlers = [
       videos.set(id, {
         id, status: "done", progress: 100, topic: "批量营销海报",
         mode: "photo", kind: "ecom_poster", created_at: new Date(0).toISOString(),
-        playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url
+        playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url, apply_visible_label: it.apply_visible_label ?? false
       });
       return { task_id: id, source_asset_id: it.source_asset_id, status: "queued" };
     });

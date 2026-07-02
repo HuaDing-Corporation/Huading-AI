@@ -27,6 +27,7 @@ const doneTask = (id: string, url: string) => ({
 });
 
 beforeEach(() => {
+  window.localStorage.clear(); // 每用例干净起点：AI 标识开关默认关，避免记忆跨用例污染
   URL.createObjectURL = vi.fn(() => "blob:mock");
   URL.revokeObjectURL = vi.fn();
   uploadMock.isPending = false;
@@ -60,9 +61,9 @@ describe("EcomImageCutoutForm (电商图 · 白底图/抠图)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "生成" }));
     await waitFor(() =>
-      expect(cutoutMock.mutateAsync).toHaveBeenCalledWith({ source_asset_id: "asset-1", background: "white" })
+      expect(cutoutMock.mutateAsync).toHaveBeenCalledWith({ source_asset_id: "asset-1", background: "white", apply_visible_label: false })
     );
-    expect(trackExistingMock).toHaveBeenCalledWith("t-1", expect.any(String), "photo");
+    expect(trackExistingMock).toHaveBeenCalledWith("t-1", expect.any(String), "photo", false);
     expect(await screen.findByRole("img", { name: copy.workbench.ecomResultsLabel })).toHaveAttribute(
       "src",
       "https://mock.local/cut.png"
@@ -77,7 +78,7 @@ describe("EcomImageCutoutForm (电商图 · 白底图/抠图)", () => {
     fireEvent.click(screen.getByRole("button", { name: "透明底" }));
     fireEvent.click(screen.getByRole("button", { name: "生成" }));
     await waitFor(() =>
-      expect(cutoutMock.mutateAsync).toHaveBeenCalledWith({ source_asset_id: "asset-1", background: "transparent" })
+      expect(cutoutMock.mutateAsync).toHaveBeenCalledWith({ source_asset_id: "asset-1", background: "transparent", apply_visible_label: false })
     );
   });
 
@@ -95,8 +96,8 @@ describe("EcomImageCutoutForm (电商图 · 白底图/抠图)", () => {
     await waitFor(() => expect(cutoutBatchMock.mutateAsync).toHaveBeenCalledTimes(1));
     expect(cutoutBatchMock.mutateAsync.mock.calls[0][0]).toEqual({
       items: [
-        { source_asset_id: "asset-1", background: "white" },
-        { source_asset_id: "asset-1", background: "white" }
+        { source_asset_id: "asset-1", background: "white", apply_visible_label: false },
+        { source_asset_id: "asset-1", background: "white", apply_visible_label: false }
       ]
     });
     expect(trackExistingMock).toHaveBeenCalledTimes(2);
@@ -155,5 +156,34 @@ describe("EcomImageCutoutForm (电商图 · 白底图/抠图)", () => {
     expect(clickSpy).toHaveBeenCalledTimes(2);
     expect(btn).toBeDisabled(); // 下载中视觉反馈
     clickSpy.mockRestore();
+  });
+
+  // LABEL-TOGGLE-UI-0001 承重：开启开关 → 电商图提交体带 apply_visible_label:true（锁外壳 applyLabel→闭包→trackExisting 全链路）
+  it("开启 AI 标识开关 → 单张 cutout 提交 apply_visible_label:true + trackExisting 第4参 true（承重）", async () => {
+    tasksMock.tasks = [doneTask("t-1", "https://mock.local/cut.png")];
+    render(<EcomImageCutoutForm />);
+    fireEvent.change(document.querySelector("#ecom-cutout-source")!, { target: { files: [png("p.png")] } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "生成" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("switch")); // 开启 AI 生成标识
+    fireEvent.click(screen.getByRole("button", { name: "生成" }));
+    await waitFor(() =>
+      expect(cutoutMock.mutateAsync).toHaveBeenCalledWith({ source_asset_id: "asset-1", background: "white", apply_visible_label: true })
+    );
+    expect(trackExistingMock).toHaveBeenCalledWith("t-1", expect.any(String), "photo", true);
+  });
+
+  it("开启 AI 标识开关 → 批量 cutout items 每项 apply_visible_label:true（承重，锁外壳批量链路）", async () => {
+    tasksMock.tasks = [doneTask("t-1", "https://mock.local/1.png"), doneTask("t-2", "https://mock.local/2.png")];
+    render(<EcomImageCutoutForm />);
+    fireEvent.click(screen.getByRole("button", { name: "批量" }));
+    fireEvent.change(document.querySelector("#ecom-cutout-batch")!, { target: { files: [png("a.png"), png("b.png")] } });
+    await waitFor(() => expect(uploadMock.mutateAsync).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("switch")); // 开启 AI 生成标识
+    fireEvent.click(screen.getByRole("button", { name: "生成" }));
+    await waitFor(() => expect(cutoutBatchMock.mutateAsync).toHaveBeenCalledTimes(1));
+    expect(cutoutBatchMock.mutateAsync.mock.calls[0][0].items).toEqual([
+      { source_asset_id: "asset-1", background: "white", apply_visible_label: true },
+      { source_asset_id: "asset-1", background: "white", apply_visible_label: true }
+    ]);
   });
 });

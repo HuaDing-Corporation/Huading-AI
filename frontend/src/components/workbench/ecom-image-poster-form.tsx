@@ -41,18 +41,19 @@ export function EcomImagePosterForm() {
       icon={<Megaphone size={18} strokeWidth={1.8} />}
       submitting={poster.isPending || posterBatch.isPending}
       extraValid={!!templateId}
-      onSubmitSingle={async (assetId) => {
+      onSubmitSingle={async (assetId, applyVisibleLabel) => {
         const res = await poster.mutateAsync({
           source_asset_id: assetId,
           template_id: templateId as string,
           title: titleVal,
-          subtitle: subtitleVal
+          subtitle: subtitleVal,
+          apply_visible_label: applyVisibleLabel
         });
         return [res.task_id];
       }}
-      onSubmitBatch={async (assetIds) => {
+      onSubmitBatch={async (assetIds, applyVisibleLabel) => {
         const res = await posterBatch.mutateAsync({
-          items: assetIds.map((id) => ({ source_asset_id: id, template_id: templateId as string, title: titleVal, subtitle: subtitleVal }))
+          items: assetIds.map((id) => ({ source_asset_id: id, template_id: templateId as string, title: titleVal, subtitle: subtitleVal, apply_visible_label: applyVisibleLabel }))
         });
         return res.tasks.map((t) => t.task_id);
       }}

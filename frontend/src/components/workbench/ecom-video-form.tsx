@@ -19,6 +19,8 @@ import { ImagePicker } from "@/components/workbench/image-picker";
 import { MoreSettings } from "@/components/workbench/more-settings";
 import { ScriptReview } from "@/components/workbench/script-review";
 import { VoicePicker } from "@/components/workbench/voice-picker";
+import { AiLabelToggle } from "@/components/label/ai-label-toggle";
+import { useLabelTogglePreference } from "@/lib/preferences/label-toggle";
 import { copy } from "@/lib/copy";
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
@@ -49,6 +51,7 @@ export function EcomVideoForm({
   const [voiceId, setVoiceId] = useState("");
   const [durationSec, setDurationSec] = useState(30);
   const [speed, setSpeed] = useState(1);
+  const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）
   const [error, setError] = useState<string | null>(null);
   const prefillConsumed = useRef(false);
   useEffect(() => {
@@ -119,7 +122,8 @@ export function EcomVideoForm({
       duration_sec: durationSec,
       speed,
       aspect_ratio: "9:16",
-      subtitle_enabled: true
+      subtitle_enabled: true,
+      apply_visible_label: applyLabel
     });
   };
 
@@ -198,6 +202,8 @@ export function EcomVideoForm({
       <VoicePicker voices={voiceList ?? []} value={voiceId} onChange={setVoiceId} />
 
       <MoreSettings speed={speed} onSpeedChange={setSpeed} />
+
+      <AiLabelToggle checked={applyLabel} onChange={setApplyLabel} />
 
       {error && (
         <p role="alert" className="mb-3 rounded-field bg-error-bg px-3 py-2 text-[13px] text-error-fg">

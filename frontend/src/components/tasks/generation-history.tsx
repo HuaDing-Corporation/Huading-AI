@@ -7,7 +7,6 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
 import { Chip } from "@/components/ui/chip";
-import { AiLabelNotice } from "@/components/label/ai-label-notice";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger, tabTriggerClass } from "@/components/ui/tabs";
 import { CopyDraftList } from "@/components/tasks/copy-draft-list";
@@ -181,11 +180,8 @@ export function PhotoHistory() {
 export function GenerationHistory() {
   return (
     <Card animateIn>
-      <div className="mb-3.5 flex flex-wrap items-center justify-between gap-2">
-        <CardTitle>{copy.history.title}</CardTitle>
-        {/* 历史产物知情提示：已含 AI 生成标识(不可去除)。(LABEL-UI-0001) */}
-        <AiLabelNotice />
-      </div>
+      {/* LABEL-TOGGLE-UI-0001：移除面板级全局「已含 AI 标识」恒显；改为每卡片按任务 apply_visible_label 显示。 */}
+      <CardTitle className="mb-3.5">{copy.history.title}</CardTitle>
       <Tabs defaultValue="avatar_talk">
         <TabsList
           aria-label={copy.history.title}

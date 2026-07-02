@@ -56,6 +56,28 @@ describe("TaskCard inline player onError once (P2-2)", () => {
   });
 });
 
+describe("TaskCard AI 标识徽标（LABEL-TOGGLE-UI-0001，按任务状态两态）", () => {
+  const doneTask = (applyVisibleLabel?: boolean): TrackedTask => ({
+    taskId: "d1",
+    topic: "T",
+    status: "done",
+    progress: 100,
+    statusLabel: "已完成",
+    playbackUrl: "https://example.test/v.mp4",
+    applyVisibleLabel
+  });
+
+  it("带标识(applyVisibleLabel=true) + done → 显示「已含 AI 生成标识」徽标", () => {
+    render(<TaskCard task={doneTask(true)} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />);
+    expect(screen.getByText(copy.label.productNotice)).toBeInTheDocument();
+  });
+
+  it("不带标识(applyVisibleLabel=false) + done → 不显示徽标", () => {
+    render(<TaskCard task={doneTask(false)} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />);
+    expect(screen.queryByText(copy.label.productNotice)).not.toBeInTheDocument();
+  });
+});
+
 describe("TaskCard photo error friendly (IMAGE-ERROR-FRIENDLY)", () => {
   it("shows friendly copy for a failed photo task — never the raw error_message", () => {
     const task: TrackedTask = {

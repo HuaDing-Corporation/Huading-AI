@@ -24,6 +24,8 @@ import { MoreSettings } from "@/components/workbench/more-settings";
 import { ScriptReview } from "@/components/workbench/script-review";
 import { VoicePicker } from "@/components/workbench/voice-picker";
 import { SubtitleStylePicker, isSubtitleStyleValid } from "@/components/workbench/subtitle-style-picker";
+import { AiLabelToggle } from "@/components/label/ai-label-toggle";
+import { useLabelTogglePreference } from "@/lib/preferences/label-toggle";
 import { copy } from "@/lib/copy";
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
@@ -54,6 +56,7 @@ export function NewVideoForm({
   const [speed, setSpeed] = useState(1);
   // 字幕样式(ORAL-PROD-UI-0001)：undefined = 不传 subtitle_style → 默认烧入(不回归 0001)
   const [subtitleStyle, setSubtitleStyle] = useState<SubtitleStyle | undefined>(undefined);
+  const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）
   const [error, setError] = useState<string | null>(null);
   const prefillConsumed = useRef(false);
   useEffect(() => {
@@ -106,7 +109,8 @@ export function NewVideoForm({
       speed,
       aspect_ratio: "9:16",
       subtitle_enabled: true,
-      subtitle_style: subtitleStyle // 不选 = undefined → JSON.stringify 丢弃 → 不回归 0001
+      subtitle_style: subtitleStyle, // 不选 = undefined → JSON.stringify 丢弃 → 不回归 0001
+      apply_visible_label: applyLabel
     });
   };
 
@@ -157,6 +161,8 @@ export function NewVideoForm({
       />
 
       <MoreSettings speed={speed} onSpeedChange={setSpeed} />
+
+      <AiLabelToggle checked={applyLabel} onChange={setApplyLabel} />
 
       {error && (
         <p role="alert" className="mb-3 rounded-field bg-error-bg px-3 py-2 text-[13px] text-error-fg">

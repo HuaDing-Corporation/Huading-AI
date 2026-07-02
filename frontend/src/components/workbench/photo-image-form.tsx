@@ -21,6 +21,8 @@ import {
 import { AiTextField } from "@/components/workbench/ai-text-field";
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
 import { ImagePicker } from "@/components/workbench/image-picker";
+import { AiLabelToggle } from "@/components/label/ai-label-toggle";
+import { useLabelTogglePreference } from "@/lib/preferences/label-toggle";
 import { copy } from "@/lib/copy";
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
@@ -43,6 +45,7 @@ export function PhotoImageForm() {
   const [prompt, setPrompt] = useState("");
   const [imageSize, setImageSize] = useState<string>(PHOTO_SIZES[0]);
   const [imageQuality, setImageQuality] = useState<string>("medium");
+  const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）
   const [error, setError] = useState<string | null>(null);
 
   // Actual submit — runs only after the 确定生成 confirmation; owns its own errors.
@@ -65,7 +68,8 @@ export function PhotoImageForm() {
       video_mode: "photo",
       image_key: refImage.value ?? undefined, // optional reference image
       image_size: imageSize,
-      image_quality: imageQuality
+      image_quality: imageQuality,
+      apply_visible_label: applyLabel
     });
   };
 
@@ -131,6 +135,8 @@ export function PhotoImageForm() {
         </div>
       </div>
       <p className="mb-3 text-[12px] text-ink-faint">{copy.workbench.photoQualityHint}</p>
+
+      <AiLabelToggle checked={applyLabel} onChange={setApplyLabel} />
 
       {error && (
         <p role="alert" className="mb-3 rounded-field bg-error-bg px-3 py-2 text-[13px] text-error-fg">

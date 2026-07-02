@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Lock, ShieldCheck } from "lucide-react";
+import { Info, ShieldCheck } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
 import { useLabelSettings, useUpdateLabelSettings } from "@/lib/api/hooks";
@@ -34,9 +34,10 @@ const POS_CLASS: Record<LabelPosition, string> = {
 };
 
 /**
- * 深度合成标识设置（LABEL-UI-0001）——位置 + 文案 + 实时预览 + 「不可关闭」明示 + 保存。
- * 合规：enabled 只读恒真，UI **不提供任何关闭显式标识的控件**（无开关/复选框）；update 只发
- * position/text（不含 enabled），结构上无法置 false。唯一 hooks 调用方。
+ * 深度合成标识「样式设置」页（LABEL-UI-0001 / 语义统一 LABEL-TOGGLE-UI-0001）——位置 + 文案 +
+ * 实时预览 + 生效方式说明 + 保存。职责：**配置显式标识的样式/文案**；是否应用由每次生成时的
+ * 「AI 生成标识」开关决定（默认关，见 AiLabelToggle）。此页不含应用开关，update 只发 position/text
+ * （不含 enabled）。唯一 hooks 调用方。
  */
 export function LabelSettings() {
   const { data, isLoading, isError, refetch } = useLabelSettings();
@@ -144,14 +145,14 @@ export function LabelSettings() {
             </div>
           </div>
 
-          {/* 合规：显式标识不可关闭明示（无任何开关/复选框） */}
+          {/* 生效方式说明：此页配样式，是否应用由每次生成时的开关决定（此页不含应用开关） */}
           <div className="mb-[15px] flex items-start gap-2.5 rounded-field border border-line-gold bg-glass-fill px-3 py-2.5">
             <ShieldCheck size={16} strokeWidth={1.8} className="mt-0.5 flex-none text-gold-deep" />
             <div className="min-w-0">
               <p className="flex items-center gap-1.5 text-[12.5px] font-medium text-ink">
-                <Lock size={12} strokeWidth={2} className="flex-none text-ink-soft" /> {copy.label.lockedTitle}
+                <Info size={12} strokeWidth={2} className="flex-none text-ink-soft" /> {copy.label.applyNoticeTitle}
               </p>
-              <p className="mt-0.5 text-[12px] text-ink-soft">{copy.label.lockedHint}</p>
+              <p className="mt-0.5 text-[12px] text-ink-soft">{copy.label.applyNoticeHint}</p>
             </div>
           </div>
 

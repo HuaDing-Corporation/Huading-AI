@@ -19,6 +19,7 @@ vi.mock("@/lib/videos/tasks-context", () => ({ useVideoTasks: () => taskMocks })
 import { PhotoImageForm } from "./photo-image-form";
 
 beforeEach(() => {
+  window.localStorage.clear(); // 每用例干净起点：AI 标识开关默认关
   URL.createObjectURL = vi.fn(() => "blob:mock");
   URL.revokeObjectURL = vi.fn();
   uploadMock.mutateAsync.mockResolvedValue({ image_key: "uploads/ref.png" });
@@ -56,11 +57,23 @@ describe("PhotoImageForm (图片生成 / 修改)", () => {
       video_mode: "photo",
       image_key: undefined,
       image_size: "1024x1024",
-      image_quality: "medium"
+      image_quality: "medium",
+      apply_visible_label: false
     });
     // photo body never carries the video-only fields.
     expect(request).not.toHaveProperty("voice_id");
     expect(request).not.toHaveProperty("duration_sec");
+  });
+
+  // LABEL-TOGGLE-UI-0001 承重：开启开关 → 提交体 apply_visible_label:true（锁 photo 面板接线）
+  it("开启 AI 标识开关 → 提交体 apply_visible_label:true（承重）", async () => {
+    render(<PhotoImageForm />);
+    fireEvent.change(screen.getByPlaceholderText(/描述想要的图片/), { target: { value: "一只橘猫" } });
+    fireEvent.click(screen.getByRole("switch")); // 开启 AI 生成标识
+    fireEvent.click(screen.getByRole("button", { name: /生成图片/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    expect(taskMocks.createAndTrack.mock.calls[0][0].apply_visible_label).toBe(true);
   });
 
   it("修图: includes image_key when a reference image is uploaded", async () => {

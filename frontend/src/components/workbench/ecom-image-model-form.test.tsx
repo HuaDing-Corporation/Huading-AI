@@ -34,6 +34,7 @@ const STYLES = [
 ];
 
 beforeEach(() => {
+  window.localStorage.clear(); // 每用例干净起点：AI 标识开关默认关
   URL.createObjectURL = vi.fn(() => "blob:mock");
   URL.revokeObjectURL = vi.fn();
   uploadMock.isPending = false;
@@ -53,7 +54,10 @@ beforeEach(() => {
     ]
   });
 });
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  vi.clearAllMocks();
+  window.localStorage.clear(); // 清 AI 标识开关记忆，隔离用例
+});
 
 describe("EcomImageModelForm (电商图 · AI 模特)", () => {
   it("风格必填门：上传后未选风格仍禁用生成", async () => {
@@ -77,14 +81,35 @@ describe("EcomImageModelForm (电商图 · AI 模特)", () => {
         source_asset_id: "asset-1",
         gender: "female",
         style_id: "studio",
-        extra_prompt: undefined
+        extra_prompt: undefined,
+        apply_visible_label: false
       })
     );
-    expect(trackExistingMock).toHaveBeenCalledWith("t-1", expect.any(String), "photo");
+    expect(trackExistingMock).toHaveBeenCalledWith("t-1", expect.any(String), "photo", false);
     expect(await screen.findByRole("img", { name: copy.workbench.ecomResultsLabel })).toHaveAttribute(
       "src",
       "https://mock.local/model-studio.png"
     );
+  });
+
+  it("开启 AI 标识开关 → model 提交 apply_visible_label:true + trackExisting 第4参 true（承重）", async () => {
+    tasksMock.tasks = [doneTask("t-1", "https://mock.local/model-studio.png")];
+    render(<EcomImageModelForm />);
+    fireEvent.change(document.querySelector("#ecom-model-source")!, { target: { files: [png("p.png")] } });
+    fireEvent.click(screen.getByRole("button", { name: "简约棚拍" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "生成" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("switch")); // 开启 AI 生成标识
+    fireEvent.click(screen.getByRole("button", { name: "生成" }));
+    await waitFor(() =>
+      expect(modelMock.mutateAsync).toHaveBeenCalledWith({
+        source_asset_id: "asset-1",
+        gender: "female",
+        style_id: "studio",
+        extra_prompt: undefined,
+        apply_visible_label: true
+      })
+    );
+    expect(trackExistingMock).toHaveBeenCalledWith("t-1", expect.any(String), "photo", true);
   });
 
   it("性别 + 自定义补充：提交带 gender=male、extra_prompt(对齐后端字段名)", async () => {
@@ -103,7 +128,8 @@ describe("EcomImageModelForm (电商图 · AI 模特)", () => {
         source_asset_id: "asset-1",
         gender: "male",
         style_id: "studio",
-        extra_prompt: "暖光街头微笑站姿"
+        extra_prompt: "暖光街头微笑站姿",
+        apply_visible_label: false
       })
     );
   });
@@ -152,8 +178,8 @@ describe("EcomImageModelForm (电商图 · AI 模特)", () => {
     await waitFor(() => expect(modelBatchMock.mutateAsync).toHaveBeenCalledTimes(1));
     expect(modelBatchMock.mutateAsync.mock.calls[0][0]).toEqual({
       items: [
-        { source_asset_id: "asset-1", gender: "female", style_id: "studio", extra_prompt: undefined },
-        { source_asset_id: "asset-1", gender: "female", style_id: "studio", extra_prompt: undefined }
+        { source_asset_id: "asset-1", gender: "female", style_id: "studio", extra_prompt: undefined, apply_visible_label: false },
+        { source_asset_id: "asset-1", gender: "female", style_id: "studio", extra_prompt: undefined, apply_visible_label: false }
       ]
     });
     expect(trackExistingMock).toHaveBeenCalledTimes(2);

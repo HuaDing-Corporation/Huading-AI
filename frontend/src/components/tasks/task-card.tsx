@@ -13,6 +13,7 @@ import {
 
 import { Progress } from "@/components/ui/progress";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { AiLabelNotice } from "@/components/label/ai-label-notice";
 import { friendlyImageError } from "@/lib/api/image-error";
 import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
@@ -102,6 +103,12 @@ export function TaskCard({ task, onOpen, onRetry, onUrlError, onDelete, deleting
           ) : null}
           {task.status === "running" ? (
             <span className="mt-0.5 block text-[12px] text-ink-soft">{task.statusLabel}</span>
+          ) : null}
+          {/* LABEL-TOGGLE-UI-0001：按任务实际状态显示徽标；带=显示，不带=不显示。 */}
+          {task.status === "done" && task.applyVisibleLabel ? (
+            <div className="mt-1">
+              <AiLabelNotice />
+            </div>
           ) : null}
         </div>
 

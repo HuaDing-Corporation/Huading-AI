@@ -169,10 +169,10 @@ export function VideoDetail({ id }: VideoDetailProps) {
         </div>
       )}
 
-      {/* 产物知情提示 + 发布入口：仅完成产物显示。(LABEL-UI-0001 / PUBLISH-UI-0001) */}
+      {/* 发布入口 + 标识徽标：仅完成产物显示。徽标按任务实际 apply_visible_label(LABEL-TOGGLE-UI-0001)；发布入口不受影响。 */}
       {data.status === "done" && data.playback_url && (
         <div className="flex flex-wrap items-center gap-2">
-          <AiLabelNotice className="w-fit" />
+          {data.apply_visible_label && <AiLabelNotice className="w-fit" />}
           {/* 发布入口：带 source_kind+source_task_id 跳发布中心(不在此发布，仅引导)。 */}
           <Link
             href={`/publish?source_kind=${data.mode === "photo" ? "image" : "video"}&source_task_id=${id}`}

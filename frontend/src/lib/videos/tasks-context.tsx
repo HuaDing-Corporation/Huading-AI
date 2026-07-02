@@ -30,7 +30,7 @@ interface TasksContextValue {
    * returns task_id(s) for backend-created photo tasks (kind=ecom_cutout). Adds the
    * task and subscribes to its SSE/poll progress without re-creating via createVideo.
    */
-  trackExisting: (taskId: string, topic: string, mode?: string | null) => void;
+  trackExisting: (taskId: string, topic: string, mode?: string | null, applyVisibleLabel?: boolean) => void;
   /**
    * Re-submit the original request for a failed task, creating a new task.
    * Resolves to the new task id or throws if the original request is unknown.
@@ -218,6 +218,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
           status: "queued",
           progress: 0,
           statusLabel: "排队中",
+          applyVisibleLabel: req.apply_visible_label ?? false, // session 卡即时徽标（LABEL-TOGGLE-UI-0001）
           retryable: true // we hold this request → retry can re-submit it (P2-1)
         },
         ...prev
@@ -231,7 +232,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
   // Track a backend-created task (cutout/batch) by id — reuse subscribe()'s full
   // SSE/poll/watchdog/reconcile machinery; product lands in TaskList + image history.
   const trackExisting = useCallback(
-    (taskId: string, topic: string, mode?: string | null): void => {
+    (taskId: string, topic: string, mode?: string | null, applyVisibleLabel?: boolean): void => {
       setTasks((prev) =>
         prev.some((t) => t.taskId === taskId)
           ? prev
@@ -243,6 +244,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
                 status: "queued",
                 progress: 0,
                 statusLabel: "排队中",
+                applyVisibleLabel: applyVisibleLabel ?? false, // ecom session 卡即时徽标（LABEL-TOGGLE-UI-0001）
                 retryable: false // 无 stored request；重试由各工具自行重新提交
               },
               ...prev

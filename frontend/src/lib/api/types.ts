@@ -47,6 +47,7 @@ export interface VideoListItem {
   kind?: string | null; // 图片细分：如 "cover"（封面 photo task；HIST kind 筛真后端支持）
   error_code?: string | null; // 图片失败时映射友好文案（friendlyImageError）
   thumbnail_url?: string | null;
+  apply_visible_label?: boolean; // 该任务是否带 AI 显式标识（LABEL-TOGGLE-UI-0001，徽标数据源）
   created_at: string;
 }
 export interface VideoListResponse {
@@ -66,6 +67,7 @@ export interface VideoDetail {
   voice_id: string | null;
   aspect_ratio: string | null;
   subtitle_enabled: boolean | null;
+  apply_visible_label?: boolean; // 该任务是否带 AI 显式标识（LABEL-TOGGLE-UI-0001，详情徽标数据源）
   playback_url?: string | null;
   download_url?: string | null;
   thumbnail_url?: string | null;
@@ -91,6 +93,7 @@ export interface CreateVideoRequest {
   aspect_ratio?: string; // 默认 "9:16"
   subtitle_enabled?: boolean; // 默认 true
   subtitle_style?: SubtitleStyle; // 数字人口播：字幕样式覆盖（ORAL-PROD-UI-0001）；缺省=与 0001 默认烧入一致（不回归）
+  apply_visible_label?: boolean; // AI 生成显式标识开关（LABEL-TOGGLE-UI-0001）；默认关(false)，开=true。对齐后端 VideoGenerateRequest.apply_visible_label
   purpose?: string; // 照片/封面：用途标识，如 "cover"（AI 封面复用 0003 文生图标识；进图片历史作为 photo）
   // ── 视频生成 video_gen (VIDEOGEN-UI-0001, seam §2) ──
   prompt?: string; // 不限字数提示词（seam 字段）；同时 topic 复用此文本作标题/展示
@@ -343,6 +346,7 @@ export type CutoutBackground = "white" | "transparent";
 export interface CutoutRequest {
   source_asset_id: string;
   background: CutoutBackground;
+  apply_visible_label?: boolean; // AI 显式标识开关（LABEL-TOGGLE-UI-0001，默认关）
 }
 export interface CutoutResponse {
   task_id: string;
@@ -353,6 +357,7 @@ export interface CutoutResponse {
 export interface CutoutBatchItem {
   source_asset_id: string;
   background: CutoutBackground;
+  apply_visible_label?: boolean; // 批量每项独立标识（后端 batch item = EcomCutoutRequest）
 }
 export interface CutoutBatchRequest {
   items: CutoutBatchItem[];
@@ -386,6 +391,7 @@ export interface ModelRequest {
   gender: ModelGender;
   style_id: string;
   extra_prompt?: string; // 自定义补充（前端 UI ≤200；后端无长度限制）
+  apply_visible_label?: boolean; // AI 显式标识开关（LABEL-TOGGLE-UI-0001，默认关）
 }
 export interface ModelResponse {
   task_id: string;
@@ -398,6 +404,7 @@ export interface ModelBatchItem {
   gender: ModelGender;
   style_id: string;
   extra_prompt?: string;
+  apply_visible_label?: boolean; // 批量每项独立标识（后端 batch item = EcomModelRequest）
 }
 export interface ModelBatchRequest {
   items: ModelBatchItem[];
@@ -431,6 +438,7 @@ export interface PosterRequest {
   template_id: string; // 版式预设，必选
   title: string; // 标题，后端必填(空串允许)，前端 UI ≤30
   subtitle: string; // 自定义一行，后端必填(空串允许)，前端 UI ≤40
+  apply_visible_label?: boolean; // AI 显式标识开关（LABEL-TOGGLE-UI-0001，默认关）
 }
 export interface PosterResponse {
   task_id: string;
@@ -443,6 +451,7 @@ export interface PosterBatchItem {
   template_id: string;
   title: string;
   subtitle: string;
+  apply_visible_label?: boolean; // 批量每项独立标识（后端 batch item = EcomPosterRequest）
 }
 export interface PosterBatchRequest {
   items: PosterBatchItem[];
