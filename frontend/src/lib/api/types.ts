@@ -591,6 +591,7 @@ export interface EcomTableRow {
 }
 export interface PromptSetRow {
   prompt: string;
+  image_asset_id?: string; // 逐行配对参考图（BATCH-PROD-UI-0002）：开启配对时第 N 行↔第 N 图；共享模式不带
 }
 export type BatchRow = EcomTableRow | PromptSetRow;
 

@@ -11,10 +11,12 @@ import { copy } from "@/lib/copy";
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 export const MAX_REFERENCE_IMAGES = 9;
 
-interface RefItem {
+/** 有序参考图项（assetId + 本地预览 object-URL）。预览 URL 生命周期由本组件持有，父级仅只读渲染，勿释放。 */
+export interface ReferenceImageItem {
   assetId: string;
   preview: string;
 }
+type RefItem = ReferenceImageItem;
 
 /**
  * 视频生成 参考图多传（VIDEOGEN-UI-0001，≤9，可增删）。复用电商图批量上传经验：每张经
@@ -24,9 +26,12 @@ interface RefItem {
  */
 export function ReferenceImagesPicker({
   onChange,
+  onItemsChange,
   inputId = "vg-ref-images"
 }: {
-  onChange: (assetIds: string[]) => void;
+  onChange?: (assetIds: string[]) => void;
+  /** 逐行配对（BATCH-PROD-UI-0002）需按序缩略图 → 上抛有序 {assetId,preview} 供父级渲染配对预览。 */
+  onItemsChange?: (items: ReferenceImageItem[]) => void;
   inputId?: string;
 }) {
   const uploadImg = useUploadImage();
@@ -34,10 +39,11 @@ export function ReferenceImagesPicker({
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // 上抛 asset_id 列表（onChange 为父级 setState，稳定引用，不触发循环）。
+  // 上抛 asset_id 列表 + 有序 items（onChange/onItemsChange 为父级 setState，稳定引用，不触发循环）。
   useEffect(() => {
-    onChange(items.map((it) => it.assetId));
-  }, [items, onChange]);
+    onChange?.(items.map((it) => it.assetId));
+    onItemsChange?.(items);
+  }, [items, onChange, onItemsChange]);
 
   // 卸载释放残留预览 object URL（对齐 ImagePicker / EcomImageTool 防泄漏）。
   const itemsRef = useRef(items);

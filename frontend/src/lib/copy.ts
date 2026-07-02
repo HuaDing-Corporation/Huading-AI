@@ -442,6 +442,15 @@ export const copy = {
     promptPlaceholder: "每行一条提示词，如：\n赛博城市夜景，霓虹运镜\n春日樱花街道，暖光",
     promptCount: (n: number) => `${n} 条`,
     promptEmpty: "请至少输入 1 条提示词",
+    // 逐行配对参考图（BATCH-PROD-UI-0002）
+    pairToggleLabel: "逐行配对参考图",
+    pairToggleHint: "开启后按顺序为每条提示词各配一张参考图（第 N 行 ↔ 第 N 张）；关闭则参考图整体共用。",
+    pairSharedNote: "参考图将应用于本批每一条。",
+    pairPreviewTitle: "配对预览（请核对顺序）",
+    pairCountMismatch: (prompts: number, images: number) =>
+      `参考图数量需与提示词行数一致：当前提示词 ${prompts} 行、参考图 ${images} 张。`,
+    pairRowLabel: (n: number) => `第 ${n} 行`,
+    pairMissingImage: "缺图",
     // 公共参数
     commonTitle: "公共参数（应用到本批每条）",
     // 超限（真拦截：禁用 + 显式提示，不裁剪）
