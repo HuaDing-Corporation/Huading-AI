@@ -43,12 +43,7 @@ Do not commit `infra/.env`.
 ## First Start
 
 ```bash
-# If you are already in repo root and use Compose's default `infra/.env` file:
-docker compose -f infra/docker-compose.prod.yml up -d --build
-
-# Explicit env-file form used by the rest of this runbook:
-docker compose -f infra/docker-compose.prod.yml --env-file infra/.env up -d --build
-docker compose -f infra/docker-compose.prod.yml --env-file infra/.env ps
+bash infra/deploy.sh
 ```
 
 The backend service runs `alembic upgrade head` before starting Uvicorn.
@@ -85,14 +80,17 @@ or raw provider keys are stored.
 ## Operations
 
 ```bash
+bash infra/deploy.sh
 docker compose -f infra/docker-compose.prod.yml --env-file infra/.env logs -f nginx
 docker compose -f infra/docker-compose.prod.yml --env-file infra/.env logs -f backend
 docker compose -f infra/docker-compose.prod.yml --env-file infra/.env logs -f worker
 docker compose -f infra/docker-compose.prod.yml --env-file infra/.env logs -f worker-video
-docker compose -f infra/docker-compose.prod.yml --env-file infra/.env pull
-docker compose -f infra/docker-compose.prod.yml --env-file infra/.env up -d --build
-docker compose -f infra/docker-compose.prod.yml --env-file infra/.env restart backend worker worker-video frontend nginx
 ```
+
+`infra/deploy.sh` runs `git pull --ff-only`, rebuilds the stack, restarts nginx as
+a compatibility fallback, then prints `alembic current` and Compose `ps`. Nginx
+also uses Docker DNS dynamic resolution for backend, frontend, and MinIO, so
+container IP changes after rebuild do not require manual nginx restarts.
 
 Persistent data lives in Docker volumes:
 

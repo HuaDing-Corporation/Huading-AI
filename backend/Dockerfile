@@ -10,8 +10,8 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH"
 
 # Optional package mirrors for restricted networks. Empty = upstream defaults
-# (deb.debian.org / pypi.org / playwright CDN). Set these for CN / corporate
-# networks, e.g. APT_MIRROR=mirrors.tuna.tsinghua.edu.cn.
+# (deb.debian.org / pypi.org / playwright CDN). Use only explicit, reviewed
+# mirrors for restricted corporate networks.
 ARG APT_MIRROR=""
 ARG UV_INDEX=""
 ARG PLAYWRIGHT_DOWNLOAD_HOST=""
