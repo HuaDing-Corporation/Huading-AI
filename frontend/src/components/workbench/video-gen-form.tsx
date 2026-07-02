@@ -18,11 +18,11 @@ import { BgmPicker } from "@/components/workbench/bgm-picker";
 import { copy } from "@/lib/copy";
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
-const RESOLUTIONS: VideoGenResolution[] = ["480p", "720p"];
+const RESOLUTIONS: VideoGenResolution[] = ["480p", "720p", "1080p"];
 
 /**
  * 视频生成 第6模式（VIDEOGEN-UI-0001，seam §5）：多参考图(≤9) + 不限 prompt + 时长(5/10/15) +
- * 分辨率(480p/720p,默认720p) + BGM(无/上传/库) → POST /videos {video_mode:"video_gen"}，SSE 进度(复用
+ * 分辨率(480p/720p/1080p,默认720p) + BGM(无/上传/库) → POST /videos {video_mode:"video_gen"}，SSE 进度(复用
  * createAndTrack)，出片入历史。复用 useGenerateConfirm/ConfirmGenerateDialog(积分预估 + 防连点)。
  * video_gen 用 prompt(同时作 topic 标题)；其余模式不受影响。
  */
@@ -96,10 +96,10 @@ export function VideoGenForm() {
         </div>
       </fieldset>
 
-      {/* 分辨率 480p/720p */}
+      {/* 分辨率 480p/720p/1080p */}
       <fieldset className="mb-[15px] m-0 min-w-0 border-0 p-0">
         <legend className={labelClass}>{copy.workbench.vgResolutionLabel}</legend>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-3 gap-2">
           {RESOLUTIONS.map((r) => (
             <SelectableOption key={r} selected={resolution === r} onSelect={() => setResolution(r)} className="justify-center">
               {r.toUpperCase()}

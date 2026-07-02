@@ -95,7 +95,7 @@ export interface CreateVideoRequest {
   // ── 视频生成 video_gen (VIDEOGEN-UI-0001, seam §2) ──
   prompt?: string; // 不限字数提示词（seam 字段）；同时 topic 复用此文本作标题/展示
   reference_image_asset_ids?: string[]; // 参考图 1–9 张（POST /uploads/images → asset_id）
-  resolution?: string; // 视频分辨率 "480p" | "720p"（默认 720p）
+  resolution?: string; // 视频分辨率 "480p" | "720p" | "1080p"（默认 720p）
   bgm?: VideoGenBgm; // 可选背景音乐：上传(asset_id) 或 配乐库(track_id)
 }
 
@@ -103,7 +103,7 @@ export interface CreateVideoRequest {
 export type VideoGenBgm =
   | { source: "upload"; asset_id: string }
   | { source: "library"; track_id: string };
-export type VideoGenResolution = "480p" | "720p";
+export type VideoGenResolution = "480p" | "720p" | "1080p";
 export const VIDEO_GEN_DURATIONS = [5, 10, 15] as const;
 export type VideoGenDuration = (typeof VIDEO_GEN_DURATIONS)[number];
 

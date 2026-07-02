@@ -61,7 +61,7 @@ const BGM_LIBRARY = [
 ];
 const BGM_TRACK_IDS = BGM_LIBRARY.map((t) => t.track_id);
 const VIDEO_GEN_DURATIONS = [5, 10, 15];
-const VIDEO_GEN_RESOLUTIONS = ["480p", "720p"];
+const VIDEO_GEN_RESOLUTIONS = ["480p", "720p", "1080p"];
 
 function sseStream(id: string, fail = false): Response {
   const enc = new TextEncoder();
@@ -160,7 +160,7 @@ export const handlers = [
       bgm?: { source?: string; asset_id?: string; track_id?: string };
     };
     // 视频生成 video_gen 校验（逐字对齐后端 schemas/videos.py:213-222：参考图 1–9 且**唯一**、prompt
-    // 非空、duration∈{5,10,15}、resolution∈{480p,720p}、bgm 二选一可选）→ 非法 422，不伪造放行/不放宽
+    // 非空、duration∈{5,10,15}、resolution∈{480p,720p,1080p}、bgm 二选一可选）→ 非法 422，不伪造放行/不放宽
     // （吸取发布中心/声音克隆 mock 掩盖契约教训）。
     if (body.video_mode === "video_gen") {
       const refs = body.reference_image_asset_ids ?? [];
