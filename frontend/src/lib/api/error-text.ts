@@ -10,6 +10,8 @@ import { copy } from "@/lib/copy";
 export function errorText(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.code === "tenant_quota_exceeded") return copy.errors.quota;
+    // 特定条：商品表批量(seedance_i2v)缺音色 → 后端英文「voice_id is required」映射为中文（通用映射不动）。
+    if (/voice_id/i.test(err.message ?? "")) return copy.errors.voiceRequired;
     return err.message || copy.errors.generic;
   }
   return copy.errors.generic;

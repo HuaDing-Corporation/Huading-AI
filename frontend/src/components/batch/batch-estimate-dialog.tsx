@@ -5,7 +5,7 @@ import { Loader2, TriangleAlert } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { useEstimateBatch } from "@/lib/api/hooks";
+import { useEstimateBatch, useVoices } from "@/lib/api/hooks";
 import type { BatchRequest } from "@/lib/api/types";
 import { copy } from "@/lib/copy";
 
@@ -24,6 +24,7 @@ export interface BatchEstimateDialogProps {
 export function BatchEstimateDialog({ open, request, submitting, onConfirm, onCancel }: BatchEstimateDialogProps) {
   const estimate = useEstimateBatch();
   const { mutate, reset } = estimate;
+  const voices = useVoices();
 
   useEffect(() => {
     if (open && request) mutate(request);
@@ -33,6 +34,9 @@ export function BatchEstimateDialog({ open, request, submitting, onConfirm, onCa
   const data = estimate.data;
   const insufficient = data?.insufficient ?? false;
   const is1080 = request?.common.resolution === "1080p";
+  // 商品表(seedance_i2v)所选音色名（估算窗顺带展示）。
+  const voiceId = request?.common.voice_id;
+  const voiceName = voiceId ? voices.data?.find((v) => v.id === voiceId)?.display_name : undefined;
   const confirmDisabled = submitting || estimate.isPending || !data || insufficient;
 
   return (
@@ -59,6 +63,12 @@ export function BatchEstimateDialog({ open, request, submitting, onConfirm, onCa
                 <dd className="text-right font-semibold text-gold-deep">{data.total_credits}</dd>
                 <dt className="text-ink-faint">{copy.batch.estimateBalance}</dt>
                 <dd className={`text-right ${insufficient ? "text-error-fg" : "text-ink"}`}>{data.balance_credits}</dd>
+                {voiceName && (
+                  <>
+                    <dt className="text-ink-faint">{copy.batch.estimateVoice}</dt>
+                    <dd className="text-right text-ink">{voiceName}</dd>
+                  </>
+                )}
               </dl>
             ) : (
               copy.confirm.estimateUnavailable

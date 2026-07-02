@@ -5,7 +5,15 @@ import { copy } from "@/lib/copy";
 import type { BatchEstimateResponse, BatchRequest } from "@/lib/api/types";
 
 const estimateMock = vi.hoisted(() => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, data: undefined as BatchEstimateResponse | undefined }));
-vi.mock("@/lib/api/hooks", () => ({ useEstimateBatch: () => estimateMock }));
+vi.mock("@/lib/api/hooks", () => ({
+  useEstimateBatch: () => estimateMock,
+  useVoices: () => ({
+    data: [
+      { id: "v1", provider: "edge_tts", voice_code: "x", display_name: "知性女声", gender: "female", language: "zh-CN", source: "preset" },
+      { id: "v2", provider: "edge_tts", voice_code: "y", display_name: "磁性男声", gender: "male", language: "zh-CN", source: "preset" }
+    ]
+  })
+}));
 
 import { BatchEstimateDialog } from "./batch-estimate-dialog";
 
@@ -51,6 +59,16 @@ describe("BatchEstimateDialog (批量确认)", () => {
     render(<BatchEstimateDialog open request={req()} submitting={false} onConfirm={onConfirm} onCancel={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: copy.batch.estimateConfirm }));
     expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("商品表：按 voice_id 精确查名（指向非首项 v2 → 显示磁性男声，而非首项知性女声）", () => {
+    estimateMock.data = est(false);
+    // 指向列表第二项：杀死「取 data[0].display_name」退化实现（只放单音色时无法证伪）。
+    const ecomReq: BatchRequest = { kind: "ecom_table", rows: [{ product_name: "a", selling_points: "s", image_url: "u" }], common: { video_mode: "seedance_i2v", resolution: "720p", voice_id: "v2" } };
+    render(<BatchEstimateDialog open request={ecomReq} submitting={false} onConfirm={vi.fn()} onCancel={vi.fn()} />);
+    expect(screen.getByText(copy.batch.estimateVoice)).toBeInTheDocument();
+    expect(screen.getByText("磁性男声")).toBeInTheDocument();
+    expect(screen.queryByText("知性女声")).not.toBeInTheDocument();
   });
 
   it("1080p → 排队提示（且充足时）", () => {

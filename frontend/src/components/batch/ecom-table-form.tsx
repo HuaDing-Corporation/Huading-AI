@@ -80,9 +80,11 @@ export function EcomTableForm({ onCreated }: { onCreated: (batchId: string) => v
   const durationOk = isValidDuration(common.duration_sec ?? NaN);
   const over = rows.length > BATCH_MAX_ROWS;
   const allValid = rows.length > 0 && rows.every((r) => validateEcomRow(r).length === 0);
+  // seedance_i2v 链路后端必填 voice_id：音色列表加载中/失败/为空时默认值未落，兜底禁用生成而非提交后吃 422。
+  const voiceMissing = !common.voice_id;
 
   const onGenerate = () => {
-    if (!allValid || !durationOk || over) return;
+    if (!allValid || !durationOk || over || voiceMissing) return;
     setError(null);
     setConfirmReq({ kind: "ecom_table", rows: rows.map(toEcomTableRow), common });
   };
@@ -190,13 +192,18 @@ export function EcomTableForm({ onCreated }: { onCreated: (batchId: string) => v
 
       <CommonParams kind="ecom_table" onChange={onCommonChange} />
 
+      {/* 行/时长齐备但音色未就绪 → 显式提示（避免直接提交后端 422）。 */}
+      {allValid && durationOk && !over && voiceMissing && (
+        <p role="alert" className="text-[12.5px] text-error-fg">{copy.errors.voiceRequired}</p>
+      )}
+
       {error && (
         <p role="alert" className="rounded-field bg-error-bg px-3 py-2 text-[13px] text-error-fg">
           {error}
         </p>
       )}
 
-      <Button variant="primary" size="lg" className="w-full" onClick={onGenerate} disabled={!allValid || !durationOk || over || create.isPending}>
+      <Button variant="primary" size="lg" className="w-full" onClick={onGenerate} disabled={!allValid || !durationOk || over || voiceMissing || create.isPending}>
         <Layers size={18} strokeWidth={1.8} /> {copy.workbench.generate}
       </Button>
 

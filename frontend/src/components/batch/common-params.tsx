@@ -7,7 +7,9 @@ import { VIDEO_GEN_DURATIONS } from "@/lib/api/types";
 import { SelectableOption } from "@/components/ui/selectable-option";
 import { DurationPicker } from "@/components/workbench/duration-picker";
 import { BgmPicker } from "@/components/workbench/bgm-picker";
+import { VoicePicker } from "@/components/workbench/voice-picker";
 import { AiLabelToggle } from "@/components/label/ai-label-toggle";
+import { useVoices } from "@/lib/api/hooks";
 import { useLabelTogglePreference } from "@/lib/preferences/label-toggle";
 import { copy } from "@/lib/copy";
 
@@ -20,20 +22,29 @@ const RESOLUTIONS: VideoGenResolution[] = ["480p", "720p", "1080p"];
  * 内部持状态，经 onChange 上抛完整 BatchCommon（含 video_mode 按 kind）。onChange 需为稳定引用(如 setState)。
  */
 export function CommonParams({ kind, onChange }: { kind: BatchKind; onChange: (common: BatchCommon) => void }) {
-  const [durationSec, setDurationSec] = useState<number>(kind === "ecom_table" ? 30 : 5);
+  const isEcom = kind === "ecom_table";
+  const [durationSec, setDurationSec] = useState<number>(isEcom ? 30 : 5);
   const [resolution, setResolution] = useState<VideoGenResolution>("720p");
   const [applyLabel, setApplyLabel] = useLabelTogglePreference();
   const [bgm, setBgm] = useState<VideoGenBgm | undefined>(undefined);
+  // 音色：仅 ecom_table(seedance_i2v 链路)必填 voice_id；video_gen 不涉及。默认选中第一项。
+  const voices = useVoices();
+  const voiceList = voices.data;
+  const [voiceId, setVoiceId] = useState("");
+  useEffect(() => {
+    if (isEcom && !voiceId && voiceList && voiceList.length > 0) setVoiceId(voiceList[0].id);
+  }, [isEcom, voiceId, voiceList]);
 
   useEffect(() => {
     onChange({
-      video_mode: kind === "ecom_table" ? "seedance_i2v" : "video_gen",
+      video_mode: isEcom ? "seedance_i2v" : "video_gen",
       duration_sec: durationSec,
       resolution,
       apply_visible_label: applyLabel,
-      bgm
+      bgm,
+      ...(isEcom ? { voice_id: voiceId || undefined } : {}) // seedance_i2v 必填；video_gen 不加
     });
-  }, [kind, durationSec, resolution, applyLabel, bgm, onChange]);
+  }, [isEcom, durationSec, resolution, applyLabel, bgm, voiceId, onChange]);
 
   return (
     <div>
@@ -66,6 +77,9 @@ export function CommonParams({ kind, onChange }: { kind: BatchKind; onChange: (c
           ))}
         </div>
       </fieldset>
+
+      {/* 音色：仅商品表(seedance_i2v)展示；提示词组(video_gen)无配音，不加。 */}
+      {isEcom && <VoicePicker voices={voiceList ?? []} value={voiceId} onChange={setVoiceId} />}
 
       <BgmPicker onChange={setBgm} />
 
