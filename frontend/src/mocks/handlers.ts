@@ -109,6 +109,42 @@ function sseStream(id: string, fail = false): Response {
   return new Response(stream, { headers: { "Content-Type": "text/event-stream" } });
 }
 
+// ── 批量生产中心 (BATCH-PROD-UI-0001) mock store ── 据 seam 冻结契约；后端合后对齐。
+// per_row 按分辨率(mock 值，真值待后端)；balance 固定便于测 insufficient；detail 轮询状态渐进。
+const BATCH_PER_ROW: Record<string, number> = { "480p": 1, "720p": 2, "1080p": 5 };
+const BATCH_BALANCE = 50; // mock 余额：便于跨小/大批测 充足/不足 边界
+type MockBatchTask = { task_id: string; row_index: number; status: string; video_url?: string | null; error?: string | null };
+type MockBatch = { id: string; kind: string; status: string; total: number; succeeded: number; failed: number; created_at: string; updated_at: string; tasks: MockBatchTask[]; _polls: number; _retried: string[] };
+const batchStore = new Map<string, MockBatch>();
+let batchSeq = 0;
+
+function batchPerRow(resolution?: string): number {
+  return BATCH_PER_ROW[resolution ?? "720p"] ?? 2;
+}
+// 逐条必填校验(对齐 seam 行契约)；返回非法行数(>0 即整批 422)。
+function invalidBatchRows(kind: string, rows: unknown[]): boolean {
+  if (!Array.isArray(rows) || rows.length < 1 || rows.length > 30) return true;
+  return rows.some((r) => {
+    const row = r as Record<string, unknown>;
+    if (kind === "ecom_table") {
+      return !row.product_name || !row.selling_points || (!row.image_asset_id && !row.image_url);
+    }
+    return !row.prompt || String(row.prompt).trim() === "";
+  });
+}
+// 聚合批次状态。
+function aggregateBatchStatus(tasks: MockBatchTask[]): string {
+  const done = tasks.filter((t) => t.status === "done").length;
+  const failed = tasks.filter((t) => t.status === "failed").length;
+  const cancelled = tasks.filter((t) => t.status === "cancelled").length;
+  const active = tasks.some((t) => t.status === "queued" || t.status === "running");
+  if (active) return "running";
+  if (cancelled === tasks.length) return "cancelled";
+  if (failed === 0) return "completed";
+  if (done === 0) return "failed";
+  return "partial_failed";
+}
+
 export const handlers = [
   // Auth = M2 shapes (unchanged). Mocked so the (app) client auth-gate can be
   // passed during the MSW parallel period without a real backend.
@@ -553,5 +589,73 @@ export const handlers = [
     if (!publishRecords.has(id)) return err(404, "PUBLISH_RECORD_NOT_FOUND", "发布记录不存在");
     publishRecords.delete(id);
     return ok({ id, deleted_at: new Date(0).toISOString() });
+  }),
+
+  // ── 批量生产中心 (BATCH-PROD-UI-0001) ── estimate/create(422 不足)/list/detail(轮询渐进)/cancel/retry
+  http.post(`${BASE}/api/v1/batches/estimate`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as { kind?: string; rows?: unknown[]; common?: { resolution?: string } };
+    const rows = body.rows ?? [];
+    if (invalidBatchRows(body.kind ?? "", rows)) return err(422, "BATCH_INVALID", "批次行校验失败（必填缺失或超 30 条）");
+    const perRow = batchPerRow(body.common?.resolution);
+    const total = perRow * rows.length;
+    return ok({ total_rows: rows.length, per_row_credits: perRow, total_credits: total, insufficient: total > BATCH_BALANCE, balance_credits: BATCH_BALANCE });
+  }),
+  http.post(`${BASE}/api/v1/batches`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as { kind?: string; rows?: unknown[]; common?: { resolution?: string } };
+    const rows = body.rows ?? [];
+    if (invalidBatchRows(body.kind ?? "", rows)) return err(422, "BATCH_INVALID", "批次行校验失败（必填缺失或超 30 条）");
+    const total = batchPerRow(body.common?.resolution) * rows.length;
+    if (total > BATCH_BALANCE) return err(422, "INSUFFICIENT_CREDITS", "余额不足，无法提交本批");
+    const id = `batch-${++batchSeq}`;
+    const tasks: MockBatchTask[] = rows.map((_, i) => ({ task_id: `${id}-t${i}`, row_index: i, status: "queued", video_url: null, error: null }));
+    batchStore.set(id, { id, kind: body.kind ?? "ecom_table", status: "running", total: rows.length, succeeded: 0, failed: 0, created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString(), tasks, _polls: 0, _retried: [] });
+    return HttpResponse.json({ data: { batch_id: id, task_ids: tasks.map((t) => t.task_id) }, error: null, request_id: "mock-req" }, { status: 201 });
+  }),
+  http.get(`${BASE}/api/v1/batches`, () => {
+    const items = [...batchStore.values()].map((b) => ({ id: b.id, kind: b.kind, status: b.status, total: b.total, succeeded: b.succeeded, failed: b.failed, created_at: b.created_at, updated_at: b.updated_at }));
+    return ok({ items, total: items.length });
+  }),
+  http.get(`${BASE}/api/v1/batches/:id`, ({ params }) => {
+    const b = batchStore.get(params.id as string);
+    if (!b) return err(404, "BATCH_NOT_FOUND", "批次不存在");
+    // 轮询渐进：每次 GET 推进——queued→running→done；末条(索引 total-1 且 total>1)在完成时置 failed 以演示 partial + 单条重试。
+    b._polls += 1;
+    b.tasks = b.tasks.map((t, i) => {
+      if (t.status === "cancelled" || t.status === "done" || t.status === "failed") return t;
+      if (b._polls >= i + 2) {
+        // 末条演示 failed（partial_failed + 单条重试）；已重试过的条目不再失败，重试后可恢复成功。
+        const isLastFailing = b.total > 1 && i === b.total - 1 && !b._retried.includes(t.task_id);
+        return isLastFailing
+          ? { ...t, status: "failed", error: "生成失败（mock）" }
+          : { ...t, status: "done", video_url: "https://mock.local/v.mp4" };
+      }
+      if (b._polls >= i + 1) return { ...t, status: "running" };
+      return t;
+    });
+    b.succeeded = b.tasks.filter((t) => t.status === "done").length;
+    b.failed = b.tasks.filter((t) => t.status === "failed").length;
+    b.status = aggregateBatchStatus(b.tasks);
+    b.updated_at = new Date(0).toISOString();
+    const batch = { id: b.id, kind: b.kind, status: b.status, total: b.total, succeeded: b.succeeded, failed: b.failed, created_at: b.created_at, updated_at: b.updated_at };
+    return ok({ batch, tasks: b.tasks });
+  }),
+  http.post(`${BASE}/api/v1/batches/:id/cancel`, ({ params }) => {
+    const b = batchStore.get(params.id as string);
+    if (!b) return err(404, "BATCH_NOT_FOUND", "批次不存在");
+    b.tasks = b.tasks.map((t) => (t.status === "queued" ? { ...t, status: "cancelled" } : t)); // 已跑不中断(best-effort)
+    b.status = aggregateBatchStatus(b.tasks);
+    const batch = { id: b.id, kind: b.kind, status: b.status, total: b.total, succeeded: b.succeeded, failed: b.failed, created_at: b.created_at, updated_at: b.updated_at };
+    return ok({ batch, tasks: b.tasks });
+  }),
+  http.post(`${BASE}/api/v1/batches/:id/tasks/:taskId/retry`, ({ params }) => {
+    const b = batchStore.get(params.id as string);
+    if (!b) return err(404, "BATCH_NOT_FOUND", "批次不存在");
+    const t = b.tasks.find((x) => x.task_id === params.taskId);
+    if (!t) return err(404, "BATCH_TASK_NOT_FOUND", "子任务不存在");
+    t.status = "running"; // 重试→重新入队(mock 直接置 running，下次轮询推进为 done)
+    t.error = null;
+    if (!b._retried.includes(t.task_id)) b._retried.push(t.task_id); // 标记：下轮轮询将其判为 done（重试可恢复）
+    b.status = aggregateBatchStatus(b.tasks);
+    return ok({ task_id: t.task_id, status: t.status });
   })
 ];

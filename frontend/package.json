@@ -26,7 +26,8 @@
     "react-dom": "19.0.0",
     "tailwind-merge": "^2.5.5",
     "tailwindcss-animate": "^1.0.7",
-    "wavesurfer.js": "^7.12.8"
+    "wavesurfer.js": "^7.12.8",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@eslint/eslintrc": "3.3.5",

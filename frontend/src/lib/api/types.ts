@@ -576,3 +576,78 @@ export interface MarkPublishedRequest {
   platform_id: PublishPlatformId;
   status: "published";
 }
+
+// ── 批量生产中心 (BATCH-PROD-UI-0001) ── 据 seam《批量生产-方案与API契约冻结-20260702》。
+// 后端 BATCH-PROD-0001 未合 → 契约据 seam 推断，合后对齐实际 schema + 真栈自查。
+export type BatchKind = "ecom_table" | "prompt_set";
+export type BatchStatus = "running" | "completed" | "partial_failed" | "failed" | "cancelled";
+
+// 行契约（按 kind）
+export interface EcomTableRow {
+  product_name: string;
+  selling_points: string;
+  image_asset_id?: string; // 本地图上传→素材接口换 asset_id
+  image_url?: string; // 表内外链 URL（后端下载转存）
+}
+export interface PromptSetRow {
+  prompt: string;
+}
+export type BatchRow = EcomTableRow | PromptSetRow;
+
+// 公共参数（common）
+export interface BatchCommon {
+  video_mode?: string; // ecom_table→seedance_i2v / prompt_set→video_gen（seam；flag 待后端核）
+  duration_sec?: number;
+  resolution?: string; // 480p | 720p | 1080p
+  apply_visible_label?: boolean; // AI 标识开关（默认关，复用 LABEL-TOGGLE）
+  bgm?: VideoGenBgm;
+  size?: string;
+  reference_image_asset_ids?: string[]; // prompt_set 参考图（沿用现有字段）
+}
+
+// POST /batches/estimate + POST /batches 共用请求体
+export interface BatchRequest {
+  kind: BatchKind;
+  rows: BatchRow[]; // ≤30
+  common: BatchCommon;
+}
+// POST /batches/estimate → 预估
+export interface BatchEstimateResponse {
+  total_rows: number;
+  per_row_credits: number;
+  total_credits: number;
+  insufficient: boolean;
+  balance_credits: number;
+}
+// POST /batches → 创建（余额不足 422 code=INSUFFICIENT_CREDITS）
+export interface BatchCreateResponse {
+  batch_id: string;
+  task_ids: string[];
+}
+// 批次聚合（列表项 + 详情的 batch）
+export interface BatchJob {
+  id: string;
+  kind: BatchKind;
+  status: BatchStatus;
+  total: number;
+  succeeded: number;
+  failed: number;
+  created_at: string;
+  updated_at: string;
+}
+export interface BatchListResponse {
+  items: BatchJob[];
+  total: number;
+}
+// GET /batches/{id} → 详情（组视图轮询 ≥5s）
+export interface BatchTask {
+  task_id: string;
+  row_index: number;
+  status: string; // queued | running | done | failed | cancelled
+  video_url?: string | null;
+  error?: string | null;
+}
+export interface BatchDetail {
+  batch: BatchJob;
+  tasks: BatchTask[];
+}

@@ -41,6 +41,13 @@ export const publishKeys = {
 // 视频生成 · 配乐库 (VIDEOGEN-UI-0001)
 export const bgmLibraryKey = ["bgm-library"] as const;
 
+// 批量生产中心 (BATCH-PROD-UI-0001)
+export const batchKeys = {
+  all: ["batches"] as const,
+  list: () => [...batchKeys.all, "list"] as const,
+  detail: (id: string) => [...batchKeys.all, "detail", id] as const
+};
+
 export const meKey = ["me"] as const;
 export const quotaKey = ["quota"] as const;
 export const voicesKey = ["voices"] as const;
