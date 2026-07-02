@@ -28,6 +28,7 @@ vi.mock("@/lib/videos/tasks-context", () => ({ useVideoTasks: () => taskMocks })
 import { EcomVideoForm } from "./ecom-video-form";
 
 beforeEach(() => {
+  window.localStorage.clear(); // 每用例干净起点：AI 标识开关默认关
   URL.createObjectURL = vi.fn(() => "blob:mock");
   URL.revokeObjectURL = vi.fn();
   uploadMock.mutateAsync.mockResolvedValue({ image_key: "uploads/abc123.png" });
@@ -102,6 +103,20 @@ describe("EcomVideoForm (电商带货 i2v)", () => {
     expect(topic).toBe("316 不锈钢保温杯");
     // i2v must NOT carry the avatar field.
     expect(request).not.toHaveProperty("avatar_asset_id");
+  });
+
+  // LABEL-TOGGLE-UI-0001 承重：开启开关 → 提交体 apply_visible_label:true（锁 seedance_i2v 面板接线）
+  it("开启 AI 标识开关 → 提交体 apply_visible_label:true（承重）", async () => {
+    render(<EcomVideoForm />);
+    fireEvent.change(screen.getByPlaceholderText(/输入产品卖点/), { target: { value: "保温杯" } });
+    selectProductImage();
+    fireEvent.click(screen.getByRole("switch")); // 开启 AI 生成标识
+    const generate = screen.getByRole("button", { name: /生成视频/ });
+    await waitFor(() => expect(generate).toBeEnabled());
+    fireEvent.click(generate);
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    expect(taskMocks.createAndTrack.mock.calls[0][0].apply_visible_label).toBe(true);
   });
 
   it("submits the selected duration gear in duration_sec", async () => {
