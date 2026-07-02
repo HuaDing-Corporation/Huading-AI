@@ -88,9 +88,10 @@ or raw provider keys are stored.
 docker compose -f infra/docker-compose.prod.yml --env-file infra/.env logs -f nginx
 docker compose -f infra/docker-compose.prod.yml --env-file infra/.env logs -f backend
 docker compose -f infra/docker-compose.prod.yml --env-file infra/.env logs -f worker
+docker compose -f infra/docker-compose.prod.yml --env-file infra/.env logs -f worker-video
 docker compose -f infra/docker-compose.prod.yml --env-file infra/.env pull
 docker compose -f infra/docker-compose.prod.yml --env-file infra/.env up -d --build
-docker compose -f infra/docker-compose.prod.yml --env-file infra/.env restart backend worker frontend nginx
+docker compose -f infra/docker-compose.prod.yml --env-file infra/.env restart backend worker worker-video frontend nginx
 ```
 
 Persistent data lives in Docker volumes:

@@ -24,6 +24,7 @@ from app.providers.url_guard import (
     object_storage_public_hosts,
     parse_host_suffixes,
 )
+from app.services.batches import refresh_batch_job
 from app.services.history import prune_video_history_best_effort
 from app.services.progress import ProgressStore, build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
@@ -1526,6 +1527,14 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
     scoped_id = _scoped_id(tenant_id, task_id)
     with SessionLocal() as db:
         task = _task_or_raise(db, tenant_id=tenant_id, task_id=task_id)
+        if task.status == "cancelled":
+            store.update(
+                scoped_id,
+                status="cancelled",
+                progress=task.progress or 0,
+                step="cancelled",
+            )
+            return {"task_id": task_id, "status": "cancelled"}
         task.status = "running"
         task.progress = max(task.progress or 0, 1)
         task.started_at = task.started_at or datetime.now(UTC)
@@ -1564,6 +1573,7 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 actual_seconds=max(1, int(round(ctx.duration_sec or 1))),
                 cost_cents=max(1, int(round(ctx.duration_sec or 1))) * 100,
             )
+            refresh_batch_job(db, batch_id=task.batch_id)
             db.commit()
             output_storage_key = task.storage_key
             prune_video_history_best_effort(
@@ -1604,6 +1614,7 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
             task.error = str(exc)
             task.finished_at = datetime.now(UTC)
             release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
+            refresh_batch_job(db, batch_id=task.batch_id)
             db.commit()
             failed_progress = task.progress or 0
             prune_video_history_best_effort(
@@ -1630,6 +1641,14 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
     scoped_id = _scoped_id(tenant_id, task_id)
     with SessionLocal() as db:
         task = _task_or_raise(db, tenant_id=tenant_id, task_id=task_id)
+        if task.status == "cancelled":
+            store.update(
+                scoped_id,
+                status="cancelled",
+                progress=task.progress or 0,
+                step="cancelled",
+            )
+            return {"task_id": task_id, "status": "cancelled"}
         task.status = "running"
         task.progress = max(task.progress or 0, 1)
         task.started_at = task.started_at or datetime.now(UTC)
@@ -1672,6 +1691,7 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
                 actual_seconds=actual_seconds,
                 cost_cents=actual_seconds * 200,
             )
+            refresh_batch_job(db, batch_id=task.batch_id)
             db.commit()
             output_storage_key = task.storage_key
             prune_video_history_best_effort(
@@ -1712,6 +1732,7 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
             task.error = str(exc)
             task.finished_at = datetime.now(UTC)
             release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
+            refresh_batch_job(db, batch_id=task.batch_id)
             db.commit()
             failed_progress = task.progress or 0
             prune_video_history_best_effort(

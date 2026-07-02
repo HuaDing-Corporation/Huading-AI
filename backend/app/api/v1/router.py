@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.v1.routes import (
     auth,
     avatars,
+    batches,
     bgm_library,
     brand_voices,
     copy,
@@ -29,6 +30,7 @@ api_router.include_router(quota.router, prefix="/quota", tags=["quota"])
 api_router.include_router(voices.router, prefix="/voices", tags=["voices"])
 api_router.include_router(brand_voices.router, prefix="/brand-voices", tags=["brand-voices"])
 api_router.include_router(avatars.router, prefix="/avatars", tags=["avatars"])
+api_router.include_router(batches.router, prefix="/batches", tags=["batches"])
 api_router.include_router(bgm_library.router, prefix="/bgm-library", tags=["bgm-library"])
 api_router.include_router(copy.router, prefix="/copy", tags=["copy"])
 api_router.include_router(oral.router, prefix="/oral", tags=["oral"])

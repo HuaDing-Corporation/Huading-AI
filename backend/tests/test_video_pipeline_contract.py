@@ -359,7 +359,7 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
     assert resp.status_code == 202
     data = resp.json()["data"]
     assert enqueued["task_id"] == data["id"]
-    assert enqueued["queue"] == "avatar"
+    assert enqueued["queue"] == "video"
     assert enqueued["args"][0]["video_mode"] == "seedance_i2v"
     assert enqueued["args"][0]["image_key"] == "uploads/product.png"
     assert enqueued["args"][0]["scene_prompt"] == "hero product on a bright kitchen counter"
