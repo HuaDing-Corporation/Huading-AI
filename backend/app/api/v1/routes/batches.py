@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import DbSessionDependency, get_object_storage, require_permission
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
-from app.db.models import BatchJob, TaskAsset, User, VideoTask
+from app.db.models import Asset, BatchJob, TaskAsset, User, VideoTask
 from app.schemas.batches import (
     BatchCancelResponse,
     BatchCreateResponse,
@@ -26,6 +26,7 @@ from app.schemas.batches import (
 from app.schemas.response import ApiResponse, ok
 from app.services.batches import (
     BatchImageDownloadError,
+    PromptBatchRow,
     batch_row_index,
     bgm_asset_or_track_or_raise,
     download_image_url_to_asset,
@@ -184,11 +185,13 @@ def _create_prompt_set_tasks(
 ) -> list[str]:
     rows = prompt_rows_or_raise(payload)
     common = payload.common
-    reference_assets = video_gen_reference_assets_or_raise(
-        db,
-        tenant_id=user.tenant_id,
-        asset_ids=list(common.reference_image_asset_ids),
-    )
+    common_reference_assets: list[Asset] = []
+    if any(row.image_asset_id is None for row in rows):
+        common_reference_assets = video_gen_reference_assets_or_raise(
+            db,
+            tenant_id=user.tenant_id,
+            asset_ids=list(common.reference_image_asset_ids),
+        )
     bgm = common.bgm.model_dump(exclude_none=True) if common.bgm is not None else None
     bgm_asset = bgm_asset_or_track_or_raise(
         db,
@@ -199,11 +202,19 @@ def _create_prompt_set_tasks(
     task_ids: list[str] = []
     for index, row in enumerate(rows):
         task_id = str(uuid4())
+        reference_assets = _prompt_reference_assets_for_row(
+            db,
+            tenant_id=user.tenant_id,
+            row=row,
+            row_index=index,
+            common_reference_assets=common_reference_assets,
+        )
+        reference_asset_ids = [asset.id for asset in reference_assets]
         params: dict[str, object] = {
             "video_mode": "video_gen",
             "prompt": row.prompt,
             "topic": row.prompt,
-            "reference_image_asset_ids": list(common.reference_image_asset_ids),
+            "reference_image_asset_ids": reference_asset_ids,
             "duration_sec": int(common.duration_sec or 5),
             "resolution": common.resolution,
             "apply_visible_label": common.apply_visible_label,
@@ -251,6 +262,32 @@ def _create_prompt_set_tasks(
         queued_payloads.append((task.id, worker_payload, generate_video_gen_task))
         task_ids.append(task.id)
     return task_ids
+
+
+def _prompt_reference_assets_for_row(
+    db: Session,
+    *,
+    tenant_id: str,
+    row: PromptBatchRow,
+    row_index: int,
+    common_reference_assets: list[Asset],
+) -> list[Asset]:
+    if not row.image_asset_id:
+        return common_reference_assets
+    try:
+        return video_gen_reference_assets_or_raise(
+            db,
+            tenant_id=tenant_id,
+            asset_ids=[row.image_asset_id],
+        )
+    except AppError as exc:
+        if exc.code == "REFERENCE_IMAGE_NOT_FOUND":
+            raise AppError(
+                f"Invalid batch row {row_index}: image_asset_id not found.",
+                code="BATCH_ROW_INVALID",
+                status_code=422,
+            ) from exc
+        raise
 
 
 def _create_ecom_table_tasks(

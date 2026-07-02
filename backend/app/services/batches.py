@@ -55,6 +55,7 @@ class EcomBatchRow:
 @dataclass(frozen=True)
 class PromptBatchRow:
     prompt: str
+    image_asset_id: str | None
 
 
 def ecom_rows_or_raise(payload: BatchRequest) -> list[EcomBatchRow]:
@@ -85,9 +86,10 @@ def prompt_rows_or_raise(payload: BatchRequest) -> list[PromptBatchRow]:
     rows: list[PromptBatchRow] = []
     for index, raw in enumerate(payload.rows):
         prompt = str(raw.get("prompt") or "").strip()
+        image_asset_id = str(raw.get("image_asset_id") or "").strip() or None
         if not prompt:
             raise _row_error(index, "prompt is required")
-        rows.append(PromptBatchRow(prompt=prompt))
+        rows.append(PromptBatchRow(prompt=prompt, image_asset_id=image_asset_id))
     return rows
 
 
