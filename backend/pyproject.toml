@@ -45,6 +45,7 @@ dev = [
 
 [tool.uv]
 package = false
+index-url = "https://pypi.org/simple"
 
 [tool.ruff]
 line-length = 100

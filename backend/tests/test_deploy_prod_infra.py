@@ -77,16 +77,32 @@ def test_prod_nginx_enforces_https_and_supports_api_sse_and_minio() -> None:
 
     assert "return 301 https://$host$request_uri;" in nginx_conf
     assert "ssl_certificate /etc/letsencrypt/live/huadingai.cn/fullchain.pem;" in nginx_conf
-    assert "proxy_pass http://backend:8000/api/" in nginx_conf
-    assert "proxy_pass http://frontend:3000" in nginx_conf
+    assert "resolver 127.0.0.11 valid=10s ipv6=off;" in nginx_conf
+    assert "set $upstream_backend http://backend:8000;" in nginx_conf
+    assert "set $upstream_frontend http://frontend:3000;" in nginx_conf
+    assert "set $upstream_minio http://minio:9000;" in nginx_conf
+    assert "proxy_pass $upstream_backend;" in nginx_conf
+    assert "proxy_pass $upstream_frontend;" in nginx_conf
     assert "location ~ ^/api/.*/events$" in nginx_conf
     assert "proxy_buffering off;" in nginx_conf
     assert "proxy_read_timeout 600s;" in nginx_conf
+    api_block = _nginx_location_block(nginx_conf, "/api/")
+    assert "proxy_set_header Host $host;" in api_block
     assert "location /minio/" not in nginx_conf
     minio_block = _nginx_location_block(nginx_conf, "/huading-videos/")
     assert "proxy_set_header Host $host;" in minio_block
-    assert "proxy_pass http://minio:9000;" in minio_block
-    assert "proxy_pass http://minio:9000/;" not in minio_block
+    assert "proxy_pass $upstream_minio;" in minio_block
+    assert "proxy_pass $upstream_minio/;" not in minio_block
+
+
+def test_backend_uv_lock_uses_official_sources() -> None:
+    lock = (REPO_ROOT / "backend" / "uv.lock").read_text(encoding="utf-8")
+    pyproject = (REPO_ROOT / "backend" / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert "pypi.tuna.tsinghua.edu.cn" not in lock
+    assert 'registry = "https://pypi.org/simple"' in lock
+    assert "https://files.pythonhosted.org/packages" in lock
+    assert 'index-url = "https://pypi.org/simple"' in pyproject
 
 
 def test_prod_env_example_and_runbook_have_placeholders_only() -> None:
@@ -137,9 +153,19 @@ def test_prod_env_example_and_runbook_have_placeholders_only() -> None:
     assert "sk-" not in backend_env_example
     assert "task-" not in backend_env_example
     assert "https://huadingai.cn/minio" not in env_example
-    assert "docker compose -f infra/docker-compose.prod.yml up -d --build" in deploy_doc
+    assert "bash infra/deploy.sh" in deploy_doc
     assert "certbot certonly --webroot" in deploy_doc
     assert "ENGINE_APIMART_VIDEO_MODEL" in deploy_doc
     assert "video_gen" in deploy_doc
     assert "https://huadingai.cn/huading-videos/" in deploy_doc
     assert "https://huadingai.cn/minio" not in deploy_doc
+
+
+def test_deploy_script_runs_one_command_deploy_sequence() -> None:
+    script = (INFRA / "deploy.sh").read_text(encoding="utf-8")
+
+    assert "git pull --ff-only" in script
+    assert 'up -d --build' in script
+    assert 'restart nginx' in script
+    assert 'exec -T backend alembic current' in script
+    assert '${DRY_RUN:-0}' in script
