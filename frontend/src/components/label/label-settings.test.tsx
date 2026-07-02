@@ -24,13 +24,13 @@ beforeEach(() => {
 afterEach(() => vi.clearAllMocks());
 
 describe("LabelSettings (深度合成标识设置)", () => {
-  // 承重：UI 不提供任何关闭显式标识的路径（无开关/复选框），仅锁定明示。
-  it("承重·不可关闭：无 enabled 开关/复选框，仅显「不可关闭」明示", () => {
+  // 承重：此「样式设置」页不含应用开关（无 switch/复选框）——是否应用由每次生成时的开关决定；此页仅显生效方式说明。
+  it("承重·此页不控制应用：无 enabled 开关/复选框，显生效方式说明", () => {
     render(<LabelSettings />);
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
-    expect(screen.getByText(copy.label.lockedTitle)).toBeInTheDocument();
-    expect(screen.getByText(copy.label.lockedHint)).toBeInTheDocument();
+    expect(screen.getByText(copy.label.applyNoticeTitle)).toBeInTheDocument();
+    expect(screen.getByText(copy.label.applyNoticeHint)).toBeInTheDocument();
   });
 
   // 承重：保存请求体只含 position/text，绝不含 enabled（结构上无法置 false）。

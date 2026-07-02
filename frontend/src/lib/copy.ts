@@ -342,7 +342,7 @@ export const copy = {
   label: {
     entry: "标识设置",
     pageTitle: "深度合成标识",
-    pageSubtitle: "设置 AI 生成内容的显式水印标识（位置 / 文案）",
+    pageSubtitle: "配置显式标识的位置与文案（在生成时开启标识的任务上生效）",
     settingsTitle: "标识水印",
     positionLabel: "标识位置",
     posBr: "右下",
@@ -354,9 +354,9 @@ export const copy = {
     textPlaceholder: "如：AI 生成（≤20 字，必填）",
     textRequired: "标识文案不能为空",
     previewLabel: "实时预览",
-    // 合规：不可关闭明示
-    lockedTitle: "显式标识已开启，不可关闭",
-    lockedHint: "根据深度合成合规要求，AI 生成内容必须带显式标识，无法关闭。",
+    // 与任务级开关语义统一(LABEL-TOGGLE-UI-0001)：此页配样式/文案，是否应用由每次生成开关决定
+    applyNoticeTitle: "显式标识如何生效",
+    applyNoticeHint: "此处仅配置显式标识的位置与文案；是否应用显式标识由每次生成时的「AI 生成标识」开关决定（默认关闭）。",
     save: "保存",
     saving: "保存中…",
     saved: "已保存",
