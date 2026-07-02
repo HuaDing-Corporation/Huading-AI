@@ -95,7 +95,11 @@ def test_db_schema_0001_core_indexes_and_constraints_are_declared() -> None:
         index.name for index in video_tasks.indexes
     }
     assert "ix_assets_tenant_type" in {index.name for index in assets.indexes}
-    assert "ix_usage_records_tenant_created_at" in {index.name for index in usage_records.indexes}
+    assert {
+        "ix_usage_records_tenant_created_at",
+        "ix_usage_records_status_created_at",
+        "ix_usage_records_tenant_status_created_at",
+    } <= {index.name for index in usage_records.indexes}
     assert "uq_task_assets_task_asset_role" in {
         constraint.name for constraint in task_assets.constraints
     }

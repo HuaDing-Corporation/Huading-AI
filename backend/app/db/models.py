@@ -580,6 +580,13 @@ class UsageRecord(Base):
         ),
         Index("ix_usage_records_subscription_status", "subscription_id", "status"),
         Index("ix_usage_records_tenant_created_at", "tenant_id", "created_at"),
+        Index("ix_usage_records_status_created_at", "status", "created_at"),
+        Index(
+            "ix_usage_records_tenant_status_created_at",
+            "tenant_id",
+            "status",
+            "created_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
