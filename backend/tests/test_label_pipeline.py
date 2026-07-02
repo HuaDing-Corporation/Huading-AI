@@ -325,6 +325,42 @@ def test_video_label_util_writes_ffprobe_readable_mp4_metadata(tmp_path: Path) -
     assert tags["aigc_provider_code"] == "provider-pending"
 
 
+def test_video_label_util_uses_visually_lossless_h264_reencode_args(monkeypatch) -> None:
+    from app.services import synthetic_label
+    from app.services.synthetic_label import LabelSettings, SyntheticLabelMeta
+
+    commands: list[list[str]] = []
+
+    def fake_run_ffmpeg(cmd: list[str]) -> None:
+        commands.append(cmd)
+        Path(cmd[-1]).write_bytes(b"labeled-video")
+
+    monkeypatch.setattr(synthetic_label, "_run_ffmpeg", fake_run_ffmpeg)
+
+    labeled = synthetic_label.label_artifact_bytes(
+        b"source-video",
+        kind="video",
+        settings=LabelSettings(position="br", text="LABEL"),
+        meta=SyntheticLabelMeta(
+            content_id="video-crf-unit",
+            provider_name="Huading",
+            provider_code="provider-pending",
+        ),
+        suffix=".mp4",
+    )
+
+    cmd = commands[0]
+    assert labeled == b"labeled-video"
+    assert cmd[cmd.index("-c:v") + 1] == "libx264"
+    assert cmd[cmd.index("-crf") + 1] == "18"
+    assert cmd[cmd.index("-preset") + 1] == "medium"
+    assert cmd[cmd.index("-pix_fmt") + 1] == "yuv420p"
+    assert cmd[cmd.index("-c:a") + 1] == "copy"
+    assert "+faststart+use_metadata_tags" in cmd
+    assert "-vf" in cmd
+    assert any(item == "aigc_content_id=video-crf-unit" for item in cmd)
+
+
 @pytest.mark.parametrize(
     ("product_kind", "params", "provider_bytes"),
     [
