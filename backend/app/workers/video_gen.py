@@ -245,10 +245,12 @@ def _mix_bgm_bytes(video_bytes: bytes, bgm_bytes: bytes, audio_suffix: str) -> b
 
 
 def _apply_synthetic_video_label(ctx: VideoGenContext, video_bytes: bytes) -> bytes:
+    visible_label = bool((ctx.task.params or {}).get("apply_visible_label", False))
     label_settings, meta, _payload = synthetic_label_context(
         ctx.db,
         tenant_id=ctx.tenant_id,
         content_id=ctx.task_id,
+        visible=visible_label,
     )
     return label_artifact_bytes(
         video_bytes,
@@ -256,6 +258,7 @@ def _apply_synthetic_video_label(ctx: VideoGenContext, video_bytes: bytes) -> by
         settings=label_settings,
         meta=meta,
         suffix=".mp4",
+        visible=visible_label,
     )
 
 
@@ -412,5 +415,10 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
 def generate_video_gen_task(self, params: dict[str, Any]) -> dict[str, Any]:
     tenant_id = str(params["tenant_id"])
     task_id = str(params["video_task_id"])
-    logger.info("video_gen.queued", task_id=task_id, tenant_id=tenant_id)
+    logger.info(
+        "video_gen.queued",
+        task_id=task_id,
+        tenant_id=tenant_id,
+        visible_label=bool(params.get("apply_visible_label", False)),
+    )
     return run_video_gen_pipeline(tenant_id=tenant_id, task_id=task_id)

@@ -121,6 +121,7 @@ def _video_gen_worker_params(payload: VideoGenerateRequest) -> dict:
         "reference_image_asset_ids": list(payload.reference_image_asset_ids),
         "duration_sec": int(payload.duration_sec or 5),
         "resolution": payload.resolution,
+        "apply_visible_label": payload.apply_visible_label,
     }
     if payload.bgm is not None:
         params["bgm"] = payload.bgm.model_dump(exclude_none=True)
@@ -275,6 +276,7 @@ def _video_read(
         created_at=task.created_at,
         duration_sec=task.duration_sec,
         duration_ms=int(task.duration_sec * 1000) if task.duration_sec is not None else None,
+        apply_visible_label=bool((task.params or {}).get("apply_visible_label", False)),
         thumbnail_url=thumbnail_url,
         playback_url=playback_url,
         download_url=download_url,
@@ -355,6 +357,7 @@ def _create_avatar_talk_video(
     params = {
         "avatar_asset_id": payload.avatar_asset_id,
         "estimated": True,
+        "apply_visible_label": payload.apply_visible_label,
     }
     if brand_voice is not None:
         params.update(
@@ -423,6 +426,7 @@ def _create_seedance_i2v_video(
         "scene_prompt": payload.scene_prompt,
         "duration_sec": target_duration_sec,
         "estimated": True,
+        "apply_visible_label": payload.apply_visible_label,
     }
     subtitle_style = _subtitle_style_params(payload)
     if subtitle_style is not None:
@@ -600,6 +604,7 @@ def _create_photo_video(
         "image_size": payload.image_size,
         "image_quality": payload.image_quality,
         "estimated": True,
+        "apply_visible_label": payload.apply_visible_label,
     }
     if payload.purpose == "cover" or payload.kind == "cover":
         params["purpose"] = "cover"
@@ -764,6 +769,7 @@ def create_video(
         topic=payload.topic,
         video_mode=payload.video_mode,
         progress=0,
+        params={"apply_visible_label": payload.apply_visible_label},
     )
     db.add(task)
     db.commit()

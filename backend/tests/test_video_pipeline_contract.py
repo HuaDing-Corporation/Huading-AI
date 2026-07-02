@@ -695,6 +695,7 @@ def test_photo_schema_validates_topic_size_and_quality() -> None:
     assert request.image_quality == "medium"
     assert request.voice_id is None
     assert request.avatar_asset_id is None
+    assert request.apply_visible_label is False
 
     invalid_cases = [
         {"topic": "premium mug", "video_mode": "photo", "image_size": "2048x2048"},
@@ -945,6 +946,7 @@ def test_video_list_filters_photo_and_returns_image_urls(
     item = data["items"][0]
     assert item["id"] == "history-photo-a"
     assert item["mode"] == "photo"
+    assert item["apply_visible_label"] is False
     assert item["playback_url"].endswith("/output.png?ttl=3600")
     assert item["download_url"].endswith("/output.png?ttl=3600&download=1")
     assert item["thumbnail_url"] == item["playback_url"]

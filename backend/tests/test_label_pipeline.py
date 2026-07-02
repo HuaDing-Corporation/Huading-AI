@@ -111,6 +111,13 @@ def _assert_bottom_center_has_visible_label(image_bytes: bytes) -> None:
     assert any(sum(pixel[:3]) < 240 for pixel in pixels)
 
 
+def _assert_png_pixels_equal(left: bytes, right: bytes) -> None:
+    with Image.open(BytesIO(left)) as left_image, Image.open(BytesIO(right)) as right_image:
+        assert list(left_image.convert("RGBA").getdata()) == list(
+            right_image.convert("RGBA").getdata()
+        )
+
+
 def _mp4_bytes(tmp_path: Path, *, name: str = "source") -> bytes:
     output = tmp_path / f"{name}.mp4"
     subprocess.run(
@@ -300,6 +307,27 @@ def test_image_label_util_writes_visible_watermark_and_png_metadata() -> None:
     _assert_bottom_center_has_visible_label(labeled)
 
 
+def test_image_label_util_metadata_only_preserves_pixels_and_png_metadata() -> None:
+    from app.services.synthetic_label import LabelSettings, SyntheticLabelMeta, label_artifact_bytes
+
+    source = _png_bytes(size=(320, 240))
+
+    labeled = label_artifact_bytes(
+        source,
+        kind="image",
+        settings=LabelSettings(position="bc", text="LABEL"),
+        meta=SyntheticLabelMeta(
+            content_id="asset-meta-only-unit",
+            provider_name="Huading",
+            provider_code="provider-pending",
+        ),
+        visible=False,
+    )
+
+    _assert_png_has_synthetic_metadata(labeled, content_id="asset-meta-only-unit")
+    _assert_png_pixels_equal(source, labeled)
+
+
 def test_video_label_util_writes_ffprobe_readable_mp4_metadata(tmp_path: Path) -> None:
     from app.services.synthetic_label import LabelSettings, SyntheticLabelMeta, label_artifact_bytes
 
@@ -321,6 +349,34 @@ def test_video_label_util_writes_ffprobe_readable_mp4_metadata(tmp_path: Path) -
         labeled,
         tmp_path,
         content_id="video-label-unit",
+    )
+    assert tags["aigc_provider_code"] == "provider-pending"
+
+
+def test_video_label_util_metadata_only_writes_ffprobe_readable_mp4_metadata(
+    tmp_path: Path,
+) -> None:
+    from app.services.synthetic_label import LabelSettings, SyntheticLabelMeta, label_artifact_bytes
+
+    source = _mp4_bytes(tmp_path, name="meta-only-source")
+
+    labeled = label_artifact_bytes(
+        source,
+        kind="video",
+        settings=LabelSettings(position="br", text="LABEL"),
+        meta=SyntheticLabelMeta(
+            content_id="video-meta-only-real-unit",
+            provider_name="Huading",
+            provider_code="provider-pending",
+        ),
+        suffix=".mp4",
+        visible=False,
+    )
+
+    tags = _assert_mp4_has_synthetic_metadata(
+        labeled,
+        tmp_path,
+        content_id="video-meta-only-real-unit",
     )
     assert tags["aigc_provider_code"] == "provider-pending"
 
@@ -359,6 +415,45 @@ def test_video_label_util_uses_visually_lossless_h264_reencode_args(monkeypatch)
     assert "+faststart+use_metadata_tags" in cmd
     assert "-vf" in cmd
     assert any(item == "aigc_content_id=video-crf-unit" for item in cmd)
+
+
+def test_video_label_util_metadata_only_uses_stream_copy_and_metadata_args(
+    monkeypatch,
+) -> None:
+    from app.services import synthetic_label
+    from app.services.synthetic_label import LabelSettings, SyntheticLabelMeta
+
+    commands: list[list[str]] = []
+
+    def fake_run_ffmpeg(cmd: list[str]) -> None:
+        commands.append(cmd)
+        Path(cmd[-1]).write_bytes(b"metadata-only-video")
+
+    monkeypatch.setattr(synthetic_label, "_run_ffmpeg", fake_run_ffmpeg)
+
+    labeled = synthetic_label.label_artifact_bytes(
+        b"source-video",
+        kind="video",
+        settings=LabelSettings(position="br", text="LABEL"),
+        meta=SyntheticLabelMeta(
+            content_id="video-meta-only-unit",
+            provider_name="Huading",
+            provider_code="provider-pending",
+        ),
+        suffix=".mp4",
+        visible=False,
+    )
+
+    cmd = commands[0]
+    assert labeled == b"metadata-only-video"
+    assert "-vf" not in cmd
+    assert "-crf" not in cmd
+    assert "-preset" not in cmd
+    assert "-pix_fmt" not in cmd
+    assert cmd[cmd.index("-c:v") + 1] == "copy"
+    assert cmd[cmd.index("-c:a") + 1] == "copy"
+    assert "+faststart+use_metadata_tags" in cmd
+    assert any(item == "aigc_content_id=video-meta-only-unit" for item in cmd)
 
 
 @pytest.mark.parametrize(
@@ -453,13 +548,61 @@ def test_image_worker_labels_each_external_image_product(
     saved_bytes, content_type = storage.saved[output_key]
     assert content_type == "image/png"
     _assert_png_has_synthetic_metadata(saved_bytes, content_id=task_id)
-    _assert_bottom_center_has_visible_label(saved_bytes)
 
     with auth_db() as db:
         asset = db.scalars(select(Asset).where(Asset.storage_key == output_key)).one()
         assert asset.metadata_["synthetic_label"]["content_id"] == task_id
         assert asset.metadata_["synthetic_label"]["text"] == "LABEL"
         assert asset.metadata_["synthetic_label"]["enabled"] is True
+        assert asset.metadata_["synthetic_label"]["visible"] is False
+
+
+def test_image_worker_honors_apply_visible_label_true(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    client = TestClient(app)
+    settings_resp = client.put(
+        "/api/v1/tenant/label-settings",
+        json={"position": "bc", "text": "LABEL", "enabled": False},
+        headers=auth_context["headers"],
+    )
+    assert settings_resp.status_code == 200
+    task_id = "label-ai-photo-visible"
+    with auth_db() as db:
+        _seed_photo_task(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            user_id=auth_context["user_id"],
+            task_id=task_id,
+        )
+        task = db.get(VideoTask, task_id)
+        task.params = {"apply_visible_label": True}
+        db.commit()
+
+    storage = _Storage()
+    store = _Store()
+    provider = _ImageProvider(_png_bytes())
+    _patch_image_worker(monkeypatch, auth_db, storage, store, provider)
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": "label test",
+            "apply_visible_label": True,
+        }
+    )
+
+    assert result["status"] == "SUCCESS"
+    output_key = f"tenants/{auth_context['tenant_id']}/photos/{task_id}/output.png"
+    saved_bytes, _content_type = storage.saved[output_key]
+    _assert_png_has_synthetic_metadata(saved_bytes, content_id=task_id)
+    _assert_bottom_center_has_visible_label(saved_bytes)
+    with auth_db() as db:
+        asset = db.scalars(select(Asset).where(Asset.storage_key == output_key)).one()
+        assert asset.metadata_["synthetic_label"]["visible"] is True
 
 
 def test_image_worker_does_not_upload_unlabeled_output_when_labeling_fails(
@@ -602,6 +745,7 @@ def test_avatar_upload_step_labels_avatar_and_i2v_videos(
         settings: LabelSettings,
         meta: SyntheticLabelMeta,
         suffix: str | None = None,
+        visible: bool = True,
     ) -> bytes:
         calls.append(
             {
@@ -609,6 +753,7 @@ def test_avatar_upload_step_labels_avatar_and_i2v_videos(
                 "settings": settings,
                 "meta": meta,
                 "suffix": suffix,
+                "visible": visible,
             }
         )
         return content + b"|LABELED"
@@ -633,6 +778,7 @@ def test_avatar_upload_step_labels_avatar_and_i2v_videos(
     assert calls[0]["suffix"] == ".mp4"
     assert calls[0]["settings"].enabled is True
     assert calls[0]["meta"].content_id == task_id
+    assert calls[0]["visible"] is False
 
 
 def test_avatar_tts_output_audio_is_implicitly_labeled_before_storage(
@@ -687,6 +833,7 @@ def test_avatar_tts_output_audio_is_implicitly_labeled_before_storage(
         settings: LabelSettings,
         meta: SyntheticLabelMeta,
         suffix: str | None = None,
+        visible: bool = True,
     ) -> bytes:
         calls.append(
             {
@@ -694,6 +841,7 @@ def test_avatar_tts_output_audio_is_implicitly_labeled_before_storage(
                 "settings": settings,
                 "meta": meta,
                 "suffix": suffix,
+                "visible": visible,
             }
         )
         return content + b"|AUDIO-LABEL"
@@ -722,3 +870,4 @@ def test_avatar_tts_output_audio_is_implicitly_labeled_before_storage(
     assert calls[0]["kind"] == "audio"
     assert calls[0]["suffix"] == ".mp3"
     assert calls[0]["meta"].content_id == task_id
+    assert calls[0]["visible"] is False

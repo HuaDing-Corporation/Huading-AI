@@ -11,6 +11,7 @@ class EcomCutoutRequest(BaseModel):
 
     source_asset_id: str = Field(min_length=1, max_length=36)
     background: EcomCutoutBackground = "white"
+    apply_visible_label: bool = False
 
 
 class EcomCutoutBatchRequest(BaseModel):
@@ -51,6 +52,7 @@ class EcomModelRequest(BaseModel):
     gender: EcomModelGender
     style_id: str = Field(min_length=1, max_length=64)
     extra_prompt: str | None = None
+    apply_visible_label: bool = False
 
 
 class EcomModelAccepted(BaseModel):
@@ -91,6 +93,7 @@ class EcomPosterRequest(BaseModel):
     template_id: str = Field(min_length=1, max_length=64)
     title: str
     subtitle: str
+    apply_visible_label: bool = False
 
 
 class EcomPosterAccepted(BaseModel):

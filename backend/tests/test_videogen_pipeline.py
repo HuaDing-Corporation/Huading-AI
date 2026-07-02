@@ -362,6 +362,7 @@ def test_create_video_gen_validates_assets_reserves_quota_and_enqueues(
             "duration_sec": 15,
             "resolution": "480p",
             "bgm": {"source": "upload", "asset_id": "asset-bgm-a"},
+            "apply_visible_label": True,
         },
         headers=auth_context["headers"],
     )
@@ -379,6 +380,7 @@ def test_create_video_gen_validates_assets_reserves_quota_and_enqueues(
                     "duration_sec": 15,
                     "resolution": "480p",
                     "bgm": {"source": "upload", "asset_id": "asset-bgm-a"},
+                    "apply_visible_label": True,
                     "tenant_id": auth_context["tenant_id"],
                     "video_task_id": task_id,
                 }
@@ -396,6 +398,7 @@ def test_create_video_gen_validates_assets_reserves_quota_and_enqueues(
         assert task.duration_sec == 15
         assert task.params["resolution"] == "480p"
         assert task.params["bgm"] == {"source": "upload", "asset_id": "asset-bgm-a"}
+        assert task.params["apply_visible_label"] is True
         roles = {
             item.role
             for item in db.scalars(
@@ -566,9 +569,16 @@ def test_video_gen_pipeline_settles_quota_stores_labeled_output_and_history(
         settings: LabelSettings,
         meta: SyntheticLabelMeta,
         suffix: str | None = None,
+        visible: bool = True,
     ) -> bytes:
         label_calls.append(
-            {"kind": kind, "settings": settings, "meta": meta, "suffix": suffix}
+            {
+                "kind": kind,
+                "settings": settings,
+                "meta": meta,
+                "suffix": suffix,
+                "visible": visible,
+            }
         )
         return content + b"|LABEL"
 
@@ -599,6 +609,7 @@ def test_video_gen_pipeline_settles_quota_stores_labeled_output_and_history(
     assert label_calls[0]["kind"] == "video"
     assert label_calls[0]["suffix"] == ".mp4"
     assert label_calls[0]["meta"].content_id == task_id
+    assert label_calls[0]["visible"] is False
     with auth_db() as db:
         task = db.get(VideoTask, task_id)
         assert task.status == "done"

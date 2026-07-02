@@ -275,10 +275,16 @@ def _apply_synthetic_label(
     kind: str,
     suffix: str,
 ) -> tuple[bytes, dict[str, object]]:
+    task = ctx.db.get(VideoTask, ctx.task_id)
+    requested_visible = (
+        bool((task.params or {}).get("apply_visible_label", False)) if task else False
+    )
+    visible = requested_visible if kind in {"image", "video"} else False
     label_settings, meta, payload = synthetic_label_context(
         ctx.db,
         tenant_id=ctx.tenant_id,
         content_id=ctx.task_id,
+        visible=visible,
     )
     return (
         label_artifact_bytes(
@@ -287,6 +293,7 @@ def _apply_synthetic_label(
             settings=label_settings,
             meta=meta,
             suffix=suffix,
+            visible=visible,
         ),
         payload,
     )
@@ -1729,7 +1736,12 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
 def generate_avatar_talk_task(self, params: dict[str, Any]) -> dict[str, Any]:
     task_id = self.request.id or params.get("video_task_id") or "unknown"
     tenant_id = str(params["tenant_id"])
-    logger.info("avatar_talk.queued", task_id=task_id, tenant_id=tenant_id)
+    logger.info(
+        "avatar_talk.queued",
+        task_id=task_id,
+        tenant_id=tenant_id,
+        visible_label=bool(params.get("apply_visible_label", False)),
+    )
     return run_avatar_talk_pipeline(tenant_id=tenant_id, task_id=task_id)
 
 
@@ -1737,5 +1749,10 @@ def generate_avatar_talk_task(self, params: dict[str, Any]) -> dict[str, Any]:
 def generate_seedance_i2v_task(self, params: dict[str, Any]) -> dict[str, Any]:
     task_id = self.request.id or params.get("video_task_id") or "unknown"
     tenant_id = str(params["tenant_id"])
-    logger.info("seedance_i2v.queued", task_id=task_id, tenant_id=tenant_id)
+    logger.info(
+        "seedance_i2v.queued",
+        task_id=task_id,
+        tenant_id=tenant_id,
+        visible_label=bool(params.get("apply_visible_label", False)),
+    )
     return run_seedance_i2v_pipeline(tenant_id=tenant_id, task_id=task_id)
