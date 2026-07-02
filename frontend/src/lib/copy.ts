@@ -210,6 +210,8 @@ export const copy = {
     uploadType: "仅支持 JPG / PNG / WebP 图片",
     network: "网络连接失败，请检查后端服务是否在线",
     generic: "操作失败，请重试",
+    // 商品表批量(seedance_i2v)缺音色 → 后端 422(voice_id is required) 的中文映射
+    voiceRequired: "请选择音色",
     // 图片生成错误（按后端 error_code 映射；见 friendlyImageError）
     imageModeration: "内容被 AI 安全系统拦截，请调整描述后重试（避免敏感或人体性暗示内容）",
     imageConnection: "网络连接失败，请检查代理 / 网络后重试",
@@ -452,6 +454,7 @@ export const copy = {
     estimatePerRow: "单条积分",
     estimateTotal: "预计总积分",
     estimateBalance: "当前余额",
+    estimateVoice: "配音音色",
     estimateInsufficient: "余额不足，无法提交本批",
     estimateQueueHint: "1080P 当前高峰可能排队较久",
     estimateConfirm: "确认生成",

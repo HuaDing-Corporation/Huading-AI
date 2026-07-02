@@ -21,11 +21,14 @@ vi.mock("@/lib/batch/ecom-table", async (orig) => ({
 vi.mock("@/components/batch/common-params", () => ({
   CommonParams: ({ onChange }: { onChange: (c: BatchCommon) => void }) => (
     <>
-      <button type="button" onClick={() => onChange({ video_mode: "seedance_i2v", duration_sec: 30, resolution: "720p", apply_visible_label: true })}>
+      <button type="button" onClick={() => onChange({ video_mode: "seedance_i2v", duration_sec: 30, resolution: "720p", apply_visible_label: true, voice_id: "v1" })}>
         set-common
       </button>
       <button type="button" onClick={() => onChange({ video_mode: "seedance_i2v", duration_sec: 0, resolution: "720p", apply_visible_label: false })}>
         set-bad-duration
+      </button>
+      <button type="button" onClick={() => onChange({ video_mode: "seedance_i2v", duration_sec: 30, resolution: "720p", apply_visible_label: true })}>
+        set-common-no-voice
       </button>
     </>
   )
@@ -104,6 +107,16 @@ describe("EcomTableForm (批量·商品表)", () => {
     expect(screen.getByRole("button", { name: copy.workbench.generate })).toBeDisabled();
   });
 
+  it("音色未就绪(列表加载中/失败/空 → common 无 voice_id) → 即便全行有效也禁用生成 + 提示（承重·seedance_i2v 必填门控）", async () => {
+    parseMock.mockResolvedValue(validRows);
+    render(<EcomTableForm onCreated={vi.fn()} />);
+    uploadFile();
+    await screen.findByText("保温杯");
+    fireEvent.click(screen.getByText("set-common-no-voice"));
+    expect(screen.getByRole("button", { name: copy.workbench.generate })).toBeDisabled();
+    expect(screen.getByText(copy.errors.voiceRequired)).toBeInTheDocument();
+  });
+
   it("全行有效 → 生成 → 提交体逐字段 + apply_visible_label 透传（承重）", async () => {
     parseMock.mockResolvedValue(validRows);
     render(<EcomTableForm onCreated={vi.fn()} />);
@@ -119,7 +132,9 @@ describe("EcomTableForm (批量·商品表)", () => {
         { product_name: "保温杯", selling_points: "316 不锈钢", image_url: "http://x/1.png" },
         { product_name: "雨伞", selling_points: "自动折叠", image_url: "http://x/2.png" }
       ],
-      common: { video_mode: "seedance_i2v", duration_sec: 30, resolution: "720p", apply_visible_label: true }
+      common: { video_mode: "seedance_i2v", duration_sec: 30, resolution: "720p", apply_visible_label: true, voice_id: "v1" }
     });
+    // 注：此处验证 common 原样透传（含 voice_id）；voice_id「来源」承重在 common-params.test.tsx，「缺失门控」承重见上「音色未就绪」用例。
+    expect(createMock.mutateAsync.mock.calls[0][0].common.voice_id).toBe("v1");
   });
 });
