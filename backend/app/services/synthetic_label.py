@@ -101,6 +101,8 @@ def implicit_metadata_fields(meta: SyntheticLabelMeta) -> dict[str, str]:
 def synthetic_label_payload(
     label_settings: LabelSettings,
     meta: SyntheticLabelMeta,
+    *,
+    visible: bool = True,
 ) -> dict[str, object]:
     return {
         **implicit_metadata_fields(meta),
@@ -111,6 +113,7 @@ def synthetic_label_payload(
         "position": label_settings.position,
         "text": label_settings.text,
         "enabled": True,
+        "visible": visible,
     }
 
 
@@ -119,10 +122,15 @@ def synthetic_label_context(
     *,
     tenant_id: str,
     content_id: str,
+    visible: bool = True,
 ) -> tuple[LabelSettings, SyntheticLabelMeta, dict[str, object]]:
     label_settings = label_settings_for_tenant(db, tenant_id=tenant_id)
     meta = build_synthetic_label_meta(content_id=content_id)
-    return label_settings, meta, synthetic_label_payload(label_settings, meta)
+    return label_settings, meta, synthetic_label_payload(
+        label_settings,
+        meta,
+        visible=visible,
+    )
 
 
 def label_artifact_bytes(
@@ -132,11 +140,18 @@ def label_artifact_bytes(
     settings: LabelSettings,
     meta: SyntheticLabelMeta,
     suffix: str | None = None,
+    visible: bool = True,
 ) -> bytes:
     if kind == "image":
-        return _label_image_bytes(content, settings=settings, meta=meta)
+        return _label_image_bytes(content, settings=settings, meta=meta, visible=visible)
     if kind == "video":
-        return _label_video_bytes(content, settings=settings, meta=meta, suffix=suffix or ".mp4")
+        return _label_video_bytes(
+            content,
+            settings=settings,
+            meta=meta,
+            suffix=suffix or ".mp4",
+            visible=visible,
+        )
     if kind == "audio":
         return _label_audio_bytes(content, meta=meta, suffix=suffix or ".mp3")
     raise ValueError(f"Unsupported synthetic label kind: {kind}")
@@ -147,10 +162,11 @@ def _label_image_bytes(
     *,
     settings: LabelSettings,
     meta: SyntheticLabelMeta,
+    visible: bool,
 ) -> bytes:
     with Image.open(BytesIO(content)) as image:
         base = image.convert("RGBA")
-    labeled = _draw_image_label(base, settings=settings)
+    labeled = _draw_image_label(base, settings=settings) if visible else base
     pnginfo = PngImagePlugin.PngInfo()
     for key, value in {
         **implicit_metadata_fields(meta),
@@ -240,34 +256,43 @@ def _label_video_bytes(
     settings: LabelSettings,
     meta: SyntheticLabelMeta,
     suffix: str,
+    visible: bool,
 ) -> bytes:
     with tempfile.TemporaryDirectory(prefix="huading-label-") as temp_dir:
         temp_path = Path(temp_dir)
         source = temp_path / f"source{suffix}"
         output = temp_path / f"labeled{suffix}"
         source.write_bytes(content)
-        cmd = [
-            _ffmpeg_binary(),
-            "-y",
-            "-i",
-            str(source),
-            "-vf",
-            _drawtext_filter(settings),
-            *_ffmpeg_metadata_args(meta),
-            "-c:v",
-            "libx264",
-            "-crf",
-            "18",
-            "-preset",
-            "medium",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "copy",
-            "-movflags",
-            "+faststart+use_metadata_tags",
-            str(output),
-        ]
+        cmd = [_ffmpeg_binary(), "-y", "-i", str(source)]
+        if visible:
+            cmd.extend(
+                [
+                    "-vf",
+                    _drawtext_filter(settings),
+                    *_ffmpeg_metadata_args(meta),
+                    "-c:v",
+                    "libx264",
+                    "-crf",
+                    "18",
+                    "-preset",
+                    "medium",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "copy",
+                ]
+            )
+        else:
+            cmd.extend(
+                [
+                    *_ffmpeg_metadata_args(meta),
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "copy",
+                ]
+            )
+        cmd.extend(["-movflags", "+faststart+use_metadata_tags", str(output)])
         _run_ffmpeg(cmd)
         return output.read_bytes()
 

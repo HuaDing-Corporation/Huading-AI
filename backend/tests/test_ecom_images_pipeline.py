@@ -108,6 +108,7 @@ def test_ecom_poster_single_creates_photo_task_clamps_text_without_quota(
                 "template_id": "promo_bold",
                 "title": long_title,
                 "subtitle": long_subtitle,
+                "apply_visible_label": True,
             },
             headers=auth_context["headers"],
         )
@@ -127,6 +128,7 @@ def test_ecom_poster_single_creates_photo_task_clamps_text_without_quota(
     assert payload["video_task_id"] == data["task_id"]
     assert payload["title"] == long_title[:30]
     assert payload["subtitle"] == long_subtitle[:40]
+    assert payload["apply_visible_label"] is True
 
     with auth_db() as db:
         task = db.get(VideoTask, data["task_id"])
@@ -139,6 +141,7 @@ def test_ecom_poster_single_creates_photo_task_clamps_text_without_quota(
     assert task.params["template_id"] == "promo_bold"
     assert task.params["title"] == long_title[:30]
     assert task.params["subtitle"] == long_subtitle[:40]
+    assert task.params["apply_visible_label"] is True
     assert usage_count == 0
     assert subscription.quota_credits_reserved == 0
 
@@ -317,6 +320,7 @@ def test_ecom_model_single_creates_photo_task_clamps_prompt_and_reserves_quota(
                 "gender": "any",
                 "style_id": "studio_white",
                 "extra_prompt": long_extra,
+                "apply_visible_label": True,
             },
             headers=auth_context["headers"],
         )
@@ -336,6 +340,7 @@ def test_ecom_model_single_creates_photo_task_clamps_prompt_and_reserves_quota(
     assert payload["source_storage_key"] == source["storage_key"]
     assert payload["video_task_id"] == data["task_id"]
     assert payload["extra_prompt"] == long_extra[:200]
+    assert payload["apply_visible_label"] is True
     assert "female" not in payload["topic"].lower()
     assert "male" not in payload["topic"].lower()
     assert "preserve the exact product shape" in payload["topic"].lower()
@@ -354,6 +359,7 @@ def test_ecom_model_single_creates_photo_task_clamps_prompt_and_reserves_quota(
     assert task.params["style_id"] == "studio_white"
     assert task.params["extra_prompt"] == long_extra[:200]
     assert task.params["source_storage_key"] == source["storage_key"]
+    assert task.params["apply_visible_label"] is True
     assert usage.status == "reserved"
     assert usage.credits == 20
     assert subscription.quota_credits_reserved == 20
@@ -515,6 +521,7 @@ def test_ecom_cutout_single_creates_photo_task_and_reserves_quota(
             json={
                 "source_asset_id": source["id"],
                 "background": "transparent",
+                "apply_visible_label": True,
             },
             headers=auth_context["headers"],
         )
@@ -534,6 +541,7 @@ def test_ecom_cutout_single_creates_photo_task_and_reserves_quota(
     assert payload["source_asset_id"] == source["id"]
     assert payload["source_storage_key"] == source["storage_key"]
     assert payload["video_task_id"] == data["task_id"]
+    assert payload["apply_visible_label"] is True
 
     with auth_db() as db:
         task = db.get(VideoTask, data["task_id"])
@@ -548,6 +556,7 @@ def test_ecom_cutout_single_creates_photo_task_and_reserves_quota(
     assert task.params["background"] == "transparent"
     assert task.params["source_asset_id"] == source["id"]
     assert task.params["source_storage_key"] == source["storage_key"]
+    assert task.params["apply_visible_label"] is True
     assert usage.status == "reserved"
     assert usage.credits == 20
     assert subscription.quota_credits_reserved == 20

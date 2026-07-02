@@ -107,6 +107,7 @@ class VideoGenerateRequest(BaseModel):
     aspect_ratio: Literal["9:16", "16:9", "1:1"] = Field(default="9:16")
     subtitle_enabled: bool = True
     subtitle_style: SubtitleStyleRequest | None = None
+    apply_visible_label: bool = False
     pipeline: str = Field(default="standard")
     mode: str = Field(default="generate", description="'generate' (LLM) or 'fixed' (use script)")
     # Which generation flow to run. 'mode' above is kept for the static-template
@@ -301,6 +302,7 @@ class VideoRead(BaseModel):
     voice_id: str | None = None
     aspect_ratio: str | None = None
     subtitle_enabled: bool | None = None
+    apply_visible_label: bool = False
     created_at: datetime
     duration_sec: float | None = None
     duration_ms: int | None = None

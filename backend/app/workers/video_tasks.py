@@ -81,9 +81,13 @@ def _tenant_upload_storage_key(tenant_id: str, image_key: str) -> str:
 
 
 def _apply_synthetic_video_label(*, tenant_id: str, task_id: str, video_bytes: bytes) -> bytes:
+    visible_label = False
     try:
         with SessionLocal() as db:
             label_settings = label_settings_for_tenant(db, tenant_id=tenant_id)
+            task = db.get(VideoTask, task_id)
+            if task is not None and task.tenant_id == tenant_id:
+                visible_label = bool((task.params or {}).get("apply_visible_label", False))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "synthetic_label.settings_failed",
@@ -99,6 +103,7 @@ def _apply_synthetic_video_label(*, tenant_id: str, task_id: str, video_bytes: b
         settings=label_settings,
         meta=meta,
         suffix=".mp4",
+        visible=visible_label,
     )
 
 
@@ -315,7 +320,13 @@ def generate_video_task(self, params: dict[str, Any]) -> dict[str, Any]:
             progress=1.0,
             stage="completed",
         )
-        logger.info("video.generated", task_id=task_id, bucket=storage_bucket, size=file_size)
+        logger.info(
+            "video.generated",
+            task_id=task_id,
+            bucket=storage_bucket,
+            size=file_size,
+            visible_label=bool(params.get("apply_visible_label", False)),
+        )
         return {
             "task_id": task_id,
             "status": "SUCCESS",

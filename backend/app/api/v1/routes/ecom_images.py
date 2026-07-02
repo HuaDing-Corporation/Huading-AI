@@ -180,6 +180,7 @@ def _task_params(
         "image_size": _DEFAULT_IMAGE_SIZE,
         "image_quality": _DEFAULT_IMAGE_QUALITY,
         "estimated": True,
+        "apply_visible_label": payload.apply_visible_label,
     }
     if batch_id is not None:
         params["batch_id"] = batch_id
@@ -201,6 +202,7 @@ def _poster_task_params(
         "subtitle": subtitle,
         "source_asset_id": source.id,
         "source_storage_key": source.storage_key,
+        "apply_visible_label": payload.apply_visible_label,
     }
     if batch_id is not None:
         params["batch_id"] = batch_id
@@ -223,6 +225,7 @@ def _model_task_params(
         "image_size": _DEFAULT_IMAGE_SIZE,
         "image_quality": _DEFAULT_IMAGE_QUALITY,
         "estimated": True,
+        "apply_visible_label": payload.apply_visible_label,
     }
     if extra_prompt:
         params["extra_prompt"] = extra_prompt

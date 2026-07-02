@@ -283,11 +283,13 @@ def _apply_synthetic_image_label(
     tenant_id: str,
     task_id: str,
     image_bytes: bytes,
+    visible: bool,
 ) -> tuple[bytes, dict[str, object]]:
     label_settings, meta, payload = synthetic_label_context(
         db,
         tenant_id=tenant_id,
         content_id=task_id,
+        visible=visible,
     )
     return (
         label_artifact_bytes(
@@ -296,6 +298,7 @@ def _apply_synthetic_image_label(
             settings=label_settings,
             meta=meta,
             suffix=".png",
+            visible=visible,
         ),
         payload,
     )
@@ -560,6 +563,12 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             task = db.get(VideoTask, task_id)
             if task is None or task.tenant_id != tenant_id:
                 raise ValueError("Video task not found for image generation.")
+            visible_label = bool(
+                (task.params or {}).get(
+                    "apply_visible_label",
+                    params.get("apply_visible_label", False),
+                )
+            )
 
             task.started_at = datetime.now(UTC)
             _update_progress(
@@ -711,6 +720,7 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                 tenant_id=tenant_id,
                 task_id=task_id,
                 image_bytes=image_bytes,
+                visible=visible_label,
             )
             metadata["synthetic_label"] = label_metadata
 
@@ -819,4 +829,10 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
 def generate_image_task(self, params: dict[str, Any]) -> dict[str, Any]:
     payload = dict(params)
     payload.setdefault("video_task_id", self.request.id)
+    logger.info(
+        "image_generation.queued",
+        task_id=payload.get("video_task_id"),
+        tenant_id=payload.get("tenant_id"),
+        visible_label=bool(payload.get("apply_visible_label", False)),
+    )
     return run_image_generation(payload)
