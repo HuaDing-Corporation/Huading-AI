@@ -1,22 +1,20 @@
 "use client";
 
-import { useState } from "react";
-
 import { Glass } from "@/components/ui/glass";
 import { Progress } from "@/components/ui/progress";
 import { SidebarNav } from "@/components/ui/sidebar-nav";
 import { useQuota } from "@/lib/api/hooks";
-import { navItems } from "@/lib/mock";
+import { navItems } from "@/lib/nav";
 
 export function Sidebar() {
-  const [active, setActive] = useState("workbench");
+  // active 态由路由推导（见 SidebarNav 内 usePathname），不再本地持有高亮 state。
   // Single quota source (same useQuota as the top-bar QuotaBadge); hide the
   // panel until real data loads so we never show a fabricated number.
   const { data: quota } = useQuota();
 
   return (
     <Glass className="flex flex-col gap-1 rounded-card p-4">
-      <SidebarNav items={navItems} activeKey={active} onSelect={setActive} />
+      <SidebarNav items={navItems} />
 
       {quota && (
         <div className="mt-auto rounded-mark border border-line-gold bg-glass-fill px-4 py-3.5">

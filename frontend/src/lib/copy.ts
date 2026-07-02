@@ -1,5 +1,7 @@
 export const copy = {
   common: { cancel: "取消", processing: "处理中…" },
+  // 侧边栏导航（BATCH-PROD-UI-0001-FIX3）
+  nav: { comingSoon: "即将上线" },
   workbench: {
     topicLabel: "视频主题",
     topicPlaceholder: "输入一句话主题，如：三分钟看懂咖啡的起源",
