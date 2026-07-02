@@ -413,6 +413,215 @@ def test_batch_create_prompt_set_fans_out_video_gen_tasks_on_video_queue(
         assert roles == {"input_reference_image", "input_bgm"}
 
 
+def test_batch_prompt_set_pairs_row_image_and_falls_back_to_common_reference(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    seedance_calls, video_calls = _stub_batch_tasks(monkeypatch)
+    with auth_db() as db:
+        _set_quota(db, auth_context["tenant_id"], total=1000)
+        common = _seed_image_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="asset-common-ref",
+        )
+        paired = _seed_image_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="asset-row-ref",
+        )
+        common_id = common.id
+        paired_id = paired.id
+        db.commit()
+
+    resp = TestClient(app).post(
+        "/api/v1/batches",
+        json={
+            "kind": "prompt_set",
+            "rows": [
+                {"prompt": "row-specific handbag shot", "image_asset_id": paired_id},
+                {"prompt": "fallback lifestyle shot"},
+            ],
+            "common": {
+                "video_mode": "video_gen",
+                "duration_sec": 5,
+                "resolution": "720p",
+                "reference_image_asset_ids": [common_id],
+            },
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 202
+    data = resp.json()["data"]
+    assert seedance_calls == []
+    assert len(video_calls) == 2
+    calls_by_prompt = {call["args"][0]["prompt"]: call["args"][0] for call in video_calls}
+    assert calls_by_prompt["row-specific handbag shot"]["reference_image_asset_ids"] == [
+        paired_id
+    ]
+    assert calls_by_prompt["fallback lifestyle shot"]["reference_image_asset_ids"] == [
+        common_id
+    ]
+
+    with auth_db() as db:
+        tasks = list(db.scalars(select(VideoTask).where(VideoTask.batch_id == data["batch_id"])))
+        assets_by_prompt = {
+            task.params["prompt"]: {
+                item.asset_id
+                for item in db.scalars(
+                    select(TaskAsset).where(
+                        TaskAsset.video_task_id == task.id,
+                        TaskAsset.role == "input_reference_image",
+                    )
+                )
+            }
+            for task in tasks
+        }
+        assert assets_by_prompt == {
+            "row-specific handbag shot": {paired_id},
+            "fallback lifestyle shot": {common_id},
+        }
+
+
+def test_batch_prompt_set_all_paired_rows_ignore_unused_common_reference(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    seedance_calls, video_calls = _stub_batch_tasks(monkeypatch)
+    client = TestClient(app)
+    other_resp = client.post(
+        "/api/v1/auth/register-tenant",
+        json={
+            "tenant_slug": "batch-pair-unused-common",
+            "tenant_name": "Unused Common Reference",
+            "email": "unused-common@example.com",
+            "password": "unit-pass-123",
+        },
+    )
+    assert other_resp.status_code == 201
+    other_tenant_id = other_resp.json()["data"]["tenant"]["id"]
+    with auth_db() as db:
+        _set_quota(db, auth_context["tenant_id"], total=1000)
+        first = _seed_image_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="asset-row-paired-first",
+        )
+        second = _seed_image_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="asset-row-paired-second",
+        )
+        _seed_image_asset(
+            db,
+            tenant_id=other_tenant_id,
+            asset_id="asset-unused-common-ref",
+        )
+        first_id = first.id
+        second_id = second.id
+        db.commit()
+
+    resp = client.post(
+        "/api/v1/batches",
+        json={
+            "kind": "prompt_set",
+            "rows": [
+                {"prompt": "first paired prompt", "image_asset_id": first_id},
+                {"prompt": "second paired prompt", "image_asset_id": second_id},
+            ],
+            "common": {
+                "video_mode": "video_gen",
+                "duration_sec": 5,
+                "resolution": "720p",
+                "reference_image_asset_ids": ["asset-unused-common-ref"],
+            },
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 202
+    data = resp.json()["data"]
+    assert seedance_calls == []
+    assert len(video_calls) == 2
+    calls_by_prompt = {call["args"][0]["prompt"]: call["args"][0] for call in video_calls}
+    assert calls_by_prompt["first paired prompt"]["reference_image_asset_ids"] == [
+        first_id
+    ]
+    assert calls_by_prompt["second paired prompt"]["reference_image_asset_ids"] == [
+        second_id
+    ]
+
+    with auth_db() as db:
+        tasks = list(db.scalars(select(VideoTask).where(VideoTask.batch_id == data["batch_id"])))
+        assets_by_prompt = {
+            task.params["prompt"]: {
+                item.asset_id
+                for item in db.scalars(
+                    select(TaskAsset).where(
+                        TaskAsset.video_task_id == task.id,
+                        TaskAsset.role == "input_reference_image",
+                    )
+                )
+            }
+            for task in tasks
+        }
+        assert assets_by_prompt == {
+            "first paired prompt": {first_id},
+            "second paired prompt": {second_id},
+        }
+
+
+def test_batch_prompt_set_rejects_cross_tenant_row_image_without_partial_rows(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    _stub_batch_tasks(monkeypatch)
+    client = TestClient(app)
+    other_resp = client.post(
+        "/api/v1/auth/register-tenant",
+        json={
+            "tenant_slug": "batch-pair-other",
+            "tenant_name": "Other Batch Pair",
+            "email": "other-batch-pair@example.com",
+            "password": "unit-pass-123",
+        },
+    )
+    assert other_resp.status_code == 201
+    other_tenant_id = other_resp.json()["data"]["tenant"]["id"]
+    with auth_db() as db:
+        _set_quota(db, auth_context["tenant_id"], total=1000)
+        _seed_image_asset(db, tenant_id=other_tenant_id, asset_id="asset-other-row-ref")
+        db.commit()
+
+    resp = client.post(
+        "/api/v1/batches",
+        json={
+            "kind": "prompt_set",
+            "rows": [
+                {"prompt": "tenant leak attempt", "image_asset_id": "asset-other-row-ref"}
+            ],
+            "common": {
+                "video_mode": "video_gen",
+                "duration_sec": 5,
+                "resolution": "720p",
+                "reference_image_asset_ids": [],
+            },
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "BATCH_ROW_INVALID"
+    with auth_db() as db:
+        assert db.scalar(select(func.count()).select_from(BatchJob)) == 0
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == 0
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == 0
+
+
 def test_batch_create_insufficient_credits_rejects_without_partial_rows(
     monkeypatch,
     auth_context,
