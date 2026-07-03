@@ -160,6 +160,16 @@ def require_permission(permission: str):
     return dependency
 
 
+def require_admin(user: User = CurrentUserDependency) -> User:
+    if "tenant:admin" not in permissions_for_role(user.role):
+        raise AppError(
+            "Insufficient permission.",
+            code="FORBIDDEN",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+    return user
+
+
 def scoped_task_id(tenant_id: str, task_id: str) -> str:
     return f"{tenant_id}:{task_id}"
 
