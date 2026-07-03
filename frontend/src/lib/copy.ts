@@ -2,6 +2,71 @@ export const copy = {
   common: { cancel: "取消", processing: "处理中…" },
   // 侧边栏导航（BATCH-PROD-UI-0001-FIX3）
   nav: { comingSoon: "即将上线" },
+  // 管理员数据看板（ANALYTICS-UI-0001）
+  analytics: {
+    pageTitle: "数据看板",
+    pageSubtitle: "管理员专属 · 全租户用量、成本与趋势总览",
+    // 日期区间
+    rangeLabel: "日期区间",
+    rangeFrom: "起",
+    rangeTo: "止",
+    preset7: "近 7 天",
+    preset30: "近 30 天",
+    preset90: "近 90 天",
+    rangeInvalid: "起始日期不得晚于结束日期",
+    // 概览卡
+    ovCredits: "总消耗积分",
+    ovCost: "总成本",
+    ovTasks: "任务量",
+    ovTasksHint: "成功 + 失败",
+    ovSuccess: "成功",
+    ovFailed: "失败",
+    ovTenants: "租户数",
+    ovReserved: "预留积分",
+    ovReservedHintAll: (n: number) => `全 ${n} 租户合计 · 与已消耗分列`,
+    ovReservedHintTop: (n: number) => `消耗榜前 ${n} 租户 · 与已消耗分列`,
+    // 租户排行表
+    tenantTitle: "租户排行",
+    colTenant: "租户",
+    colCredits: "消耗积分",
+    colCost: "成本",
+    colTasks: "任务量",
+    colSuccessRate: "成功率",
+    colBalance: "余额（总 / 已用 / 预留 / 剩余）",
+    balTotal: "总",
+    balUsed: "已用",
+    balReserved: "预留",
+    balRemaining: "剩余",
+    sortAsc: "升序",
+    sortDesc: "降序",
+    // 分页
+    pageRange: (from: number, to: number, total: number) => `第 ${from}–${to} / 共 ${total}`,
+    prevPage: "上一页",
+    nextPage: "下一页",
+    // 按功能/模型
+    providerTitle: "按功能 / 模型拆分",
+    colProvider: "功能 / 模型",
+    colBillingCount: "计费笔数", // ⚠️ 非「任务量」：count(UsageRecord)，含文案/图片等无 VideoTask 的记录
+    billingCountHint: "计费笔数 = 计费记录条数（覆盖文案 / 图片等无视频任务的功能），非视频任务数",
+    colShare: "占比",
+    // 趋势图
+    trendTitle: "趋势",
+    granDay: "按日",
+    granWeek: "按周",
+    metricCredits: "积分",
+    metricCost: "成本",
+    metricTasks: "笔数",
+    trendSummary: (metric: string, n: number) => `${metric}趋势，共 ${n} 个数据点`,
+    // 通用态
+    loading: "加载中…",
+    error: "加载失败，请重试",
+    retry: "重试",
+    empty: "该区间暂无数据",
+    // 非管理员 403
+    forbiddenTitle: "无权限访问",
+    forbiddenDesc: "数据看板仅管理员可见。",
+    forbiddenBack: "返回工作台"
+  },
   workbench: {
     topicLabel: "视频主题",
     topicPlaceholder: "输入一句话主题，如：三分钟看懂咖啡的起源",

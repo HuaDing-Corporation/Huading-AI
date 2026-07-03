@@ -48,6 +48,17 @@ export const batchKeys = {
   detail: (id: string) => [...batchKeys.all, "detail", id] as const
 };
 
+// 管理员数据看板 (ANALYTICS-UI-0001) — 以日期区间 + 查询参数为 key，区间变化即联动刷新。
+export const analyticsKeys = {
+  all: ["analytics"] as const,
+  overview: (from: string, to: string) => [...analyticsKeys.all, "overview", from, to] as const,
+  byTenant: (from: string, to: string, sort: string, limit: number, offset: number) =>
+    [...analyticsKeys.all, "by-tenant", from, to, sort, limit, offset] as const,
+  byProvider: (from: string, to: string) => [...analyticsKeys.all, "by-provider", from, to] as const,
+  timeseries: (from: string, to: string, granularity: string) =>
+    [...analyticsKeys.all, "timeseries", from, to, granularity] as const
+};
+
 export const meKey = ["me"] as const;
 export const quotaKey = ["quota"] as const;
 export const voicesKey = ["voices"] as const;

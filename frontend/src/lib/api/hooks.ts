@@ -2,7 +2,8 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 
 import { fetchMe } from "@/lib/api/auth";
 import { listAvatarPresets } from "@/lib/api/avatars";
-import { avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, labelSettingsKey, meKey, publishKeys, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
+import { analyticsKeys, avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, labelSettingsKey, meKey, publishKeys, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
+import { fetchAnalyticsByProvider, fetchAnalyticsByTenant, fetchAnalyticsOverview, fetchAnalyticsTimeseries, type AnalyticsRange } from "@/lib/api/analytics";
 import { cancelBatch, createBatch, estimateBatch, getBatch, listBatches } from "@/lib/api/batches";
 import { getQuota } from "@/lib/api/quota";
 import { clearCopyDrafts, deleteCopyDraft, generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
@@ -36,7 +37,9 @@ import type {
   ModelRequest,
   PosterBatchRequest,
   PosterRequest,
-  ScriptGenerateRequest
+  ScriptGenerateRequest,
+  AnalyticsGranularity,
+  AnalyticsTenantSort
 } from "@/lib/api/types";
 import { useAuth } from "@/lib/auth/auth-context";
 
@@ -333,5 +336,48 @@ export function useCancelBatch() {
       void qc.invalidateQueries({ queryKey: batchKeys.detail(id) });
       void qc.invalidateQueries({ queryKey: batchKeys.list() });
     }
+  });
+}
+
+// ── 管理员数据看板 (ANALYTICS-UI-0001) ── enabled 仅 !!session（不按 admin 门控）：
+// 让非管理员也真实发起请求 → 命中后端 403，由页面优雅处理，不靠前端隐藏兜底。
+// enabled 参数：非法区间(from>to)时置 false，避免把非法区间发给后端触发 422（对齐 date-range-picker 契约）。
+export function useAnalyticsOverview(range: AnalyticsRange, enabled = true) {
+  const { session } = useAuth();
+  return useQuery({
+    queryKey: analyticsKeys.overview(range.from, range.to),
+    queryFn: () => fetchAnalyticsOverview(range),
+    enabled: !!session && enabled
+  });
+}
+
+export function useAnalyticsByTenant(
+  range: AnalyticsRange,
+  opts: { sort: AnalyticsTenantSort; limit: number; offset: number },
+  enabled = true
+) {
+  const { session } = useAuth();
+  return useQuery({
+    queryKey: analyticsKeys.byTenant(range.from, range.to, opts.sort, opts.limit, opts.offset),
+    queryFn: () => fetchAnalyticsByTenant(range, opts),
+    enabled: !!session && enabled
+  });
+}
+
+export function useAnalyticsByProvider(range: AnalyticsRange, enabled = true) {
+  const { session } = useAuth();
+  return useQuery({
+    queryKey: analyticsKeys.byProvider(range.from, range.to),
+    queryFn: () => fetchAnalyticsByProvider(range),
+    enabled: !!session && enabled
+  });
+}
+
+export function useAnalyticsTimeseries(range: AnalyticsRange, granularity: AnalyticsGranularity, enabled = true) {
+  const { session } = useAuth();
+  return useQuery({
+    queryKey: analyticsKeys.timeseries(range.from, range.to, granularity),
+    queryFn: () => fetchAnalyticsTimeseries(range, granularity),
+    enabled: !!session && enabled
   });
 }

@@ -4,6 +4,7 @@ import { Glass } from "@/components/ui/glass";
 import { Progress } from "@/components/ui/progress";
 import { SidebarNav } from "@/components/ui/sidebar-nav";
 import { useQuota } from "@/lib/api/hooks";
+import { useAuth } from "@/lib/auth/auth-context";
 import { navItems } from "@/lib/nav";
 
 export function Sidebar() {
@@ -11,10 +12,14 @@ export function Sidebar() {
   // Single quota source (same useQuota as the top-bar QuotaBadge); hide the
   // panel until real data loads so we never show a fabricated number.
   const { data: quota } = useQuota();
+  // 仅管理员可见项（数据看板）：非管理员从导航过滤掉；页面本身仍优雅处理后端 403（不靠此兜底）。
+  const { session } = useAuth();
+  const isAdmin = session?.role === "admin";
+  const items = isAdmin ? navItems : navItems.filter((item) => !item.adminOnly);
 
   return (
     <Glass className="flex flex-col gap-1 rounded-card p-4">
-      <SidebarNav items={navItems} />
+      <SidebarNav items={items} />
 
       {quota && (
         <div className="mt-auto rounded-mark border border-line-gold bg-glass-fill px-4 py-3.5">
