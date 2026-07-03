@@ -13,6 +13,8 @@ export interface NavItem {
   icon: LucideIcon;
   /** 已开通路由的路径；无 href = 占位项（不导航、不高亮）。 */
   href?: string;
+  /** 仅管理员可见（如数据看板）。由容器层按角色过滤后再传入，SidebarNav 本身不判角色。 */
+  adminOnly?: boolean;
 }
 
 const baseClass =

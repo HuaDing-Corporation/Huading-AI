@@ -22,6 +22,6 @@ export const navItems: NavItem[] = [
   { key: "brand", label: "品牌库", icon: Palette },
   { key: "covers", label: "封面工坊", icon: ImageIcon },
   { key: "publish", label: "发布中心", icon: Send, href: "/publish" },
-  { key: "analytics", label: "数据看板", icon: LineChart },
+  { key: "analytics", label: "数据看板", icon: LineChart, href: "/analytics", adminOnly: true },
   { key: "team", label: "团队", icon: Users }
 ];

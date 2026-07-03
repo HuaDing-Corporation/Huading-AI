@@ -25,6 +25,8 @@ describe("SidebarNav (侧边栏路由 · FIX3)", () => {
     expect(screen.getByRole("link", { name: "工作台" })).toHaveAttribute("href", "/");
     expect(screen.getByRole("link", { name: "批量生产" })).toHaveAttribute("href", "/batch");
     expect(screen.getByRole("link", { name: "发布中心" })).toHaveAttribute("href", "/publish");
+    // 数据看板转正（ANALYTICS-UI-0001）：SidebarNav 纯展示按 href 渲染为链接（仅管理员过滤由容器 Sidebar 负责）。
+    expect(screen.getByRole("link", { name: "数据看板" })).toHaveAttribute("href", "/analytics");
   });
 
   it("直达 /batch → 批量生产高亮(aria-current=page)，工作台不高亮（承重·usePathname 推导）", () => {
@@ -64,10 +66,10 @@ describe("SidebarNav (侧边栏路由 · FIX3)", () => {
     }
   });
 
-  it("未开通项（模板中心/品牌库/封面工坊/数据看板/团队）不是链接、无高亮、悬停「即将上线」（承重·点击不导航）", () => {
+  it("未开通项（模板中心/品牌库/封面工坊/团队）不是链接、无高亮、悬停「即将上线」（承重·点击不导航）", () => {
     nav.pathname = "/batch"; // 即便在已高亮的路由下，占位项也绝不高亮
     render(<SidebarNav items={navItems} />);
-    for (const label of ["模板中心", "品牌库", "封面工坊", "数据看板", "团队"]) {
+    for (const label of ["模板中心", "品牌库", "封面工坊", "团队"]) {
       expect(screen.queryByRole("link", { name: label })).not.toBeInTheDocument(); // 非链接 → 无路由目标
       const btn = screen.getByRole("button", { name: label });
       expect(btn).toHaveAttribute("title", copy.nav.comingSoon);

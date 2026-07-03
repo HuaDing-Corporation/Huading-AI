@@ -162,6 +162,110 @@ function aggregateBatchStatus(tasks: MockBatchTask[]): string {
   return "partial_failed";
 }
 
+// ── 管理员数据看板 mock 数据 (ANALYTICS-UI-0001) ── 确定性生成，供 by-tenant 排序/分页真实生效。
+const ANALYTICS_TENANTS = Array.from({ length: 46 }, (_, i) => {
+  const total = 1000 + i * 25;
+  const used = Math.round(total * (0.2 + ((i * 7) % 60) / 100));
+  const reserved = Math.round(total * (((i * 3) % 20) / 100));
+  const credits_used = Math.round((total - i * 3) * 10) / 10;
+  const success = 40 + ((i * 13) % 160);
+  const failed = 2 + ((i * 5) % 30);
+  return {
+    tenant_id: `ten-${String(i + 1).padStart(3, "0")}`,
+    tenant_name: `租户 ${i + 1}`,
+    credits_used,
+    cost_cents: 1500 + i * 137,
+    task_count: success + failed,
+    success_rate: Math.round((success / (success + failed)) * 1000) / 1000,
+    balance: { total, used, reserved, remaining: Math.max(0, total - used - reserved) }
+  };
+});
+
+function analyticsForbidden(): boolean {
+  try {
+    return typeof localStorage !== "undefined" && localStorage.getItem("hd_mock_non_admin") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function analyticsHandlers() {
+  const A = `${BASE}/api/v1/admin/analytics`;
+  const guard = () => (analyticsForbidden() ? err(403, "FORBIDDEN", "Insufficient permission.") : null);
+  const sortTenants = (sort: string) => {
+    const field = sort.replace(/_(asc|desc)$/, "");
+    const dir = sort.endsWith("_asc") ? 1 : -1;
+    const key: Record<string, (t: (typeof ANALYTICS_TENANTS)[number]) => number> = {
+      credits: (t) => t.credits_used,
+      cost: (t) => t.cost_cents,
+      task_count: (t) => t.task_count,
+      success_rate: (t) => t.success_rate
+    };
+    const fn = key[field] ?? key.credits;
+    return [...ANALYTICS_TENANTS].sort((a, b) => (fn(a) - fn(b)) * dir);
+  };
+  return [
+    http.get(`${A}/overview`, ({ request }) => {
+      const g = guard();
+      if (g) return g;
+      const url = new URL(request.url);
+      return ok({
+        total_credits_used: 48213.5,
+        total_cost_cents: 1892340,
+        task_count: 5230,
+        success_count: 4890,
+        failed_count: 340,
+        tenant_count: ANALYTICS_TENANTS.length,
+        period: { from: url.searchParams.get("from") ?? "", to: url.searchParams.get("to") ?? "" }
+      });
+    }),
+    http.get(`${A}/by-tenant`, ({ request }) => {
+      const g = guard();
+      if (g) return g;
+      const url = new URL(request.url);
+      const sort = url.searchParams.get("sort") ?? "credits_desc";
+      const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") ?? 20)));
+      const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0));
+      const sorted = sortTenants(sort);
+      return ok({ items: sorted.slice(offset, offset + limit), total: ANALYTICS_TENANTS.length });
+    }),
+    http.get(`${A}/by-provider`, () => {
+      const g = guard();
+      if (g) return g;
+      return ok({
+        items: [
+          { provider: "seedance", model: "i2v-v1", credits_used: 21500, cost_cents: 812000, task_count: 2100, share_pct: 44.6 },
+          { provider: "video_gen", model: "vg-pro", credits_used: 15200, cost_cents: 540300, task_count: 1630, share_pct: 31.5 },
+          { provider: "copywriting", model: null, credits_used: 6800, cost_cents: 210400, task_count: 980, share_pct: 14.1 },
+          { provider: "image", model: "flux-1", credits_used: 4713.5, cost_cents: 329640, task_count: 520, share_pct: 9.8 }
+        ]
+      });
+    }),
+    http.get(`${A}/timeseries`, ({ request }) => {
+      const g = guard();
+      if (g) return g;
+      const url = new URL(request.url);
+      const granularity = url.searchParams.get("granularity") ?? "day";
+      const from = url.searchParams.get("from") ?? "";
+      const step = granularity === "week" ? 7 : 1;
+      const count = granularity === "week" ? 6 : 14;
+      const base = from ? new Date(`${from}T00:00:00`) : new Date("2026-06-01T00:00:00");
+      const buckets = Array.from({ length: count }, (_, i) => {
+        const d = new Date(base);
+        d.setDate(d.getDate() + i * step);
+        const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+        return {
+          date: iso,
+          credits_used: Math.round((800 + Math.sin(i) * 300 + i * 40) * 10) / 10,
+          cost_cents: 30000 + i * 4200 + (i % 3) * 1500,
+          task_count: 120 + i * 9 + (i % 4) * 15
+        };
+      });
+      return ok({ buckets });
+    })
+  ];
+}
+
 export const handlers = [
   // Auth = M2 shapes (unchanged). Mocked so the (app) client auth-gate can be
   // passed during the MSW parallel period without a real backend.
@@ -669,5 +773,9 @@ export const handlers = [
     b.status = aggregateBatchStatus(b.tasks);
     // 后端 BatchCancelResponse = {batch_id, cancelled, running}。
     return ok({ batch_id: b.id, cancelled, running });
-  })
+  }),
+
+  // ── 管理员数据看板 (ANALYTICS-UI-0001) ── /api/v1/admin/analytics/*，require_admin。
+  // 非管理员模拟：localStorage["hd_mock_non_admin"]==="1" → 403 FORBIDDEN（供 Playwright 403 态验证）。
+  ...analyticsHandlers()
 ];

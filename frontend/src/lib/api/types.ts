@@ -665,3 +665,68 @@ export interface BatchCancelResponse {
   cancelled: number;
   running: number;
 }
+
+// ── 管理员数据看板 (ANALYTICS-UI-0001) ── 逐字对齐后端 ANALYTICS-0001 schemas（/api/v1/admin/analytics/*，require_admin）。
+export type AnalyticsTenantSort =
+  | "credits_desc"
+  | "credits_asc"
+  | "cost_desc"
+  | "cost_asc"
+  | "task_count_desc"
+  | "task_count_asc"
+  | "success_rate_desc"
+  | "success_rate_asc";
+export type AnalyticsGranularity = "day" | "week";
+
+export interface AnalyticsPeriod {
+  from: string; // YYYY-MM-DD（后端 alias "from"）
+  to: string;
+}
+export interface AnalyticsOverview {
+  total_credits_used: number;
+  total_cost_cents: number;
+  task_count: number; // 成功+失败 VideoTask 数
+  success_count: number;
+  failed_count: number;
+  tenant_count: number;
+  period: AnalyticsPeriod;
+}
+export interface AnalyticsBalance {
+  total: number;
+  used: number;
+  reserved: number;
+  remaining: number;
+}
+export interface AnalyticsTenantItem {
+  tenant_id: string;
+  tenant_name: string;
+  credits_used: number;
+  cost_cents: number;
+  task_count: number;
+  success_rate: number; // 0–1 浮点（展示 ×100%）
+  balance: AnalyticsBalance;
+}
+export interface AnalyticsByTenant {
+  items: AnalyticsTenantItem[];
+  total: number;
+}
+export interface AnalyticsProviderItem {
+  provider: string;
+  model: string | null;
+  credits_used: number;
+  cost_cents: number;
+  task_count: number; // ⚠️ 计费笔数：count(UsageRecord)，含文案/图片等无 VideoTask 的记录，非「视频任务数」
+  share_pct: number;
+}
+export interface AnalyticsByProvider {
+  items: AnalyticsProviderItem[];
+}
+export interface AnalyticsTimeseriesBucket {
+  date: string; // YYYY-MM-DD
+  credits_used: number;
+  cost_cents: number;
+  task_count: number;
+}
+export interface AnalyticsTimeseries {
+  buckets: AnalyticsTimeseriesBucket[];
+}
