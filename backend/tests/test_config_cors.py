@@ -143,3 +143,21 @@ def test_apimart_video_settings_are_env_driven(monkeypatch) -> None:
     assert s.engine_apimart_video_poll_initial_delay_seconds == 31
     assert s.engine_apimart_video_poll_interval_seconds == 11
     assert s.engine_apimart_video_timeout_seconds == 901
+
+
+def test_apimart_cost_settings_are_env_driven(monkeypatch) -> None:
+    monkeypatch.setenv("ENGINE_APIMART_CREDIT_USD", "0.20")
+    monkeypatch.setenv("ENGINE_USD_CNY_RATE", "7.5")
+    s = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    assert s.engine_apimart_credit_usd == 0.20
+    assert s.engine_usd_cny_rate == 7.5
+
+
+def test_apimart_cost_settings_have_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("ENGINE_APIMART_CREDIT_USD", raising=False)
+    monkeypatch.delenv("ENGINE_USD_CNY_RATE", raising=False)
+    s = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    assert s.engine_apimart_credit_usd == 0.10
+    assert s.engine_usd_cny_rate == 7.2

@@ -20,6 +20,10 @@ from app.core.logging import get_logger
 from app.db.models import Asset, BgmLibraryTrack, TaskAsset, VideoTask
 from app.db.session import SessionLocal
 from app.providers.base import resolve
+from app.services.apimart_costs import (
+    apimart_cost_cents_from_reserved_usage,
+    apimart_cost_cents_from_result,
+)
 from app.services.batches import refresh_batch_job
 from app.services.history import prune_video_history_best_effort
 from app.services.progress import ProgressStore, build_progress_store
@@ -50,6 +54,7 @@ class VideoGenContext:
     duration_sec: int
     resolution: str
     bgm: dict[str, Any] | None = None
+    provider_cost_cents: int = 0
 
 
 def get_object_storage() -> ObjectStorage:
@@ -153,6 +158,7 @@ def _generate_seedance_mini_video(ctx: VideoGenContext) -> bytes:
     video_bytes = result.get("video_bytes") if isinstance(result, dict) else None
     if not isinstance(video_bytes, bytes) or not video_bytes:
         raise RuntimeError("Video provider returned no video bytes.")
+    ctx.provider_cost_cents = apimart_cost_cents_from_result(result)
     return video_bytes
 
 
@@ -358,7 +364,12 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 tenant_id=tenant_id,
                 video_task_id=task_id,
                 actual_seconds=ctx.duration_sec,
-                cost_cents=0,
+                cost_cents=ctx.provider_cost_cents
+                or apimart_cost_cents_from_reserved_usage(
+                    db,
+                    tenant_id=tenant_id,
+                    video_task_id=task_id,
+                ),
             )
             refresh_batch_job(db, batch_id=task.batch_id)
             db.commit()
