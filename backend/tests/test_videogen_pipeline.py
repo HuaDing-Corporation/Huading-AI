@@ -560,6 +560,7 @@ def test_video_gen_pipeline_settles_quota_stores_labeled_output_and_history(
 
     def fake_generate(ctx: video_gen.VideoGenContext) -> bytes:
         provider_payloads.append(video_gen._provider_payload(ctx))
+        ctx.provider_cost_cents = 511
         return b"MP4"
 
     def fake_label_artifact_bytes(
@@ -618,6 +619,7 @@ def test_video_gen_pipeline_settles_quota_stores_labeled_output_and_history(
         assert task.progress == 100
         usage = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
         assert usage.status == "settled"
+        assert usage.cost_cents == 511
         subscription = _subscription(db, auth_context["tenant_id"])
         assert subscription.quota_credits_reserved == 0
         assert subscription.quota_credits_used == 10
@@ -756,6 +758,7 @@ def test_video_gen_pipeline_mixes_library_bgm_from_track_storage(
         usage = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
         assert usage is not None
         assert usage.status == "settled"
+        assert usage.cost_cents == 720
         subscription = _subscription(db, auth_context["tenant_id"])
         assert subscription.quota_credits_reserved == 0
         assert subscription.quota_credits_used == 10

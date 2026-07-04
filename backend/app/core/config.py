@@ -128,6 +128,8 @@ class Settings(BaseSettings):
     engine_apimart_video_poll_initial_delay_seconds: float = 30.0
     engine_apimart_video_poll_interval_seconds: float = 10.0
     engine_apimart_video_timeout_seconds: float = 900.0
+    engine_apimart_credit_usd: float = 0.10
+    engine_usd_cny_rate: float = 7.2
     engine_image_provider_timeout_seconds: float = 240.0
     engine_subtitle_font_path: str = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
     engine_default_template: str = "1080x1920/static_default.html"

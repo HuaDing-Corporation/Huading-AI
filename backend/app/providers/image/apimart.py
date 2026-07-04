@@ -11,6 +11,7 @@ import requests
 from app.core.config import settings
 from app.db.models import ProviderConfig
 from app.providers.base import register_provider
+from app.services.apimart_costs import apimart_usage_metadata
 
 _DEFAULT_BASE_URL = "https://api.apimart.ai/v1"
 _DEFAULT_MODEL = "gpt-image-2"
@@ -78,7 +79,7 @@ class APIMartImageProvider:
     def _generate_image_sync(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         request_body, normalized = self._request_body(payload)
         task_id = self._submit(request_body)
-        image_url = self._poll_until_complete(task_id)
+        image_url, usage = self._poll_until_complete(task_id)
         image_bytes, mime_type = self._download_image(image_url)
         return {
             "image_bytes": image_bytes,
@@ -90,6 +91,7 @@ class APIMartImageProvider:
             "quality": normalized["quality"],
             "mode": "edit" if normalized["image_urls"] else "generate",
             "task_id": task_id,
+            **usage,
         }
 
     def _request_body(self, payload: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -157,7 +159,7 @@ class APIMartImageProvider:
             raise APIMartImageProviderError("APIMart image submit response contained no task_id.")
         return task_id
 
-    def _poll_until_complete(self, task_id: str) -> str:
+    def _poll_until_complete(self, task_id: str) -> tuple[str, dict[str, Any]]:
         deadline = self._time() + self.max_poll_seconds
         self._sleep(self.poll_initial_delay)
         while True:
@@ -181,7 +183,7 @@ class APIMartImageProvider:
 
             status = str(data.get("status") or "").strip().lower()
             if status in _COMPLETED_STATUSES:
-                return _extract_result_image_url(data)
+                return _extract_result_image_url(data), apimart_usage_metadata(data)
             if status in _FAILED_STATUSES:
                 raise APIMartImageProviderError(
                     _payload_message(data, "APIMart image task failed."),

@@ -1,3 +1,4 @@
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -82,7 +83,8 @@ async def test_apimart_provider_submits_polls_downloads_and_maps_urls() -> None:
                                     "url": ["https://upload.apimart.ai/apimart_img_1.png"],
                                     "expires_at": 123,
                                 }
-                            ]
+                            ],
+                            "usage": {"cost": "2.50"},
                         },
                     },
                 }
@@ -123,6 +125,8 @@ async def test_apimart_provider_submits_polls_downloads_and_maps_urls() -> None:
     assert result["mode"] == "edit"
     assert result["quality"] == "high"
     assert result["task_id"] == "apimart_img_1"
+    assert result["credits"] == Decimal("2.50")
+    assert result["cost_cents"] > 0
     assert sleep_calls == [10, 4, 4]
     assert session.post_calls == [
         {

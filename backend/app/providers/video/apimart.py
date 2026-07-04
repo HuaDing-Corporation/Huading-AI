@@ -10,6 +10,7 @@ import requests
 from app.core.config import settings
 from app.db.models import ProviderConfig
 from app.providers.base import register_provider
+from app.services.apimart_costs import apimart_usage_metadata
 
 _DEFAULT_BASE_URL = "https://api.apimart.ai/v1"
 _DEFAULT_MODEL = "doubao-seedance-2.0"
@@ -69,7 +70,7 @@ class APIMartVideoProvider:
     def _generate_video_sync(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         request_body, normalized = self._request_body(payload)
         task_id = self._submit(request_body)
-        video_url = self._poll_until_complete(task_id)
+        video_url, usage = self._poll_until_complete(task_id)
         video_bytes, mime_type = self._download_video(video_url)
         return {
             "video_bytes": video_bytes,
@@ -80,6 +81,7 @@ class APIMartVideoProvider:
             "duration": normalized["duration"],
             "resolution": normalized["resolution"],
             "size": normalized["size"],
+            **usage,
         }
 
     def _request_body(self, payload: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -131,7 +133,7 @@ class APIMartVideoProvider:
             raise APIMartVideoProviderError("APIMart video submit response contained no task_id.")
         return task_id
 
-    def _poll_until_complete(self, task_id: str) -> str:
+    def _poll_until_complete(self, task_id: str) -> tuple[str, dict[str, Any]]:
         deadline = self._time() + self.max_poll_seconds
         self._sleep(self.poll_initial_delay)
         while True:
@@ -155,7 +157,7 @@ class APIMartVideoProvider:
 
             status = str(data.get("status") or "").strip().lower()
             if status in _COMPLETED_STATUSES:
-                return _extract_result_video_url(data)
+                return _extract_result_video_url(data), apimart_usage_metadata(data)
             if status in _FAILED_STATUSES:
                 raise APIMartVideoProviderError(
                     _payload_message(data, "APIMart video task failed."),

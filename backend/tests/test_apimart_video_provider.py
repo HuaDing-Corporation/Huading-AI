@@ -1,3 +1,4 @@
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -81,7 +82,8 @@ async def test_apimart_video_provider_submits_polls_downloads_and_maps_i2v_paylo
                                     "url": ["https://getapib.org/video/apimart_vid_a.mp4"],
                                     "expires_at": 123,
                                 }
-                            ]
+                            ],
+                            "usage": {"cost": "7.10"},
                         },
                     },
                 }
@@ -122,6 +124,8 @@ async def test_apimart_video_provider_submits_polls_downloads_and_maps_i2v_paylo
     assert result["duration"] == 15
     assert result["resolution"] == "720p"
     assert result["size"] == "adaptive"
+    assert result["credits"] == Decimal("7.10")
+    assert result["cost_cents"] > 0
     assert sleep_calls == [30, 10]
     assert session.post_calls == [
         {

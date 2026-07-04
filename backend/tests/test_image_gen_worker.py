@@ -59,11 +59,13 @@ class _FakeProvider:
         *,
         image_bytes: bytes = b"photo-png",
         expected_input_bytes: bytes | None = b"input-image",
+        cost_cents: int = 0,
         fail: bool = False,
         failure: Exception | None = None,
     ) -> None:
         self.image_bytes = image_bytes
         self.expected_input_bytes = expected_input_bytes
+        self.cost_cents = cost_cents
         self.fail = fail
         self.failure = failure
         self.payloads: list[dict] = []
@@ -83,6 +85,7 @@ class _FakeProvider:
             "image_bytes": self.image_bytes,
             "mime_type": "image/png",
             "model": "gpt-image-2",
+            "cost_cents": self.cost_cents,
         }
 
 
@@ -319,7 +322,7 @@ def test_image_worker_text_to_image_finishes_and_settles_quota(
         )
     storage = _FakeStorage()
     store = _MemProgressStore()
-    provider = _FakeProvider(image_bytes=b"final-png")
+    provider = _FakeProvider(image_bytes=b"final-png", cost_cents=144)
     image_gen = _patch_worker(monkeypatch, auth_db, storage, store, provider)
 
     result = image_gen.run_image_generation(
@@ -362,6 +365,7 @@ def test_image_worker_text_to_image_finishes_and_settles_quota(
     assert task_asset.role == "output_image"
     assert usage.status == "settled"
     assert usage.quantity == Decimal("1.000")
+    assert usage.cost_cents == 144
     assert subscription.quota_credits_reserved == 0
     assert subscription.quota_credits_used == 30
     scoped_id = f"{auth_context['tenant_id']}:{task_id}"
@@ -405,9 +409,11 @@ def test_image_worker_marks_generated_image_as_cover_when_requested(
     output_key = f"tenants/{auth_context['tenant_id']}/photos/{task_id}/output.png"
     with auth_db() as db:
         asset = db.scalars(select(Asset).where(Asset.storage_key == output_key)).one()
+        usage = db.scalars(select(UsageRecord).where(UsageRecord.video_task_id == task_id)).one()
 
     assert asset.metadata_["purpose"] == "cover"
     assert asset.metadata_["kind"] == "cover"
+    assert usage.cost_cents == 1440
 
 
 def test_image_worker_edit_resolves_tenant_upload_and_cleans_temp_file(
