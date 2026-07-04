@@ -15,7 +15,6 @@ if __package__ in (None, ""):
 
 from app.db.models import UsageRecord
 from app.db.session import SessionLocal
-from app.services.apimart_costs import apimart_cost_cents_from_credits
 
 
 @dataclass
@@ -32,6 +31,11 @@ def backfill_apimart_zero_costs(
     apply: bool,
     limit: int | None = None,
 ) -> BackfillSummary:
+    if apply:
+        raise RuntimeError(
+            "APIMart cost backfill must be rebuilt from APIMart logs or price table before apply."
+        )
+
     query = (
         select(UsageRecord)
         .where(
@@ -49,22 +53,16 @@ def backfill_apimart_zero_costs(
     preview: list[dict[str, Any]] = []
     updated = 0
     for record in records:
-        new_cost_cents = apimart_cost_cents_from_credits(record.credits)
-        if new_cost_cents <= 0:
-            continue
         preview.append(
             {
                 "usage_record_id": record.id,
                 "tenant_id": record.tenant_id,
                 "video_task_id": record.video_task_id,
-                "credits": str(record.credits),
+                "tenant_credits": str(record.credits),
                 "old_cost_cents": record.cost_cents,
-                "new_cost_cents": new_cost_cents,
+                "reason": "requires_apimart_logs_or_price_table",
             }
         )
-        if apply:
-            record.cost_cents = new_cost_cents
-            updated += 1
 
     return BackfillSummary(
         matched=len(records),

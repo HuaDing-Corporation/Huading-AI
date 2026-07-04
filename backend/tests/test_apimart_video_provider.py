@@ -83,7 +83,7 @@ async def test_apimart_video_provider_submits_polls_downloads_and_maps_i2v_paylo
                                     "expires_at": 123,
                                 }
                             ],
-                            "usage": {"cost": "7.10"},
+                            "usage": {"credits": "3.3"},
                         },
                     },
                 }
@@ -124,8 +124,8 @@ async def test_apimart_video_provider_submits_polls_downloads_and_maps_i2v_paylo
     assert result["duration"] == 15
     assert result["resolution"] == "720p"
     assert result["size"] == "adaptive"
-    assert result["credits"] == Decimal("7.10")
-    assert result["cost_cents"] > 0
+    assert result["credits"] == Decimal("3.3")
+    assert result["cost_cents"] == 238
     assert sleep_calls == [30, 10]
     assert session.post_calls == [
         {

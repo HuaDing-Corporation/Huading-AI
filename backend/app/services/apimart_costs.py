@@ -4,23 +4,24 @@ from collections.abc import Iterable, Mapping
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
 from app.core.config import settings
-from app.db.models import UsageRecord
 
 _CREDIT_KEYS = {
     "credits",
     "credit",
     "used_credits",
-    "total_credits",
     "usage_credits",
     "task_credits",
-    "cost",
-    "usage_cost",
 }
 _COST_CENTS_KEYS = {"cost_cents", "cny_cost_cents", "cost_cent"}
+_IMAGE_CREDITS_BY_MODEL_PREFIX = {
+    "gpt-image": Decimal("0.06"),
+}
+_VIDEO_CREDITS_PER_5_SECONDS_BY_RESOLUTION = {
+    "480p": Decimal("3.3"),
+    "720p": Decimal("7.1"),
+    "1080p": Decimal("17.72"),
+}
 
 
 def apimart_cost_cents_from_credits(credits: Decimal | int | float | str | None) -> int:
@@ -53,25 +54,68 @@ def apimart_usage_metadata(payload: Mapping[str, Any]) -> dict[str, Any]:
 def apimart_cost_cents_from_result(result: Mapping[str, Any] | None) -> int:
     if not result:
         return 0
-    return _int_or_none(result.get("cost_cents")) or 0
+    cost_cents = _int_or_none(result.get("cost_cents"))
+    if cost_cents is not None and cost_cents > 0:
+        return cost_cents
 
+    credits = _decimal_or_none(result.get("credits"))
+    if credits is not None:
+        return apimart_cost_cents_from_credits(credits)
 
-def apimart_cost_cents_from_reserved_usage(
-    db: Session,
-    *,
-    tenant_id: str,
-    video_task_id: str,
-) -> int:
-    record = db.scalar(
-        select(UsageRecord).where(
-            UsageRecord.tenant_id == tenant_id,
-            UsageRecord.video_task_id == video_task_id,
-            UsageRecord.status == "reserved",
-        )
-    )
-    if record is None:
+    provider = str(result.get("provider") or "").strip().lower()
+    if provider and provider != "apimart":
         return 0
-    return apimart_cost_cents_from_credits(record.credits)
+
+    return apimart_cost_cents_from_price_table(
+        model=str(result.get("model") or ""),
+        resolution=result.get("resolution"),
+        duration_sec=result.get("duration_sec", result.get("duration")),
+    )
+
+
+def apimart_cost_cents_from_price_table(
+    *,
+    model: str,
+    resolution: Any | None = None,
+    duration_sec: Any | None = None,
+) -> int:
+    credits = apimart_price_table_credits(
+        model=model,
+        resolution=resolution,
+        duration_sec=duration_sec,
+    )
+    return apimart_cost_cents_from_credits(credits)
+
+
+def apimart_price_table_credits(
+    *,
+    model: str,
+    resolution: Any | None = None,
+    duration_sec: Any | None = None,
+) -> Decimal | None:
+    normalized_model = model.strip().lower()
+    for prefix, credits in _IMAGE_CREDITS_BY_MODEL_PREFIX.items():
+        if normalized_model.startswith(prefix):
+            return credits
+
+    if "seedance" not in normalized_model:
+        return None
+
+    normalized_resolution = str(resolution or "480p").strip().lower()
+    credits_per_5_seconds = _VIDEO_CREDITS_PER_5_SECONDS_BY_RESOLUTION.get(
+        normalized_resolution
+    )
+    if credits_per_5_seconds is None:
+        return None
+
+    try:
+        duration = int(duration_sec or 5)
+    except (TypeError, ValueError):
+        duration = 5
+    if duration <= 0:
+        return Decimal("0")
+    billing_windows = (duration + 4) // 5
+    return credits_per_5_seconds * Decimal(billing_windows)
 
 
 def _first_nested_value(value: Any, keys: set[str]) -> Any | None:

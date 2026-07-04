@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from app.db.models import Plan, Subscription, UsageRecord, VideoTask
 
 
@@ -55,7 +57,7 @@ def _seed_settled_apimart_usage(db, tenant_id: str) -> str:
     return usage.id
 
 
-def test_apimart_cost_backfill_dry_run_does_not_write_and_apply_is_idempotent(
+def test_apimart_cost_backfill_is_dry_run_only_until_rebuilt_from_apimart_basis(
     monkeypatch,
     auth_context,
     auth_db,
@@ -72,19 +74,13 @@ def test_apimart_cost_backfill_dry_run_does_not_write_and_apply_is_idempotent(
         assert usage is not None
         assert usage.cost_cents == 0
 
-        applied = backfill_apimart_zero_costs(db, apply=True)
-        db.commit()
+        with pytest.raises(RuntimeError, match="APIMart logs or price table"):
+            backfill_apimart_zero_costs(db, apply=True)
         usage = db.get(UsageRecord, usage_id)
         assert usage is not None
-        assert usage.cost_cents == 180
-
-        second = backfill_apimart_zero_costs(db, apply=True)
-        db.commit()
+        assert usage.cost_cents == 0
 
     assert dry_run.matched == 1
     assert dry_run.updated == 0
-    assert dry_run.preview[0]["new_cost_cents"] == 180
-    assert applied.matched == 1
-    assert applied.updated == 1
-    assert second.matched == 0
-    assert second.updated == 0
+    assert dry_run.preview[0]["reason"] == "requires_apimart_logs_or_price_table"
+    assert "new_cost_cents" not in dry_run.preview[0]

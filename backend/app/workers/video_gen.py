@@ -21,7 +21,7 @@ from app.db.models import Asset, BgmLibraryTrack, TaskAsset, VideoTask
 from app.db.session import SessionLocal
 from app.providers.base import resolve
 from app.services.apimart_costs import (
-    apimart_cost_cents_from_reserved_usage,
+    apimart_cost_cents_from_price_table,
     apimart_cost_cents_from_result,
 )
 from app.services.batches import refresh_batch_job
@@ -365,10 +365,10 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 video_task_id=task_id,
                 actual_seconds=ctx.duration_sec,
                 cost_cents=ctx.provider_cost_cents
-                or apimart_cost_cents_from_reserved_usage(
-                    db,
-                    tenant_id=tenant_id,
-                    video_task_id=task_id,
+                or apimart_cost_cents_from_price_table(
+                    model=settings.engine_apimart_video_model,
+                    resolution=ctx.resolution,
+                    duration_sec=ctx.duration_sec,
                 ),
             )
             refresh_batch_job(db, batch_id=task.batch_id)
