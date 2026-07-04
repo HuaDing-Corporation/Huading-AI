@@ -8,7 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 if __package__ in (None, ""):
@@ -26,6 +26,8 @@ class BackfillSummary:
     apply: bool
     preview: list[dict[str, Any]]
     skipped: list[dict[str, Any]]
+    unchanged: list[dict[str, Any]]
+    anomalies: list[dict[str, Any]]
 
 
 _BACKFILL_PROVIDERS = {
@@ -34,6 +36,10 @@ _BACKFILL_PROVIDERS = {
     "doubao-seed-tts",
     "deepseek",
 }
+_APIMART_PROVIDER = "apimart"
+_NON_APIMART_ZERO_COST_PROVIDERS = _BACKFILL_PROVIDERS - {_APIMART_PROVIDER}
+_MISMATCH_MIN_ABSOLUTE_CENTS = 1
+_MISMATCH_RELATIVE_TOLERANCE = Decimal("0.05")
 
 
 def _decimal_quantity(record: UsageRecord) -> Decimal:
@@ -89,7 +95,7 @@ def _deepseek_backfill_cost(record: UsageRecord, _task: VideoTask | None) -> int
 
 def _cost_for_record(record: UsageRecord, task: VideoTask | None) -> tuple[int, str]:
     provider = (record.provider or "").strip().lower()
-    if provider == "apimart":
+    if provider == _APIMART_PROVIDER:
         return _apimart_backfill_cost(record, task), "apimart_price_table"
     if provider == "omnihuman":
         return _omnihuman_backfill_cost(record, task), "omnihuman_duration_rate"
@@ -109,6 +115,43 @@ def _skip_reason(record: UsageRecord) -> str:
     return "cost_basis_unavailable"
 
 
+def _record_provider(record: UsageRecord) -> str:
+    return (record.provider or "").strip().lower()
+
+
+def _cost_mismatch_exceeds_tolerance(*, old_cost_cents: int, new_cost_cents: int) -> bool:
+    diff = abs(int(old_cost_cents) - int(new_cost_cents))
+    if diff < _MISMATCH_MIN_ABSOLUTE_CENTS:
+        return False
+    denominator = max(abs(int(new_cost_cents)), 1)
+    return (Decimal(diff) / Decimal(denominator)) > _MISMATCH_RELATIVE_TOLERANCE
+
+
+def _summary_item(
+    record: UsageRecord,
+    *,
+    old_cost_cents: int,
+    new_cost_cents: int,
+    basis: str,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    item = {
+        "usage_record_id": record.id,
+        "tenant_id": record.tenant_id,
+        "video_task_id": record.video_task_id,
+        "provider": record.provider,
+        "model": record.model,
+        "unit": record.unit,
+        "quantity": str(record.quantity),
+        "old_cost_cents": old_cost_cents,
+        "new_cost_cents": new_cost_cents,
+        "basis": basis,
+    }
+    if reason:
+        item["reason"] = reason
+    return item
+
+
 def backfill_provider_zero_costs(
     db: Session,
     *,
@@ -118,21 +161,26 @@ def backfill_provider_zero_costs(
     query = (
         select(UsageRecord)
         .where(
-            UsageRecord.provider.in_(_BACKFILL_PROVIDERS),
             UsageRecord.status == "settled",
-            UsageRecord.cost_cents == 0,
+            or_(
+                UsageRecord.provider == _APIMART_PROVIDER,
+                and_(
+                    UsageRecord.provider.in_(_NON_APIMART_ZERO_COST_PROVIDERS),
+                    UsageRecord.cost_cents == 0,
+                ),
+            ),
         )
         .order_by(UsageRecord.created_at.asc(), UsageRecord.id.asc())
     )
-    if limit is not None:
-        query = query.limit(limit)
-
     preview: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    unchanged: list[dict[str, Any]] = []
+    anomalies: list[dict[str, Any]] = []
     updated = 0
     for record in db.scalars(query):
         task = db.get(VideoTask, record.video_task_id) if record.video_task_id else None
         new_cost_cents, basis = _cost_for_record(record, task)
+        old_cost_cents = int(record.cost_cents or 0)
         if new_cost_cents <= 0:
             skipped.append(
                 {
@@ -147,20 +195,37 @@ def backfill_provider_zero_costs(
                 }
             )
             continue
-        preview.append(
-            {
-                "usage_record_id": record.id,
-                "tenant_id": record.tenant_id,
-                "video_task_id": record.video_task_id,
-                "provider": record.provider,
-                "model": record.model,
-                "unit": record.unit,
-                "quantity": str(record.quantity),
-                "old_cost_cents": record.cost_cents,
-                "new_cost_cents": new_cost_cents,
-                "basis": basis,
-            }
+        provider = _record_provider(record)
+        if (
+            provider == _APIMART_PROVIDER
+            and old_cost_cents > 0
+            and not _cost_mismatch_exceeds_tolerance(
+                old_cost_cents=old_cost_cents,
+                new_cost_cents=new_cost_cents,
+            )
+        ):
+            unchanged.append(
+                _summary_item(
+                    record,
+                    old_cost_cents=old_cost_cents,
+                    new_cost_cents=new_cost_cents,
+                    basis=basis,
+                    reason="within_tolerance",
+                )
+            )
+            continue
+
+        item = _summary_item(
+            record,
+            old_cost_cents=old_cost_cents,
+            new_cost_cents=new_cost_cents,
+            basis=basis,
         )
+        if limit is not None and len(preview) >= limit:
+            continue
+        preview.append(item)
+        if provider == _APIMART_PROVIDER and old_cost_cents > 0:
+            anomalies.append({**item, "reason": "apimart_nonzero_mismatch"})
         if apply:
             record.cost_cents = new_cost_cents
             updated += 1
@@ -171,6 +236,8 @@ def backfill_provider_zero_costs(
         apply=apply,
         preview=preview,
         skipped=skipped,
+        unchanged=unchanged,
+        anomalies=anomalies,
     )
 
 
