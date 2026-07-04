@@ -227,6 +227,12 @@ def test_db_schema_0001_usage_record_money_and_credit_columns() -> None:
         "settled_at",
     } <= set(usage_records.c.keys())
     assert usage_records.c.cost_cents.type.python_type is int
+    assert any(
+        constraint.name == "ck_usage_records_unit"
+        and "char" in str(constraint.sqltext)
+        for constraint in usage_records.constraints
+        if isinstance(constraint, CheckConstraint)
+    )
 
 
 def test_db_schema_0001_mapped_smoke_flow() -> None:

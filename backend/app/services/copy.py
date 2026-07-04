@@ -17,6 +17,7 @@ from app.schemas.copy import (
     CopyTitlesRequest,
     CopyTopicsRequest,
 )
+from app.services import provider_costs
 from app.workers.avatar_talk import build_script_payload, clean_spoken_script
 
 _CHAINABLE_VIDEO_MODES = {"avatar_talk", "seedance_i2v"}
@@ -123,11 +124,17 @@ def _candidate_lines(text: str, *, limit: int) -> list[str]:
     return [candidate for candidate in candidates if candidate][:limit]
 
 
-def _generate_text(db: Session, *, tenant_id: str, provider_payload: dict[str, Any]) -> Any:
+def _generate_text(
+    db: Session,
+    *,
+    tenant_id: str,
+    provider_payload: dict[str, Any],
+    record_cost: bool = True,
+) -> Any:
     _ensure_llm_configured()
     provider = resolve(db, tenant_id=tenant_id, capability="llm")
     try:
-        return asyncio.run(
+        result = asyncio.run(
             invoke(
                 db,
                 tenant_id=tenant_id,
@@ -137,6 +144,10 @@ def _generate_text(db: Session, *, tenant_id: str, provider_payload: dict[str, A
                 timeout_seconds=30.0,
             )
         )
+        if record_cost:
+            provider_costs.record_deepseek_usage(db, tenant_id=tenant_id, result=result)
+            db.commit()
+        return result
     except AppError:
         raise
     except Exception as exc:
@@ -283,12 +294,15 @@ def generate_publish_copy(
         db,
         tenant_id=tenant_id,
         provider_payload=_publish_copy_payload(source_text=source_text, platform=platform),
+        record_cost=False,
     )
-    return _publish_copy_from_text(
+    payload = _publish_copy_from_text(
         _result_text(result),
         platform=platform,
         source_text=source_text,
     )
+    payload["_llm_usage"] = provider_costs.deepseek_usage_from_result(result)
+    return payload
 
 
 def create_draft(db: Session, *, tenant_id: str, payload: CopyDraftCreateRequest) -> CopyDraft:

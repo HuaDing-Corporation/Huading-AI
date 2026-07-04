@@ -16,7 +16,7 @@ class DeepSeekProvider:
         self.model = model
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
-    async def generate_text(self, payload: dict[str, Any]) -> dict[str, str]:
+    async def generate_text(self, payload: dict[str, Any]) -> dict[str, Any]:
         topic = str(payload.get("topic") or "").strip()
         if not topic:
             raise ValueError("topic is required.")
@@ -43,7 +43,27 @@ class DeepSeekProvider:
             temperature=0.7,
         )
         text = response.choices[0].message.content or ""
-        return {"text": text.strip()}
+        usage = getattr(response, "usage", None)
+        return {
+            "text": text.strip(),
+            "provider": "deepseek",
+            "model": self.model,
+            "usage": {
+                "prompt_tokens": _usage_int(usage, "prompt_tokens"),
+                "completion_tokens": _usage_int(usage, "completion_tokens"),
+                "total_tokens": _usage_int(usage, "total_tokens"),
+            },
+        }
+
+
+def _usage_int(usage: Any, key: str) -> int:
+    if usage is None:
+        return 0
+    value = usage.get(key) if isinstance(usage, dict) else getattr(usage, key, 0)
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _deepseek_factory(config: ProviderConfig) -> DeepSeekProvider:

@@ -1199,6 +1199,87 @@ def test_script_step_cleans_existing_bad_script_before_tts(monkeypatch, tmp_path
     Base.metadata.drop_all(engine)
 
 
+def test_tts_step_records_seed_tts_character_cost(monkeypatch, tmp_path: Path):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-tts-cost"
+    unit_id = "tts-cost-unit"
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="tts-cost", name="TTS Cost"))
+        voice = Voice(
+            id="voice-tts-cost",
+            provider="doubao-seed-tts",
+            voice_code="BV001",
+            display_name="Seed TTS",
+        )
+        db.add(voice)
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="fallback topic",
+                script="hello world",
+                voice_id=voice.id,
+                duration_sec=10,
+            )
+        )
+        db.commit()
+
+        class _FakeTTS:
+            async def synthesize_speech(self, payload: dict):
+                audio = tmp_path / "tts-cost.mp3"
+                audio.write_bytes(b"MP3")
+                return {
+                    "audio_path": str(audio),
+                    "timeline": [{"text": "hello world", "start_ms": 0, "end_ms": 1000}],
+                    "duration_ms": 1000,
+                    "mime_type": "audio/mpeg",
+                    "size_bytes": 3,
+                    "provider": "doubao-seed-tts",
+                    "model": "seed-tts-2.0",
+                    "characters": 100,
+                }
+
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _FakeTTS(),
+        )
+        monkeypatch.setattr(avatar_talk, "_work_dir", lambda _unit_id: tmp_path)
+        monkeypatch.setattr(avatar_talk, "_audio_duration_sec", lambda _path: 1.0)
+        monkeypatch.setattr(avatar_talk, "label_artifact_bytes", _passthrough_label)
+        monkeypatch.setattr(
+            avatar_talk.provider_costs.settings,
+            "engine_seedtts_cny_per_char",
+            Decimal("0.0003"),
+            raising=False,
+        )
+
+        avatar_talk.tts_step(
+            avatar_talk.AvatarTalkContext(
+                task_id=unit_id,
+                tenant_id=tenant_id,
+                db=db,
+                store=_Store(),
+                storage=_Storage(),
+            )
+        )
+
+        usage = db.query(UsageRecord).filter_by(video_task_id=unit_id).one()
+        assert usage.provider == "doubao-seed-tts"
+        assert usage.model == "seed-tts-2.0"
+        assert usage.capability == "tts"
+        assert usage.unit == "char"
+        assert usage.quantity == Decimal("100.000")
+        assert usage.credits == Decimal("0.00")
+        assert usage.cost_cents == 3
+        assert usage.status == "settled"
+
+    Base.metadata.drop_all(engine)
+
+
 def test_script_step_resolves_llm_provider_from_registry(monkeypatch):
     SessionTesting, engine = _session()
     tenant_id = "tenant-script-registry"
@@ -1249,6 +1330,84 @@ def test_script_step_resolves_llm_provider_from_registry(monkeypatch):
         )
 
         assert db.get(VideoTask, task_id).script == "Registry generated script"
+
+    Base.metadata.drop_all(engine)
+
+
+def test_script_step_records_deepseek_token_cost(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-script-cost"
+    task_id = "unit-script-cost"
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="script-cost", name="Script Cost"))
+        db.add(
+            VideoTask(
+                id=task_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="wool coat",
+                script=None,
+            )
+        )
+        db.commit()
+
+        class _RegistryDeepSeek:
+            async def generate_text(self, payload: dict):
+                assert payload["topic"] == "wool coat"
+                return {
+                    "text": "Registry generated script",
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-flash",
+                    "usage": {
+                        "prompt_tokens": 100_000,
+                        "completion_tokens": 50_000,
+                        "total_tokens": 150_000,
+                    },
+                }
+
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_api_key", "k")
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_base_url", "https://deepseek.test")
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_model", "deepseek-v4-flash")
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _RegistryDeepSeek(),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            avatar_talk.provider_costs.settings,
+            "engine_deepseek_cny_per_1k_input",
+            Decimal("0.001008"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            avatar_talk.provider_costs.settings,
+            "engine_deepseek_cny_per_1k_output",
+            Decimal("0.002016"),
+            raising=False,
+        )
+
+        avatar_talk.script_step(
+            avatar_talk.AvatarTalkContext(
+                task_id=task_id,
+                tenant_id=tenant_id,
+                db=db,
+                store=_Store(),
+                storage=_Storage(),
+            )
+        )
+
+        usage = db.query(UsageRecord).filter_by(video_task_id=task_id).one()
+        assert usage.provider == "deepseek"
+        assert usage.model == "deepseek-v4-flash"
+        assert usage.capability == "llm"
+        assert usage.unit == "token"
+        assert usage.quantity == Decimal("150000.000")
+        assert usage.credits == Decimal("0.00")
+        assert usage.cost_cents == 20
+        assert usage.status == "settled"
 
     Base.metadata.drop_all(engine)
 

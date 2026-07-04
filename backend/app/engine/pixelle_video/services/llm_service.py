@@ -24,6 +24,8 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel
 from loguru import logger
 
+from app.services import provider_costs
+
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -192,6 +194,7 @@ class LLMService:
                     max_tokens=max_tokens,
                     **kwargs
                 )
+                provider_costs.capture_deepseek_response(response, model=final_model)
                 
                 result = response.choices[0].message.content
                 logger.debug(f"LLM response length: {len(result)} chars")
@@ -242,6 +245,7 @@ class LLMService:
             max_tokens=max_tokens,
             **kwargs
         )
+        provider_costs.capture_deepseek_response(response, model=model)
         content = response.choices[0].message.content
         
         logger.debug(f"Structured output response length: {len(content)} chars")

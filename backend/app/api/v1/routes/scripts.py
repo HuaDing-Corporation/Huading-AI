@@ -10,6 +10,7 @@ from app.db.models import User
 from app.providers.base import invoke, resolve
 from app.schemas.response import ApiResponse, ok
 from app.schemas.scripts import ScriptGenerateRequest, ScriptGenerateResponse
+from app.services import provider_costs
 from app.workers.avatar_talk import build_script_payload, clean_spoken_script
 
 router = APIRouter()
@@ -50,6 +51,11 @@ def generate_script(
             timeout_seconds=30.0,
         )
     )
+    provider_costs.record_deepseek_usage(
+        db,
+        tenant_id=user.tenant_id,
+        result=result,
+    )
     script = clean_spoken_script(str(result.get("text") or ""))
     if not script:
         raise AppError(
@@ -57,4 +63,5 @@ def generate_script(
             code="LLM_EMPTY_RESULT",
             status_code=502,
         )
+    db.commit()
     return ok(request, ScriptGenerateResponse(script=script))

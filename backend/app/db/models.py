@@ -571,7 +571,7 @@ class UsageRecord(Base):
             name="ck_usage_records_capability",
         ),
         CheckConstraint(
-            "unit IN ('second', 'call', 'token', 'image')",
+            "unit IN ('second', 'call', 'token', 'image', 'char')",
             name="ck_usage_records_unit",
         ),
         CheckConstraint(

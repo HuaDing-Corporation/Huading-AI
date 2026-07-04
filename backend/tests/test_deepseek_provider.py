@@ -78,6 +78,47 @@ async def test_deepseek_provider_uses_custom_script_prompts() -> None:
     assert calls["messages"][1]["content"] == "Create a 30s script with a call to action."
 
 
+@pytest.mark.asyncio
+async def test_deepseek_provider_returns_token_usage_for_cost_reconcile() -> None:
+    class _Message:
+        content = "Generated title"
+
+    class _Choice:
+        message = _Message()
+
+    class _Usage:
+        prompt_tokens = 1200
+        completion_tokens = 300
+        total_tokens = 1500
+
+    class _Response:
+        choices = [_Choice()]
+        usage = _Usage()
+
+    class _Completions:
+        async def create(self, **_kwargs):
+            return _Response()
+
+    class _Chat:
+        completions = _Completions()
+
+    class _Client:
+        chat = _Chat()
+
+    provider = DeepSeekProvider(api_key="k", base_url="https://deepseek.test", model="m")
+    provider.client = _Client()
+
+    result = await provider.generate_text({"topic": "cashmere coat"})
+
+    assert result["provider"] == "deepseek"
+    assert result["model"] == "m"
+    assert result["usage"] == {
+        "prompt_tokens": 1200,
+        "completion_tokens": 300,
+        "total_tokens": 1500,
+    }
+
+
 def test_scripts_generate_route_uses_provider_registry(monkeypatch, auth_context) -> None:
     from app.api.v1.routes import scripts as scripts_route
     from app.main import app
@@ -109,6 +150,79 @@ def test_scripts_generate_route_uses_provider_registry(monkeypatch, auth_context
 
     assert resp.status_code == 200
     assert resp.json()["data"]["script"] == "DeepSeek script"
+
+
+def test_scripts_generate_records_deepseek_token_cost(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from decimal import Decimal
+
+    from sqlalchemy import select
+
+    from app.api.v1.routes import scripts as scripts_route
+    from app.db.models import UsageRecord
+    from app.main import app
+    from app.services import provider_costs
+
+    class _FakeDeepSeek:
+        async def generate_text(self, payload: dict):
+            assert payload["topic"] == "cashmere coat"
+            return {
+                "text": "DeepSeek script",
+                "provider": "deepseek",
+                "model": "deepseek-v4-flash",
+                "usage": {
+                    "prompt_tokens": 100_000,
+                    "completion_tokens": 50_000,
+                    "total_tokens": 150_000,
+                },
+            }
+
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_api_key", "k")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_base_url", "https://deepseek.test")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_model", "deepseek-v4-flash")
+    monkeypatch.setattr(
+        provider_costs.settings,
+        "engine_deepseek_cny_per_1k_input",
+        Decimal("0.001008"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        provider_costs.settings,
+        "engine_deepseek_cny_per_1k_output",
+        Decimal("0.002016"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        scripts_route,
+        "resolve",
+        lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
+        raising=False,
+    )
+
+    resp = TestClient(app).post(
+        "/api/v1/scripts/generate",
+        json={"topic": "cashmere coat"},
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 200
+    with auth_db() as db:
+        usage = db.scalar(
+            select(UsageRecord).where(
+                UsageRecord.tenant_id == auth_context["tenant_id"],
+                UsageRecord.provider == "deepseek",
+                UsageRecord.unit == "token",
+            )
+        )
+        assert usage is not None
+        assert usage.model == "deepseek-v4-flash"
+        assert usage.quantity == Decimal("150000.000")
+        assert usage.credits == Decimal("0.00")
+        assert usage.cost_cents == 20
+        assert usage.status == "settled"
 
 
 def test_scripts_generate_seedance_i2v_uses_ecommerce_payload_and_cleans(

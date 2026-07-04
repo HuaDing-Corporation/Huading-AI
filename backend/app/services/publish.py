@@ -200,6 +200,7 @@ def create_publish_draft(
             tenant_id=tenant_id,
             provider="deepseek",
             model=settings.engine_llm_model or None,
+            llm_usage=copy_payload.get("_llm_usage"),
         )
         items.append(
             {
