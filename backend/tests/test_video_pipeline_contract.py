@@ -379,7 +379,8 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
         reserved = db.query(UsageRecord).filter_by(video_task_id=data["id"]).one()
         assert reserved.status == "reserved"
         assert reserved.capability == "video"
-        assert reserved.provider == "seedance"
+        assert reserved.provider == "apimart"
+        assert reserved.model == "doubao-seedance-2.0"
         assert reserved.quantity == Decimal("30")
         assert reserved.credits == Decimal("60.00")
 

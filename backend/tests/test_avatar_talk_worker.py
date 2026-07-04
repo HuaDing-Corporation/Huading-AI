@@ -153,8 +153,8 @@ def _seed_reserved_seedance_task(
             subscription_id=sub.id,
             video_task_id=task_id,
             capability="video",
-            provider="seedance",
-            model="doubao-seedance-2-0-260128",
+            provider="apimart",
+            model="doubao-seedance-2.0",
             unit="second",
             quantity=Decimal("10"),
             credits=Decimal("20.00"),
@@ -318,6 +318,7 @@ def test_seedance_i2v_task_success_marks_done_and_settles_quota(monkeypatch, wor
     def fake_step(ctx):
         ctx.duration_sec = 5
         ctx.seedance_billable_seconds = 5
+        ctx.provider_cost_cents = 511
         ctx.storage_key = f"tenants/{tenant_id}/videos/{task_id}/final.mp4"
         ctx.size_bytes = 456
         return ctx
@@ -343,7 +344,9 @@ def test_seedance_i2v_task_success_marks_done_and_settles_quota(monkeypatch, wor
         assert sub.quota_credits_reserved == 0
         assert sub.quota_credits_used == 10
         assert usage.status == "settled"
-        assert usage.cost_cents == 1000
+        assert usage.provider == "apimart"
+        assert usage.model == "doubao-seedance-2.0"
+        assert usage.cost_cents == 511
     history_ids = _terminal_history_ids(worker_db, mode="seedance_i2v")
     assert len(history_ids) == 20
     assert "seedance-history-success-00" not in history_ids

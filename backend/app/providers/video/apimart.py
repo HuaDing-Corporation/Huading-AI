@@ -69,8 +69,13 @@ class APIMartVideoProvider:
 
     def _generate_video_sync(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         request_body, normalized = self._request_body(payload)
+        raw_progress_callback = payload.get("progress_callback")
+        progress_callback = raw_progress_callback if callable(raw_progress_callback) else None
         task_id = self._submit(request_body)
-        video_url, usage = self._poll_until_complete(task_id)
+        video_url, usage = self._poll_until_complete(
+            task_id,
+            progress_callback=progress_callback,
+        )
         video_bytes, mime_type = self._download_video(video_url)
         return {
             "video_bytes": video_bytes,
@@ -133,8 +138,14 @@ class APIMartVideoProvider:
             raise APIMartVideoProviderError("APIMart video submit response contained no task_id.")
         return task_id
 
-    def _poll_until_complete(self, task_id: str) -> tuple[str, dict[str, Any]]:
+    def _poll_until_complete(
+        self,
+        task_id: str,
+        *,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> tuple[str, dict[str, Any]]:
         deadline = self._time() + self.max_poll_seconds
+        poll_count = 0
         self._sleep(self.poll_initial_delay)
         while True:
             if self._time() > deadline:
@@ -162,6 +173,15 @@ class APIMartVideoProvider:
                 raise APIMartVideoProviderError(
                     _payload_message(data, "APIMart video task failed."),
                     error_type="task_failed",
+                )
+            poll_count += 1
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "task_id": task_id,
+                        "status": status or "processing",
+                        "poll_count": poll_count,
+                    }
                 )
             self._sleep(self.poll_interval)
 

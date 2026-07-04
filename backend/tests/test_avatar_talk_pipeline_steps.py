@@ -48,6 +48,73 @@ class _Storage:
         return f"https://storage.test/{key}"
 
 
+class _FakeAPIMartVideoProvider:
+    def __init__(
+        self,
+        calls: list[dict[str, object]],
+        *,
+        poll_counts: int | list[int] = 1,
+    ) -> None:
+        self.calls = calls
+        self.poll_counts = poll_counts
+
+    async def generate_video(self, payload: dict[str, object]) -> dict[str, object]:
+        self.calls.append(dict(payload))
+        callback = payload.get("progress_callback")
+        call_index = len(self.calls) - 1
+        poll_total = (
+            self.poll_counts[call_index]
+            if isinstance(self.poll_counts, list)
+            else self.poll_counts
+        )
+        if callable(callback):
+            for poll_count in range(1, poll_total + 1):
+                callback({"poll_count": poll_count, "status": "processing"})
+        return {
+            "video_bytes": f"SCENE-{len(self.calls)}".encode(),
+            "provider": "apimart",
+            "model": "doubao-seedance-2.0",
+            "duration": 5,
+            "resolution": "720p",
+            "size": "adaptive",
+            "credits": Decimal("7.1"),
+        }
+
+
+def _patch_apimart_i2v_provider(
+    monkeypatch,
+    calls: list[dict[str, object]],
+    *,
+    poll_counts: int | list[int] = 1,
+) -> None:
+    provider = _FakeAPIMartVideoProvider(calls, poll_counts=poll_counts)
+
+    def fake_resolve(_db, *, tenant_id: str, capability: str):
+        assert tenant_id
+        assert capability == "video"
+        return provider
+
+    def fail_direct_seedance(*_args, **_kwargs):
+        raise AssertionError("ecommerce i2v must use APIMart video provider")
+
+    def fail_local_image_download(_params):
+        raise AssertionError("ecommerce i2v must pass presigned image URLs")
+
+    monkeypatch.setattr(avatar_talk, "resolve", fake_resolve)
+    monkeypatch.setattr(
+        avatar_talk,
+        "generate_seedance_video",
+        fail_direct_seedance,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        avatar_talk,
+        "_resolve_i2v_image",
+        fail_local_image_download,
+        raising=False,
+    )
+
+
 def _passthrough_label(content: bytes, **_kwargs) -> bytes:
     return content
 
@@ -253,14 +320,7 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
         )
         db.commit()
 
-        image_path = tmp_path / "product.png"
-        image_path.write_bytes(b"PNG")
         calls: list[dict[str, object]] = []
-
-        def fake_generate(cfg, prompt, **kwargs):
-            calls.append({"cfg": cfg, "prompt": prompt, "kwargs": kwargs})
-            kwargs["progress_callback"]({"poll_count": 4})
-            Path(kwargs["save_path"]).write_bytes(f"SCENE-{len(calls)}".encode())
 
         concat_calls: dict[str, object] = {}
 
@@ -269,8 +329,6 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
             concat_calls["output_path"] = Path(output_path).name
             Path(output_path).write_bytes(b"CONCAT-SEEDANCE-MP4")
 
-        monkeypatch.setattr(avatar_talk, "_resolve_i2v_image", lambda params: str(image_path))
-        monkeypatch.setattr(avatar_talk, "_seedance_engine_config", lambda: object())
         monkeypatch.setattr(
             avatar_talk,
             "_plan_seedance_i2v_scenes",
@@ -278,8 +336,9 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
                 f"visual prompt {index + 1}" for index in range(scene_count)
             ],
         )
-        monkeypatch.setattr(avatar_talk, "generate_seedance_video", fake_generate)
+        _patch_apimart_i2v_provider(monkeypatch, calls, poll_counts=1)
         monkeypatch.setattr(avatar_talk, "concat_seedance_clips", fake_concat)
+        monkeypatch.setattr(avatar_talk, "_work_dir", lambda _task_id: tmp_path / unit_id)
 
         store = _Store()
         ctx = avatar_talk.AvatarTalkContext(
@@ -295,6 +354,7 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
 
         assert result.base_video_bytes == b"CONCAT-SEEDANCE-MP4"
         assert result.use_tts_audio is True
+        assert result.provider_cost_cents == 1534
         assert len(calls) == 3
         assert [call["prompt"] for call in calls] == [
             "visual prompt 1",
@@ -307,14 +367,16 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
             "seedance_scene_02.mp4",
         ]
         for call in calls:
-            kwargs = call["kwargs"]
-            assert kwargs["image_path"] == str(image_path)
-            assert kwargs["image_role"] == "first_frame"
-            assert kwargs["ratio"] == "9:16"
-            assert kwargs["resolution"] == "720p"
-            assert kwargs["generate_audio"] is False
-            assert kwargs["duration"] == 5
-        assert not any(call["kwargs"]["duration"] == 12 for call in calls)
+            assert call["model"] == "doubao-seedance-2.0"
+            assert call["image_urls"] == [
+                f"https://storage.test/tenants/{tenant_id}/uploads/product.png"
+            ]
+            assert call["size"] == "adaptive"
+            assert call["resolution"] == "720p"
+            assert call["generate_audio"] is False
+            assert call["duration"] == 5
+            assert "image_path" not in call
+        assert not any(call["duration"] == 12 for call in calls)
         frame_events = [
             event[1].get("frame_current")
             for event in store.events
@@ -353,29 +415,11 @@ def test_seedance_i2v_progress_advances_on_every_poll_without_stalling(
         )
         db.commit()
 
-        image_path = tmp_path / "product.png"
-        image_path.write_bytes(b"PNG")
-        elapsed_seconds = 0
         poll_interval_seconds = 5
-
-        def fake_generate(cfg, prompt, **kwargs):
-            nonlocal elapsed_seconds
-            for poll_count in range(1, 9):
-                elapsed_seconds += poll_interval_seconds
-                kwargs["progress_callback"](
-                    {
-                        "poll_count": poll_count,
-                        "status": "running",
-                        "step_elapsed_seconds": elapsed_seconds,
-                    }
-                )
-            Path(kwargs["save_path"]).write_bytes(b"SCENE-MP4")
 
         def fake_concat(scene_paths, output_path):
             Path(output_path).write_bytes(b"CONCAT-SEEDANCE-MP4")
 
-        monkeypatch.setattr(avatar_talk, "_resolve_i2v_image", lambda params: str(image_path))
-        monkeypatch.setattr(avatar_talk, "_seedance_engine_config", lambda: object())
         monkeypatch.setattr(
             avatar_talk,
             "_plan_seedance_i2v_scenes",
@@ -383,8 +427,9 @@ def test_seedance_i2v_progress_advances_on_every_poll_without_stalling(
                 f"visual prompt {index + 1}" for index in range(scene_count)
             ],
         )
-        monkeypatch.setattr(avatar_talk, "generate_seedance_video", fake_generate)
+        _patch_apimart_i2v_provider(monkeypatch, [], poll_counts=8)
         monkeypatch.setattr(avatar_talk, "concat_seedance_clips", fake_concat)
+        monkeypatch.setattr(avatar_talk, "_work_dir", lambda _task_id: tmp_path / unit_id)
 
         store = _Store()
         ctx = avatar_talk.AvatarTalkContext(
@@ -447,31 +492,9 @@ def test_seedance_i2v_long_single_scene_polling_does_not_trip_watchdog(
         )
         db.commit()
 
-        image_path = tmp_path / "product.png"
-        image_path.write_bytes(b"PNG")
-        elapsed_seconds = 0
-        generate_calls = 0
-
-        def fake_generate(cfg, prompt, **kwargs):
-            nonlocal elapsed_seconds, generate_calls
-            generate_calls += 1
-            poll_total = 120 if generate_calls == 1 else 1
-            for poll_count in range(1, poll_total + 1):
-                elapsed_seconds += poll_interval_seconds
-                kwargs["progress_callback"](
-                    {
-                        "poll_count": poll_count,
-                        "status": "running",
-                        "step_elapsed_seconds": elapsed_seconds,
-                    }
-                )
-            Path(kwargs["save_path"]).write_bytes(b"SCENE-MP4")
-
         def fake_concat(scene_paths, output_path):
             Path(output_path).write_bytes(b"CONCAT-SEEDANCE-MP4")
 
-        monkeypatch.setattr(avatar_talk, "_resolve_i2v_image", lambda params: str(image_path))
-        monkeypatch.setattr(avatar_talk, "_seedance_engine_config", lambda: object())
         monkeypatch.setattr(
             avatar_talk,
             "_plan_seedance_i2v_scenes",
@@ -479,8 +502,9 @@ def test_seedance_i2v_long_single_scene_polling_does_not_trip_watchdog(
                 f"visual prompt {index + 1}" for index in range(scene_count)
             ],
         )
-        monkeypatch.setattr(avatar_talk, "generate_seedance_video", fake_generate)
+        _patch_apimart_i2v_provider(monkeypatch, [], poll_counts=[120, 1, 1])
         monkeypatch.setattr(avatar_talk, "concat_seedance_clips", fake_concat)
+        monkeypatch.setattr(avatar_talk, "_work_dir", lambda _task_id: tmp_path / unit_id)
 
         store = _Store()
         ctx = avatar_talk.AvatarTalkContext(
@@ -536,28 +560,9 @@ def test_seedance_i2v_24_scene_progress_keeps_watchdog_alive(
         )
         db.commit()
 
-        image_path = tmp_path / "product.png"
-        image_path.write_bytes(b"PNG")
-        elapsed_seconds = 0
-
-        def fake_generate(cfg, prompt, **kwargs):
-            nonlocal elapsed_seconds
-            for poll_count in range(1, 121):
-                elapsed_seconds += poll_interval_seconds
-                kwargs["progress_callback"](
-                    {
-                        "poll_count": poll_count,
-                        "status": "running",
-                        "step_elapsed_seconds": elapsed_seconds,
-                    }
-                )
-            Path(kwargs["save_path"]).write_bytes(b"SCENE-MP4")
-
         def fake_concat(scene_paths, output_path):
             Path(output_path).write_bytes(b"CONCAT-SEEDANCE-MP4")
 
-        monkeypatch.setattr(avatar_talk, "_resolve_i2v_image", lambda params: str(image_path))
-        monkeypatch.setattr(avatar_talk, "_seedance_engine_config", lambda: object())
         monkeypatch.setattr(
             avatar_talk,
             "_plan_seedance_i2v_scenes",
@@ -565,8 +570,9 @@ def test_seedance_i2v_24_scene_progress_keeps_watchdog_alive(
                 f"visual prompt {index + 1}" for index in range(scene_count)
             ],
         )
-        monkeypatch.setattr(avatar_talk, "generate_seedance_video", fake_generate)
+        _patch_apimart_i2v_provider(monkeypatch, [], poll_counts=120)
         monkeypatch.setattr(avatar_talk, "concat_seedance_clips", fake_concat)
+        monkeypatch.setattr(avatar_talk, "_work_dir", lambda _task_id: tmp_path / unit_id)
 
         store = _Store()
         ctx = avatar_talk.AvatarTalkContext(
@@ -814,8 +820,8 @@ def test_seedance_i2v_runner_releases_quota_on_failure(monkeypatch):
                 subscription_id=sub.id,
                 video_task_id=unit_id,
                 capability="video",
-                provider="seedance",
-                model="doubao-seedance-2-0-260128",
+                provider="apimart",
+                model="doubao-seedance-2.0",
                 unit="second",
                 quantity=Decimal("5"),
                 credits=Decimal("10.00"),
