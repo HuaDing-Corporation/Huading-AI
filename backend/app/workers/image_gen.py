@@ -20,10 +20,7 @@ from app.core.logging import get_logger
 from app.db.models import Asset, TaskAsset, VideoTask
 from app.db.session import SessionLocal
 from app.providers.base import invoke, resolve
-from app.services.apimart_costs import (
-    apimart_cost_cents_from_reserved_usage,
-    apimart_cost_cents_from_result,
-)
+from app.services.apimart_costs import apimart_cost_cents_from_result
 from app.services.history import prune_video_history_best_effort
 from app.services.progress import build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
@@ -759,12 +756,6 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             task.error_message = None
             if not ecom_poster:
                 cost_cents = apimart_cost_cents_from_result(result)
-                if cost_cents <= 0:
-                    cost_cents = apimart_cost_cents_from_reserved_usage(
-                        db,
-                        tenant_id=tenant_id,
-                        video_task_id=task_id,
-                    )
                 settle_reserved_quota(
                     db,
                     tenant_id=tenant_id,

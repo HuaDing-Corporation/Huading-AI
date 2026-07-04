@@ -413,7 +413,7 @@ def test_image_worker_marks_generated_image_as_cover_when_requested(
 
     assert asset.metadata_["purpose"] == "cover"
     assert asset.metadata_["kind"] == "cover"
-    assert usage.cost_cents == 1440
+    assert usage.cost_cents == 4
 
 
 def test_image_worker_edit_resolves_tenant_upload_and_cleans_temp_file(
