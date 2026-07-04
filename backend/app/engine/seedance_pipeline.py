@@ -40,6 +40,7 @@ from loguru import logger
 
 from app.engine.config import EngineConfig
 from app.engine.video import generate_seedance_video
+from app.services import provider_costs
 
 ProgressCallback = Callable[[Any], None] | None
 
@@ -85,6 +86,7 @@ async def _plan_scenes(cfg: EngineConfig, topic: str, n_scenes: int) -> list[Sce
         temperature=0.7,
         max_tokens=2000,
     )
+    provider_costs.capture_deepseek_response(response, model=cfg.llm_model)
     content = response.choices[0].message.content or ""
 
     data = _parse_json_array(content)

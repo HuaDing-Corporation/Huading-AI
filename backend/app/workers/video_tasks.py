@@ -20,6 +20,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.models import VideoTask
 from app.db.session import SessionLocal
+from app.services import provider_costs
 from app.services.progress import build_progress_store
 from app.services.storage.factory import create_object_storage
 from app.services.synthetic_label import (
@@ -151,6 +152,29 @@ def _update_video_task(
         logger.warning("video_task.db_update_failed", task_id=task_id, error=str(exc))
 
 
+def _record_deepseek_cost_usage(
+    task_id: str,
+    tenant_id: str,
+    usage: provider_costs.DeepSeekUsageCost | None,
+) -> None:
+    if usage is None:
+        return
+    try:
+        with SessionLocal() as db:
+            task = db.get(VideoTask, task_id)
+            if task is None or task.tenant_id != tenant_id:
+                return
+            provider_costs.record_deepseek_usage_cost(
+                db,
+                tenant_id=tenant_id,
+                usage=usage,
+                video_task_id=task_id,
+            )
+            db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("video_task.llm_cost_record_failed", task_id=task_id, error=str(exc))
+
+
 def _build_engine_config(params: dict[str, Any]):
     # Validate credentials before importing the (heavy) engine package so callers
     # / tests hitting the missing-config path stay cheap.
@@ -279,10 +303,14 @@ def generate_video_task(self, params: dict[str, Any]) -> dict[str, Any]:
         # static_template (default) runs the engine's HTML-frame pipeline;
         # seedance_t2v / seedance_i2v run the Seedance clip pipelines.
         video_mode = params.get("video_mode", "static_template")
-        if video_mode in ("seedance_t2v", "seedance_i2v"):
-            result = asyncio.run(_generate_with_seedance(params, progress_cb))
-        else:
-            result = asyncio.run(_generate_with_engine(params, progress_cb))
+        capture_token = provider_costs.begin_deepseek_usage_capture()
+        try:
+            if video_mode in ("seedance_t2v", "seedance_i2v"):
+                result = asyncio.run(_generate_with_seedance(params, progress_cb))
+            else:
+                result = asyncio.run(_generate_with_engine(params, progress_cb))
+        finally:
+            llm_usage = provider_costs.finish_deepseek_usage_capture(capture_token)
         video_bytes = Path(result["video_path"]).read_bytes()
         video_bytes = _apply_synthetic_video_label(
             tenant_id=tenant_id,
@@ -314,6 +342,7 @@ def generate_video_task(self, params: dict[str, Any]) -> dict[str, Any]:
             duration_sec=float(duration) if duration is not None else None,
             local_path=str(result["video_path"]),
         )
+        _record_deepseek_cost_usage(task_id, tenant_id, llm_usage)
         store.update(
             progress_task_id,
             status="SUCCESS",

@@ -24,6 +24,7 @@ from app.providers.url_guard import (
     object_storage_public_hosts,
     parse_host_suffixes,
 )
+from app.services import provider_costs
 from app.services.batches import refresh_batch_job
 from app.services.history import prune_video_history_best_effort
 from app.services.progress import ProgressStore, build_progress_store
@@ -421,6 +422,12 @@ def script_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
                 timeout_seconds=30.0,
             )
         )
+        provider_costs.record_deepseek_usage(
+            ctx.db,
+            tenant_id=ctx.tenant_id,
+            result=result,
+            video_task_id=ctx.task_id,
+        )
         task.script = str(result.get("text") or "")
         generated_script = True
 
@@ -456,6 +463,12 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
             ),
             timeout_seconds=settings.engine_omnihuman_request_timeout_seconds,
         )
+    )
+    provider_costs.record_seed_tts_usage(
+        ctx.db,
+        tenant_id=ctx.tenant_id,
+        result=result,
+        video_task_id=ctx.task_id,
     )
     audio_bytes = Path(str(result["audio_path"])).read_bytes()
     audio_bytes, label_metadata = _apply_synthetic_label(
@@ -648,6 +661,12 @@ def _plan_seedance_i2v_scenes(
             operation=lambda: provider.generate_text(payload),
             timeout_seconds=30.0,
         )
+    )
+    provider_costs.record_deepseek_usage(
+        ctx.db,
+        tenant_id=ctx.tenant_id,
+        result=result,
+        video_task_id=ctx.task_id,
     )
     return _parse_scene_prompt_text(
         str(result.get("text") or ""),
@@ -1571,7 +1590,9 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 tenant_id=tenant_id,
                 video_task_id=task_id,
                 actual_seconds=max(1, int(round(ctx.duration_sec or 1))),
-                cost_cents=max(1, int(round(ctx.duration_sec or 1))) * 100,
+                cost_cents=provider_costs.omnihuman_cost_cents(
+                    max(1, int(round(ctx.duration_sec or 1)))
+                ),
             )
             refresh_batch_job(db, batch_id=task.batch_id)
             db.commit()

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.db.models import CreditRate, Subscription, UsageRecord
+from app.services import provider_costs
 
 _SCRIPT_CPS = Decimal("5")
 _MIN_SECONDS = Decimal("3")
@@ -319,6 +320,7 @@ def charge_copy_quota(
     tenant_id: str,
     provider: str,
     model: str | None = None,
+    llm_usage: provider_costs.DeepSeekUsageCost | None = None,
 ) -> UsageRecord:
     subscription = active_subscription(db, tenant_id)
     estimate = estimate_copy_quota(db, tenant_id=tenant_id)
@@ -329,6 +331,15 @@ def charge_copy_quota(
             status_code=403,
         )
     subscription.quota_credits_used += estimate.reservation_units
+    unit = "call"
+    quantity = Decimal("1.000")
+    cost_cents = 0
+    if llm_usage is not None:
+        provider = llm_usage.provider
+        model = llm_usage.model or model
+        unit = "token"
+        quantity = Decimal(llm_usage.total_tokens)
+        cost_cents = llm_usage.cost_cents
     usage_record = UsageRecord(
         tenant_id=tenant_id,
         subscription_id=subscription.id,
@@ -336,10 +347,10 @@ def charge_copy_quota(
         capability="llm",
         provider=provider,
         model=model,
-        unit="call",
-        quantity=Decimal("1.000"),
+        unit=unit,
+        quantity=quantity,
         credits=estimate.estimated_credits,
-        cost_cents=0,
+        cost_cents=cost_cents,
         status="settled",
         settled_at=datetime.now(UTC),
     )

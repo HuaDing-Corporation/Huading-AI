@@ -7,6 +7,8 @@ orchestration, routing, validation, and tenant scoping.
 import sys
 import threading
 import time
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,9 +22,10 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.api.deps import get_object_storage  # noqa: E402
 from app.api.v1.routes import uploads as uploads_route  # noqa: E402
 from app.core.exceptions import AppError  # noqa: E402
-from app.db.models import VideoTask  # noqa: E402
+from app.db.models import UsageRecord, VideoTask  # noqa: E402
 from app.engine import EngineConfig, seedance_pipeline  # noqa: E402
 from app.main import app  # noqa: E402
+from app.services import provider_costs  # noqa: E402
 from app.workers import video_tasks  # noqa: E402
 
 
@@ -118,6 +121,120 @@ async def test_pipeline_rejects_empty_topic(piped):
         await seedance_pipeline.run_seedance_pipeline(_cfg(), "   ")
 
 
+@pytest.mark.asyncio
+async def test_seedance_scene_planner_captures_deepseek_usage(monkeypatch):
+    class _Usage:
+        prompt_tokens = 100_000
+        completion_tokens = 50_000
+        total_tokens = 150_000
+
+    class _Message:
+        content = '[{"narration":"n","video_prompt":"v"}]'
+
+    class _Choice:
+        message = _Message()
+
+    class _Response:
+        choices = [_Choice()]
+        usage = _Usage()
+
+    class _Completions:
+        async def create(self, **_kwargs):
+            return _Response()
+
+    class _Chat:
+        completions = _Completions()
+
+    class _AsyncOpenAI:
+        def __init__(self, **_kwargs):
+            pass
+
+    _AsyncOpenAI.chat = _Chat()
+    monkeypatch.setattr("openai.AsyncOpenAI", _AsyncOpenAI)
+    monkeypatch.setattr(
+        provider_costs.settings,
+        "engine_deepseek_cny_per_1k_input",
+        Decimal("0.001008"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        provider_costs.settings,
+        "engine_deepseek_cny_per_1k_output",
+        Decimal("0.002016"),
+        raising=False,
+    )
+
+    token = provider_costs.begin_deepseek_usage_capture()
+    scenes = await seedance_pipeline._plan_scenes(_cfg(llm_model="deepseek-v4-flash"), "t", 1)
+    usage = provider_costs.finish_deepseek_usage_capture(token)
+
+    assert scenes == [seedance_pipeline.Scene(narration="n", video_prompt="v")]
+    assert usage is not None
+    assert usage.model == "deepseek-v4-flash"
+    assert usage.total_tokens == 150_000
+    assert usage.cost_cents == 20
+
+
+@pytest.mark.asyncio
+async def test_pixelle_llm_service_captures_deepseek_usage(monkeypatch):
+    from pixelle_video.services.llm_service import LLMService
+
+    class _Usage:
+        prompt_tokens = 100_000
+        completion_tokens = 50_000
+        total_tokens = 150_000
+
+    class _Message:
+        content = "text"
+
+    class _Choice:
+        message = _Message()
+
+    class _Response:
+        choices = [_Choice()]
+        usage = _Usage()
+
+    class _Completions:
+        async def create(self, **_kwargs):
+            return _Response()
+
+    class _Chat:
+        completions = _Completions()
+
+    class _Client:
+        chat = _Chat()
+        base_url = "https://deepseek.test"
+
+    monkeypatch.setattr(LLMService, "_create_client", lambda self, **_kwargs: _Client())
+
+    def fake_config_value(self, key, default=None):
+        return "deepseek-v4-flash" if key == "model" else default
+
+    monkeypatch.setattr(LLMService, "_get_config_value", fake_config_value)
+    monkeypatch.setattr(
+        provider_costs.settings,
+        "engine_deepseek_cny_per_1k_input",
+        Decimal("0.001008"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        provider_costs.settings,
+        "engine_deepseek_cny_per_1k_output",
+        Decimal("0.002016"),
+        raising=False,
+    )
+
+    token = provider_costs.begin_deepseek_usage_capture()
+    text = await LLMService({})("prompt")
+    usage = provider_costs.finish_deepseek_usage_capture(token)
+
+    assert text == "text"
+    assert usage is not None
+    assert usage.model == "deepseek-v4-flash"
+    assert usage.total_tokens == 150_000
+    assert usage.cost_cents == 20
+
+
 # ---------------- worker routing ----------------
 
 
@@ -145,6 +262,85 @@ def test_worker_routes_seedance_modes(monkeypatch, tmp_path):
         args=[{"topic": "t", "video_mode": "seedance_t2v", "tenant_id": "tn1"}]
     ).get()
     assert seen["mode"] == "seedance_t2v"
+
+
+def test_worker_records_captured_legacy_engine_deepseek_usage(
+    monkeypatch,
+    tmp_path,
+    auth_context,
+    auth_db,
+):
+    out = tmp_path / "final.mp4"
+    out.write_bytes(b"V")
+    tenant_id = auth_context["tenant_id"]
+    task_id = "legacy-engine-llm-cost"
+    with auth_db() as db:
+        db.add(
+            VideoTask(
+                id=task_id,
+                tenant_id=tenant_id,
+                status="queued",
+                topic="legacy static template",
+                mode="static_template",
+                video_mode="static_template",
+                created_at=datetime.now(UTC),
+            )
+        )
+        db.commit()
+
+    class _Usage:
+        prompt_tokens = 100_000
+        completion_tokens = 50_000
+        total_tokens = 150_000
+
+    class _Response:
+        usage = _Usage()
+
+    async def fake_engine(params, cb):
+        provider_costs.capture_deepseek_response(_Response(), model="deepseek-v4-flash")
+        return {"video_path": str(out), "duration": 1.0, "file_size": 1}
+
+    async def fail_seedance(params, cb):  # pragma: no cover
+        raise AssertionError("static_template must use engine path")
+
+    monkeypatch.setattr(video_tasks, "_generate_with_engine", fake_engine)
+    monkeypatch.setattr(video_tasks, "_generate_with_seedance", fail_seedance)
+    monkeypatch.setattr(video_tasks, "build_progress_store", lambda url: _Store())
+    monkeypatch.setattr(video_tasks, "label_artifact_bytes", lambda content, **_kwargs: content)
+    monkeypatch.setattr(video_tasks, "create_object_storage", lambda settings: _FakeStorage())
+    monkeypatch.setattr(video_tasks, "SessionLocal", auth_db)
+    monkeypatch.setattr(
+        provider_costs.settings,
+        "engine_deepseek_cny_per_1k_input",
+        Decimal("0.001008"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        provider_costs.settings,
+        "engine_deepseek_cny_per_1k_output",
+        Decimal("0.002016"),
+        raising=False,
+    )
+
+    video_tasks.generate_video_task.apply(
+        args=[
+            {
+                "topic": "legacy static template",
+                "video_mode": "static_template",
+                "tenant_id": tenant_id,
+            }
+        ],
+        task_id=task_id,
+    ).get()
+
+    with auth_db() as db:
+        usage = db.query(UsageRecord).filter_by(video_task_id=task_id).one()
+        assert usage.provider == "deepseek"
+        assert usage.model == "deepseek-v4-flash"
+        assert usage.unit == "token"
+        assert usage.quantity == Decimal("150000.000")
+        assert usage.credits == Decimal("0.00")
+        assert usage.cost_cents == 20
 
 
 class _Store:

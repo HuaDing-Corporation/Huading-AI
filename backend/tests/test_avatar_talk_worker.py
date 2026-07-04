@@ -227,6 +227,12 @@ def test_avatar_talk_task_success_marks_done_and_settles_quota(monkeypatch, work
     monkeypatch.setattr(avatar_talk, "build_progress_store", lambda _url: store)
     monkeypatch.setattr(avatar_talk, "create_object_storage", lambda _settings: storage)
     monkeypatch.setattr(avatar_talk, "AVATAR_TALK_STEPS", [("upload", 100, fake_step)])
+    monkeypatch.setattr(
+        avatar_talk.provider_costs.settings,
+        "engine_omnihuman_cny_per_sec",
+        Decimal("1.5"),
+        raising=False,
+    )
 
     result = avatar_talk.generate_avatar_talk_task.apply(
         args=[{"tenant_id": tenant_id, "video_task_id": task_id}],
@@ -244,7 +250,7 @@ def test_avatar_talk_task_success_marks_done_and_settles_quota(monkeypatch, work
         assert sub.quota_credits_reserved == 0
         assert sub.quota_credits_used == 5
         assert usage.status == "settled"
-        assert usage.cost_cents == 400
+        assert usage.cost_cents == 600
     history_ids = _terminal_history_ids(worker_db, mode="avatar_talk")
     assert len(history_ids) == 20
     assert "avatar-history-success-00" not in history_ids

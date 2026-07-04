@@ -145,7 +145,14 @@ def _patch_publish_llm(monkeypatch, payloads: list[dict]) -> None:
                         "hashtags": hashtags,
                     },
                     ensure_ascii=False,
-                )
+                ),
+                "provider": "deepseek",
+                "model": "deepseek-v4-flash",
+                "usage": {
+                    "prompt_tokens": 100_000,
+                    "completion_tokens": 50_000,
+                    "total_tokens": 150_000,
+                },
             }
 
     monkeypatch.setattr(copy_service.settings, "engine_llm_api_key", "k")
@@ -239,13 +246,15 @@ def test_publish_drafts_generates_per_platform_copy_and_charges_per_platform(
             .where(
                 UsageRecord.tenant_id == auth_context["tenant_id"],
                 UsageRecord.capability == "llm",
-                UsageRecord.unit == "call",
+                UsageRecord.unit == "token",
             )
             .order_by(UsageRecord.created_at)
         ).all()
         assert len(usage) == 2
         assert all(record.status == "settled" for record in usage)
         assert all(record.credits == Decimal("2.00") for record in usage)
+        assert all(record.quantity == Decimal("150000.000") for record in usage)
+        assert all(record.cost_cents == 20 for record in usage)
         assert db.scalar(select(func.count()).select_from(PlatformAccount)) == 0
         assert db.scalar(select(func.count()).select_from(PublishJob)) == 0
 

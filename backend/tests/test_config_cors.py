@@ -161,3 +161,29 @@ def test_apimart_cost_settings_have_defaults(monkeypatch) -> None:
 
     assert s.engine_apimart_credit_usd == 0.10
     assert s.engine_usd_cny_rate == 7.2
+
+
+def test_direct_cny_provider_cost_settings_are_env_driven(monkeypatch) -> None:
+    monkeypatch.setenv("ENGINE_OMNIHUMAN_CNY_PER_SEC", "1.5")
+    monkeypatch.setenv("ENGINE_SEEDTTS_CNY_PER_CHAR", "0.0004")
+    monkeypatch.setenv("ENGINE_DEEPSEEK_CNY_PER_1K_INPUT", "0.002")
+    monkeypatch.setenv("ENGINE_DEEPSEEK_CNY_PER_1K_OUTPUT", "0.003")
+    s = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    assert s.engine_omnihuman_cny_per_sec == 1.5
+    assert s.engine_seedtts_cny_per_char == 0.0004
+    assert s.engine_deepseek_cny_per_1k_input == 0.002
+    assert s.engine_deepseek_cny_per_1k_output == 0.003
+
+
+def test_direct_cny_provider_cost_settings_have_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("ENGINE_OMNIHUMAN_CNY_PER_SEC", raising=False)
+    monkeypatch.delenv("ENGINE_SEEDTTS_CNY_PER_CHAR", raising=False)
+    monkeypatch.delenv("ENGINE_DEEPSEEK_CNY_PER_1K_INPUT", raising=False)
+    monkeypatch.delenv("ENGINE_DEEPSEEK_CNY_PER_1K_OUTPUT", raising=False)
+    s = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    assert s.engine_omnihuman_cny_per_sec == 1.0
+    assert s.engine_seedtts_cny_per_char == 0.0003
+    assert s.engine_deepseek_cny_per_1k_input == 0.001008
+    assert s.engine_deepseek_cny_per_1k_output == 0.002016

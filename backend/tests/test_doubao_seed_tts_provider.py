@@ -138,6 +138,9 @@ async def test_doubao_seed_tts_sends_auth_header_and_locked_request_body(tmp_pat
     )
 
     assert Path(result["audio_path"]).read_bytes() == b"MP3"
+    assert result["provider"] == "doubao-seed-tts"
+    assert result["model"] == "seed-tts-2.0"
+    assert result["characters"] == 5
     assert result["duration_ms"] == 315
     assert result["timeline"] == [{"text": "hello", "start_ms": 205, "end_ms": 315}]
     call = http.calls[0]

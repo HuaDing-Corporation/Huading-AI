@@ -98,6 +98,9 @@ class DoubaoSeedTTSProvider:
             "duration_ms": offset_ms,
             "mime_type": "audio/mpeg",
             "size_bytes": audio_path.stat().st_size,
+            "provider": "doubao-seed-tts",
+            "model": self.resource_id,
+            "characters": len(text),
         }
 
     def _synthesize_segment(

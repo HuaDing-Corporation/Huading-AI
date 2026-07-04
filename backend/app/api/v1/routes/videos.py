@@ -41,6 +41,7 @@ from app.schemas.videos import (
     VideoListResponse,
     VideoRead,
 )
+from app.services import provider_costs
 from app.services.bgm_library import ensure_default_bgm_tracks
 from app.services.history import (
     clear_video_history,
@@ -690,6 +691,11 @@ def generate_scene_prompt(
             timeout_seconds=30.0,
         )
     )
+    provider_costs.record_deepseek_usage(
+        db,
+        tenant_id=user.tenant_id,
+        result=result,
+    )
     scene_prompt = str(result.get("text") or "").strip()
     if not scene_prompt:
         raise AppError(
@@ -697,6 +703,7 @@ def generate_scene_prompt(
             code="LLM_EMPTY_RESULT",
             status_code=502,
         )
+    db.commit()
     return ok(request, ScenePromptResponse(scene_prompt=scene_prompt))
 
 

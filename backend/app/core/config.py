@@ -89,6 +89,7 @@ class Settings(BaseSettings):
     engine_omnihuman_poll_interval_seconds: float = 5.0
     engine_omnihuman_timeout_seconds: float = 600.0
     engine_omnihuman_result_host_suffixes: str = "aigc-cloud.com"
+    engine_omnihuman_cny_per_sec: float = 1.0
     # Volcengine Doubao Seed-TTS. Credentials are env-only; when absent the
     # provider resolver keeps using edge-tts so CI/dev stays self-contained.
     engine_doubao_tts_appid: str = ""
@@ -99,6 +100,7 @@ class Settings(BaseSettings):
     engine_doubao_tts_endpoint: str = "https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse"
     engine_doubao_tts_request_timeout_seconds: float = 60.0
     engine_doubao_tts_aigc_watermark: bool = True
+    engine_seedtts_cny_per_char: float = 0.0003
     # Volcengine Doubao voice clone. These default to the same Seed-TTS account
     # values when clone-specific env vars are absent.
     engine_doubao_voice_clone_appid: str = ""
@@ -130,6 +132,8 @@ class Settings(BaseSettings):
     engine_apimart_video_timeout_seconds: float = 900.0
     engine_apimart_credit_usd: float = 0.10
     engine_usd_cny_rate: float = 7.2
+    engine_deepseek_cny_per_1k_input: float = 0.001008
+    engine_deepseek_cny_per_1k_output: float = 0.002016
     engine_image_provider_timeout_seconds: float = 240.0
     engine_subtitle_font_path: str = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
     engine_default_template: str = "1080x1920/static_default.html"
