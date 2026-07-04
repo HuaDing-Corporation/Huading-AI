@@ -8,6 +8,7 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,12 @@ from app.providers.url_guard import (
     parse_host_suffixes,
 )
 from app.services import provider_costs
+from app.services.apimart_costs import (
+    apimart_cost_cents_from_credits,
+    apimart_cost_cents_from_price_table,
+    apimart_cost_cents_from_result,
+    apimart_price_table_credits,
+)
 from app.services.batches import refresh_batch_job
 from app.services.history import prune_video_history_best_effort
 from app.services.progress import ProgressStore, build_progress_store
@@ -53,6 +60,7 @@ _SEEDANCE_I2V_PROGRESS_START = 25
 _SEEDANCE_I2V_PROGRESS_END = 88
 _SEEDANCE_I2V_PROGRESS_POLL_RATE = 0.02
 _SEEDANCE_I2V_PROGRESS_EPSILON = 0.001
+_APIMART_VIDEO_MIN_PRESIGN_TTL_SECONDS = 7200
 _SEEDANCE_I2V_PROMPT_SUFFIX = (
     "产品展示，镜头平稳推进，明亮商业棚拍，干净背景，"
     "突出商品材质与卖点，9:16竖屏电商带货短视频。"
@@ -106,10 +114,99 @@ def _work_dir(task_id: str) -> Path:
     return Path(tempfile.gettempdir()) / "huading-avatar-talk" / task_id
 
 
-def _resolve_i2v_image(params: dict[str, Any]) -> str:
-    from app.workers.video_tasks import _resolve_i2v_image as resolve_i2v_image
+def _seedance_i2v_image_url(ctx: AvatarTalkContext, params: Mapping[str, Any]) -> str:
+    from app.workers.video_tasks import _tenant_upload_storage_key
 
-    return resolve_i2v_image(params)
+    image_key = str(params.get("image_key") or "")
+    storage_key = _tenant_upload_storage_key(ctx.tenant_id, image_key)
+    presign_ttl = max(
+        int(settings.engine_s3_presign_ttl),
+        math.ceil(float(settings.engine_apimart_video_timeout_seconds)),
+        _APIMART_VIDEO_MIN_PRESIGN_TTL_SECONDS,
+    )
+    return ctx.storage.presign_get_url(storage_key, expires_in=presign_ttl)
+
+
+def _seedance_i2v_provider_payload(
+    *,
+    prompt: str,
+    image_url: str,
+    clip_duration: int,
+    progress_callback: Any,
+) -> dict[str, Any]:
+    return {
+        "model": settings.engine_apimart_video_model,
+        "prompt": prompt,
+        "duration": clip_duration,
+        "resolution": "720p",
+        "size": "adaptive",
+        "generate_audio": False,
+        "image_urls": [image_url],
+        "progress_callback": progress_callback,
+    }
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    decimal_value = _decimal_or_none(value)
+    if decimal_value is None or decimal_value <= 0:
+        return None
+    return int(decimal_value)
+
+
+def _seedance_i2v_clip_billing(
+    result: Mapping[str, Any],
+    *,
+    clip_duration: int,
+) -> tuple[Decimal, int]:
+    credits = _decimal_or_none(result.get("credits"))
+    if credits is not None and credits > 0:
+        return credits, 0
+
+    cost_cents = _positive_int_or_none(result.get("cost_cents"))
+    if cost_cents is not None:
+        return Decimal("0"), cost_cents
+
+    price_table_credits = apimart_price_table_credits(
+        model=str(result.get("model") or settings.engine_apimart_video_model),
+        resolution=result.get("resolution") or "720p",
+        duration_sec=result.get("duration") or clip_duration,
+    )
+    if price_table_credits is not None and price_table_credits > 0:
+        return price_table_credits, 0
+
+    return Decimal("0"), apimart_cost_cents_from_result(result)
+
+
+def _seedance_i2v_fallback_cost_cents(*, actual_seconds: int) -> int:
+    scene_count = max(1, int(math.ceil(actual_seconds / _SEEDANCE_I2V_CLIP_DURATION_SEC)))
+    credits = sum(
+        (
+            apimart_price_table_credits(
+                model=settings.engine_apimart_video_model,
+                resolution="720p",
+                duration_sec=_SEEDANCE_I2V_CLIP_DURATION_SEC,
+            )
+            or Decimal("0")
+        )
+        for _ in range(scene_count)
+    )
+    cost_cents = apimart_cost_cents_from_credits(credits)
+    if cost_cents > 0:
+        return cost_cents
+    return scene_count * apimart_cost_cents_from_price_table(
+        model=settings.engine_apimart_video_model,
+        resolution="720p",
+        duration_sec=_SEEDANCE_I2V_CLIP_DURATION_SEC,
+    )
 
 
 def _seedance_i2v_prompt(topic: str | None) -> str:
@@ -149,33 +246,6 @@ def _seedance_i2v_poll_progress(
     ratio = 1 - (1 / (1 + safe_poll_tick * _SEEDANCE_I2V_PROGRESS_POLL_RATE))
     progress = _SEEDANCE_I2V_PROGRESS_START + span * ratio
     return min(_SEEDANCE_I2V_PROGRESS_END - _SEEDANCE_I2V_PROGRESS_EPSILON, progress)
-
-
-def _seedance_engine_config() -> Any:
-    from app.engine import EngineConfig
-
-    if not settings.engine_seedance_api_key:
-        raise RuntimeError("Seedance is not configured (set ENGINE_SEEDANCE_API_KEY).")
-    return EngineConfig(
-        llm_api_key=settings.engine_llm_api_key or "unused",
-        llm_base_url=settings.engine_llm_base_url or "https://unused.invalid",
-        llm_model=settings.engine_llm_model or "unused",
-        seedance_api_key=settings.engine_seedance_api_key,
-        seedance_base_url=settings.engine_seedance_base_url,
-        seedance_model=settings.engine_seedance_model,
-        seedance_request_timeout_seconds=settings.engine_seedance_request_timeout_seconds,
-        seedance_poll_interval_seconds=settings.engine_seedance_poll_interval_seconds,
-        seedance_timeout_seconds=settings.engine_seedance_timeout_seconds,
-        default_template=settings.engine_default_template,
-        runtime_root=settings.engine_runtime_root,
-        browser_channel=settings.engine_browser_channel,
-    )
-
-
-def generate_seedance_video(*args: Any, **kwargs: Any) -> Any:
-    from app.engine.video import generate_seedance_video as run_generate_seedance_video
-
-    return run_generate_seedance_video(*args, **kwargs)
 
 
 def concat_seedance_clips(scene_paths: list[str], output_path: str) -> str:
@@ -681,7 +751,7 @@ def seedance_i2v_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     work_dir.mkdir(parents=True, exist_ok=True)
     params = dict(task.params or {})
     params["tenant_id"] = ctx.tenant_id
-    image_path = Path(_resolve_i2v_image(params))
+    image_url = _seedance_i2v_image_url(ctx, params)
     target_duration = _task_target_duration_sec(task)
     scene_count = _seedance_i2v_scene_count(target_duration)
     clip_duration = _SEEDANCE_I2V_CLIP_DURATION_SEC
@@ -689,57 +759,61 @@ def seedance_i2v_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     scene_paths: list[str] = []
     seedance_poll_ticks = 0
     last_seedance_progress = float(_SEEDANCE_I2V_PROGRESS_START)
+    provider_credits = Decimal("0")
+    provider_cost_cents = 0
+    provider = resolve(ctx.db, tenant_id=ctx.tenant_id, capability="video")
 
-    try:
-        cfg = _seedance_engine_config()
-        for index, prompt in enumerate(scene_prompts):
-            save_path = work_dir / f"seedance_scene_{index:02d}.mp4"
+    for index, prompt in enumerate(scene_prompts):
+        save_path = work_dir / f"seedance_scene_{index:02d}.mp4"
 
-            def on_seedance_progress(event: dict[str, Any], scene_index: int = index) -> None:
-                nonlocal last_seedance_progress, seedance_poll_ticks
-                seedance_poll_ticks += 1
-                progress = _seedance_i2v_poll_progress(poll_tick=seedance_poll_ticks)
-                progress = max(last_seedance_progress, progress)
-                last_seedance_progress = progress
-                ctx.store.update(
-                    _scoped_id(ctx.tenant_id, ctx.task_id),
-                    status="running",
-                    progress=progress,
-                    step="seedance",
-                    stage="seedance_generating",
-                    frame_current=scene_index + 1,
-                    frame_total=scene_count,
-                )
-
-            generate_seedance_video(
-                cfg,
-                prompt or _fallback_scene_prompt(task, index, scene_count),
-                image_path=str(image_path),
-                save_path=str(save_path),
-                image_role="first_frame",
-                ratio="9:16",
-                resolution="720p",
-                generate_audio=False,
-                duration=clip_duration,
-                progress_callback=on_seedance_progress,
+        def on_seedance_progress(event: dict[str, Any], scene_index: int = index) -> None:
+            nonlocal last_seedance_progress, seedance_poll_ticks
+            seedance_poll_ticks += 1
+            progress = _seedance_i2v_poll_progress(poll_tick=seedance_poll_ticks)
+            progress = max(last_seedance_progress, progress)
+            last_seedance_progress = progress
+            ctx.store.update(
+                _scoped_id(ctx.tenant_id, ctx.task_id),
+                status="running",
+                progress=progress,
+                step="seedance",
+                stage="seedance_generating",
+                frame_current=scene_index + 1,
+                frame_total=scene_count,
             )
-            if not save_path.exists() or save_path.stat().st_size <= 0:
-                raise RuntimeError(f"Seedance did not produce scene {index + 1}.")
-            scene_paths.append(str(save_path))
 
-        concat_path = work_dir / "seedance_concat.mp4"
-        concat_seedance_clips(scene_paths, str(concat_path))
-        if not concat_path.exists() or concat_path.stat().st_size <= 0:
-            raise RuntimeError("Seedance scene concatenation produced an empty video.")
-        ctx.base_video_bytes = concat_path.read_bytes()
-        ctx.use_tts_audio = True
-        ctx.seedance_billable_seconds = scene_count * clip_duration
-        return ctx
-    finally:
-        try:
-            image_path.unlink(missing_ok=True)
-        except OSError:
-            logger.warning("seedance_i2v.input_cleanup_failed", image_path=str(image_path))
+        payload = _seedance_i2v_provider_payload(
+            prompt=prompt or _fallback_scene_prompt(task, index, scene_count),
+            image_url=image_url,
+            clip_duration=clip_duration,
+            progress_callback=on_seedance_progress,
+        )
+        result = asyncio.run(provider.generate_video(payload))
+        if not isinstance(result, Mapping):
+            raise RuntimeError("APIMart video provider returned invalid result.")
+        video_bytes = result.get("video_bytes")
+        if not isinstance(video_bytes, bytes) or not video_bytes:
+            raise RuntimeError(f"APIMart did not produce scene {index + 1}.")
+        save_path.write_bytes(video_bytes)
+        clip_credits, clip_cost_cents = _seedance_i2v_clip_billing(
+            result,
+            clip_duration=clip_duration,
+        )
+        provider_credits += clip_credits
+        provider_cost_cents += clip_cost_cents
+        scene_paths.append(str(save_path))
+
+    concat_path = work_dir / "seedance_concat.mp4"
+    concat_seedance_clips(scene_paths, str(concat_path))
+    if not concat_path.exists() or concat_path.stat().st_size <= 0:
+        raise RuntimeError("Seedance scene concatenation produced an empty video.")
+    ctx.base_video_bytes = concat_path.read_bytes()
+    ctx.use_tts_audio = True
+    ctx.seedance_billable_seconds = scene_count * clip_duration
+    ctx.provider_cost_cents = (
+        apimart_cost_cents_from_credits(provider_credits) + provider_cost_cents
+    )
+    return ctx
 
 
 def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
@@ -1705,12 +1779,17 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
                 1,
                 int(round(getattr(ctx, "seedance_billable_seconds", ctx.duration_sec or 1))),
             )
+            cost_cents = int(getattr(ctx, "provider_cost_cents", 0) or 0)
+            if cost_cents <= 0:
+                cost_cents = _seedance_i2v_fallback_cost_cents(
+                    actual_seconds=actual_seconds,
+                )
             settle_reserved_quota(
                 db,
                 tenant_id=tenant_id,
                 video_task_id=task_id,
                 actual_seconds=actual_seconds,
-                cost_cents=actual_seconds * 200,
+                cost_cents=cost_cents,
             )
             refresh_batch_job(db, batch_id=task.batch_id)
             db.commit()
