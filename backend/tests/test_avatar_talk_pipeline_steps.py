@@ -530,12 +530,14 @@ def test_ecom_i2v_keeps_tts_timeline_for_subtitle_after_seedance_step(
             db=db,
             store=_Store(),
             storage=storage,
-            duration_sec=timeline[-1]["end_ms"] / 1000,
+            duration_sec=10.0,
         )
         ctx.timeline = list(timeline)
 
         avatar_talk.seedance_i2v_step(ctx)
         assert ctx.timeline == timeline
+        assert timeline[-1]["end_ms"] == 1900
+        assert ctx.duration_sec == 10.0
 
         avatar_talk.subtitle_step(ctx)
 

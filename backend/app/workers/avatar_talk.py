@@ -937,16 +937,22 @@ def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
     timeline = getattr(ctx, "timeline", []) or []
     duration_sec = float(ctx.duration_sec or 1)
+    timeline_items = _caption_timeline_items(timeline)
+    subtitle_duration_sec = _subtitle_timing_duration_sec(
+        task,
+        timeline_items,
+        duration_sec,
+    )
     script = clean_spoken_script(str(task.script or task.topic or ""))
     captions, source, clause_count = _script_timed_captions(
         script,
         timeline,
-        duration_sec=duration_sec,
+        duration_sec=subtitle_duration_sec,
     )
     if not captions:
         captions = _fallback_captions(
             script,
-            duration_sec=duration_sec,
+            duration_sec=subtitle_duration_sec,
         )
         source = "script_fallback"
         clause_count = len(captions)
@@ -967,7 +973,6 @@ def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         size_bytes=len(content),
     )
     ctx.subtitle_key = subtitle_key
-    timeline_items = _caption_timeline_items(timeline)
     logger.info(
         "avatar_talk.subtitle",
         task_id=ctx.task_id,
@@ -975,13 +980,29 @@ def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         timeline_items=len(timeline),
         timeline_first_ms=timeline_items[0][0] if timeline_items else None,
         timeline_last_ms=timeline_items[-1][1] if timeline_items else None,
-        audio_duration_ms=int(round(duration_sec * 1000)),
+        audio_duration_ms=int(round(subtitle_duration_sec * 1000)),
+        video_duration_ms=int(round(duration_sec * 1000)),
         clause_count=clause_count,
         caption_count=len(captions),
         cue_ranges_ms=[{"start_ms": start, "end_ms": end} for start, end, _text in captions],
         source=source,
     )
     return ctx
+
+
+def _subtitle_timing_duration_sec(
+    task: VideoTask,
+    timeline_items: list[tuple[int, int]],
+    duration_sec: float,
+) -> float:
+    if _task_mode(task) == "seedance_i2v" and timeline_items:
+        timeline_span_ms = max(1, timeline_items[-1][1] - timeline_items[0][0])
+        return timeline_span_ms / 1000
+    return duration_sec
+
+
+def _task_mode(task: VideoTask) -> str:
+    return str(task.video_mode or task.mode or "")
 
 
 def _script_timed_captions(
