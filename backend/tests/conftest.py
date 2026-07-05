@@ -64,7 +64,7 @@ def seed_plan(auth_db):
         name="Basic",
         price_cents=0,
         period="monthly",
-        quota_credits=1000,
+        quota_credits=10_000_000,
         is_active=True,
     )
     session.add(plan)
