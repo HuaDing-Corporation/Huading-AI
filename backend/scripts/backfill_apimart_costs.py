@@ -52,6 +52,28 @@ def _task_params(task: VideoTask | None) -> dict[str, Any]:
     return dict(task.params)
 
 
+def _task_resolution(task: VideoTask | None) -> str:
+    params = _task_params(task)
+    return str(params.get("resolution") or "").strip()
+
+
+def _is_seedance_i2v_task(task: VideoTask | None) -> bool:
+    if task is None:
+        return False
+    return task.mode == "seedance_i2v" or task.video_mode == "seedance_i2v"
+
+
+def _skip_legacy_ecom_i2v_without_resolution(
+    record: UsageRecord,
+    task: VideoTask | None,
+) -> bool:
+    return (
+        _record_provider(record) == _APIMART_PROVIDER
+        and _is_seedance_i2v_task(task)
+        and not _task_resolution(task)
+    )
+
+
 def _task_duration(task: VideoTask | None, record: UsageRecord) -> float | None:
     if task is not None and task.duration_sec:
         return float(task.duration_sec)
@@ -179,6 +201,20 @@ def backfill_provider_zero_costs(
     updated = 0
     for record in db.scalars(query):
         task = db.get(VideoTask, record.video_task_id) if record.video_task_id else None
+        if _skip_legacy_ecom_i2v_without_resolution(record, task):
+            skipped.append(
+                {
+                    "usage_record_id": record.id,
+                    "tenant_id": record.tenant_id,
+                    "video_task_id": record.video_task_id,
+                    "provider": record.provider,
+                    "model": record.model,
+                    "unit": record.unit,
+                    "quantity": str(record.quantity),
+                    "reason": "ecom_i2v_no_resolution",
+                }
+            )
+            continue
         new_cost_cents, basis = _cost_for_record(record, task)
         old_cost_cents = int(record.cost_cents or 0)
         if new_cost_cents <= 0:

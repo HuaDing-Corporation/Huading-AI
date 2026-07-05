@@ -428,6 +428,7 @@ def _create_seedance_i2v_video(
         "image_key": payload.image_key,
         "scene_prompt": payload.scene_prompt,
         "duration_sec": target_duration_sec,
+        "resolution": payload.resolution,
         "estimated": True,
         "apply_visible_label": payload.apply_visible_label,
     }
