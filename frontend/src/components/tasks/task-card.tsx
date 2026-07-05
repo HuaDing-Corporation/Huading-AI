@@ -16,6 +16,7 @@ import { Progress } from "@/components/ui/progress";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { AiLabelNotice } from "@/components/label/ai-label-notice";
 import { friendlyImageError } from "@/lib/api/image-error";
+import { friendlyVideoError } from "@/lib/api/video-error";
 import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
 import type { TrackedTask, UiStatus } from "@/lib/sse/progress-mapping";
@@ -70,8 +71,8 @@ export function TaskCard({ task, onOpen, onRetry, onUrlError, onDelete, deleting
   const Icon = thumbIcon[task.status] ?? Clock;
   const showPlayer = task.status === "done" && !!task.playbackUrl;
   const isImage = task.mode === "photo";
-  // photo 失败映射友好文案（不露原始 JSON）；视频沿用原始 message（不破）。
-  const failureText = isImage ? friendlyImageError(task.errorCode) : task.error;
+  // 失败均映射友好中文（不露裸 error_message/技术串）：photo→friendlyImageError，视频→friendlyVideoError（VIDEO-ERR-MAP-UI）。
+  const failureText = isImage ? friendlyImageError(task.errorCode) : friendlyVideoError(task.errorCode);
 
   // Fire onUrlError at most once per playback URL (mirrors VideoPlayer); reset
   // the guard when the URL changes so a refreshed URL can error once again (P2-2).
@@ -135,10 +136,7 @@ export function TaskCard({ task, onOpen, onRetry, onUrlError, onDelete, deleting
       {task.status === "failed" ? (
         <div className="mt-2 px-2">
           {failureText ? (
-            <p
-              className="mb-1.5 text-[12px] text-error-fg"
-              title={isImage ? undefined : task.error ?? undefined}
-            >
+            <p className="mb-1.5 text-[12px] text-error-fg" title={failureText ?? undefined}>
               {failureText}
             </p>
           ) : null}

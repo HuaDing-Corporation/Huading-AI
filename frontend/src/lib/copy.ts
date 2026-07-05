@@ -286,6 +286,13 @@ export const copy = {
     imageGeneric: "图片生成失败，请重试",
     // 抠图透明底专属（IMAGE_ALPHA_MISSING）：可操作文案，不落通用兜底
     imageAlphaMissing: "透明底生成失败：未返回透明像素，请重试或改用白底",
+    // 视频失败友好映射（VIDEO-ERR-MAP-UI，与后端 VIDEO-ERR-MAP-BE 共用错误码）——绝不回落裸 error_message
+    videoInsufficientBalance: "余额不足，无法生成，请充值后重试",
+    videoTimeout: "生成超时，请稍后重试",
+    videoConnection: "网络异常，请检查网络后重试",
+    videoGeneric: "视频生成失败，请重试",
+    // 批量电商行参考图下载失败（BATCH_IMAGE_DOWNLOAD_FAILED，可操作）——批量视频失败面复用视频友好映射
+    batchImageDownloadFailed: "参考图下载失败，请改用本地上传后重试",
     // 品牌音色音频上传/录音 (BRAND-VOICE-UI-0001)
     audioType: "仅支持 WAV / MP3 / M4A 音频",
     audioTooLarge: "音频过大，请控制在 20MB 以内",
