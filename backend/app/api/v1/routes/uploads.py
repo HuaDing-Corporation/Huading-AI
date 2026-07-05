@@ -13,6 +13,7 @@ from app.api.deps import (
 )
 from app.core.config import settings
 from app.core.exceptions import AppError
+from app.core.utils import base_mime
 from app.db.models import Asset, User
 from app.schemas.response import ApiResponse, ok
 from app.schemas.uploads import UploadImageResponse, UploadResponse
@@ -69,7 +70,7 @@ async def upload_image(
 ) -> ApiResponse[UploadResponse]:
     """Store an image under the caller's tenant namespace and return the key
     that video generation accepts as ``image_key`` (i2v input)."""
-    content_type = (file.content_type or "").lower()
+    content_type = base_mime(file.content_type)
     extension = _ALLOWED_TYPES.get(content_type)
     if extension is None:
         raise AppError(
@@ -106,7 +107,7 @@ async def upload_audio(
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[UploadImageResponse]:
-    content_type = (file.content_type or "").lower()
+    content_type = base_mime(file.content_type)
     extension = _ALLOWED_AUDIO_TYPES.get(content_type)
     if extension is None:
         raise AppError(
@@ -150,7 +151,7 @@ async def upload_avatar_image(
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[UploadImageResponse]:
-    content_type = (file.content_type or "").lower()
+    content_type = base_mime(file.content_type)
     extension = _ALLOWED_TYPES.get(content_type)
     if extension is None:
         raise AppError(
