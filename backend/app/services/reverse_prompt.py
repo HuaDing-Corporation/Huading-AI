@@ -12,9 +12,10 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.exceptions import AppError
-from app.db.models import Asset, ReversePromptJob, UsageRecord, User
+from app.db.models import Asset, ReversePromptJob, User
 from app.providers.base import resolve
 from app.schemas.reverse_prompt import ReversePromptResult
+from app.services import quota
 from app.services.storage.base import ObjectStorage
 
 _TARGET_FORMAT = "seedance_2_0"
@@ -37,6 +38,7 @@ def create_reverse_prompt_job(
             status_code=422,
         )
     source = source_image_asset_or_raise(db, tenant_id=user.tenant_id, asset_id=source_asset_id)
+    quota.ensure_reverse_prompt_quota_available(db, tenant_id=user.tenant_id)
     job = ReversePromptJob(
         id=str(uuid4()),
         tenant_id=user.tenant_id,
@@ -61,16 +63,10 @@ def create_reverse_prompt_job(
         _mark_job_succeeded(db, job=job, result=result)
         _record_usage(db, tenant_id=user.tenant_id, job=job, result=result)
     except AppError:
-        job.status = "failed"
-        job.error_code = "REVERSE_PROMPT_FAILED"
-        job.error_message = "Reverse prompt failed."
-        job.updated_at = datetime.now(UTC)
+        _mark_job_failed(db, job=job, message="Reverse prompt failed.")
         raise
     except Exception as exc:
-        job.status = "failed"
-        job.error_code = "REVERSE_PROMPT_FAILED"
-        job.error_message = str(exc)[:1000]
-        job.updated_at = datetime.now(UTC)
+        _mark_job_failed(db, job=job, message=str(exc)[:1000])
         raise AppError(
             "Reverse prompt failed.",
             code="REVERSE_PROMPT_FAILED",
@@ -96,20 +92,32 @@ def regenerate_reverse_prompt_job(
             status_code=404,
         )
     source_image_asset_or_raise(db, tenant_id=user.tenant_id, asset_id=job.source_asset_id)
+    quota.ensure_reverse_prompt_quota_available(db, tenant_id=user.tenant_id)
     job.status = "running"
     job.error_code = None
     job.error_message = None
     job.updated_at = datetime.now(UTC)
-    result = _invoke_reverse_provider(
-        db,
-        tenant_id=user.tenant_id,
-        image_url=storage.presign_get_url(
-            str(job.source_storage_key),
-            expires_in=settings.engine_s3_presign_ttl,
-        ),
-    )
-    _mark_job_succeeded(db, job=job, result=result)
-    _record_usage(db, tenant_id=user.tenant_id, job=job, result=result)
+    try:
+        result = _invoke_reverse_provider(
+            db,
+            tenant_id=user.tenant_id,
+            image_url=storage.presign_get_url(
+                str(job.source_storage_key),
+                expires_in=settings.engine_s3_presign_ttl,
+            ),
+        )
+        _mark_job_succeeded(db, job=job, result=result)
+        _record_usage(db, tenant_id=user.tenant_id, job=job, result=result)
+    except AppError:
+        _mark_job_failed(db, job=job, message="Reverse prompt failed.")
+        raise
+    except Exception as exc:
+        _mark_job_failed(db, job=job, message=str(exc)[:1000])
+        raise AppError(
+            "Reverse prompt failed.",
+            code="REVERSE_PROMPT_FAILED",
+            status_code=502,
+        ) from exc
     db.commit()
     db.refresh(job)
     return job
@@ -231,6 +239,14 @@ def _mark_job_succeeded(
     db.flush()
 
 
+def _mark_job_failed(db: Session, *, job: ReversePromptJob, message: str) -> None:
+    job.status = "failed"
+    job.error_code = "REVERSE_PROMPT_FAILED"
+    job.error_message = message
+    job.updated_at = datetime.now(UTC)
+    db.commit()
+
+
 def _record_usage(
     db: Session,
     *,
@@ -241,19 +257,13 @@ def _record_usage(
     total_tokens = _int_value(result.get("total_tokens")) or (
         _int_value(result.get("prompt_tokens")) + _int_value(result.get("completion_tokens"))
     )
-    db.add(
-        UsageRecord(
-            tenant_id=tenant_id,
-            capability="reverse_prompt",
-            provider=str(result.get("provider") or "apimart"),
-            model=str(result.get("model") or settings.engine_apimart_reverse_prompt_model),
-            unit="token",
-            quantity=Decimal(total_tokens),
-            credits=Decimal(str(result.get("credits") or "0")),
-            cost_cents=_int_value(result.get("cost_cents")),
-            status="settled",
-            settled_at=datetime.now(UTC),
-        )
+    quota.charge_reverse_prompt_quota(
+        db,
+        tenant_id=tenant_id,
+        provider=str(result.get("provider") or "apimart"),
+        model=str(result.get("model") or settings.engine_apimart_reverse_prompt_model),
+        total_tokens=total_tokens,
+        cost_cents=_int_value(result.get("cost_cents")),
     )
 
 

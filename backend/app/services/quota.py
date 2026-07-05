@@ -314,6 +314,39 @@ def estimate_copy_quota(
     )
 
 
+def estimate_reverse_prompt_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+) -> QuotaEstimate:
+    reverse_prompt_rate = _rate(
+        db,
+        tenant_id=tenant_id,
+        capability="reverse_prompt",
+        unit="call",
+        default=Decimal("1.0000"),
+    )
+    credits = reverse_prompt_rate.quantize(Decimal("0.01"))
+    return QuotaEstimate(
+        estimated_seconds=1,
+        estimated_credits=credits,
+        reservation_units=_credit_units(credits),
+        capability="reverse_prompt",
+        unit="call",
+    )
+
+
+def ensure_reverse_prompt_quota_available(db: Session, *, tenant_id: str) -> None:
+    subscription = active_subscription(db, tenant_id)
+    estimate = estimate_reverse_prompt_quota(db, tenant_id=tenant_id)
+    if remaining_credits(subscription) < estimate.reservation_units:
+        raise AppError(
+            "Insufficient tenant quota.",
+            code="TENANT_QUOTA_EXCEEDED",
+            status_code=403,
+        )
+
+
 def charge_copy_quota(
     db: Session,
     *,
@@ -349,6 +382,42 @@ def charge_copy_quota(
         model=model,
         unit=unit,
         quantity=quantity,
+        credits=estimate.estimated_credits,
+        cost_cents=cost_cents,
+        status="settled",
+        settled_at=datetime.now(UTC),
+    )
+    db.add(usage_record)
+    return usage_record
+
+
+def charge_reverse_prompt_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    provider: str,
+    model: str | None,
+    total_tokens: int,
+    cost_cents: int,
+) -> UsageRecord:
+    subscription = active_subscription(db, tenant_id)
+    estimate = estimate_reverse_prompt_quota(db, tenant_id=tenant_id)
+    if remaining_credits(subscription) < estimate.reservation_units:
+        raise AppError(
+            "Insufficient tenant quota.",
+            code="TENANT_QUOTA_EXCEEDED",
+            status_code=403,
+        )
+    subscription.quota_credits_used += estimate.reservation_units
+    usage_record = UsageRecord(
+        tenant_id=tenant_id,
+        subscription_id=subscription.id,
+        video_task_id=None,
+        capability="reverse_prompt",
+        provider=provider,
+        model=model,
+        unit="token",
+        quantity=Decimal(total_tokens),
         credits=estimate.estimated_credits,
         cost_cents=cost_cents,
         status="settled",

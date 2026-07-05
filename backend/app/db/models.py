@@ -345,7 +345,7 @@ class CreditRate(Base):
     __table_args__ = (
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
-            "'publish', 'voice_clone', 'video_gen')",
+            "'publish', 'voice_clone', 'video_gen', 'reverse_prompt')",
             name="ck_credit_rates_capability",
         ),
         CheckConstraint(

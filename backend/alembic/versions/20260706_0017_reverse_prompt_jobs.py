@@ -27,7 +27,16 @@ _USAGE_CAPABILITY_LEGACY = (
     "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
     "'publish', 'voice_clone', 'video_gen')"
 )
-_PROVIDER_ID = "platform-reverse-prompt-apimart-gemini"
+_CREDIT_RATE_CAPABILITY_WITH_REVERSE = (
+    "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
+    "'publish', 'voice_clone', 'video_gen', 'reverse_prompt')"
+)
+_CREDIT_RATE_CAPABILITY_LEGACY = (
+    "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
+    "'publish', 'voice_clone', 'video_gen')"
+)
+_PROVIDER_ID = "reverse-prompt-apimart-gemini"
+_CREDIT_RATE_ID = "reverse-prompt-call-rate"
 
 
 def upgrade() -> None:
@@ -126,6 +135,12 @@ def upgrade() -> None:
             "ck_usage_records_capability",
             _USAGE_CAPABILITY_WITH_REVERSE,
         )
+    with op.batch_alter_table("credit_rates") as batch_op:
+        batch_op.drop_constraint("ck_credit_rates_capability", type_="check")
+        batch_op.create_check_constraint(
+            "ck_credit_rates_capability",
+            _CREDIT_RATE_CAPABILITY_WITH_REVERSE,
+        )
 
     provider_configs = sa.table(
         "provider_configs",
@@ -149,14 +164,47 @@ def upgrade() -> None:
             }
         ],
     )
+    credit_rates = sa.table(
+        "credit_rates",
+        sa.column("id", sa.String),
+        sa.column("tenant_id", sa.String),
+        sa.column("capability", sa.String),
+        sa.column("unit", sa.String),
+        sa.column("credits_per_unit", sa.Numeric),
+        sa.column("is_active", sa.Boolean),
+    )
+    op.bulk_insert(
+        credit_rates,
+        [
+            {
+                "id": _CREDIT_RATE_ID,
+                "tenant_id": None,
+                "capability": "reverse_prompt",
+                "unit": "call",
+                "credits_per_unit": 1,
+                "is_active": True,
+            }
+        ],
+    )
 
 
 def downgrade() -> None:
+    op.execute(
+        sa.text("DELETE FROM credit_rates WHERE id = :rate_id").bindparams(
+            rate_id=_CREDIT_RATE_ID
+        )
+    )
     op.execute(
         sa.text("DELETE FROM provider_configs WHERE id = :provider_id").bindparams(
             provider_id=_PROVIDER_ID
         )
     )
+    with op.batch_alter_table("credit_rates") as batch_op:
+        batch_op.drop_constraint("ck_credit_rates_capability", type_="check")
+        batch_op.create_check_constraint(
+            "ck_credit_rates_capability",
+            _CREDIT_RATE_CAPABILITY_LEGACY,
+        )
     with op.batch_alter_table("usage_records") as batch_op:
         batch_op.drop_constraint("ck_usage_records_capability", type_="check")
         batch_op.create_check_constraint(

@@ -1,14 +1,31 @@
 from __future__ import annotations
 
+import importlib.util
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.db.models import Asset, ProviderConfig, ReversePromptJob, Tenant, UsageRecord
+from app.db.models import Asset, ProviderConfig, ReversePromptJob, Subscription, Tenant, UsageRecord
 from app.main import app
 from app.providers.reverse_prompt.apimart_gemini import APIMartGeminiReversePromptProvider
+
+
+def test_reverse_prompt_seed_provider_id_fits_provider_config_column():
+    migration_path = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "20260706_0017_reverse_prompt_jobs.py"
+    )
+    spec = importlib.util.spec_from_file_location("reverse_prompt_migration", migration_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    assert len(migration._PROVIDER_ID) <= 36
 
 
 class _Response:
@@ -123,6 +140,21 @@ def test_apimart_gemini_provider_accepts_apimart_data_wrapper():
     assert result["prompt_tokens"] == 1000
     assert result["completion_tokens"] == 500
     assert result["prompt_en"].startswith("Glass perfume")
+
+
+def test_apimart_gemini_provider_rejects_apimart_error_envelope():
+    provider = APIMartGeminiReversePromptProvider(
+        api_key="api-test-key",
+        session=_Session([{"code": 401, "message": "invalid token"}]),
+    )
+
+    try:
+        provider.reverse_image_sync({"image_url": "https://assets.test/input.png"})
+    except Exception as exc:
+        assert exc.__class__.__name__ == "APIMartGeminiReversePromptError"
+        assert "invalid token" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("APIMart error envelope must fail")
 
 
 def test_apimart_gemini_provider_retries_once_when_model_returns_invalid_json():
@@ -252,6 +284,9 @@ def test_reverse_prompt_sync_creates_job_records_usage_and_returns_fill_targets(
 
     db = auth_db()
     job = db.get(ReversePromptJob, body["id"])
+    subscription = db.scalar(
+        select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+    )
     assert job is not None
     assert job.tenant_id == auth_context["tenant_id"]
     usage = db.scalar(
@@ -262,13 +297,101 @@ def test_reverse_prompt_sync_creates_job_records_usage_and_returns_fill_targets(
     )
     assert usage is not None
     assert usage.video_task_id is None
+    assert usage.subscription_id == subscription.id
     assert usage.capability == "reverse_prompt"
     assert usage.provider == "apimart"
     assert usage.model == "gemini-3.1-pro-preview"
     assert usage.unit == "token"
     assert usage.quantity == Decimal("1500.000")
-    assert usage.credits == Decimal("0.06")
+    assert usage.credits == Decimal("1.00")
     assert usage.cost_cents == 5
+    assert subscription.quota_credits_used == 1
+    db.close()
+
+
+def test_reverse_prompt_rejects_when_quota_is_exhausted(auth_db, auth_context, monkeypatch):
+    session = auth_db()
+    _seed_reverse_prompt_provider(session)
+    asset = _seed_image_asset(session, auth_context["tenant_id"])
+    asset_id = asset.id
+    subscription = session.scalar(
+        select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+    )
+    subscription.quota_credits_used = subscription.quota_credits_total
+    session.commit()
+    session.close()
+
+    fake_provider = SimpleNamespace(
+        reverse_image=lambda payload: (_ for _ in ()).throw(
+            AssertionError("insufficient quota must not call provider")
+        )
+    )
+    monkeypatch.setattr(
+        "app.services.reverse_prompt.resolve",
+        lambda *args, **kwargs: fake_provider,
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/reverse-prompt",
+        json={"source_asset_id": asset_id, "target_format": "seedance_2_0"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "TENANT_QUOTA_EXCEEDED"
+
+
+def test_reverse_prompt_regenerate_failure_marks_job_failed(auth_db, auth_context, monkeypatch):
+    session = auth_db()
+    _seed_reverse_prompt_provider(session)
+    asset = _seed_image_asset(session, auth_context["tenant_id"])
+    job = ReversePromptJob(
+        tenant_id=auth_context["tenant_id"],
+        created_by_user_id=auth_context["user_id"],
+        source_kind="image",
+        source_asset_id=asset.id,
+        source_storage_key=asset.storage_key,
+        target_format="seedance_2_0",
+        status="succeeded",
+        result_json={"target_format": "seedance_2_0"},
+    )
+    session.add(job)
+    session.commit()
+    job_id = job.id
+    session.close()
+
+    class _Storage:
+        def presign_get_url(
+            self,
+            key: str,
+            *,
+            expires_in: int,
+            download_filename: str | None = None,
+        ) -> str:
+            return "https://assets.test/presigned-source.png"
+
+    fake_provider = SimpleNamespace(
+        reverse_image=lambda payload: (_ for _ in ()).throw(RuntimeError("provider down"))
+    )
+    monkeypatch.setattr("app.api.v1.routes.reverse_prompt.get_object_storage", lambda: _Storage())
+    monkeypatch.setattr(
+        "app.services.reverse_prompt.resolve",
+        lambda *args, **kwargs: fake_provider,
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        f"/api/v1/reverse-prompt/jobs/{job_id}/regenerate",
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "REVERSE_PROMPT_FAILED"
+    db = auth_db()
+    failed_job = db.get(ReversePromptJob, job_id)
+    assert failed_job.status == "failed"
+    assert failed_job.error_code == "REVERSE_PROMPT_FAILED"
     db.close()
 
 

@@ -200,11 +200,16 @@ def _response_payload(response: Any) -> dict[str, Any]:
 
 def _raise_for_response(response: Any, payload: Mapping[str, Any], fallback: str) -> None:
     status_code = int(getattr(response, "status_code", 200) or 200)
-    if status_code < 400:
+    api_code = payload.get("code")
+    try:
+        numeric_api_code = int(api_code) if api_code is not None else 200
+    except (TypeError, ValueError):
+        numeric_api_code = 200
+    if status_code < 400 and numeric_api_code in {0, 200}:
         return
     raise APIMartGeminiReversePromptError(
         _payload_message(payload, fallback),
-        status_code=status_code,
+        status_code=status_code if status_code >= 400 else numeric_api_code,
         error_type=str(payload.get("type") or payload.get("error") or ""),
     )
 
@@ -218,6 +223,11 @@ def _payload_message(payload: Mapping[str, Any], fallback: str) -> str:
             nested = _payload_message(value, fallback)
             if nested != fallback:
                 return nested
+    data = payload.get("data")
+    if isinstance(data, Mapping):
+        nested = _payload_message(data, fallback)
+        if nested != fallback:
+            return nested
     return fallback
 
 
