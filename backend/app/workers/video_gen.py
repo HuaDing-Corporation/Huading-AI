@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import requests
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -20,6 +21,7 @@ from app.core.logging import get_logger
 from app.db.models import Asset, BgmLibraryTrack, TaskAsset, VideoTask
 from app.db.session import SessionLocal
 from app.providers.base import resolve
+from app.providers.video.apimart import APIMartVideoProviderError
 from app.services.apimart_costs import (
     apimart_cost_cents_from_price_table,
     apimart_cost_cents_from_result,
@@ -40,6 +42,29 @@ logger = get_logger(__name__)
 
 _BGM_VOLUME = 0.22
 _APIMART_VIDEO_MIN_PRESIGN_TTL_SECONDS = 7200
+_VIDEO_GEN_FAILED_ERROR_CODE = "VIDEO_GEN_FAILED"
+_VIDEO_INSUFFICIENT_BALANCE_ERROR_CODE = "VIDEO_INSUFFICIENT_BALANCE"
+_VIDEO_TIMEOUT_ERROR_CODE = "VIDEO_TIMEOUT"
+_VIDEO_CONNECTION_ERROR_CODE = "VIDEO_CONNECTION_ERROR"
+_BALANCE_ERROR_TYPES = {
+    "insufficient_balance",
+    "insufficient_quota",
+    "insufficient_credits",
+    "payment_required",
+    "quota_exceeded",
+    "balance_not_enough",
+}
+_BALANCE_ERROR_TEXT_MARKERS = (
+    "insufficient balance",
+    "insufficient credit",
+    "insufficient quota",
+    "not enough balance",
+    "not enough credit",
+    "quota exceeded",
+    "payment required",
+    "余额不足",
+    "额度不足",
+)
 
 
 @dataclass
@@ -59,6 +84,51 @@ class VideoGenContext:
 
 def get_object_storage() -> ObjectStorage:
     return create_object_storage(settings)
+
+
+def _video_error_text(exc: Exception) -> str:
+    parts: list[str] = []
+    for attr in ("error_type", "status_code", "code", "type", "message"):
+        value = getattr(exc, attr, None)
+        if value:
+            parts.append(str(value))
+
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code:
+        parts.append(str(status_code))
+
+    if str(exc):
+        parts.append(str(exc))
+    return " ".join(parts).lower()
+
+
+def classify_video_error(exc: Exception) -> str:
+    cause = exc.__cause__
+    if cause is not None and cause is not exc:
+        cause_code = classify_video_error(cause)
+        if cause_code != _VIDEO_GEN_FAILED_ERROR_CODE:
+            return cause_code
+
+    if isinstance(exc, APIMartVideoProviderError):
+        error_type = str(exc.error_type or "").strip().lower()
+        error_text = _video_error_text(exc)
+        if exc.status_code == 402 or error_type in _BALANCE_ERROR_TYPES:
+            return _VIDEO_INSUFFICIENT_BALANCE_ERROR_CODE
+        if any(marker in error_text for marker in _BALANCE_ERROR_TEXT_MARKERS):
+            return _VIDEO_INSUFFICIENT_BALANCE_ERROR_CODE
+        if error_type == "timeout":
+            return _VIDEO_TIMEOUT_ERROR_CODE
+        return _VIDEO_GEN_FAILED_ERROR_CODE
+
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return _VIDEO_CONNECTION_ERROR_CODE
+    if isinstance(exc, requests.exceptions.RequestException):
+        response = getattr(exc, "response", None)
+        if int(getattr(response, "status_code", 0) or 0) == 402:
+            return _VIDEO_INSUFFICIENT_BALANCE_ERROR_CODE
+
+    return _VIDEO_GEN_FAILED_ERROR_CODE
 
 
 def _task_or_raise(db: Session, *, tenant_id: str, task_id: str) -> VideoTask:
@@ -301,12 +371,13 @@ def _mark_video_gen_failed(
     tenant_id: str,
     task_id: str,
     error_message: str,
+    error_code: str,
 ) -> int:
     task = db.get(VideoTask, task_id)
     if task is None or task.tenant_id != tenant_id or task.video_mode != "video_gen":
         return 100
     task.status = "failed"
-    task.error_code = "VIDEO_GEN_FAILED"
+    task.error_code = error_code
     task.error_message = error_message
     task.error = error_message
     task.finished_at = datetime.now(UTC)
@@ -405,6 +476,7 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
             logger.exception("video_gen.failed", task_id=task_id, tenant_id=tenant_id)
             db.rollback()
             error_message = str(exc)
+            error_code = classify_video_error(exc)
             failed_task = db.get(VideoTask, task_id)
             batch_id = (
                 failed_task.batch_id
@@ -416,6 +488,7 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 tenant_id=tenant_id,
                 task_id=task_id,
                 error_message=error_message,
+                error_code=error_code,
             )
             release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
             refresh_batch_job(db, batch_id=batch_id)
@@ -434,7 +507,7 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                     status="failed",
                     progress=failed_progress,
                     step="failed",
-                    error_code="VIDEO_GEN_FAILED",
+                    error_code=error_code,
                     error_message=error_message,
                 )
             raise
