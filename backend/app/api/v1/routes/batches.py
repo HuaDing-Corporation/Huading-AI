@@ -346,7 +346,11 @@ def _create_ecom_table_tasks(
                 subtitle_enabled=common.subtitle_enabled,
                 duration_sec=target_duration_sec,
                 batch_id=batch.id,
-                params={"batch_id": batch.id, "batch_row_index": index},
+                params={
+                    "batch_id": batch.id,
+                    "batch_row_index": index,
+                    "resolution": common.resolution,
+                },
             )
             db.add(failed)
             db.flush()
@@ -357,6 +361,7 @@ def _create_ecom_table_tasks(
             "image_key": image_key,
             "scene_prompt": row_topic,
             "duration_sec": target_duration_sec,
+            "resolution": common.resolution,
             "speed": common.speed,
             "estimated": True,
             "apply_visible_label": common.apply_visible_label,

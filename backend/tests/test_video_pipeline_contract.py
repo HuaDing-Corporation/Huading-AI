@@ -349,6 +349,7 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
             "voice_id": voice_id,
             "scene_prompt": "hero product on a bright kitchen counter",
             "duration_sec": 30,
+            "resolution": "1080p",
             "speed": 1.0,
             "aspect_ratio": "9:16",
             "subtitle_enabled": True,
@@ -364,6 +365,7 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
     assert enqueued["args"][0]["image_key"] == "uploads/product.png"
     assert enqueued["args"][0]["scene_prompt"] == "hero product on a bright kitchen counter"
     assert enqueued["args"][0]["duration_sec"] == 30
+    assert enqueued["args"][0]["resolution"] == "1080p"
     with auth_db() as db:
         task = db.get(VideoTask, data["id"])
         assert task is not None
@@ -373,6 +375,7 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
         assert task.params["image_key"] == "uploads/product.png"
         assert task.params["scene_prompt"] == "hero product on a bright kitchen counter"
         assert task.params["duration_sec"] == 30
+        assert task.params["resolution"] == "1080p"
         assert task.duration_sec == 30
         subscription = db.get(Subscription, subscription_id)
         assert subscription.quota_credits_reserved == 65
@@ -775,10 +778,12 @@ def test_seedance_i2v_duration_is_clamped_and_forwarded(
 
     assert resp.status_code == 202
     assert enqueued["args"][0]["duration_sec"] == 120
+    assert enqueued["args"][0]["resolution"] == "720p"
     with auth_db() as db:
         task = db.get(VideoTask, resp.json()["data"]["id"])
         assert task.duration_sec == 120
         assert task.params["duration_sec"] == 120
+        assert task.params["resolution"] == "720p"
 
 
 def test_video_generate_request_clamps_seedance_duration() -> None:

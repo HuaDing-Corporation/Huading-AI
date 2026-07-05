@@ -699,6 +699,7 @@ def test_batch_create_ecom_table_download_failure_marks_one_row_failed_not_whole
                     "video_mode": "seedance_i2v",
                     "voice_id": "voice-batch",
                     "duration_sec": 10,
+                    "resolution": "480p",
                     "speed": 1.25,
                     "apply_visible_label": True,
                 },
@@ -716,6 +717,7 @@ def test_batch_create_ecom_table_download_failure_marks_one_row_failed_not_whole
     assert seedance_calls[0]["queue"] == "video"
     assert seedance_calls[0]["args"][0]["apply_visible_label"] is True
     assert seedance_calls[0]["args"][0]["speed"] == 1.25
+    assert seedance_calls[0]["args"][0]["resolution"] == "480p"
 
     with auth_db() as db:
         batch = db.get(BatchJob, data["batch_id"])
@@ -733,6 +735,7 @@ def test_batch_create_ecom_table_download_failure_marks_one_row_failed_not_whole
         assert queued_task.status == "queued"
         assert queued_task.params["image_key"].startswith("uploads/")
         assert queued_task.params["speed"] == 1.25
+        assert queued_task.params["resolution"] == "480p"
         assert db.scalar(select(func.count()).select_from(UsageRecord)) == 1
         assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 20
 

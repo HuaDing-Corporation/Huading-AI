@@ -61,6 +61,7 @@ _SEEDANCE_I2V_PROGRESS_END = 88
 _SEEDANCE_I2V_PROGRESS_POLL_RATE = 0.02
 _SEEDANCE_I2V_PROGRESS_EPSILON = 0.001
 _APIMART_VIDEO_MIN_PRESIGN_TTL_SECONDS = 7200
+_SEEDANCE_I2V_RESOLUTIONS = {"480p", "720p", "1080p"}
 _SEEDANCE_I2V_PROMPT_SUFFIX = (
     "产品展示，镜头平稳推进，明亮商业棚拍，干净背景，"
     "突出商品材质与卖点，9:16竖屏电商带货短视频。"
@@ -132,13 +133,14 @@ def _seedance_i2v_provider_payload(
     prompt: str,
     image_url: str,
     clip_duration: int,
+    resolution: str,
     progress_callback: Any,
 ) -> dict[str, Any]:
     return {
         "model": settings.engine_apimart_video_model,
         "prompt": prompt,
         "duration": clip_duration,
-        "resolution": "720p",
+        "resolution": resolution,
         "size": "adaptive",
         "generate_audio": False,
         "image_urls": [image_url],
@@ -166,6 +168,7 @@ def _seedance_i2v_clip_billing(
     result: Mapping[str, Any],
     *,
     clip_duration: int,
+    resolution: str,
 ) -> tuple[Decimal, int]:
     credits = _decimal_or_none(result.get("credits"))
     if credits is not None and credits > 0:
@@ -177,7 +180,7 @@ def _seedance_i2v_clip_billing(
 
     price_table_credits = apimart_price_table_credits(
         model=str(result.get("model") or settings.engine_apimart_video_model),
-        resolution=result.get("resolution") or "720p",
+        resolution=result.get("resolution") or resolution,
         duration_sec=result.get("duration") or clip_duration,
     )
     if price_table_credits is not None and price_table_credits > 0:
@@ -186,13 +189,22 @@ def _seedance_i2v_clip_billing(
     return Decimal("0"), apimart_cost_cents_from_result(result)
 
 
-def _seedance_i2v_fallback_cost_cents(*, actual_seconds: int) -> int:
+def _seedance_i2v_resolution(params: Mapping[str, Any] | None) -> str:
+    resolution = str((params or {}).get("resolution") or "720p").strip().lower()
+    return resolution if resolution in _SEEDANCE_I2V_RESOLUTIONS else "720p"
+
+
+def _seedance_i2v_fallback_cost_cents(*, actual_seconds: int, resolution: str = "720p") -> int:
     scene_count = max(1, int(math.ceil(actual_seconds / _SEEDANCE_I2V_CLIP_DURATION_SEC)))
+    normalized_resolution = str(resolution or "720p").strip().lower()
+    selected_resolution = (
+        normalized_resolution if normalized_resolution in _SEEDANCE_I2V_RESOLUTIONS else "720p"
+    )
     credits = sum(
         (
             apimart_price_table_credits(
                 model=settings.engine_apimart_video_model,
-                resolution="720p",
+                resolution=selected_resolution,
                 duration_sec=_SEEDANCE_I2V_CLIP_DURATION_SEC,
             )
             or Decimal("0")
@@ -204,7 +216,7 @@ def _seedance_i2v_fallback_cost_cents(*, actual_seconds: int) -> int:
         return cost_cents
     return scene_count * apimart_cost_cents_from_price_table(
         model=settings.engine_apimart_video_model,
-        resolution="720p",
+        resolution=selected_resolution,
         duration_sec=_SEEDANCE_I2V_CLIP_DURATION_SEC,
     )
 
@@ -753,6 +765,7 @@ def seedance_i2v_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     params["tenant_id"] = ctx.tenant_id
     image_url = _seedance_i2v_image_url(ctx, params)
     target_duration = _task_target_duration_sec(task)
+    resolution = _seedance_i2v_resolution(params)
     scene_count = _seedance_i2v_scene_count(target_duration)
     clip_duration = _SEEDANCE_I2V_CLIP_DURATION_SEC
     scene_prompts = _plan_seedance_i2v_scenes(ctx, scene_count, clip_duration)
@@ -786,6 +799,7 @@ def seedance_i2v_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
             prompt=prompt or _fallback_scene_prompt(task, index, scene_count),
             image_url=image_url,
             clip_duration=clip_duration,
+            resolution=resolution,
             progress_callback=on_seedance_progress,
         )
         result = asyncio.run(provider.generate_video(payload))
@@ -798,6 +812,7 @@ def seedance_i2v_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         clip_credits, clip_cost_cents = _seedance_i2v_clip_billing(
             result,
             clip_duration=clip_duration,
+            resolution=resolution,
         )
         provider_credits += clip_credits
         provider_cost_cents += clip_cost_cents
@@ -1783,6 +1798,7 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
             if cost_cents <= 0:
                 cost_cents = _seedance_i2v_fallback_cost_cents(
                     actual_seconds=actual_seconds,
+                    resolution=_seedance_i2v_resolution(task.params),
                 )
             settle_reserved_quota(
                 db,

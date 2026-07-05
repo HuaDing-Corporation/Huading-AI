@@ -49,6 +49,12 @@ class _Storage:
 
 
 class _FakeAPIMartVideoProvider:
+    _CREDITS_BY_RESOLUTION = {
+        "480p": Decimal("3.3"),
+        "720p": Decimal("7.1"),
+        "1080p": Decimal("17.72"),
+    }
+
     def __init__(
         self,
         calls: list[dict[str, object]],
@@ -62,6 +68,7 @@ class _FakeAPIMartVideoProvider:
         self.calls.append(dict(payload))
         callback = payload.get("progress_callback")
         call_index = len(self.calls) - 1
+        resolution = str(payload.get("resolution") or "720p")
         poll_total = (
             self.poll_counts[call_index]
             if isinstance(self.poll_counts, list)
@@ -75,9 +82,9 @@ class _FakeAPIMartVideoProvider:
             "provider": "apimart",
             "model": "doubao-seedance-2.0",
             "duration": 5,
-            "resolution": "720p",
+            "resolution": resolution,
             "size": "adaptive",
-            "credits": Decimal("7.1"),
+            "credits": self._CREDITS_BY_RESOLUTION.get(resolution, Decimal("7.1")),
         }
 
 
@@ -315,7 +322,11 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
                 topic="soft scarf for winter gifting",
                 script="soft scarf script",
                 duration_sec=12,
-                params={"image_key": "uploads/product.png", "duration_sec": 12},
+                params={
+                    "image_key": "uploads/product.png",
+                    "duration_sec": 12,
+                    "resolution": "1080p",
+                },
             )
         )
         db.commit()
@@ -354,7 +365,7 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
 
         assert result.base_video_bytes == b"CONCAT-SEEDANCE-MP4"
         assert result.use_tts_audio is True
-        assert result.provider_cost_cents == 1534
+        assert result.provider_cost_cents == 3828
         assert len(calls) == 3
         assert [call["prompt"] for call in calls] == [
             "visual prompt 1",
@@ -372,7 +383,7 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
                 f"https://storage.test/tenants/{tenant_id}/uploads/product.png"
             ]
             assert call["size"] == "adaptive"
-            assert call["resolution"] == "720p"
+            assert call["resolution"] == "1080p"
             assert call["generate_audio"] is False
             assert call["duration"] == 5
             assert "image_path" not in call
@@ -389,6 +400,35 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
         ]
 
     Base.metadata.drop_all(engine)
+
+
+def test_seedance_i2v_fallback_cost_uses_selected_resolution(monkeypatch):
+    from app.services import apimart_costs
+
+    monkeypatch.setattr(apimart_costs.settings, "engine_apimart_credit_usd", Decimal("0.10"))
+    monkeypatch.setattr(apimart_costs.settings, "engine_usd_cny_rate", Decimal("7.20"))
+
+    assert (
+        avatar_talk._seedance_i2v_fallback_cost_cents(
+            actual_seconds=5,
+            resolution="480p",
+        )
+        == 238
+    )
+    assert (
+        avatar_talk._seedance_i2v_fallback_cost_cents(
+            actual_seconds=5,
+            resolution="720p",
+        )
+        == 511
+    )
+    assert (
+        avatar_talk._seedance_i2v_fallback_cost_cents(
+            actual_seconds=5,
+            resolution="1080p",
+        )
+        == 1276
+    )
 
 
 def test_seedance_i2v_progress_advances_on_every_poll_without_stalling(

@@ -293,6 +293,80 @@ def test_cost_backfill_apply_writes_only_reconstructed_costs(
         assert db.get(UsageRecord, usage.id).cost_cents == 1800
 
 
+def test_cost_backfill_skips_legacy_ecom_i2v_without_resolution_but_recomputes_recorded_resolution(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.services import apimart_costs
+    from scripts.backfill_apimart_costs import backfill_provider_zero_costs
+
+    monkeypatch.setattr(apimart_costs.settings, "engine_apimart_credit_usd", Decimal("0.10"))
+    monkeypatch.setattr(apimart_costs.settings, "engine_usd_cny_rate", Decimal("7.20"))
+    tenant_id = auth_context["tenant_id"]
+    with auth_db() as db:
+        subscription = _seed_subscription(db, tenant_id)
+        db.add_all(
+            [
+                VideoTask(
+                    id="backfill-ecom-legacy-no-resolution",
+                    tenant_id=tenant_id,
+                    status="done",
+                    mode="seedance_i2v",
+                    video_mode="seedance_i2v",
+                    progress=100,
+                    duration_sec=5,
+                    params={"duration_sec": 5},
+                ),
+                VideoTask(
+                    id="backfill-ecom-recorded-1080p",
+                    tenant_id=tenant_id,
+                    status="done",
+                    mode="seedance_i2v",
+                    video_mode="seedance_i2v",
+                    progress=100,
+                    duration_sec=5,
+                    params={"resolution": "1080p", "duration_sec": 5},
+                ),
+            ]
+        )
+        db.flush()
+        legacy_usage = _usage(
+            db,
+            tenant_id=tenant_id,
+            subscription_id=subscription.id,
+            task_id="backfill-ecom-legacy-no-resolution",
+            provider="apimart",
+            model="doubao-seedance-2.0",
+            capability="video",
+            unit="second",
+            quantity=Decimal("5"),
+            cost_cents=511,
+        )
+        recorded_usage = _usage(
+            db,
+            tenant_id=tenant_id,
+            subscription_id=subscription.id,
+            task_id="backfill-ecom-recorded-1080p",
+            provider="apimart",
+            model="doubao-seedance-2.0",
+            capability="video",
+            unit="second",
+            quantity=Decimal("5"),
+        )
+        db.commit()
+
+        summary = backfill_provider_zero_costs(db, apply=False)
+
+        skipped = {item["usage_record_id"]: item for item in summary.skipped}
+        assert skipped[legacy_usage.id]["reason"] == "ecom_i2v_no_resolution"
+        preview = {item["usage_record_id"]: item for item in summary.preview}
+        assert preview[recorded_usage.id]["new_cost_cents"] == 1276
+        assert legacy_usage.id not in preview
+        assert db.get(UsageRecord, legacy_usage.id).cost_cents == 511
+        assert db.get(UsageRecord, recorded_usage.id).cost_cents == 0
+
+
 def test_cost_backfill_dry_run_recomputes_only_apimart_nonzero_mismatches(
     monkeypatch,
     auth_context,
