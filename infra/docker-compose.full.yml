@@ -95,7 +95,7 @@ services:
       ENGINE_S3_SECURE: ${ENGINE_S3_SECURE:-false}
       ENGINE_S3_ADDRESSING_STYLE: ${ENGINE_S3_ADDRESSING_STYLE:-path}
       ENGINE_AIGC_PRODUCER: ${ENGINE_AIGC_PRODUCER:-Huading}
-      ENGINE_DOUBAO_TTS_AIGC_WATERMARK: ${ENGINE_DOUBAO_TTS_AIGC_WATERMARK:-true}
+      ENGINE_DOUBAO_TTS_AIGC_WATERMARK: ${ENGINE_DOUBAO_TTS_AIGC_WATERMARK:-false}
     # Run DB migrations, then serve the API.
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     ports:
@@ -143,7 +143,7 @@ services:
       ENGINE_S3_SECURE: ${ENGINE_S3_SECURE:-false}
       ENGINE_S3_ADDRESSING_STYLE: ${ENGINE_S3_ADDRESSING_STYLE:-path}
       ENGINE_AIGC_PRODUCER: ${ENGINE_AIGC_PRODUCER:-Huading}
-      ENGINE_DOUBAO_TTS_AIGC_WATERMARK: ${ENGINE_DOUBAO_TTS_AIGC_WATERMARK:-true}
+      ENGINE_DOUBAO_TTS_AIGC_WATERMARK: ${ENGINE_DOUBAO_TTS_AIGC_WATERMARK:-false}
     # Default/avatar/image worker. Long-running seedance_i2v/video_gen jobs are
     # isolated in worker-video so image jobs are not blocked by video polling.
     command: celery -A app.workers.celery_app.celery_app worker --pool=solo --concurrency=1 -Q default,avatar,image --loglevel=info
@@ -181,7 +181,7 @@ services:
       ENGINE_S3_SECURE: ${ENGINE_S3_SECURE:-false}
       ENGINE_S3_ADDRESSING_STYLE: ${ENGINE_S3_ADDRESSING_STYLE:-path}
       ENGINE_AIGC_PRODUCER: ${ENGINE_AIGC_PRODUCER:-Huading}
-      ENGINE_DOUBAO_TTS_AIGC_WATERMARK: ${ENGINE_DOUBAO_TTS_AIGC_WATERMARK:-true}
+      ENGINE_DOUBAO_TTS_AIGC_WATERMARK: ${ENGINE_DOUBAO_TTS_AIGC_WATERMARK:-false}
     command: celery -A app.workers.celery_app.celery_app worker --concurrency=3 -Q video --loglevel=info
     volumes:
       - media:/app/.local-storage
