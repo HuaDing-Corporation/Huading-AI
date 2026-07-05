@@ -54,4 +54,13 @@ describe("CommonParams (批量公共参数，端到端)", () => {
     fireEvent.click(screen.getByRole("button", { name: "1080P" }));
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ resolution: "1080p" }));
   });
+
+  it("商品表(ecom_table)切 1080P → onChange resolution:1080p（承重·批量电商分辨率贯通，后端 #117 写入行 params）", () => {
+    const onChange = vi.fn();
+    render(<CommonParams kind="ecom_table" onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "1080P" }));
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ video_mode: "seedance_i2v", resolution: "1080p" })
+    );
+  });
 });

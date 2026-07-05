@@ -305,6 +305,15 @@ export const handlers = [
       { status: 201 }
     );
   }),
+  // 产品图上传（电商带货 i2v）→ 后端 POST /uploads 返 UploadResponse{key,uri}(201)，前端映射 key→image_key。
+  // 此前 mock 缺该端点致电商 tab 无法真栈冒烟（ECOM-RESOLUTION-UI-0001 顺带补齐，忠实真契约）。
+  http.post(`${BASE}/api/v1/uploads`, () => {
+    const n = ++imageUploadSeq;
+    return HttpResponse.json(
+      { data: { key: `uploads/mock-product-${n}.png`, uri: `mock://uploads/mock-product-${n}.png` }, error: null, request_id: "mock-req" },
+      { status: 201 }
+    );
+  }),
   http.post(`${BASE}/api/v1/videos`, async ({ request }) => {
     const body = (await request.json()) as {
       topic?: string;
@@ -317,9 +326,13 @@ export const handlers = [
       bgm?: { source?: string; asset_id?: string; track_id?: string };
       apply_visible_label?: boolean;
     };
+    // resolution 是后端全模式 Literal["480p","720p","1080p"]（含 seedance_i2v，见 schemas/videos.py:154）：
+    // 非法即 422，不按模式放宽（ECOM-RESOLUTION-UI-0001：电商也带 resolution，需与 video_gen 同等把关，不伪造放行）。
+    if (body.resolution !== undefined && !VIDEO_GEN_RESOLUTIONS.includes(body.resolution)) {
+      return err(422, "VALIDATION_ERROR", "resolution 非法");
+    }
     // 视频生成 video_gen 校验（逐字对齐后端 schemas/videos.py:213-222：参考图 1–9 且**唯一**、prompt
-    // 非空、duration∈{5,10,15}、resolution∈{480p,720p,1080p}、bgm 二选一可选）→ 非法 422，不伪造放行/不放宽
-    // （吸取发布中心/声音克隆 mock 掩盖契约教训）。
+    // 非空、duration∈{5,10,15}、bgm 二选一可选）→ 非法 422，不伪造放行/不放宽（resolution 已在上方全模式把关）。
     if (body.video_mode === "video_gen") {
       const refs = body.reference_image_asset_ids ?? [];
       const refsUnique = new Set(refs).size === refs.length; // 对齐后端唯一性校验（重复→422）
@@ -335,7 +348,6 @@ export const handlers = [
         !body.prompt ||
         !body.prompt.trim() ||
         !VIDEO_GEN_DURATIONS.includes(body.duration_sec as number) ||
-        !VIDEO_GEN_RESOLUTIONS.includes(body.resolution as string) ||
         !bgmOk
       ) {
         return err(422, "VIDEO_GEN_INVALID", "视频生成参数非法");
