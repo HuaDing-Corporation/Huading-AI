@@ -25,14 +25,15 @@ const GENDER_OPTIONS: { id: ModelGender; label: string }[] = [
  * 单张 POST /ecom-images/model、批量 /model/batch 返回已创建 photo task(kind=ecom_model)，
  * 由外壳 trackExisting 轮询（产物进 TaskList + 图片历史）。
  */
-export function EcomImageModelForm() {
+export function EcomImageModelForm({ initialCustom }: { initialCustom?: string } = {}) {
   const model = useModelImage();
   const modelBatch = useModelBatch();
   const styles = useModelStyles();
 
   const [gender, setGender] = useState<ModelGender>("female");
   const [styleId, setStyleId] = useState<string | null>(null);
-  const [custom, setCustom] = useState("");
+  // 提示词反推「带入 · 电商图(AI 模特)」惰性注入自定义补充(= extra_prompt)。
+  const [custom, setCustom] = useState(() => (initialCustom ?? "").slice(0, MAX_CUSTOM));
 
   const styleList = styles.data ?? [];
   const extraPrompt = custom.trim() || undefined;

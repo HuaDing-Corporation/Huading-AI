@@ -1,9 +1,20 @@
 import { multipartFetch } from "@/lib/api/client";
+import { copy } from "@/lib/copy";
 import type { UploadImageResponse, UploadResponse } from "@/lib/api/types";
 
 // Client-side guards (the backend enforces the same; this is a fast first pass).
 export const ALLOWED_UPLOAD_TYPES = ["image/jpeg", "image/png", "image/webp"];
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
+
+/**
+ * 图片上传客户端校验（快速第一道；后端仍会二次把关）。**按真实 MIME（file.type）判定，不信文件名后缀**——
+ * 把 evil.exe 改名 a.png 仍会被 type 挡下。返回友好中文错误串，合规返回 null。供提示词反推等上传入口复用。
+ */
+export function validateImageFile(file: File): string | null {
+  if (!ALLOWED_UPLOAD_TYPES.includes(file.type)) return copy.errors.uploadType;
+  if (file.size > MAX_UPLOAD_BYTES) return copy.errors.uploadTooLarge;
+  return null;
+}
 
 /** 单文件 multipart 上传 → 解包封套。复用 client.multipartFetch（鉴权/401/封套单一实现）。 */
 function postImageUpload<T>(path: string, file: File): Promise<T> {

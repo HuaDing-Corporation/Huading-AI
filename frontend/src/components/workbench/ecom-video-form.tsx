@@ -35,9 +35,16 @@ const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
  * shares logic with NewVideoForm rather than duplicating it.
  */
 export function EcomVideoForm({
+  initialTopic,
+  initialScenePrompt,
   initialScript,
   onPrefillConsumed
-}: { initialScript?: string; onPrefillConsumed?: () => void } = {}) {
+}: {
+  initialTopic?: string;
+  initialScenePrompt?: string;
+  initialScript?: string;
+  onPrefillConsumed?: () => void;
+} = {}) {
   const { createAndTrack } = useVideoTasks();
   const scriptGen = useScriptGenerate();
   const scenePromptGen = useScenePromptGenerate();
@@ -45,10 +52,10 @@ export function EcomVideoForm({
   const voices = useVoices();
   const productImage = useTrackedUpload(uploadProduct.mutateAsync, (r) => r.image_key);
 
-  const [topic, setTopic] = useState("");
-  // 文案模式「用此文案」一次性 prefill：惰性消费 initialScript，mount 后回调 page 清空。
+  // 一次性 prefill：文案「用此文案」注 script；提示词反推「带入」注 topic + scene_prompt(+script)。惰性消费。
+  const [topic, setTopic] = useState(() => initialTopic ?? "");
   const [script, setScript] = useState(() => initialScript ?? "");
-  const [scenePrompt, setScenePrompt] = useState("");
+  const [scenePrompt, setScenePrompt] = useState(() => initialScenePrompt ?? "");
   const [voiceId, setVoiceId] = useState("");
   const [durationSec, setDurationSec] = useState(30);
   // 分辨率（ECOM-RESOLUTION-UI-0001）：默认 720p 与后端缺省一致，不选时行为不变。
@@ -58,11 +65,14 @@ export function EcomVideoForm({
   const [error, setError] = useState<string | null>(null);
   const prefillConsumed = useRef(false);
   useEffect(() => {
-    if (!prefillConsumed.current && initialScript !== undefined) {
+    if (
+      !prefillConsumed.current &&
+      (initialTopic !== undefined || initialScenePrompt !== undefined || initialScript !== undefined)
+    ) {
       prefillConsumed.current = true;
       onPrefillConsumed?.();
     }
-  }, [initialScript, onPrefillConsumed]);
+  }, [initialTopic, initialScenePrompt, initialScript, onPrefillConsumed]);
 
   // Actual submit — runs only after the 确定生成 confirmation; owns its own errors.
   const submit = async (req: CreateVideoRequest) => {

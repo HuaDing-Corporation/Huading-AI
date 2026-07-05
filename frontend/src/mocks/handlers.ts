@@ -45,6 +45,39 @@ let audioAssetSeq = 0;
 // 图片资产上传序号：每次 /uploads/images 返唯一 asset_id（贴近真后端 uuid），避免多图碰撞同 id。
 let imageUploadSeq = 0;
 
+// ── 提示词反推 (REVERSE-PROMPT-UI-0001) mock ── 忠实任务包 §三扁平契约：扁平 result + 4 fill_targets。
+// fill_targets 4 模块齐备 → 结果页「带入」四路全亮，交互冒烟可逐一验证落点；缺则该模块置灰。非伪造。
+let reverseSeq = 0;
+const REVERSE_RESULT = {
+  target_format: "seedance_2_0",
+  subject: "白色大理石台面上的便携保温杯",
+  scene: "室内桌面，暖色晨光",
+  composition: "居中特写，浅景深",
+  camera: "35mm 定焦，微俯拍",
+  lighting: "柔和暖光，右上主光",
+  style_tags: ["产品广告", "极简", "高级质感"],
+  motion_hint: "缓慢环绕运镜，蒸汽轻升",
+  prompt_zh: "白色大理石台面上的便携保温杯，暖色晨光，浅景深特写，产品广告风格，缓慢环绕运镜，蒸汽轻升。",
+  prompt_en:
+    "A portable insulated bottle on a white marble countertop, warm morning light, shallow depth of field, product-ad style, slow orbiting camera, gentle rising steam.",
+  negative_prompt: "低分辨率, 变形, 多余文字, 水印, 杂乱背景",
+  selling_points: ["24 小时保温", "便携轻巧", "食品级内胆"],
+  text_in_media: ["24H"],
+  confidence: 0.82,
+  disclaimer: "AI 依据画面近似重建提示词，仅供二次创作参考，不保证完全复刻原素材。",
+  fill_targets: {
+    avatar_talk: { topic: "便携保温杯种草", script: "大家好，今天给大家安利这款便携保温杯，24 小时保温，出门必备……" },
+    seedance_i2v: { topic: "便携保温杯卖点", scene_prompt: "白色大理石台面暖光特写，蒸汽轻升，缓慢环绕运镜" },
+    video_gen: { prompt: "白色大理石台面上的保温杯，暖色晨光，缓慢环绕运镜，产品广告风格", topic: "便携保温杯" },
+    ecom_image: {
+      topic: "便携保温杯",
+      extra_prompt: "工作室柔光、简洁白底、突出质感",
+      poster_title: "年中大促",
+      poster_subtitle: "限时 5 折 错过再等一年"
+    }
+  }
+};
+
 // ── 深度合成标识设置 (LABEL-UI-0001) mock store ──
 // 忠实契约：enabled 只读恒真(合规不可关)；PUT 校验 text 非空 ≤20(否则 422)；非伪造。
 const labelSettings = { position: "br", text: "AI 生成", enabled: true };
@@ -325,6 +358,16 @@ export const handlers = [
       { status: 201 }
     );
   }),
+  // 提示词反推（REVERSE-PROMPT-UI-0001）：只收 source_asset_id + 语言 + 细节 → 同步返回 completed + 扁平 result。
+  http.post(`${BASE}/api/v1/reverse-prompt`, async ({ request }) => {
+    const body = (await request.json()) as { source_asset_id?: string };
+    if (!body.source_asset_id) return err(422, "VALIDATION_ERROR", "source_asset_id is required");
+    return ok({ jobId: `rp-${++reverseSeq}`, status: "completed", result: REVERSE_RESULT });
+  }),
+  http.post(`${BASE}/api/v1/reverse-prompt/:jobId/regenerate`, ({ params }) =>
+    ok({ jobId: String(params.jobId), status: "completed", result: REVERSE_RESULT })
+  ),
+  http.post(`${BASE}/api/v1/reverse-prompt/:jobId/save`, () => ok({ saved: true })),
   http.post(`${BASE}/api/v1/videos`, async ({ request }) => {
     const body = (await request.json()) as {
       topic?: string;

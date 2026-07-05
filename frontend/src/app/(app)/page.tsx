@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronLeft, Clapperboard, Eraser, ImagePlus, Mic, PenLine, Share2, ShieldCheck, Store, UserRound, type LucideIcon } from "lucide-react";
+import { ChevronLeft, Clapperboard, Eraser, ImagePlus, Mic, PenLine, ScanSearch, Share2, ShieldCheck, Store, UserRound, type LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
@@ -11,20 +11,23 @@ import { NewVideoForm } from "@/components/workbench/new-video-form";
 import { PhotoImageForm } from "@/components/workbench/photo-image-form";
 import { CopywritingForm } from "@/components/workbench/copywriting-form";
 import { EcomImageWorkbench } from "@/components/workbench/ecom-image-workbench";
+import { ReversePromptForm } from "@/components/workbench/reverse-prompt-form";
 import { GenerationHistory } from "@/components/tasks/generation-history";
 import { Sidebar } from "@/components/layout/sidebar";
 import { TaskList } from "@/components/tasks/task-list";
 import { TopBar } from "@/components/layout/top-bar";
+import type { WorkbenchPrefill } from "@/lib/api/reverse-prompt";
 import { copy } from "@/lib/copy";
 
-type WorkbenchMode = "avatar_talk" | "seedance_i2v" | "video_gen" | "photo" | "copywriting" | "ecom_image";
+type WorkbenchMode = "avatar_talk" | "seedance_i2v" | "video_gen" | "photo" | "copywriting" | "ecom_image" | "reverse_prompt";
 type VideoMode = "avatar_talk" | "seedance_i2v";
 
-// Workbench modes: 数字人口播 (video) / 电商带货 i2v (video) / 视频生成 i2v (video) / 照片·AI 图 (image) / 文案仿写 (text) / 电商图·白底图 (image).
+// Workbench modes: 数字人口播 (video) / 电商带货 i2v (video) / 视频生成 i2v (video) / 提示词反推 (image→prompt) / 照片·AI 图 (image) / 文案仿写 (text) / 电商图·白底图 (image).
 const MODES: { id: WorkbenchMode; label: string; Icon: LucideIcon }[] = [
   { id: "avatar_talk", label: copy.workbench.modeAvatar, Icon: UserRound },
   { id: "seedance_i2v", label: copy.workbench.modeEcom, Icon: Store },
   { id: "video_gen", label: copy.workbench.modeVideoGen, Icon: Clapperboard },
+  { id: "reverse_prompt", label: copy.workbench.modeReverse, Icon: ScanSearch },
   { id: "photo", label: copy.workbench.modePhoto, Icon: ImagePlus },
   { id: "copywriting", label: copy.workbench.modeCopywriting, Icon: PenLine },
   { id: "ecom_image", label: copy.workbench.modeEcomImage, Icon: Eraser }
@@ -33,12 +36,17 @@ const MODES: { id: WorkbenchMode; label: string; Icon: LucideIcon }[] = [
 export default function Home() {
   const router = useRouter();
   const [mode, setMode] = useState<WorkbenchMode>("avatar_talk");
-  // 一次性 prefill：文案模式「用此文案」→ 注入目标视频表单的 script，目标表单 mount 消费后
-  // 回调 clearPrefill 清空，避免口播↔电商来回切 remount 时重复注入旧文案。
-  const [pendingPrefill, setPendingPrefill] = useState<{ target: VideoMode; script: string } | null>(null);
+  // 一次性 prefill：文案模式「用此文案」(script-only) 与 提示词反推「带入」(富载荷) 共用同一缓冲——
+  // 目标表单 mount 惰性消费后回调 clearPrefill 清空，避免来回切 remount 时重复注入旧值。
+  const [pendingPrefill, setPendingPrefill] = useState<WorkbenchPrefill | null>(null);
   const useCopyInVideo = (target: VideoMode, script: string) => {
     setPendingPrefill({ target, script });
     setMode(target);
+  };
+  // 提示词反推「带入 X」：BE 载荷经 fillTargetToPrefill 已落好字段，这里切模式 + 缓冲，目标表单 mount 消费。
+  const applyPrefill = (prefill: WorkbenchPrefill) => {
+    setPendingPrefill(prefill);
+    setMode(prefill.target);
   };
   const clearPrefill = () => setPendingPrefill(null);
 
@@ -127,20 +135,34 @@ export default function Home() {
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(320px,400px)_minmax(0,1fr)]">
             {mode === "avatar_talk" ? (
               <NewVideoForm
+                initialTopic={pendingPrefill?.target === "avatar_talk" ? pendingPrefill.topic : undefined}
                 initialScript={pendingPrefill?.target === "avatar_talk" ? pendingPrefill.script : undefined}
                 onPrefillConsumed={clearPrefill}
               />
             ) : mode === "seedance_i2v" ? (
               <EcomVideoForm
+                initialTopic={pendingPrefill?.target === "seedance_i2v" ? pendingPrefill.topic : undefined}
+                initialScenePrompt={pendingPrefill?.target === "seedance_i2v" ? pendingPrefill.scenePrompt : undefined}
                 initialScript={pendingPrefill?.target === "seedance_i2v" ? pendingPrefill.script : undefined}
                 onPrefillConsumed={clearPrefill}
               />
             ) : mode === "video_gen" ? (
-              <VideoGenForm />
+              <VideoGenForm
+                initialPrompt={pendingPrefill?.target === "video_gen" ? pendingPrefill.prompt : undefined}
+                onPrefillConsumed={clearPrefill}
+              />
+            ) : mode === "reverse_prompt" ? (
+              <ReversePromptForm onApplyPrefill={applyPrefill} />
             ) : mode === "copywriting" ? (
               <CopywritingForm onUseInVideo={useCopyInVideo} />
             ) : mode === "ecom_image" ? (
-              <EcomImageWorkbench />
+              <EcomImageWorkbench
+                initialTool={pendingPrefill?.target === "ecom_image" ? pendingPrefill.tool : undefined}
+                initialCustom={pendingPrefill?.target === "ecom_image" ? pendingPrefill.custom : undefined}
+                initialTitle={pendingPrefill?.target === "ecom_image" ? pendingPrefill.title : undefined}
+                initialTagline={pendingPrefill?.target === "ecom_image" ? pendingPrefill.tagline : undefined}
+                onPrefillConsumed={clearPrefill}
+              />
             ) : (
               <PhotoImageForm />
             )}
