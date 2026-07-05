@@ -164,7 +164,10 @@ export default function Home() {
                 onPrefillConsumed={clearPrefill}
               />
             ) : (
-              <PhotoImageForm />
+              <PhotoImageForm
+                initialPrompt={pendingPrefill?.target === "photo" ? pendingPrefill.prompt : undefined}
+                onPrefillConsumed={clearPrefill}
+              />
             )}
             <TaskList />
           </div>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Sparkles } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
@@ -37,12 +37,23 @@ const PHOTO_QUALITIES = ["low", "medium", "high"] as const;
  * and the submit body carries image_size + image_quality. The result is an image,
  * not a video. The ONLY hooks caller here.
  */
-export function PhotoImageForm() {
+export function PhotoImageForm({
+  initialPrompt,
+  onPrefillConsumed
+}: { initialPrompt?: string; onPrefillConsumed?: () => void } = {}) {
   const { createAndTrack } = useVideoTasks();
   const uploadRef = useUploadProductImage();
   const refImage = useTrackedUpload(uploadRef.mutateAsync, (r) => r.image_key);
 
-  const [prompt, setPrompt] = useState("");
+  // 提示词反推「带入 · 图片生成」注入 prompt(=fill_targets.photo.topic)；惰性消费，mount 后回调 page 清空。
+  const [prompt, setPrompt] = useState(() => initialPrompt ?? "");
+  const prefillConsumed = useRef(false);
+  useEffect(() => {
+    if (!prefillConsumed.current && initialPrompt !== undefined) {
+      prefillConsumed.current = true;
+      onPrefillConsumed?.();
+    }
+  }, [initialPrompt, onPrefillConsumed]);
   const [imageSize, setImageSize] = useState<string>(PHOTO_SIZES[0]);
   const [imageQuality, setImageQuality] = useState<string>("medium");
   const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）

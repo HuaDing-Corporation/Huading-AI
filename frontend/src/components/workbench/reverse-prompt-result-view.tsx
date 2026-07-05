@@ -5,9 +5,9 @@ import { AlertTriangle, Copy, RefreshCw, Save, Sparkles } from "lucide-react";
 
 import {
   fillTargetToPrefill,
+  type ReversePromptFillTargetKey,
   type ReversePromptResult,
-  type WorkbenchPrefill,
-  type WorkbenchPrefillTarget
+  type WorkbenchPrefill
 } from "@/lib/api/reverse-prompt";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
@@ -79,11 +79,14 @@ function TagRow({ label, tags, note }: { label: string; tags: string[]; note?: s
   );
 }
 
-const APPLY_BUTTONS: { target: WorkbenchPrefillTarget; label: string }[] = [
-  { target: "avatar_talk", label: copy.reverse.applyAvatar },
-  { target: "seedance_i2v", label: copy.reverse.applyEcomVideo },
-  { target: "video_gen", label: copy.reverse.applyVideoGen },
-  { target: "ecom_image", label: copy.reverse.applyEcomImage }
+// 6 个「带入」按键，逐一对齐 BE fill_targets 的 6 键 → 对应工作台模式。
+const APPLY_BUTTONS: { key: ReversePromptFillTargetKey; label: string }[] = [
+  { key: "avatar_talk", label: copy.reverse.applyAvatar },
+  { key: "seedance_i2v", label: copy.reverse.applyEcomVideo },
+  { key: "video_gen", label: copy.reverse.applyVideoGen },
+  { key: "photo", label: copy.reverse.applyPhoto },
+  { key: "ecom_model", label: copy.reverse.applyEcomModel },
+  { key: "ecom_poster", label: copy.reverse.applyEcomPoster }
 ];
 
 export interface ReversePromptResultViewProps {
@@ -169,11 +172,11 @@ export function ReversePromptResultView({
         </div>
         <p className="mb-2.5 text-[12px] text-ink-soft">{copy.reverse.applyHint}</p>
         <div className="grid grid-cols-2 gap-2">
-          {APPLY_BUTTONS.map(({ target, label }) => {
-            const prefill = fillTargetToPrefill(target, result.fill_targets);
+          {APPLY_BUTTONS.map(({ key, label }) => {
+            const prefill = fillTargetToPrefill(key, result.fill_targets);
             return (
               <Button
-                key={target}
+                key={key}
                 variant="soft"
                 size="sm"
                 className="justify-start"

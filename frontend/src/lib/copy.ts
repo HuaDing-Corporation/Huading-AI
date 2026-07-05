@@ -309,14 +309,7 @@ export const copy = {
     upload: "上传图片",
     uploadHint: "支持 JPG / PNG / WebP，≤10MB；仅用于本次反推参考",
     reupload: "换一张",
-    langLabel: "输出语言",
-    langZh: "中文",
-    langEn: "英文",
-    langBilingual: "中英双语",
-    detailLabel: "细节程度",
-    detailConcise: "精简",
-    detailStandard: "标准",
-    detailExpert: "专家",
+    // 输出语言/细节度不进请求（BE extra="forbid"，且输出本就同时给 zh+en）——面板已移除，仅保留目标格式只读展示。
     targetLabel: "目标格式",
     targetSeedance: "Seedance 2.0",
     analyze: "开始反推",
@@ -349,7 +342,9 @@ export const copy = {
     applyAvatar: "带入 · 数字人口播",
     applyEcomVideo: "带入 · 电商带货",
     applyVideoGen: "带入 · 视频生成",
-    applyEcomImage: "带入 · 电商图",
+    applyPhoto: "带入 · 图片生成",
+    applyEcomModel: "带入 · AI 模特",
+    applyEcomPoster: "带入 · 营销海报",
     applyUnavailable: "该模块暂无可带入内容"
   },
   tasks: {

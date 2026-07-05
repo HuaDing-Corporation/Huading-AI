@@ -24,8 +24,10 @@ const FULL: ReversePromptResult = {
   fill_targets: {
     avatar_talk: { topic: "保温杯种草", script: "大家好……" },
     seedance_i2v: { topic: "保温杯卖点", scene_prompt: "暖光特写" },
-    video_gen: { prompt: "保温杯广告运镜", topic: "保温杯" },
-    ecom_image: { topic: "保温杯", extra_prompt: "白底柔光", poster_title: "大促", poster_subtitle: "5 折" }
+    video_gen: { topic: "保温杯", prompt: "保温杯广告运镜" },
+    photo: { topic: "白底保温杯特写" },
+    ecom_model: { extra_prompt: "白底柔光" },
+    ecom_poster: { title: "大促", subtitle: "5 折" }
   }
 };
 
@@ -44,13 +46,13 @@ describe("ReversePromptResultView（反推结果 + 带入 4 模块）", () => {
 
   it("近似重建红线 disclaimer 醒目呈现（BE 给则用其文案）", () => {
     render(<ReversePromptResultView result={FULL} onApply={noop} onRegenerate={noop} onSave={noop} />);
-    expect(screen.getByText(FULL.disclaimer!)).toBeInTheDocument();
+    expect(screen.getByText(FULL.disclaimer)).toBeInTheDocument();
   });
 
-  it("BE 未给 disclaimer → 用前端兜底红线文案（近似重建不可少）", () => {
+  it("BE 空 disclaimer（默认空串）→ 用前端兜底红线文案（近似重建不可少）", () => {
     render(
       <ReversePromptResultView
-        result={{ ...FULL, disclaimer: undefined }}
+        result={{ ...FULL, disclaimer: "" }}
         onApply={noop}
         onRegenerate={noop}
         onSave={noop}
@@ -64,14 +66,16 @@ describe("ReversePromptResultView（反推结果 + 带入 4 模块）", () => {
     expect(screen.getByText(/82\s*%/)).toBeInTheDocument();
   });
 
-  it("带入 4 模块按钮齐备；全 fill_targets 在 → 均可点，点「数字人口播」以正确落点 apply", () => {
+  it("带入 6 模块按钮齐备；全 fill_targets 在 → 均可点，点「数字人口播」以正确落点 apply", () => {
     const onApply = vi.fn();
     render(<ReversePromptResultView result={FULL} onApply={onApply} onRegenerate={noop} onSave={noop} />);
     for (const label of [
       copy.reverse.applyAvatar,
       copy.reverse.applyEcomVideo,
       copy.reverse.applyVideoGen,
-      copy.reverse.applyEcomImage
+      copy.reverse.applyPhoto,
+      copy.reverse.applyEcomModel,
+      copy.reverse.applyEcomPoster
     ]) {
       expect(screen.getByRole("button", { name: label })).toBeEnabled();
     }
@@ -86,27 +90,35 @@ describe("ReversePromptResultView（反推结果 + 带入 4 模块）", () => {
     expect(onApply).toHaveBeenCalledWith({ target: "seedance_i2v", topic: "保温杯卖点", scenePrompt: "暖光特写" });
   });
 
-  it("点「带入·电商图」（含海报标题）→ 落营销海报 poster + title/subtitle", () => {
+  it("点「带入·图片生成」→ photo.topic 落 prompt", () => {
     const onApply = vi.fn();
     render(<ReversePromptResultView result={FULL} onApply={onApply} onRegenerate={noop} onSave={noop} />);
-    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyEcomImage }));
-    expect(onApply).toHaveBeenCalledWith({
-      target: "ecom_image",
-      tool: "poster",
-      custom: "白底柔光",
-      title: "大促",
-      tagline: "5 折"
-    });
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyPhoto }));
+    expect(onApply).toHaveBeenCalledWith({ target: "photo", prompt: "白底保温杯特写" });
   });
 
-  it("承重：缺某 fill_target → 该模块「带入」置灰不可点，且不触发 apply", () => {
+  it("点「带入·AI 模特」→ ecom_model.extra_prompt 落 custom（tool=model）", () => {
     const onApply = vi.fn();
-    const onlyAvatar: ReversePromptResult = {
+    render(<ReversePromptResultView result={FULL} onApply={onApply} onRegenerate={noop} onSave={noop} />);
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyEcomModel }));
+    expect(onApply).toHaveBeenCalledWith({ target: "ecom_image", tool: "model", custom: "白底柔光" });
+  });
+
+  it("点「带入·营销海报」→ ecom_poster.title/subtitle 落 title/tagline（tool=poster）", () => {
+    const onApply = vi.fn();
+    render(<ReversePromptResultView result={FULL} onApply={onApply} onRegenerate={noop} onSave={noop} />);
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyEcomPoster }));
+    expect(onApply).toHaveBeenCalledWith({ target: "ecom_image", tool: "poster", title: "大促", tagline: "5 折" });
+  });
+
+  it("承重：缺某 fill_target 键 → 该模块「带入」置灰不可点，且不触发 apply", () => {
+    const onApply = vi.fn();
+    const onlyAvatar = {
       ...FULL,
       fill_targets: { avatar_talk: { topic: "x", script: "y" } }
-    };
+    } as unknown as ReversePromptResult;
     render(<ReversePromptResultView result={onlyAvatar} onApply={onApply} onRegenerate={noop} onSave={noop} />);
-    const ecomBtn = screen.getByRole("button", { name: copy.reverse.applyEcomVideo });
+    const ecomBtn = screen.getByRole("button", { name: copy.reverse.applyEcomPoster });
     expect(ecomBtn).toBeDisabled();
     fireEvent.click(ecomBtn);
     expect(onApply).not.toHaveBeenCalled();

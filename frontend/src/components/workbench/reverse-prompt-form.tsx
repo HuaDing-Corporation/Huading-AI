@@ -3,41 +3,24 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { ImageUp, Loader2, Sparkles, X } from "lucide-react";
 
-import { errorText } from "@/lib/api/error-text";
+import { ApiError } from "@/lib/api/client";
 import { useRegenerateReversePrompt, useReverseFromAsset, useSaveReversePrompt, useUploadImage } from "@/lib/api/hooks";
 import { useTrackedUpload } from "@/lib/api/use-tracked-upload";
 import { validateImageFile } from "@/lib/api/uploads";
-import {
-  friendlyReverseError,
-  type ReversePromptDetail,
-  type ReversePromptJob,
-  type ReversePromptLanguage,
-  type WorkbenchPrefill
-} from "@/lib/api/reverse-prompt";
+import { friendlyReverseError, type ReversePromptJobRead, type WorkbenchPrefill } from "@/lib/api/reverse-prompt";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
-import { SelectableOption } from "@/components/ui/selectable-option";
 import { ReversePromptResultView } from "@/components/workbench/reverse-prompt-result-view";
 import { copy } from "@/lib/copy";
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 
-const LANGUAGES: { id: ReversePromptLanguage; label: string }[] = [
-  { id: "zh", label: copy.reverse.langZh },
-  { id: "en", label: copy.reverse.langEn },
-  { id: "bilingual", label: copy.reverse.langBilingual }
-];
-const DETAILS: { id: ReversePromptDetail; label: string }[] = [
-  { id: "concise", label: copy.reverse.detailConcise },
-  { id: "standard", label: copy.reverse.detailStandard },
-  { id: "expert", label: copy.reverse.detailExpert }
-];
-
 /**
- * 提示词反推 · 图片 (REVERSE-PROMPT-UI-0001) 工作台容器 —— 唯一 hooks 调用方。状态机：
- * 上传图片(客户端校验，走现有 /uploads/images 拿 source_asset_id) → 选语言/细节 → 反推 →
- * 结果块 + 复制/保存/重推 + 「带入」4 模块。带入落点由 ReversePromptResultView 据 BE 载荷直落，
- * 经 onApplyPrefill 冒泡至 page 切模式并预填目标表单。P1 只图片，但类型/交互未写死「只图片」。
+ * 提示词反推 · 图片 (REVERSE-PROMPT-UI) 工作台容器 —— 唯一 hooks 调用方。状态机：
+ * 上传图片(客户端校验，走现有 /uploads/images 拿 source_asset_id) → 反推 → 结果块 + 复制/保存/重推 +
+ * 「带入」6 键。FIX1：请求体仅 { source_asset_id }（BE extra="forbid"，语言/细节不进请求，输出本就给 zh+en）；
+ * 成功以 result 存在为准（BE status="succeeded"），失败经 apiFetch throw 落 catch。带入落点由结果视图据
+ * BE 载荷直落，经 onApplyPrefill 冒泡至 page 切模式并预填目标表单。P1 只图片，但类型/交互未写死「只图片」。
  */
 export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefill: WorkbenchPrefill) => void } = {}) {
   const uploadImg = useUploadImage();
@@ -47,9 +30,7 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
   const save = useSaveReversePrompt();
 
   const [preview, setPreview] = useState<string | null>(null);
-  const [lang, setLang] = useState<ReversePromptLanguage>("bilingual");
-  const [detail, setDetail] = useState<ReversePromptDetail>("standard");
-  const [job, setJob] = useState<ReversePromptJob | null>(null);
+  const [job, setJob] = useState<ReversePromptJobRead | null>(null);
   const [saved, setSaved] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
@@ -95,18 +76,15 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
     setLocalError(null);
     setSaved(false);
     try {
-      const res = await reverse.mutateAsync({
-        source_asset_id: source.value,
-        output_language: lang,
-        detail_level: detail
-      });
-      if (res.status === "failed" || !res.result) {
+      const res = await reverse.mutateAsync({ source_asset_id: source.value });
+      if (!res.result) {
         setLocalError(friendlyReverseError(res.error_code));
         return;
       }
       setJob(res);
     } catch (err) {
-      setLocalError(friendlyReverseError(null, errorText(err)));
+      // 只取 ApiError.code（无稳定码→通用中文兜底）；不透传后端英文 message，绝不泄裸/英文。
+      setLocalError(friendlyReverseError(err instanceof ApiError ? err.code : null));
     }
   };
 
@@ -115,14 +93,15 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
     setLocalError(null);
     setSaved(false);
     try {
-      const res = await regen.mutateAsync(job.jobId);
-      if (res.status === "failed" || !res.result) {
+      const res = await regen.mutateAsync(job.id);
+      if (!res.result) {
         setLocalError(friendlyReverseError(res.error_code));
         return;
       }
       setJob(res);
     } catch (err) {
-      setLocalError(friendlyReverseError(null, errorText(err)));
+      // 只取 ApiError.code（无稳定码→通用中文兜底）；不透传后端英文 message，绝不泄裸/英文。
+      setLocalError(friendlyReverseError(err instanceof ApiError ? err.code : null));
     }
   };
 
@@ -130,10 +109,10 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
     if (!job || save.isPending) return;
     setLocalError(null);
     try {
-      await save.mutateAsync(job.jobId);
+      await save.mutateAsync(job.id);
       setSaved(true);
     } catch (err) {
-      setLocalError(friendlyReverseError(null, errorText(err)));
+      setLocalError(friendlyReverseError(err instanceof ApiError ? err.code : null));
     }
   };
 
@@ -182,31 +161,7 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
           )}
         </div>
 
-        {/* 输出语言 */}
-        <fieldset className="mb-[15px] m-0 min-w-0 border-0 p-0">
-          <legend className={labelClass}>{copy.reverse.langLabel}</legend>
-          <div className="grid grid-cols-3 gap-2">
-            {LANGUAGES.map(({ id, label }) => (
-              <SelectableOption key={id} selected={lang === id} onSelect={() => setLang(id)} className="justify-center">
-                {label}
-              </SelectableOption>
-            ))}
-          </div>
-        </fieldset>
-
-        {/* 细节程度 */}
-        <fieldset className="mb-[15px] m-0 min-w-0 border-0 p-0">
-          <legend className={labelClass}>{copy.reverse.detailLabel}</legend>
-          <div className="grid grid-cols-3 gap-2">
-            {DETAILS.map(({ id, label }) => (
-              <SelectableOption key={id} selected={detail === id} onSelect={() => setDetail(id)} className="justify-center">
-                {label}
-              </SelectableOption>
-            ))}
-          </div>
-        </fieldset>
-
-        {/* 目标格式（固定 seedance_2_0，只读展示） */}
+        {/* 目标格式（固定 seedance_2_0，只读展示；语言/细节不进请求，故无设置项） */}
         <div className="mb-[18px] flex items-center justify-between rounded-field border border-line-gold bg-glass-soft px-3 py-2">
           <span className="text-[12.5px] text-ink-soft">{copy.reverse.targetLabel}</span>
           <span className="text-[12.5px] font-medium text-ink">{copy.reverse.targetSeedance}</span>
