@@ -28,6 +28,69 @@ def test_reverse_prompt_seed_provider_id_fits_provider_config_column():
     assert len(migration._PROVIDER_ID) <= 36
 
 
+def test_reverse_prompt_seed_credit_rate_defaults_to_30():
+    migration_path = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "20260706_0017_reverse_prompt_jobs.py"
+    )
+    spec = importlib.util.spec_from_file_location("reverse_prompt_migration_rate", migration_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    class _Batch:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def drop_constraint(self, *args, **kwargs):
+            return None
+
+        def create_check_constraint(self, *args, **kwargs):
+            return None
+
+    class _Op:
+        def __init__(self):
+            self.inserted = []
+
+        def create_table(self, *args, **kwargs):
+            return None
+
+        def create_index(self, *args, **kwargs):
+            return None
+
+        def batch_alter_table(self, *args, **kwargs):
+            return _Batch()
+
+        def bulk_insert(self, table, rows):
+            self.inserted.append((table.name, rows))
+
+    fake_op = _Op()
+    migration.op = fake_op
+    migration.upgrade()
+
+    credit_rate_rows = [
+        row
+        for table_name, rows in fake_op.inserted
+        if table_name == "credit_rates"
+        for row in rows
+    ]
+    assert credit_rate_rows == [
+        {
+            "id": "reverse-prompt-call-rate",
+            "tenant_id": None,
+            "capability": "reverse_prompt",
+            "unit": "call",
+            "credits_per_unit": 30,
+            "is_active": True,
+        }
+    ]
+
+
 class _Response:
     def __init__(self, payload: dict, status_code: int = 200) -> None:
         self._payload = payload
@@ -303,9 +366,9 @@ def test_reverse_prompt_sync_creates_job_records_usage_and_returns_fill_targets(
     assert usage.model == "gemini-3.1-pro-preview"
     assert usage.unit == "token"
     assert usage.quantity == Decimal("1500.000")
-    assert usage.credits == Decimal("1.00")
+    assert usage.credits == Decimal("30.00")
     assert usage.cost_cents == 5
-    assert subscription.quota_credits_used == 1
+    assert subscription.quota_credits_used == 30
     db.close()
 
 

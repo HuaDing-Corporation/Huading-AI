@@ -181,7 +181,7 @@ def upgrade() -> None:
                 "tenant_id": None,
                 "capability": "reverse_prompt",
                 "unit": "call",
-                "credits_per_unit": 1,
+                "credits_per_unit": 30,
                 "is_active": True,
             }
         ],

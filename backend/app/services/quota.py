@@ -324,7 +324,7 @@ def estimate_reverse_prompt_quota(
         tenant_id=tenant_id,
         capability="reverse_prompt",
         unit="call",
-        default=Decimal("1.0000"),
+        default=Decimal("30.0000"),
     )
     credits = reverse_prompt_rate.quantize(Decimal("0.01"))
     return QuotaEstimate(
