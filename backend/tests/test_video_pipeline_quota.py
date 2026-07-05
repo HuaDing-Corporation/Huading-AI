@@ -35,9 +35,9 @@ def _seed_subscription(db, tenant_id: str, *, total: int, used: int = 0, reserve
     db.add(sub)
     db.add_all(
         [
-            CreditRate(capability="avatar", unit="second", credits_per_unit=Decimal("1.0000")),
-            CreditRate(capability="tts", unit="second", credits_per_unit=Decimal("0.2000")),
-            CreditRate(capability="image", unit="image", credits_per_unit=Decimal("5.0000")),
+            CreditRate(capability="avatar", unit="second", credits_per_unit=Decimal("150.0000")),
+            CreditRate(capability="tts", unit="character", credits_per_unit=Decimal("0.1000")),
+            CreditRate(capability="image", unit="image", credits_per_unit=Decimal("10.0000")),
         ]
     )
     db.commit()
@@ -194,12 +194,12 @@ def test_image_generation_quota_uses_quality_multipliers(auth_context, auth_db) 
 
     assert low.capability == "image"
     assert low.unit == "image"
-    assert low.reservation_units == 5
-    assert low.estimated_credits == Decimal("5.00")
-    assert medium.reservation_units == 20
-    assert medium.estimated_credits == Decimal("20.00")
-    assert high.reservation_units == 75
-    assert high.estimated_credits == Decimal("75.00")
+    assert low.reservation_units == 10
+    assert low.estimated_credits == Decimal("10.00")
+    assert medium.reservation_units == 40
+    assert medium.estimated_credits == Decimal("40.00")
+    assert high.reservation_units == 150
+    assert high.estimated_credits == Decimal("150.00")
 
 
 def test_reserve_image_generation_quota_creates_reserved_usage(auth_context, auth_db) -> None:
@@ -226,8 +226,8 @@ def test_reserve_image_generation_quota_creates_reserved_usage(auth_context, aut
         reserved = sub.quota_credits_reserved
 
     assert reservation.estimated_seconds == 1
-    assert reservation.estimated_credits == Decimal("20.00")
-    assert reserved == 20
+    assert reservation.estimated_credits == Decimal("40.00")
+    assert reserved == 40
     assert record.status == "reserved"
     assert record.capability == "image"
     assert record.provider == "apimart"

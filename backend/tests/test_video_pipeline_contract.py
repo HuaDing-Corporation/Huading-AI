@@ -77,25 +77,25 @@ def _seed_billing(db, tenant_id: str) -> Subscription:
                 tenant_id=None,
                 capability="avatar",
                 unit="second",
-                credits_per_unit=Decimal("1.0000"),
+                credits_per_unit=Decimal("150.0000"),
             ),
             CreditRate(
                 tenant_id=None,
                 capability="tts",
-                unit="second",
-                credits_per_unit=Decimal("0.2000"),
+                unit="character",
+                credits_per_unit=Decimal("0.1000"),
             ),
             CreditRate(
                 tenant_id=None,
                 capability="video",
                 unit="second",
-                credits_per_unit=Decimal("2.0000"),
+                credits_per_unit=Decimal("80.0000"),
             ),
             CreditRate(
                 tenant_id=None,
                 capability="image",
                 unit="image",
-                credits_per_unit=Decimal("5.0000"),
+                credits_per_unit=Decimal("10.0000"),
             ),
         ]
     )
@@ -226,7 +226,7 @@ def test_avatar_talk_order_reserves_quota_and_returns_queued_id(
 ) -> None:
     with auth_db() as db:
         subscription = _seed_billing(db, auth_context["tenant_id"])
-        subscription.quota_credits_total = 200
+        subscription.quota_credits_total = 10000
         voice, avatar = _seed_voice_and_avatar(db, auth_context["tenant_id"])
         voice_id = voice.id
         avatar_id = avatar.id
@@ -280,7 +280,8 @@ def test_avatar_talk_order_without_script_leaves_worker_to_generate_it(
     auth_db,
 ) -> None:
     with auth_db() as db:
-        _seed_billing(db, auth_context["tenant_id"])
+        subscription = _seed_billing(db, auth_context["tenant_id"])
+        subscription.quota_credits_total = 10000
         voice, avatar = _seed_voice_and_avatar(db, auth_context["tenant_id"])
         voice_id = voice.id
         avatar_id = avatar.id
@@ -319,6 +320,7 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
 ) -> None:
     with auth_db() as db:
         subscription = _seed_billing(db, auth_context["tenant_id"])
+        subscription.quota_credits_total = 10000
         voice, _avatar = _seed_voice_and_avatar(db, auth_context["tenant_id"])
         voice_id = voice.id
         subscription_id = subscription.id
@@ -378,14 +380,14 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
         assert task.params["resolution"] == "1080p"
         assert task.duration_sec == 30
         subscription = db.get(Subscription, subscription_id)
-        assert subscription.quota_credits_reserved == 65
+        assert subscription.quota_credits_reserved == 8408
         reserved = db.query(UsageRecord).filter_by(video_task_id=data["id"]).one()
         assert reserved.status == "reserved"
         assert reserved.capability == "video"
         assert reserved.provider == "apimart"
         assert reserved.model == "doubao-seedance-2.0"
         assert reserved.quantity == Decimal("30")
-        assert reserved.credits == Decimal("60.00")
+        assert reserved.credits == Decimal("8403.00")
 
 
 def test_photo_order_routes_before_avatar_when_voice_is_present(
@@ -449,13 +451,13 @@ def test_photo_order_routes_before_avatar_when_voice_is_present(
         assert task.params["image_size"] == "1536x1024"
         assert task.params["image_quality"] == "high"
         subscription = db.get(Subscription, subscription_id)
-        assert subscription.quota_credits_reserved == 80
+        assert subscription.quota_credits_reserved == 155
         reserved = db.query(UsageRecord).filter_by(video_task_id=data["id"]).one()
         assert reserved.status == "reserved"
         assert reserved.capability == "image"
         assert reserved.provider == "apimart"
         assert reserved.quantity == Decimal("1.000")
-        assert reserved.credits == Decimal("75.00")
+        assert reserved.credits == Decimal("150.00")
 
 
 def test_video_estimate_seedance_i2v_matches_reserved_quota_with_tenant_rate(
@@ -509,19 +511,19 @@ def test_video_estimate_seedance_i2v_matches_reserved_quota_with_tenant_rate(
 
     assert estimate_resp.status_code == 200
     assert estimate_resp.json()["data"] == {
-        "estimated_credits": 90,
+        "estimated_credits": 150,
         "unit": "credits",
         "note": "Estimated reservation; final settlement uses actual generated duration.",
     }
     assert create_resp.status_code == 202
     with auth_db() as db:
         subscription = db.get(Subscription, subscription_id)
-        assert subscription.quota_credits_reserved - reserved_before == 90
+        assert subscription.quota_credits_reserved - reserved_before == 150
         reserved = db.query(UsageRecord).filter_by(
             video_task_id=create_resp.json()["data"]["id"]
         ).one()
         assert reserved.quantity == Decimal("30")
-        assert reserved.credits == Decimal("90.00")
+        assert reserved.credits == Decimal("149.25")
 
 
 def test_video_estimate_photo_matches_reserved_quota_with_quality_rate(
@@ -604,7 +606,7 @@ def test_video_estimate_avatar_uses_existing_script_duration_and_tenant_rates(
                 CreditRate(
                     tenant_id=auth_context["tenant_id"],
                     capability="tts",
-                    unit="second",
+                    unit="character",
                     credits_per_unit=Decimal("0.5000"),
                 ),
             ]
@@ -630,7 +632,7 @@ def test_video_estimate_avatar_uses_existing_script_duration_and_tenant_rates(
 
     assert resp.status_code == 200
     data = resp.json()["data"]
-    assert data["estimated_credits"] == 8
+    assert data["estimated_credits"] == 16
     assert data["unit"] == "credits"
 
 
@@ -748,7 +750,7 @@ def test_seedance_i2v_duration_is_clamped_and_forwarded(
 ) -> None:
     with auth_db() as db:
         subscription = _seed_billing(db, auth_context["tenant_id"])
-        subscription.quota_credits_total = 500
+        subscription.quota_credits_total = 30000
         db.commit()
         voice, _avatar = _seed_voice_and_avatar(db, auth_context["tenant_id"])
         voice_id = voice.id

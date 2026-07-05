@@ -349,7 +349,7 @@ class CreditRate(Base):
             name="ck_credit_rates_capability",
         ),
         CheckConstraint(
-            "unit IN ('second', 'call', 'token', 'image')",
+            "unit IN ('second', 'call', 'token', 'image', 'character')",
             name="ck_credit_rates_unit",
         ),
         Index("ix_credit_rates_tenant_capability_unit", "tenant_id", "capability", "unit"),

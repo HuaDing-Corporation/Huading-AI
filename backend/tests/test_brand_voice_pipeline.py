@@ -86,7 +86,7 @@ def _active_subscription(db, tenant_id: str) -> Subscription:
 
 def _seed_brand_voice_billing(db, tenant_id: str) -> str:
     subscription = _active_subscription(db, tenant_id)
-    subscription.quota_credits_total = 500
+    subscription.quota_credits_total = 10000
     subscription.quota_credits_used = 0
     subscription.quota_credits_reserved = 0
     db.add_all(
@@ -101,13 +101,13 @@ def _seed_brand_voice_billing(db, tenant_id: str) -> str:
                 tenant_id=None,
                 capability="avatar",
                 unit="second",
-                credits_per_unit=Decimal("1.0000"),
+                credits_per_unit=Decimal("150.0000"),
             ),
             CreditRate(
                 tenant_id=None,
                 capability="tts",
-                unit="second",
-                credits_per_unit=Decimal("0.2000"),
+                unit="character",
+                credits_per_unit=Decimal("0.1000"),
             ),
         ]
     )

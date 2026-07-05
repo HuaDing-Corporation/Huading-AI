@@ -361,8 +361,8 @@ def test_ecom_model_single_creates_photo_task_clamps_prompt_and_reserves_quota(
     assert task.params["source_storage_key"] == source["storage_key"]
     assert task.params["apply_visible_label"] is True
     assert usage.status == "reserved"
-    assert usage.credits == 20
-    assert subscription.quota_credits_reserved == 20
+    assert usage.credits == 40
+    assert subscription.quota_credits_reserved == 40
 
 
 def test_ecom_model_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
@@ -432,7 +432,7 @@ def test_ecom_model_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
     assert task_count == 20
     assert batch_rows == 0
     assert reserved_count == 20
-    assert subscription.quota_credits_reserved == 400
+    assert subscription.quota_credits_reserved == 800
 
 
 def test_ecom_model_rejects_unknown_style_id(
@@ -558,8 +558,8 @@ def test_ecom_cutout_single_creates_photo_task_and_reserves_quota(
     assert task.params["source_storage_key"] == source["storage_key"]
     assert task.params["apply_visible_label"] is True
     assert usage.status == "reserved"
-    assert usage.credits == 20
-    assert subscription.quota_credits_reserved == 20
+    assert usage.credits == 40
+    assert subscription.quota_credits_reserved == 40
 
 
 def test_ecom_cutout_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
@@ -621,7 +621,7 @@ def test_ecom_cutout_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
     assert task_count == 20
     assert batch_rows == 0
     assert reserved_count == 20
-    assert subscription.quota_credits_reserved == 400
+    assert subscription.quota_credits_reserved == 800
 
 
 def test_ecom_cutout_rejects_cross_tenant_source_asset(

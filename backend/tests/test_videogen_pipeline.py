@@ -111,7 +111,7 @@ def _subscription(db, tenant_id: str) -> Subscription:
 
 def _reset_subscription_quota(db, tenant_id: str) -> Subscription:
     subscription = _subscription(db, tenant_id)
-    subscription.quota_credits_total = 1000
+    subscription.quota_credits_total = 10000
     subscription.quota_credits_used = 0
     subscription.quota_credits_reserved = 0
     return subscription
@@ -323,8 +323,8 @@ def test_video_gen_1080p_quota_estimate_uses_resolution_multiplier(
         )
 
     assert estimate.estimated_seconds == 15
-    assert estimate.estimated_credits == Decimal("67.50")
-    assert estimate.reservation_units == 68
+    assert estimate.estimated_credits == Decimal("4200.00")
+    assert estimate.reservation_units == 4200
 
 
 def test_create_video_gen_validates_assets_reserves_quota_and_enqueues(
