@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import {
   AlertTriangle,
+  Ban,
   Check,
   Clapperboard,
   Clock,
@@ -25,14 +26,16 @@ const thumbIcon: Record<UiStatus, LucideIcon> = {
   running: Clapperboard,
   done: Check,
   queued: Clock,
-  failed: AlertTriangle
+  failed: AlertTriangle,
+  cancelled: Ban
 };
 
 const thumbStyle: Record<UiStatus, string> = {
   running: "bg-grad-gold text-ink shadow-thumb",
   done: "bg-grad-done text-ink shadow-thumb-done",
   queued: "bg-track text-ink-faint",
-  failed: "bg-error-bg text-error-fg shadow-thumb-failed"
+  failed: "bg-error-bg text-error-fg shadow-thumb-failed",
+  cancelled: "bg-track text-ink-faint"
 };
 
 // ── Props ─────────────────────────────────────────────────────────────────────
@@ -63,7 +66,8 @@ export interface TaskCardProps {
  *  - done     → thumbnail + "open detail" button + inline video player
  */
 export function TaskCard({ task, onOpen, onRetry, onUrlError, onDelete, deleting }: TaskCardProps) {
-  const Icon = thumbIcon[task.status];
+  // 兜底 ?? Clock：即便后端未来再冒未知状态（前端类型未及时补），也走「排队」图标而非 undefined → 不 #130 白屏。
+  const Icon = thumbIcon[task.status] ?? Clock;
   const showPlayer = task.status === "done" && !!task.playbackUrl;
   const isImage = task.mode === "photo";
   // photo 失败映射友好文案（不露原始 JSON）；视频沿用原始 message（不破）。
@@ -88,7 +92,7 @@ export function TaskCard({ task, onOpen, onRetry, onUrlError, onDelete, deleting
         <div
           className={cn(
             "flex h-12 w-12 flex-none items-center justify-center rounded-chip",
-            thumbStyle[task.status]
+            thumbStyle[task.status] ?? "bg-track text-ink-faint"
           )}
         >
           <Icon size={20} strokeWidth={1.8} />

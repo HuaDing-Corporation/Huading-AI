@@ -64,6 +64,14 @@ function ResultTile({ task, decoration }: { task: TrackedTask; decoration?: CSSP
       </div>
     );
   }
+  // cancelled：终态中性瓦片（不显进度条，避免像卡住的进行中；ECOM-HISTORY-CANCELLED-FIX-0001 一致性补全）。
+  if (task.status === "cancelled") {
+    return (
+      <div className="flex items-center justify-center rounded-field border border-line-gold bg-glass-fill p-4 text-center">
+        <span className="text-[12.5px] text-ink-faint">{task.statusLabel}</span>
+      </div>
+    );
+  }
   // queued / running
   return (
     <div className="flex flex-col gap-1.5 rounded-field border border-line-gold bg-glass-fill p-4">

@@ -112,7 +112,8 @@ export function VideoDetail({ id }: VideoDetailProps) {
     queued: copy.status.queued,
     running: `生成中 ${data.progress}%`,
     done: copy.status.done,
-    failed: copy.status.failed
+    failed: copy.status.failed,
+    cancelled: copy.status.cancelled // 批量退分产生的 cancelled 也显中文「已取消」，不露英文（ECOM-HISTORY-CANCELLED-FIX-0001）
   };
 
   return (

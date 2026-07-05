@@ -328,7 +328,7 @@ export const copy = {
     clearFailed: "清空失败，请重试"
   },
   detail: { notFound: "视频不存在或无权访问", back: "返回", download: "下载 MP4", downloadImage: "下载图片" },
-  status: { queued: "排队中", failed: "失败", done: "已完成" },
+  status: { queued: "排队中", failed: "失败", done: "已完成", cancelled: "已取消" },
   // 封面制作（口播视频产物附属 ORAL-PROD-UI-0001）
   cover: {
     entry: "做封面",

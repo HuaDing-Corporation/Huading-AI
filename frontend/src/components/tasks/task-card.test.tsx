@@ -78,6 +78,23 @@ describe("TaskCard AI 标识徽标（LABEL-TOGGLE-UI-0001，按任务状态两�
   });
 });
 
+describe("TaskCard cancelled 状态（ECOM-HISTORY-CANCELLED-FIX-0001 · 根治电商历史 #130）", () => {
+  // 后端 VideoTask.status 含 cancelled（批量生产 cancel 退分产生）；旧 thumbIcon 只覆盖 4 档 →
+  // thumbIcon["cancelled"]=undefined → <Icon/> → React #130，整个电商历史白屏。承重（先红后绿）。
+  it("cancelled 历史项 → 正常渲染「已取消」状态徽标，不 #130 白屏", () => {
+    const cancelled: TrackedTask = {
+      taskId: "c1",
+      topic: "退款任务",
+      status: "cancelled",
+      progress: 100,
+      statusLabel: "已取消"
+    };
+    render(<TaskCard task={cancelled} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />);
+    expect(screen.getByText("退款任务")).toBeInTheDocument();
+    expect(screen.getByText("已取消")).toBeInTheDocument(); // StatusBadge 覆盖 cancelled
+  });
+});
+
 describe("TaskCard photo error friendly (IMAGE-ERROR-FRIENDLY)", () => {
   it("shows friendly copy for a failed photo task — never the raw error_message", () => {
     const task: TrackedTask = {
