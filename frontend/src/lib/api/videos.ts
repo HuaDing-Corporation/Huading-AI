@@ -1,4 +1,4 @@
-import { API_BASE_URL, ApiError, apiFetch, authHeaders } from "@/lib/api/client";
+import { ApiError, apiFetch, apiUrl, authHeaders } from "@/lib/api/client";
 import { authStore } from "@/lib/auth/store";
 import type { ClearResult, CreateVideoRequest, DeleteResult, EstimateResponse, ScenePromptResponse, VideoAccepted, VideoDetail, VideoEvent, VideoListItem, VideoListResponse } from "@/lib/api/types";
 
@@ -62,8 +62,10 @@ export async function streamVideoEvents(
   onMessage: (event: VideoEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {
+  // SSE 也必须走 apiUrl() 单前缀守卫（ECOM-FIXES-0001 Bug B）：此前直拼 ${API_BASE_URL}/api/v1/... 在
+  // API_BASE_URL 以 /api 结尾的生产配置下拼成 /api/api/v1/.../events → 404。fetch 主路径走了 apiUrl，SSE 漏了。
   const res = await fetch(
-    `${API_BASE_URL}/api/v1/videos/${encodeURIComponent(taskId)}/events`,
+    apiUrl(`/api/v1/videos/${encodeURIComponent(taskId)}/events`),
     { headers: { Accept: "text/event-stream", ...authHeaders() }, signal }
   );
 

@@ -28,6 +28,24 @@ describe("api URL construction", () => {
 
     expect(apiUrl("/api/v1/videos")).toBe("https://huadingai.cn/api/v1/videos");
   });
+
+  // ECOM-FIXES-0001 Bug B 承重：SSE/EventSource 进度流也必须走 apiUrl 单前缀守卫。
+  // 旧代码直拼 ${API_BASE_URL}/api/v1/.../events，在 base 以 /api 结尾时拼成 /api/api/.../events → 404。
+  it("streamVideoEvents 的 SSE URL 走单前缀：base 以 /api 结尾也绝不出现 /api/api", async () => {
+    vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "https://huadingai.cn/api");
+    vi.resetModules();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("", { status: 200, headers: { "Content-Type": "text/event-stream" } })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { streamVideoEvents } = await import("./videos");
+    await streamVideoEvents("task-abc", () => {}).catch(() => {});
+
+    const url = fetchMock.mock.calls[0]![0] as string;
+    expect(url).toBe("https://huadingai.cn/api/v1/videos/task-abc/events");
+    expect(url).not.toContain("/api/api");
+  });
 });
 
 describe("apiFetch 401 handling", () => {
