@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Clapperboard } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
@@ -28,10 +28,21 @@ const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
  * createAndTrack)，出片入历史。复用 useGenerateConfirm/ConfirmGenerateDialog(积分预估 + 防连点)。
  * video_gen 用 prompt(同时作 topic 标题)；其余模式不受影响。
  */
-export function VideoGenForm() {
+export function VideoGenForm({
+  initialPrompt,
+  onPrefillConsumed
+}: { initialPrompt?: string; onPrefillConsumed?: () => void } = {}) {
   const { createAndTrack } = useVideoTasks();
   const [refAssetIds, setRefAssetIds] = useState<string[]>([]);
-  const [prompt, setPrompt] = useState("");
+  // 提示词反推「带入」注入 prompt（同时作 topic）；惰性消费，mount 后回调 page 清空。参考图仍需用户自行上传。
+  const [prompt, setPrompt] = useState(() => initialPrompt ?? "");
+  const prefillConsumed = useRef(false);
+  useEffect(() => {
+    if (!prefillConsumed.current && initialPrompt !== undefined) {
+      prefillConsumed.current = true;
+      onPrefillConsumed?.();
+    }
+  }, [initialPrompt, onPrefillConsumed]);
   const [durationSec, setDurationSec] = useState<VideoGenDuration>(5);
   const [resolution, setResolution] = useState<VideoGenResolution>("720p");
   const [bgm, setBgm] = useState<VideoGenBgm | undefined>(undefined);

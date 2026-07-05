@@ -38,9 +38,10 @@ const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
  * the backend's real message surfaces (keyed on contract err.code, not status).
  */
 export function NewVideoForm({
+  initialTopic,
   initialScript,
   onPrefillConsumed
-}: { initialScript?: string; onPrefillConsumed?: () => void } = {}) {
+}: { initialTopic?: string; initialScript?: string; onPrefillConsumed?: () => void } = {}) {
   const { createAndTrack } = useVideoTasks();
   const scriptGen = useScriptGenerate();
   const uploadImg = useUploadImage();
@@ -49,8 +50,8 @@ export function NewVideoForm({
   const subtitleTemplates = useSubtitleTemplates();
   const avatar = useTrackedUpload(uploadImg.mutateAsync, (r) => r.asset_id);
 
-  const [topic, setTopic] = useState("");
-  // 文案模式「用此文案」一次性 prefill：惰性消费 initialScript，mount 后回调 page 清空。
+  // 一次性 prefill：文案「用此文案」注 script；提示词反推「带入」注 topic+script。惰性消费，mount 后回调清空。
+  const [topic, setTopic] = useState(() => initialTopic ?? "");
   const [script, setScript] = useState(() => initialScript ?? "");
   const [voiceId, setVoiceId] = useState("");
   const [speed, setSpeed] = useState(1);
@@ -60,11 +61,11 @@ export function NewVideoForm({
   const [error, setError] = useState<string | null>(null);
   const prefillConsumed = useRef(false);
   useEffect(() => {
-    if (!prefillConsumed.current && initialScript !== undefined) {
+    if (!prefillConsumed.current && (initialTopic !== undefined || initialScript !== undefined)) {
       prefillConsumed.current = true;
       onPrefillConsumed?.();
     }
-  }, [initialScript, onPrefillConsumed]);
+  }, [initialTopic, initialScript, onPrefillConsumed]);
 
   // Actual submit — runs only after the 确定生成 confirmation; owns its own errors.
   const submit = async (req: CreateVideoRequest) => {

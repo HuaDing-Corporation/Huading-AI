@@ -8,6 +8,7 @@ import { cancelBatch, createBatch, estimateBatch, getBatch, listBatches } from "
 import { getQuota } from "@/lib/api/quota";
 import { clearCopyDrafts, deleteCopyDraft, generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
 import { generateScript } from "@/lib/api/scripts";
+import { regenerateReversePrompt, reverseFromAsset, saveReversePrompt, type ReverseFromAssetInput } from "@/lib/api/reverse-prompt";
 import { uploadImage, uploadProductImage } from "@/lib/api/uploads";
 import { listBgmLibrary } from "@/lib/api/bgm";
 import { uploadAudio } from "@/lib/api/brand-voices";
@@ -104,6 +105,16 @@ export function useScriptGenerate() {
 }
 export function useScenePromptGenerate() {
   return useMutation({ mutationFn: (topic: string) => generateScenePrompt(topic) });
+}
+// ── 提示词反推 (REVERSE-PROMPT-UI-0001) — 反推 / 重推 / 保存 ──
+export function useReverseFromAsset() {
+  return useMutation({ mutationFn: (input: ReverseFromAssetInput) => reverseFromAsset(input) });
+}
+export function useRegenerateReversePrompt() {
+  return useMutation({ mutationFn: (jobId: string) => regenerateReversePrompt(jobId) });
+}
+export function useSaveReversePrompt() {
+  return useMutation({ mutationFn: (jobId: string) => saveReversePrompt(jobId) });
 }
 // ── 口播生产力增强 (ORAL-PROD-UI-0001) — 字幕模板 / 封面截帧 ──
 export function useSubtitleTemplates() {

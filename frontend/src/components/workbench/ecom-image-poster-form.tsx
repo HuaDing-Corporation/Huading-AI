@@ -19,14 +19,18 @@ const MAX_TAGLINE = 40;
  * 为海报渲染文本(可选)。单张 POST /ecom-images/poster、批量 /poster/batch 返回已创建 photo
  * task(kind=ecom_poster)，由外壳 trackExisting 轮询（产物进 TaskList + 图片历史）。
  */
-export function EcomImagePosterForm() {
+export function EcomImagePosterForm({
+  initialTitle,
+  initialTagline
+}: { initialTitle?: string; initialTagline?: string } = {}) {
   const poster = usePosterImage();
   const posterBatch = usePosterBatch();
   const templates = usePosterTemplates();
 
   const [templateId, setTemplateId] = useState<string | null>(null);
-  const [title, setTitle] = useState("");
-  const [tagline, setTagline] = useState("");
+  // 提示词反推「带入 · 电商图(营销海报)」惰性注入标题/副标(= poster_title/poster_subtitle)。
+  const [title, setTitle] = useState(() => (initialTitle ?? "").slice(0, MAX_TITLE));
+  const [tagline, setTagline] = useState(() => (initialTagline ?? "").slice(0, MAX_TAGLINE));
 
   const templateList = templates.data ?? [];
   // 后端 title/subtitle 为必填 key(空串允许)：始终发送 trim 后的字符串，不省略 key(否则 422)。

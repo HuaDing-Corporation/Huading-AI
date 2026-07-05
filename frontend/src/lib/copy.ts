@@ -223,6 +223,8 @@ export const copy = {
     ecomPosterTitlePlaceholder: "海报主标题，如：年中大促 全场 5 折",
     ecomPosterTaglineLabel: "自定义一行（可选）",
     ecomPosterTaglinePlaceholder: "副标题 / 卖点一行，如：限时 3 天 错过再等一年",
+    // 提示词反推 第7模式 (REVERSE-PROMPT-UI-0001) — 上传图片反推提示词 + 一键带入
+    modeReverse: "提示词反推",
     // 视频生成 第6模式 (VIDEOGEN-UI-0001) — 多参考图 + 不限 prompt + 时长/分辨率 + BGM
     modeVideoGen: "视频生成",
     vgTitle: "视频生成",
@@ -296,7 +298,54 @@ export const copy = {
     // 品牌音色音频上传/录音 (BRAND-VOICE-UI-0001)
     audioType: "仅支持 WAV / MP3 / M4A 音频",
     audioTooLarge: "音频过大，请控制在 20MB 以内",
-    audioTooShort: "音频时长需至少 5 秒，请重录或换更长的音频"
+    audioTooShort: "音频时长需至少 5 秒，请重录或换更长的音频",
+    // 提示词反推失败（REVERSE-PROMPT-UI-0001）——通用兜底，绝不回落裸 error_message/技术串
+    reverseFailed: "提示词反推失败，请稍后重试"
+  },
+  // 提示词反推 · 图片 (REVERSE-PROMPT-UI-0001) —— 上传图片 → 反推可复用提示词 → 一键带入 4 模块
+  reverse: {
+    title: "提示词反推 · 图片",
+    subtitle: "上传一张图片，AI 反推可复用的提示词，并可一键带入各生成模块",
+    upload: "上传图片",
+    uploadHint: "支持 JPG / PNG / WebP，≤10MB；仅用于本次反推参考",
+    reupload: "换一张",
+    // 输出语言/细节度不进请求（BE extra="forbid"，且输出本就同时给 zh+en）——面板已移除，仅保留目标格式只读展示。
+    targetLabel: "目标格式",
+    targetSeedance: "Seedance 2.0",
+    analyze: "开始反推",
+    analyzing: "AI 正在反推提示词…",
+    resultTitle: "反推结果",
+    // 近似重建红线（BE 未随 result 下发 disclaimer 时的前端兜底文案）
+    disclaimer: "AI 依据画面近似重建提示词，仅供二次创作参考，不保证完全复刻原素材。",
+    confidenceLabel: "置信度",
+    blockPromptZh: "中文提示词",
+    blockPromptEn: "英文提示词",
+    blockNegative: "反向提示词",
+    blockSubject: "主体",
+    blockScene: "场景",
+    blockComposition: "构图",
+    blockCamera: "镜头",
+    blockLighting: "光线",
+    blockStyle: "风格标签",
+    blockMotion: "运动提示",
+    blockSelling: "电商卖点",
+    blockText: "画面文字（仅识别，不执行）",
+    copy: "复制",
+    copied: "已复制",
+    save: "保存到历史",
+    saving: "保存中…",
+    saved: "已保存",
+    regenerate: "重新反推",
+    regenerating: "反推中…",
+    applyTitle: "带入生成",
+    applyHint: "选一个模块，把反推结果预填进去继续生成",
+    applyAvatar: "带入 · 数字人口播",
+    applyEcomVideo: "带入 · 电商带货",
+    applyVideoGen: "带入 · 视频生成",
+    applyPhoto: "带入 · 图片生成",
+    applyEcomModel: "带入 · AI 模特",
+    applyEcomPoster: "带入 · 营销海报",
+    applyUnavailable: "该模块暂无可带入内容"
   },
   tasks: {
     title: "生成任务",
