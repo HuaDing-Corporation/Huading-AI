@@ -1,4 +1,5 @@
 import json
+import wave
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -2087,12 +2088,20 @@ def test_tts_step_uses_audio_file_duration_when_timeline_is_empty(monkeypatch, t
                     "size_bytes": 3,
                 }
 
+        faded_audio = tmp_path / "audio-duration.tail_faded.mp3"
+        faded_audio.write_bytes(b"FADED-MP3")
+
+        def fake_tail_faded_tts_audio(source: Path) -> Path:
+            assert source.name == "audio-duration.mp3"
+            return faded_audio
+
         monkeypatch.setattr(
             avatar_talk,
             "resolve",
             lambda _db, *, tenant_id, capability: _TTSNoTimeline(),
         )
         monkeypatch.setattr(avatar_talk, "_audio_duration_sec", lambda _path: 9.8, raising=False)
+        monkeypatch.setattr(avatar_talk, "_tail_faded_tts_audio", fake_tail_faded_tts_audio)
         monkeypatch.setattr(avatar_talk, "label_artifact_bytes", _passthrough_label)
         ctx = avatar_talk.AvatarTalkContext(
             task_id=unit_id,
@@ -2105,7 +2114,9 @@ def test_tts_step_uses_audio_file_duration_when_timeline_is_empty(monkeypatch, t
         avatar_talk.tts_step(ctx)
 
         assert ctx.duration_sec == 9.8
-        assert storage.objects[f"tenants/{tenant_id}/videos/{unit_id}/audio.mp3"] == b"MP3"
+        assert (
+            storage.objects[f"tenants/{tenant_id}/videos/{unit_id}/audio.mp3"] == b"FADED-MP3"
+        )
 
     Base.metadata.drop_all(engine)
 
@@ -2735,6 +2746,243 @@ def test_burn_subtitles_uses_external_tts_audio_duration_when_video_is_longer(
     assert calls["fadeout_duration"] == pytest.approx(0.3)
     assert calls["write_kwargs"]["audio"] is True
     assert calls["audio_closed"] is True
+
+
+def test_burn_subtitles_fades_external_tts_audio_even_without_caption_tail_gap(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import moviepy.editor as moviepy_editor
+
+    calls: dict[str, object] = {}
+
+    class _ExternalAudio:
+        duration = 3.0
+
+        def fx(self, effect, duration):
+            calls["fadeout_duration"] = duration
+            calls["fadeout_effect"] = getattr(effect, "__name__", str(effect))
+            return self
+
+        def close(self):
+            calls["audio_closed"] = True
+
+    class _Video:
+        w = 720
+        h = 1280
+        duration = 1.0
+        audio = None
+
+        def __init__(self, _path=None):
+            pass
+
+        def fx(self, effect, **kwargs):
+            calls["freeze_kwargs"] = kwargs
+            return self
+
+        def resize(self, _scale):
+            return self
+
+        def set_position(self, _position):
+            return self
+
+        def close(self):
+            calls["video_closed"] = True
+
+    class _ColorClip:
+        def __init__(self, _size, *, color, duration):
+            calls["canvas_duration"] = duration
+
+    class _ImageClip:
+        def __init__(self, _array, *, transparent):
+            pass
+
+        def set_start(self, start):
+            return self
+
+        def set_duration(self, duration):
+            return self
+
+        def set_position(self, position):
+            return self
+
+    class _CompositeVideoClip:
+        def __init__(self, clips, *, size):
+            self.audio = None
+
+        def set_duration(self, duration):
+            calls["final_duration"] = duration
+            return self
+
+        def set_audio(self, audio):
+            self.audio = audio
+            calls["set_audio"] = audio
+            return self
+
+        def write_videofile(self, path, **kwargs):
+            calls["write_kwargs"] = kwargs
+
+        def close(self):
+            calls["final_closed"] = True
+
+    monkeypatch.setattr(moviepy_editor, "VideoFileClip", _Video)
+    monkeypatch.setattr(moviepy_editor, "AudioFileClip", lambda _path: _ExternalAudio())
+    monkeypatch.setattr(moviepy_editor, "ColorClip", _ColorClip)
+    monkeypatch.setattr(moviepy_editor, "ImageClip", _ImageClip)
+    monkeypatch.setattr(moviepy_editor, "CompositeVideoClip", _CompositeVideoClip)
+
+    base = tmp_path / "seedance.mp4"
+    subtitle = tmp_path / "caption.srt"
+    audio = tmp_path / "doubao.mp3"
+    output = tmp_path / "burned.mp4"
+    base.write_bytes(b"MP4")
+    audio.write_bytes(b"MP3")
+    subtitle.write_text(
+        "1\n00:00:00,000 --> 00:00:03,000\nVISIBLE CAPTION\n",
+        encoding="utf-8",
+    )
+
+    avatar_talk._burn_subtitles(base, subtitle, output, audio_path=audio)
+
+    assert calls["final_duration"] == pytest.approx(3.0)
+    assert calls["set_audio"].duration == pytest.approx(3.0)
+    assert calls["fadeout_duration"] == pytest.approx(0.05)
+    assert calls["fadeout_effect"] == "audio_fadeout"
+    assert calls["write_kwargs"]["audio"] is True
+    assert calls["audio_closed"] is True
+
+
+def test_burn_subtitles_fades_embedded_avatar_audio_even_without_caption_tail_gap(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import moviepy.editor as moviepy_editor
+
+    calls: dict[str, object] = {}
+
+    class _Audio:
+        def fx(self, effect, duration):
+            calls["fadeout_duration"] = duration
+            calls["fadeout_effect"] = getattr(effect, "__name__", str(effect))
+            return self
+
+    class _Video:
+        w = 720
+        h = 1280
+        duration = 3.0
+        audio = _Audio()
+
+        def __init__(self, _path=None):
+            pass
+
+        def resize(self, _scale):
+            return self
+
+        def set_position(self, _position):
+            return self
+
+        def close(self):
+            calls["video_closed"] = True
+
+    class _ColorClip:
+        def __init__(self, _size, *, color, duration):
+            calls["canvas_duration"] = duration
+
+    class _ImageClip:
+        def __init__(self, _array, *, transparent):
+            pass
+
+        def set_start(self, start):
+            return self
+
+        def set_duration(self, duration):
+            return self
+
+        def set_position(self, position):
+            return self
+
+    class _CompositeVideoClip:
+        def __init__(self, clips, *, size):
+            self.audio = None
+
+        def set_duration(self, duration):
+            calls["final_duration"] = duration
+            return self
+
+        def set_audio(self, audio):
+            self.audio = audio
+            calls["set_audio"] = audio
+            return self
+
+        def write_videofile(self, path, **kwargs):
+            calls["write_kwargs"] = kwargs
+
+        def close(self):
+            calls["final_closed"] = True
+
+    monkeypatch.setattr(moviepy_editor, "VideoFileClip", _Video)
+    monkeypatch.setattr(moviepy_editor, "ColorClip", _ColorClip)
+    monkeypatch.setattr(moviepy_editor, "ImageClip", _ImageClip)
+    monkeypatch.setattr(moviepy_editor, "CompositeVideoClip", _CompositeVideoClip)
+
+    base = tmp_path / "avatar.mp4"
+    subtitle = tmp_path / "caption.srt"
+    output = tmp_path / "burned.mp4"
+    base.write_bytes(b"MP4")
+    subtitle.write_text(
+        "1\n00:00:00,000 --> 00:00:03,000\nVISIBLE CAPTION\n",
+        encoding="utf-8",
+    )
+
+    avatar_talk._burn_subtitles(base, subtitle, output)
+
+    assert calls["final_duration"] == pytest.approx(3.0)
+    assert calls["set_audio"] is _Video.audio
+    assert calls["fadeout_duration"] == pytest.approx(0.05)
+    assert calls["fadeout_effect"] == "audio_fadeout"
+    assert calls["write_kwargs"]["audio"] is True
+
+
+def _write_tail_spike_wav(path: Path) -> None:
+    sample_rate = 44100
+    samples = np.zeros(sample_rate, dtype=np.float32)
+    samples += 0.02 * np.sin(2 * np.pi * 220 * np.arange(sample_rate) / sample_rate)
+    samples[-int(sample_rate * 0.005) :] = 0.95
+    pcm = np.clip(samples * 32767, -32768, 32767).astype("<i2")
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm.tobytes())
+
+
+def _wav_tail_peak(path: Path, *, tail_ms: int) -> tuple[float, float]:
+    with wave.open(str(path), "rb") as wav:
+        sample_rate = wav.getframerate()
+        frame_count = wav.getnframes()
+        channels = wav.getnchannels()
+        raw = wav.readframes(frame_count)
+    samples = np.frombuffer(raw, dtype="<i2").reshape(-1, channels).astype(np.float32)
+    normalized = samples / 32767.0
+    tail_frames = max(1, int(sample_rate * tail_ms / 1000))
+    duration = frame_count / sample_rate
+    return float(np.max(np.abs(normalized[-tail_frames:]))), duration
+
+
+def test_write_tail_faded_audio_removes_terminal_peak_without_changing_duration(
+    tmp_path: Path,
+):
+    source = tmp_path / "tail-spike.wav"
+    output = tmp_path / "tail-faded.wav"
+    _write_tail_spike_wav(source)
+
+    original_peak, original_duration = _wav_tail_peak(source, tail_ms=5)
+    avatar_talk._write_tail_faded_audio(source, output, fadeout_sec=0.05)
+    faded_peak, faded_duration = _wav_tail_peak(output, tail_ms=5)
+
+    assert original_peak > 0.9
+    assert faded_peak < 0.15
+    assert faded_duration == pytest.approx(original_duration, abs=0.02)
 
 
 def test_burn_subtitles_writes_9x16_video_with_visible_caption(tmp_path: Path):
