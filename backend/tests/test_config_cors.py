@@ -92,11 +92,11 @@ def test_doubao_seed_tts_settings_are_env_driven(monkeypatch) -> None:
     assert s.engine_doubao_tts_aigc_watermark is False
 
 
-def test_doubao_seed_tts_watermark_defaults_to_true(monkeypatch) -> None:
+def test_doubao_seed_tts_watermark_defaults_to_false(monkeypatch) -> None:
     monkeypatch.delenv("ENGINE_DOUBAO_TTS_AIGC_WATERMARK", raising=False)
     s = Settings(_env_file=None, jwt_secret_key=_JWT)
 
-    assert s.engine_doubao_tts_aigc_watermark is True
+    assert s.engine_doubao_tts_aigc_watermark is False
 
 
 def test_doubao_voice_clone_settings_are_env_driven(monkeypatch) -> None:

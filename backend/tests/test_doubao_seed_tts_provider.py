@@ -1,7 +1,10 @@
 import base64
+import io
 import json
+import wave
 from pathlib import Path
 
+import numpy as np
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -41,6 +44,31 @@ class _FakeHTTP:
         return _Response(self.responses.pop(0))
 
 
+class _WatermarkEchoHTTP:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def post(self, url: str, *, json: dict, headers: dict, timeout: float, stream: bool):
+        import json as jsonlib
+
+        self.calls.append(
+            {
+                "url": url,
+                "json": json,
+                "headers": headers,
+                "timeout": timeout,
+                "stream": stream,
+            }
+        )
+        additions = jsonlib.loads(json["req_params"]["additions"])
+        return _Response(
+            _seed_sse_response(
+                _seed_tts_wav_bytes(watermark=bool(additions["aigc_watermark"])),
+                words=[{"word": "hello", "startTime": 0.0, "endTime": 5.6}],
+            )
+        )
+
+
 class _Utf8SseResponse:
     def __init__(self, lines: list[dict]) -> None:
         self.lines = lines
@@ -65,6 +93,55 @@ def _seed_sse_response(audio: bytes, *, words: list[dict]) -> list[dict]:
         {"code": 0, "data": None, "sentence": {"text": "hello", "words": words}},
         {"code": 20000000, "message": "ok", "data": None, "usage": {"characters": 5}},
     ]
+
+
+_SAMPLE_RATE = 24_000
+
+
+def _seed_tts_wav_bytes(*, watermark: bool) -> bytes:
+    duration_sec = 6.6
+    t = np.arange(int(_SAMPLE_RATE * duration_sec), dtype=np.float32) / _SAMPLE_RATE
+    samples = np.zeros_like(t)
+    speech = t < 5.6
+    samples[speech] = 0.05 * np.sin(2 * np.pi * 220 * t[speech])
+    if watermark:
+        for start_sec, end_sec in ((5.90, 6.15), (6.35, 6.50)):
+            mask = (t >= start_sec) & (t < end_sec)
+            samples[mask] = 0.70 * np.sin(2 * np.pi * 700 * t[mask])
+    pcm = np.clip(samples * 32767, -32768, 32767).astype("<i2")
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(_SAMPLE_RATE)
+        wav.writeframes(pcm.tobytes())
+    return output.getvalue()
+
+
+def _has_700hz_watermark_tone(path: Path) -> bool:
+    with wave.open(str(path), "rb") as wav:
+        sample_rate = wav.getframerate()
+        channels = wav.getnchannels()
+        frame_count = wav.getnframes()
+        samples = np.frombuffer(wav.readframes(frame_count), dtype="<i2")
+    mono = samples.reshape(-1, channels).mean(axis=1).astype(np.float32) / 32767.0
+    start = int(sample_rate * 5.90)
+    end = int(sample_rate * 6.15)
+    segment = mono[start:end]
+    if segment.size == 0:
+        return False
+    rms = float(np.sqrt(np.mean(segment**2)))
+    if rms < 0.05:
+        return False
+    windowed = segment * np.hanning(segment.size)
+    spectrum = np.abs(np.fft.rfft(windowed)) ** 2
+    freqs = np.fft.rfftfreq(segment.size, d=1 / sample_rate)
+    total_power = float(np.sum(spectrum))
+    if total_power <= 0:
+        return False
+    target_power = float(np.sum(spectrum[(freqs >= 690) & (freqs <= 710)]))
+    flatness = float(np.exp(np.mean(np.log(spectrum + 1e-12))) / np.mean(spectrum + 1e-12))
+    return target_power / total_power > 0.80 and flatness < 0.02
 
 
 def test_parse_sse_response_decodes_utf8_chinese_timeline_from_bytes():
@@ -163,12 +240,39 @@ async def test_doubao_seed_tts_sends_auth_header_and_locked_request_body(tmp_pat
     }
     assert json.loads(body["req_params"]["additions"]) == {
         "disable_markdown_filter": True,
-        "aigc_watermark": True,
+        "aigc_watermark": False,
     }
 
 
 @pytest.mark.asyncio
-async def test_doubao_seed_tts_can_disable_aigc_watermark_in_additions(
+async def test_doubao_seed_tts_default_disables_aigc_watermark_tone(
+    tmp_path: Path,
+):
+    from app.providers.tts.doubao_seed_tts_provider import DoubaoSeedTTSProvider
+
+    http = _WatermarkEchoHTTP()
+    provider = DoubaoSeedTTSProvider(
+        appid="doubao-appid",
+        access_token="seed-token",
+        http_client=http,
+        output_dir=str(tmp_path),
+    )
+
+    result = await provider.synthesize_speech(
+        {
+            "text": "hello",
+            "voice": "zh_male_m191_uranus_bigtts",
+            "task_id": "tts-default-no-watermark-unit",
+        }
+    )
+
+    additions = json.loads(http.calls[0]["json"]["req_params"]["additions"])
+    assert additions == {"disable_markdown_filter": True, "aigc_watermark": False}
+    assert _has_700hz_watermark_tone(Path(result["audio_path"])) is False
+
+
+@pytest.mark.asyncio
+async def test_doubao_seed_tts_can_enable_aigc_watermark_in_additions(
     tmp_path: Path,
 ):
     from app.providers.tts.doubao_seed_tts_provider import DoubaoSeedTTSProvider
@@ -186,7 +290,7 @@ async def test_doubao_seed_tts_can_disable_aigc_watermark_in_additions(
         access_token="seed-token",
         http_client=http,
         output_dir=str(tmp_path),
-        aigc_watermark=False,
+        aigc_watermark=True,
     )
 
     await provider.synthesize_speech(
@@ -198,7 +302,38 @@ async def test_doubao_seed_tts_can_disable_aigc_watermark_in_additions(
     )
 
     additions = json.loads(http.calls[0]["json"]["req_params"]["additions"])
-    assert additions == {"disable_markdown_filter": True, "aigc_watermark": False}
+    assert additions == {"disable_markdown_filter": True, "aigc_watermark": True}
+
+
+@pytest.mark.asyncio
+async def test_doubao_seed_tts_watermark_ab_maps_to_700hz_tail(
+    tmp_path: Path,
+):
+    from app.providers.tts.doubao_seed_tts_provider import DoubaoSeedTTSProvider
+
+    async def synthesize(*, watermark: bool, task_id: str) -> Path:
+        http = _WatermarkEchoHTTP()
+        provider = DoubaoSeedTTSProvider(
+            appid="doubao-appid",
+            access_token="seed-token",
+            http_client=http,
+            output_dir=str(tmp_path),
+            aigc_watermark=watermark,
+        )
+        result = await provider.synthesize_speech(
+            {
+                "text": "hello",
+                "voice": "zh_male_m191_uranus_bigtts",
+                "task_id": task_id,
+            }
+        )
+        return Path(result["audio_path"])
+
+    with_watermark = await synthesize(watermark=True, task_id="tts-watermark-on")
+    without_watermark = await synthesize(watermark=False, task_id="tts-watermark-off")
+
+    assert _has_700hz_watermark_tone(with_watermark) is True
+    assert _has_700hz_watermark_tone(without_watermark) is False
 
 
 @pytest.mark.asyncio

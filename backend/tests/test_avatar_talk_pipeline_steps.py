@@ -1,3 +1,5 @@
+import base64
+import io
 import json
 import wave
 from datetime import UTC, datetime, timedelta
@@ -125,6 +127,112 @@ def _patch_apimart_i2v_provider(
 
 def _passthrough_label(content: bytes, **_kwargs) -> bytes:
     return content
+
+
+_SPECTRUM_SAMPLE_RATE = 24_000
+
+
+def _seed_tts_watermark_wav_bytes(*, watermark: bool) -> bytes:
+    duration_sec = 6.6
+    t = np.arange(int(_SPECTRUM_SAMPLE_RATE * duration_sec), dtype=np.float32)
+    t /= _SPECTRUM_SAMPLE_RATE
+    samples = np.zeros_like(t)
+    speech = t < 5.6
+    samples[speech] = 0.05 * np.sin(2 * np.pi * 220 * t[speech])
+    if watermark:
+        for start_sec, end_sec in ((5.90, 6.15), (6.35, 6.50)):
+            mask = (t >= start_sec) & (t < end_sec)
+            samples[mask] = 0.70 * np.sin(2 * np.pi * 700 * t[mask])
+    pcm = np.clip(samples * 32767, -32768, 32767).astype("<i2")
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(_SPECTRUM_SAMPLE_RATE)
+        wav.writeframes(pcm.tobytes())
+    return output.getvalue()
+
+
+def _write_seed_tts_watermark_wav(path: Path, *, watermark: bool) -> None:
+    path.write_bytes(_seed_tts_watermark_wav_bytes(watermark=watermark))
+
+
+def _has_700hz_watermark_tone(path: Path) -> bool:
+    with wave.open(str(path), "rb") as wav:
+        sample_rate = wav.getframerate()
+        channels = wav.getnchannels()
+        frame_count = wav.getnframes()
+        samples = np.frombuffer(wav.readframes(frame_count), dtype="<i2")
+    mono = samples.reshape(-1, channels).mean(axis=1).astype(np.float32) / 32767.0
+    start = int(sample_rate * 5.90)
+    end = int(sample_rate * 6.15)
+    segment = mono[start:end]
+    if segment.size == 0:
+        return False
+    rms = float(np.sqrt(np.mean(segment**2)))
+    if rms < 0.05:
+        return False
+    windowed = segment * np.hanning(segment.size)
+    spectrum = np.abs(np.fft.rfft(windowed)) ** 2
+    freqs = np.fft.rfftfreq(segment.size, d=1 / sample_rate)
+    total_power = float(np.sum(spectrum))
+    if total_power <= 0:
+        return False
+    target_power = float(np.sum(spectrum[(freqs >= 690) & (freqs <= 710)]))
+    flatness = float(np.exp(np.mean(np.log(spectrum + 1e-12))) / np.mean(spectrum + 1e-12))
+    return target_power / total_power > 0.80 and flatness < 0.02
+
+
+class _SeedTTSWatermarkEchoHTTP:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def post(self, url: str, *, json: dict, headers: dict, timeout: float, stream: bool):
+        import json as jsonlib
+
+        self.calls.append(
+            {
+                "url": url,
+                "json": json,
+                "headers": headers,
+                "timeout": timeout,
+                "stream": stream,
+            }
+        )
+        additions = jsonlib.loads(json["req_params"]["additions"])
+        audio = _seed_tts_watermark_wav_bytes(
+            watermark=bool(additions["aigc_watermark"])
+        )
+
+        class _Response:
+            def iter_lines(self, decode_unicode: bool = False):
+                del decode_unicode
+                events = [
+                    {
+                        "code": 0,
+                        "data": base64.b64encode(audio).decode("ascii"),
+                    },
+                    {
+                        "code": 0,
+                        "data": None,
+                        "sentence": {
+                            "words": [
+                                {"word": "hello", "startTime": 0.0, "endTime": 5.6}
+                            ]
+                        },
+                    },
+                    {"code": 20000000, "message": "ok", "data": None},
+                ]
+                for event in events:
+                    yield (
+                        "data: "
+                        + jsonlib.dumps(event, separators=(",", ":"))
+                    ).encode()
+
+            def raise_for_status(self) -> None:
+                return None
+
+        return _Response()
 
 
 BAD_SCRIPT_SAMPLE = (
@@ -1472,6 +1580,143 @@ def test_tts_step_records_seed_tts_character_cost(monkeypatch, tmp_path: Path):
         assert usage.status == "settled"
 
     Base.metadata.drop_all(engine)
+
+
+def test_ecom_compose_receives_seed_tts_audio_without_700hz_watermark(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from app.providers.tts.doubao_seed_tts_provider import DoubaoSeedTTSProvider
+
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-ecom-no-beep"
+    unit_id = "ecom-no-beep-unit"
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="ecom-no-beep", name="Ecom No Beep"))
+        voice = Voice(
+            id="voice-ecom-no-beep",
+            provider="doubao-seed-tts",
+            voice_code="BV001",
+            display_name="Seed TTS",
+        )
+        db.add(voice)
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic="product topic",
+                script="hello",
+                voice_id=voice.id,
+                duration_sec=10,
+            )
+        )
+        db.commit()
+
+        http = _SeedTTSWatermarkEchoHTTP()
+        provider = DoubaoSeedTTSProvider(
+            appid="doubao-appid",
+            access_token="seed-token",
+            http_client=http,
+            output_dir=str(tmp_path),
+        )
+
+        def fake_resolve(_db, *, tenant_id: str, capability: str):
+            assert tenant_id == "tenant-ecom-no-beep"
+            assert capability == "tts"
+            return provider
+
+        monkeypatch.setattr(avatar_talk, "resolve", fake_resolve)
+        monkeypatch.setattr(avatar_talk, "_work_dir", lambda _unit_id: tmp_path)
+        monkeypatch.setattr(avatar_talk, "_tail_faded_tts_audio", lambda source: source)
+        monkeypatch.setattr(avatar_talk, "_audio_duration_sec", lambda _path: 6.6)
+        monkeypatch.setattr(avatar_talk, "label_artifact_bytes", _passthrough_label)
+
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=storage,
+        )
+
+        avatar_talk.tts_step(ctx)
+
+        additions = json.loads(http.calls[0]["json"]["req_params"]["additions"])
+        assert additions["aigc_watermark"] is False
+        audio_key = f"tenants/{tenant_id}/videos/{unit_id}/audio.mp3"
+        stored_audio = tmp_path / "stored-ecom-audio.wav"
+        stored_audio.write_bytes(storage.objects[audio_key])
+        assert _has_700hz_watermark_tone(stored_audio) is False
+
+        subtitle_key = f"tenants/{tenant_id}/videos/{unit_id}/subtitle.srt"
+        storage.objects[subtitle_key] = (
+            b"1\n00:00:00,000 --> 00:00:05,600\nhello\n"
+        )
+        ctx.base_video_bytes = b"SILENT-SEEDANCE-MP4"
+        ctx.subtitle_key = subtitle_key
+        ctx.use_tts_audio = True
+        compose_seen: dict[str, bool] = {}
+
+        def fake_burn_subtitles(_base, _subtitle, output, *, audio_path=None, **_kwargs):
+            assert audio_path is not None
+            compose_seen["has_700hz"] = _has_700hz_watermark_tone(Path(audio_path))
+            output.write_bytes(b"FINAL")
+
+        monkeypatch.setattr(avatar_talk, "_burn_subtitles", fake_burn_subtitles)
+
+        avatar_talk.compose_step(ctx)
+
+        assert compose_seen["has_700hz"] is False
+        assert ctx.final_video_bytes == b"FINAL"
+
+    Base.metadata.drop_all(engine)
+
+
+def test_avatar_compose_does_not_reuse_raw_seed_tts_watermark_audio(
+    monkeypatch,
+    tmp_path: Path,
+):
+    storage = _Storage()
+    audio_key = "tenants/tenant-avatar-no-beep/videos/avatar-no-beep/audio.mp3"
+    subtitle_key = "tenants/tenant-avatar-no-beep/videos/avatar-no-beep/subtitle.srt"
+    storage.objects[audio_key] = _seed_tts_watermark_wav_bytes(watermark=True)
+    storage.objects[subtitle_key] = b"1\n00:00:00,000 --> 00:00:05,600\nhello\n"
+    raw_tts = tmp_path / "raw-watermarked-tts.wav"
+    raw_tts.write_bytes(storage.objects[audio_key])
+    omnihuman_audio = tmp_path / "mock-omnihuman-audio.wav"
+    _write_seed_tts_watermark_wav(omnihuman_audio, watermark=False)
+
+    assert _has_700hz_watermark_tone(raw_tts) is True
+    assert _has_700hz_watermark_tone(omnihuman_audio) is False
+
+    ctx = avatar_talk.AvatarTalkContext(
+        task_id="avatar-no-beep",
+        tenant_id="tenant-avatar-no-beep",
+        db=None,
+        store=_Store(),
+        storage=storage,
+    )
+    ctx.audio_key = audio_key
+    ctx.base_video_bytes = b"OMNIHUMAN-MP4"
+    ctx.subtitle_key = subtitle_key
+    compose_seen: dict[str, object] = {}
+
+    def fake_burn_subtitles(_base, _subtitle, output, *, audio_path=None, **_kwargs):
+        compose_seen["audio_path"] = audio_path
+        output.write_bytes(b"FINAL-AVATAR")
+
+    monkeypatch.setattr(avatar_talk, "_work_dir", lambda _unit_id: tmp_path)
+    monkeypatch.setattr(avatar_talk, "_burn_subtitles", fake_burn_subtitles)
+
+    avatar_talk.compose_step(ctx)
+
+    assert compose_seen["audio_path"] is None
+    assert getattr(ctx, "use_tts_audio", False) is False
+    assert ctx.final_video_bytes == b"FINAL-AVATAR"
 
 
 def test_script_step_resolves_llm_provider_from_registry(monkeypatch):

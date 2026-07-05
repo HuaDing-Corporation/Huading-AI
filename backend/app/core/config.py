@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     engine_doubao_tts_default_voice: str = "zh_male_m191_uranus_bigtts"
     engine_doubao_tts_endpoint: str = "https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse"
     engine_doubao_tts_request_timeout_seconds: float = 60.0
-    engine_doubao_tts_aigc_watermark: bool = True
+    engine_doubao_tts_aigc_watermark: bool = False
     engine_seedtts_cny_per_char: float = 0.0003
     # Volcengine Doubao voice clone. These default to the same Seed-TTS account
     # values when clone-specific env vars are absent.
