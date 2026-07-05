@@ -177,6 +177,7 @@ def _quota_estimate_for_payload(
             script=payload.script or payload.topic,
             speed=payload.speed,
             estimated_seconds=seedance_i2v_billable_seconds(target_duration_sec),
+            resolution=payload.resolution,
         )
     if payload.video_mode == "video_gen":
         return estimate_video_gen_quota(
@@ -461,6 +462,7 @@ def _create_seedance_i2v_video(
         script=script or payload.topic,
         speed=payload.speed,
         estimated_seconds=seedance_i2v_billable_seconds(target_duration_sec),
+        resolution=payload.resolution,
     )
     db.commit()
     _video_task_tenants[task_id] = user.tenant_id

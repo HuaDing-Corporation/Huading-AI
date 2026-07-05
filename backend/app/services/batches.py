@@ -108,15 +108,21 @@ def estimate_batch(
     payload: BatchRequest,
 ) -> tuple[QuotaEstimate, int, int]:
     if payload.kind == "ecom_table":
-        ecom_rows_or_raise(payload)
+        rows = ecom_rows_or_raise(payload)
         target_seconds = seedance_i2v_target_seconds(payload.common.duration_sec)
-        per_row = estimate_seedance_i2v_quota(
-            db,
-            tenant_id=tenant_id,
-            script="batch ecom row",
-            speed=payload.common.speed,
-            estimated_seconds=seedance_i2v_billable_seconds(target_seconds),
-        )
+        estimates = [
+            estimate_seedance_i2v_quota(
+                db,
+                tenant_id=tenant_id,
+                script=ecom_topic(row),
+                speed=payload.common.speed,
+                estimated_seconds=seedance_i2v_billable_seconds(target_seconds),
+                resolution=payload.common.resolution,
+            )
+            for row in rows
+        ]
+        per_row = max(estimates, key=lambda estimate: estimate.reservation_units)
+        total_units = sum(estimate.reservation_units for estimate in estimates)
     else:
         prompt_rows_or_raise(payload)
         per_row = estimate_video_gen_quota(
@@ -125,7 +131,7 @@ def estimate_batch(
             duration_sec=int(payload.common.duration_sec or 5),
             resolution=payload.common.resolution,
         )
-    total_units = per_row.reservation_units * len(payload.rows)
+        total_units = per_row.reservation_units * len(payload.rows)
     subscription = active_subscription(db, tenant_id)
     return per_row, total_units, remaining_credits(subscription)
 

@@ -58,7 +58,7 @@ def test_register_creates_active_subscription(auth_context, auth_db) -> None:
         )
     assert sub is not None, "register-tenant must create a subscription (P0-B)"
     assert sub.status == "active"
-    assert sub.quota_credits_total == 1000
+    assert sub.quota_credits_total == 10_000_000
     assert sub.quota_credits_used == 0
     assert sub.quota_credits_reserved == 0
 

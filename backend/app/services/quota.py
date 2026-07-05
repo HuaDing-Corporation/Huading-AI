@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.exceptions import AppError
-from app.db.models import CreditRate, Subscription, UsageRecord
+from app.db.models import CreditRate, Subscription, UsageRecord, VideoTask
 from app.services import provider_costs
 
 _SCRIPT_CPS = Decimal("5")
@@ -22,8 +22,8 @@ _SEEDANCE_I2V_MAX_SECONDS = 120
 _VIDEO_GEN_DURATIONS = {5, 10, 15}
 _VIDEO_GEN_RESOLUTION_MULTIPLIERS = {
     "480p": Decimal("1.0000"),
-    "720p": Decimal("1.5000"),
-    "1080p": Decimal("2.2500"),
+    "720p": Decimal("1.6250"),
+    "1080p": Decimal("3.5000"),
 }
 _IMAGE_QUALITY_MULTIPLIERS = {
     "low": Decimal("1"),
@@ -145,6 +145,13 @@ def _credit_units(value: Decimal) -> int:
     return int(Decimal(value).to_integral_value(rounding=ROUND_CEILING))
 
 
+def _video_resolution_multiplier(resolution: str) -> Decimal:
+    multiplier = _VIDEO_GEN_RESOLUTION_MULTIPLIERS.get(resolution)
+    if multiplier is None:
+        raise AppError("Invalid video resolution.", code="VALIDATION_ERROR", status_code=422)
+    return multiplier
+
+
 def estimate_avatar_talk_quota(
     db: Session,
     *,
@@ -158,16 +165,18 @@ def estimate_avatar_talk_quota(
         tenant_id=tenant_id,
         capability="avatar",
         unit="second",
-        default=Decimal("1.0000"),
+        default=Decimal("150.0000"),
     )
     tts_rate = _rate(
         db,
         tenant_id=tenant_id,
         capability="tts",
-        unit="second",
-        default=Decimal("0.2000"),
+        unit="character",
+        default=Decimal("0.1000"),
     )
-    credits = (Decimal(seconds) * (avatar_rate + tts_rate)).quantize(Decimal("0.01"))
+    credits = (
+        Decimal(seconds) * avatar_rate + Decimal(len(script or "")) * tts_rate
+    ).quantize(Decimal("0.01"))
     return QuotaEstimate(
         estimated_seconds=seconds,
         estimated_credits=credits,
@@ -184,6 +193,7 @@ def estimate_seedance_i2v_quota(
     script: str,
     speed: Decimal | float | int,
     estimated_seconds: int | None = None,
+    resolution: str = "720p",
 ) -> QuotaEstimate:
     seconds = (
         estimated_seconds if estimated_seconds is not None else estimate_seconds(script, speed)
@@ -193,9 +203,19 @@ def estimate_seedance_i2v_quota(
         tenant_id=tenant_id,
         capability="video",
         unit="second",
-        default=Decimal("2.0000"),
+        default=Decimal("80.0000"),
     )
-    credits = (Decimal(seconds) * video_rate).quantize(Decimal("0.01"))
+    tts_rate = _rate(
+        db,
+        tenant_id=tenant_id,
+        capability="tts",
+        unit="character",
+        default=Decimal("0.1000"),
+    )
+    credits = (
+        Decimal(seconds) * video_rate * _video_resolution_multiplier(resolution)
+        + Decimal(len(script or "")) * tts_rate
+    ).quantize(Decimal("0.01"))
     return QuotaEstimate(
         estimated_seconds=seconds,
         estimated_credits=credits,
@@ -220,15 +240,13 @@ def estimate_video_gen_quota(
     resolution: str,
 ) -> QuotaEstimate:
     seconds = video_gen_billable_seconds(duration_sec)
-    multiplier = _VIDEO_GEN_RESOLUTION_MULTIPLIERS.get(resolution)
-    if multiplier is None:
-        raise AppError("Invalid video_gen resolution.", code="VALIDATION_ERROR", status_code=422)
+    multiplier = _video_resolution_multiplier(resolution)
     video_rate = _rate(
         db,
         tenant_id=tenant_id,
         capability="video_gen",
         unit="second",
-        default=Decimal("2.0000"),
+        default=Decimal("80.0000"),
     )
     credits = (Decimal(seconds) * video_rate * multiplier).quantize(Decimal("0.01"))
     return QuotaEstimate(
@@ -256,7 +274,7 @@ def estimate_image_generation_quota(
         tenant_id=tenant_id,
         capability="image",
         unit="image",
-        default=Decimal("5.0000"),
+        default=Decimal("10.0000"),
     )
     credits = (Decimal(count) * image_rate * multiplier).quantize(Decimal("0.01"))
     return QuotaEstimate(
@@ -513,6 +531,7 @@ def reserve_seedance_i2v_quota(
     script: str,
     speed: Decimal | float | int,
     estimated_seconds: int | None = None,
+    resolution: str = "720p",
 ) -> Reservation:
     subscription = active_subscription(db, tenant_id)
     estimate = estimate_seedance_i2v_quota(
@@ -521,6 +540,7 @@ def reserve_seedance_i2v_quota(
         script=script,
         speed=speed,
         estimated_seconds=estimated_seconds,
+        resolution=resolution,
     )
     if remaining_credits(subscription) < estimate.reservation_units:
         raise AppError(
@@ -664,6 +684,65 @@ def release_reserved_quota(db: Session, *, tenant_id: str, video_task_id: str) -
     record.settled_at = datetime.now(UTC)
 
 
+def _script_chars(task: VideoTask | None) -> int:
+    if task is None:
+        return 0
+    return len(task.script or task.topic or "")
+
+
+def _settled_componentized_credits(
+    db: Session,
+    *,
+    tenant_id: str,
+    record: UsageRecord,
+    task: VideoTask | None,
+    actual_quantity: Decimal,
+) -> Decimal | None:
+    if task is None:
+        return None
+    reserved_quantity = Decimal(record.quantity or 0)
+    if reserved_quantity <= 0:
+        return None
+
+    tts_rate = _rate(
+        db,
+        tenant_id=tenant_id,
+        capability="tts",
+        unit="character",
+        default=Decimal("0.1000"),
+    )
+    tts_credits = Decimal(_script_chars(task)) * tts_rate
+    if record.capability == "avatar":
+        timed_rate = _rate(
+            db,
+            tenant_id=tenant_id,
+            capability="avatar",
+            unit="second",
+            default=Decimal("150.0000"),
+        )
+    elif record.capability == "video" and (task.video_mode or task.mode) == "seedance_i2v":
+        resolution = str((task.params or {}).get("resolution") or "720p")
+        timed_rate = (
+            _rate(
+                db,
+                tenant_id=tenant_id,
+                capability="video",
+                unit="second",
+                default=Decimal("80.0000"),
+            )
+            * _video_resolution_multiplier(resolution)
+        )
+    else:
+        return None
+
+    expected_reserved = (reserved_quantity * timed_rate + tts_credits).quantize(
+        Decimal("0.01")
+    )
+    if expected_reserved != Decimal(record.credits).quantize(Decimal("0.01")):
+        return None
+    return (actual_quantity * timed_rate + tts_credits).quantize(Decimal("0.01"))
+
+
 def settle_reserved_quota(
     db: Session,
     *,
@@ -681,8 +760,17 @@ def settle_reserved_quota(
 
     actual_quantity = Decimal(actual_seconds).quantize(Decimal("0.001"))
     reserved_units = _credit_units(Decimal(record.credits))
-    per_second = Decimal(record.credits) / Decimal(record.quantity or 1)
-    actual_credits = (actual_quantity * per_second).quantize(Decimal("0.01"))
+    task = db.get(VideoTask, video_task_id)
+    actual_credits = _settled_componentized_credits(
+        db,
+        tenant_id=tenant_id,
+        record=record,
+        task=task,
+        actual_quantity=actual_quantity,
+    )
+    if actual_credits is None:
+        per_second = Decimal(record.credits) / Decimal(record.quantity or 1)
+        actual_credits = (actual_quantity * per_second).quantize(Decimal("0.01"))
     actual_units = _credit_units(actual_credits)
 
     subscription.quota_credits_reserved = max(

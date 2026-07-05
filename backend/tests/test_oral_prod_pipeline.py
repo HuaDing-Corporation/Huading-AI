@@ -79,7 +79,7 @@ def _seed_billing(db, tenant_id: str) -> None:
             status="active",
             period_start=now - timedelta(days=1),
             period_end=now + timedelta(days=30),
-            quota_credits_total=500,
+            quota_credits_total=10000,
             quota_credits_used=0,
             quota_credits_reserved=0,
         )
@@ -90,19 +90,19 @@ def _seed_billing(db, tenant_id: str) -> None:
                 tenant_id=None,
                 capability="avatar",
                 unit="second",
-                credits_per_unit=Decimal("1.0000"),
+                credits_per_unit=Decimal("150.0000"),
             ),
             CreditRate(
                 tenant_id=None,
                 capability="tts",
-                unit="second",
-                credits_per_unit=Decimal("0.2000"),
+                unit="character",
+                credits_per_unit=Decimal("0.1000"),
             ),
             CreditRate(
                 tenant_id=None,
                 capability="image",
                 unit="image",
-                credits_per_unit=Decimal("5.0000"),
+                credits_per_unit=Decimal("10.0000"),
             ),
         ]
     )
@@ -1094,11 +1094,11 @@ def test_prune_photo_history_skips_reserved_inflight_task_without_leaking_quota(
     with auth_db() as db:
         oldest_terminal = db.get(VideoTask, "terminal-prune-photo-00")
         _assert_reserved_photo_still_linked(
-            db,
-            tenant_id=auth_context["tenant_id"],
-            task_id="reserved-prune-photo",
-            expected_reserved=40,
-        )
+                db,
+                tenant_id=auth_context["tenant_id"],
+                task_id="reserved-prune-photo",
+                expected_reserved=60,
+            )
     assert oldest_terminal is None
     assert storage.deleted == [
         f"tenants/{auth_context['tenant_id']}/photos/terminal-00.png"

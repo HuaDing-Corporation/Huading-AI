@@ -319,7 +319,7 @@ def test_batch_estimate_prompt_set_sums_video_gen_quota(
     auth_db,
 ) -> None:
     with auth_db() as db:
-        _set_quota(db, auth_context["tenant_id"], total=1000)
+        _set_quota(db, auth_context["tenant_id"], total=5000)
         db.commit()
 
     resp = TestClient(app).post(
@@ -342,10 +342,54 @@ def test_batch_estimate_prompt_set_sums_video_gen_quota(
     data = resp.json()["data"]
     assert data == {
         "total_rows": 2,
-        "per_row_credits": 30,
-        "total_credits": 60,
+        "per_row_credits": 1300,
+        "total_credits": 2600,
         "insufficient": False,
-        "balance_credits": 1000,
+        "balance_credits": 5000,
+    }
+
+
+def test_batch_estimate_ecom_table_sums_row_tts_characters(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        _set_quota(db, auth_context["tenant_id"], total=5000)
+        db.commit()
+
+    resp = TestClient(app).post(
+        "/api/v1/batches/estimate",
+        json={
+            "kind": "ecom_table",
+            "rows": [
+                {
+                    "product_name": "a",
+                    "selling_points": "b",
+                    "image_asset_id": "asset-a",
+                },
+                {
+                    "product_name": "c",
+                    "selling_points": "d",
+                    "image_asset_id": "asset-b",
+                },
+            ],
+            "common": {
+                "video_mode": "seedance_i2v",
+                "voice_id": "voice-batch",
+                "duration_sec": 5,
+                "resolution": "480p",
+            },
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["data"] == {
+        "total_rows": 2,
+        "per_row_credits": 401,
+        "total_credits": 802,
+        "insufficient": False,
+        "balance_credits": 5000,
     }
 
 
@@ -356,7 +400,7 @@ def test_batch_create_prompt_set_fans_out_video_gen_tasks_on_video_queue(
 ) -> None:
     seedance_calls, video_calls = _stub_batch_tasks(monkeypatch)
     with auth_db() as db:
-        _set_quota(db, auth_context["tenant_id"], total=1000)
+        _set_quota(db, auth_context["tenant_id"], total=5000)
         ref = _seed_image_asset(db, tenant_id=auth_context["tenant_id"], asset_id="asset-ref")
         bgm = _seed_audio_asset(db, tenant_id=auth_context["tenant_id"])
         ref_id = ref.id
@@ -403,7 +447,7 @@ def test_batch_create_prompt_set_fans_out_video_gen_tasks_on_video_queue(
             select(func.count()).select_from(UsageRecord).where(UsageRecord.status == "reserved")
         )
         assert usage_count == 2
-        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 46
+        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 2800
         roles = {
             item.role
             for item in db.scalars(
@@ -420,7 +464,7 @@ def test_batch_prompt_set_pairs_row_image_and_falls_back_to_common_reference(
 ) -> None:
     seedance_calls, video_calls = _stub_batch_tasks(monkeypatch)
     with auth_db() as db:
-        _set_quota(db, auth_context["tenant_id"], total=1000)
+        _set_quota(db, auth_context["tenant_id"], total=5000)
         common = _seed_image_asset(
             db,
             tenant_id=auth_context["tenant_id"],
@@ -504,7 +548,7 @@ def test_batch_prompt_set_all_paired_rows_ignore_unused_common_reference(
     assert other_resp.status_code == 201
     other_tenant_id = other_resp.json()["data"]["tenant"]["id"]
     with auth_db() as db:
-        _set_quota(db, auth_context["tenant_id"], total=1000)
+        _set_quota(db, auth_context["tenant_id"], total=5000)
         first = _seed_image_asset(
             db,
             tenant_id=auth_context["tenant_id"],
@@ -593,7 +637,7 @@ def test_batch_prompt_set_rejects_cross_tenant_row_image_without_partial_rows(
     assert other_resp.status_code == 201
     other_tenant_id = other_resp.json()["data"]["tenant"]["id"]
     with auth_db() as db:
-        _set_quota(db, auth_context["tenant_id"], total=1000)
+        _set_quota(db, auth_context["tenant_id"], total=5000)
         _seed_image_asset(db, tenant_id=other_tenant_id, asset_id="asset-other-row-ref")
         db.commit()
 
@@ -663,7 +707,7 @@ def test_batch_create_ecom_table_download_failure_marks_one_row_failed_not_whole
     seedance_calls, video_calls = _stub_batch_tasks(monkeypatch)
     storage = _FakeStorage()
     with auth_db() as db:
-        _set_quota(db, auth_context["tenant_id"], total=1000)
+        _set_quota(db, auth_context["tenant_id"], total=5000)
         _seed_voice(db)
         asset = _seed_image_asset(db, tenant_id=auth_context["tenant_id"])
         asset_id = asset.id
@@ -737,7 +781,7 @@ def test_batch_create_ecom_table_download_failure_marks_one_row_failed_not_whole
         assert queued_task.params["speed"] == 1.25
         assert queued_task.params["resolution"] == "480p"
         assert db.scalar(select(func.count()).select_from(UsageRecord)) == 1
-        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 20
+        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 803
 
 
 def test_batch_cancel_releases_queued_tasks_and_leaves_running_tasks(
@@ -747,7 +791,7 @@ def test_batch_cancel_releases_queued_tasks_and_leaves_running_tasks(
     from app.services.batches import refresh_batch_job
 
     with auth_db() as db:
-        _set_quota(db, auth_context["tenant_id"], total=1000)
+        _set_quota(db, auth_context["tenant_id"], total=2000)
         batch = BatchJob(
             id="batch-cancel",
             tenant_id=auth_context["tenant_id"],
@@ -820,7 +864,7 @@ def test_batch_cancel_releases_queued_tasks_and_leaves_running_tasks(
         )
         assert released.status == "released"
         assert reserved.status == "reserved"
-        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 15
+        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 650
         assert db.get(BatchJob, "batch-cancel").status == "running"
 
 

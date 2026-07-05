@@ -401,6 +401,7 @@ def _create_ecom_table_tasks(
             script=row_topic,
             speed=common.speed,
             estimated_seconds=seedance_i2v_billable_seconds(target_duration_sec),
+            resolution=common.resolution,
         )
         worker_payload = dict(params)
         worker_payload.update(
