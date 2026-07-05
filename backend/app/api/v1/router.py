@@ -14,6 +14,7 @@ from app.api.v1.routes import (
     oral,
     publish,
     quota,
+    reverse_prompt,
     scripts,
     storage,
     tasks,
@@ -39,6 +40,7 @@ api_router.include_router(oral.router, prefix="/oral", tags=["oral"])
 api_router.include_router(publish.router, prefix="/publish", tags=["publish"])
 api_router.include_router(covers.router, prefix="/covers", tags=["covers"])
 api_router.include_router(ecom_images.router, prefix="/ecom-images", tags=["ecom-images"])
+api_router.include_router(reverse_prompt.router, prefix="/reverse-prompt", tags=["reverse-prompt"])
 api_router.include_router(scripts.router, prefix="/scripts", tags=["scripts"])
 api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
 api_router.include_router(tenant.router, prefix="/tenant", tags=["tenant"])

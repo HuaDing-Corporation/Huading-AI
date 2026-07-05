@@ -131,6 +131,9 @@ class Settings(BaseSettings):
     engine_apimart_video_poll_interval_seconds: float = 10.0
     engine_apimart_video_timeout_seconds: float = 900.0
     engine_apimart_credit_usd: float = 0.10
+    engine_apimart_reverse_prompt_model: str = "gemini-3.1-pro-preview"
+    engine_apimart_reverse_prompt_input_credits_per_m: float = 16.0
+    engine_apimart_reverse_prompt_output_credits_per_m: float = 96.0
     engine_usd_cny_rate: float = 7.2
     engine_deepseek_cny_per_1k_input: float = 0.001008
     engine_deepseek_cny_per_1k_output: float = 0.002016
