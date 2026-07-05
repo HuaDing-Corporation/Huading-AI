@@ -336,7 +336,7 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
 
         concat_calls: dict[str, object] = {}
 
-        def fake_concat(scene_paths, output_path):
+        def fake_concat_without_audio(scene_paths, output_path):
             concat_calls["scene_paths"] = [Path(path).name for path in scene_paths]
             concat_calls["output_path"] = Path(output_path).name
             Path(output_path).write_bytes(b"CONCAT-SEEDANCE-MP4")
@@ -349,7 +349,11 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
             ],
         )
         _patch_apimart_i2v_provider(monkeypatch, calls, poll_counts=1)
-        monkeypatch.setattr(avatar_talk, "concat_seedance_clips", fake_concat)
+        monkeypatch.setattr(
+            avatar_talk,
+            "concat_seedance_clips_without_audio",
+            fake_concat_without_audio,
+        )
         monkeypatch.setattr(avatar_talk, "_work_dir", lambda _task_id: tmp_path / unit_id)
 
         store = _Store()
@@ -399,6 +403,147 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
             2,
             3,
         ]
+
+    Base.metadata.drop_all(engine)
+
+
+def test_concat_seedance_clips_without_audio_removes_seedance_scene_audio(tmp_path: Path):
+    from moviepy.audio.AudioClip import AudioArrayClip
+    from moviepy.editor import ColorClip, VideoFileClip
+
+    scene = tmp_path / "seedance-scene.mp4"
+    output = tmp_path / "seedance-silent.mp4"
+    sample_rate = 44100
+    samples = np.sin(2 * np.pi * 440 * np.arange(sample_rate) / sample_rate)
+    audio = AudioArrayClip(samples.reshape(-1, 1), fps=sample_rate)
+    clip = ColorClip((64, 64), color=(20, 30, 40), duration=1).set_audio(audio)
+    try:
+        clip.write_videofile(
+            str(scene),
+            fps=12,
+            codec="libx264",
+            audio_codec="aac",
+            logger=None,
+        )
+    finally:
+        clip.close()
+        audio.close()
+
+    avatar_talk.concat_seedance_clips_without_audio([str(scene)], str(output))
+
+    result = VideoFileClip(str(output))
+    try:
+        assert result.duration == pytest.approx(1.0, abs=0.2)
+        assert result.audio is None
+    finally:
+        result.close()
+
+
+def test_concat_seedance_clips_without_audio_strips_every_scene_before_concat(
+    monkeypatch,
+    tmp_path: Path,
+):
+    scenes = [tmp_path / "scene-a.mp4", tmp_path / "scene-b.mp4"]
+    for scene in scenes:
+        scene.write_bytes(b"SCENE")
+    output = tmp_path / "concat.mp4"
+    stripped: list[tuple[str, str]] = []
+    concat_inputs: list[str] = []
+
+    def fake_strip(source: Path, silent_output: Path) -> Path:
+        stripped.append((source.name, silent_output.name))
+        silent_output.write_bytes(b"SILENT")
+        return silent_output
+
+    def fake_concat(scene_paths: list[str], output_path: str) -> str:
+        concat_inputs.extend(Path(path).name for path in scene_paths)
+        assert all(Path(path).read_bytes() == b"SILENT" for path in scene_paths)
+        Path(output_path).write_bytes(b"CONCAT")
+        return output_path
+
+    monkeypatch.setattr(avatar_talk, "_strip_video_audio", fake_strip)
+    monkeypatch.setattr(avatar_talk, "concat_seedance_clips", fake_concat)
+
+    avatar_talk.concat_seedance_clips_without_audio([str(scene) for scene in scenes], str(output))
+
+    assert stripped == [
+        ("scene-a.mp4", "concat_silent_00.mp4"),
+        ("scene-b.mp4", "concat_silent_01.mp4"),
+    ]
+    assert concat_inputs == ["concat_silent_00.mp4", "concat_silent_01.mp4"]
+    assert output.read_bytes() == b"CONCAT"
+    assert not (tmp_path / "concat_silent_00.mp4").exists()
+    assert not (tmp_path / "concat_silent_01.mp4").exists()
+
+
+def test_ecom_i2v_keeps_tts_timeline_for_subtitle_after_seedance_step(
+    monkeypatch,
+    tmp_path: Path,
+):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-ecom-timeline"
+    unit_id = "ecom-timeline-job"
+    script = "real first. real second."
+    timeline = _caption_timeline_from_script(script, step_ms=100)
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="ecom-timeline", name="Ecom Timeline"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic="timeline product",
+                script=script,
+                duration_sec=10,
+                params={"image_key": "uploads/product.png", "duration_sec": 10},
+            )
+        )
+        db.commit()
+
+        calls: list[dict[str, object]] = []
+
+        monkeypatch.setattr(
+            avatar_talk,
+            "_plan_seedance_i2v_scenes",
+            lambda ctx, scene_count, clip_duration: [
+                f"visual prompt {index + 1}" for index in range(scene_count)
+            ],
+        )
+        _patch_apimart_i2v_provider(monkeypatch, calls, poll_counts=1)
+
+        def fake_concat_without_audio(scene_paths, output_path):
+            Path(output_path).write_bytes(b"SILENT-SEEDANCE-MP4")
+
+        monkeypatch.setattr(
+            avatar_talk,
+            "concat_seedance_clips_without_audio",
+            fake_concat_without_audio,
+        )
+        monkeypatch.setattr(avatar_talk, "_work_dir", lambda _task_id: tmp_path / unit_id)
+
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=storage,
+            duration_sec=timeline[-1]["end_ms"] / 1000,
+        )
+        ctx.timeline = list(timeline)
+
+        avatar_talk.seedance_i2v_step(ctx)
+        assert ctx.timeline == timeline
+
+        avatar_talk.subtitle_step(ctx)
+
+        subtitle_key = f"tenants/{tenant_id}/videos/{unit_id}/subtitle.srt"
+        srt_path = tmp_path / "subtitle.srt"
+        srt_path.write_text(storage.objects[subtitle_key].decode("utf-8"), encoding="utf-8")
+        captions = avatar_talk._parse_srt(srt_path)
+        assert captions == [(0.0, 0.9, "real first."), (0.9, 1.9, "real second.")]
 
     Base.metadata.drop_all(engine)
 
@@ -469,7 +614,7 @@ def test_seedance_i2v_progress_advances_on_every_poll_without_stalling(
             ],
         )
         _patch_apimart_i2v_provider(monkeypatch, [], poll_counts=8)
-        monkeypatch.setattr(avatar_talk, "concat_seedance_clips", fake_concat)
+        monkeypatch.setattr(avatar_talk, "concat_seedance_clips_without_audio", fake_concat)
         monkeypatch.setattr(avatar_talk, "_work_dir", lambda _task_id: tmp_path / unit_id)
 
         store = _Store()
@@ -544,7 +689,7 @@ def test_seedance_i2v_long_single_scene_polling_does_not_trip_watchdog(
             ],
         )
         _patch_apimart_i2v_provider(monkeypatch, [], poll_counts=[120, 1, 1])
-        monkeypatch.setattr(avatar_talk, "concat_seedance_clips", fake_concat)
+        monkeypatch.setattr(avatar_talk, "concat_seedance_clips_without_audio", fake_concat)
         monkeypatch.setattr(avatar_talk, "_work_dir", lambda _task_id: tmp_path / unit_id)
 
         store = _Store()
@@ -612,7 +757,7 @@ def test_seedance_i2v_24_scene_progress_keeps_watchdog_alive(
             ],
         )
         _patch_apimart_i2v_provider(monkeypatch, [], poll_counts=120)
-        monkeypatch.setattr(avatar_talk, "concat_seedance_clips", fake_concat)
+        monkeypatch.setattr(avatar_talk, "concat_seedance_clips_without_audio", fake_concat)
         monkeypatch.setattr(avatar_talk, "_work_dir", lambda _task_id: tmp_path / unit_id)
 
         store = _Store()
