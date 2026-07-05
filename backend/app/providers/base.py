@@ -23,6 +23,7 @@ Capability = Literal[
     "asr",
     "publish",
     "voice_clone",
+    "reverse_prompt",
 ]
 T = TypeVar("T")
 
@@ -69,6 +70,11 @@ class VoiceCloneProvider(Protocol):
     async def delete_voice(self, payload: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
 
+@runtime_checkable
+class ReversePromptProvider(Protocol):
+    async def reverse_image(self, payload: Mapping[str, Any]) -> Mapping[str, Any]: ...
+
+
 Provider = (
     LLMProvider
     | TTSProvider
@@ -78,6 +84,7 @@ Provider = (
     | ASRProvider
     | PublishProvider
     | VoiceCloneProvider
+    | ReversePromptProvider
 )
 ProviderFactory = Callable[[ProviderConfig], Provider]
 Operation = Callable[[], T | Awaitable[T]]

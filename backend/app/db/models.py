@@ -345,7 +345,7 @@ class CreditRate(Base):
     __table_args__ = (
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
-            "'publish', 'voice_clone', 'video_gen')",
+            "'publish', 'voice_clone', 'video_gen', 'reverse_prompt')",
             name="ck_credit_rates_capability",
         ),
         CheckConstraint(
@@ -454,6 +454,54 @@ class Asset(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
 
+class ReversePromptJob(TenantScopedMixin, Base):
+    __tablename__ = "reverse_prompt_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "source_kind IN ('image', 'video')",
+            name="ck_reverse_prompt_jobs_source_kind",
+        ),
+        CheckConstraint(
+            "target_format IN ('seedance_2_0')",
+            name="ck_reverse_prompt_jobs_target_format",
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'succeeded', 'failed', 'saved')",
+            name="ck_reverse_prompt_jobs_status",
+        ),
+        Index("ix_reverse_prompt_jobs_tenant_created_at", "tenant_id", "created_at"),
+        Index("ix_reverse_prompt_jobs_tenant_status", "tenant_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    source_kind: Mapped[str] = mapped_column(String(16), default="image")
+    source_asset_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("assets.id", ondelete="SET NULL"), nullable=True
+    )
+    source_video_task_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("video_tasks.id", ondelete="SET NULL"), nullable=True
+    )
+    source_storage_key: Mapped[str | None] = mapped_column(String(500), default=None)
+    target_format: Mapped[str] = mapped_column(String(32), default="seedance_2_0")
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    result_json: Mapped[dict[str, object] | None] = mapped_column(_json_type(), default=None)
+    raw_model_json: Mapped[dict[str, object] | None] = mapped_column(_json_type(), default=None)
+    error_code: Mapped[str | None] = mapped_column(String(40), default=None)
+    error_message: Mapped[str | None] = mapped_column(Text, default=None)
+    provider: Mapped[str | None] = mapped_column(String(40), default=None)
+    model: Mapped[str | None] = mapped_column(String(80), default=None)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    credits: Mapped[Decimal] = mapped_column(Numeric(12, 3), default=Decimal("0"))
+    cost_cents: Mapped[int] = mapped_column(Integer, default=0)
+    saved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class Brand(Base):
     __tablename__ = "brands"
     __table_args__ = (Index("ix_brands_tenant_id", "tenant_id"),)
@@ -532,7 +580,7 @@ class ProviderConfig(Base):
     __table_args__ = (
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
-            "'publish', 'voice_clone')",
+            "'publish', 'voice_clone', 'reverse_prompt')",
             name="ck_provider_configs_capability",
         ),
         Index(
@@ -567,7 +615,7 @@ class UsageRecord(Base):
     __table_args__ = (
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
-            "'publish', 'voice_clone', 'video_gen')",
+            "'publish', 'voice_clone', 'video_gen', 'reverse_prompt')",
             name="ck_usage_records_capability",
         ),
         CheckConstraint(
