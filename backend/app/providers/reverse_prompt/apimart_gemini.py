@@ -119,6 +119,7 @@ class APIMartGeminiReversePromptProvider:
         return {
             "model": self.model,
             "temperature": 0.2,
+            "stream": False,
             "messages": [
                 {"role": "system", "content": _system_prompt()},
                 {
@@ -191,11 +192,87 @@ def _reverse_prompt_instruction() -> str:
 
 
 def _response_payload(response: Any) -> dict[str, Any]:
+    if _is_event_stream(response):
+        return _streaming_response_payload(response)
     try:
         payload = response.json()
     except ValueError:
-        return {}
+        return _streaming_response_payload(response)
     return payload if isinstance(payload, dict) else {}
+
+
+def _is_event_stream(response: Any) -> bool:
+    headers = getattr(response, "headers", {}) or {}
+    content_type = ""
+    if isinstance(headers, Mapping):
+        content_type = str(headers.get("content-type") or headers.get("Content-Type") or "")
+    return "text/event-stream" in content_type.lower()
+
+
+def _streaming_response_payload(response: Any) -> dict[str, Any]:
+    iter_lines = getattr(response, "iter_lines", None)
+    if not callable(iter_lines):
+        return {}
+
+    content_parts: list[str] = []
+    usage: Mapping[str, Any] | None = None
+    metadata: dict[str, Any] = {}
+    for raw_line in iter_lines():
+        data = _sse_data(raw_line)
+        if not data:
+            continue
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(chunk, Mapping):
+            continue
+
+        content_parts.extend(_stream_delta_text(chunk))
+        chunk_usage = chunk.get("usage")
+        if isinstance(chunk_usage, Mapping):
+            usage = chunk_usage
+        for key in ("credits", "credit", "used_credits", "usage_credits", "cost_cents"):
+            if key in chunk and chunk[key] not in (None, ""):
+                metadata[key] = chunk[key]
+
+    payload: dict[str, Any] = {
+        "choices": [{"message": {"content": "".join(content_parts)}}],
+    }
+    if usage is not None:
+        payload["usage"] = dict(usage)
+    payload.update(metadata)
+    return payload
+
+
+def _sse_data(raw_line: Any) -> str:
+    if raw_line in (None, b"", ""):
+        return ""
+    if isinstance(raw_line, bytes):
+        line = raw_line.decode("utf-8", errors="replace")
+    else:
+        line = str(raw_line)
+    line = line.strip()
+    if not line.startswith("data:"):
+        return ""
+    return line.removeprefix("data:").strip()
+
+
+def _stream_delta_text(chunk: Mapping[str, Any]) -> list[str]:
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
+        return []
+    delta = choices[0].get("delta")
+    if not isinstance(delta, Mapping):
+        return []
+    parts: list[str] = []
+    for key in ("content", "reasoning_content"):
+        value = delta.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+    return parts
 
 
 def _raise_for_response(response: Any, payload: Mapping[str, Any], fallback: str) -> None:
@@ -236,13 +313,24 @@ def _extract_message_text(payload: Mapping[str, Any]) -> str:
     if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
         message = choices[0].get("message")
         if isinstance(message, Mapping):
-            content = message.get("content")
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                return "".join(
-                    str(item.get("text") or "") for item in content if isinstance(item, Mapping)
-                )
+            empty_content: str | None = None
+            for key in ("content", "reasoning_content"):
+                content = message.get(key)
+                if isinstance(content, str):
+                    if content:
+                        return content
+                    empty_content = content
+                if isinstance(content, list):
+                    text = "".join(
+                        str(item.get("text") or "")
+                        for item in content
+                        if isinstance(item, Mapping)
+                    )
+                    if text:
+                        return text
+                    empty_content = text
+            if empty_content is not None:
+                return empty_content
     raise APIMartGeminiReversePromptError("APIMart Gemini response contained no message content.")
 
 

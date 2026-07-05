@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json as jsonlib
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -103,20 +104,38 @@ class _Response:
     def __init__(self, payload: dict, status_code: int = 200) -> None:
         self._payload = payload
         self.status_code = status_code
+        self.headers = {"content-type": "application/json"}
         self.text = str(payload)
 
     def json(self) -> dict:
         return self._payload
 
 
+class _SseResponse:
+    def __init__(self, lines: list[str | bytes], status_code: int = 200) -> None:
+        self._lines = list(lines)
+        self.status_code = status_code
+        self.headers = {"content-type": "text/event-stream; charset=utf-8"}
+        self.text = ""
+
+    def json(self) -> dict:
+        raise ValueError("streaming response is not JSON")
+
+    def iter_lines(self):
+        yield from self._lines
+
+
 class _Session:
-    def __init__(self, payloads: list[dict]) -> None:
+    def __init__(self, payloads: list[dict | _Response | _SseResponse]) -> None:
         self.payloads = list(payloads)
         self.calls: list[dict] = []
 
     def post(self, url: str, *, headers: dict, json: dict, timeout: float):
         self.calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
-        return _Response(self.payloads.pop(0))
+        payload = self.payloads.pop(0)
+        if isinstance(payload, _Response | _SseResponse):
+            return payload
+        return _Response(payload)
 
 
 def _chat_payload(
@@ -163,21 +182,94 @@ def test_apimart_gemini_provider_uses_token_pricing_when_chat_response_has_no_cr
         "app.services.apimart_costs.settings.engine_usd_cny_rate",
         Decimal("7.20"),
     )
+    session = _Session([_chat_payload(JSON_CONTENT)])
     provider = APIMartGeminiReversePromptProvider(
         api_key="api-test-key",
         base_url="https://api.apimart.ai/v1",
         model="gemini-3.1-pro-preview",
-        session=_Session([_chat_payload(JSON_CONTENT)]),
+        session=session,
     )
 
     result = provider.reverse_image_sync({"image_url": "https://assets.test/input.png"})
 
+    assert session.calls[0]["json"]["stream"] is False
     assert result["prompt_zh"].startswith("Premium perfume")
     assert result["target_format"] == "seedance_2_0"
     assert result["prompt_tokens"] == 1000
     assert result["completion_tokens"] == 500
     assert result["credits"] == Decimal("0.064")
     assert result["cost_cents"] == 5
+
+
+def test_apimart_gemini_provider_parses_streaming_sse_response(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.apimart_costs.settings.engine_apimart_credit_usd",
+        Decimal("0.10"),
+    )
+    monkeypatch.setattr(
+        "app.services.apimart_costs.settings.engine_usd_cny_rate",
+        Decimal("7.20"),
+    )
+    midpoint = len(JSON_CONTENT) // 2
+    stream_response = _SseResponse(
+        [
+            (
+                'data: {"choices":[{"delta":{"content":'
+                f"{jsonlib.dumps(JSON_CONTENT[:midpoint])}"
+                "}}]}"
+            ),
+            (
+                'data: {"choices":[{"delta":{"content":'
+                f"{jsonlib.dumps(JSON_CONTENT[midpoint:])}"
+                '}}],"usage":{"prompt_tokens":1195,'
+                '"completion_tokens":1211,"total_tokens":2406}}'
+            ).encode(),
+            "data: [DONE]",
+        ]
+    )
+    provider = APIMartGeminiReversePromptProvider(
+        api_key="api-test-key",
+        session=_Session([stream_response]),
+    )
+
+    result = provider.reverse_image_sync({"image_url": "https://assets.test/input.png"})
+
+    assert result["prompt_en"].startswith("Glass perfume")
+    assert result["prompt_tokens"] == 1195
+    assert result["completion_tokens"] == 1211
+    assert result["total_tokens"] == 2406
+    assert result["credits"] == Decimal("0.1353760")
+    assert result["cost_cents"] == 10
+
+
+def test_apimart_gemini_provider_uses_reasoning_content_when_message_content_empty():
+    provider = APIMartGeminiReversePromptProvider(
+        api_key="api-test-key",
+        session=_Session(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "",
+                                "reasoning_content": JSON_CONTENT,
+                            }
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 1000,
+                        "completion_tokens": 500,
+                        "total_tokens": 1500,
+                    },
+                }
+            ]
+        ),
+    )
+
+    result = provider.reverse_image_sync({"image_url": "https://assets.test/input.png"})
+
+    assert result["prompt_zh"].startswith("Premium perfume")
+    assert result["completion_tokens"] == 500
 
 
 def test_apimart_gemini_provider_prefers_authoritative_credits_when_present(monkeypatch):
@@ -246,6 +338,21 @@ def test_apimart_gemini_provider_retries_once_when_model_returns_invalid_json():
         "Previous response was not valid JSON" in part.get("text", "")
         for part in retry_text_parts
     )
+
+
+def test_apimart_gemini_provider_retries_once_when_model_returns_empty_content():
+    session = _Session(
+        [
+            _chat_payload(""),
+            _chat_payload(JSON_CONTENT),
+        ]
+    )
+    provider = APIMartGeminiReversePromptProvider(api_key="api-test-key", session=session)
+
+    result = provider.reverse_image_sync({"image_url": "https://assets.test/input.png"})
+
+    assert result["prompt_en"].startswith("Glass perfume")
+    assert len(session.calls) == 2
 
 
 def _seed_reverse_prompt_provider(db, tenant_id: str | None = None) -> None:
