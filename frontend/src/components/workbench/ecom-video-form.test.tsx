@@ -95,6 +95,7 @@ describe("EcomVideoForm (电商带货 i2v)", () => {
       image_key: "uploads/abc123.png",
       voice_id: "v1",
       duration_sec: 30,
+      resolution: "720p", // ECOM-RESOLUTION-UI-0001 承重：默认 720p（与后端缺省一致，不选行为不变）
       speed: 1,
       aspect_ratio: "9:16",
       subtitle_enabled: true,
@@ -103,6 +104,25 @@ describe("EcomVideoForm (电商带货 i2v)", () => {
     expect(topic).toBe("316 不锈钢保温杯");
     // i2v must NOT carry the avatar field.
     expect(request).not.toHaveProperty("avatar_asset_id");
+  });
+
+  // ECOM-RESOLUTION-UI-0001 承重：三档出现、默认 720P、切 1080P → 提交体 resolution:"1080p"（断接线即红）
+  it("分辨率三档出现且默认 720P；切 1080P → 提交体 resolution:1080p（承重）", async () => {
+    render(<EcomVideoForm />);
+    fireEvent.change(screen.getByPlaceholderText(/输入产品卖点/), { target: { value: "保温杯" } });
+    selectProductImage();
+    // 三档同款选择器（aria-pressed 语义来自 SelectableOption），默认选中 720P。
+    expect(screen.getByRole("button", { name: "480P" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "720P" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "1080P" })).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(screen.getByRole("button", { name: "1080P" }));
+    expect(screen.getByRole("button", { name: "1080P" })).toHaveAttribute("aria-pressed", "true");
+    const generate = screen.getByRole("button", { name: /生成视频/ });
+    await waitFor(() => expect(generate).toBeEnabled());
+    fireEvent.click(generate);
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    expect(taskMocks.createAndTrack.mock.calls[0][0].resolution).toBe("1080p");
   });
 
   // LABEL-TOGGLE-UI-0001 承重：开启开关 → 提交体 apply_visible_label:true（锁 seedance_i2v 面板接线）

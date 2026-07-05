@@ -21,7 +21,7 @@ vi.mock("@/lib/batch/ecom-table", async (orig) => ({
 vi.mock("@/components/batch/common-params", () => ({
   CommonParams: ({ onChange }: { onChange: (c: BatchCommon) => void }) => (
     <>
-      <button type="button" onClick={() => onChange({ video_mode: "seedance_i2v", duration_sec: 30, resolution: "720p", apply_visible_label: true, voice_id: "v1" })}>
+      <button type="button" onClick={() => onChange({ video_mode: "seedance_i2v", duration_sec: 30, resolution: "1080p", apply_visible_label: true, voice_id: "v1" })}>
         set-common
       </button>
       <button type="button" onClick={() => onChange({ video_mode: "seedance_i2v", duration_sec: 0, resolution: "720p", apply_visible_label: false })}>
@@ -132,7 +132,9 @@ describe("EcomTableForm (批量·商品表)", () => {
         { product_name: "保温杯", selling_points: "316 不锈钢", image_url: "http://x/1.png" },
         { product_name: "雨伞", selling_points: "自动折叠", image_url: "http://x/2.png" }
       ],
-      common: { video_mode: "seedance_i2v", duration_sec: 30, resolution: "720p", apply_visible_label: true, voice_id: "v1" }
+      // resolution 用非默认 1080p（ECOM-RESOLUTION-UI-0001 承重）：锁批量电商透传第二段——EcomTableForm 把 common 原样带进
+      // 提交体，杀「提交前把 resolution 归一化/硬编码回 720p」变异；批量分辨率贯通 = 此段 + common-params.test 的 onChange 段。
+      common: { video_mode: "seedance_i2v", duration_sec: 30, resolution: "1080p", apply_visible_label: true, voice_id: "v1" }
     });
     // 注：此处验证 common 原样透传（含 voice_id）；voice_id「来源」承重在 common-params.test.tsx，「缺失门控」承重见上「音色未就绪」用例。
     expect(createMock.mutateAsync.mock.calls[0][0].common.voice_id).toBe("v1");

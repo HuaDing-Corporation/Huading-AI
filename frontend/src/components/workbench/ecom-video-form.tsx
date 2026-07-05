@@ -7,7 +7,7 @@ import { errorText } from "@/lib/api/error-text";
 import { useScenePromptGenerate, useScriptGenerate, useUploadProductImage, useVoices } from "@/lib/api/hooks";
 import { useGenerateConfirm } from "@/lib/api/use-generate-confirm";
 import { useTrackedUpload } from "@/lib/api/use-tracked-upload";
-import type { CreateVideoRequest } from "@/lib/api/types";
+import type { CreateVideoRequest, VideoGenResolution } from "@/lib/api/types";
 import { useVideoTasks } from "@/lib/videos/tasks-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { DurationPicker, isValidDuration } from "@/components/workbench/duration-picker";
 import { ImagePicker } from "@/components/workbench/image-picker";
 import { MoreSettings } from "@/components/workbench/more-settings";
+import { ResolutionPicker } from "@/components/workbench/resolution-picker";
 import { ScriptReview } from "@/components/workbench/script-review";
 import { VoicePicker } from "@/components/workbench/voice-picker";
 import { AiLabelToggle } from "@/components/label/ai-label-toggle";
@@ -50,6 +51,8 @@ export function EcomVideoForm({
   const [scenePrompt, setScenePrompt] = useState("");
   const [voiceId, setVoiceId] = useState("");
   const [durationSec, setDurationSec] = useState(30);
+  // 分辨率（ECOM-RESOLUTION-UI-0001）：默认 720p 与后端缺省一致，不选时行为不变。
+  const [resolution, setResolution] = useState<VideoGenResolution>("720p");
   const [speed, setSpeed] = useState(1);
   const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）
   const [error, setError] = useState<string | null>(null);
@@ -120,6 +123,7 @@ export function EcomVideoForm({
       voice_id: voiceId,
       scene_prompt: scenePrompt.trim() || undefined,
       duration_sec: durationSec,
+      resolution, // ECOM-RESOLUTION-UI-0001：后端 #117 存 params.resolution 按档出片&计费
       speed,
       aspect_ratio: "9:16",
       subtitle_enabled: true,
@@ -150,6 +154,9 @@ export function EcomVideoForm({
         onChange={setDurationSec}
         label={copy.workbench.durationLabelAligned}
       />
+
+      {/* 分辨率（ECOM-RESOLUTION-UI-0001）：与视频生成同款三档，位置参照其时长→分辨率顺序。 */}
+      <ResolutionPicker value={resolution} onChange={setResolution} />
 
       <div className="mb-[15px]">
         <label htmlFor="ecom-topic" className={labelClass}>

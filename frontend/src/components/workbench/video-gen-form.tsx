@@ -14,13 +14,13 @@ import { SelectableOption } from "@/components/ui/selectable-option";
 import { AiTextField } from "@/components/workbench/ai-text-field";
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
 import { ReferenceImagesPicker } from "@/components/workbench/reference-images-picker";
+import { ResolutionPicker } from "@/components/workbench/resolution-picker";
 import { BgmPicker } from "@/components/workbench/bgm-picker";
 import { AiLabelToggle } from "@/components/label/ai-label-toggle";
 import { useLabelTogglePreference } from "@/lib/preferences/label-toggle";
 import { copy } from "@/lib/copy";
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
-const RESOLUTIONS: VideoGenResolution[] = ["480p", "720p", "1080p"];
 
 /**
  * 视频生成 第6模式（VIDEOGEN-UI-0001，seam §5）：多参考图(≤9) + 不限 prompt + 时长(5/10/15) +
@@ -100,18 +100,8 @@ export function VideoGenForm() {
         </div>
       </fieldset>
 
-      {/* 分辨率 480p/720p/1080p */}
-      <fieldset className="mb-[15px] m-0 min-w-0 border-0 p-0">
-        <legend className={labelClass}>{copy.workbench.vgResolutionLabel}</legend>
-        <div className="grid grid-cols-3 gap-2">
-          {RESOLUTIONS.map((r) => (
-            <SelectableOption key={r} selected={resolution === r} onSelect={() => setResolution(r)} className="justify-center">
-              {r.toUpperCase()}
-            </SelectableOption>
-          ))}
-        </div>
-        <p className="mt-2 text-[12px] text-ink-faint">{copy.workbench.vgResolutionHint}</p>
-      </fieldset>
+      {/* 分辨率 480p/720p/1080p（共享 ResolutionPicker，电商带货同款） */}
+      <ResolutionPicker value={resolution} onChange={setResolution} />
 
       <BgmPicker onChange={setBgm} />
 
