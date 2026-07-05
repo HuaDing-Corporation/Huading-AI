@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import re
+import subprocess
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -274,6 +276,54 @@ def concat_seedance_clips(scene_paths: list[str], output_path: str) -> str:
     from pixelle_video.services.video import VideoService
 
     return VideoService().concat_videos(videos=scene_paths, output=output_path)
+
+
+def _ffmpeg_binary() -> str:
+    return os.environ.get("FFMPEG_BINARY", "ffmpeg")
+
+
+def _strip_video_audio(source: Path, output: Path) -> Path:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        _ffmpeg_binary(),
+        "-y",
+        "-i",
+        str(source),
+        "-map",
+        "0:v:0",
+        "-c:v",
+        "copy",
+        "-an",
+        str(output),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(f"Failed to strip Seedance scene audio: {detail}")
+    return output
+
+
+def concat_seedance_clips_without_audio(scene_paths: list[str], output_path: str) -> str:
+    if not scene_paths:
+        raise RuntimeError("No Seedance scene clips to concatenate.")
+    output = Path(output_path)
+    if len(scene_paths) == 1:
+        _strip_video_audio(Path(scene_paths[0]), output)
+        return output_path
+
+    silent_paths: list[Path] = []
+    try:
+        for index, scene_path in enumerate(scene_paths):
+            silent_path = output.with_name(f"{output.stem}_silent_{index:02d}{output.suffix}")
+            _strip_video_audio(Path(scene_path), silent_path)
+            silent_paths.append(silent_path)
+        return concat_seedance_clips([str(path) for path in silent_paths], output_path)
+    finally:
+        for path in silent_paths:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _download_bytes(url: str) -> bytes:
@@ -871,7 +921,7 @@ def seedance_i2v_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         scene_paths.append(str(save_path))
 
     concat_path = work_dir / "seedance_concat.mp4"
-    concat_seedance_clips(scene_paths, str(concat_path))
+    concat_seedance_clips_without_audio(scene_paths, str(concat_path))
     if not concat_path.exists() or concat_path.stat().st_size <= 0:
         raise RuntimeError("Seedance scene concatenation produced an empty video.")
     ctx.base_video_bytes = concat_path.read_bytes()
@@ -887,16 +937,22 @@ def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
     timeline = getattr(ctx, "timeline", []) or []
     duration_sec = float(ctx.duration_sec or 1)
+    timeline_items = _caption_timeline_items(timeline)
+    subtitle_duration_sec = _subtitle_timing_duration_sec(
+        task,
+        timeline_items,
+        duration_sec,
+    )
     script = clean_spoken_script(str(task.script or task.topic or ""))
     captions, source, clause_count = _script_timed_captions(
         script,
         timeline,
-        duration_sec=duration_sec,
+        duration_sec=subtitle_duration_sec,
     )
     if not captions:
         captions = _fallback_captions(
             script,
-            duration_sec=duration_sec,
+            duration_sec=subtitle_duration_sec,
         )
         source = "script_fallback"
         clause_count = len(captions)
@@ -917,7 +973,6 @@ def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         size_bytes=len(content),
     )
     ctx.subtitle_key = subtitle_key
-    timeline_items = _caption_timeline_items(timeline)
     logger.info(
         "avatar_talk.subtitle",
         task_id=ctx.task_id,
@@ -925,13 +980,29 @@ def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         timeline_items=len(timeline),
         timeline_first_ms=timeline_items[0][0] if timeline_items else None,
         timeline_last_ms=timeline_items[-1][1] if timeline_items else None,
-        audio_duration_ms=int(round(duration_sec * 1000)),
+        audio_duration_ms=int(round(subtitle_duration_sec * 1000)),
+        video_duration_ms=int(round(duration_sec * 1000)),
         clause_count=clause_count,
         caption_count=len(captions),
         cue_ranges_ms=[{"start_ms": start, "end_ms": end} for start, end, _text in captions],
         source=source,
     )
     return ctx
+
+
+def _subtitle_timing_duration_sec(
+    task: VideoTask,
+    timeline_items: list[tuple[int, int]],
+    duration_sec: float,
+) -> float:
+    if _task_mode(task) == "seedance_i2v" and timeline_items:
+        timeline_span_ms = max(1, timeline_items[-1][1] - timeline_items[0][0])
+        return timeline_span_ms / 1000
+    return duration_sec
+
+
+def _task_mode(task: VideoTask) -> str:
+    return str(task.video_mode or task.mode or "")
 
 
 def _script_timed_captions(
