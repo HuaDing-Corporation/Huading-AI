@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, get_args
 
 import pytest
+import requests
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -683,6 +684,124 @@ def test_video_gen_pipeline_setup_failure_marks_failed_and_releases_reserved(
         subscription = _subscription(db, auth_context["tenant_id"])
         assert subscription.quota_credits_reserved == 0
         assert subscription.quota_credits_used == 0
+
+
+def test_classify_video_error_uses_provider_and_connection_signals() -> None:
+    from app.providers.video.apimart import APIMartVideoProviderError
+    from app.workers.video_gen import classify_video_error
+
+    assert (
+        classify_video_error(
+            APIMartVideoProviderError("payment required", status_code=402)
+        )
+        == "VIDEO_INSUFFICIENT_BALANCE"
+    )
+    assert (
+        classify_video_error(
+            APIMartVideoProviderError("video task timed out", error_type="timeout")
+        )
+        == "VIDEO_TIMEOUT"
+    )
+    assert (
+        classify_video_error(requests.exceptions.ConnectionError("network down"))
+        == "VIDEO_CONNECTION_ERROR"
+    )
+    assert classify_video_error(RuntimeError("unexpected provider failure")) == "VIDEO_GEN_FAILED"
+
+
+def test_classify_video_error_checks_wrapped_causes() -> None:
+    from app.providers.video.apimart import APIMartVideoProviderError
+    from app.workers.video_gen import classify_video_error
+
+    inner = APIMartVideoProviderError("video task timed out", error_type="timeout")
+    outer = RuntimeError("wrapped provider error")
+    outer.__cause__ = inner
+
+    assert classify_video_error(outer) == "VIDEO_TIMEOUT"
+
+
+def test_classify_video_error_handles_cyclic_causes() -> None:
+    from app.workers.video_gen import classify_video_error
+
+    first = RuntimeError("first")
+    second = RuntimeError("second")
+    first.__cause__ = second
+    second.__cause__ = first
+
+    assert classify_video_error(first) == "VIDEO_GEN_FAILED"
+
+
+def test_classify_video_error_still_detects_balance_error_in_cause_chain() -> None:
+    from app.providers.video.apimart import APIMartVideoProviderError
+    from app.workers.video_gen import classify_video_error
+
+    inner = APIMartVideoProviderError("payment required", status_code=402)
+    middle = RuntimeError("middle")
+    outer = RuntimeError("outer")
+    middle.__cause__ = inner
+    outer.__cause__ = middle
+
+    assert classify_video_error(outer) == "VIDEO_INSUFFICIENT_BALANCE"
+
+
+def test_video_gen_pipeline_failure_persists_classified_provider_error_code(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.providers.video.apimart import APIMartVideoProviderError
+    from app.workers import video_gen
+
+    storage = _Storage()
+    store = _MemProgressStore()
+    task_id = "video-gen-provider-402"
+    with auth_db() as db:
+        subscription = _reset_subscription_quota(db, auth_context["tenant_id"])
+        _add_video_gen_task(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            user_id=auth_context["user_id"],
+            task_id=task_id,
+            params={"duration_sec": 5, "resolution": "720p"},
+        )
+        _add_reserved_video_gen_usage(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            subscription=subscription,
+            task_id=task_id,
+        )
+        db.commit()
+
+    def fail_with_provider_402(_ctx):
+        raise APIMartVideoProviderError("payment required", status_code=402)
+
+    monkeypatch.setattr(video_gen, "SessionLocal", auth_db)
+    monkeypatch.setattr(video_gen, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(video_gen, "build_progress_store", lambda _url: store)
+    monkeypatch.setattr(video_gen, "_generate_seedance_mini_video", fail_with_provider_402)
+
+    with pytest.raises(APIMartVideoProviderError, match="payment required"):
+        video_gen.run_video_gen_pipeline(
+            tenant_id=auth_context["tenant_id"],
+            task_id=task_id,
+        )
+
+    scoped_id = f"{auth_context['tenant_id']}:{task_id}"
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
+        subscription = _subscription(db, auth_context["tenant_id"])
+
+    assert task is not None
+    assert task.status == "failed"
+    assert task.error_code == "VIDEO_INSUFFICIENT_BALANCE"
+    assert task.error_message == "payment required"
+    assert usage is not None
+    assert usage.status == "released"
+    assert subscription.quota_credits_reserved == 0
+    assert store.snapshots[scoped_id]["status"] == "failed"
+    assert store.snapshots[scoped_id]["error_code"] == "VIDEO_INSUFFICIENT_BALANCE"
+    assert store.snapshots[scoped_id]["error_message"] == "payment required"
 
 
 def test_video_gen_pipeline_mixes_library_bgm_from_track_storage(
