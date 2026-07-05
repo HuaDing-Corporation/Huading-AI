@@ -134,6 +134,31 @@ describe("VideoDetail", () => {
     expect(screen.queryByText(/Error code: 400/)).not.toBeInTheDocument();
   });
 
+  // VIDEO-ERR-MAP-UI：视频失败详情页也走友好映射（照抄图片线），不露裸 error_message。
+  it("shows friendly copy for a failed video (never the raw error_message)", () => {
+    (useVideo as Mock).mockReturnValue({
+      data: {
+        id: "vf1",
+        status: "failed",
+        progress: 0,
+        mode: "avatar_talk",
+        topic: "口播失败",
+        script: null,
+        voice_id: null,
+        aspect_ratio: null,
+        subtitle_enabled: null,
+        error_code: "VIDEO_TIMEOUT",
+        error_message: "Error code: 504 - upstream timeout (raw)",
+        created_at: "2026-06-25T00:00:00Z"
+      },
+      error: null,
+      isLoading: false
+    });
+    render(<VideoDetail id="vf1" />, { wrapper });
+    expect(screen.getByText(copy.errors.videoTimeout)).toBeInTheDocument();
+    expect(screen.queryByText(/Error code: 504/)).not.toBeInTheDocument();
+  });
+
   it("P2-3: renders without crashing when backend nullable fields are null", () => {
     (useVideo as Mock).mockReturnValue({
       data: {

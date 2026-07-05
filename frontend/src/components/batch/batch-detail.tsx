@@ -3,6 +3,7 @@
 import { ChevronLeft, Download } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
+import { friendlyVideoError } from "@/lib/api/video-error";
 import { useBatch, useCancelBatch } from "@/lib/api/hooks";
 import type { BatchStatus } from "@/lib/api/types";
 import { Button } from "@/components/ui/button";
@@ -93,8 +94,10 @@ export function BatchDetail({ batchId, onBack }: { batchId: string; onBack: () =
                   <span className={`text-[12.5px] ${t.status === "failed" ? "text-error-fg" : "text-ink"}`}>
                     {TASK_STATUS_LABEL[t.status] ?? t.status}
                   </span>
-                  {t.status === "failed" && (t.error_message || t.error) && (
-                    <p className="mt-0.5 text-[12px] text-error-fg">{t.error_message || t.error}</p>
+                  {/* 批量子任务是视频任务(seedance_i2v/video_gen)：失败走 friendlyVideoError 友好中文映射，
+                      绝不裸展示后端 error_message/error（真后端会回落 str(exc) 英文技术串）。VIDEO-ERR-MAP-UI。 */}
+                  {t.status === "failed" && (
+                    <p className="mt-0.5 text-[12px] text-error-fg">{friendlyVideoError(t.error_code)}</p>
                   )}
                   {t.status === "done" && t.video_url && (
                     <div className="mt-1.5 flex flex-wrap items-center gap-2">

@@ -116,9 +116,18 @@ describe("TaskCard photo error friendly (IMAGE-ERROR-FRIENDLY)", () => {
     expect(screen.queryByText(/Error code/)).toBeNull();
   });
 
-  it("does NOT change video error display (avatar/i2v keep the original message)", () => {
-    const task: TrackedTask = { ...failed, error: "积分不足，无法生成" };
+  // VIDEO-ERR-MAP-UI：视频失败也走友好中文映射（照抄图片线），不再露裸 error_message / 技术串。
+  it("视频失败·已知码 VIDEO_TIMEOUT → 友好中文，且不露裸 error", () => {
+    const task: TrackedTask = { ...failed, errorCode: "VIDEO_TIMEOUT", error: "Error code: 504 - upstream timeout" };
     render(<TaskCard task={task} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />);
-    expect(screen.getByText("积分不足，无法生成")).toBeInTheDocument();
+    expect(screen.getByText(copy.errors.videoTimeout)).toBeInTheDocument();
+    expect(screen.queryByText(/Error code: 504/)).toBeNull();
+  });
+
+  it("视频失败·未知/缺失码 → 通用视频兜底文案，绝不回落裸 error_message", () => {
+    const task: TrackedTask = { ...failed, errorCode: null, error: "RuntimeError: something exploded" };
+    render(<TaskCard task={task} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />);
+    expect(screen.getByText(copy.errors.videoGeneric)).toBeInTheDocument();
+    expect(screen.queryByText(/RuntimeError/)).toBeNull();
   });
 });

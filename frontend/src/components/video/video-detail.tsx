@@ -9,6 +9,7 @@ import { ApiError } from "@/lib/api/client";
 import { useVideo } from "@/lib/api/hooks";
 import { videoKeys } from "@/lib/api/keys";
 import { friendlyImageError } from "@/lib/api/image-error";
+import { friendlyVideoError } from "@/lib/api/video-error";
 import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
@@ -215,11 +216,12 @@ export function VideoDetail({ id }: VideoDetailProps) {
           <dt className="text-ink-faint">创建时间</dt>
           <dd className="text-ink">{formatDate(data.created_at)}</dd>
         </div>
-        {(data.mode === "photo" ? data.status === "failed" : !!data.error_message) && (
+        {data.status === "failed" && (
           <div className="col-span-full">
             <dt className="text-ink-faint">错误信息</dt>
+            {/* 失败均映射友好中文（不露裸 error_message）：photo→friendlyImageError，视频→friendlyVideoError（VIDEO-ERR-MAP-UI）。 */}
             <dd className="text-error-fg">
-              {data.mode === "photo" ? friendlyImageError(data.error_code) : data.error_message}
+              {data.mode === "photo" ? friendlyImageError(data.error_code) : friendlyVideoError(data.error_code)}
             </dd>
           </div>
         )}
