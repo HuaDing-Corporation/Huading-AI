@@ -8,7 +8,15 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.db.models import Asset, ProviderConfig, ReversePromptJob, Subscription, Tenant, UsageRecord
+from app.db.models import (
+    Asset,
+    CreditRate,
+    ProviderConfig,
+    ReversePromptJob,
+    Subscription,
+    Tenant,
+    UsageRecord,
+)
 from app.main import app
 from app.providers.reverse_prompt.apimart_gemini import APIMartGeminiReversePromptProvider
 
@@ -241,14 +249,23 @@ def test_apimart_gemini_provider_retries_once_when_model_returns_invalid_json():
 
 
 def _seed_reverse_prompt_provider(db, tenant_id: str | None = None) -> None:
-    db.add(
-        ProviderConfig(
-            tenant_id=tenant_id,
-            capability="reverse_prompt",
-            provider="apimart-gemini",
-            config={"api_key": "api-test-key"},
-            is_active=True,
-        )
+    db.add_all(
+        [
+            ProviderConfig(
+                tenant_id=tenant_id,
+                capability="reverse_prompt",
+                provider="apimart-gemini",
+                config={"api_key": "api-test-key"},
+                is_active=True,
+            ),
+            CreditRate(
+                tenant_id=tenant_id,
+                capability="reverse_prompt",
+                unit="call",
+                credits_per_unit=Decimal("30.0000"),
+                is_active=True,
+            ),
+        ]
     )
 
 
