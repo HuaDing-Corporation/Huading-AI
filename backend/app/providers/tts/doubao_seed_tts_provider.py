@@ -38,7 +38,7 @@ class DoubaoSeedTTSProvider:
         output_dir: str | None = None,
         request_timeout_seconds: float = 60.0,
         max_text_bytes: int = 1024,
-        aigc_watermark: bool = True,
+        aigc_watermark: bool = False,
     ) -> None:
         if not api_key and (not appid or not access_token):
             raise DoubaoSeedTTSError(
