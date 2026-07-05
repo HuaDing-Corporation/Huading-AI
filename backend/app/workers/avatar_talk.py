@@ -51,6 +51,7 @@ _MIN_TIMELINE_COVERAGE_RATIO = 0.8
 _TAIL_TRIM_THRESHOLD_SEC = 0.6
 _TAIL_KEEP_AFTER_SPEECH_SEC = 0.5
 _AUDIO_FADEOUT_SEC = 0.3
+_AUDIO_TAIL_FADEOUT_SEC = 0.05
 _SCRIPT_CLAUSE_ENDINGS = tuple(".!?;。！？；，、")
 _SEEDANCE_I2V_DEFAULT_DURATION_SEC = 15
 _SEEDANCE_I2V_MIN_DURATION_SEC = 5
@@ -307,6 +308,56 @@ def _audio_duration_sec(path: Path) -> float:
         clip.close()
 
 
+def _audio_codec_for_path(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".wav":
+        return "pcm_s16le"
+    if suffix == ".m4a":
+        return "aac"
+    return "libmp3lame"
+
+
+def _write_tail_faded_audio(
+    source: Path,
+    output: Path,
+    *,
+    fadeout_sec: float = _AUDIO_TAIL_FADEOUT_SEC,
+) -> Path:
+    from moviepy.audio.fx.audio_fadeout import audio_fadeout
+    from moviepy.editor import AudioFileClip
+
+    clip = AudioFileClip(str(source))
+    faded = None
+    try:
+        fade_duration = min(max(0.0, fadeout_sec), max(0.0, float(clip.duration or 0)))
+        faded = clip.fx(audio_fadeout, fade_duration) if fade_duration > 0 else clip
+        output.parent.mkdir(parents=True, exist_ok=True)
+        faded.write_audiofile(
+            str(output),
+            codec=_audio_codec_for_path(output),
+            fps=44100,
+            logger=None,
+        )
+        return output
+    finally:
+        if faded is not None and faded is not clip:
+            faded.close()
+        clip.close()
+
+
+def _tail_faded_tts_audio(source: Path) -> Path:
+    output = source.with_name(f"{source.stem}.tail_faded{source.suffix or '.mp3'}")
+    try:
+        return _write_tail_faded_audio(source, output)
+    except Exception as exc:
+        logger.warning(
+            "avatar_talk.tts_tail_fade_failed",
+            error=str(exc),
+            suffix=source.suffix.lower(),
+        )
+        return source
+
+
 def _input_avatar_asset(ctx: AvatarTalkContext) -> Asset:
     asset = ctx.db.scalar(
         select(Asset)
@@ -552,7 +603,8 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         result=result,
         video_task_id=ctx.task_id,
     )
-    audio_bytes = Path(str(result["audio_path"])).read_bytes()
+    audio_source_path = _tail_faded_tts_audio(Path(str(result["audio_path"])))
+    audio_bytes = audio_source_path.read_bytes()
     audio_bytes, label_metadata = _apply_synthetic_label(
         ctx,
         audio_bytes,
@@ -561,7 +613,7 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     )
     audio_key = f"tenants/{ctx.tenant_id}/videos/{ctx.task_id}/audio.mp3"
     ctx.storage.put_bytes(audio_key, audio_bytes, content_type="audio/mpeg")
-    detected_duration_sec = _audio_duration_sec(Path(str(result["audio_path"])))
+    detected_duration_sec = _audio_duration_sec(audio_source_path)
     duration_ms = int(round(detected_duration_sec * 1000))
     if duration_ms <= 0:
         duration_ms = int(result.get("duration_ms") or 0)
@@ -1320,6 +1372,20 @@ def _compose_end_time(video_duration: float, last_caption_end: float | None) -> 
     )
 
 
+def _audio_tail_fadeout_duration(
+    compose_end: float,
+    last_caption_end: float | None,
+) -> float:
+    if compose_end <= 0:
+        return 0.0
+    if (
+        last_caption_end is not None
+        and compose_end - last_caption_end >= _AUDIO_FADEOUT_SEC
+    ):
+        return min(_AUDIO_FADEOUT_SEC, compose_end)
+    return min(_AUDIO_TAIL_FADEOUT_SEC, compose_end)
+
+
 def _aigc_metadata_params(*, task_id: str, producer: str, propagate_id: str) -> list[str]:
     content_id = _metadata_text(task_id)
     producer_text = _metadata_text(producer)
@@ -1552,12 +1618,10 @@ def _burn_subtitles(
             final = final.set_audio(video.audio)
         if audio_clip is None and compose_end < video.duration:
             final = final.subclip(0, compose_end)
-        if (
-            final.audio is not None
-            and last_caption_end is not None
-            and compose_end - last_caption_end >= _AUDIO_FADEOUT_SEC
-        ):
-            final = final.set_audio(final.audio.fx(audio_fadeout, _AUDIO_FADEOUT_SEC))
+        if final.audio is not None:
+            fadeout_duration = _audio_tail_fadeout_duration(compose_end, last_caption_end)
+            if fadeout_duration > 0:
+                final = final.set_audio(final.audio.fx(audio_fadeout, fadeout_duration))
         output.parent.mkdir(parents=True, exist_ok=True)
         final.write_videofile(
             str(output),
