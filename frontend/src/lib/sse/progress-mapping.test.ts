@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { eventToProgress, fromVideoRead, mapSseStatus, TERMINAL } from "./progress-mapping";
+import { eventToProgress, fromVideoRead, labelFor, mapSseStatus, TERMINAL } from "./progress-mapping";
 
 describe("progress-mapping", () => {
   it("maps new lowercase + old uppercase statuses", () => {
@@ -48,5 +48,24 @@ describe("progress-mapping", () => {
   it("knows terminal states", () => {
     expect(TERMINAL.includes("done")).toBe(true);
     expect(TERMINAL.includes("running")).toBe(false);
+  });
+
+  // ECOM-HISTORY-CANCELLED-FIX-0001：cancelled（批量退分）经 fromVideoRead 归为一等 UiStatus，
+  // statusLabel=已取消、属终态；根治历史列表 thumbIcon 查不到 → #130 白屏。
+  it("fromVideoRead 的 cancelled 项：status=cancelled、statusLabel=已取消（不裸透传致 #130）", () => {
+    const t = fromVideoRead({ id: "x1", status: "cancelled", progress: 100, topic: "退款", created_at: "" });
+    expect(t.status).toBe("cancelled");
+    expect(t.statusLabel).toBe("已取消");
+  });
+
+  it("labelFor(cancelled)=已取消；cancelled 属终态（不再轮询）", () => {
+    expect(labelFor("cancelled", 100)).toBe("已取消");
+    expect(TERMINAL.includes("cancelled")).toBe(true);
+  });
+
+  it("mapSseStatus 归一化 cancelled/canceled/cancel → cancelled（SSE 路径也不漏）", () => {
+    expect(mapSseStatus("cancelled")).toBe("cancelled");
+    expect(mapSseStatus("CANCELED")).toBe("cancelled");
+    expect(mapSseStatus("cancel")).toBe("cancelled");
   });
 });

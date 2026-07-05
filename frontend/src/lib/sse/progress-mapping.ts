@@ -27,7 +27,7 @@ export interface TrackedTask {
   applyVisibleLabel?: boolean;
 }
 
-export const TERMINAL: UiStatus[] = ["done", "failed"];
+export const TERMINAL: UiStatus[] = ["done", "failed", "cancelled"];
 
 const STEP_LABEL: Record<string, string> = {
   script: "撰写文案",
@@ -44,6 +44,8 @@ export function labelFor(status: UiStatus, pct: number, step?: string | null): s
       return "已完成";
     case "failed":
       return "失败";
+    case "cancelled":
+      return "已取消";
     case "running":
       return step && STEP_LABEL[step] ? `${STEP_LABEL[step]} ${pct}%` : `生成中 ${pct}%`;
     default:
@@ -65,6 +67,10 @@ export function mapSseStatus(status: string | undefined): UiStatus {
     case "started":
     case "running":
       return "running";
+    case "cancelled":
+    case "canceled":
+    case "cancel":
+      return "cancelled";
     default:
       return "queued";
   }
