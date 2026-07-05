@@ -103,13 +103,7 @@ def _video_error_text(exc: Exception) -> str:
     return " ".join(parts).lower()
 
 
-def classify_video_error(exc: Exception) -> str:
-    cause = exc.__cause__
-    if cause is not None and cause is not exc:
-        cause_code = classify_video_error(cause)
-        if cause_code != _VIDEO_GEN_FAILED_ERROR_CODE:
-            return cause_code
-
+def _classify_single_video_error(exc: Exception) -> str:
     if isinstance(exc, APIMartVideoProviderError):
         error_type = str(exc.error_type or "").strip().lower()
         error_text = _video_error_text(exc)
@@ -128,6 +122,28 @@ def classify_video_error(exc: Exception) -> str:
         if int(getattr(response, "status_code", 0) or 0) == 402:
             return _VIDEO_INSUFFICIENT_BALANCE_ERROR_CODE
 
+    return _VIDEO_GEN_FAILED_ERROR_CODE
+
+
+def classify_video_error(exc: Exception) -> str:
+    seen: set[int] = set()
+    chain: list[Exception] = []
+    current: Exception | None = exc
+    while current is not None:
+        current_id = id(current)
+        if current_id in seen:
+            return _VIDEO_GEN_FAILED_ERROR_CODE
+        seen.add(current_id)
+        chain.append(current)
+        cause = current.__cause__
+        if cause is None or cause is current:
+            break
+        current = cause
+
+    for item in reversed(chain):
+        code = _classify_single_video_error(item)
+        if code != _VIDEO_GEN_FAILED_ERROR_CODE:
+            return code
     return _VIDEO_GEN_FAILED_ERROR_CODE
 
 

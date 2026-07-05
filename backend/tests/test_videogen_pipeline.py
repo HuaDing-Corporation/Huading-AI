@@ -720,6 +720,30 @@ def test_classify_video_error_checks_wrapped_causes() -> None:
     assert classify_video_error(outer) == "VIDEO_TIMEOUT"
 
 
+def test_classify_video_error_handles_cyclic_causes() -> None:
+    from app.workers.video_gen import classify_video_error
+
+    first = RuntimeError("first")
+    second = RuntimeError("second")
+    first.__cause__ = second
+    second.__cause__ = first
+
+    assert classify_video_error(first) == "VIDEO_GEN_FAILED"
+
+
+def test_classify_video_error_still_detects_balance_error_in_cause_chain() -> None:
+    from app.providers.video.apimart import APIMartVideoProviderError
+    from app.workers.video_gen import classify_video_error
+
+    inner = APIMartVideoProviderError("payment required", status_code=402)
+    middle = RuntimeError("middle")
+    outer = RuntimeError("outer")
+    middle.__cause__ = inner
+    outer.__cause__ = middle
+
+    assert classify_video_error(outer) == "VIDEO_INSUFFICIENT_BALANCE"
+
+
 def test_video_gen_pipeline_failure_persists_classified_provider_error_code(
     monkeypatch,
     auth_context,
