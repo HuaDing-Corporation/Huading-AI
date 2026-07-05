@@ -9,6 +9,15 @@ const err = (status: number, code: string, message: string) =>
 
 // in-memory store so list/detail/SSE stay consistent within a session
 const videos = new Map<string, Record<string, unknown>>();
+// mock 种子（ECOM-FIXES-0001 ③）：预置电商(seedance_i2v)历史项，覆盖 TaskCard 全渲染分支（done 播放器/时长/AI标识、
+// running 进度、failed 错误+重试、queued），供「电商视频历史」交互冒烟真点后渲染 TaskCard、堵 #130 白屏回归。仅 mock 生效。
+const ECOM_HISTORY_SEED = [
+  { id: "seed-ecom-done", status: "done", progress: 100, topic: "保温杯带货", mode: "seedance_i2v", kind: null, created_at: new Date(0).toISOString(), playback_url: "https://mock.local/v.mp4", download_url: "https://mock.local/v.mp4", thumbnail_url: "https://mock.local/t.jpg", duration_ms: 30000, apply_visible_label: true, voice_id: "v-zhixing", aspect_ratio: "9:16", subtitle_enabled: true },
+  { id: "seed-ecom-running", status: "running", progress: 55, topic: "雨伞带货", mode: "seedance_i2v", kind: null, created_at: new Date(0).toISOString(), apply_visible_label: false, voice_id: "v-zhixing", aspect_ratio: "9:16", subtitle_enabled: true },
+  { id: "seed-ecom-failed", status: "failed", progress: 100, topic: "台灯带货", mode: "seedance_i2v", kind: null, created_at: new Date(0).toISOString(), error_message: "生成失败：上游超时", error_code: "PROVIDER_TIMEOUT", apply_visible_label: false, voice_id: "v-zhixing", aspect_ratio: "9:16", subtitle_enabled: true },
+  { id: "seed-ecom-queued", status: "queued", progress: 0, topic: "水杯带货", mode: "seedance_i2v", kind: null, created_at: new Date(0).toISOString(), apply_visible_label: false, voice_id: "v-zhixing", aspect_ratio: "9:16", subtitle_enabled: true }
+];
+for (const v of ECOM_HISTORY_SEED) videos.set(v.id, v);
 // 文案草稿内存 store（newest first），供 POST/GET /copy/drafts 一致回放
 const copyDrafts: Record<string, unknown>[] = [];
 // 单调递增 id 计数器：删后重建不复用 id（videos+covers 共享 Map 故共用一个），避免碰撞/重复(HIST-UI-0001 RV)

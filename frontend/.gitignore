@@ -1,2 +1,8 @@
 # TypeScript incremental build artifact
 tsconfig.tsbuildinfo
+
+# Playwright interactive smoke artifacts (ECOM-FIXES-0001 ③)
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/

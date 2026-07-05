@@ -139,11 +139,13 @@ describe("EcomVideoForm (电商带货 i2v)", () => {
     expect(taskMocks.createAndTrack.mock.calls[0][0].apply_visible_label).toBe(true);
   });
 
-  it("submits the selected duration gear in duration_sec", async () => {
+  it("submits the selected duration gear in duration_sec（用保留档 30；45/60 已去，见 duration-picker.test）", async () => {
     render(<EcomVideoForm />);
     fireEvent.change(screen.getByPlaceholderText(/输入产品卖点/), { target: { value: "保温杯" } });
     selectProductImage();
-    fireEvent.click(screen.getByRole("button", { name: "45 秒" }));
+    // 默认 30 → 先切 10 再切 30，确认切档真生效（避免与默认值巧合）。
+    fireEvent.click(screen.getByRole("button", { name: "10 秒" }));
+    fireEvent.click(screen.getByRole("button", { name: "30 秒" }));
 
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
@@ -153,7 +155,7 @@ describe("EcomVideoForm (电商带货 i2v)", () => {
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0]).toMatchObject({
       video_mode: "seedance_i2v",
-      duration_sec: 45
+      duration_sec: 30
     });
   });
 

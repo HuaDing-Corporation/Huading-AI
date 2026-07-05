@@ -69,6 +69,11 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      # 类型门：next build 只类型检查应用图内文件；tsc --noEmit 覆盖全仓（含 e2e/ Playwright spec，
+      # 否则 e2e 类型错误既不进 next lint dirs 也不进 build 图，CI 无门禁）。(ECOM-FIXES-0001)
+      - name: Typecheck (tsc --noEmit, covers e2e)
+        run: pnpm typecheck
+
       - name: Test
         run: pnpm test
 
@@ -76,3 +81,19 @@ jobs:
       # 抓 SSR/prerender 期崩溃。路由表会打印 ○(Static)/ƒ(Dynamic) 标记，/analytics 应为 ○（静态预渲染）。
       - name: Build (production, anti-#130 gate)
         run: pnpm build
+
+      # 交互冒烟门（ECOM-FIXES-0001 ③「根本堵漏」）：只预渲染初始态的 build 冒烟点不进历史，才漏了这次
+      # 电商历史 #130。以 mock 构建 → next start → Playwright 真点「电商视频历史」，抓 vitest 测不出的
+      # 运行时 undefined 组件 #130 + /api/api 双前缀。mock 构建须与真 build 分开（NEXT_PUBLIC_USE_MOCK 构建期烘焙）。
+      - name: Build (mock, for interactive smoke)
+        run: pnpm build
+        env:
+          NEXT_PUBLIC_USE_MOCK: "1"
+
+      - name: Install Playwright browser
+        run: pnpm exec playwright install --with-deps chromium
+
+      # 主门禁：真点「电商视频历史」抓运行时 #130 白屏（undefined 组件，vitest 测不出）。附防御性 /api/api 断言
+      # （Bug B 主承重在 client.test.ts base=/api 单测；见 e2e spec 头注）。
+      - name: Interactive smoke (电商视频历史 · 运行时 #130 白屏门)
+        run: pnpm test:e2e

@@ -8,7 +8,9 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     globals: true,
-    setupFiles: ["./vitest.setup.ts"]
+    setupFiles: ["./vitest.setup.ts"],
+    // e2e/ 是 Playwright 交互冒烟（*.spec.ts），不归 vitest 跑（ECOM-FIXES-0001 ③）。
+    exclude: ["**/node_modules/**", "**/dist/**", "e2e/**"]
   },
   resolve: {
     alias: { "@": path.resolve(__dirname, "src") }
