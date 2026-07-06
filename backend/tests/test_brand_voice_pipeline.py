@@ -429,6 +429,122 @@ def test_create_brand_voice_uses_env_speaker_slots_when_config_pool_missing(
         assert config.config["used_speaker_ids"] == {"S_env_slot_001": data["id"]}
 
 
+def test_create_brand_voice_prefers_db_speaker_slots_over_env(
+    auth_context,
+    auth_db,
+    monkeypatch,
+):
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+
+    provider = _CloneProvider()
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "settings",
+        SimpleNamespace(engine_doubao_voice_clone_speaker_ids=["S_env_slot_001"]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "resolve",
+        lambda _db, *, tenant_id, capability: provider,
+    )
+    with auth_db() as db:
+        _seed_brand_voice_billing(
+            db,
+            auth_context["tenant_id"],
+            speaker_ids=("S_db_slot_001",),
+        )
+        asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
+
+    storage = _Storage()
+    storage.objects[f"tenants/{auth_context['tenant_id']}/uploads/brand-voice.wav"] = b"WAVDATA"
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    client = TestClient(app)
+    try:
+        resp = client.post(
+            "/api/v1/brand-voices",
+            json={
+                "name": "Store Voice",
+                "source_audio_asset_id": asset_id,
+                "consent_confirmed": True,
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 201
+    data = resp.json()["data"]
+    assert provider.clone_calls[0]["speaker_id"] == "S_db_slot_001"
+    with auth_db() as db:
+        config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
+        assert config.config["speaker_ids"] == ["S_db_slot_001"]
+        assert config.config["used_speaker_ids"] == {"S_db_slot_001": data["id"]}
+
+
+def test_delete_brand_voice_releases_env_fallback_speaker_slot(
+    auth_context,
+    auth_db,
+    monkeypatch,
+):
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+
+    provider = _CloneProvider()
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "settings",
+        SimpleNamespace(engine_doubao_voice_clone_speaker_ids=["S_env_slot_001"]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "resolve",
+        lambda _db, *, tenant_id, capability: provider,
+    )
+    with auth_db() as db:
+        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
+        config.config = {}
+        asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
+
+    storage = _Storage()
+    storage.objects[f"tenants/{auth_context['tenant_id']}/uploads/brand-voice.wav"] = b"WAVDATA"
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    client = TestClient(app)
+    try:
+        create_resp = client.post(
+            "/api/v1/brand-voices",
+            json={
+                "name": "Store Voice",
+                "source_audio_asset_id": asset_id,
+                "consent_confirmed": True,
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert create_resp.status_code == 201
+    brand_voice_id = create_resp.json()["data"]["id"]
+    delete_resp = client.delete(
+        f"/api/v1/brand-voices/{brand_voice_id}",
+        headers=auth_context["headers"],
+    )
+
+    assert delete_resp.status_code == 200
+    assert provider.delete_calls == [
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "brand_voice_id": brand_voice_id,
+            "speaker_id": "S_env_slot_001",
+        }
+    ]
+    with auth_db() as db:
+        config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
+        assert config.config["speaker_ids"] == ["S_env_slot_001"]
+        assert config.config["used_speaker_ids"] == {}
+
+
 def test_voice_clone_slot_allocation_locks_provider_config_row():
     from app.api.v1.routes import brand_voices as brand_voice_routes
 
