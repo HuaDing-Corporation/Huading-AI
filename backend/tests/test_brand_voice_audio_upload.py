@@ -82,6 +82,41 @@ def test_upload_audio_creates_tenant_scoped_audio_asset(auth_context, auth_db, m
         assert storage.saved[asset.storage_key] == (b"RIFF fake wav bytes", "audio/wav")
 
 
+def test_upload_audio_accepts_codec_param_and_normalizes_mime(
+    auth_context,
+    auth_db,
+    monkeypatch,
+):
+    from app.api.v1.routes import uploads
+
+    storage = _Storage()
+    monkeypatch.setattr(uploads, "_probe_audio_duration_ms", lambda *_args, **_kwargs: 8000)
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    client = TestClient(app)
+    try:
+        resp = client.post(
+            "/api/v1/uploads/audio",
+            files={
+                "file": (
+                    "voice.webm",
+                    b"webm opus bytes",
+                    "audio/webm;codecs=opus",
+                )
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 201
+    with auth_db() as db:
+        asset = db.get(Asset, resp.json()["data"]["asset_id"])
+        assert asset is not None
+        assert asset.mime_type == "audio/webm"
+        assert asset.storage_key.endswith(".webm")
+        assert storage.saved[asset.storage_key] == (b"webm opus bytes", "audio/webm")
+
+
 def test_upload_audio_rejects_unsupported_type_without_asset(auth_context, auth_db):
     storage = _Storage()
     app.dependency_overrides[get_object_storage] = lambda: storage
@@ -89,7 +124,7 @@ def test_upload_audio_rejects_unsupported_type_without_asset(auth_context, auth_
     try:
         resp = client.post(
             "/api/v1/uploads/audio",
-            files={"file": ("voice.txt", b"not audio", "text/plain")},
+            files={"file": ("voice.flac", b"not accepted", "audio/flac")},
             headers=auth_context["headers"],
         )
     finally:
@@ -146,6 +181,8 @@ def test_upload_audio_keeps_asset_when_duration_probe_fails(auth_context, auth_d
         assert asset is not None
         assert asset.type == "audio"
         assert asset.duration_ms is None
+        assert asset.mime_type == "audio/webm"
+        assert storage.saved[asset.storage_key] == (b"webm audio bytes", "audio/webm")
 
 
 def test_upload_audio_then_create_brand_voice_without_direct_db_audio_seed(
@@ -198,3 +235,51 @@ def test_upload_audio_then_create_brand_voice_without_direct_db_audio_seed(
         brand_voice = db.get(BrandVoice, created["id"])
         assert brand_voice is not None
         assert brand_voice.source_audio_asset_id == audio_assets[0].id
+
+
+def test_create_brand_voice_accepts_historical_codec_param_audio_asset(
+    auth_context,
+    auth_db,
+    monkeypatch,
+):
+    from app.api.v1.routes import brand_voices
+
+    provider = _CloneProvider()
+    storage = _Storage()
+    monkeypatch.setattr(
+        brand_voices,
+        "resolve",
+        lambda _db, *, tenant_id, capability: provider,
+    )
+    with auth_db() as db:
+        asset = Asset(
+            tenant_id=auth_context["tenant_id"],
+            type="audio",
+            source="upload",
+            storage_key=f"tenants/{auth_context['tenant_id']}/uploads/legacy.webm",
+            mime_type="audio/webm;codecs=opus",
+            size_bytes=1234,
+            duration_ms=8000,
+            status="ready",
+        )
+        db.add(asset)
+        db.commit()
+        asset_id = asset.id
+
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    client = TestClient(app)
+    try:
+        create_resp = client.post(
+            "/api/v1/brand-voices",
+            json={
+                "name": "Legacy WebM Voice",
+                "source_audio_asset_id": asset_id,
+                "consent_confirmed": True,
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert create_resp.status_code == 201
+    assert provider.clone_calls[0]["source_audio_asset_id"] == asset_id

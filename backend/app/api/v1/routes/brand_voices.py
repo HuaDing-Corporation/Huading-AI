@@ -17,6 +17,7 @@ from app.api.deps import (
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
+from app.core.utils import base_mime
 from app.db.models import Asset, BrandVoice, User
 from app.providers.base import ProviderResolutionError, resolve
 from app.schemas.brand_voices import (
@@ -263,7 +264,7 @@ def _source_audio_or_404(db: Session, *, tenant_id: str, asset_id: str) -> Asset
 
 
 def _validate_audio_asset(asset: Asset, *, tenant_id: str) -> None:
-    mime_type = (asset.mime_type or "").lower()
+    mime_type = base_mime(asset.mime_type)
     if mime_type not in _ALLOWED_AUDIO_TYPES:
         raise AppError(
             "Unsupported source audio type.",
