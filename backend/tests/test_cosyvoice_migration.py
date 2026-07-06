@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import sqlalchemy as sa
@@ -34,6 +36,17 @@ def test_cosyvoice_migration_seeds_provider_and_relaxes_unique_indexes():
         sa.Column("config", sa.JSON, nullable=False, default=dict),
         sa.Column("is_active", sa.Boolean, nullable=False, default=True),
     )
+    credit_rates = sa.Table(
+        "credit_rates",
+        metadata,
+        sa.Column("id", sa.String, primary_key=True),
+        sa.Column("tenant_id", sa.String, nullable=True),
+        sa.Column("capability", sa.String, nullable=False),
+        sa.Column("unit", sa.String, nullable=False),
+        sa.Column("credits_per_unit", sa.Numeric(12, 4), nullable=False),
+        sa.Column("is_active", sa.Boolean, nullable=False, default=True),
+        sa.Column("effective_at", sa.DateTime(timezone=True), nullable=False),
+    )
     sa.Index(
         "uq_provider_configs_tenant_capability",
         provider_configs.c.tenant_id,
@@ -60,6 +73,29 @@ def test_cosyvoice_migration_seeds_provider_and_relaxes_unique_indexes():
                 "config": {},
                 "is_active": True,
             },
+        )
+        conn.execute(
+            credit_rates.insert(),
+            [
+                {
+                    "id": "platform-voice-clone-rate",
+                    "tenant_id": None,
+                    "capability": "voice_clone",
+                    "unit": "call",
+                    "credits_per_unit": Decimal("30.0000"),
+                    "is_active": True,
+                    "effective_at": datetime.now(UTC),
+                },
+                {
+                    "id": "tenant-voice-clone-rate",
+                    "tenant_id": "tenant-custom",
+                    "capability": "voice_clone",
+                    "unit": "call",
+                    "credits_per_unit": Decimal("42.0000"),
+                    "is_active": True,
+                    "effective_at": datetime.now(UTC),
+                },
+            ],
         )
 
         class _Op:
@@ -107,6 +143,20 @@ def test_cosyvoice_migration_seeds_provider_and_relaxes_unique_indexes():
         index_names = {
             index["name"] for index in sa.inspect(conn).get_indexes("provider_configs")
         }
+        platform_rate = conn.scalar(
+            sa.select(credit_rates.c.credits_per_unit).where(
+                credit_rates.c.tenant_id.is_(None),
+                credit_rates.c.capability == "voice_clone",
+                credit_rates.c.unit == "call",
+            )
+        )
+        tenant_rate = conn.scalar(
+            sa.select(credit_rates.c.credits_per_unit).where(
+                credit_rates.c.tenant_id == "tenant-custom",
+                credit_rates.c.capability == "voice_clone",
+                credit_rates.c.unit == "call",
+            )
+        )
 
     assert rows == [
         ("voice_clone", "cosyvoice-voice-clone", True),
@@ -115,3 +165,5 @@ def test_cosyvoice_migration_seeds_provider_and_relaxes_unique_indexes():
     assert "uq_provider_configs_platform_capability" not in index_names
     assert "uq_provider_configs_platform_capability_provider" in index_names
     assert "uq_provider_configs_platform_capability_non_voice_clone" in index_names
+    assert Decimal(str(platform_rate)) == Decimal("30000.0000")
+    assert Decimal(str(tenant_rate)) == Decimal("42.0000")

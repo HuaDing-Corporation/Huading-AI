@@ -118,7 +118,7 @@ def _seed_brand_voice_billing(
     speaker_ids: tuple[str, ...] = ("S_brand_slot_001",),
 ) -> str:
     subscription = _active_subscription(db, tenant_id)
-    subscription.quota_credits_total = 10000
+    subscription.quota_credits_total = 100000
     subscription.quota_credits_used = 0
     subscription.quota_credits_reserved = 0
     db.add_all(
@@ -127,7 +127,7 @@ def _seed_brand_voice_billing(
                 tenant_id=None,
                 capability="voice_clone",
                 unit="call",
-                credits_per_unit=Decimal("30.0000"),
+                credits_per_unit=Decimal("30000.0000"),
             ),
             CreditRate(
                 tenant_id=None,
@@ -281,7 +281,7 @@ def test_create_brand_voice_clones_and_charges_once(auth_context, auth_db, monke
 
         subscription = db.get(Subscription, subscription_id)
         assert subscription.quota_credits_reserved == 0
-        assert subscription.quota_credits_used == 30
+        assert subscription.quota_credits_used == 30000
 
         usage = db.scalar(select(UsageRecord).where(UsageRecord.capability == "voice_clone"))
         assert usage is not None
@@ -289,7 +289,7 @@ def test_create_brand_voice_clones_and_charges_once(auth_context, auth_db, monke
         assert usage.provider == "doubao-voice-clone"
         assert usage.unit == "call"
         assert usage.quantity == Decimal("1.000")
-        assert usage.credits == Decimal("30.00")
+        assert usage.credits == Decimal("30000.00")
         assert usage.status == "settled"
         config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
         assert config.config["used_speaker_ids"] == {"S_brand_slot_001": data["id"]}
@@ -344,9 +344,10 @@ def test_create_brand_voice_routes_cosyvoice_provider(auth_context, auth_db, mon
         config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
         assert config.config.get("used_speaker_ids", {}) == {}
         subscription = db.get(Subscription, subscription_id)
-        assert subscription.quota_credits_used == 30
+        assert subscription.quota_credits_used == 0
         usage = db.scalar(select(UsageRecord).where(UsageRecord.capability == "voice_clone"))
         assert usage.provider == "cosyvoice-voice-clone"
+        assert usage.credits == Decimal("0.00")
 
 
 def test_create_brand_voice_rejects_unknown_provider(auth_context, auth_db):

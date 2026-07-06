@@ -30,6 +30,8 @@ _IMAGE_QUALITY_MULTIPLIERS = {
     "medium": Decimal("4"),
     "high": Decimal("15"),
 }
+_COSYVOICE_CLONE_PROVIDER = "cosyvoice-voice-clone"
+_VOICE_CLONE_DEFAULT_CREDITS = Decimal("30000.0000")
 
 
 @dataclass(frozen=True)
@@ -290,15 +292,19 @@ def estimate_voice_clone_quota(
     db: Session,
     *,
     tenant_id: str,
+    provider: str = "doubao-voice-clone",
 ) -> QuotaEstimate:
-    clone_rate = _rate(
-        db,
-        tenant_id=tenant_id,
-        capability="voice_clone",
-        unit="call",
-        default=Decimal("30.0000"),
-    )
-    credits = clone_rate.quantize(Decimal("0.01"))
+    if provider == _COSYVOICE_CLONE_PROVIDER:
+        credits = Decimal("0.00")
+    else:
+        clone_rate = _rate(
+            db,
+            tenant_id=tenant_id,
+            capability="voice_clone",
+            unit="call",
+            default=_VOICE_CLONE_DEFAULT_CREDITS,
+        )
+        credits = clone_rate.quantize(Decimal("0.01"))
     return QuotaEstimate(
         estimated_seconds=1,
         estimated_credits=credits,
@@ -453,7 +459,7 @@ def charge_voice_clone_quota(
     model: str | None = None,
 ) -> UsageRecord:
     subscription = active_subscription(db, tenant_id)
-    estimate = estimate_voice_clone_quota(db, tenant_id=tenant_id)
+    estimate = estimate_voice_clone_quota(db, tenant_id=tenant_id, provider=provider)
     if remaining_credits(subscription) < estimate.reservation_units:
         raise AppError(
             "Insufficient tenant quota.",
