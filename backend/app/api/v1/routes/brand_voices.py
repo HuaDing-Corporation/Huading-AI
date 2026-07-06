@@ -333,6 +333,7 @@ def _allocate_voice_clone_speaker_id(
 ) -> str:
     config = _voice_clone_provider_config(db, tenant_id=tenant_id, for_update=True)
     values = dict(config.config or {}) if config is not None else {}
+    has_db_speaker_ids = "speaker_ids" in values
     speaker_ids = _configured_speaker_ids(values)
     used = {
         str(key): str(value)
@@ -347,7 +348,8 @@ def _allocate_voice_clone_speaker_id(
             status_code=409,
         )
     used[speaker_id] = brand_voice_id
-    values["speaker_ids"] = speaker_ids
+    if has_db_speaker_ids:
+        values["speaker_ids"] = speaker_ids
     values["used_speaker_ids"] = used
     if config is not None:
         config.config = values

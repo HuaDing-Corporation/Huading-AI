@@ -508,7 +508,7 @@ def test_create_brand_voice_uses_env_speaker_slots_when_config_pool_missing(
     assert provider.clone_calls[0]["speaker_id"] == "S_env_slot_001"
     with auth_db() as db:
         config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
-        assert config.config["speaker_ids"] == ["S_env_slot_001"]
+        assert "speaker_ids" not in config.config
         assert config.config["used_speaker_ids"] == {"S_env_slot_001": data["id"]}
 
 
@@ -627,7 +627,7 @@ def test_delete_brand_voice_releases_env_fallback_speaker_slot(
     ]
     with auth_db() as db:
         config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
-        assert config.config["speaker_ids"] == ["S_env_slot_001"]
+        assert "speaker_ids" not in config.config
         assert config.config["used_speaker_ids"] == {}
 
 
