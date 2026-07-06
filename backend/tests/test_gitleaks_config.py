@@ -10,6 +10,7 @@ import tomllib
 from pathlib import Path
 
 CONFIG = Path(__file__).resolve().parents[2] / ".gitleaks.toml"
+IGNORE = Path(__file__).resolve().parents[2] / ".gitleaksignore"
 
 
 def _config() -> dict:
@@ -44,3 +45,21 @@ def test_hash_shapes_ignored_but_real_token_caught() -> None:
     # literal that the scanner (or this very config) would flag.
     sample_token = "sk-" + "x" * 20
     assert not ignored(sample_token)
+
+
+def test_gitleaksignore_uses_precise_fingerprints_only() -> None:
+    lines = [
+        line.strip()
+        for line in IGNORE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+    assert lines
+    for line in lines:
+        parts = line.split(":")
+        assert len(parts) == 4
+        commit, path, rule_id, line_number = parts
+        assert re.fullmatch(r"[a-f0-9]{40}", commit)
+        assert path
+        assert rule_id == "huading-sk-api-key"
+        assert line_number.isdecimal()
