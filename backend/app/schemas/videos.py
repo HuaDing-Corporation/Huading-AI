@@ -103,6 +103,7 @@ class VideoGenerateRequest(BaseModel):
     script: str | None = Field(default=None, max_length=5000)
     voice_id: str | None = None
     avatar_asset_id: str | None = None
+    avatar_video_asset_id: str | None = None
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
     aspect_ratio: Literal["9:16", "16:9", "1:1"] = Field(default="9:16")
     subtitle_enabled: bool = True
@@ -242,8 +243,12 @@ class VideoGenerateRequest(BaseModel):
         if self.video_mode == "avatar_talk":
             if not self.voice_id:
                 raise ValueError("avatar_talk requires voice_id")
-            if not self.avatar_asset_id:
-                raise ValueError("avatar_talk requires avatar_asset_id")
+            source_count = int(bool(self.avatar_asset_id)) + int(bool(self.avatar_video_asset_id))
+            if source_count != 1:
+                raise ValueError(
+                    "avatar_talk requires exactly one of avatar_asset_id or "
+                    "avatar_video_asset_id"
+                )
         return self
 
 

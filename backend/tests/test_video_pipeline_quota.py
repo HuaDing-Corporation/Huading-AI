@@ -172,6 +172,59 @@ def test_settle_reserved_quota_moves_reserved_to_used(auth_context, auth_db) -> 
         assert record.settled_at is not None
 
 
+def test_settle_avatar_video_source_keeps_avatar_credits_and_updates_provider_cost(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        sub = _seed_subscription(db, auth_context["tenant_id"], total=10_000)
+        db.add(
+            VideoTask(
+                id="task-change-lips-settle",
+                tenant_id=auth_context["tenant_id"],
+                status="queued",
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                script="",
+            )
+        )
+        db.flush()
+        record = UsageRecord(
+            tenant_id=auth_context["tenant_id"],
+            subscription_id=sub.id,
+            video_task_id="task-change-lips-settle",
+            capability="avatar",
+            provider="omnihuman",
+            model="jimeng_realman_avatar_picture_omni_v15",
+            unit="second",
+            quantity=Decimal("10"),
+            credits=Decimal("1500.00"),
+            cost_cents=0,
+            status="reserved",
+        )
+        sub.quota_credits_reserved = 1500
+        db.add(record)
+        db.commit()
+
+        quota.settle_reserved_quota(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            video_task_id="task-change-lips-settle",
+            actual_seconds=8,
+            cost_cents=240,
+            provider="omnihuman",
+            model="realman_change_lips",
+        )
+        db.commit()
+
+        assert sub.quota_credits_reserved == 0
+        assert sub.quota_credits_used == 1200
+        assert record.credits == Decimal("1200.00")
+        assert record.cost_cents == 240
+        assert record.provider == "omnihuman"
+        assert record.model == "realman_change_lips"
+
+
 def test_image_generation_quota_uses_quality_multipliers(auth_context, auth_db) -> None:
     with auth_db() as db:
         _seed_subscription(db, auth_context["tenant_id"], total=100)

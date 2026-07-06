@@ -5,7 +5,16 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from app.api.deps import get_object_storage, get_progress_store
-from app.db.models import Asset, CreditRate, Plan, Subscription, UsageRecord, VideoTask, Voice
+from app.db.models import (
+    Asset,
+    CreditRate,
+    Plan,
+    Subscription,
+    TaskAsset,
+    UsageRecord,
+    VideoTask,
+    Voice,
+)
 from app.main import app
 from app.schemas.videos import VideoGenerateRequest
 
@@ -123,6 +132,73 @@ def _seed_voice_and_avatar(db, tenant_id: str) -> tuple[Voice, Asset]:
     db.add_all([voice, avatar])
     db.commit()
     return voice, avatar
+
+
+def _seed_voice_and_avatar_video(db, tenant_id: str) -> tuple[Voice, Asset]:
+    voice = Voice(
+        provider="edge-tts",
+        voice_code="zh-CN-XiaoxiaoNeural",
+        display_name="Xiaoxiao",
+        gender="female",
+        language="zh-CN",
+        is_active=True,
+    )
+    avatar_video = Asset(
+        tenant_id=tenant_id,
+        type="video",
+        source="upload",
+        storage_key=f"tenants/{tenant_id}/uploads/avatar-source.mp4",
+        mime_type="video/mp4",
+        size_bytes=8_000_000,
+        duration_ms=9_500,
+        width=960,
+        height=960,
+        status="ready",
+        metadata_={
+            "purpose": "avatar_source",
+            "container": "mp4",
+            "video_codec": "h264",
+            "audio_codec": "aac",
+        },
+    )
+    db.add_all([voice, avatar_video])
+    db.commit()
+    return voice, avatar_video
+
+
+def test_avatar_talk_schema_accepts_exactly_one_avatar_source() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    video_request = VideoGenerateRequest.model_validate(
+        {
+            "topic": "avatar video source",
+            "voice_id": "voice-1",
+            "avatar_video_asset_id": "video-1",
+            "video_mode": "avatar_talk",
+        }
+    )
+
+    assert video_request.avatar_asset_id is None
+    assert video_request.avatar_video_asset_id == "video-1"
+
+    invalid_payloads = [
+        {
+            "topic": "avatar video source",
+            "voice_id": "voice-1",
+            "video_mode": "avatar_talk",
+        },
+        {
+            "topic": "avatar video source",
+            "voice_id": "voice-1",
+            "avatar_asset_id": "image-1",
+            "avatar_video_asset_id": "video-1",
+            "video_mode": "avatar_talk",
+        },
+    ]
+    for payload in invalid_payloads:
+        with pytest.raises(ValidationError):
+            VideoGenerateRequest.model_validate(payload)
 
 
 def test_quota_returns_current_subscription_totals(auth_context, auth_db) -> None:
@@ -311,6 +387,198 @@ def test_avatar_talk_order_without_script_leaves_worker_to_generate_it(
         assert task is not None
         assert task.topic == "cashmere coat"
         assert task.script is None
+
+
+def test_avatar_talk_order_accepts_avatar_video_source_and_reserves_same_quota(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(db, auth_context["tenant_id"])
+        subscription.quota_credits_total = 10000
+        voice, avatar_video = _seed_voice_and_avatar_video(db, auth_context["tenant_id"])
+        voice_id = voice.id
+        avatar_video_id = avatar_video.id
+        subscription_id = subscription.id
+
+    enqueued: dict[str, object] = {}
+
+    class _FakeTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            enqueued.update({"args": args, "task_id": task_id, "queue": queue})
+            return type("Result", (), {"status": "PENDING"})()
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _FakeTask())
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/videos",
+        json={
+            "topic": "cashmere coat",
+            "script": "short avatar video source script",
+            "voice_id": voice_id,
+            "avatar_video_asset_id": avatar_video_id,
+            "video_mode": "avatar_talk",
+            "speed": 1.0,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 202
+    data = resp.json()["data"]
+    assert enqueued["task_id"] == data["id"]
+    assert enqueued["queue"] == "avatar"
+    with auth_db() as db:
+        task = db.get(VideoTask, data["id"])
+        assert task is not None
+        assert task.mode == "avatar_talk"
+        assert task.params["avatar_video_asset_id"] == avatar_video_id
+        assert task.params["avatar_source_type"] == "video"
+        input_asset = db.scalar(
+            select(Asset)
+            .join(TaskAsset, TaskAsset.asset_id == Asset.id)
+            .where(TaskAsset.video_task_id == task.id, TaskAsset.role == "input_avatar")
+        )
+        assert input_asset is not None
+        assert input_asset.id == avatar_video_id
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved > 5
+        reserved = db.query(UsageRecord).filter_by(video_task_id=data["id"]).one()
+        assert reserved.capability == "avatar"
+        assert reserved.model == "jimeng_realman_avatar_picture_omni_v15"
+
+
+def test_avatar_talk_video_source_rejects_invalid_asset_matrix(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(db, auth_context["tenant_id"])
+        subscription.quota_credits_total = 10000
+        voice, valid_video = _seed_voice_and_avatar_video(db, auth_context["tenant_id"])
+        from app.db.models import Tenant
+
+        db.add(Tenant(id="other-tenant", slug="other-tenant", name="Other Tenant"))
+        db.flush()
+        too_long = Asset(
+            tenant_id=auth_context["tenant_id"],
+            type="video",
+            source="upload",
+            storage_key=f"tenants/{auth_context['tenant_id']}/uploads/too-long.mp4",
+            mime_type="video/mp4",
+            size_bytes=8_000_000,
+            duration_ms=10_001,
+            width=960,
+            height=960,
+            status="ready",
+            metadata_={"purpose": "avatar_source", "video_codec": "h264", "audio_codec": "aac"},
+        )
+        wrong_type = Asset(
+            tenant_id=auth_context["tenant_id"],
+            type="avatar_image",
+            source="upload",
+            storage_key=f"tenants/{auth_context['tenant_id']}/uploads/avatar.png",
+            mime_type="image/png",
+            status="ready",
+        )
+        other_tenant_video = Asset(
+            tenant_id="other-tenant",
+            type="video",
+            source="upload",
+            storage_key="tenants/other-tenant/uploads/avatar-source.mp4",
+            mime_type="video/mp4",
+            size_bytes=8_000_000,
+            duration_ms=9_500,
+            width=960,
+            height=960,
+            status="ready",
+            metadata_={"purpose": "avatar_source", "video_codec": "h264", "audio_codec": "aac"},
+        )
+        bad_codec = Asset(
+            tenant_id=auth_context["tenant_id"],
+            type="video",
+            source="upload",
+            storage_key=f"tenants/{auth_context['tenant_id']}/uploads/bad-codec.mp4",
+            mime_type="video/mp4",
+            size_bytes=8_000_000,
+            duration_ms=9_500,
+            width=960,
+            height=960,
+            status="ready",
+            metadata_={"purpose": "avatar_source", "video_codec": "hevc", "audio_codec": "aac"},
+        )
+        bad_resolution = Asset(
+            tenant_id=auth_context["tenant_id"],
+            type="video",
+            source="upload",
+            storage_key=f"tenants/{auth_context['tenant_id']}/uploads/bad-resolution.mp4",
+            mime_type="video/mp4",
+            size_bytes=8_000_000,
+            duration_ms=9_500,
+            width=320,
+            height=320,
+            status="ready",
+            metadata_={"purpose": "avatar_source", "video_codec": "h264", "audio_codec": "aac"},
+        )
+        too_large = Asset(
+            tenant_id=auth_context["tenant_id"],
+            type="video",
+            source="upload",
+            storage_key=f"tenants/{auth_context['tenant_id']}/uploads/too-large.mp4",
+            mime_type="video/mp4",
+            size_bytes=201 * 1024 * 1024,
+            duration_ms=9_500,
+            width=960,
+            height=960,
+            status="ready",
+            metadata_={"purpose": "avatar_source", "video_codec": "h264", "audio_codec": "aac"},
+        )
+        db.add_all(
+            [
+                too_long,
+                wrong_type,
+                other_tenant_video,
+                bad_codec,
+                bad_resolution,
+                too_large,
+            ]
+        )
+        db.commit()
+        voice_id = voice.id
+        cases = [
+            (too_long.id, 422),
+            (wrong_type.id, 404),
+            (other_tenant_video.id, 404),
+            (bad_codec.id, 422),
+            (bad_resolution.id, 422),
+            (too_large.id, 413),
+            (valid_video.id, 202),
+        ]
+
+    class _FakeTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            return type("Result", (), {"status": "PENDING"})()
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _FakeTask())
+    client = TestClient(app)
+    for asset_id, expected_status in cases:
+        resp = client.post(
+            "/api/v1/videos",
+            json={
+                "topic": "cashmere coat",
+                "script": "short avatar video source script",
+                "voice_id": voice_id,
+                "avatar_video_asset_id": asset_id,
+                "video_mode": "avatar_talk",
+            },
+            headers=auth_context["headers"],
+        )
+        assert resp.status_code == expected_status
 
 
 def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
