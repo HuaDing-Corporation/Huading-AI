@@ -21,6 +21,7 @@ from app.services.storage.base import ObjectStorage
 _TARGET_FORMAT = "seedance_2_0"
 _SOURCE_IMAGE_TYPES = {"avatar_image", "product_image", "generated_image", "cover"}
 _SOURCE_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+_EMPTY_TEXT_PLACEHOLDERS = {"none", "n/a", "na", "null", "nil"}
 
 
 def create_reverse_prompt_job(
@@ -335,7 +336,8 @@ def _int_value(value: Any) -> int:
 
 
 def _clean_text(value: Any) -> str:
-    return " ".join(str(value or "").strip().split())
+    text = " ".join(str(value or "").strip().split())
+    return "" if text.casefold() in _EMPTY_TEXT_PLACEHOLDERS else text
 
 
 def _clean_list(value: Any) -> list[str]:
