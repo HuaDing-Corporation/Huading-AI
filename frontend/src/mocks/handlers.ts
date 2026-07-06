@@ -35,9 +35,12 @@ interface MockBrandVoice {
   status: "processing" | "ready" | "failed";
   created_at: string;
   _polls: number; // GET 轮询计数：processing 第 2 次轮询后翻 ready，模拟异步克隆完成
+  provider?: string; // BRAND-VOICE-PICKER-UI-0001：doubao/cosyvoice；部分项**故意缺省**以验证前端兼容不显徽标
 }
 const brandVoices = new Map<string, MockBrandVoice>([
-  ["bv-ready-1", { id: "bv-ready-1", name: "我的主播音", status: "ready", created_at: new Date(0).toISOString(), _polls: 99 }],
+  // provider：ready 项分别带 doubao/cosyvoice（picker 徽标 豆包/CosyVoice）；failed 项无 provider（picker 中隐藏，兼容缺省）。
+  ["bv-ready-1", { id: "bv-ready-1", name: "我的主播音", status: "ready", created_at: new Date(0).toISOString(), _polls: 99, provider: "doubao" }],
+  ["bv-ready-2", { id: "bv-ready-2", name: "免费复刻音", status: "ready", created_at: new Date(0).toISOString(), _polls: 99, provider: "cosyvoice" }],
   ["bv-failed-1", { id: "bv-failed-1", name: "失败样例", status: "failed", created_at: new Date(0).toISOString(), _polls: 99 }]
 ]);
 let brandVoiceSeq = 0;
@@ -680,7 +683,8 @@ export const handlers = [
         v._polls += 1;
         if (v._polls >= 2) v.status = "ready";
       }
-      return { id: v.id, name: v.name, status: v.status, created_at: v.created_at };
+      // provider 透出（缺省则 null）——镜像 COSYVOICE-CLONE-0001 合并后真形状，前端兼容 null。
+      return { id: v.id, name: v.name, status: v.status, created_at: v.created_at, provider: v.provider ?? null };
     });
     return ok({ items, total: items.length });
   }),

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Sparkles } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
-import { useScenePromptGenerate, useScriptGenerate, useUploadProductImage, useVoices } from "@/lib/api/hooks";
+import { useBrandVoices, useScenePromptGenerate, useScriptGenerate, useUploadProductImage, useVoices } from "@/lib/api/hooks";
 import { useGenerateConfirm } from "@/lib/api/use-generate-confirm";
 import { useTrackedUpload } from "@/lib/api/use-tracked-upload";
 import type { CreateVideoRequest, VideoGenResolution } from "@/lib/api/types";
@@ -50,6 +50,7 @@ export function EcomVideoForm({
   const scenePromptGen = useScenePromptGenerate();
   const uploadProduct = useUploadProductImage();
   const voices = useVoices();
+  const brandVoices = useBrandVoices(); // 「选我的音色」：品牌音色(声音复刻)全状态
   const productImage = useTrackedUpload(uploadProduct.mutateAsync, (r) => r.image_key);
 
   // 一次性 prefill：文案「用此文案」注 script；提示词反推「带入」注 topic + scene_prompt(+script)。惰性消费。
@@ -216,7 +217,13 @@ export function EcomVideoForm({
         inputId="product-image"
       />
 
-      <VoicePicker voices={voiceList ?? []} value={voiceId} onChange={setVoiceId} />
+      <VoicePicker
+        voices={voiceList ?? []}
+        value={voiceId}
+        onChange={setVoiceId}
+        brandVoices={brandVoices.data ?? []}
+        brandVoicesLoading={brandVoices.isLoading}
+      />
 
       <MoreSettings speed={speed} onSpeedChange={setSpeed} />
 

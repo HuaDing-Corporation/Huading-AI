@@ -17,6 +17,7 @@ vi.mock("@/lib/api/hooks", () => ({
     isPending: false,
     data: { estimated_credits: 12, unit: "credits" }
   }),
+  useBrandVoices: () => ({ data: [], isLoading: false }),
   useVoices: () => ({
     data: [
       { id: "v1", provider: "doubao", voice_code: "c", display_name: "豆包女声", gender: null, language: null }
