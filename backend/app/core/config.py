@@ -106,11 +106,18 @@ class Settings(BaseSettings):
     engine_doubao_voice_clone_appid: str = ""
     engine_doubao_voice_clone_access_token: str = ""
     engine_doubao_voice_clone_api_key: str = ""
-    engine_doubao_voice_clone_resource_id: str = "seed-icl-2.0"
+    engine_doubao_voice_clone_resource_id: str = "volc.megatts.voiceclone"
     engine_doubao_voice_clone_endpoint: str = (
-        "https://openspeech.bytedance.com/api/v3/voice-clone"
+        "https://openspeech.bytedance.com/api/v1/mega_tts/audio/upload"
+    )
+    engine_doubao_voice_clone_status_endpoint: str = (
+        "https://openspeech.bytedance.com/api/v1/mega_tts/status"
     )
     engine_doubao_voice_clone_request_timeout_seconds: float = 60.0
+    engine_doubao_voice_clone_poll_interval_seconds: float = 2.0
+    engine_doubao_voice_clone_timeout_seconds: float = 60.0
+    engine_doubao_voice_clone_model_type: int = 4
+    engine_doubao_voice_clone_tts_resource_id: str = "seed-icl-2.0"
     # OpenAI Images for the photo pipeline. Credentials stay env-only.
     openai_api_key: str = ""
     openai_base_url: str = ""

@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import time
 from collections.abc import Mapping
 from typing import Any
 from uuid import uuid4
 
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.db.models import ProviderConfig
 from app.providers.base import register_provider
 
-_DEFAULT_ENDPOINT = "https://openspeech.bytedance.com/api/v3/voice-clone"
-_DEFAULT_RESOURCE_ID = "seed-icl-2.0"
+_DEFAULT_ENDPOINT = "https://openspeech.bytedance.com/api/v1/mega_tts/audio/upload"
+_DEFAULT_STATUS_ENDPOINT = "https://openspeech.bytedance.com/api/v1/mega_tts/status"
+_DEFAULT_RESOURCE_ID = "volc.megatts.voiceclone"
+_DEFAULT_MODEL_TYPE = 4
 _PROVIDER_NAME = "doubao-voice-clone"
+logger = get_logger(__name__)
 
 
 class DoubaoVoiceCloneError(RuntimeError):
@@ -27,19 +33,25 @@ class DoubaoVoiceCloneProvider:
         api_key: str = "",
         resource_id: str = _DEFAULT_RESOURCE_ID,
         endpoint: str = _DEFAULT_ENDPOINT,
+        status_endpoint: str = _DEFAULT_STATUS_ENDPOINT,
         http_client: Any | None = None,
         request_timeout_seconds: float = 60.0,
+        poll_interval_seconds: float = 2.0,
+        timeout_seconds: float = 60.0,
+        model_type: int = _DEFAULT_MODEL_TYPE,
     ) -> None:
-        if not api_key and (not appid or not access_token):
-            raise DoubaoVoiceCloneError(
-                "Doubao voice clone appid/access token or api key are required."
-            )
+        if not appid or not access_token:
+            raise DoubaoVoiceCloneError("Doubao voice clone appid/access token are required.")
         self.appid = appid
         self.access_token = access_token
         self.api_key = api_key
         self.resource_id = resource_id or _DEFAULT_RESOURCE_ID
         self.endpoint = endpoint or _DEFAULT_ENDPOINT
+        self.status_endpoint = status_endpoint or _DEFAULT_STATUS_ENDPOINT
         self.request_timeout_seconds = request_timeout_seconds
+        self.poll_interval_seconds = poll_interval_seconds
+        self.timeout_seconds = timeout_seconds
+        self.model_type = int(model_type or _DEFAULT_MODEL_TYPE)
         if http_client is None:
             import requests
 
@@ -53,76 +65,101 @@ class DoubaoVoiceCloneProvider:
         return await asyncio.to_thread(self.delete_voice_sync, payload)
 
     def clone_voice_sync(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        speaker_id = str(payload.get("speaker_id") or "").strip()
+        if not speaker_id:
+            raise ValueError("Voice clone speaker_id is required.")
+        audio_bytes = _payload_audio_bytes(payload)
+        audio_format = _audio_format(
+            mime_type=str(payload.get("source_audio_mime_type") or ""),
+            storage_key=str(payload.get("source_audio_storage_key") or ""),
+        )
         body = {
-            "speaker_name": str(payload.get("name") or "").strip(),
-            "audio": {
-                "url": str(payload.get("source_audio_url") or ""),
-                "mime_type": str(payload.get("source_audio_mime_type") or ""),
-            },
-            "metadata": {
-                "tenant_id": str(payload.get("tenant_id") or ""),
-                "brand_voice_id": str(payload.get("brand_voice_id") or ""),
-                "source_audio_asset_id": str(payload.get("source_audio_asset_id") or ""),
-            },
+            "appid": self.appid,
+            "speaker_id": speaker_id,
+            "audios": [
+                {
+                    "audio_bytes": base64.b64encode(audio_bytes).decode("ascii"),
+                    "audio_format": audio_format,
+                }
+            ],
+            "source": 2,
+            "language": 0,
+            "model_type": self.model_type,
         }
-        if not body["speaker_name"]:
-            raise ValueError("Voice clone name is required.")
-        if not body["audio"]["url"]:
-            raise ValueError("Voice clone source audio URL is required.")
+        request_id = uuid4().hex
         response = self.http.post(
             self.endpoint,
             json=body,
             headers=self._headers(),
             timeout=self.request_timeout_seconds,
         )
+        logger.info(
+            "doubao_voice_clone.upload",
+            tenant_id=str(payload.get("tenant_id") or ""),
+            brand_voice_id=str(payload.get("brand_voice_id") or ""),
+            speaker_id=speaker_id,
+            request_id=request_id,
+            http_status_code=getattr(response, "status_code", None),
+        )
         response.raise_for_status()
-        data = response.json()
-        speaker_id = _first_value(data, ("speaker_id", "speakerId", "voice_id", "voiceId"))
-        if not speaker_id and isinstance(data.get("data"), Mapping):
-            speaker_id = _first_value(
-                data["data"],
-                ("speaker_id", "speakerId", "voice_id", "voiceId"),
-            )
-        if not speaker_id:
-            raise DoubaoVoiceCloneError("Doubao voice clone did not return speaker_id.")
-        status = str(_first_value(data, ("status",)) or "ready").lower()
-        if status not in {"processing", "ready", "failed"}:
-            status = "ready"
-        return {"speaker_id": str(speaker_id), "status": status, "provider": _PROVIDER_NAME}
+        status = self._poll_status(
+            speaker_id,
+            tenant_id=str(payload.get("tenant_id") or ""),
+            brand_voice_id=str(payload.get("brand_voice_id") or ""),
+        )
+        return {"speaker_id": speaker_id, "status": status, "provider": _PROVIDER_NAME}
 
     def delete_voice_sync(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         speaker_id = str(payload.get("speaker_id") or "").strip()
         if not speaker_id:
             return {"released": False}
-        response = self.http.delete(
-            self.endpoint,
-            json={
-                "speaker_id": speaker_id,
-                "metadata": {
-                    "tenant_id": str(payload.get("tenant_id") or ""),
-                    "brand_voice_id": str(payload.get("brand_voice_id") or ""),
-                },
-            },
-            headers=self._headers(),
-            timeout=self.request_timeout_seconds,
-        )
-        response.raise_for_status()
-        data = response.json()
-        released = bool(data.get("released", True))
-        return {"released": released}
+        return {"released": True, "remote": False}
 
     def _headers(self) -> dict[str, str]:
-        headers = {
+        return {
             "Content-Type": "application/json",
-            "X-Api-Resource-Id": self.resource_id,
-            "X-Api-Request-Id": uuid4().hex,
+            "Authorization": f"Bearer;{self.access_token}",
+            "Resource-Id": self.resource_id,
         }
-        if self.api_key:
-            headers["X-Api-Key"] = self.api_key
-        else:
-            headers["X-Api-App-Id"] = self.appid
-            headers["X-Api-Access-Key"] = self.access_token
-        return headers
+
+    def _poll_status(
+        self,
+        speaker_id: str,
+        *,
+        tenant_id: str,
+        brand_voice_id: str,
+    ) -> str:
+        deadline = time.monotonic() + self.timeout_seconds
+        while True:
+            request_id = uuid4().hex
+            response = self.http.post(
+                self.status_endpoint,
+                json={"appid": self.appid, "speaker_id": speaker_id},
+                headers=self._headers(),
+                timeout=self.request_timeout_seconds,
+            )
+            logger.info(
+                "doubao_voice_clone.status",
+                tenant_id=tenant_id,
+                brand_voice_id=brand_voice_id,
+                speaker_id=speaker_id,
+                request_id=request_id,
+                http_status_code=getattr(response, "status_code", None),
+            )
+            response.raise_for_status()
+            data = response.json()
+            status_code = _status_code(data)
+            if status_code in {2, 4}:
+                return "ready"
+            if status_code in {0, 3}:
+                message = _status_message(data) or "Doubao voice clone training failed."
+                raise DoubaoVoiceCloneError(message)
+            if status_code != 1:
+                raise DoubaoVoiceCloneError(f"Unknown Doubao voice clone status: {status_code}")
+            if time.monotonic() >= deadline:
+                raise DoubaoVoiceCloneError("Doubao voice clone training timed out.")
+            if self.poll_interval_seconds > 0:
+                time.sleep(self.poll_interval_seconds)
 
 
 def _first_value(data: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
@@ -131,6 +168,45 @@ def _first_value(data: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
         if value:
             return value
     return None
+
+
+def _payload_audio_bytes(payload: Mapping[str, Any]) -> bytes:
+    value = payload.get("source_audio_bytes")
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    raise ValueError("Voice clone source audio bytes are required.")
+
+
+def _audio_format(*, mime_type: str, storage_key: str) -> str:
+    normalized = mime_type.split(";", 1)[0].lower().strip()
+    if normalized in {"audio/wav", "audio/x-wav", "audio/wave"}:
+        return "wav"
+    if normalized in {"audio/mpeg", "audio/mp3"}:
+        return "mp3"
+    if normalized in {"audio/mp4", "audio/x-m4a"}:
+        return "m4a"
+    suffix = storage_key.rsplit(".", 1)[-1].lower() if "." in storage_key else ""
+    if suffix in {"wav", "mp3", "m4a"}:
+        return suffix
+    raise ValueError("Unsupported Doubao voice clone audio format.")
+
+
+def _status_code(data: Mapping[str, Any]) -> int:
+    value = _first_value(data, ("status", "Status"))
+    if value is None and isinstance(data.get("data"), Mapping):
+        value = _first_value(data["data"], ("status", "Status"))
+    if value is None and isinstance(data.get("Data"), Mapping):
+        value = _first_value(data["Data"], ("status", "Status"))
+    return int(value if value is not None else -1)
+
+
+def _status_message(data: Mapping[str, Any]) -> str:
+    value = _first_value(data, ("message", "msg", "Message"))
+    if value is None and isinstance(data.get("data"), Mapping):
+        value = _first_value(data["data"], ("message", "msg", "Message"))
+    return str(value or "")
 
 
 def _doubao_voice_clone_factory(config: ProviderConfig) -> DoubaoVoiceCloneProvider:
@@ -155,10 +231,21 @@ def _doubao_voice_clone_factory(config: ProviderConfig) -> DoubaoVoiceCloneProvi
             values.get("resource_id") or settings.engine_doubao_voice_clone_resource_id
         ),
         endpoint=str(values.get("endpoint") or settings.engine_doubao_voice_clone_endpoint),
+        status_endpoint=str(
+            values.get("status_endpoint") or settings.engine_doubao_voice_clone_status_endpoint
+        ),
         request_timeout_seconds=float(
             values.get("request_timeout_seconds")
             or settings.engine_doubao_voice_clone_request_timeout_seconds
         ),
+        poll_interval_seconds=float(
+            values.get("poll_interval_seconds")
+            or settings.engine_doubao_voice_clone_poll_interval_seconds
+        ),
+        timeout_seconds=float(
+            values.get("timeout_seconds") or settings.engine_doubao_voice_clone_timeout_seconds
+        ),
+        model_type=int(values.get("model_type") or settings.engine_doubao_voice_clone_model_type),
     )
 
 

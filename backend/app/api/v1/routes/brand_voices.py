@@ -14,11 +14,10 @@ from app.api.deps import (
     get_object_storage,
     require_permission,
 )
-from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
 from app.core.utils import base_mime
-from app.db.models import Asset, BrandVoice, User
+from app.db.models import Asset, BrandVoice, ProviderConfig, User
 from app.providers.base import ProviderResolutionError, resolve
 from app.schemas.brand_voices import (
     BrandVoiceCreateRequest,
@@ -49,7 +48,7 @@ _ALLOWED_AUDIO_TYPES = {
 }
 _MIN_SOURCE_AUDIO_MS = 5_000
 _VOICE_CLONE_PROVIDER = "doubao-voice-clone"
-_VOICE_CLONE_MODEL = "seed-icl-2.0"
+_VOICE_CLONE_MODEL = "volc.megatts.voiceclone"
 _CLONE_ERROR_TEXT_LIMIT = 1000
 
 
@@ -92,6 +91,16 @@ def create_brand_voice(
     db.add(brand_voice)
     db.flush()
 
+    try:
+        speaker_id = _allocate_voice_clone_speaker_id(
+            db,
+            tenant_id=user.tenant_id,
+            brand_voice_id=brand_voice.id,
+        )
+    except AppError:
+        db.rollback()
+        raise
+
     usage = charge_voice_clone_quota(
         db,
         tenant_id=user.tenant_id,
@@ -106,12 +115,10 @@ def create_brand_voice(
                     "tenant_id": user.tenant_id,
                     "brand_voice_id": brand_voice.id,
                     "name": payload.name,
+                    "speaker_id": speaker_id,
                     "source_audio_asset_id": source_audio.id,
                     "source_audio_storage_key": source_audio.storage_key,
-                    "source_audio_url": storage.presign_get_url(
-                        source_audio.storage_key,
-                        expires_in=settings.engine_s3_presign_ttl,
-                    ),
+                    "source_audio_bytes": storage.get_bytes(source_audio.storage_key),
                     "source_audio_mime_type": source_audio.mime_type,
                 }
             )
@@ -219,6 +226,12 @@ def delete_brand_voice(
     brand_voice = _brand_voice_or_404(db, tenant_id=user.tenant_id, brand_voice_id=brand_voice_id)
     if brand_voice.speaker_id:
         _release_remote_speaker(db, user=user, brand_voice=brand_voice)
+        _release_voice_clone_speaker_id(
+            db,
+            tenant_id=user.tenant_id,
+            speaker_id=brand_voice.speaker_id,
+            brand_voice_id=brand_voice.id,
+        )
     brand_voice.deleted_at = datetime.now(UTC)
     brand_voice.updated_at = brand_voice.deleted_at
     db.commit()
@@ -255,6 +268,72 @@ def _release_remote_speaker(db: Session, *, user: User, brand_voice: BrandVoice)
             brand_voice_id=brand_voice.id,
             error=str(exc),
         )
+
+
+def _voice_clone_provider_config(db: Session, *, tenant_id: str) -> ProviderConfig | None:
+    tenant_config = db.scalar(
+        select(ProviderConfig).where(
+            ProviderConfig.tenant_id == tenant_id,
+            ProviderConfig.capability == "voice_clone",
+            ProviderConfig.is_active.is_(True),
+        )
+    )
+    if tenant_config is not None:
+        return tenant_config
+    return db.scalar(
+        select(ProviderConfig).where(
+            ProviderConfig.tenant_id.is_(None),
+            ProviderConfig.capability == "voice_clone",
+            ProviderConfig.is_active.is_(True),
+        )
+    )
+
+
+def _allocate_voice_clone_speaker_id(
+    db: Session,
+    *,
+    tenant_id: str,
+    brand_voice_id: str,
+) -> str:
+    config = _voice_clone_provider_config(db, tenant_id=tenant_id)
+    values = dict(config.config or {}) if config is not None else {}
+    speaker_ids = [str(item).strip() for item in values.get("speaker_ids") or [] if str(item)]
+    used = {
+        str(key): str(value)
+        for key, value in dict(values.get("used_speaker_ids") or {}).items()
+        if str(key)
+    }
+    speaker_id = next((item for item in speaker_ids if item not in used), "")
+    if not speaker_id:
+        raise AppError(
+            "暂无可用音色槽位，请先购买。",
+            code="VOICE_CLONE_SLOT_UNAVAILABLE",
+            status_code=409,
+        )
+    used[speaker_id] = brand_voice_id
+    values["speaker_ids"] = speaker_ids
+    values["used_speaker_ids"] = used
+    if config is not None:
+        config.config = values
+    return speaker_id
+
+
+def _release_voice_clone_speaker_id(
+    db: Session,
+    *,
+    tenant_id: str,
+    speaker_id: str,
+    brand_voice_id: str,
+) -> None:
+    config = _voice_clone_provider_config(db, tenant_id=tenant_id)
+    if config is None:
+        return
+    values = dict(config.config or {})
+    used = dict(values.get("used_speaker_ids") or {})
+    if str(used.get(speaker_id) or "") == brand_voice_id or speaker_id in used:
+        used.pop(speaker_id, None)
+        values["used_speaker_ids"] = used
+        config.config = values
 
 
 def _source_audio_or_404(db: Session, *, tenant_id: str, asset_id: str) -> Asset:
