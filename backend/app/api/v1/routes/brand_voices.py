@@ -50,6 +50,7 @@ _ALLOWED_AUDIO_TYPES = {
 _MIN_SOURCE_AUDIO_MS = 5_000
 _VOICE_CLONE_PROVIDER = "doubao-voice-clone"
 _VOICE_CLONE_MODEL = "seed-icl-2.0"
+_CLONE_ERROR_TEXT_LIMIT = 1000
 
 
 @router.post(
@@ -123,7 +124,18 @@ def create_brand_voice(
             status_code=503,
         ) from exc
     except Exception as exc:
+        brand_voice_id = brand_voice.id
+        source_audio_id = source_audio.id
         db.rollback()
+        logger.warning(
+            "brand_voice.clone_failed",
+            tenant_id=user.tenant_id,
+            brand_voice_id=brand_voice_id,
+            source_audio_asset_id=source_audio_id,
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+            **_http_error_details(exc),
+        )
         raise AppError(
             "Voice clone failed.",
             code="VOICE_CLONE_FAILED",
@@ -288,6 +300,36 @@ def _validate_audio_asset(asset: Asset, *, tenant_id: str) -> None:
             code="SOURCE_AUDIO_TOO_SHORT",
             status_code=422,
         )
+
+
+def _http_error_details(exc: Exception) -> dict[str, Any]:
+    response = getattr(exc, "response", None)
+    if response is None:
+        return {}
+    details: dict[str, Any] = {}
+    status_code = getattr(response, "status_code", None)
+    if status_code is not None:
+        details["http_status_code"] = status_code
+    text = _response_text(response)
+    if text:
+        details["http_response_text"] = _truncate_text(text, _CLONE_ERROR_TEXT_LIMIT)
+    return details
+
+
+def _response_text(response: Any) -> str:
+    try:
+        text = getattr(response, "text", "")
+    except Exception:
+        return ""
+    if isinstance(text, bytes):
+        return text.decode("utf-8", errors="replace")
+    return str(text or "")
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return f"{value[:limit]}..."
 
 
 def _provider_status(result: dict[str, Any]) -> str:

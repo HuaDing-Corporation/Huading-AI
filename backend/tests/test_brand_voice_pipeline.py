@@ -39,6 +39,30 @@ class _CloneProvider:
         return {"released": True}
 
 
+class _CloneFailureProvider:
+    async def clone_voice(self, payload: dict[str, Any]) -> dict[str, Any]:
+        raise _HttpCloneError()
+
+
+class _HttpCloneError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("volcengine voice clone rejected request")
+        self.response = _HttpErrorResponse()
+
+
+class _HttpErrorResponse:
+    status_code = 400
+    text = '{"code":"InvalidAudio","message":"audio duration too short"}'
+
+
+class _Logger:
+    def __init__(self) -> None:
+        self.warnings: list[tuple[str, dict[str, Any]]] = []
+
+    def warning(self, event: str, **kwargs: Any) -> None:
+        self.warnings.append((event, kwargs))
+
+
 class _Storage:
     bucket = "bucket"
 
@@ -248,6 +272,72 @@ def test_create_brand_voice_clones_and_charges_once(auth_context, auth_db, monke
         assert usage.quantity == Decimal("1.000")
         assert usage.credits == Decimal("30.00")
         assert usage.status == "settled"
+
+
+def test_create_brand_voice_logs_clone_http_error_details(
+    auth_context,
+    auth_db,
+    monkeypatch,
+):
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+
+    logger = _Logger()
+    monkeypatch.setattr(brand_voice_routes, "logger", logger)
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "resolve",
+        lambda _db, *, tenant_id, capability: _CloneFailureProvider(),
+    )
+    with auth_db() as db:
+        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
+
+    storage = _Storage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    client = TestClient(app)
+    try:
+        resp = client.post(
+            "/api/v1/brand-voices",
+            json={
+                "name": "Store Voice",
+                "source_audio_asset_id": asset_id,
+                "consent_confirmed": True,
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 502
+    assert resp.json()["error"]["code"] == "VOICE_CLONE_FAILED"
+    assert len(logger.warnings) == 1
+    event, details = logger.warnings[0]
+    assert event == "brand_voice.clone_failed"
+    assert details["tenant_id"] == auth_context["tenant_id"]
+    assert details["brand_voice_id"]
+    assert details["source_audio_asset_id"] == asset_id
+    assert details["error"] == "volcengine voice clone rejected request"
+    assert details["error_type"] == "_HttpCloneError"
+    assert details["http_status_code"] == 400
+    assert details["http_response_text"] == (
+        '{"code":"InvalidAudio","message":"audio duration too short"}'
+    )
+
+
+def test_clone_http_error_details_truncates_long_response_text():
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+
+    class _LongHttpResponse:
+        status_code = 429
+        text = "x" * 1200
+
+    class _LongHttpError(Exception):
+        response = _LongHttpResponse()
+
+    details = brand_voice_routes._http_error_details(_LongHttpError())
+
+    assert details["http_status_code"] == 429
+    assert details["http_response_text"] == f"{'x' * 1000}..."
 
 
 def test_create_brand_voice_rejects_cross_tenant_source_audio(auth_context, auth_db, monkeypatch):
