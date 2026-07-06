@@ -22,7 +22,7 @@ describe("brand-voices API ↔ MSW（mock 忠实，§8）", () => {
       .mockResolvedValueOnce(jsonResponse({ asset_id: "audio-1" }, 201))
       .mockResolvedValueOnce(jsonResponse({ id: "bv-1", name: "我的音", status: "processing", created_at: "" }, 201));
     try {
-      await createBrandVoiceFromAudio({ name: "我的音", audio, consentConfirmed: true });
+      await createBrandVoiceFromAudio({ name: "我的音", audio, consentConfirmed: true, provider: "doubao" });
       expect(fetchSpy).toHaveBeenCalledTimes(2);
 
       // ① /uploads/audio：multipart，含 file
@@ -39,7 +39,8 @@ describe("brand-voices API ↔ MSW（mock 忠实，§8）", () => {
       expect((i1 as RequestInit).method).toBe("POST");
       expect(((i1 as RequestInit).headers as Record<string, string>)["Content-Type"]).toBe("application/json");
       const body = JSON.parse((i1 as RequestInit).body as string);
-      expect(body).toEqual({ name: "我的音", source_audio_asset_id: "audio-1", consent_confirmed: true });
+      // 范围4：provider 通路进 body（此处 doubao）。
+      expect(body).toEqual({ name: "我的音", source_audio_asset_id: "audio-1", consent_confirmed: true, provider: "doubao" });
     } finally {
       fetchSpy.mockRestore();
     }
@@ -61,7 +62,7 @@ describe("brand-voices API ↔ MSW（mock 忠实，§8）", () => {
       );
     try {
       await expect(
-        createBrandVoiceFromAudio({ name: "x", audio: new Blob(["x"], { type: "audio/webm" }), consentConfirmed: true })
+        createBrandVoiceFromAudio({ name: "x", audio: new Blob(["x"], { type: "audio/webm" }), consentConfirmed: true, provider: "cosyvoice" })
       ).rejects.toBeInstanceOf(ApiError);
       expect(fetchSpy).toHaveBeenCalledTimes(1); // 仅 /uploads/audio，未短路到 /brand-voices
       expect(String(fetchSpy.mock.calls[0][0])).toContain("/api/v1/uploads/audio");
@@ -73,7 +74,7 @@ describe("brand-voices API ↔ MSW（mock 忠实，§8）", () => {
   it("createBrandVoice JSON：consent_confirmed=false → 422(后端 extra=forbid + consent 校验)", async () => {
     let caught: unknown;
     try {
-      await createBrandVoice({ name: "x", source_audio_asset_id: "audio-1", consent_confirmed: false });
+      await createBrandVoice({ name: "x", source_audio_asset_id: "audio-1", consent_confirmed: false, provider: "cosyvoice" });
     } catch (e) {
       caught = e;
     }
@@ -85,7 +86,8 @@ describe("brand-voices API ↔ MSW（mock 忠实，§8）", () => {
     const created = await createBrandVoiceFromAudio({
       name: "整链音色",
       audio: new Blob(["x"], { type: "audio/webm" }),
-      consentConfirmed: true
+      consentConfirmed: true,
+      provider: "cosyvoice"
     });
     expect(created.id).toBeTruthy();
     expect(created.status).toBe("processing");
@@ -101,7 +103,8 @@ describe("brand-voices API ↔ MSW（mock 忠实，§8）", () => {
     const created = await createBrandVoiceFromAudio({
       name: "轮询音色",
       audio: new Blob(["x"], { type: "audio/webm" }),
-      consentConfirmed: true
+      consentConfirmed: true,
+      provider: "cosyvoice"
     });
     let resolved = created;
     for (let i = 0; i < 4 && resolved.status === "processing"; i++) {
@@ -115,7 +118,8 @@ describe("brand-voices API ↔ MSW（mock 忠实，§8）", () => {
     const created = await createBrandVoiceFromAudio({
       name: "待删音色",
       audio: new Blob(["x"], { type: "audio/webm" }),
-      consentConfirmed: true
+      consentConfirmed: true,
+      provider: "cosyvoice"
     });
     const res = await deleteBrandVoice(created.id);
     expect(res.deleted).toBe(true);

@@ -38,17 +38,64 @@ describe("BrandVoiceCreate (品牌音色创建)", () => {
     expect(screen.getByText(copy.brandVoice.consentRequired)).toBeInTheDocument();
   });
 
-  it("授权已勾 + 名称 + 音频：create 提交 {name, audio}", async () => {
+  it("选 cosyvoice(免费)：直建、无扣费确认窗，提交带 provider:cosyvoice", async () => {
     const file = mp3();
     render(<BrandVoiceCreate />);
     uploadAudio(file);
     fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "我的音" } });
     fireEvent.click(screen.getByRole("checkbox"));
+    // 主动选免费档 cosyvoice（缺省是 doubao）。
+    fireEvent.click(screen.getByText(copy.brandVoice.providerCosyTitle));
     fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
 
+    // cosyvoice 免费 → 无扣费确认窗，直接创建；provider 进 body。
+    expect(screen.queryByText(copy.brandVoice.chargeConfirmTitle)).not.toBeInTheDocument();
     await waitFor(() =>
-      expect(createMock.mutateAsync).toHaveBeenCalledWith({ name: "我的音", audio: file, consentConfirmed: true })
+      expect(createMock.mutateAsync).toHaveBeenCalledWith({
+        name: "我的音",
+        audio: file,
+        consentConfirmed: true,
+        provider: "cosyvoice"
+      })
     );
+  });
+
+  // 承重·缺省 doubao（兼容承现状）：不选卡片时默认 doubao → 点创建即弹扣费确认（现状即豆包付费）。
+  it("缺省 doubao：不选卡片点创建 → 弹扣费确认，确认后带 provider:doubao", async () => {
+    const file = mp3();
+    render(<BrandVoiceCreate />);
+    uploadAudio(file);
+    fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "默认音" } });
+    fireEvent.click(screen.getByRole("checkbox"));
+    // 不动通路卡（缺省 doubao）
+    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
+
+    // 弹扣费确认窗 + 明确 30000 积分文案；此时**尚未**创建。
+    expect(screen.getByText(copy.brandVoice.chargeConfirmTitle)).toBeInTheDocument();
+    expect(screen.getByText(copy.brandVoice.chargeConfirmMessage(30000))).toBeInTheDocument();
+    expect(createMock.mutateAsync).not.toHaveBeenCalled();
+    // 确认扣费 → 带 provider:doubao 创建。
+    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.chargeConfirmBtn }));
+    await waitFor(() =>
+      expect(createMock.mutateAsync).toHaveBeenCalledWith({
+        name: "默认音",
+        audio: file,
+        consentConfirmed: true,
+        provider: "doubao"
+      })
+    );
+  });
+
+  it("doubao 扣费确认取消 → 不创建", () => {
+    render(<BrandVoiceCreate />);
+    uploadAudio();
+    fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "VIP音" } });
+    fireEvent.click(screen.getByRole("checkbox"));
+    // 缺省即 doubao，无需再点卡；点创建 → 弹扣费确认。
+    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
+    // 取消
+    fireEvent.click(screen.getByRole("button", { name: copy.common.cancel }));
+    expect(createMock.mutateAsync).not.toHaveBeenCalled();
   });
 
   it("无音频：提示先录制/上传，不发请求", () => {
@@ -85,6 +132,8 @@ describe("BrandVoiceCreate (品牌音色创建)", () => {
     fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "名".repeat(50) } });
     fireEvent.click(screen.getByRole("checkbox"));
     fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
+    // 缺省 doubao → 过扣费确认再创建。
+    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.chargeConfirmBtn }));
     await waitFor(() => expect(createMock.mutateAsync).toHaveBeenCalled());
     expect(createMock.mutateAsync.mock.calls[0][0].name).toHaveLength(30);
   });

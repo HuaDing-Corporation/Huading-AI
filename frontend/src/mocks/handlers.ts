@@ -693,6 +693,7 @@ export const handlers = [
       name?: string;
       source_audio_asset_id?: string;
       consent_confirmed?: boolean;
+      provider?: string; // 范围4：克隆通路 doubao/cosyvoice（COSYVOICE-CLONE-0001 合并后真契约）
     };
     // 真后端 extra=forbid + consent 校验：缺 source_audio_asset_id 或 consent_confirmed!==true → 422。
     if (!body.source_audio_asset_id || body.consent_confirmed !== true) {
@@ -700,8 +701,10 @@ export const handlers = [
       return err(422, "BRAND_VOICE_CONSENT_REQUIRED", "需确认授权并提供音频资源");
     }
     const id = `bv-${++brandVoiceSeq}`;
-    brandVoices.set(id, { id, name: body.name || "未命名品牌音色", status: "processing", created_at: new Date(0).toISOString(), _polls: 0 });
-    return ok({ id, name: body.name || "未命名品牌音色", status: "processing", created_at: new Date(0).toISOString() });
+    // provider 缺省回落 doubao（对齐 codex-a 真契约默认值）；存入以便列表/picker 徽标回放。
+    const provider = body.provider === "cosyvoice" ? "cosyvoice" : "doubao";
+    brandVoices.set(id, { id, name: body.name || "未命名品牌音色", status: "processing", created_at: new Date(0).toISOString(), _polls: 0, provider });
+    return ok({ id, name: body.name || "未命名品牌音色", status: "processing", created_at: new Date(0).toISOString(), provider });
   }),
   http.delete(`${BASE}/api/v1/brand-voices/:id`, ({ params }) => {
     const id = params.id as string;
