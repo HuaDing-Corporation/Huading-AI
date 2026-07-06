@@ -295,6 +295,118 @@ def test_upload_images_creates_avatar_asset_under_tenant_scope(
         assert asset.storage_key in storage.saved
 
 
+def test_upload_videos_creates_avatar_source_asset_under_tenant_scope(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import uploads
+    from app.api.v1.routes.videos import _AvatarVideoProbe
+
+    storage = _FakeStorage()
+    monkeypatch.setattr(
+        uploads,
+        "_probe_avatar_video_bytes",
+        lambda _content, *, suffix: _AvatarVideoProbe(
+            duration_ms=9_500,
+            width=720,
+            height=1280,
+            container="mov,mp4,m4a,3gp,3g2,mj2",
+            video_codec="h264",
+            audio_codec="aac",
+        ),
+        raising=False,
+    )
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/uploads/videos",
+            files={
+                "file": (
+                    "avatar-source.mp4",
+                    b"fake mp4 bytes",
+                    "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+                )
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 201
+    data = resp.json()["data"]
+    assert data["asset_id"]
+    assert data["type"] == "video"
+    assert data["status"] == "ready"
+    with auth_db() as db:
+        asset = db.get(Asset, data["asset_id"])
+        assert asset is not None
+        assert asset.tenant_id == auth_context["tenant_id"]
+        assert asset.type == "video"
+        assert asset.mime_type == "video/mp4"
+        assert asset.source == "upload"
+        assert asset.status == "ready"
+        assert asset.size_bytes == len(b"fake mp4 bytes")
+        assert asset.duration_ms == 9_500
+        assert asset.width == 720
+        assert asset.height == 1280
+        assert asset.metadata_ == {
+            "purpose": "avatar_source",
+            "container": "mov,mp4,m4a,3gp,3g2,mj2",
+            "video_codec": "h264",
+            "audio_codec": "aac",
+        }
+        assert asset.storage_key.startswith(f"tenants/{auth_context['tenant_id']}/uploads/")
+        assert asset.storage_key.endswith(".mp4")
+        assert storage.saved[asset.storage_key] == (b"fake mp4 bytes", "video/mp4")
+
+
+def test_upload_videos_rejects_invalid_source_without_asset(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import uploads
+    from app.api.v1.routes.videos import _AvatarVideoProbe
+
+    storage = _FakeStorage()
+    monkeypatch.setattr(
+        uploads,
+        "_probe_avatar_video_bytes",
+        lambda _content, *, suffix: _AvatarVideoProbe(
+            duration_ms=10_001,
+            width=720,
+            height=1280,
+            container="mov,mp4,m4a,3gp,3g2,mj2",
+            video_codec="h264",
+            audio_codec="aac",
+        ),
+        raising=False,
+    )
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        client = TestClient(app)
+        bad_type = client.post(
+            "/api/v1/uploads/videos",
+            files={"file": ("avatar-source.mov", b"mov bytes", "video/quicktime")},
+            headers=auth_context["headers"],
+        )
+        bad_duration = client.post(
+            "/api/v1/uploads/videos",
+            files={"file": ("avatar-source.mp4", b"too long", "video/mp4")},
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert bad_type.status_code == 415
+    assert bad_duration.status_code == 422
+    assert storage.saved == {}
+    with auth_db() as db:
+        assert db.scalar(select(Asset).where(Asset.type == "video")) is None
+
+
 def test_avatar_talk_order_reserves_quota_and_returns_queued_id(
     monkeypatch,
     auth_context,
@@ -450,6 +562,54 @@ def test_avatar_talk_order_accepts_avatar_video_source_and_reserves_same_quota(
         assert reserved.model == "jimeng_realman_avatar_picture_omni_v15"
 
 
+def test_avatar_talk_video_source_accepts_change_lips_optional_params(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(db, auth_context["tenant_id"])
+        subscription.quota_credits_total = 10000
+        voice, avatar_video = _seed_voice_and_avatar_video(db, auth_context["tenant_id"])
+        voice_id = voice.id
+        avatar_video_id = avatar_video.id
+
+    class _FakeTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            return type("Result", (), {"status": "PENDING"})()
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _FakeTask())
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/videos",
+        json={
+            "topic": "cashmere coat",
+            "script": "short avatar video source script",
+            "voice_id": voice_id,
+            "avatar_video_asset_id": avatar_video_id,
+            "video_mode": "avatar_talk",
+            "align_audio_reverse": True,
+            "templ_start_seconds": 1.5,
+            "open_sr": True,
+            "separate_vocal": False,
+            "open_scenedet": True,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 202
+    with auth_db() as db:
+        task = db.get(VideoTask, resp.json()["data"]["id"])
+        assert task is not None
+        assert task.params["align_audio_reverse"] is True
+        assert task.params["templ_start_seconds"] == 1.5
+        assert task.params["open_sr"] is True
+        assert task.params["separate_vocal"] is False
+        assert task.params["open_scenedet"] is True
+
+
 def test_avatar_talk_video_source_rejects_invalid_asset_matrix(
     monkeypatch,
     auth_context,
@@ -579,6 +739,61 @@ def test_avatar_talk_video_source_rejects_invalid_asset_matrix(
             headers=auth_context["headers"],
         )
         assert resp.status_code == expected_status
+
+
+def test_avatar_talk_video_source_checks_storage_size_when_metadata_size_missing(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(db, auth_context["tenant_id"])
+        subscription.quota_credits_total = 10000
+        voice, _valid_video = _seed_voice_and_avatar_video(db, auth_context["tenant_id"])
+        from app.db.models import Asset
+
+        storage_key = f"tenants/{auth_context['tenant_id']}/uploads/missing-size.mp4"
+        missing_size = Asset(
+            tenant_id=auth_context["tenant_id"],
+            type="video",
+            source="upload",
+            storage_key=storage_key,
+            mime_type="video/mp4",
+            size_bytes=None,
+            duration_ms=9_500,
+            width=960,
+            height=960,
+            status="ready",
+            metadata_={"purpose": "avatar_source", "video_codec": "h264", "audio_codec": "aac"},
+        )
+        db.add(missing_size)
+        db.commit()
+        voice_id = voice.id
+        asset_id = missing_size.id
+
+    from app.api.v1.routes import videos as videos_route
+
+    storage = _FakeStorage()
+    storage.saved[storage_key] = (b"too-large", "video/mp4")
+    monkeypatch.setattr(videos_route, "_AVATAR_VIDEO_SOURCE_MAX_BYTES", 4)
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/videos",
+            json={
+                "topic": "cashmere coat",
+                "script": "short avatar video source script",
+                "voice_id": voice_id,
+                "avatar_video_asset_id": asset_id,
+                "video_mode": "avatar_talk",
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 413
 
 
 def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(

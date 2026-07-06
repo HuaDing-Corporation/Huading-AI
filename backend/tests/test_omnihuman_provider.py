@@ -396,6 +396,11 @@ def test_omnihuman_change_lips_submit_poll_prefers_resp_data_url(monkeypatch) ->
             "audio_url": "https://assets.example/voice.mp3",
             "tier": "basic",
             "align_audio": True,
+            "align_audio_reverse": True,
+            "templ_start_seconds": 1.5,
+            "open_sr": True,
+            "separate_vocal": False,
+            "open_scenedet": True,
             "progress_callback": heartbeats.append,
         }
     )
@@ -414,6 +419,11 @@ def test_omnihuman_change_lips_submit_poll_prefers_resp_data_url(monkeypatch) ->
     assert submit_body["url"] == "https://assets.example/avatar-source.mp4"
     assert submit_body["pure_audio_url"] == "https://assets.example/voice.mp3"
     assert submit_body["align_audio"] is True
+    assert submit_body["align_audio_reverse"] is True
+    assert submit_body["templ_start_seconds"] == 1.5
+    assert submit_body["open_sr"] is True
+    assert submit_body["separate_vocal"] is False
+    assert submit_body["open_scenedet"] is True
     assert "/cn-beijing/cv/request" in submit["headers"]["Authorization"]
     assert poll1["params"]["Action"] == "RealmanChangeLipsGetResult"
     assert poll_body["req_key"] == "realman_change_lips_basic_chimera"
@@ -449,10 +459,15 @@ def test_omnihuman_change_lips_falls_back_to_data_video_url(monkeypatch) -> None
             "video_url": "https://assets.example/avatar-source.mp4",
             "audio_url": "https://assets.example/voice.mp3",
             "tier": "lite",
+            "align_audio_reverse": True,
+            "open_sr": True,
         }
     )
 
     assert result["video_url"] == "https://visual.example/change-lips-lite.mp4"
+    submit_body = json.loads(http.calls[0]["data"].decode("utf-8"))
+    assert submit_body["align_audio_reverse"] is True
+    assert "open_sr" not in submit_body
 
 
 def test_omnihuman_change_lips_maps_known_video_errors_to_friendly_message() -> None:

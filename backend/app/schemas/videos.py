@@ -104,6 +104,11 @@ class VideoGenerateRequest(BaseModel):
     voice_id: str | None = None
     avatar_asset_id: str | None = None
     avatar_video_asset_id: str | None = None
+    align_audio_reverse: bool | None = None
+    templ_start_seconds: float | None = Field(default=None, ge=0)
+    open_sr: bool | None = None
+    separate_vocal: bool | None = None
+    open_scenedet: bool | None = None
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
     aspect_ratio: Literal["9:16", "16:9", "1:1"] = Field(default="9:16")
     subtitle_enabled: bool = True

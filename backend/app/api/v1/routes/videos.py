@@ -99,6 +99,13 @@ _AVATAR_VIDEO_SOURCE_MAX_DIMENSION = 1920
 _AVATAR_VIDEO_SOURCE_MIN_DIMENSION = 360
 _AVATAR_VIDEO_CODECS = {"h264", "avc1"}
 _AVATAR_VIDEO_AUDIO_CODECS = {"aac", "mp4a"}
+_CHANGE_LIPS_OPTIONAL_FIELDS = {
+    "align_audio_reverse",
+    "templ_start_seconds",
+    "open_sr",
+    "separate_vocal",
+    "open_scenedet",
+}
 
 
 @dataclass(frozen=True)
@@ -309,6 +316,19 @@ def _avatar_video_probe(asset: Asset, *, storage: ObjectStorage) -> _AvatarVideo
     return _probe_avatar_video_bytes(content, suffix=suffix)
 
 
+def _avatar_video_size_bytes(asset: Asset, *, storage: ObjectStorage) -> int | None:
+    if asset.size_bytes is not None:
+        return asset.size_bytes
+    try:
+        return len(storage.get_bytes(asset.storage_key))
+    except Exception as exc:
+        raise AppError(
+            "Avatar source video metadata is incomplete and the object could not be read.",
+            code="AVATAR_VIDEO_NOT_READABLE",
+            status_code=422,
+        ) from exc
+
+
 def _validate_avatar_video_probe(asset: Asset, probe: _AvatarVideoProbe) -> None:
     if base_mime(asset.mime_type) != "video/mp4":
         raise AppError(
@@ -403,10 +423,8 @@ def _avatar_video_asset_or_404(
             code="AVATAR_VIDEO_ASSET_NOT_FOUND",
             status_code=404,
         )
-    if (
-        avatar_video.size_bytes is not None
-        and avatar_video.size_bytes > _AVATAR_VIDEO_SOURCE_MAX_BYTES
-    ):
+    size_bytes = _avatar_video_size_bytes(avatar_video, storage=storage)
+    if size_bytes is not None and size_bytes > _AVATAR_VIDEO_SOURCE_MAX_BYTES:
         raise AppError(
             f"Avatar source video is too large; limit is {_AVATAR_VIDEO_SOURCE_MAX_BYTES} bytes.",
             code="AVATAR_VIDEO_TOO_LARGE",
@@ -635,6 +653,10 @@ def _create_avatar_talk_video(
     }
     if payload.avatar_video_asset_id:
         params["avatar_video_asset_id"] = payload.avatar_video_asset_id
+        for key in _CHANGE_LIPS_OPTIONAL_FIELDS:
+            value = getattr(payload, key)
+            if value is not None:
+                params[key] = value
     else:
         params["avatar_asset_id"] = payload.avatar_asset_id
     if brand_voice is not None:

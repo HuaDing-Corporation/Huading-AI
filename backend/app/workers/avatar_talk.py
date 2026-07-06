@@ -99,6 +99,10 @@ _ECOMMERCE_SCRIPT_FORBIDDEN_TERMS = (
 )
 
 
+class ChangeLipsOutputTooShort(RuntimeError):
+    pass
+
+
 @dataclass
 class AvatarTalkContext:
     task_id: str
@@ -418,7 +422,7 @@ def _fit_change_lips_video_to_tts(
     if output_duration <= 0:
         raise RuntimeError("改口型结果视频无法解析。")
     if output_duration + _CHANGE_LIPS_DURATION_TOLERANCE_SEC < tts_duration_sec:
-        raise RuntimeError("改口型结果短于口播音频，请缩短文案或更换源视频。")
+        raise ChangeLipsOutputTooShort("改口型结果短于口播音频，请缩短文案或更换源视频。")
     if output_duration - tts_duration_sec > _CHANGE_LIPS_DURATION_TOLERANCE_SEC:
         return _trim_video_bytes(
             source,
@@ -841,22 +845,38 @@ def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
             )
 
         payload["progress_callback"] = on_change_lips_progress
-        result = asyncio.run(
-            invoke(
-                ctx.db,
-                tenant_id=ctx.tenant_id,
-                capability="avatar",
-                provider=provider.__class__.__name__,
-                operation=lambda: provider.generate_change_lips(payload),
-                timeout_seconds=settings.engine_omnihuman_timeout_seconds,
+
+        def generate_for_tier(selected_tier: str) -> bytes:
+            payload["tier"] = selected_tier
+            result = asyncio.run(
+                invoke(
+                    ctx.db,
+                    tenant_id=ctx.tenant_id,
+                    capability="avatar",
+                    provider=provider.__class__.__name__,
+                    operation=lambda: provider.generate_change_lips(payload),
+                    timeout_seconds=settings.engine_omnihuman_timeout_seconds,
+                )
             )
-        )
-        result_bytes = _download_bytes(str(result["video_url"]))
-        ctx.base_video_bytes = _fit_change_lips_video_to_tts(
-            result_bytes,
-            tts_duration_sec=float(ctx.duration_sec or 0),
-            work_dir=_work_dir(ctx.task_id),
-        )
+            result_bytes = _download_bytes(str(result["video_url"]))
+            return _fit_change_lips_video_to_tts(
+                result_bytes,
+                tts_duration_sec=float(ctx.duration_sec or 0),
+                work_dir=_work_dir(ctx.task_id),
+            )
+
+        try:
+            ctx.base_video_bytes = generate_for_tier(tier)
+        except ChangeLipsOutputTooShort:
+            if (
+                tier != "basic"
+                and settings.engine_omnihuman_change_lips_basic_retry_on_short_output
+            ):
+                _validate_change_lips_tts_duration(float(ctx.duration_sec or 0), tier="basic")
+                tier = "basic"
+                ctx.base_video_bytes = generate_for_tier(tier)
+            else:
+                raise
         ctx.change_lips_tier = tier
         ctx.provider_model = _CHANGE_LIPS_MODEL
         return ctx

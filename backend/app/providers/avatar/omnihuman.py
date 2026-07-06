@@ -27,9 +27,11 @@ _SERVICE = "cv"
 _RETRYABLE_CODES = {50429, 50430, 50500, 50501}
 _NON_RETRYABLE_CODES = {50215, 50411, 50511, 50412, 50512, 50413, 50514}
 _PENDING_STATUSES = {"processing", "in_queue", "generating"}
-_CHANGE_LIPS_OPTIONAL_FIELDS = {
+_CHANGE_LIPS_SHARED_OPTIONAL_FIELDS = {
     "align_audio_reverse",
     "templ_start_seconds",
+}
+_CHANGE_LIPS_BASIC_OPTIONAL_FIELDS = {
     "open_sr",
     "separate_vocal",
     "open_scenedet",
@@ -227,7 +229,10 @@ class OmniHumanProvider:
             "pure_audio_url": audio_url,
             "align_audio": bool(payload.get("align_audio", True)),
         }
-        for key in _CHANGE_LIPS_OPTIONAL_FIELDS:
+        optional_fields = set(_CHANGE_LIPS_SHARED_OPTIONAL_FIELDS)
+        if tier == "basic":
+            optional_fields.update(_CHANGE_LIPS_BASIC_OPTIONAL_FIELDS)
+        for key in optional_fields:
             value = payload.get(key)
             if value is not None:
                 submit_body[key] = value
