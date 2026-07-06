@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     engine_doubao_voice_clone_appid: str = ""
     engine_doubao_voice_clone_access_token: str = ""
     engine_doubao_voice_clone_api_key: str = ""
+    engine_doubao_voice_clone_speaker_ids: Annotated[list[str], NoDecode] = Field(
+        default_factory=list
+    )
     engine_doubao_voice_clone_resource_id: str = "volc.megatts.voiceclone"
     engine_doubao_voice_clone_endpoint: str = (
         "https://openspeech.bytedance.com/api/v1/mega_tts/audio/upload"
@@ -162,9 +165,14 @@ class Settings(BaseSettings):
     def effective_cors_origins(self) -> list[str]:
         return self.engine_cors_origins or self.cors_origins
 
-    @field_validator("cors_origins", "engine_cors_origins", mode="before")
+    @field_validator(
+        "cors_origins",
+        "engine_cors_origins",
+        "engine_doubao_voice_clone_speaker_ids",
+        mode="before",
+    )
     @classmethod
-    def split_cors_origins(cls, value: str | list[str]) -> list[str]:
+    def split_list_setting(cls, value: str | list[str]) -> list[str]:
         # Accept a JSON array, a comma-separated string, or a single URL.
         if isinstance(value, str):
             text = value.strip()

@@ -14,6 +14,7 @@ from app.api.deps import (
     get_object_storage,
     require_permission,
 )
+from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
 from app.core.utils import base_mime
@@ -270,23 +271,30 @@ def _release_remote_speaker(db: Session, *, user: User, brand_voice: BrandVoice)
         )
 
 
-def _voice_clone_provider_config(db: Session, *, tenant_id: str) -> ProviderConfig | None:
-    tenant_config = db.scalar(
-        select(ProviderConfig).where(
-            ProviderConfig.tenant_id == tenant_id,
-            ProviderConfig.capability == "voice_clone",
-            ProviderConfig.is_active.is_(True),
-        )
+def _voice_clone_provider_config(
+    db: Session,
+    *,
+    tenant_id: str,
+    for_update: bool = False,
+) -> ProviderConfig | None:
+    tenant_statement = select(ProviderConfig).where(
+        ProviderConfig.tenant_id == tenant_id,
+        ProviderConfig.capability == "voice_clone",
+        ProviderConfig.is_active.is_(True),
     )
+    if for_update:
+        tenant_statement = tenant_statement.with_for_update()
+    tenant_config = db.scalar(tenant_statement)
     if tenant_config is not None:
         return tenant_config
-    return db.scalar(
-        select(ProviderConfig).where(
-            ProviderConfig.tenant_id.is_(None),
-            ProviderConfig.capability == "voice_clone",
-            ProviderConfig.is_active.is_(True),
-        )
+    platform_statement = select(ProviderConfig).where(
+        ProviderConfig.tenant_id.is_(None),
+        ProviderConfig.capability == "voice_clone",
+        ProviderConfig.is_active.is_(True),
     )
+    if for_update:
+        platform_statement = platform_statement.with_for_update()
+    return db.scalar(platform_statement)
 
 
 def _allocate_voice_clone_speaker_id(
@@ -295,9 +303,9 @@ def _allocate_voice_clone_speaker_id(
     tenant_id: str,
     brand_voice_id: str,
 ) -> str:
-    config = _voice_clone_provider_config(db, tenant_id=tenant_id)
+    config = _voice_clone_provider_config(db, tenant_id=tenant_id, for_update=True)
     values = dict(config.config or {}) if config is not None else {}
-    speaker_ids = [str(item).strip() for item in values.get("speaker_ids") or [] if str(item)]
+    speaker_ids = _configured_speaker_ids(values)
     used = {
         str(key): str(value)
         for key, value in dict(values.get("used_speaker_ids") or {}).items()
@@ -318,6 +326,31 @@ def _allocate_voice_clone_speaker_id(
     return speaker_id
 
 
+def _configured_speaker_ids(values: dict[str, Any]) -> list[str]:
+    raw_ids = (
+        values.get("speaker_ids")
+        if "speaker_ids" in values
+        else settings.engine_doubao_voice_clone_speaker_ids
+    )
+    return _normalize_speaker_ids(raw_ids)
+
+
+def _normalize_speaker_ids(raw_ids: Any) -> list[str]:
+    if isinstance(raw_ids, str):
+        candidates = raw_ids.split(",")
+    else:
+        candidates = list(raw_ids or [])
+    speaker_ids: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        speaker_id = str(item).strip()
+        if not speaker_id or speaker_id in seen:
+            continue
+        speaker_ids.append(speaker_id)
+        seen.add(speaker_id)
+    return speaker_ids
+
+
 def _release_voice_clone_speaker_id(
     db: Session,
     *,
@@ -325,12 +358,12 @@ def _release_voice_clone_speaker_id(
     speaker_id: str,
     brand_voice_id: str,
 ) -> None:
-    config = _voice_clone_provider_config(db, tenant_id=tenant_id)
+    config = _voice_clone_provider_config(db, tenant_id=tenant_id, for_update=True)
     if config is None:
         return
     values = dict(config.config or {})
     used = dict(values.get("used_speaker_ids") or {})
-    if str(used.get(speaker_id) or "") == brand_voice_id or speaker_id in used:
+    if str(used.get(speaker_id) or "") == brand_voice_id:
         used.pop(speaker_id, None)
         values["used_speaker_ids"] = used
         config.config = values

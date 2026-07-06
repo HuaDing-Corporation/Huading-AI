@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
+import subprocess
+import tempfile
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -69,7 +73,8 @@ class DoubaoVoiceCloneProvider:
         if not speaker_id:
             raise ValueError("Voice clone speaker_id is required.")
         audio_bytes = _payload_audio_bytes(payload)
-        audio_format = _audio_format(
+        upload_audio_bytes, audio_format = _audio_upload_payload(
+            audio_bytes,
             mime_type=str(payload.get("source_audio_mime_type") or ""),
             storage_key=str(payload.get("source_audio_storage_key") or ""),
         )
@@ -78,7 +83,7 @@ class DoubaoVoiceCloneProvider:
             "speaker_id": speaker_id,
             "audios": [
                 {
-                    "audio_bytes": base64.b64encode(audio_bytes).decode("ascii"),
+                    "audio_bytes": base64.b64encode(upload_audio_bytes).decode("ascii"),
                     "audio_format": audio_format,
                 }
             ],
@@ -102,6 +107,7 @@ class DoubaoVoiceCloneProvider:
             http_status_code=getattr(response, "status_code", None),
         )
         response.raise_for_status()
+        _raise_base_resp_error(response.json())
         status = self._poll_status(
             speaker_id,
             tenant_id=str(payload.get("tenant_id") or ""),
@@ -164,8 +170,8 @@ class DoubaoVoiceCloneProvider:
 
 def _first_value(data: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
     for key in keys:
-        value = data.get(key)
-        if value:
+        if key in data and data[key] is not None:
+            value = data[key]
             return value
     return None
 
@@ -179,7 +185,19 @@ def _payload_audio_bytes(payload: Mapping[str, Any]) -> bytes:
     raise ValueError("Voice clone source audio bytes are required.")
 
 
-def _audio_format(*, mime_type: str, storage_key: str) -> str:
+def _audio_upload_payload(
+    audio_bytes: bytes,
+    *,
+    mime_type: str,
+    storage_key: str,
+) -> tuple[bytes, str]:
+    audio_format = _audio_format(mime_type=mime_type, storage_key=storage_key)
+    if audio_format is not None:
+        return audio_bytes, audio_format
+    return _transcode_audio_to_wav(audio_bytes, suffix=_audio_suffix(mime_type, storage_key)), "wav"
+
+
+def _audio_format(*, mime_type: str, storage_key: str) -> str | None:
     normalized = mime_type.split(";", 1)[0].lower().strip()
     if normalized in {"audio/wav", "audio/x-wav", "audio/wave"}:
         return "wav"
@@ -190,7 +208,58 @@ def _audio_format(*, mime_type: str, storage_key: str) -> str:
     suffix = storage_key.rsplit(".", 1)[-1].lower() if "." in storage_key else ""
     if suffix in {"wav", "mp3", "m4a"}:
         return suffix
+    if normalized in {"audio/aac", "audio/ogg", "audio/webm"} or suffix in {
+        "aac",
+        "ogg",
+        "opus",
+        "webm",
+    }:
+        return None
     raise ValueError("Unsupported Doubao voice clone audio format.")
+
+
+def _audio_suffix(mime_type: str, storage_key: str) -> str:
+    suffix = storage_key.rsplit(".", 1)[-1].lower() if "." in storage_key else ""
+    if suffix:
+        return f".{suffix}"
+    normalized = mime_type.split(";", 1)[0].lower().strip()
+    return {
+        "audio/aac": ".aac",
+        "audio/ogg": ".ogg",
+        "audio/webm": ".webm",
+    }.get(normalized, ".bin")
+
+
+def _ffmpeg_binary() -> str:
+    return os.environ.get("FFMPEG_BINARY", "ffmpeg")
+
+
+def _transcode_audio_to_wav(audio_bytes: bytes, *, suffix: str) -> bytes:
+    try:
+        with tempfile.TemporaryDirectory(prefix="huading-voice-clone-") as temp_dir:
+            source = Path(temp_dir) / f"source{suffix or '.bin'}"
+            target = Path(temp_dir) / "source.wav"
+            source.write_bytes(audio_bytes)
+            subprocess.run(
+                [
+                    _ffmpeg_binary(),
+                    "-y",
+                    "-i",
+                    str(source),
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "24000",
+                    "-f",
+                    "wav",
+                    str(target),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            return target.read_bytes()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise DoubaoVoiceCloneError("Failed to transcode voice clone audio to wav.") from exc
 
 
 def _status_code(data: Mapping[str, Any]) -> int:
@@ -200,6 +269,28 @@ def _status_code(data: Mapping[str, Any]) -> int:
     if value is None and isinstance(data.get("Data"), Mapping):
         value = _first_value(data["Data"], ("status", "Status"))
     return int(value if value is not None else -1)
+
+
+def _raise_base_resp_error(data: Mapping[str, Any]) -> None:
+    base_resp = _first_value(data, ("BaseResp", "base_resp", "baseResp"))
+    if not isinstance(base_resp, Mapping):
+        return
+    raw_code = _first_value(base_resp, ("StatusCode", "status_code", "code", "Code"))
+    if raw_code is None:
+        return
+    try:
+        status_code = int(raw_code)
+    except (TypeError, ValueError):
+        status_code = -1
+    if status_code == 0:
+        return
+    message = _first_value(
+        base_resp,
+        ("StatusMessage", "status_message", "message", "Message", "msg"),
+    )
+    raise DoubaoVoiceCloneError(
+        str(message or f"Doubao voice clone upload failed: {status_code}")
+    )
 
 
 def _status_message(data: Mapping[str, Any]) -> str:

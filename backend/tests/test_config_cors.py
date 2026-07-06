@@ -104,6 +104,10 @@ def test_doubao_voice_clone_settings_are_env_driven(monkeypatch) -> None:
     monkeypatch.setenv("ENGINE_DOUBAO_VOICE_CLONE_ACCESS_TOKEN", "clone-token")
     monkeypatch.setenv("ENGINE_DOUBAO_VOICE_CLONE_RESOURCE_ID", "volc.megatts.voiceclone")
     monkeypatch.setenv(
+        "ENGINE_DOUBAO_VOICE_CLONE_SPEAKER_IDS",
+        "S_env_slot_001, S_env_slot_002",
+    )
+    monkeypatch.setenv(
         "ENGINE_DOUBAO_VOICE_CLONE_ENDPOINT",
         "https://openspeech.bytedance.com/api/v1/mega_tts/audio/upload",
     )
@@ -120,6 +124,10 @@ def test_doubao_voice_clone_settings_are_env_driven(monkeypatch) -> None:
         "https://openspeech.bytedance.com/api/v1/mega_tts/status"
     )
     assert s.engine_doubao_voice_clone_model_type == 4
+    assert s.engine_doubao_voice_clone_speaker_ids == [
+        "S_env_slot_001",
+        "S_env_slot_002",
+    ]
     assert s.engine_doubao_voice_clone_request_timeout_seconds > 0
 
 
