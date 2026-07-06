@@ -84,7 +84,8 @@ export interface CreateVideoRequest {
   topic: string; // 必填 ≤500（电商带货=产品卖点/主题）；视频生成 video_gen 传 prompt 文本作标题
   script?: string; // 可选；缺则后端 DeepSeek 生成（前端流程会带）
   voice_id?: string; // 数字人口播 / 电商带货必填；照片 photo 不传（无配音）
-  avatar_asset_id?: string; // 数字人口播必填（上传/预设产出的 asset_id）；i2v 不传
+  avatar_asset_id?: string; // 数字人口播·照片形象（上传/预设产出的 asset_id）；与 avatar_video_asset_id 互斥
+  avatar_video_asset_id?: string; // 数字人口播·本人出镜视频源（AVATAR-VIDEO-SOURCE-UI-0001，与 avatar_asset_id 互斥）；字段形状以 BE 包为准
   video_mode?: string; // 省略=数字人口播 avatar_talk；电商带货传 "seedance_i2v"；视频生成传 "video_gen"
   image_key?: string; // 电商带货 i2v 必填 / 照片 photo 可选参考图，来自 POST /uploads
   scene_prompt?: string; // 电商带货 i2v 画面提示词（与口播解耦，可 AI 生成）；空则后端回退 topic
@@ -174,6 +175,14 @@ export interface UploadImageResponse {
   type: "avatar_image";
   status: "ready";
   thumbnail_url?: string | null;
+}
+
+// POST /uploads/videos（数字人出镜视频源，AVATAR-VIDEO-SOURCE-UI-0001）：返回 asset_id 供 avatar_video_asset_id。
+// 形状以 BE 包(AVATAR-VIDEO-SOURCE-BE-0001)为准；mock 先行。
+export interface AvatarVideoUploadResponse {
+  asset_id: string;
+  type?: string;
+  status?: string;
 }
 
 // POST /uploads（电商带货 i2v 产品图）：返回的 `key` 即提交体使用的 image_key。

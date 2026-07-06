@@ -33,6 +33,7 @@ vi.mock("@/lib/api/hooks", () => ({
   useSaveCopyDraft: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useScriptGenerate: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useUploadImage: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useUploadAvatarVideo: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useUploadProductImage: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useScenePromptGenerate: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useVoices: () => ({

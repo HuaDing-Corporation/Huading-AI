@@ -1,6 +1,6 @@
 import { multipartFetch } from "@/lib/api/client";
 import { copy } from "@/lib/copy";
-import type { UploadImageResponse, UploadResponse } from "@/lib/api/types";
+import type { AvatarVideoUploadResponse, UploadImageResponse, UploadResponse } from "@/lib/api/types";
 
 // Client-side guards (the backend enforces the same; this is a fast first pass).
 export const ALLOWED_UPLOAD_TYPES = ["image/jpeg", "image/png", "image/webp"];
@@ -39,4 +39,13 @@ export function uploadImage(file: File): Promise<UploadImageResponse> {
 export async function uploadProductImage(file: File): Promise<{ image_key: string }> {
   const res = await postImageUpload<UploadResponse>("/api/v1/uploads", file);
   return { image_key: res.key };
+}
+
+/**
+ * Upload a 本人出镜视频 (数字人口播·视频源) → `asset_id`. Hits POST /uploads/videos (镜像 /uploads/images
+ * ·/uploads/audio 的 multipart 上传)，返回的 asset_id 作 create-video 的 avatar_video_asset_id。
+ * AVATAR-VIDEO-SOURCE-UI-0001；端点/形状以 BE 包为准，mock 先行。
+ */
+export function uploadAvatarVideo(file: File): Promise<AvatarVideoUploadResponse> {
+  return postImageUpload<AvatarVideoUploadResponse>("/api/v1/uploads/videos", file);
 }
