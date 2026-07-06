@@ -90,6 +90,13 @@ class Settings(BaseSettings):
     engine_omnihuman_timeout_seconds: float = 600.0
     engine_omnihuman_result_host_suffixes: str = "aigc-cloud.com"
     engine_omnihuman_cny_per_sec: float = 1.0
+    engine_omnihuman_change_lips_lite_req_key: str = "realman_change_lips"
+    engine_omnihuman_change_lips_basic_req_key: str = "realman_change_lips_basic_chimera"
+    engine_omnihuman_change_lips_region: str = "cn-beijing"
+    engine_omnihuman_change_lips_lite_cny_per_sec: float = 0.3
+    engine_omnihuman_change_lips_basic_cny_per_sec: float = 0.3
+    engine_omnihuman_change_lips_default_tier: str = "lite"
+    engine_omnihuman_change_lips_basic_retry_on_short_output: bool = False
     # Volcengine Doubao Seed-TTS. Credentials are env-only; when absent the
     # provider resolver keeps using edge-tts so CI/dev stays self-contained.
     engine_doubao_tts_appid: str = ""

@@ -42,6 +42,21 @@ def omnihuman_cost_cents(seconds: int | float | Decimal) -> int:
     return cny_to_cents(safe_seconds * _decimal_setting(settings.engine_omnihuman_cny_per_sec))
 
 
+def omnihuman_change_lips_cost_cents(
+    seconds: int | float | Decimal,
+    *,
+    tier: str | None,
+) -> int:
+    safe_seconds = max(0, Decimal(str(seconds or 0)))
+    normalized_tier = str(tier or settings.engine_omnihuman_change_lips_default_tier).lower()
+    price = (
+        settings.engine_omnihuman_change_lips_basic_cny_per_sec
+        if normalized_tier == "basic"
+        else settings.engine_omnihuman_change_lips_lite_cny_per_sec
+    )
+    return cny_to_cents(safe_seconds * _decimal_setting(price))
+
+
 def seed_tts_cost_cents(characters: int | float | Decimal) -> int:
     safe_chars = max(0, Decimal(str(characters or 0)))
     return cny_to_cents(safe_chars * _decimal_setting(settings.engine_seedtts_cny_per_char))

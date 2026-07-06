@@ -357,3 +357,137 @@ def test_omnihuman_keeps_media_urls_strict_when_result_suffix_configured() -> No
         )
 
     assert http.calls == []
+
+
+def test_omnihuman_change_lips_submit_poll_prefers_resp_data_url(monkeypatch) -> None:
+    http = _Http(
+        [
+            {"code": 10000, "data": {"task_id": "change-lips-1"}},
+            {"code": 10000, "data": {"status": "processing"}},
+            {
+                "code": 10000,
+                "data": {
+                    "status": "done",
+                    "video_url": "",
+                    "resp_data": json.dumps(
+                        {"url": "https://visual.example/change-lips-basic.mp4"}
+                    ),
+                },
+            },
+        ]
+    )
+    heartbeats: list[dict] = []
+    monkeypatch.setattr("app.providers.avatar.omnihuman.time.sleep", lambda *_: None)
+    provider = OmniHumanProvider(
+        access_key="ak",
+        secret_key="sk",
+        region="cn-north-1",
+        http_client=http,
+        poll_interval_seconds=0,
+        timeout_seconds=30,
+        allowed_hosts={"assets.example", "visual.example", "visual.volcengineapi.com"},
+        change_lips_lite_req_key="realman_change_lips",
+        change_lips_basic_req_key="realman_change_lips_basic_chimera",
+    )
+
+    result = provider.generate_change_lips_sync(
+        {
+            "video_url": "https://assets.example/avatar-source.mp4",
+            "audio_url": "https://assets.example/voice.mp3",
+            "tier": "basic",
+            "align_audio": True,
+            "align_audio_reverse": True,
+            "templ_start_seconds": 1.5,
+            "open_sr": True,
+            "separate_vocal": False,
+            "open_scenedet": True,
+            "progress_callback": heartbeats.append,
+        }
+    )
+
+    assert result["task_id"] == "change-lips-1"
+    assert result["video_url"] == "https://visual.example/change-lips-basic.mp4"
+    assert result["tier"] == "basic"
+    submit, poll1, poll2 = http.calls
+    submit_body = json.loads(submit["data"].decode("utf-8"))
+    poll_body = json.loads(poll2["data"].decode("utf-8"))
+    assert submit["params"] == {
+        "Action": "RealmanChangeLipsSubmitTask",
+        "Version": "2024-06-06",
+    }
+    assert submit_body["req_key"] == "realman_change_lips_basic_chimera"
+    assert submit_body["url"] == "https://assets.example/avatar-source.mp4"
+    assert submit_body["pure_audio_url"] == "https://assets.example/voice.mp3"
+    assert submit_body["align_audio"] is True
+    assert submit_body["align_audio_reverse"] is True
+    assert submit_body["templ_start_seconds"] == 1.5
+    assert submit_body["open_sr"] is True
+    assert submit_body["separate_vocal"] is False
+    assert submit_body["open_scenedet"] is True
+    assert "/cn-beijing/cv/request" in submit["headers"]["Authorization"]
+    assert poll1["params"]["Action"] == "RealmanChangeLipsGetResult"
+    assert poll_body["req_key"] == "realman_change_lips_basic_chimera"
+    assert poll_body["task_id"] == "change-lips-1"
+    assert [item["status"] for item in heartbeats] == ["processing"]
+
+
+def test_omnihuman_change_lips_falls_back_to_data_video_url(monkeypatch) -> None:
+    http = _Http(
+        [
+            {"code": 10000, "data": {"task_id": "change-lips-2"}},
+            {
+                "code": 10000,
+                "data": {
+                    "status": "done",
+                    "video_url": "https://visual.example/change-lips-lite.mp4",
+                },
+            },
+        ]
+    )
+    monkeypatch.setattr("app.providers.avatar.omnihuman.time.sleep", lambda *_: None)
+    provider = OmniHumanProvider(
+        access_key="ak",
+        secret_key="sk",
+        region="cn-beijing",
+        http_client=http,
+        poll_interval_seconds=0,
+        allowed_hosts={"assets.example", "visual.example", "visual.volcengineapi.com"},
+    )
+
+    result = provider.generate_change_lips_sync(
+        {
+            "video_url": "https://assets.example/avatar-source.mp4",
+            "audio_url": "https://assets.example/voice.mp3",
+            "tier": "lite",
+            "align_audio_reverse": True,
+            "open_sr": True,
+        }
+    )
+
+    assert result["video_url"] == "https://visual.example/change-lips-lite.mp4"
+    submit_body = json.loads(http.calls[0]["data"].decode("utf-8"))
+    assert submit_body["align_audio_reverse"] is True
+    assert "open_sr" not in submit_body
+
+
+def test_omnihuman_change_lips_maps_known_video_errors_to_friendly_message() -> None:
+    http = _Http([{"code": 50411, "message": "ECVideoDecodeError: bad stream"}])
+    provider = OmniHumanProvider(
+        access_key="ak",
+        secret_key="sk",
+        region="cn-beijing",
+        http_client=http,
+        allowed_hosts={"assets.example", "visual.volcengineapi.com"},
+    )
+
+    with pytest.raises(OmniHumanProviderError) as exc_info:
+        provider.generate_change_lips_sync(
+            {
+                "video_url": "https://assets.example/avatar-source.mp4",
+                "audio_url": "https://assets.example/voice.mp3",
+                "tier": "lite",
+            }
+        )
+
+    assert "ECVideoDecodeError" not in str(exc_info.value)
+    assert "无法解码" in str(exc_info.value)

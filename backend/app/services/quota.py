@@ -756,6 +756,8 @@ def settle_reserved_quota(
     video_task_id: str,
     actual_seconds: int,
     cost_cents: int,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> None:
     record = _reserved_record(db, tenant_id=tenant_id, video_task_id=video_task_id)
     if record is None or record.subscription_id is None:
@@ -787,5 +789,9 @@ def settle_reserved_quota(
     record.quantity = actual_quantity
     record.credits = actual_credits
     record.cost_cents = cost_cents
+    if provider:
+        record.provider = provider
+    if model:
+        record.model = model
     record.status = "settled"
     record.settled_at = datetime.now(UTC)

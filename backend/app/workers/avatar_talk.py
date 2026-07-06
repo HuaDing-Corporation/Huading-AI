@@ -65,6 +65,15 @@ _SEEDANCE_I2V_PROGRESS_POLL_RATE = 0.02
 _SEEDANCE_I2V_PROGRESS_EPSILON = 0.001
 _APIMART_VIDEO_MIN_PRESIGN_TTL_SECONDS = 7200
 _SEEDANCE_I2V_RESOLUTIONS = {"480p", "720p", "1080p"}
+_CHANGE_LIPS_MODEL = "realman_change_lips"
+_CHANGE_LIPS_DURATION_TOLERANCE_SEC = 0.1
+_CHANGE_LIPS_OPTIONAL_FIELDS = {
+    "align_audio_reverse",
+    "templ_start_seconds",
+    "open_sr",
+    "separate_vocal",
+    "open_scenedet",
+}
 _SEEDANCE_I2V_PROMPT_SUFFIX = (
     "产品展示，镜头平稳推进，明亮商业棚拍，干净背景，"
     "突出商品材质与卖点，9:16竖屏电商带货短视频。"
@@ -88,6 +97,10 @@ _ECOMMERCE_SCRIPT_FORBIDDEN_TERMS = (
     "出镜",
     "微笑致意",
 )
+
+
+class ChangeLipsOutputTooShort(RuntimeError):
+    pass
 
 
 @dataclass
@@ -356,6 +369,84 @@ def _audio_duration_sec(path: Path) -> float:
         return max(0.0, float(clip.duration or 0))
     finally:
         clip.close()
+
+
+def _video_duration_sec(path: Path) -> float:
+    from moviepy.editor import VideoFileClip
+
+    try:
+        clip = VideoFileClip(str(path))
+    except Exception:
+        return 0.0
+    try:
+        return max(0.0, float(clip.duration or 0))
+    finally:
+        clip.close()
+
+
+def _trim_video_bytes(source: Path, *, duration_sec: float, output: Path) -> bytes:
+    from moviepy.editor import VideoFileClip
+
+    clip = VideoFileClip(str(source))
+    trimmed = None
+    try:
+        duration = min(max(0.1, float(duration_sec)), max(0.1, float(clip.duration or 0.1)))
+        trimmed = clip.subclip(0, duration)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        trimmed.write_videofile(
+            str(output),
+            fps=25,
+            codec="libx264",
+            audio_codec="aac",
+            audio_bitrate="192k",
+            audio_fps=44100,
+            logger=None,
+        )
+        return output.read_bytes()
+    finally:
+        if trimmed is not None:
+            trimmed.close()
+        clip.close()
+
+
+def _fit_change_lips_video_to_tts(
+    video_bytes: bytes,
+    *,
+    tts_duration_sec: float,
+    work_dir: Path,
+) -> bytes:
+    source = work_dir / "change_lips_result.mp4"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(video_bytes)
+    output_duration = _video_duration_sec(source)
+    if output_duration <= 0:
+        raise RuntimeError("改口型结果视频无法解析。")
+    if output_duration + _CHANGE_LIPS_DURATION_TOLERANCE_SEC < tts_duration_sec:
+        raise ChangeLipsOutputTooShort("改口型结果短于口播音频，请缩短文案或更换源视频。")
+    if output_duration - tts_duration_sec > _CHANGE_LIPS_DURATION_TOLERANCE_SEC:
+        return _trim_video_bytes(
+            source,
+            duration_sec=tts_duration_sec,
+            output=work_dir / "change_lips_result.trimmed.mp4",
+        )
+    return video_bytes
+
+
+def _change_lips_tier() -> str:
+    value = str(settings.engine_omnihuman_change_lips_default_tier or "lite").lower()
+    return "basic" if value == "basic" else "lite"
+
+
+def _change_lips_tts_limit_seconds(tier: str) -> float:
+    return 150.0 if tier == "basic" else 240.0
+
+
+def _validate_change_lips_tts_duration(duration_sec: float, *, tier: str) -> None:
+    if duration_sec <= 1.0:
+        raise RuntimeError("口播音频过短，请增加口播文案。")
+    limit = _change_lips_tts_limit_seconds(tier)
+    if duration_sec > limit:
+        raise RuntimeError(f"口播文案过长，{tier} 档位最长支持 {int(limit)} 秒。")
 
 
 def _audio_codec_for_path(path: Path) -> str:
@@ -760,6 +851,75 @@ def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     if not audio_key:
         raise RuntimeError("TTS audio is missing for avatar generation.")
     provider = resolve(ctx.db, tenant_id=ctx.tenant_id, capability="avatar")
+    task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
+    if avatar.type == "video":
+        tier = _change_lips_tier()
+        _validate_change_lips_tts_duration(float(ctx.duration_sec or 0), tier=tier)
+        payload = {
+            "video_url": ctx.storage.presign_get_url(
+                avatar.storage_key,
+                expires_in=settings.engine_s3_presign_ttl,
+            ),
+            "audio_url": ctx.storage.presign_get_url(
+                audio_key,
+                expires_in=settings.engine_s3_presign_ttl,
+            ),
+            "tier": tier,
+            "align_audio": True,
+        }
+        for key in _CHANGE_LIPS_OPTIONAL_FIELDS:
+            value = (task.params or {}).get(key)
+            if value is not None:
+                payload[key] = value
+
+        def on_change_lips_progress(event: dict[str, Any]) -> None:
+            poll_count = int(event.get("poll_count") or 1)
+            progress = min(84, 24 + poll_count)
+            ctx.store.update(
+                _scoped_id(ctx.tenant_id, ctx.task_id),
+                status="running",
+                progress=progress,
+                step="avatar",
+                stage="change_lips_generating",
+            )
+
+        payload["progress_callback"] = on_change_lips_progress
+
+        def generate_for_tier(selected_tier: str) -> bytes:
+            payload["tier"] = selected_tier
+            result = asyncio.run(
+                invoke(
+                    ctx.db,
+                    tenant_id=ctx.tenant_id,
+                    capability="avatar",
+                    provider=provider.__class__.__name__,
+                    operation=lambda: provider.generate_change_lips(payload),
+                    timeout_seconds=settings.engine_omnihuman_timeout_seconds,
+                )
+            )
+            result_bytes = _download_bytes(str(result["video_url"]))
+            return _fit_change_lips_video_to_tts(
+                result_bytes,
+                tts_duration_sec=float(ctx.duration_sec or 0),
+                work_dir=_work_dir(ctx.task_id),
+            )
+
+        try:
+            ctx.base_video_bytes = generate_for_tier(tier)
+        except ChangeLipsOutputTooShort:
+            if (
+                tier != "basic"
+                and settings.engine_omnihuman_change_lips_basic_retry_on_short_output
+            ):
+                _validate_change_lips_tts_duration(float(ctx.duration_sec or 0), tier="basic")
+                tier = "basic"
+                ctx.base_video_bytes = generate_for_tier(tier)
+            else:
+                raise
+        ctx.change_lips_tier = tier
+        ctx.provider_model = _CHANGE_LIPS_MODEL
+        return ctx
+
     payload = {
         "image_url": ctx.storage.presign_get_url(
             avatar.storage_key,
@@ -769,7 +929,7 @@ def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
             audio_key,
             expires_in=settings.engine_s3_presign_ttl,
         ),
-        "prompt": _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id).topic,
+        "prompt": task.topic,
         "aigc_meta": {
             "content_producer": "Huading",
             "producer_id": ctx.tenant_id,
@@ -1848,14 +2008,23 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 task.size_bytes = ctx.size_bytes
             if ctx.duration_sec is not None:
                 task.duration_sec = float(ctx.duration_sec)
+            actual_seconds = max(1, int(round(ctx.duration_sec or 1)))
+            provider_model = getattr(ctx, "provider_model", None)
+            if provider_model == _CHANGE_LIPS_MODEL:
+                cost_cents = provider_costs.omnihuman_change_lips_cost_cents(
+                    actual_seconds,
+                    tier=getattr(ctx, "change_lips_tier", None),
+                )
+            else:
+                cost_cents = provider_costs.omnihuman_cost_cents(actual_seconds)
             settle_reserved_quota(
                 db,
                 tenant_id=tenant_id,
                 video_task_id=task_id,
-                actual_seconds=max(1, int(round(ctx.duration_sec or 1))),
-                cost_cents=provider_costs.omnihuman_cost_cents(
-                    max(1, int(round(ctx.duration_sec or 1)))
-                ),
+                actual_seconds=actual_seconds,
+                cost_cents=cost_cents,
+                provider="omnihuman" if provider_model else None,
+                model=provider_model,
             )
             refresh_batch_job(db, batch_id=task.batch_id)
             db.commit()
