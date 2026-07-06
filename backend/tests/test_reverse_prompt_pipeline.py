@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -493,6 +494,80 @@ def test_reverse_prompt_sync_creates_job_records_usage_and_returns_fill_targets(
     assert usage.credits == Decimal("30.00")
     assert usage.cost_cents == 5
     assert subscription.quota_credits_used == 30
+    db.close()
+
+
+@pytest.mark.parametrize("placeholder", ["None", "N/A"])
+def test_reverse_prompt_sync_stores_empty_disclaimer_for_placeholder_text(
+    auth_db,
+    auth_context,
+    monkeypatch,
+    placeholder,
+):
+    session = auth_db()
+    _seed_reverse_prompt_provider(session)
+    asset = _seed_image_asset(session, auth_context["tenant_id"])
+    asset_id = asset.id
+    asset_storage_key = asset.storage_key
+    session.commit()
+    session.close()
+
+    class _Storage:
+        def presign_get_url(
+            self,
+            key: str,
+            *,
+            expires_in: int,
+            download_filename: str | None = None,
+        ) -> str:
+            assert key == asset_storage_key
+            return "https://assets.test/presigned-source.png"
+
+    fake_provider = SimpleNamespace(
+        reverse_image=lambda payload: {
+            "target_format": "seedance_2_0",
+            "prompt_zh": "Premium perfume bottle on marble.",
+            "prompt_en": "Premium perfume bottle commercial product shot.",
+            "negative_prompt": "blurry",
+            "style_tags": ["commercial"],
+            "camera": "close-up",
+            "lighting": "soft light",
+            "composition": "centered",
+            "subject": "perfume bottle",
+            "scene": "marble surface",
+            "motion_hint": "slow push-in",
+            "selling_points": ["premium texture"],
+            "text_in_media": [],
+            "disclaimer": placeholder,
+            "confidence": 0.91,
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "total_tokens": 1500,
+            "credits": Decimal("0.064"),
+            "cost_cents": 5,
+            "provider": "apimart",
+            "model": "gemini-3.1-pro-preview",
+        }
+    )
+    monkeypatch.setattr("app.api.v1.routes.reverse_prompt.get_object_storage", lambda: _Storage())
+    monkeypatch.setattr(
+        "app.services.reverse_prompt.resolve",
+        lambda *args, **kwargs: fake_provider,
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/reverse-prompt",
+        json={"source_asset_id": asset_id, "target_format": "seedance_2_0"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 201
+    body = response.json()["data"]
+    assert body["result"]["disclaimer"] == ""
+    db = auth_db()
+    job = db.get(ReversePromptJob, body["id"])
+    assert job.result_json["disclaimer"] == ""
     db.close()
 
 
