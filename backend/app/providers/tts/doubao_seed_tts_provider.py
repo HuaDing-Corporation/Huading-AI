@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.db.models import ProviderConfig
 from app.providers.base import register_provider
 
@@ -18,6 +19,9 @@ _DEFAULT_ENDPOINT = "https://openspeech.bytedance.com/api/v3/tts/unidirectional/
 _DEFAULT_RESOURCE_ID = "seed-tts-2.0"
 _DEFAULT_VOICE = "zh_male_m191_uranus_bigtts"
 _SENTENCE_PATTERN = re.compile(r"[^.!?\n。！？；;]+[.!?\n。！？；;]*")
+
+
+logger = get_logger(__name__)
 
 
 class DoubaoSeedTTSError(RuntimeError):
@@ -31,6 +35,7 @@ class DoubaoSeedTTSProvider:
         appid: str,
         access_token: str,
         resource_id: str = _DEFAULT_RESOURCE_ID,
+        voice_clone_resource_id: str = "seed-icl-2.0",
         default_voice: str = _DEFAULT_VOICE,
         endpoint: str = _DEFAULT_ENDPOINT,
         api_key: str = "",
@@ -48,6 +53,7 @@ class DoubaoSeedTTSProvider:
         self.access_token = access_token
         self.api_key = api_key
         self.resource_id = resource_id or _DEFAULT_RESOURCE_ID
+        self.voice_clone_resource_id = voice_clone_resource_id or "seed-icl-2.0"
         self.default_voice = default_voice or _DEFAULT_VOICE
         self.endpoint = endpoint or _DEFAULT_ENDPOINT
         self.output_dir = Path(output_dir) if output_dir else None
@@ -80,12 +86,18 @@ class DoubaoSeedTTSProvider:
         audio = bytearray()
         timeline: list[dict[str, int | str]] = []
         offset_ms = 0
+        resource_id = (
+            self.voice_clone_resource_id
+            if str(payload.get("voice_source") or "") == "brand_voice"
+            else self.resource_id
+        )
         for segment in _split_text(text, max_bytes=self.max_text_bytes):
             segment_audio, segment_timeline, duration_ms = self._synthesize_segment(
                 segment,
                 voice=voice,
                 speed=speed,
                 uid=uid,
+                resource_id=resource_id,
             )
             audio.extend(segment_audio)
             timeline.extend(_offset_timeline(segment_timeline, offset_ms))
@@ -99,7 +111,7 @@ class DoubaoSeedTTSProvider:
             "mime_type": "audio/mpeg",
             "size_bytes": audio_path.stat().st_size,
             "provider": "doubao-seed-tts",
-            "model": self.resource_id,
+            "model": resource_id,
             "characters": len(text),
         }
 
@@ -110,6 +122,7 @@ class DoubaoSeedTTSProvider:
         voice: str,
         speed: float,
         uid: str,
+        resource_id: str,
     ) -> tuple[bytes, list[dict[str, int | str]], int]:
         body = {
             "user": {"uid": uid},
@@ -134,19 +147,25 @@ class DoubaoSeedTTSProvider:
         response = self.http.post(
             self.endpoint,
             json=body,
-            headers=self._headers(),
+            headers=self._headers(resource_id=resource_id),
             timeout=self.request_timeout_seconds,
             stream=True,
+        )
+        logger.info(
+            "doubao_seed_tts.synthesize",
+            request_id=uuid4().hex,
+            resource_id=resource_id,
+            http_status_code=getattr(response, "status_code", None),
         )
         response.raise_for_status()
         audio, timeline = _parse_sse_response(response)
         duration_ms = max((int(item["end_ms"]) for item in timeline), default=0)
         return audio, timeline, duration_ms
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, *, resource_id: str | None = None) -> dict[str, str]:
         headers = {
             "Content-Type": "application/json",
-            "X-Api-Resource-Id": self.resource_id,
+            "X-Api-Resource-Id": resource_id or self.resource_id,
             "X-Api-Request-Id": uuid4().hex,
         }
         if self.api_key:
@@ -317,6 +336,10 @@ def _doubao_seed_tts_factory(config: ProviderConfig) -> DoubaoSeedTTSProvider:
         access_token=str(values.get("access_token") or settings.engine_doubao_tts_access_token),
         api_key=str(values.get("api_key") or settings.engine_doubao_tts_api_key),
         resource_id=str(values.get("resource_id") or settings.engine_doubao_tts_resource_id),
+        voice_clone_resource_id=str(
+            values.get("voice_clone_resource_id")
+            or settings.engine_doubao_voice_clone_tts_resource_id
+        ),
         default_voice=str(
             values.get("default_voice") or settings.engine_doubao_tts_default_voice
         ),

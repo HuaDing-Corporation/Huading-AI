@@ -245,6 +245,43 @@ async def test_doubao_seed_tts_sends_auth_header_and_locked_request_body(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_doubao_seed_tts_brand_voice_uses_clone_resource_id(tmp_path: Path):
+    from app.providers.tts.doubao_seed_tts_provider import DoubaoSeedTTSProvider
+
+    http = _FakeHTTP(
+        [
+            _seed_sse_response(
+                b"MP3",
+                words=[{"word": "hello", "startTime": 0.0, "endTime": 0.5}],
+            )
+        ]
+    )
+    provider = DoubaoSeedTTSProvider(
+        appid="doubao-appid",
+        access_token="seed-token",
+        resource_id="seed-tts-2.0",
+        voice_clone_resource_id="seed-icl-2.0",
+        default_voice="zh_male_m191_uranus_bigtts",
+        http_client=http,
+        output_dir=str(tmp_path),
+    )
+
+    result = await provider.synthesize_speech(
+        {
+            "text": "hello",
+            "voice": "S_brand_001",
+            "voice_source": "brand_voice",
+            "task_id": "brand-tts-unit",
+        }
+    )
+
+    call = http.calls[0]
+    assert call["headers"]["X-Api-Resource-Id"] == "seed-icl-2.0"
+    assert call["json"]["req_params"]["speaker"] == "S_brand_001"
+    assert result["model"] == "seed-icl-2.0"
+
+
+@pytest.mark.asyncio
 async def test_doubao_seed_tts_default_disables_aigc_watermark_tone(
     tmp_path: Path,
 ):

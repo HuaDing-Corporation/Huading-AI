@@ -102,19 +102,32 @@ def test_doubao_seed_tts_watermark_defaults_to_false(monkeypatch) -> None:
 def test_doubao_voice_clone_settings_are_env_driven(monkeypatch) -> None:
     monkeypatch.setenv("ENGINE_DOUBAO_VOICE_CLONE_APPID", "clone-appid")
     monkeypatch.setenv("ENGINE_DOUBAO_VOICE_CLONE_ACCESS_TOKEN", "clone-token")
-    monkeypatch.setenv("ENGINE_DOUBAO_VOICE_CLONE_RESOURCE_ID", "seed-icl-2.0")
+    monkeypatch.setenv("ENGINE_DOUBAO_VOICE_CLONE_RESOURCE_ID", "volc.megatts.voiceclone")
+    monkeypatch.setenv(
+        "ENGINE_DOUBAO_VOICE_CLONE_SPEAKER_IDS",
+        "S_env_slot_001, S_env_slot_002",
+    )
     monkeypatch.setenv(
         "ENGINE_DOUBAO_VOICE_CLONE_ENDPOINT",
-        "https://openspeech.bytedance.com/api/v3/voice-clone",
+        "https://openspeech.bytedance.com/api/v1/mega_tts/audio/upload",
     )
+    monkeypatch.setenv("ENGINE_DOUBAO_VOICE_CLONE_MODEL_TYPE", "4")
     s = Settings(_env_file=None, jwt_secret_key=_JWT)
 
     assert s.engine_doubao_voice_clone_appid == "clone-appid"
     assert s.engine_doubao_voice_clone_access_token == "clone-token"
-    assert s.engine_doubao_voice_clone_resource_id == "seed-icl-2.0"
+    assert s.engine_doubao_voice_clone_resource_id == "volc.megatts.voiceclone"
     assert s.engine_doubao_voice_clone_endpoint == (
-        "https://openspeech.bytedance.com/api/v3/voice-clone"
+        "https://openspeech.bytedance.com/api/v1/mega_tts/audio/upload"
     )
+    assert s.engine_doubao_voice_clone_status_endpoint == (
+        "https://openspeech.bytedance.com/api/v1/mega_tts/status"
+    )
+    assert s.engine_doubao_voice_clone_model_type == 4
+    assert s.engine_doubao_voice_clone_speaker_ids == [
+        "S_env_slot_001",
+        "S_env_slot_002",
+    ]
     assert s.engine_doubao_voice_clone_request_timeout_seconds > 0
 
 
