@@ -131,6 +131,25 @@ def test_doubao_voice_clone_settings_are_env_driven(monkeypatch) -> None:
     assert s.engine_doubao_voice_clone_request_timeout_seconds > 0
 
 
+def test_cosyvoice_voice_clone_settings_are_env_driven(monkeypatch) -> None:
+    monkeypatch.setenv("ENGINE_COSYVOICE_VOICE_CLONE_API_KEY", "dashscope-key")
+    monkeypatch.setenv(
+        "ENGINE_COSYVOICE_VOICE_CLONE_TARGET_MODEL",
+        "cosyvoice-v3.5-plus",
+    )
+    monkeypatch.setenv("ENGINE_COSYVOICE_VOICE_CLONE_REQUEST_TIMEOUT_SECONDS", "42")
+    monkeypatch.setenv(
+        "ENGINE_COSYVOICE_VOICE_CLONE_BASE_URL",
+        "https://workspace.example/api/v1",
+    )
+    s = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    assert s.engine_cosyvoice_voice_clone_api_key == "dashscope-key"
+    assert s.engine_cosyvoice_voice_clone_target_model == "cosyvoice-v3.5-plus"
+    assert s.engine_cosyvoice_voice_clone_base_url == "https://workspace.example/api/v1"
+    assert s.engine_cosyvoice_voice_clone_request_timeout_seconds == 42
+
+
 def test_aigc_producer_settings_are_env_driven(monkeypatch) -> None:
     monkeypatch.setenv("ENGINE_AIGC_PRODUCER", "Huading")
     s = Settings(_env_file=None, jwt_secret_key=_JWT)

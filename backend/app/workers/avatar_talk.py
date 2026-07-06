@@ -21,7 +21,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.models import Asset, BrandVoice, TaskAsset, VideoTask, Voice
 from app.db.session import SessionLocal
-from app.providers.base import invoke, resolve
+from app.providers.base import invoke, resolve, resolve_named_provider
 from app.providers.url_guard import (
     ensure_https_url_allowed,
     object_storage_public_hosts,
@@ -626,19 +626,28 @@ def script_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
 
 def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
-    voice_code, voice_source = _tts_voice_for_task(ctx.db, task, tenant_id=ctx.tenant_id)
-    provider = resolve(ctx.db, tenant_id=ctx.tenant_id, capability="tts")
+    voice_code, voice_source, brand_voice_provider = _tts_voice_for_task(
+        ctx.db,
+        task,
+        tenant_id=ctx.tenant_id,
+    )
+    provider, capability = _tts_provider_for_voice(
+        ctx.db,
+        tenant_id=ctx.tenant_id,
+        brand_voice_provider=brand_voice_provider,
+    )
     result = asyncio.run(
         invoke(
             ctx.db,
             tenant_id=ctx.tenant_id,
-            capability="tts",
+            capability=capability,
             provider=provider.__class__.__name__,
             operation=lambda: provider.synthesize_speech(
                 {
                     "text": task.script or task.topic or "",
                     "voice": voice_code,
                     "voice_source": voice_source,
+                    "brand_voice_provider": brand_voice_provider,
                     "speed": float(task.speed or 1.0),
                     "task_id": ctx.task_id,
                     "output_dir": str(_work_dir(ctx.task_id)),
@@ -647,7 +656,7 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
             timeout_seconds=settings.engine_omnihuman_request_timeout_seconds,
         )
     )
-    provider_costs.record_seed_tts_usage(
+    provider_costs.record_tts_usage(
         ctx.db,
         tenant_id=ctx.tenant_id,
         result=result,
@@ -685,18 +694,26 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         "avatar_talk.tts",
         task_id=ctx.task_id,
         tenant_id=ctx.tenant_id,
+        voice_source=voice_source,
+        brand_voice_provider=brand_voice_provider,
         timeline_items=len(ctx.timeline),
         duration_sec=ctx.duration_sec,
     )
     return ctx
 
 
-def _tts_voice_for_task(db: Session, task: VideoTask, *, tenant_id: str) -> tuple[str, str]:
+def _tts_voice_for_task(
+    db: Session,
+    task: VideoTask,
+    *,
+    tenant_id: str,
+) -> tuple[str, str, str | None]:
     params = task.params or {}
     brand_voice_id = task.brand_voice_id or str(params.get("brand_voice_id") or "")
     if brand_voice_id:
         speaker_id = str(params.get("tts_speaker_id") or "").strip()
-        if not speaker_id:
+        brand_voice_provider = str(params.get("brand_voice_provider") or "").strip()
+        if not speaker_id or not brand_voice_provider:
             brand_voice = db.get(BrandVoice, brand_voice_id)
             if (
                 brand_voice is not None
@@ -704,15 +721,37 @@ def _tts_voice_for_task(db: Session, task: VideoTask, *, tenant_id: str) -> tupl
                 and brand_voice.deleted_at is None
                 and brand_voice.status == "ready"
             ):
-                speaker_id = str(brand_voice.speaker_id or "").strip()
+                if not speaker_id:
+                    speaker_id = str(brand_voice.speaker_id or "").strip()
+                if not brand_voice_provider:
+                    brand_voice_provider = str(brand_voice.provider or "").strip()
         if not speaker_id:
             raise RuntimeError("Brand voice speaker not found for avatar_talk.")
-        return speaker_id, "brand_voice"
+        return speaker_id, "brand_voice", brand_voice_provider or "doubao-voice-clone"
 
     voice = db.get(Voice, task.voice_id) if task.voice_id else None
     if voice is None:
         raise RuntimeError("Voice not found for avatar_talk.")
-    return voice.voice_code, "preset"
+    return voice.voice_code, "preset", None
+
+
+def _tts_provider_for_voice(
+    db: Session,
+    *,
+    tenant_id: str,
+    brand_voice_provider: str | None,
+):
+    if brand_voice_provider == "cosyvoice-voice-clone":
+        return (
+            resolve_named_provider(
+                db,
+                tenant_id=tenant_id,
+                capability="voice_clone",
+                provider=brand_voice_provider,
+            ),
+            "voice_clone",
+        )
+    return resolve(db, tenant_id=tenant_id, capability="tts"), "tts"
 
 
 def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:

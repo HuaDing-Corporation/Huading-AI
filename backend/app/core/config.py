@@ -121,6 +121,11 @@ class Settings(BaseSettings):
     engine_doubao_voice_clone_timeout_seconds: float = 60.0
     engine_doubao_voice_clone_model_type: int = 4
     engine_doubao_voice_clone_tts_resource_id: str = "seed-icl-2.0"
+    # Alibaba Cloud DashScope CosyVoice clone path. API keys stay env-only.
+    engine_cosyvoice_voice_clone_api_key: str = ""
+    engine_cosyvoice_voice_clone_target_model: str = "cosyvoice-v3.5-plus"
+    engine_cosyvoice_voice_clone_base_url: str = ""
+    engine_cosyvoice_voice_clone_request_timeout_seconds: float = 60.0
     # OpenAI Images for the photo pipeline. Credentials stay env-only.
     openai_api_key: str = ""
     openai_base_url: str = ""

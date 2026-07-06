@@ -89,6 +89,9 @@ Provider = (
 ProviderFactory = Callable[[ProviderConfig], Provider]
 Operation = Callable[[], T | Awaitable[T]]
 _REGISTRY: dict[tuple[str, str], ProviderFactory] = {}
+_DEFAULT_PROVIDERS: dict[str, str] = {
+    "voice_clone": "doubao-voice-clone",
+}
 
 
 class ProviderResolutionError(RuntimeError):
@@ -128,23 +131,40 @@ def _provider_config(
     tenant_id: str,
     capability: Capability | str,
 ) -> ProviderConfig:
+    default_provider = _DEFAULT_PROVIDERS.get(str(capability))
     tenant_config = db.scalar(
-        select(ProviderConfig).where(
-            ProviderConfig.tenant_id == tenant_id,
-            ProviderConfig.capability == capability,
-            ProviderConfig.is_active.is_(True),
+        _provider_config_query(
+            tenant_id=tenant_id,
+            capability=capability,
+            provider=default_provider,
         )
     )
     if tenant_config is not None:
         return tenant_config
+    if default_provider is not None:
+        tenant_config = db.scalar(
+            _provider_config_query(
+                tenant_id=tenant_id,
+                capability=capability,
+            )
+        )
+        if tenant_config is not None:
+            return tenant_config
 
     platform_config = db.scalar(
-        select(ProviderConfig).where(
-            ProviderConfig.tenant_id.is_(None),
-            ProviderConfig.capability == capability,
-            ProviderConfig.is_active.is_(True),
+        _provider_config_query(
+            tenant_id=None,
+            capability=capability,
+            provider=default_provider,
         )
     )
+    if platform_config is None and default_provider is not None:
+        platform_config = db.scalar(
+            _provider_config_query(
+                tenant_id=None,
+                capability=capability,
+            )
+        )
     if platform_config is None:
         raise ProviderResolutionError(f"No provider configured for {capability}.")
     if _should_promote_doubao_tts(capability, platform_config):
@@ -154,6 +174,55 @@ def _provider_config(
             provider="doubao-seed-tts",
             config={},
             is_active=True,
+        )
+    return platform_config
+
+
+def _provider_config_query(
+    *,
+    tenant_id: str | None,
+    capability: Capability | str,
+    provider: str | None = None,
+):
+    query = select(ProviderConfig).where(
+        ProviderConfig.capability == capability,
+        ProviderConfig.is_active.is_(True),
+    )
+    if tenant_id is None:
+        query = query.where(ProviderConfig.tenant_id.is_(None))
+    else:
+        query = query.where(ProviderConfig.tenant_id == tenant_id)
+    if provider is not None:
+        query = query.where(ProviderConfig.provider == provider)
+    return query.order_by(ProviderConfig.provider.asc())
+
+
+def _provider_config_by_name(
+    db: Session,
+    *,
+    tenant_id: str,
+    capability: Capability | str,
+    provider: str,
+) -> ProviderConfig:
+    tenant_config = db.scalar(
+        _provider_config_query(
+            tenant_id=tenant_id,
+            capability=capability,
+            provider=provider,
+        )
+    )
+    if tenant_config is not None:
+        return tenant_config
+    platform_config = db.scalar(
+        _provider_config_query(
+            tenant_id=None,
+            capability=capability,
+            provider=provider,
+        )
+    )
+    if platform_config is None:
+        raise ProviderResolutionError(
+            f"No provider {provider!r} configured for {capability}."
         )
     return platform_config
 
@@ -177,6 +246,27 @@ def _should_promote_doubao_tts(
 
 def resolve(db: Session, *, tenant_id: str, capability: Capability | str) -> Provider:
     config = _provider_config(db, tenant_id=tenant_id, capability=capability)
+    factory = _REGISTRY.get((capability, config.provider))
+    if factory is None:
+        raise ProviderResolutionError(
+            f"Provider {config.provider!r} is not registered for {capability!r}."
+        )
+    return factory(config)
+
+
+def resolve_named_provider(
+    db: Session,
+    *,
+    tenant_id: str,
+    capability: Capability | str,
+    provider: str,
+) -> Provider:
+    config = _provider_config_by_name(
+        db,
+        tenant_id=tenant_id,
+        capability=capability,
+        provider=provider,
+    )
     factory = _REGISTRY.get((capability, config.provider))
     if factory is None:
         raise ProviderResolutionError(
