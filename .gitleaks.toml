@@ -21,6 +21,8 @@ keywords = ["sk-"]
 
 [allowlist]
 description = "Historical removed key + lockfile integrity/hash shapes (not secrets)."
+# Fingerprint-level false-positive suppressions live in .gitleaksignore; avoid
+# broad commit/path/rule allowlists here.
 # Allowlist by VALUE/SHAPE only — NOT by file path. The previous config
 # wholesale-allowlisted entire lockfile paths, which would have hidden a real
 # token sneaked into a lockfile. Here we only ignore integrity/hash-shaped
