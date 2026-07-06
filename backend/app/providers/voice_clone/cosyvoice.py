@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import tempfile
+import threading
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,6 +19,7 @@ _PROVIDER_NAME = "cosyvoice-voice-clone"
 _TTS_PROVIDER_NAME = "cosyvoice-tts"
 _DEFAULT_TARGET_MODEL = "cosyvoice-v3.5-plus"
 _SAFE_PREFIX_PATTERN = re.compile(r"[a-z0-9]+")
+_DASHSCOPE_RUNTIME_LOCK = threading.RLock()
 
 logger = get_logger(__name__)
 
@@ -180,19 +182,20 @@ def _workspace_websocket_base_url(http_base_url: str) -> str:
 def _dashscope_runtime(api_key: str, base_url: str):
     import dashscope
 
-    previous_api_key = getattr(dashscope, "api_key", None)
-    previous_http_url = getattr(dashscope, "base_http_api_url", None)
-    previous_websocket_url = getattr(dashscope, "base_websocket_api_url", None)
-    dashscope.api_key = api_key
-    if base_url:
-        dashscope.base_http_api_url = base_url
-        dashscope.base_websocket_api_url = _workspace_websocket_base_url(base_url)
-    try:
-        yield
-    finally:
-        dashscope.api_key = previous_api_key
-        dashscope.base_http_api_url = previous_http_url
-        dashscope.base_websocket_api_url = previous_websocket_url
+    with _DASHSCOPE_RUNTIME_LOCK:
+        previous_api_key = getattr(dashscope, "api_key", None)
+        previous_http_url = getattr(dashscope, "base_http_api_url", None)
+        previous_websocket_url = getattr(dashscope, "base_websocket_api_url", None)
+        dashscope.api_key = api_key
+        if base_url:
+            dashscope.base_http_api_url = base_url
+            dashscope.base_websocket_api_url = _workspace_websocket_base_url(base_url)
+        try:
+            yield
+        finally:
+            dashscope.api_key = previous_api_key
+            dashscope.base_http_api_url = previous_http_url
+            dashscope.base_websocket_api_url = previous_websocket_url
 
 
 def _safe_prefix(payload: Mapping[str, Any]) -> str:

@@ -1,3 +1,6 @@
+import threading
+import time
+
 import pytest
 
 
@@ -200,6 +203,75 @@ async def test_cosyvoice_unset_base_url_leaves_dashscope_urls_unchanged(monkeypa
     )
 
     assert captured == {"http": "https://default-http", "websocket": "wss://default-ws"}
+    assert dashscope.base_http_api_url == "https://default-http"
+    assert dashscope.base_websocket_api_url == "wss://default-ws"
+
+
+def test_cosyvoice_dashscope_runtime_serializes_global_url_changes(monkeypatch):
+    import dashscope
+
+    from app.providers.voice_clone.cosyvoice import CosyVoiceCloneProvider
+
+    monkeypatch.setattr(dashscope, "api_key", "default-key", raising=False)
+    monkeypatch.setattr(dashscope, "base_http_api_url", "https://default-http", raising=False)
+    monkeypatch.setattr(dashscope, "base_websocket_api_url", "wss://default-ws", raising=False)
+    first_inside = threading.Event()
+    release_first = threading.Event()
+    captures: list[tuple[str, str, str]] = []
+    errors: list[BaseException] = []
+
+    class _SlowEnrollment(_FakeEnrollment):
+        def create_voice(self, target_model: str, prefix: str, url: str) -> str:
+            captures.append(("first-start", dashscope.api_key, dashscope.base_http_api_url))
+            first_inside.set()
+            assert release_first.wait(2)
+            captures.append(("first-end", dashscope.api_key, dashscope.base_http_api_url))
+            return "cosy-first"
+
+    class _FastEnrollment(_FakeEnrollment):
+        def create_voice(self, target_model: str, prefix: str, url: str) -> str:
+            captures.append(("second", dashscope.api_key, dashscope.base_http_api_url))
+            return "cosy-second"
+
+    first = CosyVoiceCloneProvider(
+        api_key="workspace-key-1",
+        base_url="https://workspace-one.example/api/v1",
+        enrollment_service=_SlowEnrollment(),
+    )
+    second = CosyVoiceCloneProvider(
+        api_key="workspace-key-2",
+        base_url="https://workspace-two.example/api/v1",
+        enrollment_service=_FastEnrollment(),
+    )
+
+    def run_clone(provider: CosyVoiceCloneProvider, brand_voice_id: str) -> None:
+        try:
+            provider.clone_voice_sync(
+                {
+                    "brand_voice_id": brand_voice_id,
+                    "source_audio_url": "https://storage.test/audio.wav",
+                }
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    first_thread = threading.Thread(target=run_clone, args=(first, "brand-one"))
+    second_thread = threading.Thread(target=run_clone, args=(second, "brand-two"))
+    first_thread.start()
+    assert first_inside.wait(2)
+    second_thread.start()
+    time.sleep(0.05)
+    release_first.set()
+    first_thread.join(2)
+    second_thread.join(2)
+
+    assert errors == []
+    assert captures == [
+        ("first-start", "workspace-key-1", "https://workspace-one.example/api/v1"),
+        ("first-end", "workspace-key-1", "https://workspace-one.example/api/v1"),
+        ("second", "workspace-key-2", "https://workspace-two.example/api/v1"),
+    ]
+    assert dashscope.api_key == "default-key"
     assert dashscope.base_http_api_url == "https://default-http"
     assert dashscope.base_websocket_api_url == "wss://default-ws"
 
