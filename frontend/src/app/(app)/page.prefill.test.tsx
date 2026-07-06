@@ -35,6 +35,7 @@ vi.mock("@/lib/api/hooks", () => ({
   useUploadImage: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useUploadProductImage: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useScenePromptGenerate: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useBrandVoices: () => ({ data: [], isLoading: false }),
   useVoices: () => ({
     data: [{ id: "v1", provider: "edge", voice_code: "x", display_name: "音色1", gender: null, language: null }]
   }),

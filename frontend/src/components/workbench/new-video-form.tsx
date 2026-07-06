@@ -6,6 +6,7 @@ import { Sparkles } from "lucide-react";
 import { errorText } from "@/lib/api/error-text";
 import {
   useAvatarPresets,
+  useBrandVoices,
   useScriptGenerate,
   useSubtitleTemplates,
   useUploadImage,
@@ -46,6 +47,7 @@ export function NewVideoForm({
   const scriptGen = useScriptGenerate();
   const uploadImg = useUploadImage();
   const voices = useVoices();
+  const brandVoices = useBrandVoices(); // 「选我的音色」：品牌音色(声音复刻)全状态
   const presets = useAvatarPresets();
   const subtitleTemplates = useSubtitleTemplates();
   const avatar = useTrackedUpload(uploadImg.mutateAsync, (r) => r.asset_id);
@@ -153,7 +155,13 @@ export function NewVideoForm({
         uploadError={avatar.error}
       />
 
-      <VoicePicker voices={voiceList ?? []} value={voiceId} onChange={setVoiceId} />
+      <VoicePicker
+        voices={voiceList ?? []}
+        value={voiceId}
+        onChange={setVoiceId}
+        brandVoices={brandVoices.data ?? []}
+        brandVoicesLoading={brandVoices.isLoading}
+      />
 
       <SubtitleStylePicker
         templates={subtitleTemplates.data ?? []}
