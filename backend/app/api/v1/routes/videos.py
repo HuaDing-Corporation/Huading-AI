@@ -369,6 +369,7 @@ def _create_avatar_talk_video(
                 "voice_source": "brand_voice",
                 "brand_voice_id": brand_voice.id,
                 "tts_speaker_id": brand_voice.speaker_id,
+                "brand_voice_provider": brand_voice.provider,
             }
         )
     subtitle_style = _subtitle_style_params(payload)

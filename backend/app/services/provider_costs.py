@@ -203,7 +203,7 @@ def record_deepseek_usage(
     )
 
 
-def record_seed_tts_usage(
+def record_tts_usage(
     db: Session,
     *,
     tenant_id: str,
@@ -213,7 +213,7 @@ def record_seed_tts_usage(
     if not isinstance(result, dict):
         return None
     provider = str(result.get("provider") or "").strip()
-    if provider != "doubao-seed-tts":
+    if provider not in {"doubao-seed-tts", "cosyvoice-tts"}:
         return None
     try:
         characters = max(0, int(result.get("characters") or 0))
@@ -226,8 +226,7 @@ def record_seed_tts_usage(
         video_task_id=video_task_id,
         capability="tts",
         provider=provider,
-        model=str(result.get("model") or settings.engine_doubao_tts_resource_id or "")
-        or None,
+        model=_tts_model_from_result(result, provider),
         unit="char",
         quantity=Decimal(characters),
         credits=Decimal("0"),
@@ -237,3 +236,27 @@ def record_seed_tts_usage(
     )
     db.add(record)
     return record
+
+
+def record_seed_tts_usage(
+    db: Session,
+    *,
+    tenant_id: str,
+    result: Any,
+    video_task_id: str | None = None,
+) -> UsageRecord | None:
+    return record_tts_usage(
+        db,
+        tenant_id=tenant_id,
+        result=result,
+        video_task_id=video_task_id,
+    )
+
+
+def _tts_model_from_result(result: dict[str, Any], provider: str) -> str | None:
+    default_model = (
+        settings.engine_cosyvoice_voice_clone_target_model
+        if provider == "cosyvoice-tts"
+        else settings.engine_doubao_tts_resource_id
+    )
+    return str(result.get("model") or default_model or "") or None

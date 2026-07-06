@@ -197,9 +197,10 @@ def test_upload_audio_then_create_brand_voice_without_direct_db_audio_seed(
     monkeypatch.setattr(uploads, "_probe_audio_duration_ms", lambda *_args, **_kwargs: 6100)
     monkeypatch.setattr(
         brand_voices,
-        "resolve",
-        lambda _db, *, tenant_id, capability: provider,
+        "resolve_named_provider",
+        lambda _db, *, tenant_id, capability, provider: provider_obj,
     )
+    provider_obj = provider
     with auth_db() as db:
         db.add(
             ProviderConfig(
@@ -259,9 +260,10 @@ def test_create_brand_voice_accepts_historical_codec_param_audio_asset(
     storage = _Storage()
     monkeypatch.setattr(
         brand_voices,
-        "resolve",
-        lambda _db, *, tenant_id, capability: provider,
+        "resolve_named_provider",
+        lambda _db, *, tenant_id, capability, provider: provider_obj,
     )
+    provider_obj = provider
     with auth_db() as db:
         db.add(
             ProviderConfig(
