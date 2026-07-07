@@ -337,6 +337,48 @@ function analyticsHandlers() {
   ];
 }
 
+// ── 电商详情图·强制复刻 (ECOM-REPLICATE-UI-0001) mock ── 镜像 BE 两阶段状态机（以 BE 包为准，mock 先行）：
+// plan(规划表 + total_credits，不扣) → confirm(一次扣费，幂等) → GET 轮询推进逐张 → 单张 retry(不重复扣)。
+const ECOM_REPLICATE_RATE = 15; // credit/张（前端不硬编码：从 total_credits 取；此为 mock 内算）
+const ECOM_BANNED_WORDS = ["第一", "顶级", "最好", "天花板", "爆款", "唯一", "独家", "国家级", "永久", "100%", "绝对", "立刻见效", "全网最低", "销量第一"];
+const ECOM_MAIN_THEMES = ["核心卖点图", "功能卖点图", "使用场景图", "细节质感图", "白底商品图"];
+const ECOM_DETAIL_THEMES = ["首屏主视觉", "痛点1", "痛点2", "卖点1", "卖点2", "卖点3", "卖点4", "细节1", "细节2", "场景图", "参数/赠品", "售后/信任"];
+// APIMart 保比例不保精确像素（BE 契约记 requested vs actual）：mock 忠实映射实返尺寸。
+const ECOM_ACTUAL_DIMS: Record<string, string> = { "1024x1024": "1254x1254", "768x1024": "1086x1448", "1024x1536": "1024x1536" };
+interface MockEcomOutput { page_no: number; status: string; asset_id: string | null; download_url: string | null; preview_url: string | null; requested_size: string; actual_dimensions: string | null; error_code: string | null; }
+interface MockEcomJob { job_id: string; status: string; output_mode: string; total_credits: number; plan: Record<string, unknown>[]; outputs: MockEcomOutput[]; _charged: boolean; _polls: number; _failPage: number | null; }
+const ecomReplicateJobs = new Map<string, MockEcomJob>();
+let ecomReplicateSeq = 0;
+
+function ecomHasBanned(texts: string[]): string | null {
+  for (const t of texts) for (const w of ECOM_BANNED_WORDS) if (t.includes(w)) return w;
+  return null;
+}
+function ecomBuildPlan(mode: string, refs: string[], productInfo: string, points: string[]): Record<string, unknown>[] {
+  const count = mode === "main" ? 5 : 12;
+  const themes = mode === "main" ? ECOM_MAIN_THEMES : ECOM_DETAIL_THEMES;
+  const size = mode === "main" ? "1024x1024" : "768x1024";
+  const nRefs = Math.max(refs.length, 1);
+  const nPts = Math.max(points.length, 1);
+  return Array.from({ length: count }, (_, i) => {
+    const whiteBg = mode === "main" && i === 4; // 主图第 5 张纯白底
+    return {
+      page_no: i + 1,
+      theme: themes[i] ?? `第${i + 1}页`,
+      ref_label: whiteBg ? "白底图" : `ref_${String((i % nRefs) + 1).padStart(3, "0")}`,
+      main_title: whiteBg ? "" : (points[i % nPts] || productInfo || "").slice(0, 12),
+      sub_title: whiteBg ? "" : (points[(i + 1) % nPts] || "").slice(0, 20),
+      display_style: whiteBg ? "商品居中" : "复刻参考图构图 / 摆位 / 光影",
+      requested_size: size,
+      no_crop_notice: "原图输出，不裁剪",
+      reused: whiteBg ? false : i >= refs.length // 参考图不足 → 循环复用
+    };
+  });
+}
+function ecomJobResponse(j: MockEcomJob) {
+  return { job_id: j.job_id, status: j.status, output_mode: j.output_mode, total_credits: j.total_credits, plan: j.plan, outputs: j.outputs };
+}
+
 export const handlers = [
   // Auth = M2 shapes (unchanged). Mocked so the (app) client auth-gate can be
   // passed during the MSW parallel period without a real backend.
@@ -692,6 +734,98 @@ export const handlers = [
       return { task_id: id, source_asset_id: it.source_asset_id, status: "queued" };
     });
     return ok({ batch_id: batchId, tasks });
+  }),
+
+  // ── 电商详情图·强制复刻 (ECOM-REPLICATE-UI-0001) 两阶段状态机 ──
+  http.post(`${BASE}/api/v1/ecom-images/detail/plan`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as {
+      output_mode?: string;
+      reference_image_asset_ids?: string[];
+      product_image_asset_ids?: string[];
+      product_info?: string;
+      selling_points?: string[];
+      size?: string;
+    };
+    const mode = body.output_mode;
+    if (mode !== "main" && mode !== "detail") return err(422, "ECOM_MODE_REQUIRED", "请选择生成模式：主图 / 详情页");
+    const refs = body.reference_image_asset_ids ?? [];
+    const products = body.product_image_asset_ids ?? [];
+    if (refs.length < 1) return err(422, "ECOM_REF_REQUIRED", "请上传参考图（至少 1 张）");
+    if (products.length < 1) return err(422, "ECOM_PRODUCT_REQUIRED", "请上传商品图（至少 1 张）");
+    const points = (body.selling_points ?? []).map((p) => String(p).trim()).filter(Boolean);
+    // 禁词校验（§13）：命中即拒（只用用户提供文案）。
+    const banned = ecomHasBanned([body.product_info ?? "", ...points]);
+    if (banned) return err(422, "ECOM_BANNED_WORD", `文案含禁用词「${banned}」，请修改后重试`);
+    const plan = ecomBuildPlan(mode, refs, body.product_info ?? "", points);
+    const id = `ecomrep-${++ecomReplicateSeq}`;
+    ecomReplicateJobs.set(id, {
+      job_id: id, status: "plan_ready", output_mode: mode, total_credits: plan.length * ECOM_REPLICATE_RATE,
+      plan, outputs: [], _charged: false, _polls: 0,
+      // 承重·retry 演示：product_info 含 __FAIL__ → 首张生成失败（→ partial_failed，可单张重试）。
+      _failPage: (body.product_info ?? "").includes("__FAIL__") ? 1 : null
+    });
+    return ok(ecomJobResponse(ecomReplicateJobs.get(id)!));
+  }),
+  http.post(`${BASE}/api/v1/ecom-images/detail/:jobId/confirm`, ({ params }) => {
+    const j = ecomReplicateJobs.get(String(params.jobId));
+    if (!j) return err(404, "ECOM_JOB_NOT_FOUND", "复刻任务不存在");
+    // 一次性扣费 + 幂等：已确认（_charged）再 confirm 不重复扣、不重置。
+    if (!j._charged) {
+      j._charged = true;
+      j.status = "generating";
+      j.outputs = j.plan.map((p) => ({
+        page_no: p.page_no as number, status: "pending", asset_id: null, download_url: null, preview_url: null,
+        requested_size: p.requested_size as string, actual_dimensions: null, error_code: null
+      }));
+    }
+    return ok(ecomJobResponse(j));
+  }),
+  http.get(`${BASE}/api/v1/ecom-images/detail/:jobId`, ({ params }) => {
+    const j = ecomReplicateJobs.get(String(params.jobId));
+    if (!j) return err(404, "ECOM_JOB_NOT_FOUND", "复刻任务不存在");
+    if (j.status === "generating") {
+      j._polls += 1;
+      // 轮询推进：第 2 次 GET 起逐张出图（模拟后台并发完成）。全部完成才由前端一次性展示。
+      if (j._polls >= 2) {
+        for (const o of j.outputs) {
+          if (o.status === "succeeded" || o.status === "failed") continue;
+          if (j._failPage === o.page_no) {
+            o.status = "failed";
+            o.error_code = "ECOM_RENDER_FAILED";
+          } else {
+            o.status = "succeeded";
+            const url = `https://mock.local/ecom-detail-${j.job_id}-${o.page_no}.png`;
+            o.asset_id = `ecomimg-${j.job_id}-${o.page_no}`;
+            o.preview_url = url;
+            o.download_url = `${url}?dl=1`;
+            o.actual_dimensions = ECOM_ACTUAL_DIMS[o.requested_size] ?? o.requested_size;
+          }
+        }
+        const anyFail = j.outputs.some((o) => o.status === "failed");
+        j.status = anyFail ? "partial_failed" : "completed";
+      }
+    }
+    return ok(ecomJobResponse(j));
+  }),
+  http.post(`${BASE}/api/v1/ecom-images/detail/:jobId/outputs/:pageNo/retry`, ({ params }) => {
+    const j = ecomReplicateJobs.get(String(params.jobId));
+    if (!j) return err(404, "ECOM_JOB_NOT_FOUND", "复刻任务不存在");
+    const pageNo = Number(params.pageNo);
+    const o = j.outputs.find((x) => x.page_no === pageNo);
+    if (!o) return err(404, "ECOM_OUTPUT_NOT_FOUND", "该张不存在");
+    // 单张重试成功（不重复扣费：_charged 不动）；清失败页避免再次失败。
+    if (o.status === "failed") {
+      j._failPage = null;
+      o.status = "succeeded";
+      o.error_code = null;
+      const url = `https://mock.local/ecom-detail-${j.job_id}-${o.page_no}-retry.png`;
+      o.asset_id = `ecomimg-${j.job_id}-${o.page_no}-r`;
+      o.preview_url = url;
+      o.download_url = `${url}?dl=1`;
+      o.actual_dimensions = ECOM_ACTUAL_DIMS[o.requested_size] ?? o.requested_size;
+    }
+    j.status = j.outputs.some((x) => x.status === "failed") ? "partial_failed" : "completed";
+    return ok(ecomJobResponse(j));
   }),
 
   // ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001，FIX1 §8) — 三段式 CRUD mock ──

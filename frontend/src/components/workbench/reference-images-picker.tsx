@@ -27,12 +27,20 @@ type RefItem = ReferenceImageItem;
 export function ReferenceImagesPicker({
   onChange,
   onItemsChange,
-  inputId = "vg-ref-images"
+  inputId = "vg-ref-images",
+  label = copy.workbench.vgRefImagesLabel,
+  uploadLabel = copy.workbench.vgRefImagesUpload,
+  overLimitError = copy.workbench.vgRefOverLimit
 }: {
   onChange?: (assetIds: string[]) => void;
   /** 逐行配对（BATCH-PROD-UI-0002）需按序缩略图 → 上抛有序 {assetId,preview} 供父级渲染配对预览。 */
   onItemsChange?: (items: ReferenceImageItem[]) => void;
   inputId?: string;
+  /** 字段标签 / 上传按钮文案；默认视频生成参考图（ECOM-REPLICATE-UI-0001 复用于详情图参考图+商品图，不改 vg 行为）。 */
+  label?: string;
+  uploadLabel?: string;
+  /** 越限提示文案；默认视频生成「参考图」措辞，复用为商品图等场景传中性文案避免名词错配。 */
+  overLimitError?: string;
 }) {
   const uploadImg = useUploadImage();
   const [items, setItems] = useState<RefItem[]>([]);
@@ -67,7 +75,7 @@ export function ReferenceImagesPicker({
     else if (all.some((f) => f.size > MAX_UPLOAD_BYTES)) setError(copy.errors.uploadTooLarge);
     // ≤9 承重：room 取剩余位，超出部分不添加并提示。
     const room = MAX_REFERENCE_IMAGES - itemsRef.current.length;
-    if (valid.length > room) setError(copy.workbench.vgRefOverLimit);
+    if (valid.length > room) setError(overLimitError);
     for (const file of valid.slice(0, Math.max(0, room))) {
       const preview = URL.createObjectURL(file);
       try {
@@ -99,7 +107,7 @@ export function ReferenceImagesPicker({
 
   return (
     <fieldset className="mb-[15px] m-0 min-w-0 border-0 p-0">
-      <legend className={labelClass}>{copy.workbench.vgRefImagesLabel}</legend>
+      <legend className={labelClass}>{label}</legend>
       <input
         ref={inputRef}
         id={inputId}
@@ -114,7 +122,7 @@ export function ReferenceImagesPicker({
           {items.map((item, i) => (
             <div key={item.assetId} className="relative overflow-hidden rounded-mark border border-line-gold">
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={item.preview} alt={copy.workbench.vgRefImagesLabel} className="aspect-square w-full object-cover" />
+              <img src={item.preview} alt={label} className="aspect-square w-full object-cover" />
               <button
                 type="button"
                 onClick={() => removeItem(i)}
@@ -134,7 +142,7 @@ export function ReferenceImagesPicker({
         className="flex w-full items-center justify-center gap-2 rounded-field border border-dashed border-line-gold bg-glass-fill py-5 text-[13px] text-ink-soft transition-colors hover:bg-glass-hover disabled:pointer-events-none disabled:opacity-50"
       >
         <ImagePlus size={18} strokeWidth={1.8} />{" "}
-        {uploadImg.isPending ? copy.workbench.vgGenerating : `${copy.workbench.vgRefImagesUpload}（${items.length}/${MAX_REFERENCE_IMAGES}）`}
+        {uploadImg.isPending ? copy.workbench.vgGenerating : `${uploadLabel}（${items.length}/${MAX_REFERENCE_IMAGES}）`}
       </button>
       {error && (
         <p role="alert" className="mt-2 rounded-field bg-error-bg px-3 py-2 text-[12.5px] text-error-fg">

@@ -102,7 +102,7 @@ export type WorkbenchPrefill =
   | { target: "seedance_i2v"; topic?: string; scenePrompt?: string; script?: string }
   | { target: "video_gen"; prompt?: string }
   | { target: "photo"; prompt?: string }
-  | { target: "ecom_image"; tool: "model" | "poster"; custom?: string; title?: string; tagline?: string };
+  | { target: "ecom_image"; tool: "model"; custom?: string };
 
 /**
  * BE fill_target 键 → WorkbenchPrefill 落点映射（核心）。BE 载荷直落对应表单字段，缺键即 null（置灰）。
@@ -139,10 +139,9 @@ export function fillTargetToPrefill(
       const t = fillTargets.ecom_model;
       return t ? { target: "ecom_image", tool: "model", custom: t.extra_prompt } : null;
     }
-    case "ecom_poster": {
-      const t = fillTargets.ecom_poster;
-      return t ? { target: "ecom_image", tool: "poster", title: t.title, tagline: t.subtitle } : null;
-    }
+    case "ecom_poster":
+      // 营销海报已下线（ECOM-REPLICATE-UI-0001）→ 无落点，返 null（「带入·营销海报」按钮已移除）。
+      return null;
     default:
       return null;
   }
