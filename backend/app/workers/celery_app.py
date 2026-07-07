@@ -23,6 +23,7 @@ celery_app.conf.update(
         "app.workers.avatar_talk.generate_seedance_i2v": {"queue": "video"},
         "app.workers.video_gen.generate": {"queue": "video"},
         "app.workers.image_gen.generate": {"queue": "image"},
+        "app.workers.image_gen.generate_ecom_replicate": {"queue": "image"},
     },
     task_always_eager=settings.celery_task_always_eager,
     task_store_eager_result=False,

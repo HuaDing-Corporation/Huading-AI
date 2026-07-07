@@ -156,6 +156,15 @@ class Settings(BaseSettings):
     engine_apimart_reverse_prompt_model: str = "gemini-3.1-pro-preview"
     engine_apimart_reverse_prompt_input_credits_per_m: float = 16.0
     engine_apimart_reverse_prompt_output_credits_per_m: float = 96.0
+    engine_ecom_replicate_enabled: bool = True
+    engine_ecom_replicate_credits_per_image: float = 15.0
+    engine_ecom_replicate_analysis_cny_per_call: float = 0.14
+    engine_ecom_replicate_render_cny_per_image: float = 0.0432
+    engine_ecom_replicate_main_size: str = "1024x1024"
+    engine_ecom_replicate_detail_size: str = "768x1024"
+    engine_ecom_replicate_detail_fallback_size: str = "1024x1536"
+    engine_ecom_replicate_quality: str = "high"
+    engine_ecom_replicate_max_retry: int = 2
     engine_usd_cny_rate: float = 7.2
     engine_deepseek_cny_per_1k_input: float = 0.001008
     engine_deepseek_cny_per_1k_output: float = 0.002016
