@@ -502,6 +502,126 @@ class ReversePromptJob(TenantScopedMixin, Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class EcomReplicateJob(TenantScopedMixin, Base):
+    __tablename__ = "ecom_replicate_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('planning', 'plan_ready', 'generating', 'completed', "
+            "'partial_failed', 'failed', 'cancelled')",
+            name="ck_ecom_replicate_jobs_status",
+        ),
+        CheckConstraint(
+            "output_mode IN ('main', 'detail')",
+            name="ck_ecom_replicate_jobs_output_mode",
+        ),
+        Index("ix_ecom_replicate_jobs_tenant_created_at", "tenant_id", "created_at"),
+        Index("ix_ecom_replicate_jobs_tenant_status", "tenant_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(32), default="planning")
+    output_mode: Mapped[str] = mapped_column(String(16))
+    requested_size: Mapped[str] = mapped_column(String(20))
+    requested_aspect: Mapped[str] = mapped_column(String(16))
+    detail_fallback_size: Mapped[str | None] = mapped_column(String(20), default=None)
+    reference_image_asset_ids: Mapped[list[str]] = mapped_column(_json_type(), default=list)
+    product_image_asset_ids: Mapped[list[str]] = mapped_column(_json_type(), default=list)
+    product_info: Mapped[dict[str, object]] = mapped_column(_json_type(), default=dict)
+    selling_points: Mapped[list[str]] = mapped_column(_json_type(), default=list)
+    reference_analysis_json: Mapped[list[dict[str, object]]] = mapped_column(
+        _json_type(),
+        default=list,
+    )
+    template_mapping_json: Mapped[dict[str, object]] = mapped_column(_json_type(), default=dict)
+    generation_plan_json: Mapped[dict[str, object]] = mapped_column(_json_type(), default=dict)
+    validation_json: Mapped[dict[str, object] | None] = mapped_column(
+        _json_type(),
+        default=None,
+    )
+    output_count: Mapped[int] = mapped_column(Integer, default=0)
+    total_credits: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
+    credit_rate: Mapped[Decimal] = mapped_column(Numeric(12, 4), default=Decimal("15"))
+    analysis_provider: Mapped[str | None] = mapped_column(String(40), default=None)
+    analysis_model: Mapped[str | None] = mapped_column(String(80), default=None)
+    render_provider: Mapped[str] = mapped_column(String(40), default="apimart")
+    render_model: Mapped[str | None] = mapped_column(String(80), default=None)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    error_code: Mapped[str | None] = mapped_column(String(40), default=None)
+    error_message: Mapped[str | None] = mapped_column(Text, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class EcomReplicateOutput(Base):
+    __tablename__ = "ecom_replicate_outputs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('planned', 'generating', 'succeeded', 'failed')",
+            name="ck_ecom_replicate_outputs_status",
+        ),
+        UniqueConstraint("job_id", "index", name="uq_ecom_replicate_outputs_job_index"),
+        Index("ix_ecom_replicate_outputs_job_id", "job_id"),
+        Index("ix_ecom_replicate_outputs_tenant_created_at", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    job_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("ecom_replicate_jobs.id", ondelete="CASCADE"),
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        index=True,
+    )
+    index: Mapped[int] = mapped_column(Integer)
+    theme: Mapped[str] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(32), default="planned")
+    reference_asset_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("assets.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    product_asset_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("assets.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    requested_size: Mapped[str] = mapped_column(String(20))
+    requested_aspect: Mapped[str] = mapped_column(String(16))
+    actual_width: Mapped[int | None] = mapped_column(Integer, default=None)
+    actual_height: Mapped[int | None] = mapped_column(Integer, default=None)
+    prompt: Mapped[str | None] = mapped_column(Text, default=None)
+    reference_analysis_json: Mapped[dict[str, object] | None] = mapped_column(
+        _json_type(),
+        default=None,
+    )
+    template_mapping_json: Mapped[dict[str, object] | None] = mapped_column(
+        _json_type(),
+        default=None,
+    )
+    validation_json: Mapped[dict[str, object] | None] = mapped_column(
+        _json_type(),
+        default=None,
+    )
+    asset_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("assets.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    storage_key: Mapped[str | None] = mapped_column(String(500), default=None)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(40), default=None)
+    error_message: Mapped[str | None] = mapped_column(Text, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class Brand(Base):
     __tablename__ = "brands"
     __table_args__ = (Index("ix_brands_tenant_id", "tenant_id"),)

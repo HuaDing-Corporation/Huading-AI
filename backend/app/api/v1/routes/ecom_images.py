@@ -24,17 +24,20 @@ from app.schemas.ecom_images import (
     EcomModelStylesResponse,
     EcomPosterAccepted,
     EcomPosterBatchAccepted,
-    EcomPosterBatchItem,
     EcomPosterBatchRequest,
     EcomPosterRequest,
     EcomPosterTemplate,
     EcomPosterTemplatesResponse,
+    EcomReplicateAccepted,
+    EcomReplicateConfirmAccepted,
+    EcomReplicateRequest,
 )
 from app.schemas.response import ApiResponse, ok
+from app.services import ecom_replicate
 from app.services.history import prune_video_history
 from app.services.quota import reserve_image_generation_quota
 from app.services.storage.base import ObjectStorage
-from app.workers.image_gen import generate_image_task
+from app.workers.image_gen import generate_ecom_replicate_task, generate_image_task
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -363,6 +366,58 @@ def _prune_photo_history_best_effort(
         logger.warning("ecom_image_history_prune_failed", tenant_id=tenant_id, error=str(exc))
 
 
+def _poster_disabled() -> None:
+    raise AppError(
+        "Marketing poster generation has been retired.",
+        code="ECOM_POSTER_DISABLED",
+        status_code=410,
+    )
+
+
+@router.post(
+    "/replicate",
+    response_model=ApiResponse[EcomReplicateAccepted],
+    status_code=status.HTTP_201_CREATED,
+)
+def create_replicate_plan(
+    request: Request,
+    payload: EcomReplicateRequest,
+    user: User = CreateEcomImagePermissionDependency,
+    db: Session = DbSessionDependency,
+    storage: ObjectStorage = ObjectStorageDependency,
+) -> ApiResponse[EcomReplicateAccepted]:
+    job = ecom_replicate.create_replicate_plan(
+        db,
+        user=user,
+        payload=payload,
+        storage=storage,
+    )
+    db.commit()
+    return ok(request, ecom_replicate.response_for_job(db, job))
+
+
+@router.post(
+    "/replicate/{job_id}/confirm",
+    response_model=ApiResponse[EcomReplicateConfirmAccepted],
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def confirm_replicate_plan(
+    request: Request,
+    job_id: str,
+    user: User = CreateEcomImagePermissionDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[EcomReplicateConfirmAccepted]:
+    job, should_enqueue = ecom_replicate.confirm_replicate_job(
+        db,
+        tenant_id=user.tenant_id,
+        job_id=job_id,
+    )
+    db.commit()
+    if should_enqueue:
+        generate_ecom_replicate_task.apply_async(args=[job.id], task_id=job.id, queue="image")
+    return ok(request, ecom_replicate.confirm_response(job))
+
+
 @router.get(
     "/model-styles",
     response_model=ApiResponse[EcomModelStylesResponse],
@@ -382,7 +437,7 @@ def list_poster_templates(
     request: Request,
     _user: User = CreateEcomImagePermissionDependency,
 ) -> ApiResponse[EcomPosterTemplatesResponse]:
-    return ok(request, EcomPosterTemplatesResponse(templates=list(_POSTER_TEMPLATES)))
+    _poster_disabled()
 
 
 @router.post(
@@ -397,16 +452,7 @@ def create_poster(
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[EcomPosterAccepted]:
-    source = _source_asset_or_raise(
-        db,
-        tenant_id=user.tenant_id,
-        source_asset_id=payload.source_asset_id,
-    )
-    task = _create_poster_task(db, user=user, payload=payload, source=source)
-    db.commit()
-    _prune_photo_history_best_effort(db, tenant_id=user.tenant_id, storage=storage)
-    _enqueue_image_task(task)
-    return ok(request, EcomPosterAccepted(task_id=task.id))
+    _poster_disabled()
 
 
 @router.post(
@@ -421,39 +467,7 @@ def create_poster_batch(
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[EcomPosterBatchAccepted]:
-    selected_items = payload.items[:_BATCH_LIMIT]
-    sources = [
-        _source_asset_or_raise(
-            db,
-            tenant_id=user.tenant_id,
-            source_asset_id=item.source_asset_id,
-        )
-        for item in selected_items
-    ]
-    batch_id = str(uuid4())
-    tasks = [
-        _create_poster_task(
-            db,
-            user=user,
-            payload=item,
-            source=source,
-            batch_id=batch_id,
-        )
-        for item, source in zip(selected_items, sources, strict=True)
-    ]
-    db.commit()
-    _prune_photo_history_best_effort(db, tenant_id=user.tenant_id, storage=storage)
-    for task in tasks:
-        _enqueue_image_task(task)
-
-    response_tasks = [
-        EcomPosterBatchItem(
-            task_id=task.id,
-            source_asset_id=str(task.params["source_asset_id"]),
-        )
-        for task in tasks
-    ]
-    return ok(request, EcomPosterBatchAccepted(batch_id=batch_id, tasks=response_tasks))
+    _poster_disabled()
 
 
 @router.post(

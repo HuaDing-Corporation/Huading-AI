@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 EcomCutoutBackground = Literal["white", "transparent"]
 EcomModelGender = Literal["female", "male", "any"]
+EcomReplicateOutputMode = Literal["main", "detail"]
 
 
 class EcomCutoutRequest(BaseModel):
@@ -116,3 +117,63 @@ class EcomPosterBatchItem(BaseModel):
 class EcomPosterBatchAccepted(BaseModel):
     batch_id: str
     tasks: list[EcomPosterBatchItem]
+
+
+class EcomReplicateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reference_image_asset_ids: list[str] = Field(min_length=1, max_length=4)
+    product_image_asset_ids: list[str] = Field(min_length=1, max_length=4)
+    product_info: dict[str, object] = Field(default_factory=dict)
+    selling_points: list[str] = Field(default_factory=list, max_length=8)
+    output_mode: EcomReplicateOutputMode = "main"
+    size: str | None = Field(default=None, max_length=20)
+
+
+class EcomReplicatePlanOutput(BaseModel):
+    id: str
+    index: int
+    theme: str
+    reference_asset_id: str | None = None
+    product_asset_id: str | None = None
+    requested_size: str
+    requested_aspect: str
+    status: str
+    prompt: str | None = None
+    asset_id: str | None = None
+    actual_width: int | None = None
+    actual_height: int | None = None
+
+
+class EcomReplicatePlanPayload(BaseModel):
+    outputs: list[EcomReplicatePlanOutput]
+    reference_analysis_json: list[dict[str, object]]
+    template_mapping_json: dict[str, object]
+    generation_plan_json: dict[str, object]
+
+
+class EcomReplicateAccepted(BaseModel):
+    job_id: str
+    status: Literal[
+        "planning",
+        "plan_ready",
+        "generating",
+        "completed",
+        "partial_failed",
+        "failed",
+        "cancelled",
+    ]
+    output_mode: EcomReplicateOutputMode
+    output_count: int
+    total_credits: float
+    credit_rate: float
+    requested_size: str
+    requested_aspect: str
+    plan: EcomReplicatePlanPayload
+
+
+class EcomReplicateConfirmAccepted(BaseModel):
+    job_id: str
+    status: Literal["generating", "completed", "partial_failed", "failed", "cancelled"]
+    output_count: int
+    total_credits: float

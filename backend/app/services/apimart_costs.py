@@ -12,6 +12,7 @@ _CREDIT_KEYS = {
     "used_credits",
     "usage_credits",
     "task_credits",
+    "credits_cost",
 }
 _COST_CENTS_KEYS = {"cost_cents", "cny_cost_cents", "cost_cent"}
 _IMAGE_CREDITS_BY_MODEL_PREFIX = {

@@ -588,6 +588,12 @@ def list_videos(
     offset: int = Query(default=0, ge=0),
 ) -> ApiResponse[VideoListResponse]:
     query = select(VideoTask).where(VideoTask.tenant_id == user.tenant_id)
+    query = query.where(
+        or_(
+            VideoTask.params["kind"].as_string().is_(None),
+            VideoTask.params["kind"].as_string() != "ecom_poster",
+        )
+    )
     if mode is not None:
         query = query.where(video_mode_filter(mode))
     if kind is not None:
