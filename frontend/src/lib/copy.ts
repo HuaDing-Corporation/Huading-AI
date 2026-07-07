@@ -479,7 +479,14 @@ export const copy = {
     deleteConfirmBtn: "确认删除",
     // 口播 picker 分组
     pickerBrandGroup: "我的品牌音色",
-    pickerStandardGroup: "系统音色"
+    pickerStandardGroup: "系统音色",
+    // 「选我的音色」picker（BRAND-VOICE-PICKER-UI-0001）
+    pickerBrandLoading: "加载我的音色…",
+    pickerBrandEmpty: "还没有品牌音色",
+    pickerBrandCreate: "去创建",
+    pickerCloning: "复刻中",
+    providerDoubao: "豆包",
+    providerCosyvoice: "CosyVoice"
   },
   // 深度合成标识设置 (LABEL-UI-0001)
   label: {

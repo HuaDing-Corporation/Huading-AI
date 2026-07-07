@@ -584,16 +584,35 @@ class ProviderConfig(Base):
             name="ck_provider_configs_capability",
         ),
         Index(
-            "uq_provider_configs_tenant_capability",
+            "uq_provider_configs_tenant_capability_non_voice_clone",
             "tenant_id",
             "capability",
+            unique=True,
+            postgresql_where=text(
+                "tenant_id IS NOT NULL AND capability != 'voice_clone'"
+            ),
+            sqlite_where=text("tenant_id IS NOT NULL AND capability != 'voice_clone'"),
+        ),
+        Index(
+            "uq_provider_configs_tenant_capability_provider",
+            "tenant_id",
+            "capability",
+            "provider",
             unique=True,
             postgresql_where=text("tenant_id IS NOT NULL"),
             sqlite_where=text("tenant_id IS NOT NULL"),
         ),
         Index(
-            "uq_provider_configs_platform_capability",
+            "uq_provider_configs_platform_capability_non_voice_clone",
             "capability",
+            unique=True,
+            postgresql_where=text("tenant_id IS NULL AND capability != 'voice_clone'"),
+            sqlite_where=text("tenant_id IS NULL AND capability != 'voice_clone'"),
+        ),
+        Index(
+            "uq_provider_configs_platform_capability_provider",
+            "capability",
+            "provider",
             unique=True,
             postgresql_where=text("tenant_id IS NULL"),
             sqlite_where=text("tenant_id IS NULL"),

@@ -480,12 +480,18 @@ export interface PosterBatchResponse {
 // ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001，FIX1 对齐后端 §8 真契约) ──
 export type BrandVoiceStatus = "processing" | "ready" | "failed"; // 处理中 / 可用 / 失败
 
-// BrandVoiceRead：后端仅返 id/name/status/created_at（无 sample_url/error_message）。
+// 声音复刻通路（BRAND-VOICE-PICKER-UI-0001）：doubao（豆包）/ cosyvoice（免费通路 COSYVOICE-CLONE-0001）。
+// 字符串宽松兼容未来通路；**provider 可选**——接口暂无该字段时前端不显徽标、不报错（UI 可先于后端合并）。
+export type BrandVoiceProvider = "doubao" | "cosyvoice";
+
+// BrandVoiceRead：后端仅返 id/name/status/created_at（无 sample_url/error_message）；
+// provider 为 COSYVOICE-CLONE-0001 合并后新增，**当前可能缺省**，故 optional。
 export interface BrandVoice {
   id: string;
   name: string;
   status: BrandVoiceStatus;
   created_at: string;
+  provider?: BrandVoiceProvider | string | null;
 }
 export interface BrandVoiceListResponse {
   items: BrandVoice[];

@@ -30,6 +30,7 @@ def test_provider_costs_use_provider_specific_bases(monkeypatch) -> None:
     )
 
     assert provider_costs.omnihuman_cost_cents(18) == 1800
+    assert provider_costs.omnihuman_change_lips_cost_cents(18, tier="lite") == 540
     assert provider_costs.seed_tts_cost_cents(100) == 3
     assert provider_costs.deepseek_cost_cents(
         prompt_tokens=100_000,
@@ -67,6 +68,7 @@ def test_provider_costs_do_not_apply_usd_exchange_to_direct_cny(monkeypatch) -> 
     )
 
     assert provider_costs.omnihuman_cost_cents(18) == 1800
+    assert provider_costs.omnihuman_change_lips_cost_cents(18, tier="lite") == 540
     assert provider_costs.seed_tts_cost_cents(100) == 3
     assert provider_costs.deepseek_cost_cents(
         prompt_tokens=100_000,

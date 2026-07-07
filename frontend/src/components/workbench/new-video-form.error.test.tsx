@@ -9,6 +9,7 @@ vi.mock("@/lib/api/hooks", () => ({
   useScriptGenerate: () => ({ mutateAsync: vi.fn().mockResolvedValue({ script: "s" }), isPending: false }),
   useUploadImage: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useUploadAvatarVideo: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useBrandVoices: () => ({ data: [], isLoading: false }),
   useVoices: () => ({
     data: [
       { id: "v1", provider: "edge_tts", voice_code: "c", display_name: "声", gender: null, language: null }
