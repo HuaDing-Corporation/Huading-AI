@@ -14,6 +14,7 @@ vi.mock("@/lib/api/hooks", () => ({
   useScriptGenerate: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useUploadImage: () => ({ mutateAsync: uploadImgMock.mutateAsync, isPending: false }),
   useUploadAvatarVideo: () => ({ mutateAsync: uploadVideoMock.mutateAsync, isPending: false }),
+  useBrandVoices: () => ({ data: [], isLoading: false }),
   useVoices: () => ({ data: [{ id: "v1", provider: "edge", voice_code: "x", display_name: "音色1", gender: null, language: null }] }),
   useAvatarPresets: () => ({ data: [] }),
   useSubtitleTemplates: () => ({ data: [] }),

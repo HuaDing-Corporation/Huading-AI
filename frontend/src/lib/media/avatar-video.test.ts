@@ -7,7 +7,8 @@ import {
   validateAvatarVideoMetadata
 } from "./avatar-video";
 
-// AVATAR-VIDEO-SOURCE-UI-0001 预检拒绝矩阵（纯函数确定性）：MP4 / ≤10s(含 0.5 容差) / 360p–1080p(短边)。
+// AVATAR-VIDEO-SOURCE-UI-0001 预检拒绝矩阵（纯函数确定性）。FE-INTEGRATION-0001 对齐 BE 定稿：
+// MP4 / ≤200MB / 时长 3–10s(含 0.5 容差) / 分辨率短边≥360 且长边≤1920。
 function typedFile(type: string, name = "v", size = 1024): File {
   const f = new File([new Uint8Array(8)], name, { type });
   Object.defineProperty(f, "size", { value: size });
@@ -31,21 +32,32 @@ describe("validateAvatarVideoFile（MIME + 大小）", () => {
   });
 });
 
-describe("validateAvatarVideoMetadata（时长 + 分辨率）", () => {
-  it("合规：8s / 720×1280(短边720) → null", () => {
+describe("validateAvatarVideoMetadata（时长 3–10s + 分辨率 短边≥360 & 长边≤1920）", () => {
+  it("合规：8s / 720×1280(短边720、长边1280) → null", () => {
     expect(validateAvatarVideoMetadata({ duration: 8, width: 720, height: 1280 })).toBeNull();
   });
-  it("边界：10.4s（10+容差内）通过；10.6s 超时长 → videoTooLong", () => {
+  it("时长上界：10.4s（10+容差内）通过；10.6s 超时长 → videoTooLong", () => {
     expect(validateAvatarVideoMetadata({ duration: 10.4, width: 720, height: 1280 })).toBeNull();
     expect(validateAvatarVideoMetadata({ duration: 10.6, width: 720, height: 1280 })).toBe(copy.errors.videoTooLong);
+  });
+  it("时长下界(FE-INTEGRATION 对齐 3s)：2.4s 太短 → videoTooLong；3s 通过", () => {
+    expect(validateAvatarVideoMetadata({ duration: 2.4, width: 720, height: 1280 })).toBe(copy.errors.videoTooLong);
+    expect(validateAvatarVideoMetadata({ duration: 3, width: 720, height: 1280 })).toBeNull();
   });
   it("分辨率短边 < 360（如 320×568）→ videoResolution", () => {
     expect(validateAvatarVideoMetadata({ duration: 5, width: 320, height: 568 })).toBe(copy.errors.videoResolution);
   });
-  it("分辨率短边 > 1080（如 1440×2560）→ videoResolution", () => {
+  it("分辨率长边 > 1920（如 1440×2560）→ videoResolution", () => {
     expect(validateAvatarVideoMetadata({ duration: 5, width: 1440, height: 2560 })).toBe(copy.errors.videoResolution);
   });
-  it("边界短边=360 与 =1080 均通过", () => {
+  // 承重·对齐 BE(min≥360 && max≤1920)，非旧「短边≤1080」：
+  it("长边>1920 即拒(800×2000，旧短边规则会误放行) → videoResolution", () => {
+    expect(validateAvatarVideoMetadata({ duration: 5, width: 800, height: 2000 })).toBe(copy.errors.videoResolution);
+  });
+  it("短边>1080 但长边≤1920 应通过(1200×1300，旧短边规则会误拒)", () => {
+    expect(validateAvatarVideoMetadata({ duration: 5, width: 1200, height: 1300 })).toBeNull();
+  });
+  it("边界短边=360 与 长边=1920 均通过", () => {
     expect(validateAvatarVideoMetadata({ duration: 5, width: 360, height: 640 })).toBeNull();
     expect(validateAvatarVideoMetadata({ duration: 5, width: 1080, height: 1920 })).toBeNull();
   });
