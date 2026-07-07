@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.api.deps import get_object_storage
-from app.db.models import Asset, BrandVoice
+from app.db.models import Asset, BrandVoice, ProviderConfig
 from app.main import app
 
 
@@ -38,7 +38,7 @@ class _CloneProvider:
     async def clone_voice(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.clone_calls.append(dict(payload))
         return {
-            "speaker_id": "brand-speaker-upload",
+            "speaker_id": str(payload.get("speaker_id") or "brand-speaker-upload"),
             "status": "ready",
             "provider": "doubao-voice-clone",
         }
@@ -197,9 +197,21 @@ def test_upload_audio_then_create_brand_voice_without_direct_db_audio_seed(
     monkeypatch.setattr(uploads, "_probe_audio_duration_ms", lambda *_args, **_kwargs: 6100)
     monkeypatch.setattr(
         brand_voices,
-        "resolve",
-        lambda _db, *, tenant_id, capability: provider,
+        "resolve_named_provider",
+        lambda _db, *, tenant_id, capability, provider: provider_obj,
     )
+    provider_obj = provider
+    with auth_db() as db:
+        db.add(
+            ProviderConfig(
+                tenant_id=None,
+                capability="voice_clone",
+                provider="doubao-voice-clone",
+                config={"speaker_ids": ["S_upload_slot_001"]},
+                is_active=True,
+            )
+        )
+        db.commit()
     app.dependency_overrides[get_object_storage] = lambda: storage
     client = TestClient(app)
     try:
@@ -225,9 +237,9 @@ def test_upload_audio_then_create_brand_voice_without_direct_db_audio_seed(
     assert create_resp.status_code == 201
     created = create_resp.json()["data"]
     assert created["status"] == "ready"
-    assert provider.clone_calls[0]["source_audio_url"].startswith(
-        f"https://storage.test/tenants/{auth_context['tenant_id']}/uploads/"
-    )
+    assert provider.clone_calls[0]["speaker_id"] == "S_upload_slot_001"
+    assert provider.clone_calls[0]["source_audio_bytes"] == b"ID3 fake mp3 bytes"
+    assert "source_audio_url" not in provider.clone_calls[0]
     with auth_db() as db:
         audio_assets = list(db.scalars(select(Asset).where(Asset.type == "audio")))
         assert len(audio_assets) == 1
@@ -248,10 +260,20 @@ def test_create_brand_voice_accepts_historical_codec_param_audio_asset(
     storage = _Storage()
     monkeypatch.setattr(
         brand_voices,
-        "resolve",
-        lambda _db, *, tenant_id, capability: provider,
+        "resolve_named_provider",
+        lambda _db, *, tenant_id, capability, provider: provider_obj,
     )
+    provider_obj = provider
     with auth_db() as db:
+        db.add(
+            ProviderConfig(
+                tenant_id=None,
+                capability="voice_clone",
+                provider="doubao-voice-clone",
+                config={"speaker_ids": ["S_legacy_slot_001"]},
+                is_active=True,
+            )
+        )
         asset = Asset(
             tenant_id=auth_context["tenant_id"],
             type="audio",
@@ -267,6 +289,10 @@ def test_create_brand_voice_accepts_historical_codec_param_audio_asset(
         asset_id = asset.id
 
     app.dependency_overrides[get_object_storage] = lambda: storage
+    storage.saved[f"tenants/{auth_context['tenant_id']}/uploads/legacy.webm"] = (
+        b"legacy webm bytes",
+        "audio/webm",
+    )
     client = TestClient(app)
     try:
         create_resp = client.post(
@@ -283,3 +309,5 @@ def test_create_brand_voice_accepts_historical_codec_param_audio_asset(
 
     assert create_resp.status_code == 201
     assert provider.clone_calls[0]["source_audio_asset_id"] == asset_id
+    assert provider.clone_calls[0]["speaker_id"] == "S_legacy_slot_001"
+    assert provider.clone_calls[0]["source_audio_bytes"] == b"legacy webm bytes"

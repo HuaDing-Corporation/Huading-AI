@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
@@ -16,6 +17,7 @@ class BrandVoiceCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=30)
     source_audio_asset_id: str
     consent_confirmed: StrictBool
+    provider: Literal["doubao", "cosyvoice"] = "doubao"
 
     @field_validator("name")
     @classmethod
@@ -37,6 +39,7 @@ class BrandVoiceUpdateRequest(BaseModel):
 class BrandVoiceRead(BaseModel):
     id: str
     name: str
+    provider: str
     status: str
     created_at: datetime
 

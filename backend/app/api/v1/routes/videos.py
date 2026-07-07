@@ -1,6 +1,10 @@
 import asyncio
 import json
+import subprocess
+from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query, Request, status
@@ -19,6 +23,7 @@ from app.api.deps import (
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
+from app.core.utils import base_mime
 from app.db.models import (
     Asset,
     BgmLibraryTrack,
@@ -87,6 +92,30 @@ _SSE_INTERVAL_S = 1.0
 _ESTIMATE_NOTE = "Estimated reservation; final settlement uses actual generated duration."
 _VIDEO_HISTORY_MODE_PATTERN = "^(avatar_talk|seedance_i2v|photo|video_gen)$"
 _VIDEO_GEN_IMAGE_TYPES = {"avatar_image", "product_image", "generated_image", "cover"}
+_AVATAR_VIDEO_SOURCE_MAX_BYTES = 200 * 1024 * 1024
+_AVATAR_VIDEO_SOURCE_MIN_DURATION_MS = 3_000
+_AVATAR_VIDEO_SOURCE_MAX_DURATION_MS = 10_000
+_AVATAR_VIDEO_SOURCE_MAX_DIMENSION = 1920
+_AVATAR_VIDEO_SOURCE_MIN_DIMENSION = 360
+_AVATAR_VIDEO_CODECS = {"h264", "avc1"}
+_AVATAR_VIDEO_AUDIO_CODECS = {"aac", "mp4a"}
+_CHANGE_LIPS_OPTIONAL_FIELDS = {
+    "align_audio_reverse",
+    "templ_start_seconds",
+    "open_sr",
+    "separate_vocal",
+    "open_scenedet",
+}
+
+
+@dataclass(frozen=True)
+class _AvatarVideoProbe:
+    duration_ms: int | None
+    width: int | None
+    height: int | None
+    container: str | None
+    video_codec: str | None
+    audio_codec: str | None
 
 
 def _is_avatar_talk_requested(payload: VideoGenerateRequest) -> bool:
@@ -96,6 +125,7 @@ def _is_avatar_talk_requested(payload: VideoGenerateRequest) -> bool:
         payload.video_mode == "avatar_talk"
         or bool(payload.voice_id)
         or bool(payload.avatar_asset_id)
+        or bool(payload.avatar_video_asset_id)
     )
 
 
@@ -156,6 +186,257 @@ def _resolve_avatar_talk_voice(
     raise AppError("Voice not found.", code="VOICE_NOT_FOUND", status_code=404)
 
 
+def _avatar_source_count(payload: VideoGenerateRequest) -> int:
+    return int(bool(payload.avatar_asset_id)) + int(bool(payload.avatar_video_asset_id))
+
+
+def _metadata_str(asset: Asset, *keys: str) -> str | None:
+    metadata = asset.metadata_ or {}
+    for key in keys:
+        value = metadata.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _metadata_int(asset: Asset, *keys: str) -> int | None:
+    for key in keys:
+        value = (asset.metadata_ or {}).get(key)
+        try:
+            if value not in (None, ""):
+                return int(float(str(value)))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _avatar_video_probe_from_metadata(asset: Asset) -> _AvatarVideoProbe | None:
+    container = _metadata_str(asset, "container", "format", "format_name")
+    video_codec = _metadata_str(asset, "video_codec", "codec_name")
+    audio_codec = _metadata_str(asset, "audio_codec")
+    width = asset.width or _metadata_int(asset, "width", "video_width")
+    height = asset.height or _metadata_int(asset, "height", "video_height")
+    duration_ms = asset.duration_ms or _metadata_int(asset, "duration_ms")
+    if not all([container, video_codec, audio_codec, width, height, duration_ms]):
+        return None
+    return _AvatarVideoProbe(
+        duration_ms=duration_ms,
+        width=width,
+        height=height,
+        container=container,
+        video_codec=video_codec,
+        audio_codec=audio_codec,
+    )
+
+
+def _probe_avatar_video_bytes(content: bytes, *, suffix: str) -> _AvatarVideoProbe:
+    temp_path: Path | None = None
+    try:
+        with NamedTemporaryFile(delete=False, suffix=suffix or ".mp4") as temp_file:
+            temp_file.write(content)
+            temp_path = Path(temp_file.name)
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-print_format",
+                    "json",
+                    "-show_format",
+                    "-show_streams",
+                    str(temp_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            raise AppError(
+                "Avatar source video cannot be decoded. Please upload an MP4/H.264/AAC video.",
+                code="AVATAR_VIDEO_DECODE_FAILED",
+                status_code=422,
+            ) from exc
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+    if result.returncode != 0:
+        raise AppError(
+            "Avatar source video cannot be decoded. Please upload an MP4/H.264/AAC video.",
+            code="AVATAR_VIDEO_DECODE_FAILED",
+            status_code=422,
+        )
+    try:
+        data = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise AppError(
+            "Avatar source video cannot be decoded. Please upload an MP4/H.264/AAC video.",
+            code="AVATAR_VIDEO_DECODE_FAILED",
+            status_code=422,
+        ) from exc
+    streams = data.get("streams") if isinstance(data, dict) else []
+    video_stream = next(
+        (stream for stream in streams or [] if stream.get("codec_type") == "video"),
+        {},
+    )
+    audio_stream = next(
+        (stream for stream in streams or [] if stream.get("codec_type") == "audio"),
+        {},
+    )
+    format_info = data.get("format") if isinstance(data, dict) else {}
+    duration = format_info.get("duration") or video_stream.get("duration")
+    duration_ms = None
+    try:
+        duration_ms = int(round(float(duration) * 1000)) if duration is not None else None
+    except (TypeError, ValueError):
+        duration_ms = None
+    return _AvatarVideoProbe(
+        duration_ms=duration_ms,
+        width=int(video_stream["width"]) if video_stream.get("width") else None,
+        height=int(video_stream["height"]) if video_stream.get("height") else None,
+        container=str(format_info.get("format_name") or ""),
+        video_codec=str(video_stream.get("codec_name") or ""),
+        audio_codec=str(audio_stream.get("codec_name") or ""),
+    )
+
+
+def _avatar_video_probe(asset: Asset, *, storage: ObjectStorage) -> _AvatarVideoProbe:
+    probe = _avatar_video_probe_from_metadata(asset)
+    if probe is not None:
+        return probe
+    try:
+        content = storage.get_bytes(asset.storage_key)
+    except Exception as exc:
+        raise AppError(
+            "Avatar source video metadata is incomplete and the object could not be read.",
+            code="AVATAR_VIDEO_NOT_READABLE",
+            status_code=422,
+        ) from exc
+    suffix = Path(asset.storage_key).suffix or ".mp4"
+    return _probe_avatar_video_bytes(content, suffix=suffix)
+
+
+def _avatar_video_size_bytes(asset: Asset, *, storage: ObjectStorage) -> int | None:
+    if asset.size_bytes is not None:
+        return asset.size_bytes
+    try:
+        return len(storage.get_bytes(asset.storage_key))
+    except Exception as exc:
+        raise AppError(
+            "Avatar source video metadata is incomplete and the object could not be read.",
+            code="AVATAR_VIDEO_NOT_READABLE",
+            status_code=422,
+        ) from exc
+
+
+def _validate_avatar_video_probe(asset: Asset, probe: _AvatarVideoProbe) -> None:
+    if base_mime(asset.mime_type) != "video/mp4":
+        raise AppError(
+            "Avatar source video must be MP4.",
+            code="AVATAR_VIDEO_UNSUPPORTED_FORMAT",
+            status_code=422,
+        )
+    if asset.size_bytes is not None and asset.size_bytes > _AVATAR_VIDEO_SOURCE_MAX_BYTES:
+        raise AppError(
+            f"Avatar source video is too large; limit is {_AVATAR_VIDEO_SOURCE_MAX_BYTES} bytes.",
+            code="AVATAR_VIDEO_TOO_LARGE",
+            status_code=413,
+        )
+    if (
+        probe.duration_ms is None
+        or probe.duration_ms < _AVATAR_VIDEO_SOURCE_MIN_DURATION_MS
+        or probe.duration_ms > _AVATAR_VIDEO_SOURCE_MAX_DURATION_MS
+    ):
+        raise AppError(
+            "Avatar source video must be between 3 and 10 seconds.",
+            code="AVATAR_VIDEO_DURATION_INVALID",
+            status_code=422,
+        )
+    width = int(probe.width or 0)
+    height = int(probe.height or 0)
+    if (
+        min(width, height) < _AVATAR_VIDEO_SOURCE_MIN_DIMENSION
+        or max(width, height) > _AVATAR_VIDEO_SOURCE_MAX_DIMENSION
+    ):
+        raise AppError(
+            "Avatar source video resolution must be between 360p and 1080p.",
+            code="AVATAR_VIDEO_RESOLUTION_INVALID",
+            status_code=422,
+        )
+    container = (probe.container or "").lower()
+    if "mp4" not in container and container not in {"mov,mp4,m4a,3gp,3g2,mj2"}:
+        raise AppError(
+            "Avatar source video must be MP4.",
+            code="AVATAR_VIDEO_UNSUPPORTED_FORMAT",
+            status_code=422,
+        )
+    if (probe.video_codec or "").lower() not in _AVATAR_VIDEO_CODECS:
+        raise AppError(
+            "Avatar source video must use H.264 video.",
+            code="AVATAR_VIDEO_CODEC_INVALID",
+            status_code=422,
+        )
+    if (probe.audio_codec or "").lower() not in _AVATAR_VIDEO_AUDIO_CODECS:
+        raise AppError(
+            "Avatar source video must include AAC audio.",
+            code="AVATAR_VIDEO_AUDIO_CODEC_INVALID",
+            status_code=422,
+        )
+
+
+def _avatar_image_asset_or_404(db: Session, *, tenant_id: str, asset_id: str) -> Asset:
+    avatar = db.get(Asset, asset_id)
+    if (
+        avatar is None
+        or avatar.type != "avatar_image"
+        or avatar.status != "ready"
+        or avatar.deleted_at is not None
+        or avatar.tenant_id not in {tenant_id, None}
+    ):
+        raise AppError("Avatar asset not found.", code="AVATAR_ASSET_NOT_FOUND", status_code=404)
+    return avatar
+
+
+def _avatar_video_asset_or_404(
+    db: Session,
+    *,
+    tenant_id: str,
+    asset_id: str,
+    storage: ObjectStorage,
+) -> Asset:
+    avatar_video = db.get(Asset, asset_id)
+    if (
+        avatar_video is None
+        or avatar_video.tenant_id != tenant_id
+        or avatar_video.type != "video"
+        or avatar_video.status != "ready"
+        or avatar_video.deleted_at is not None
+    ):
+        raise AppError(
+            "Avatar source video not found.",
+            code="AVATAR_VIDEO_ASSET_NOT_FOUND",
+            status_code=404,
+        )
+    if (avatar_video.metadata_ or {}).get("purpose") != "avatar_source":
+        raise AppError(
+            "Avatar source video not found.",
+            code="AVATAR_VIDEO_ASSET_NOT_FOUND",
+            status_code=404,
+        )
+    size_bytes = _avatar_video_size_bytes(avatar_video, storage=storage)
+    if size_bytes is not None and size_bytes > _AVATAR_VIDEO_SOURCE_MAX_BYTES:
+        raise AppError(
+            f"Avatar source video is too large; limit is {_AVATAR_VIDEO_SOURCE_MAX_BYTES} bytes.",
+            code="AVATAR_VIDEO_TOO_LARGE",
+            status_code=413,
+        )
+    _validate_avatar_video_probe(
+        avatar_video,
+        _avatar_video_probe(avatar_video, storage=storage),
+    )
+    return avatar_video
+
+
 def _quota_estimate_for_payload(
     payload: VideoGenerateRequest,
     *,
@@ -193,9 +474,9 @@ def _quota_estimate_for_payload(
                 code="VALIDATION_ERROR",
                 status_code=422,
             )
-        if not payload.avatar_asset_id:
+        if _avatar_source_count(payload) != 1:
             raise AppError(
-                "avatar_talk requires avatar_asset_id.",
+                "avatar_talk requires exactly one of avatar_asset_id or avatar_video_asset_id.",
                 code="VALIDATION_ERROR",
                 status_code=422,
             )
@@ -332,12 +613,13 @@ def _create_avatar_talk_video(
     *,
     user: User,
     db: Session,
+    storage: ObjectStorage,
 ) -> str:
     if not payload.voice_id:
         raise AppError("avatar_talk requires voice_id.", code="VALIDATION_ERROR", status_code=422)
-    if not payload.avatar_asset_id:
+    if _avatar_source_count(payload) != 1:
         raise AppError(
-            "avatar_talk requires avatar_asset_id.",
+            "avatar_talk requires exactly one of avatar_asset_id or avatar_video_asset_id.",
             code="VALIDATION_ERROR",
             status_code=422,
         )
@@ -346,29 +628,44 @@ def _create_avatar_talk_video(
         tenant_id=user.tenant_id,
         voice_id=payload.voice_id,
     )
-    avatar = db.get(Asset, payload.avatar_asset_id)
-    if (
-        avatar is None
-        or avatar.type != "avatar_image"
-        or avatar.status != "ready"
-        or avatar.deleted_at is not None
-        or avatar.tenant_id not in {user.tenant_id, None}
-    ):
-        raise AppError("Avatar asset not found.", code="AVATAR_ASSET_NOT_FOUND", status_code=404)
+    if payload.avatar_video_asset_id:
+        avatar = _avatar_video_asset_or_404(
+            db,
+            tenant_id=user.tenant_id,
+            asset_id=payload.avatar_video_asset_id,
+            storage=storage,
+        )
+        avatar_source_type = "video"
+    else:
+        avatar = _avatar_image_asset_or_404(
+            db,
+            tenant_id=user.tenant_id,
+            asset_id=str(payload.avatar_asset_id),
+        )
+        avatar_source_type = "image"
 
     task_id = str(uuid4())
     script = payload.script
     params = {
-        "avatar_asset_id": payload.avatar_asset_id,
+        "avatar_source_type": avatar_source_type,
         "estimated": True,
         "apply_visible_label": payload.apply_visible_label,
     }
+    if payload.avatar_video_asset_id:
+        params["avatar_video_asset_id"] = payload.avatar_video_asset_id
+        for key in _CHANGE_LIPS_OPTIONAL_FIELDS:
+            value = getattr(payload, key)
+            if value is not None:
+                params[key] = value
+    else:
+        params["avatar_asset_id"] = payload.avatar_asset_id
     if brand_voice is not None:
         params.update(
             {
                 "voice_source": "brand_voice",
                 "brand_voice_id": brand_voice.id,
                 "tts_speaker_id": brand_voice.speaker_id,
+                "brand_voice_provider": brand_voice.provider,
             }
         )
     subtitle_style = _subtitle_style_params(payload)
@@ -764,7 +1061,7 @@ def create_video(
         return ok(request, VideoAccepted(id=task_id, task_id=task_id, status="queued"))
 
     if _is_avatar_talk_requested(payload):
-        task_id = _create_avatar_talk_video(payload, user=user, db=db)
+        task_id = _create_avatar_talk_video(payload, user=user, db=db, storage=storage)
         _prune_after_create(db, tenant_id=user.tenant_id, mode="avatar_talk", storage=storage)
         params = _worker_params(payload)
         params["tenant_id"] = user.tenant_id

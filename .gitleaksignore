@@ -1,0 +1,5 @@
+# False positives from test fixture IDs that contain "task-change-...".
+# Keep this file fingerprint-only: commit:file:rule:line.
+fd385e0e6135cd60d8c15551564cbd470a966596:backend/tests/test_video_pipeline_quota.py:huading-sk-api-key:183
+fd385e0e6135cd60d8c15551564cbd470a966596:backend/tests/test_video_pipeline_quota.py:huading-sk-api-key:195
+fd385e0e6135cd60d8c15551564cbd470a966596:backend/tests/test_video_pipeline_quota.py:huading-sk-api-key:212

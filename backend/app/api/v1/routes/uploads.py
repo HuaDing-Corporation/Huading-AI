@@ -11,6 +11,11 @@ from app.api.deps import (
     require_permission,
     tenant_storage_key,
 )
+from app.api.v1.routes.videos import (
+    _AVATAR_VIDEO_SOURCE_MAX_BYTES,
+    _probe_avatar_video_bytes,
+    _validate_avatar_video_probe,
+)
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.utils import base_mime
@@ -39,11 +44,14 @@ _ALLOWED_AUDIO_TYPES: dict[str, str] = {
     "audio/x-m4a": ".m4a",
     "audio/x-wav": ".wav",
 }
+_ALLOWED_AVATAR_VIDEO_TYPES: dict[str, str] = {
+    "video/mp4": ".mp4",
+}
 _MAX_BYTES = settings.upload_max_bytes
 _UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
 
 
-async def _read_limited_upload(file: UploadFile) -> bytes:
+async def _read_limited_upload(file: UploadFile, *, max_bytes: int = _MAX_BYTES) -> bytes:
     chunks: list[bytes] = []
     total = 0
     while True:
@@ -51,9 +59,9 @@ async def _read_limited_upload(file: UploadFile) -> bytes:
         if not chunk:
             break
         total += len(chunk)
-        if total > _MAX_BYTES:
+        if total > max_bytes:
             raise AppError(
-                f"File too large ({total} bytes); limit is {_MAX_BYTES} bytes.",
+                f"File too large ({total} bytes); limit is {max_bytes} bytes.",
                 code="UPLOAD_TOO_LARGE",
                 status_code=413,
             )
@@ -183,6 +191,75 @@ async def upload_avatar_image(
         request,
         UploadImageResponse(asset_id=asset.id, type=asset.type, status=asset.status),
     )
+
+
+@router.post(
+    "/videos",
+    response_model=ApiResponse[UploadImageResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_avatar_video(
+    request: Request,
+    file: UploadFile,
+    user: User = UploadPermissionDependency,
+    db: Session = DbSessionDependency,
+    storage: ObjectStorage = ObjectStorageDependency,
+) -> ApiResponse[UploadImageResponse]:
+    content_type = base_mime(file.content_type)
+    extension = _ALLOWED_AVATAR_VIDEO_TYPES.get(content_type)
+    if extension is None:
+        raise AppError(
+            f"Unsupported avatar video type {content_type or 'unknown'!r}; "
+            f"allowed: {', '.join(sorted(_ALLOWED_AVATAR_VIDEO_TYPES))}.",
+            code="UNSUPPORTED_MEDIA_TYPE",
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        )
+
+    content = await _read_limited_upload(file, max_bytes=_AVATAR_VIDEO_SOURCE_MAX_BYTES)
+    if not content:
+        raise AppError("Uploaded file is empty.", code="EMPTY_UPLOAD", status_code=400)
+
+    probe = _probe_avatar_video_bytes(content, suffix=extension)
+    metadata = {
+        "purpose": "avatar_source",
+        "container": probe.container,
+        "video_codec": probe.video_codec,
+        "audio_codec": probe.audio_codec,
+    }
+    candidate = Asset(
+        tenant_id=user.tenant_id,
+        type="video",
+        source="upload",
+        storage_key="",
+        mime_type=content_type,
+        size_bytes=len(content),
+        duration_ms=probe.duration_ms,
+        width=probe.width,
+        height=probe.height,
+        status="ready",
+        metadata_=metadata,
+    )
+    _validate_avatar_video_probe(candidate, probe)
+
+    storage_key = tenant_storage_key(user.tenant_id, f"uploads/{uuid.uuid4().hex}{extension}")
+    storage.put_bytes(storage_key, content, content_type=content_type)
+    asset = Asset(
+        tenant_id=user.tenant_id,
+        type="video",
+        source="upload",
+        storage_key=storage_key,
+        mime_type=content_type,
+        size_bytes=len(content),
+        duration_ms=probe.duration_ms,
+        width=probe.width,
+        height=probe.height,
+        status="ready",
+        metadata_=metadata,
+    )
+    db.add(asset)
+    db.commit()
+    db.refresh(asset)
+    return ok(request, UploadImageResponse(asset_id=asset.id, type=asset.type, status=asset.status))
 
 
 def _probe_audio_duration_ms(content: bytes, *, extension: str) -> int | None:

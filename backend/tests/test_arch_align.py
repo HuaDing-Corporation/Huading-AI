@@ -167,6 +167,69 @@ def test_provider_resolve_prefers_tenant_config_and_falls_back_to_platform() -> 
         Base.metadata.drop_all(engine)
 
 
+def test_provider_resolve_named_provider_and_voice_clone_default() -> None:
+    from app.providers.base import (
+        clear_provider_registry,
+        register_provider,
+        resolve,
+        resolve_named_provider,
+    )
+
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    SessionTesting = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+    class FakeProvider:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    clear_provider_registry()
+    register_provider("voice_clone", "doubao-voice-clone", lambda _config: FakeProvider("doubao"))
+    register_provider(
+        "voice_clone",
+        "cosyvoice-voice-clone",
+        lambda _config: FakeProvider("cosyvoice"),
+    )
+
+    try:
+        with SessionTesting() as db:
+            db.add_all(
+                [
+                    ProviderConfig(
+                        tenant_id=None,
+                        capability="voice_clone",
+                        provider="doubao-voice-clone",
+                        config={},
+                    ),
+                    ProviderConfig(
+                        tenant_id=None,
+                        capability="voice_clone",
+                        provider="cosyvoice-voice-clone",
+                        config={},
+                    ),
+                ]
+            )
+            db.commit()
+
+            assert resolve(db, tenant_id="tenant-a", capability="voice_clone").name == "doubao"
+            assert (
+                resolve_named_provider(
+                    db,
+                    tenant_id="tenant-a",
+                    capability="voice_clone",
+                    provider="cosyvoice-voice-clone",
+                ).name
+                == "cosyvoice"
+            )
+    finally:
+        clear_provider_registry()
+        Base.metadata.drop_all(engine)
+
+
 @pytest.mark.asyncio
 async def test_provider_invoke_records_usage() -> None:
     from app.providers.base import ProviderUsage, invoke

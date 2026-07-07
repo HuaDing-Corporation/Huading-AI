@@ -2439,6 +2439,404 @@ def test_avatar_step_publishes_progress_heartbeat_during_provider_polling():
     Base.metadata.drop_all(engine)
 
 
+def test_avatar_step_routes_video_source_to_change_lips_and_crops_to_tts(
+    monkeypatch,
+):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-avatar-video-source"
+    unit_id = "avatar-video-source-job"
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="avatar-video-source", name="Avatar Video Source"))
+        source_video = Asset(
+            id="avatar-source-video",
+            tenant_id=tenant_id,
+            type="video",
+            source="upload",
+            storage_key=f"tenants/{tenant_id}/uploads/avatar-source.mp4",
+            mime_type="video/mp4",
+            size_bytes=8_000_000,
+            duration_ms=9_500,
+            width=960,
+            height=960,
+            status="ready",
+            metadata_={"purpose": "avatar_source", "video_codec": "h264", "audio_codec": "aac"},
+        )
+        db.add(source_video)
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="avatar video source",
+                script="avatar video source script",
+                params={"avatar_video_asset_id": source_video.id},
+            )
+        )
+        db.add(TaskAsset(video_task_id=unit_id, asset_id=source_video.id, role="input_avatar"))
+        db.commit()
+
+        captured_payloads: list[dict] = []
+
+        class _AvatarProvider:
+            async def generate_avatar(self, _payload: dict):
+                raise AssertionError("video avatar source must not use image avatar generation")
+
+            async def generate_change_lips(self, payload: dict):
+                captured_payloads.append(dict(payload))
+                payload["progress_callback"]({"poll_count": 1, "status": "processing"})
+                return {
+                    "video_url": "https://visual.example/change-lips.mp4",
+                    "tier": "lite",
+                }
+
+        def fake_fit(video_bytes: bytes, *, tts_duration_sec: float, work_dir: Path) -> bytes:
+            assert video_bytes == b"LONG-MP4"
+            assert tts_duration_sec == 8.0
+            assert work_dir.name == unit_id
+            return b"CROPPED-MP4"
+
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _AvatarProvider(),
+        )
+        monkeypatch.setattr(avatar_talk, "_download_bytes", lambda _url: b"LONG-MP4")
+        monkeypatch.setattr(avatar_talk, "_fit_change_lips_video_to_tts", fake_fit)
+        monkeypatch.setattr(
+            avatar_talk.settings,
+            "engine_omnihuman_change_lips_default_tier",
+            "lite",
+            raising=False,
+        )
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=storage,
+            duration_sec=8.0,
+        )
+        ctx.audio_key = f"tenants/{tenant_id}/videos/{unit_id}/audio.mp3"
+
+        avatar_talk.avatar_step(ctx)
+
+        assert ctx.base_video_bytes == b"CROPPED-MP4"
+        assert ctx.provider_model == "realman_change_lips"
+        assert ctx.change_lips_tier == "lite"
+        assert captured_payloads[0]["video_url"].startswith(
+            f"https://storage.test/tenants/{tenant_id}/uploads/avatar-source.mp4"
+        )
+        assert captured_payloads[0]["audio_url"].startswith(
+            f"https://storage.test/tenants/{tenant_id}/videos/{unit_id}/audio.mp3"
+        )
+
+    Base.metadata.drop_all(engine)
+
+
+def test_avatar_step_retries_basic_when_lite_output_is_too_short(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-avatar-video-source-retry"
+    unit_id = "avatar-video-source-retry-job"
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="avatar-video-source-retry", name="Avatar Retry"))
+        source_video = Asset(
+            id="avatar-source-video-retry",
+            tenant_id=tenant_id,
+            type="video",
+            source="upload",
+            storage_key=f"tenants/{tenant_id}/uploads/avatar-source.mp4",
+            mime_type="video/mp4",
+            size_bytes=8_000_000,
+            duration_ms=9_500,
+            width=960,
+            height=960,
+            status="ready",
+            metadata_={"purpose": "avatar_source", "video_codec": "h264", "audio_codec": "aac"},
+        )
+        db.add(source_video)
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="avatar video source",
+                script="avatar video source script",
+                params={"avatar_video_asset_id": source_video.id},
+            )
+        )
+        db.add(TaskAsset(video_task_id=unit_id, asset_id=source_video.id, role="input_avatar"))
+        db.commit()
+
+        captured_tiers: list[str] = []
+
+        class _AvatarProvider:
+            async def generate_change_lips(self, payload: dict):
+                captured_tiers.append(str(payload["tier"]))
+                return {"video_url": f"https://visual.example/{payload['tier']}.mp4"}
+
+            async def generate_avatar(self, _payload: dict):
+                raise AssertionError("video avatar source must not use image avatar generation")
+
+        fit_calls = 0
+
+        def fake_fit(video_bytes: bytes, *, tts_duration_sec: float, work_dir: Path) -> bytes:
+            nonlocal fit_calls
+            fit_calls += 1
+            if fit_calls == 1:
+                raise avatar_talk.ChangeLipsOutputTooShort("too short")
+            return b"BASIC-MP4"
+
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _AvatarProvider(),
+        )
+        monkeypatch.setattr(avatar_talk, "_download_bytes", lambda _url: b"MP4")
+        monkeypatch.setattr(avatar_talk, "_fit_change_lips_video_to_tts", fake_fit)
+        monkeypatch.setattr(
+            avatar_talk.settings,
+            "engine_omnihuman_change_lips_default_tier",
+            "lite",
+            raising=False,
+        )
+        monkeypatch.setattr(
+            avatar_talk.settings,
+            "engine_omnihuman_change_lips_basic_retry_on_short_output",
+            True,
+            raising=False,
+        )
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=storage,
+            duration_sec=8.0,
+        )
+        ctx.audio_key = f"tenants/{tenant_id}/videos/{unit_id}/audio.mp3"
+
+        avatar_talk.avatar_step(ctx)
+
+        assert captured_tiers == ["lite", "basic"]
+        assert ctx.base_video_bytes == b"BASIC-MP4"
+        assert ctx.change_lips_tier == "basic"
+
+    Base.metadata.drop_all(engine)
+
+
+def test_avatar_step_revalidates_basic_limit_before_retry(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-avatar-video-source-basic-limit"
+    unit_id = "avatar-video-source-basic-limit-job"
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(
+            Tenant(
+                id=tenant_id,
+                slug="avatar-video-source-basic-limit",
+                name="Avatar Basic Limit",
+            )
+        )
+        source_video = Asset(
+            id="avatar-source-video-basic-limit",
+            tenant_id=tenant_id,
+            type="video",
+            source="upload",
+            storage_key=f"tenants/{tenant_id}/uploads/avatar-source.mp4",
+            mime_type="video/mp4",
+            size_bytes=8_000_000,
+            duration_ms=9_500,
+            width=960,
+            height=960,
+            status="ready",
+            metadata_={"purpose": "avatar_source", "video_codec": "h264", "audio_codec": "aac"},
+        )
+        db.add(source_video)
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="avatar video source",
+                script="avatar video source script",
+                params={"avatar_video_asset_id": source_video.id},
+            )
+        )
+        db.add(TaskAsset(video_task_id=unit_id, asset_id=source_video.id, role="input_avatar"))
+        db.commit()
+
+        captured_tiers: list[str] = []
+
+        class _AvatarProvider:
+            async def generate_change_lips(self, payload: dict):
+                captured_tiers.append(str(payload["tier"]))
+                return {"video_url": f"https://visual.example/{payload['tier']}.mp4"}
+
+            async def generate_avatar(self, _payload: dict):
+                raise AssertionError("video avatar source must not use image avatar generation")
+
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _AvatarProvider(),
+        )
+        monkeypatch.setattr(avatar_talk, "_download_bytes", lambda _url: b"MP4")
+
+        def fail_fit(*_args, **_kwargs):
+            raise avatar_talk.ChangeLipsOutputTooShort("too short")
+
+        monkeypatch.setattr(
+            avatar_talk,
+            "_fit_change_lips_video_to_tts",
+            fail_fit,
+        )
+        monkeypatch.setattr(
+            avatar_talk.settings,
+            "engine_omnihuman_change_lips_default_tier",
+            "lite",
+            raising=False,
+        )
+        monkeypatch.setattr(
+            avatar_talk.settings,
+            "engine_omnihuman_change_lips_basic_retry_on_short_output",
+            True,
+            raising=False,
+        )
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=storage,
+            duration_sec=151.0,
+        )
+        ctx.audio_key = f"tenants/{tenant_id}/videos/{unit_id}/audio.mp3"
+
+        with pytest.raises(RuntimeError, match="basic 档位最长支持 150 秒"):
+            avatar_talk.avatar_step(ctx)
+
+        assert captured_tiers == ["lite"]
+
+    Base.metadata.drop_all(engine)
+
+
+def test_avatar_step_rejects_too_long_tts_before_change_lips_call(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-avatar-video-source-limit"
+    unit_id = "avatar-video-source-limit-job"
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(
+            Tenant(
+                id=tenant_id,
+                slug="avatar-video-source-limit",
+                name="Avatar Video Source Limit",
+            )
+        )
+        source_video = Asset(
+            id="avatar-source-video-limit",
+            tenant_id=tenant_id,
+            type="video",
+            source="upload",
+            storage_key=f"tenants/{tenant_id}/uploads/avatar-source.mp4",
+            mime_type="video/mp4",
+            size_bytes=8_000_000,
+            duration_ms=9_500,
+            width=960,
+            height=960,
+            status="ready",
+            metadata_={"purpose": "avatar_source", "video_codec": "h264", "audio_codec": "aac"},
+        )
+        db.add(source_video)
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="avatar video source",
+                script="x" * 1000,
+                params={"avatar_video_asset_id": source_video.id},
+            )
+        )
+        db.add(TaskAsset(video_task_id=unit_id, asset_id=source_video.id, role="input_avatar"))
+        db.commit()
+
+        class _AvatarProvider:
+            async def generate_change_lips(self, _payload: dict):
+                raise AssertionError("duration guard must run before provider call")
+
+            async def generate_avatar(self, _payload: dict):
+                raise AssertionError("video avatar source must not use image avatar generation")
+
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _AvatarProvider(),
+        )
+        monkeypatch.setattr(
+            avatar_talk.settings,
+            "engine_omnihuman_change_lips_default_tier",
+            "lite",
+            raising=False,
+        )
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=storage,
+            duration_sec=241.0,
+        )
+        ctx.audio_key = f"tenants/{tenant_id}/videos/{unit_id}/audio.mp3"
+
+        with pytest.raises(RuntimeError, match="口播文案过长"):
+            avatar_talk.avatar_step(ctx)
+
+    Base.metadata.drop_all(engine)
+
+
+def test_fit_change_lips_video_to_tts_crops_long_output_and_rejects_short(
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.setattr(avatar_talk, "_video_duration_sec", lambda _path: 12.0)
+
+    def fake_trim(source: Path, *, duration_sec: float, output: Path) -> bytes:
+        assert source.name == "change_lips_result.mp4"
+        assert duration_sec == 8.0
+        assert output.name == "change_lips_result.trimmed.mp4"
+        return b"TRIMMED"
+
+    monkeypatch.setattr(avatar_talk, "_trim_video_bytes", fake_trim)
+
+    assert (
+        avatar_talk._fit_change_lips_video_to_tts(
+            b"LONG",
+            tts_duration_sec=8.0,
+            work_dir=tmp_path,
+        )
+        == b"TRIMMED"
+    )
+
+    monkeypatch.setattr(avatar_talk, "_video_duration_sec", lambda _path: 7.8)
+    with pytest.raises(RuntimeError, match="短于口播音频"):
+        avatar_talk._fit_change_lips_video_to_tts(
+            b"SHORT",
+            tts_duration_sec=8.0,
+            work_dir=tmp_path,
+        )
+
+
 def test_tts_step_uses_audio_file_duration_when_timeline_is_empty(monkeypatch, tmp_path: Path):
     SessionTesting, engine = _session()
     tenant_id = "tenant-audio-duration"

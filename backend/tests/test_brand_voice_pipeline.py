@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -11,6 +12,7 @@ from app.db.models import (
     Asset,
     BrandVoice,
     CreditRate,
+    ProviderConfig,
     Subscription,
     Tenant,
     UsageRecord,
@@ -22,16 +24,17 @@ from app.workers import avatar_talk
 
 
 class _CloneProvider:
-    def __init__(self) -> None:
+    def __init__(self, provider_name: str = "doubao-voice-clone") -> None:
+        self.provider_name = provider_name
         self.clone_calls: list[dict[str, Any]] = []
         self.delete_calls: list[dict[str, Any]] = []
 
     async def clone_voice(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.clone_calls.append(dict(payload))
         return {
-            "speaker_id": "brand-speaker-001",
+            "speaker_id": str(payload.get("speaker_id") or "brand-speaker-001"),
             "status": "ready",
-            "provider": "doubao-voice-clone",
+            "provider": self.provider_name,
         }
 
     async def delete_voice(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -108,9 +111,14 @@ def _active_subscription(db, tenant_id: str) -> Subscription:
     return subscription
 
 
-def _seed_brand_voice_billing(db, tenant_id: str) -> str:
+def _seed_brand_voice_billing(
+    db,
+    tenant_id: str,
+    *,
+    speaker_ids: tuple[str, ...] = ("S_brand_slot_001",),
+) -> str:
     subscription = _active_subscription(db, tenant_id)
-    subscription.quota_credits_total = 10000
+    subscription.quota_credits_total = 100000
     subscription.quota_credits_used = 0
     subscription.quota_credits_reserved = 0
     db.add_all(
@@ -119,7 +127,7 @@ def _seed_brand_voice_billing(db, tenant_id: str) -> str:
                 tenant_id=None,
                 capability="voice_clone",
                 unit="call",
-                credits_per_unit=Decimal("30.0000"),
+                credits_per_unit=Decimal("30000.0000"),
             ),
             CreditRate(
                 tenant_id=None,
@@ -132,6 +140,13 @@ def _seed_brand_voice_billing(db, tenant_id: str) -> str:
                 capability="tts",
                 unit="character",
                 credits_per_unit=Decimal("0.1000"),
+            ),
+            ProviderConfig(
+                tenant_id=None,
+                capability="voice_clone",
+                provider="doubao-voice-clone",
+                config={"speaker_ids": list(speaker_ids)},
+                is_active=True,
             ),
         ]
     )
@@ -175,9 +190,10 @@ def test_create_brand_voice_requires_confirmed_consent(auth_context, auth_db, mo
     provider = _CloneProvider()
     monkeypatch.setattr(
         brand_voice_routes,
-        "resolve",
-        lambda _db, *, tenant_id, capability: provider,
+        "resolve_named_provider",
+        lambda _db, *, tenant_id, capability, provider: provider_obj,
     )
+    provider_obj = provider
     with auth_db() as db:
         asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
 
@@ -206,14 +222,16 @@ def test_create_brand_voice_clones_and_charges_once(auth_context, auth_db, monke
     provider = _CloneProvider()
     monkeypatch.setattr(
         brand_voice_routes,
-        "resolve",
-        lambda _db, *, tenant_id, capability: provider,
+        "resolve_named_provider",
+        lambda _db, *, tenant_id, capability, provider: provider_obj,
     )
+    provider_obj = provider
     with auth_db() as db:
         subscription_id = _seed_brand_voice_billing(db, auth_context["tenant_id"])
         asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
 
     storage = _Storage()
+    storage.objects[f"tenants/{auth_context['tenant_id']}/uploads/brand-voice.wav"] = b"WAVDATA"
     app.dependency_overrides[get_object_storage] = lambda: storage
     client = TestClient(app)
     try:
@@ -233,20 +251,20 @@ def test_create_brand_voice_clones_and_charges_once(auth_context, auth_db, monke
     data = resp.json()["data"]
     assert data["status"] == "ready"
     assert data["name"] == "Store Voice"
+    assert data["provider"] == "doubao-voice-clone"
     assert provider.clone_calls == [
         {
             "tenant_id": auth_context["tenant_id"],
             "brand_voice_id": data["id"],
             "name": "Store Voice",
+            "speaker_id": "S_brand_slot_001",
             "source_audio_asset_id": asset_id,
             "source_audio_storage_key": (
                 f"tenants/{auth_context['tenant_id']}/uploads/brand-voice.wav"
             ),
-            "source_audio_url": (
-                f"https://storage.test/tenants/{auth_context['tenant_id']}/"
-                "uploads/brand-voice.wav"
-            ),
+            "source_audio_bytes": b"WAVDATA",
             "source_audio_mime_type": "audio/wav",
+            "voice_clone_provider": "doubao-voice-clone",
         }
     ]
 
@@ -255,14 +273,15 @@ def test_create_brand_voice_clones_and_charges_once(auth_context, auth_db, monke
         assert brand_voice is not None
         assert brand_voice.tenant_id == auth_context["tenant_id"]
         assert brand_voice.source_audio_asset_id == asset_id
-        assert brand_voice.speaker_id == "brand-speaker-001"
+        assert brand_voice.speaker_id == "S_brand_slot_001"
+        assert brand_voice.provider == "doubao-voice-clone"
         assert brand_voice.status == "ready"
         assert brand_voice.consent_confirmed is True
         assert brand_voice.consent_confirmed_at is not None
 
         subscription = db.get(Subscription, subscription_id)
         assert subscription.quota_credits_reserved == 0
-        assert subscription.quota_credits_used == 30
+        assert subscription.quota_credits_used == 30000
 
         usage = db.scalar(select(UsageRecord).where(UsageRecord.capability == "voice_clone"))
         assert usage is not None
@@ -270,8 +289,85 @@ def test_create_brand_voice_clones_and_charges_once(auth_context, auth_db, monke
         assert usage.provider == "doubao-voice-clone"
         assert usage.unit == "call"
         assert usage.quantity == Decimal("1.000")
-        assert usage.credits == Decimal("30.00")
+        assert usage.credits == Decimal("30000.00")
         assert usage.status == "settled"
+        config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
+        assert config.config["used_speaker_ids"] == {"S_brand_slot_001": data["id"]}
+
+
+def test_create_brand_voice_routes_cosyvoice_provider(auth_context, auth_db, monkeypatch):
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+
+    calls: list[tuple[str, str]] = []
+    provider = _CloneProvider("cosyvoice-voice-clone")
+
+    def fake_resolve_named(_db, *, tenant_id: str, capability: str, provider: str):
+        calls.append((capability, provider))
+        return provider_obj
+
+    provider_obj = provider
+    monkeypatch.setattr(brand_voice_routes, "resolve_named_provider", fake_resolve_named)
+    with auth_db() as db:
+        subscription_id = _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
+
+    storage = _Storage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    client = TestClient(app)
+    try:
+        resp = client.post(
+            "/api/v1/brand-voices",
+            json={
+                "name": "中文音色",
+                "source_audio_asset_id": asset_id,
+                "consent_confirmed": True,
+                "provider": "cosyvoice",
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 201
+    data = resp.json()["data"]
+    assert data["provider"] == "cosyvoice-voice-clone"
+    assert calls == [("voice_clone", "cosyvoice-voice-clone")]
+    assert "speaker_id" not in provider.clone_calls[0]
+    assert provider.clone_calls[0]["source_audio_url"] == (
+        f"https://storage.test/tenants/{auth_context['tenant_id']}/uploads/brand-voice.wav"
+    )
+    assert provider.clone_calls[0]["name"] == "中文音色"
+
+    with auth_db() as db:
+        brand_voice = db.get(BrandVoice, data["id"])
+        assert brand_voice.provider == "cosyvoice-voice-clone"
+        config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
+        assert config.config.get("used_speaker_ids", {}) == {}
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_used == 0
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.capability == "voice_clone"))
+        assert usage.provider == "cosyvoice-voice-clone"
+        assert usage.credits == Decimal("0.00")
+
+
+def test_create_brand_voice_rejects_unknown_provider(auth_context, auth_db):
+    with auth_db() as db:
+        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/brand-voices",
+        json={
+            "name": "Store Voice",
+            "source_audio_asset_id": asset_id,
+            "consent_confirmed": True,
+            "provider": "unknown",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 422
 
 
 def test_create_brand_voice_logs_clone_http_error_details(
@@ -285,14 +381,15 @@ def test_create_brand_voice_logs_clone_http_error_details(
     monkeypatch.setattr(brand_voice_routes, "logger", logger)
     monkeypatch.setattr(
         brand_voice_routes,
-        "resolve",
-        lambda _db, *, tenant_id, capability: _CloneFailureProvider(),
+        "resolve_named_provider",
+        lambda _db, *, tenant_id, capability, provider: _CloneFailureProvider(),
     )
     with auth_db() as db:
         _seed_brand_voice_billing(db, auth_context["tenant_id"])
         asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
 
     storage = _Storage()
+    storage.objects[f"tenants/{auth_context['tenant_id']}/uploads/brand-voice.wav"] = b"WAVDATA"
     app.dependency_overrides[get_object_storage] = lambda: storage
     client = TestClient(app)
     try:
@@ -322,6 +419,273 @@ def test_create_brand_voice_logs_clone_http_error_details(
     assert details["http_response_text"] == (
         '{"code":"InvalidAudio","message":"audio duration too short"}'
     )
+    with auth_db() as db:
+        config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
+        assert config.config.get("used_speaker_ids", {}) == {}
+
+
+def test_create_brand_voice_returns_friendly_error_when_speaker_slots_exhausted(
+    auth_context,
+    auth_db,
+    monkeypatch,
+):
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+
+    provider = _CloneProvider()
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "resolve_named_provider",
+        lambda _db, *, tenant_id, capability, provider: provider_obj,
+    )
+    provider_obj = provider
+    with auth_db() as db:
+        _seed_brand_voice_billing(db, auth_context["tenant_id"], speaker_ids=())
+        asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/brand-voices",
+        json={
+            "name": "Store Voice",
+            "source_audio_asset_id": asset_id,
+            "consent_confirmed": True,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "VOICE_CLONE_SLOT_UNAVAILABLE"
+    assert provider.clone_calls == []
+    with auth_db() as db:
+        assert db.scalar(select(UsageRecord).where(UsageRecord.capability == "voice_clone")) is None
+
+
+def test_create_brand_voice_uses_env_speaker_slots_when_config_pool_missing(
+    auth_context,
+    auth_db,
+    monkeypatch,
+):
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+
+    provider = _CloneProvider()
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "settings",
+        SimpleNamespace(engine_doubao_voice_clone_speaker_ids=["S_env_slot_001"]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "resolve_named_provider",
+        lambda _db, *, tenant_id, capability, provider: provider_obj,
+    )
+    provider_obj = provider
+    with auth_db() as db:
+        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
+        config.config = {}
+        asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
+
+    storage = _Storage()
+    storage.objects[f"tenants/{auth_context['tenant_id']}/uploads/brand-voice.wav"] = b"WAVDATA"
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    client = TestClient(app)
+    try:
+        resp = client.post(
+            "/api/v1/brand-voices",
+            json={
+                "name": "Store Voice",
+                "source_audio_asset_id": asset_id,
+                "consent_confirmed": True,
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 201
+    data = resp.json()["data"]
+    assert provider.clone_calls[0]["speaker_id"] == "S_env_slot_001"
+    with auth_db() as db:
+        config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
+        assert "speaker_ids" not in config.config
+        assert config.config["used_speaker_ids"] == {"S_env_slot_001": data["id"]}
+
+
+def test_create_brand_voice_prefers_db_speaker_slots_over_env(
+    auth_context,
+    auth_db,
+    monkeypatch,
+):
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+
+    provider = _CloneProvider()
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "settings",
+        SimpleNamespace(engine_doubao_voice_clone_speaker_ids=["S_env_slot_001"]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "resolve_named_provider",
+        lambda _db, *, tenant_id, capability, provider: provider_obj,
+    )
+    provider_obj = provider
+    with auth_db() as db:
+        _seed_brand_voice_billing(
+            db,
+            auth_context["tenant_id"],
+            speaker_ids=("S_db_slot_001",),
+        )
+        asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
+
+    storage = _Storage()
+    storage.objects[f"tenants/{auth_context['tenant_id']}/uploads/brand-voice.wav"] = b"WAVDATA"
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    client = TestClient(app)
+    try:
+        resp = client.post(
+            "/api/v1/brand-voices",
+            json={
+                "name": "Store Voice",
+                "source_audio_asset_id": asset_id,
+                "consent_confirmed": True,
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 201
+    data = resp.json()["data"]
+    assert provider.clone_calls[0]["speaker_id"] == "S_db_slot_001"
+    with auth_db() as db:
+        config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
+        assert config.config["speaker_ids"] == ["S_db_slot_001"]
+        assert config.config["used_speaker_ids"] == {"S_db_slot_001": data["id"]}
+
+
+def test_delete_brand_voice_releases_env_fallback_speaker_slot(
+    auth_context,
+    auth_db,
+    monkeypatch,
+):
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+
+    provider = _CloneProvider()
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "settings",
+        SimpleNamespace(engine_doubao_voice_clone_speaker_ids=["S_env_slot_001"]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "resolve_named_provider",
+        lambda _db, *, tenant_id, capability, provider: provider_obj,
+    )
+    provider_obj = provider
+    with auth_db() as db:
+        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
+        config.config = {}
+        asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
+
+    storage = _Storage()
+    storage.objects[f"tenants/{auth_context['tenant_id']}/uploads/brand-voice.wav"] = b"WAVDATA"
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    client = TestClient(app)
+    try:
+        create_resp = client.post(
+            "/api/v1/brand-voices",
+            json={
+                "name": "Store Voice",
+                "source_audio_asset_id": asset_id,
+                "consent_confirmed": True,
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert create_resp.status_code == 201
+    brand_voice_id = create_resp.json()["data"]["id"]
+    delete_resp = client.delete(
+        f"/api/v1/brand-voices/{brand_voice_id}",
+        headers=auth_context["headers"],
+    )
+
+    assert delete_resp.status_code == 200
+    assert provider.delete_calls == [
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "brand_voice_id": brand_voice_id,
+            "speaker_id": "S_env_slot_001",
+            "voice_clone_provider": "doubao-voice-clone",
+        }
+    ]
+    with auth_db() as db:
+        config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
+        assert "speaker_ids" not in config.config
+        assert config.config["used_speaker_ids"] == {}
+
+
+def test_voice_clone_slot_allocation_locks_provider_config_row():
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+
+    statements = []
+
+    class _FakeDb:
+        def scalar(self, statement):
+            statements.append(statement)
+            return ProviderConfig(
+                tenant_id=None,
+                capability="voice_clone",
+                provider="doubao-voice-clone",
+                config={"speaker_ids": ["S_locked_slot_001"]},
+                is_active=True,
+            )
+
+    speaker_id = brand_voice_routes._allocate_voice_clone_speaker_id(
+        _FakeDb(),
+        tenant_id="tenant-lock",
+        brand_voice_id="brand-lock",
+    )
+
+    assert speaker_id == "S_locked_slot_001"
+    assert statements[0]._for_update_arg is not None
+
+
+def test_release_voice_clone_speaker_id_keeps_slot_owned_by_other_voice(auth_context, auth_db):
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+
+    with auth_db() as db:
+        db.add(
+            ProviderConfig(
+                tenant_id=None,
+                capability="voice_clone",
+                provider="doubao-voice-clone",
+                config={
+                    "speaker_ids": ["S_shared_slot_001"],
+                    "used_speaker_ids": {"S_shared_slot_001": "brand-owner"},
+                },
+                is_active=True,
+            )
+        )
+        db.commit()
+
+        brand_voice_routes._release_voice_clone_speaker_id(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            speaker_id="S_shared_slot_001",
+            brand_voice_id="brand-stale",
+        )
+        db.commit()
+
+    with auth_db() as db:
+        config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
+        assert config.config["used_speaker_ids"] == {"S_shared_slot_001": "brand-owner"}
 
 
 def test_clone_http_error_details_truncates_long_response_text():
@@ -346,9 +710,10 @@ def test_create_brand_voice_rejects_cross_tenant_source_audio(auth_context, auth
     provider = _CloneProvider()
     monkeypatch.setattr(
         brand_voice_routes,
-        "resolve",
-        lambda _db, *, tenant_id, capability: provider,
+        "resolve_named_provider",
+        lambda _db, *, tenant_id, capability, provider: provider_obj,
     )
+    provider_obj = provider
     other_tenant_id = "other-source-audio-tenant"
     with auth_db() as db:
         _seed_brand_voice_billing(db, auth_context["tenant_id"])
@@ -384,9 +749,10 @@ def test_brand_voice_list_and_delete_are_tenant_scoped_404(
     provider = _CloneProvider()
     monkeypatch.setattr(
         brand_voice_routes,
-        "resolve",
-        lambda _db, *, tenant_id, capability: provider,
+        "resolve_named_provider",
+        lambda _db, *, tenant_id, capability, provider: provider_obj,
     )
+    provider_obj = provider
     other_tenant_id = "other-brand-tenant"
     with auth_db() as db:
         db.add(Tenant(id=other_tenant_id, slug="other-brand", name="Other Brand"))
@@ -410,10 +776,31 @@ def test_brand_voice_list_and_delete_are_tenant_scoped_404(
             consent_confirmed=True,
             consent_confirmed_at=datetime.now(UTC),
         )
-        db.add_all([own, other])
+        db.add_all(
+            [
+                own,
+                other,
+                ProviderConfig(
+                    tenant_id=None,
+                    capability="voice_clone",
+                    provider="doubao-voice-clone",
+                    config={
+                        "speaker_ids": ["own-speaker"],
+                        "used_speaker_ids": {"own-speaker": "pending"},
+                    },
+                    is_active=True,
+                ),
+            ]
+        )
         db.commit()
         own_id = own.id
         other_id = other.id
+        config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
+        config.config = {
+            "speaker_ids": ["own-speaker"],
+            "used_speaker_ids": {"own-speaker": own_id},
+        }
+        db.commit()
 
     client = TestClient(app)
     list_resp = client.get("/api/v1/brand-voices", headers=auth_context["headers"])
@@ -437,11 +824,58 @@ def test_brand_voice_list_and_delete_are_tenant_scoped_404(
             "tenant_id": auth_context["tenant_id"],
             "brand_voice_id": own_id,
             "speaker_id": "own-speaker",
+            "voice_clone_provider": "doubao-voice-clone",
         }
     ]
     with auth_db() as db:
         assert db.get(BrandVoice, own_id).deleted_at is not None
         assert db.get(BrandVoice, other_id).deleted_at is None
+        config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
+        assert config.config["used_speaker_ids"] == {}
+
+
+def test_delete_brand_voice_uses_stored_provider(auth_context, auth_db, monkeypatch):
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+
+    calls: list[tuple[str, str]] = []
+    provider = _CloneProvider("cosyvoice-voice-clone")
+
+    def fake_resolve_named(_db, *, tenant_id: str, capability: str, provider: str):
+        calls.append((capability, provider))
+        return provider_obj
+
+    provider_obj = provider
+    monkeypatch.setattr(brand_voice_routes, "resolve_named_provider", fake_resolve_named)
+    with auth_db() as db:
+        brand_voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            name="Cosy Voice",
+            provider="cosyvoice-voice-clone",
+            speaker_id="cosy-speaker",
+            status="ready",
+            consent_confirmed=True,
+            consent_confirmed_at=datetime.now(UTC),
+        )
+        db.add(brand_voice)
+        db.commit()
+        brand_voice_id = brand_voice.id
+
+    client = TestClient(app)
+    resp = client.delete(
+        f"/api/v1/brand-voices/{brand_voice_id}",
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 200
+    assert calls == [("voice_clone", "cosyvoice-voice-clone")]
+    assert provider.delete_calls == [
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "brand_voice_id": brand_voice_id,
+            "speaker_id": "cosy-speaker",
+            "voice_clone_provider": "cosyvoice-voice-clone",
+        }
+    ]
 
 
 def test_brand_voice_get_and_patch_are_tenant_scoped(auth_context, auth_db):
@@ -476,6 +910,7 @@ def test_brand_voice_get_and_patch_are_tenant_scoped(auth_context, auth_db):
     get_resp = client.get(f"/api/v1/brand-voices/{own_id}", headers=auth_context["headers"])
     assert get_resp.status_code == 200
     assert get_resp.json()["data"]["name"] == "Own Voice"
+    assert get_resp.json()["data"]["provider"] == "doubao-voice-clone"
 
     patch_resp = client.patch(
         f"/api/v1/brand-voices/{own_id}",
@@ -650,6 +1085,96 @@ def test_avatar_talk_accepts_brand_voice_and_worker_uses_speaker_id(
 
     assert captured_tts_payloads[0]["voice"] == "oral-brand-speaker"
     assert captured_tts_payloads[0]["voice_source"] == "brand_voice"
+
+
+def test_avatar_talk_cosyvoice_brand_voice_uses_cosyvoice_synthesizer(
+    auth_context,
+    auth_db,
+    monkeypatch,
+    tmp_path: Path,
+):
+    captured_tts_payloads: list[dict[str, Any]] = []
+    unit_id = "cosyvoice-avatar-unit"
+    with auth_db() as db:
+        brand_voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            name="Cosy Brand",
+            provider="cosyvoice-voice-clone",
+            speaker_id="cosy-speaker",
+            status="ready",
+            consent_confirmed=True,
+            consent_confirmed_at=datetime.now(UTC),
+        )
+        db.add(brand_voice)
+        db.flush()
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=auth_context["tenant_id"],
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="cosy brand voice",
+                script="cosy script",
+                brand_voice_id=brand_voice.id,
+                params={
+                    "voice_source": "brand_voice",
+                    "brand_voice_id": brand_voice.id,
+                    "tts_speaker_id": "cosy-speaker",
+                },
+            )
+        )
+        db.commit()
+
+        class _FakeCosyVoice:
+            async def synthesize_speech(self, payload: dict[str, Any]):
+                captured_tts_payloads.append(dict(payload))
+                audio = tmp_path / "cosy-voice.mp3"
+                audio.write_bytes(b"MP3")
+                return {
+                    "audio_path": str(audio),
+                    "timeline": [],
+                    "duration_ms": 1000,
+                    "provider": "cosyvoice-tts",
+                    "model": "cosyvoice-v3.5-plus",
+                    "characters": len(payload["text"]),
+                }
+
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve_named_provider",
+            lambda _db, *, tenant_id, capability, provider: _FakeCosyVoice(),
+        )
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: (_ for _ in ()).throw(
+                AssertionError("CosyVoice brand voices must not use generic TTS resolve")
+            ),
+        )
+        monkeypatch.setattr(avatar_talk, "_work_dir", lambda _unit_id: tmp_path)
+        monkeypatch.setattr(avatar_talk, "_audio_duration_sec", lambda _path: 1.0)
+        monkeypatch.setattr(avatar_talk, "label_artifact_bytes", _passthrough_label)
+
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=auth_context["tenant_id"],
+            db=db,
+            store=_Store(),
+            storage=_Storage(),
+        )
+        avatar_talk.tts_step(ctx)
+
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.capability == "tts"))
+        assert usage is not None
+        assert usage.provider == "cosyvoice-tts"
+        assert usage.model == "cosyvoice-v3.5-plus"
+        assert usage.unit == "char"
+        assert usage.quantity == Decimal(len("cosy script"))
+
+    assert captured_tts_payloads[0]["voice"] == "cosy-speaker"
+    assert captured_tts_payloads[0]["voice_source"] == "brand_voice"
+    assert captured_tts_payloads[0]["brand_voice_provider"] == "cosyvoice-voice-clone"
 
 
 def test_avatar_talk_preset_voice_still_uses_voice_code(
