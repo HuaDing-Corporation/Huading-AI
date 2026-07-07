@@ -6,13 +6,16 @@ import { Download, Loader2, Plus, RotateCw, Sparkles, Trash2 } from "lucide-reac
 import { ApiError } from "@/lib/api/client";
 import {
   confirmEcomReplicate,
+  ecomReplicateActualDimensions,
+  ECOM_REPLICATE_MAX_IMAGES,
+  ECOM_REPLICATE_MAX_POINTS,
   getEcomReplicateJob,
   isEcomReplicateSettled,
   planEcomReplicate,
   retryEcomReplicateOutput,
   type EcomReplicateJob,
   type EcomReplicateMode,
-  type EcomReplicateOutput
+  type EcomReplicatePlanOutput
 } from "@/lib/api/ecom-replicate";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
@@ -29,6 +32,13 @@ function friendly(err: unknown, fallback: string): string {
   return err instanceof ApiError ? err.message || fallback : fallback;
 }
 
+/** 提示词摘要（规划表 v1 用 theme + 摘要代替臆造的主/副标题列）。 */
+function promptSummary(prompt?: string | null): string {
+  const t = (prompt ?? "").trim();
+  if (!t) return "—";
+  return t.length > 48 ? `${t.slice(0, 48)}…` : t;
+}
+
 /** 结果单张：预览仅 CSS 等比缩放；下载给原图 bytes（<a download>，**零 canvas/crop/resize**，红线安全）；不隐藏原始尺寸。 */
 function ResultTile({
   output,
@@ -37,24 +47,27 @@ function ResultTile({
   retryBusy,
   onRetry
 }: {
-  output: EcomReplicateOutput;
+  output: EcomReplicatePlanOutput;
   mode: EcomReplicateMode;
   retrying: boolean;
   /** 有任一张正在重试（串行化）→ 全部重试按钮禁用，避免点了没反应的静默无反馈。 */
   retryBusy: boolean;
   onRetry: () => void;
 }) {
-  // 原图尺寸透明红线：只在后端真回 actual_dimensions 时展示「AI 原始输出尺寸」；缺失（null）绝不把请求尺寸冒充实际输出。
-  const sizeHint = output.actual_dimensions
+  const pageNo = output.index + 1;
+  // 原图尺寸透明红线：只在后端真回 actual_width/height 时展示「AI 原始输出尺寸」；缺失（null）绝不把请求尺寸冒充实际输出。
+  const actual = ecomReplicateActualDimensions(output);
+  const sizeHint = actual
     ? mode === "main"
-      ? copy.workbench.ecomResultSizeMain(output.actual_dimensions)
-      : copy.workbench.ecomResultSizeDetail(output.actual_dimensions)
+      ? copy.workbench.ecomResultSizeMain(actual)
+      : copy.workbench.ecomResultSizeDetail(actual)
     : copy.workbench.ecomResultSizeUnknown;
   const failed = output.status === "failed";
   return (
     <div className="flex flex-col gap-2 rounded-field border border-line-gold bg-glass-fill p-2.5">
       <div className="flex items-center justify-between text-[12px] text-ink-soft">
-        <span>{copy.workbench.ecomResultPageNo(output.page_no)}</span>
+        <span>{copy.workbench.ecomResultPageNo(pageNo)}</span>
+        <span className="text-ink-faint">{copy.workbench.ecomReplicateTheme(output.theme)}</span>
       </div>
       {failed ? (
         <div role="alert" className="flex flex-col items-center gap-2 rounded-mark bg-error-bg px-3 py-6 text-center text-[12.5px] text-error-fg">
@@ -65,30 +78,37 @@ function ResultTile({
         </div>
       ) : (
         <>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={output.preview_url ?? undefined}
-            alt={copy.workbench.ecomResultPreviewAlt(output.page_no)}
-            className="w-full rounded-mark border border-line-gold object-contain"
-          />
-          {/* 不隐藏原始尺寸 + 平台建议 + 未裁剪提示（§18） */}
-          <p className="text-[11.5px] leading-relaxed text-ink-faint">{sizeHint}</p>
-          {/* 下载 = 浏览器按 URL 取原始 bytes；download 属性，无任何前端后处理。download_url 缺失时给禁用态而非死链。 */}
+          {/* 真 BE 唯一图片 URL 即 download_url（无 preview_url）：预览仅 CSS 等比缩放该原图（object-contain，零裁剪）。 */}
           {output.download_url ? (
-            <a
-              href={output.download_url}
-              download={`ecom-detail-${output.page_no}.png`}
-              className="inline-flex h-9 items-center justify-center gap-1.5 rounded-field border border-line-gold bg-glass-fill px-3 text-[13px] text-ink-soft outline-none transition-colors hover:bg-white/60 focus-visible:shadow-focus-gold"
-            >
-              <Download size={14} strokeWidth={2} /> {copy.workbench.ecomResultDownload}
-            </a>
+            <>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={output.download_url}
+                alt={copy.workbench.ecomResultPreviewAlt(pageNo)}
+                className="w-full rounded-mark border border-line-gold object-contain"
+              />
+              {/* 不隐藏原始尺寸 + 平台建议 + 未裁剪提示（§18） */}
+              <p className="text-[11.5px] leading-relaxed text-ink-faint">{sizeHint}</p>
+              {/* 下载 = 浏览器按同一原图 URL 取 bytes；download 属性，无任何前端后处理（零 canvas/crop/resize）。 */}
+              <a
+                href={output.download_url}
+                download={`ecom-replicate-${pageNo}.png`}
+                className="inline-flex h-9 items-center justify-center gap-1.5 rounded-field border border-line-gold bg-glass-fill px-3 text-[13px] text-ink-soft outline-none transition-colors hover:bg-white/60 focus-visible:shadow-focus-gold"
+              >
+                <Download size={14} strokeWidth={2} /> {copy.workbench.ecomResultDownload}
+              </a>
+            </>
           ) : (
-            <span
-              aria-disabled="true"
-              className="inline-flex h-9 cursor-not-allowed items-center justify-center gap-1.5 rounded-field border border-line-gold bg-glass-fill px-3 text-[13px] text-ink-faint opacity-60"
-            >
-              <Download size={14} strokeWidth={2} /> {copy.workbench.ecomResultDownloadUnavailable}
-            </span>
+            // download_url 缺失（防御）：不渲染无 src 空图/死链，给尺寸信息 + 明确禁用态。
+            <>
+              <p className="text-[11.5px] leading-relaxed text-ink-faint">{sizeHint}</p>
+              <span
+                aria-disabled="true"
+                className="inline-flex h-9 cursor-not-allowed items-center justify-center gap-1.5 rounded-field border border-line-gold bg-glass-fill px-3 text-[13px] text-ink-faint opacity-60"
+              >
+                <Download size={14} strokeWidth={2} /> {copy.workbench.ecomResultDownloadUnavailable}
+              </span>
+            </>
           )}
         </>
       )}
@@ -97,10 +117,10 @@ function ResultTile({
 }
 
 /**
- * 电商详情图·强制复刻向导（ECOM-REPLICATE-UI-0001）。4 Step 状态机：
- * 上传(模式二选一 + 参考图1+/商品图1+/商品信息/卖点多条) → 规划表确认(渲染 §10 表 + total_credits 后端取 +
- * 扣费 ConfirmDialog 恰一次) → 生成中(轮询、禁分批、全部完成才展示) → 结果(一次性 + 原始尺寸 §18 + 下载原图 +
- * 单张重试不二次扣)。契约走 lib/api/ecom-replicate（mock 先行，以 BE 包为准）。
+ * 电商详情图·强制复刻向导（ECOM-REPLICATE-UI-0001 · FIX1 对齐真实 BE 契约）。4 Step 状态机：
+ * 上传(模式二选一 + 参考图1–4/商品图1–4/商品信息 dict/卖点≤8) → 规划表确认(渲染 plan.outputs + total_credits
+ * 后端取 + 扣费 ConfirmDialog 恰一次) → 生成中(轮询 GET、禁分批、全部完成才展示) → 结果(一次性 + 原始尺寸
+ * actual_w/h §18 + 下载原图 + 单张按 index 重试不二次扣)。契约走 lib/api/ecom-replicate。
  */
 export function EcomDetailWizard() {
   const [step, setStep] = useState<Step>("upload");
@@ -114,16 +134,16 @@ export function EcomDetailWizard() {
   const [planning, setPlanning] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [chargeOpen, setChargeOpen] = useState(false);
-  const [retryingPage, setRetryingPage] = useState<number | null>(null);
+  const [retryingIndex, setRetryingIndex] = useState<number | null>(null);
   const [pollError, setPollError] = useState(false); // 轮询瞬时失败 → 软提示（不放弃整套）
   const [pollTick, setPollTick] = useState(0); // 失败后自增以重排下一次轮询（job 未变，靠此触发 effect 重跑）
 
-  // 生成中轮询：job 更新驱动重跑；settled 才切结果（**全部完成才一次性展示**，生成阶段只显进度）。
-  // 红线：轮询瞬时失败（500/离线）**绝不**跳结果页把未完成的 pending 输出当成品展示（用户已扣费、后端仍在
-  // 生成）——保持生成中、软提示、下一拍自动重试（transient 可自愈），结果页只经 settled-gate 到达。
+  // 生成中轮询 GET /replicate/{id}：job 更新驱动重跑；settled 才切结果（**全部完成才一次性展示**，生成阶段只显进度）。
+  // 红线：轮询瞬时失败（500/离线）**绝不**跳结果页把未完成输出当成品展示（用户已扣费、后端仍在生成）——保持生成中、
+  // 软提示、下一拍自动重试（transient 可自愈），结果页只经 settled-gate 到达。
   useEffect(() => {
     if (step !== "generating" || !job) return;
-    if (isEcomReplicateSettled(job)) {
+    if (isEcomReplicateSettled(job.status)) {
       setStep("result");
       return;
     }
@@ -149,6 +169,7 @@ export function EcomDetailWizard() {
   }, [step, job, pollTick]);
 
   const cleanPoints = points.map((p) => p.trim()).filter(Boolean);
+  const canAddPoint = points.length < ECOM_REPLICATE_MAX_POINTS;
   const validateUpload = (): string | null => {
     if (!mode) return copy.errors.ecomDetailNeedMode;
     if (refIds.length < 1) return copy.errors.ecomDetailNeedRef;
@@ -169,10 +190,11 @@ export function EcomDetailWizard() {
     try {
       const planned = await planEcomReplicate({
         output_mode: mode as EcomReplicateMode,
-        reference_image_asset_ids: refIds,
-        product_image_asset_ids: productIds,
-        product_info: productInfo.trim(),
-        selling_points: cleanPoints
+        reference_image_asset_ids: refIds.slice(0, ECOM_REPLICATE_MAX_IMAGES),
+        product_image_asset_ids: productIds.slice(0, ECOM_REPLICATE_MAX_IMAGES),
+        // 真契约：product_info 为 dict（非字符串）。单一「商品信息」自由文本落 description 键。
+        product_info: { description: productInfo.trim() },
+        selling_points: cleanPoints.slice(0, ECOM_REPLICATE_MAX_POINTS)
       });
       setJob(planned);
       setStep("plan");
@@ -188,7 +210,12 @@ export function EcomDetailWizard() {
     setConfirming(true);
     try {
       const confirmed = await confirmEcomReplicate(job.job_id);
-      setJob(confirmed);
+      // confirm 只回 minimal（无 outputs）——**不覆盖**已有 plan.outputs；置 generating 进入轮询，
+      // 由 GET 取真实逐张状态（即便 BE 已 completed，也先 GET 一次拿新 outputs，避免展示 planned 陈图）。
+      setJob((prev) =>
+        prev ? { ...prev, status: "generating", output_count: confirmed.output_count, total_credits: confirmed.total_credits } : prev
+      );
+      setPollError(false);
       setChargeOpen(false);
       setStep("generating");
     } catch (err) {
@@ -199,16 +226,28 @@ export function EcomDetailWizard() {
     }
   };
 
-  const onRetry = async (pageNo: number) => {
-    if (!job || retryingPage !== null) return;
-    setRetryingPage(pageNo);
+  const onRetry = async (index: number) => {
+    if (!job || retryingIndex !== null) return;
+    setRetryingIndex(index);
     try {
-      const next = await retryEcomReplicateOutput(job.job_id, pageNo);
-      setJob(next);
+      const retried = await retryEcomReplicateOutput(job.job_id, index);
+      // 单张重试：BE 使该张回 planned + 整单回 generating（**不重复扣费**）。本地并入该张最新态、置 generating
+      // 回到轮询，等其重新出图后整套一次性刷新（与「禁分批/全部完成才展示」一致）。
+      setJob((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: "generating",
+              plan: { ...prev.plan, outputs: prev.plan.outputs.map((o) => (o.index === index ? { ...o, ...retried } : o)) }
+            }
+          : prev
+      );
+      setPollError(false);
+      setStep("generating");
     } catch (err) {
       setError(friendly(err, copy.errors.ecomDetailGenFailed));
     } finally {
-      setRetryingPage(null);
+      setRetryingIndex(null);
     }
   };
 
@@ -236,14 +275,16 @@ export function EcomDetailWizard() {
           inputId="ecom-detail-ref"
           label={copy.workbench.ecomDetailRefLabel}
           uploadLabel={copy.workbench.ecomDetailRefUpload}
-          overLimitError={copy.workbench.refImagesOverLimit}
+          overLimitError={copy.workbench.refImagesOverLimit(ECOM_REPLICATE_MAX_IMAGES)}
+          max={ECOM_REPLICATE_MAX_IMAGES}
           onChange={setRefIds}
         />
         <ReferenceImagesPicker
           inputId="ecom-detail-product"
           label={copy.workbench.ecomDetailProductLabel}
           uploadLabel={copy.workbench.ecomDetailProductUpload}
-          overLimitError={copy.workbench.refImagesOverLimit}
+          overLimitError={copy.workbench.refImagesOverLimit(ECOM_REPLICATE_MAX_IMAGES)}
+          max={ECOM_REPLICATE_MAX_IMAGES}
           onChange={setProductIds}
         />
 
@@ -261,7 +302,7 @@ export function EcomDetailWizard() {
           />
         </div>
 
-        {/* 核心卖点（多条，可增删） */}
+        {/* 核心卖点（多条，可增删，≤8 条） */}
         <fieldset className="mb-[15px] m-0 min-w-0 border-0 p-0">
           <legend className={labelClass}>{copy.workbench.ecomDetailPointsLabel}</legend>
           <div className="flex flex-col gap-2">
@@ -285,13 +326,15 @@ export function EcomDetailWizard() {
               </div>
             ))}
           </div>
-          <button
-            type="button"
-            onClick={() => setPoints((prev) => [...prev, ""])}
-            className="mt-2 inline-flex items-center gap-1 rounded-field px-2 py-1 text-[12.5px] text-gold-deep outline-none hover:bg-glass-soft focus-visible:shadow-focus-gold"
-          >
-            <Plus size={14} strokeWidth={2} /> {copy.workbench.ecomDetailAddPoint}
-          </button>
+          {canAddPoint && (
+            <button
+              type="button"
+              onClick={() => setPoints((prev) => (prev.length < ECOM_REPLICATE_MAX_POINTS ? [...prev, ""] : prev))}
+              className="mt-2 inline-flex items-center gap-1 rounded-field px-2 py-1 text-[12.5px] text-gold-deep outline-none hover:bg-glass-soft focus-visible:shadow-focus-gold"
+            >
+              <Plus size={14} strokeWidth={2} /> {copy.workbench.ecomDetailAddPoint}
+            </button>
+          )}
         </fieldset>
 
         {error && (
@@ -317,40 +360,31 @@ export function EcomDetailWizard() {
 
   // ── Step: 规划表确认（扣费门） ──
   if (step === "plan" && job) {
-    const anyReused = job.plan.some((p) => p.reused);
     return (
       <Card animateIn>
         <CardTitle>{copy.workbench.ecomPlanTitle}</CardTitle>
-        {anyReused && <p className="mb-2 mt-1 text-[12px] text-ink-faint">{copy.workbench.ecomPlanReuseHint}</p>}
 
         <div className="mb-3 overflow-x-auto rounded-field border border-line-gold">
-          <table className="w-full min-w-[640px] border-collapse text-left text-[12px]">
+          <table className="w-full min-w-[560px] border-collapse text-left text-[12px]">
             <thead>
               <tr className="bg-glass-soft text-ink-soft">
                 <th className="px-2 py-1.5 font-medium">{copy.workbench.ecomPlanColPage}</th>
                 <th className="px-2 py-1.5 font-medium">{copy.workbench.ecomPlanColTheme}</th>
-                <th className="px-2 py-1.5 font-medium">{copy.workbench.ecomPlanColRef}</th>
-                <th className="px-2 py-1.5 font-medium">{copy.workbench.ecomPlanColMainTitle}</th>
-                <th className="px-2 py-1.5 font-medium">{copy.workbench.ecomPlanColSubTitle}</th>
-                <th className="px-2 py-1.5 font-medium">{copy.workbench.ecomPlanColStyle}</th>
                 <th className="px-2 py-1.5 font-medium">{copy.workbench.ecomPlanColSize}</th>
+                <th className="px-2 py-1.5 font-medium">{copy.workbench.ecomPlanColPrompt}</th>
                 <th className="px-2 py-1.5 font-medium">{copy.workbench.ecomPlanColOutput}</th>
               </tr>
             </thead>
             <tbody>
-              {job.plan.map((p) => (
-                <tr key={p.page_no} className="border-t border-line-gold text-ink">
-                  <td className="px-2 py-1.5">{p.page_no}</td>
-                  <td className="px-2 py-1.5">{p.theme}</td>
-                  <td className="px-2 py-1.5">
-                    {p.ref_label}
-                    {p.reused && <span className="ml-1 rounded-pill bg-chip-sel px-1.5 py-0.5 text-[10px] text-gold-deep">{copy.workbench.ecomPlanReusedBadge}</span>}
+              {job.plan.outputs.map((o) => (
+                <tr key={o.id} className="border-t border-line-gold text-ink">
+                  <td className="px-2 py-1.5">{o.index + 1}</td>
+                  <td className="px-2 py-1.5">{copy.workbench.ecomReplicateTheme(o.theme)}</td>
+                  <td className="px-2 py-1.5">{o.requested_size}</td>
+                  <td className="px-2 py-1.5 text-ink-soft" title={o.prompt ?? undefined}>
+                    {promptSummary(o.prompt)}
                   </td>
-                  <td className="px-2 py-1.5 text-ink-soft">{p.main_title || "—"}</td>
-                  <td className="px-2 py-1.5 text-ink-soft">{p.sub_title || "—"}</td>
-                  <td className="px-2 py-1.5 text-ink-soft">{p.display_style}</td>
-                  <td className="px-2 py-1.5">{p.requested_size}</td>
-                  <td className="px-2 py-1.5 text-ink-faint">{p.no_crop_notice}</td>
+                  <td className="px-2 py-1.5 text-ink-faint">{copy.workbench.ecomPlanNoCrop}</td>
                 </tr>
               ))}
             </tbody>
@@ -390,8 +424,8 @@ export function EcomDetailWizard() {
 
   // ── Step: 生成中（禁分批，只显进度） ──
   if (step === "generating" && job) {
-    const done = job.outputs.filter((o) => o.status === "succeeded" || o.status === "failed").length;
-    const total = job.outputs.length || job.plan.length;
+    const done = job.plan.outputs.filter((o) => o.status === "succeeded" || o.status === "failed").length;
+    const total = job.output_count || job.plan.outputs.length;
     return (
       <Card animateIn>
         <CardTitle>{copy.workbench.ecomGenTitle}</CardTitle>
@@ -411,9 +445,10 @@ export function EcomDetailWizard() {
 
   // ── Step: 结果（一次性展示） ──
   if (step === "result" && job) {
+    const outputs = job.plan.outputs;
     // 整单失败（status=failed，通常无任何输出）→ 明确告知 + 返回入口，不渲染空网格/坏图。
-    const allFailed = job.status === "failed" || job.outputs.length === 0;
-    const retryBusy = retryingPage !== null;
+    const allFailed = job.status === "failed" || outputs.length === 0;
+    const retryBusy = retryingIndex !== null;
     return (
       <Card animateIn>
         <CardTitle>{copy.workbench.ecomResultTitle}</CardTitle>
@@ -436,14 +471,14 @@ export function EcomDetailWizard() {
           </div>
         ) : (
           <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {job.outputs.map((o) => (
+            {outputs.map((o) => (
               <ResultTile
-                key={o.page_no}
+                key={o.id}
                 output={o}
                 mode={job.output_mode}
-                retrying={retryingPage === o.page_no}
+                retrying={retryingIndex === o.index}
                 retryBusy={retryBusy}
-                onRetry={() => void onRetry(o.page_no)}
+                onRetry={() => void onRetry(o.index)}
               />
             ))}
           </div>

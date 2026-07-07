@@ -42,9 +42,9 @@ async function fillUpload(page: Page, mode: "主图（5 张）" | "详情页（1
 
   await page.locator('input[type="file"]#ecom-detail-ref').setInputFiles(PNG);
   await page.locator('input[type="file"]#ecom-detail-product').setInputFiles(PNG);
-  // 上传经 /uploads/images 拿 asset_id 后按钮显示 1/9，确保 refIds/productIds 已就绪再进入规划。
-  await expect(page.getByRole("button", { name: /上传参考图.*1\/9/ })).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByRole("button", { name: /上传商品图.*1\/9/ })).toBeVisible({ timeout: 15_000 });
+  // 上传经 /uploads/images 拿 asset_id 后按钮显示 1/4（BE 契约上限 4），确保 refIds/productIds 已就绪再进入规划。
+  await expect(page.getByRole("button", { name: /上传参考图.*1\/4/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("button", { name: /上传商品图.*1\/4/ })).toBeVisible({ timeout: 15_000 });
 
   await page.locator("#ecom-detail-info").fill("316 不锈钢保温杯，600ml");
   await page.getByPlaceholder("一条卖点，如：316 不锈钢，24 小时持续锁温").fill("24 小时持续锁温");
@@ -58,7 +58,7 @@ test("主图流：上传→规划(75积分)→确认扣费→一次性 5 张→�
   // 规划表 + 整套总价取后端 total_credits（主图 5×15=75）+ 未裁剪红线列。
   await expect(page.getByText("生成规划（确认后按此复刻，仅确认一次）")).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText("整套预计 75 积分")).toBeVisible();
-  await expect(page.getByText("原图输出，不裁剪").first()).toBeVisible();
+  await expect(page.getByText("原图不裁剪").first()).toBeVisible();
 
   // 扣费门：确认恰一次。
   await page.getByRole("button", { name: "确认并生成" }).click();
@@ -70,7 +70,7 @@ test("主图流：上传→规划(75积分)→确认扣费→一次性 5 张→�
   await expect(links).toHaveCount(5);
   // 原图红线：下载给原图 bytes（href 指原图 URL、有 download 属性），零前端后处理。
   await expect(links.first()).toHaveAttribute("href", /\?dl=1$/);
-  await expect(links.first()).toHaveAttribute("download", /ecom-detail-1\.png/);
+  await expect(links.first()).toHaveAttribute("download", /ecom-replicate-1\.png/);
   // 不隐藏 AI 原始尺寸（1024x1024 → APIMart 实返 1254x1254）。
   await expect(page.getByText(/1254x1254/).first()).toBeVisible();
 

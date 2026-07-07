@@ -30,7 +30,8 @@ export function ReferenceImagesPicker({
   inputId = "vg-ref-images",
   label = copy.workbench.vgRefImagesLabel,
   uploadLabel = copy.workbench.vgRefImagesUpload,
-  overLimitError = copy.workbench.vgRefOverLimit
+  overLimitError = copy.workbench.vgRefOverLimit,
+  max = MAX_REFERENCE_IMAGES
 }: {
   onChange?: (assetIds: string[]) => void;
   /** 逐行配对（BATCH-PROD-UI-0002）需按序缩略图 → 上抛有序 {assetId,preview} 供父级渲染配对预览。 */
@@ -41,6 +42,8 @@ export function ReferenceImagesPicker({
   uploadLabel?: string;
   /** 越限提示文案；默认视频生成「参考图」措辞，复用为商品图等场景传中性文案避免名词错配。 */
   overLimitError?: string;
+  /** 数量上限；默认 9（视频生成）。电商详情图·复刻按 BE 契约传 4。 */
+  max?: number;
 }) {
   const uploadImg = useUploadImage();
   const [items, setItems] = useState<RefItem[]>([]);
@@ -74,14 +77,14 @@ export function ReferenceImagesPicker({
     if (all.some((f) => !ALLOWED_UPLOAD_TYPES.includes(f.type))) setError(copy.errors.uploadType);
     else if (all.some((f) => f.size > MAX_UPLOAD_BYTES)) setError(copy.errors.uploadTooLarge);
     // ≤9 承重：room 取剩余位，超出部分不添加并提示。
-    const room = MAX_REFERENCE_IMAGES - itemsRef.current.length;
+    const room = max - itemsRef.current.length;
     if (valid.length > room) setError(overLimitError);
     for (const file of valid.slice(0, Math.max(0, room))) {
       const preview = URL.createObjectURL(file);
       try {
         const r = await uploadImg.mutateAsync(file);
         setItems((prev) => {
-          if (prev.length >= MAX_REFERENCE_IMAGES) {
+          if (prev.length >= max) {
             URL.revokeObjectURL(preview); // 满额拒收也释放预览 URL，防泄漏
             return prev;
           }
@@ -103,7 +106,7 @@ export function ReferenceImagesPicker({
     });
   };
 
-  const full = items.length >= MAX_REFERENCE_IMAGES;
+  const full = items.length >= max;
 
   return (
     <fieldset className="mb-[15px] m-0 min-w-0 border-0 p-0">
@@ -142,7 +145,7 @@ export function ReferenceImagesPicker({
         className="flex w-full items-center justify-center gap-2 rounded-field border border-dashed border-line-gold bg-glass-fill py-5 text-[13px] text-ink-soft transition-colors hover:bg-glass-hover disabled:pointer-events-none disabled:opacity-50"
       >
         <ImagePlus size={18} strokeWidth={1.8} />{" "}
-        {uploadImg.isPending ? copy.workbench.vgGenerating : `${uploadLabel}（${items.length}/${MAX_REFERENCE_IMAGES}）`}
+        {uploadImg.isPending ? copy.workbench.vgGenerating : `${uploadLabel}（${items.length}/${max}）`}
       </button>
       {error && (
         <p role="alert" className="mt-2 rounded-field bg-error-bg px-3 py-2 text-[12.5px] text-error-fg">
