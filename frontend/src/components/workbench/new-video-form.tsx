@@ -9,6 +9,7 @@ import {
   useBrandVoices,
   useScriptGenerate,
   useSubtitleTemplates,
+  useUploadAvatarVideo,
   useUploadImage,
   useVoices
 } from "@/lib/api/hooks";
@@ -20,7 +21,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
 import { Input } from "@/components/ui/input";
+import { SelectableOption } from "@/components/ui/selectable-option";
 import { ImagePicker } from "@/components/workbench/image-picker";
+import { AvatarVideoPicker } from "@/components/workbench/avatar-video-picker";
 import { MoreSettings } from "@/components/workbench/more-settings";
 import { ScriptReview } from "@/components/workbench/script-review";
 import { VoicePicker } from "@/components/workbench/voice-picker";
@@ -46,11 +49,22 @@ export function NewVideoForm({
   const { createAndTrack } = useVideoTasks();
   const scriptGen = useScriptGenerate();
   const uploadImg = useUploadImage();
+  const uploadVideo = useUploadAvatarVideo();
   const voices = useVoices();
   const brandVoices = useBrandVoices(); // 「选我的音色」：品牌音色(声音复刻)全状态
   const presets = useAvatarPresets();
   const subtitleTemplates = useSubtitleTemplates();
   const avatar = useTrackedUpload(uploadImg.mutateAsync, (r) => r.asset_id);
+  const avatarVideo = useTrackedUpload(uploadVideo.mutateAsync, (r) => r.asset_id);
+  // 形象来源二选一（AVATAR-VIDEO-SOURCE-UI-0001）：photo=现状默认(承重零回归)，video=本人出镜视频。
+  const [source, setSource] = useState<"photo" | "video">("photo");
+  // 切换即清空另一源的上传：避免切回残留「已上传但预览丢失」的武装态错位（Review P3），并让二选一互斥更明确。
+  const switchSource = (next: "photo" | "video") => {
+    if (next === source) return;
+    setSource(next);
+    if (next === "photo") avatarVideo.setValue(null);
+    else avatar.setValue(null);
+  };
 
   // 一次性 prefill：文案「用此文案」注 script；提示词反推「带入」注 topic+script。惰性消费，mount 后回调清空。
   const [topic, setTopic] = useState(() => initialTopic ?? "");
@@ -99,16 +113,21 @@ export function NewVideoForm({
     }
   };
 
+  // 当前形象来源对应的 asset 值（照片=avatar_asset_id / 视频=avatar_video_asset_id）。
+  const activeSourceValue = source === "photo" ? avatar.value : avatarVideo.value;
+
   // Run existing validation, then open the confirm dialog instead of submitting.
   const onGenerate = () => {
     const trimmed = topic.trim();
-    if (!trimmed || !voiceId || !avatar.value) return;
+    if (!trimmed || !voiceId || !activeSourceValue) return;
     setError(null);
     confirm.requestConfirm({
       topic: trimmed,
       script: script.trim() || undefined,
       voice_id: voiceId,
-      avatar_asset_id: avatar.value,
+      // 二选一互斥：仅带当前来源字段，另一路恒 undefined → JSON.stringify 丢弃。照片=现状（零回归）。
+      avatar_asset_id: source === "photo" ? (avatar.value ?? undefined) : undefined,
+      avatar_video_asset_id: source === "video" ? (avatarVideo.value ?? undefined) : undefined,
       speed,
       aspect_ratio: "9:16",
       subtitle_enabled: true,
@@ -118,7 +137,12 @@ export function NewVideoForm({
   };
 
   const generateDisabled =
-    uploadImg.isPending || !topic.trim() || !voiceId || !avatar.value || !isSubtitleStyleValid(subtitleStyle);
+    uploadImg.isPending ||
+    uploadVideo.isPending ||
+    !topic.trim() ||
+    !voiceId ||
+    !activeSourceValue ||
+    !isSubtitleStyleValid(subtitleStyle);
 
   return (
     <Card animateIn>
@@ -146,14 +170,37 @@ export function NewVideoForm({
         speed={speed}
       />
 
-      <ImagePicker
-        value={avatar.value}
-        onChange={avatar.setValue}
-        presets={presets.data ?? []}
-        uploading={uploadImg.isPending}
-        onUpload={avatar.onUpload}
-        uploadError={avatar.error}
-      />
+      {/* 形象来源二选一（AVATAR-VIDEO-SOURCE-UI-0001）：照片=默认(承重零回归) / 本人出镜视频 */}
+      <fieldset className="mb-[15px] m-0 min-w-0 border-0 p-0">
+        <legend className={labelClass}>{copy.workbench.avatarSourceLabel}</legend>
+        <div role="group" aria-label={copy.workbench.avatarSourceLabel} className="grid grid-cols-2 gap-2">
+          <SelectableOption selected={source === "photo"} onSelect={() => switchSource("photo")} className="justify-center">
+            {copy.workbench.sourcePhoto}
+          </SelectableOption>
+          <SelectableOption selected={source === "video"} onSelect={() => switchSource("video")} className="justify-center">
+            {copy.workbench.sourceVideo}
+          </SelectableOption>
+        </div>
+      </fieldset>
+
+      {source === "photo" ? (
+        <ImagePicker
+          value={avatar.value}
+          onChange={avatar.setValue}
+          presets={presets.data ?? []}
+          uploading={uploadImg.isPending}
+          onUpload={avatar.onUpload}
+          uploadError={avatar.error}
+        />
+      ) : (
+        <AvatarVideoPicker
+          value={avatarVideo.value}
+          onChange={avatarVideo.setValue}
+          uploading={uploadVideo.isPending}
+          onUpload={avatarVideo.onUpload}
+          uploadError={avatarVideo.error}
+        />
+      )}
 
       <VoicePicker
         voices={voiceList ?? []}

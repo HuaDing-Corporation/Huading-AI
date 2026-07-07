@@ -376,6 +376,15 @@ export const handlers = [
       { status: 201 }
     );
   }),
+  // 数字人出镜视频源上传（AVATAR-VIDEO-SOURCE-UI-0001，镜像 /uploads/images·/uploads/audio）→ {asset_id}。
+  // 端点/形状以 BE 包(AVATAR-VIDEO-SOURCE-BE-0001)为准，mock 先行。
+  http.post(`${BASE}/api/v1/uploads/videos`, () => {
+    const n = ++imageUploadSeq;
+    return HttpResponse.json(
+      { data: { asset_id: `video-asset-${n}`, type: "avatar_video", status: "ready" }, error: null, request_id: "mock-req" },
+      { status: 201 }
+    );
+  }),
   // 产品图上传（电商带货 i2v）→ 后端 POST /uploads 返 UploadResponse{key,uri}(201)，前端映射 key→image_key。
   // 此前 mock 缺该端点致电商 tab 无法真栈冒烟（ECOM-RESOLUTION-UI-0001 顺带补齐，忠实真契约）。
   http.post(`${BASE}/api/v1/uploads`, () => {
@@ -411,11 +420,18 @@ export const handlers = [
       resolution?: string;
       bgm?: { source?: string; asset_id?: string; track_id?: string };
       apply_visible_label?: boolean;
+      avatar_asset_id?: string;
+      avatar_video_asset_id?: string;
     };
     // resolution 是后端全模式 Literal["480p","720p","1080p"]（含 seedance_i2v，见 schemas/videos.py:154）：
     // 非法即 422，不按模式放宽（ECOM-RESOLUTION-UI-0001：电商也带 resolution，需与 video_gen 同等把关，不伪造放行）。
     if (body.resolution !== undefined && !VIDEO_GEN_RESOLUTIONS.includes(body.resolution)) {
       return err(422, "VALIDATION_ERROR", "resolution 非法");
+    }
+    // 数字人形象源二选一互斥（AVATAR-VIDEO-SOURCE-UI-0001）：照片 avatar_asset_id 与视频 avatar_video_asset_id
+    // 不可同发（BE 权威，mock 先行守住互斥）。前端只发其一，此为防漂移。
+    if (body.avatar_asset_id && body.avatar_video_asset_id) {
+      return err(422, "AVATAR_SOURCE_CONFLICT", "照片与视频形象只能二选一");
     }
     // 视频生成 video_gen 校验（逐字对齐后端 schemas/videos.py:213-222：参考图 1–9 且**唯一**、prompt
     // 非空、duration∈{5,10,15}、bgm 二选一可选）→ 非法 422，不伪造放行/不放宽（resolution 已在上方全模式把关）。

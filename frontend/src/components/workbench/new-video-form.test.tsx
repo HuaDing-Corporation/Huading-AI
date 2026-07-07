@@ -13,6 +13,7 @@ const h = vi.hoisted(() => {
 vi.mock("@/lib/api/hooks", () => ({
   useScriptGenerate: () => ({ mutateAsync: vi.fn().mockResolvedValue({ script: "s" }), isPending: false }),
   useUploadImage: () => ({ mutateAsync: vi.fn(() => h.promise), isPending: false }),
+  useUploadAvatarVideo: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useBrandVoices: () => ({ data: [], isLoading: false }),
   useVoices: () => ({
     data: [

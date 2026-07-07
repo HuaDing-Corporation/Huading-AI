@@ -10,6 +10,7 @@ const uploadMock = vi.hoisted(() => ({ mutateAsync: vi.fn() }));
 vi.mock("@/lib/api/hooks", () => ({
   useScriptGenerate: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useUploadImage: () => ({ mutateAsync: uploadMock.mutateAsync, isPending: false }),
+  useUploadAvatarVideo: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useBrandVoices: () => ({ data: [], isLoading: false }),
   useVoices: () => ({
     data: [{ id: "v1", provider: "edge", voice_code: "x", display_name: "音色1", gender: null, language: null }]

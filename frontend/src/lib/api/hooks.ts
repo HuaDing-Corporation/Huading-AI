@@ -9,7 +9,7 @@ import { getQuota } from "@/lib/api/quota";
 import { clearCopyDrafts, deleteCopyDraft, generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
 import { generateScript } from "@/lib/api/scripts";
 import { regenerateReversePrompt, reverseFromAsset, saveReversePrompt, type ReverseFromAssetInput } from "@/lib/api/reverse-prompt";
-import { uploadImage, uploadProductImage } from "@/lib/api/uploads";
+import { uploadAvatarVideo, uploadImage, uploadProductImage } from "@/lib/api/uploads";
 import { listBgmLibrary } from "@/lib/api/bgm";
 import { uploadAudio } from "@/lib/api/brand-voices";
 import { listVoices } from "@/lib/api/voices";
@@ -95,6 +95,10 @@ export function useUploadImage() {
 }
 export function useUploadProductImage() {
   return useMutation({ mutationFn: (file: File) => uploadProductImage(file) });
+}
+// 数字人·本人出镜视频源上传（AVATAR-VIDEO-SOURCE-UI-0001）→ asset_id（作 avatar_video_asset_id）。
+export function useUploadAvatarVideo() {
+  return useMutation({ mutationFn: (file: File) => uploadAvatarVideo(file) });
 }
 // 视频生成 BGM 上传（VIDEOGEN-UI-0001）：复用 /uploads/audio（声音克隆已建）→ asset_id。
 export function useUploadAudio() {

@@ -88,6 +88,18 @@ export const copy = {
     modeEcom: "电商带货",
     aspectBadge: "竖屏 9:16",
     avatarPreviewAlt: "形象预览",
+    // 数字人形象来源：照片 / 本人出镜视频二选一（AVATAR-VIDEO-SOURCE-UI-0001）
+    avatarSourceLabel: "数字人形象来源",
+    sourcePhoto: "照片",
+    sourceVideo: "本人出镜视频",
+    videoUpload: "上传 MP4 本人出镜视频（3–10 秒）",
+    videoHint: "MP4，3–10 秒，360p–1080p，单人正脸出镜效果最佳",
+    videoPreviewAlt: "视频预览",
+    removeVideo: "移除视频",
+    videoValidating: "校验视频中…",
+    videoReady: "已上传，可生成",
+    videoUploading: "上传中…",
+    videoUploadFailed: "上传失败",
     // 电商带货（图生视频 i2v）表单
     ecomTitle: "电商带货视频",
     ecomSubtitle: "上传产品图、输入卖点，AI 一键生成带货短片",
@@ -279,6 +291,16 @@ export const copy = {
     uploadType: "仅支持 JPG / PNG / WebP 图片",
     network: "网络连接失败，请检查后端服务是否在线",
     generic: "操作失败，请重试",
+    // 数字人出镜视频客户端预检（AVATAR-VIDEO-SOURCE-UI-0001，MP4/≤10s/360p–1080p）
+    videoType: "仅支持 MP4 视频",
+    videoTooLarge: "视频过大，请控制在 200MB 以内",
+    videoTooLong: "请上传 3–10 秒的单人出镜视频",
+    videoResolution: "视频分辨率需在 360p–1080p",
+    videoUnreadable: "无法读取视频信息，请换一个 MP4 文件",
+    // 后端二次校验专属码（FE-INTEGRATION-0001；前端预检读不到编码，回显后端码时用）
+    videoCodec: "视频编码需为 H.264，请用常见工具重新导出 MP4",
+    videoAudioCodec: "视频音轨需为 AAC，请用常见工具重新导出 MP4",
+    videoAssetLost: "视频资源已失效，请重新上传",
     // 商品表批量(seedance_i2v)缺音色 → 后端 422(voice_id is required) 的中文映射
     voiceRequired: "请选择音色",
     // 图片生成错误（按后端 error_code 映射；见 friendlyImageError）

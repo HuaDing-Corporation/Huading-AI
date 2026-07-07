@@ -8,6 +8,7 @@ const taskMocks = vi.hoisted(() => ({ createAndTrack: vi.fn() }));
 vi.mock("@/lib/api/hooks", () => ({
   useScriptGenerate: () => ({ mutateAsync: vi.fn().mockResolvedValue({ script: "s" }), isPending: false }),
   useUploadImage: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useUploadAvatarVideo: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useBrandVoices: () => ({ data: [], isLoading: false }),
   useVoices: () => ({
     data: [
