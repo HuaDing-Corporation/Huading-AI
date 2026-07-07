@@ -35,8 +35,10 @@ function playSample(url: string) {
 
 /** provider → 徽标文案；**未知/缺省返回 undefined（不显徽标、不报错）**，兼容接口暂无 provider。 */
 function providerLabel(provider?: string | null): string | undefined {
-  if (provider === "doubao") return copy.brandVoice.providerDoubao;
-  if (provider === "cosyvoice") return copy.brandVoice.providerCosyvoice;
+  // 兼容短值(请求侧 Literal doubao/cosyvoice)与 canonical 长值(BE read 侧经 _brand_voice_read 归一化返
+  // doubao-voice-clone / cosyvoice-voice-clone)——真接口联调对齐(FE-INTEGRATION-0001)。
+  if (provider === "doubao" || provider === "doubao-voice-clone") return copy.brandVoice.providerDoubao;
+  if (provider === "cosyvoice" || provider === "cosyvoice-voice-clone") return copy.brandVoice.providerCosyvoice;
   return undefined;
 }
 

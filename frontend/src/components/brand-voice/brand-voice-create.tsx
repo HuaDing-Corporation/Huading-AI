@@ -5,14 +5,24 @@ import { Mic, Square, Trash2, Upload } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
 import { useCreateBrandVoice } from "@/lib/api/hooks";
+import type { BrandVoiceProvider } from "@/lib/api/types";
 import { useAudioRecorder } from "@/lib/media/use-audio-recorder";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
+import { SelectableOption } from "@/components/ui/selectable-option";
 import { copy } from "@/lib/copy";
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 const MIN_DURATION_SEC = 5;
+// 豆包 VIP 通路扣费额度（范围4）。TODO(pricing)：优先从后端费率/报价接口读取；develop 的 routes/quota.py
+// 仅有订阅额度 GET、无单项报价端点，故暂置常量（文案定稿 300 元 = 30000 积分），接口就绪后替换。
+const DOUBAO_CLONE_CREDITS = 30000;
+const PROVIDERS: { id: BrandVoiceProvider; title: string; desc: string }[] = [
+  { id: "cosyvoice", title: copy.brandVoice.providerCosyTitle, desc: copy.brandVoice.providerCosyDesc },
+  { id: "doubao", title: copy.brandVoice.providerDoubaoTitle, desc: copy.brandVoice.providerDoubaoDesc }
+];
 const MAX_AUDIO_BYTES = 20 * 1024 * 1024; // 20MB
 // wav/mp3/m4a 常见 MIME（不同浏览器/系统差异，宽松匹配）。
 const ALLOWED_AUDIO_TYPES = ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3", "audio/mp4", "audio/x-m4a", "audio/m4a", "audio/aac"];
@@ -29,6 +39,10 @@ export function BrandVoiceCreate() {
 
   const [name, setName] = useState("");
   const [consent, setConsent] = useState(false);
+  // 克隆通路（范围4）：**缺省 doubao 通路**（与现状一致，兼容承重——现有克隆即豆包付费）；doubao 需
+  // 创建前扣费确认。cosyvoice 为 COSYVOICE-CLONE-0001 新增的免费档，需用户主动选择。
+  const [provider, setProvider] = useState<BrandVoiceProvider>("doubao");
+  const [chargeOpen, setChargeOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // 录音(已知时长)时长不足 5s 拦截；上传文件时长未知(durationSec=0)，仅校验类型/大小。
@@ -51,7 +65,25 @@ export function BrandVoiceCreate() {
     recorder.setExternal(file);
   };
 
-  const onCreate = async () => {
+  // 实际创建（带 provider 通路）；成功清空回初始态、关扣费窗。仅在校验通过（含 doubao 扣费确认）后调用。
+  const doCreate = async () => {
+    if (!recorder.blob) return;
+    try {
+      // 三段式：上传音频→JSON 创建；consent_confirmed + provider 进 body（勾选才到此，consent 恒 true）。
+      await create.mutateAsync({ name: name.trim(), audio: recorder.blob, consentConfirmed: consent, provider });
+      // 成功：清空，回到初始态（通路复位缺省 doubao）。
+      recorder.reset();
+      setName("");
+      setConsent(false);
+      setProvider("doubao");
+      setChargeOpen(false);
+    } catch (err) {
+      setChargeOpen(false);
+      setError(errorText(err));
+    }
+  };
+
+  const onCreate = () => {
     setError(null);
     if (!recorder.blob) {
       setError(copy.brandVoice.createNeedAudio);
@@ -70,16 +102,12 @@ export function BrandVoiceCreate() {
       setError(copy.brandVoice.consentRequired);
       return;
     }
-    try {
-      // 三段式：上传音频→JSON 创建；consent_confirmed 进 body（勾选才到此，恒 true）。
-      await create.mutateAsync({ name: name.trim(), audio: recorder.blob, consentConfirmed: consent });
-      // 成功：清空，回到初始态。
-      recorder.reset();
-      setName("");
-      setConsent(false);
-    } catch (err) {
-      setError(errorText(err));
+    // doubao 付费通路：创建前明确扣费确认（30000 积分）；cosyvoice 免费直建。
+    if (provider === "doubao") {
+      setChargeOpen(true);
+      return;
     }
+    void doCreate();
   };
 
   const createDisabled = create.isPending || !audioReady || !name.trim();
@@ -177,6 +205,21 @@ export function BrandVoiceCreate() {
         />
       </div>
 
+      {/* 克隆通路（范围4）：两档单选卡片；doubao 付费创建前扣费确认，cosyvoice 免费。 */}
+      <fieldset className="mb-[15px] m-0 min-w-0 border-0 p-0">
+        <legend className={labelClass}>{copy.brandVoice.providerSectionLabel}</legend>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {PROVIDERS.map((p) => (
+            <SelectableOption key={p.id} selected={provider === p.id} onSelect={() => setProvider(p.id)}>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-ink">{p.title}</span>
+                <span className="block truncate text-[11.5px] text-ink-faint">{p.desc}</span>
+              </span>
+            </SelectableOption>
+          ))}
+        </div>
+      </fieldset>
+
       {/* 授权 checkbox（load-bearing 门） */}
       <label className="mb-3 flex cursor-pointer items-start gap-2.5 text-[12.5px] leading-relaxed text-ink-soft">
         <input
@@ -196,9 +239,20 @@ export function BrandVoiceCreate() {
         </p>
       )}
 
-      <Button variant="primary" size="lg" className="w-full" onClick={() => void onCreate()} disabled={createDisabled}>
+      <Button variant="primary" size="lg" className="w-full" onClick={onCreate} disabled={createDisabled}>
         {create.isPending ? copy.brandVoice.creating : copy.brandVoice.create}
       </Button>
+
+      {/* doubao 付费通路扣费确认（明确 30000 积分；确认后才发创建请求）。 */}
+      <ConfirmDialog
+        open={chargeOpen}
+        title={copy.brandVoice.chargeConfirmTitle}
+        message={copy.brandVoice.chargeConfirmMessage(DOUBAO_CLONE_CREDITS)}
+        confirmLabel={copy.brandVoice.chargeConfirmBtn}
+        submitting={create.isPending}
+        onConfirm={() => void doCreate()}
+        onCancel={() => setChargeOpen(false)}
+      />
     </Card>
   );
 }

@@ -62,9 +62,11 @@ describe("BrandVoiceCreate · 录音态（mock useAudioRecorder）", () => {
     fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "录音音色" } });
     fireEvent.click(screen.getByRole("checkbox"));
     fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
+    // 缺省 doubao → 过扣费确认再创建（带 provider:doubao）。
+    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.chargeConfirmBtn }));
 
     await waitFor(() =>
-      expect(createMock.mutateAsync).toHaveBeenCalledWith({ name: "录音音色", audio: blob, consentConfirmed: true })
+      expect(createMock.mutateAsync).toHaveBeenCalledWith({ name: "录音音色", audio: blob, consentConfirmed: true, provider: "doubao" })
     );
   });
 });

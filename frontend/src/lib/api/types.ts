@@ -495,16 +495,20 @@ export interface AudioUploadResponse {
   asset_id: string;
 }
 // POST /brand-voices = JSON(extra=forbid)：consent_confirmed 必须进 body(StrictBool true，否则 422)。
+// provider（BRAND-VOICE-PICKER-UI-0001 范围4）：克隆通路，doubao(付费)/cosyvoice(免费)。**依赖后端
+// COSYVOICE-CLONE-0001 合并**（真契约 provider: Literal["doubao","cosyvoice"]="doubao"）——UI 先行、mock 已收。
 export interface BrandVoiceCreateBody {
   name: string; // 1–30 非空
   source_audio_asset_id: string;
   consent_confirmed: boolean;
+  provider: BrandVoiceProvider;
 }
-// UI 侧入参（组件持有 Blob + 名称 + 授权勾选）；经 createBrandVoiceFromAudio 编排上传→创建。
+// UI 侧入参（组件持有 Blob + 名称 + 授权勾选 + 通路）；经 createBrandVoiceFromAudio 编排上传→创建。
 export interface CreateBrandVoiceInput {
   name: string;
   audio: Blob; // 录音 MediaRecorder 产物 或 上传的音频文件
   consentConfirmed: boolean;
+  provider: BrandVoiceProvider; // 克隆通路 doubao/cosyvoice（范围4）
 }
 
 // ── 深度合成标识设置 (LABEL-UI-0001) ──

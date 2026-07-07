@@ -446,6 +446,16 @@ export const copy = {
     creating: "创建中…",
     createNeedAudio: "请先录制或上传一段音频",
     createNeedName: "请填写音色名称",
+    // 克隆通路选择（BRAND-VOICE-PICKER-UI-0001 范围4，文案用户定稿）
+    providerSectionLabel: "克隆通路",
+    providerCosyTitle: "免费开通私人专属音色",
+    providerCosyDesc: "CosyVoice-v3.5-plus · 免费",
+    providerDoubaoTitle: "升级版 VIP 永久高端定制音色",
+    providerDoubaoDesc: "豆包 · 300 元（30000 积分）",
+    chargeConfirmTitle: "确认开通高端定制音色？",
+    chargeConfirmMessage: (credits: number) =>
+      `将消耗 ${credits} 积分（约 300 元）开通豆包 VIP 永久高端定制音色，确认后立即扣费，克隆结果生成后不可退。`,
+    chargeConfirmBtn: "确认扣费开通",
     // 列表
     listTitle: "我的品牌音色",
     listLoading: "加载中…",
