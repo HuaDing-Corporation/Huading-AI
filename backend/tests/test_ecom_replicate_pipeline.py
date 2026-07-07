@@ -246,6 +246,25 @@ def _create_main_replicate_plan(
     return data
 
 
+def _register_tenant(*, slug: str, email: str) -> dict:
+    response = TestClient(app).post(
+        "/api/v1/auth/register-tenant",
+        json={
+            "tenant_slug": slug,
+            "tenant_name": f"{slug} Studio",
+            "email": email,
+            "password": "secret-pass",
+        },
+    )
+    assert response.status_code == 201
+    data = response.json()["data"]
+    return {
+        "headers": {"Authorization": f"Bearer {data['token']['access_token']}"},
+        "tenant_id": data["tenant"]["id"],
+        "user_id": data["user"]["id"],
+    }
+
+
 def test_ecom_replicate_plan_creates_plan_ready_job_with_total_price(
     monkeypatch,
     auth_context,
@@ -646,6 +665,119 @@ def test_ecom_replicate_worker_records_requested_actual_dimensions_and_raw_bytes
     assert storage.saved[outputs[0].storage_key][0] == _png_bytes(size=(3, 5))
     assert len(render_costs) == 5
     assert all(record.cost_cents == 4 for record in render_costs)
+
+
+def test_ecom_replicate_get_returns_generating_job_outputs_without_download_url(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    _patch_replicate_providers(monkeypatch)
+    _stub_replicate_task(monkeypatch)
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        plan = _create_main_replicate_plan(
+            auth_context=auth_context,
+            auth_db=auth_db,
+            reference_id="polling-ref",
+            product_id="polling-product",
+        )
+        confirm = TestClient(app).post(
+            f"/api/v1/ecom-images/replicate/{plan['job_id']}/confirm",
+            headers=auth_context["headers"],
+        )
+        assert confirm.status_code == 202
+
+        response = TestClient(app).get(
+            f"/api/v1/ecom-images/replicate/{plan['job_id']}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["job_id"] == plan["job_id"]
+    assert data["status"] == "generating"
+    assert len(data["plan"]["outputs"]) == 5
+    assert {output["status"] for output in data["plan"]["outputs"]} == {"planned"}
+    assert all(output["asset_id"] is None for output in data["plan"]["outputs"])
+    assert all(output["actual_width"] is None for output in data["plan"]["outputs"])
+    assert all(output["actual_height"] is None for output in data["plan"]["outputs"])
+    assert all(output["download_url"] is None for output in data["plan"]["outputs"])
+
+
+def test_ecom_replicate_get_returns_completed_outputs_with_download_urls(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    _patch_replicate_providers(monkeypatch)
+    _stub_replicate_task(monkeypatch)
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    monkeypatch.setattr(image_gen, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(image_gen, "SessionLocal", auth_db)
+    try:
+        plan = _create_main_replicate_plan(
+            auth_context=auth_context,
+            auth_db=auth_db,
+            reference_id="completed-get-ref",
+            product_id="completed-get-product",
+        )
+        TestClient(app).post(
+            f"/api/v1/ecom-images/replicate/{plan['job_id']}/confirm",
+            headers=auth_context["headers"],
+        )
+        result = image_gen.run_ecom_replicate_generation(plan["job_id"])
+        assert result["status"] == "SUCCESS"
+
+        response = TestClient(app).get(
+            f"/api/v1/ecom-images/replicate/{plan['job_id']}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["status"] == "completed"
+    first_output = data["plan"]["outputs"][0]
+    assert first_output["status"] == "succeeded"
+    assert first_output["asset_id"]
+    assert first_output["actual_width"] == 3
+    assert first_output["actual_height"] == 5
+    assert first_output["download_url"].startswith(
+        f"https://storage.test/tenants/{auth_context['tenant_id']}/ecom-replicate/"
+        f"{plan['job_id']}/00.png?ttl="
+    )
+    assert "download=1" in first_output["download_url"]
+    assert all(output["download_url"] for output in data["plan"]["outputs"])
+
+
+def test_ecom_replicate_get_cross_tenant_returns_404(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    _patch_replicate_providers(monkeypatch)
+    _stub_replicate_task(monkeypatch)
+    plan = _create_main_replicate_plan(
+        auth_context=auth_context,
+        auth_db=auth_db,
+        reference_id="cross-get-ref",
+        product_id="cross-get-product",
+    )
+    other = _register_tenant(slug="other-get", email="other-get@example.com")
+
+    response = TestClient(app).get(
+        f"/api/v1/ecom-images/replicate/{plan['job_id']}",
+        headers=other["headers"],
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "ECOM_REPLICATE_JOB_NOT_FOUND"
 
 
 def test_ecom_replicate_worker_retries_single_failed_output_without_extra_charge(

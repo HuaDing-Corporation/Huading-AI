@@ -141,6 +141,7 @@ class EcomReplicatePlanOutput(BaseModel):
     status: str
     prompt: str | None = None
     asset_id: str | None = None
+    download_url: str | None = None
     actual_width: int | None = None
     actual_height: int | None = None
 

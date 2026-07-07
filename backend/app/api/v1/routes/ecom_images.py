@@ -397,6 +397,21 @@ def create_replicate_plan(
     return ok(request, ecom_replicate.response_for_job(db, job))
 
 
+@router.get(
+    "/replicate/{job_id}",
+    response_model=ApiResponse[EcomReplicateAccepted],
+)
+def get_replicate_job(
+    request: Request,
+    job_id: str,
+    user: User = CreateEcomImagePermissionDependency,
+    db: Session = DbSessionDependency,
+    storage: ObjectStorage = ObjectStorageDependency,
+) -> ApiResponse[EcomReplicateAccepted]:
+    job = ecom_replicate.job_or_404(db, tenant_id=user.tenant_id, job_id=job_id)
+    return ok(request, ecom_replicate.response_for_job(db, job, storage=storage))
+
+
 @router.post(
     "/replicate/{job_id}/confirm",
     response_model=ApiResponse[EcomReplicateConfirmAccepted],

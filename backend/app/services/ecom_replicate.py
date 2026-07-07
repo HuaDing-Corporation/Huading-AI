@@ -320,7 +320,12 @@ def outputs_for_job(db: Session, job_id: str) -> list[EcomReplicateOutput]:
     )
 
 
-def response_for_job(db: Session, job: EcomReplicateJob) -> EcomReplicateAccepted:
+def response_for_job(
+    db: Session,
+    job: EcomReplicateJob,
+    *,
+    storage: ObjectStorage | None = None,
+) -> EcomReplicateAccepted:
     outputs = outputs_for_job(db, job.id)
     return EcomReplicateAccepted(
         job_id=job.id,
@@ -332,7 +337,7 @@ def response_for_job(db: Session, job: EcomReplicateJob) -> EcomReplicateAccepte
         requested_size=job.requested_size,
         requested_aspect=job.requested_aspect,
         plan=EcomReplicatePlanPayload(
-            outputs=[_output_response(output) for output in outputs],
+            outputs=[_output_response(output, storage=storage) for output in outputs],
             reference_analysis_json=list(job.reference_analysis_json or []),
             template_mapping_json=dict(job.template_mapping_json or {}),
             generation_plan_json=dict(job.generation_plan_json or {}),
@@ -401,8 +406,12 @@ def prepare_output_retry(
     return job, output
 
 
-def output_response(output: EcomReplicateOutput) -> EcomReplicatePlanOutput:
-    return _output_response(output)
+def output_response(
+    output: EcomReplicateOutput,
+    *,
+    storage: ObjectStorage | None = None,
+) -> EcomReplicatePlanOutput:
+    return _output_response(output, storage=storage)
 
 
 def record_analysis_cost(
@@ -580,7 +589,25 @@ def _render_prompt(
     )
 
 
-def _output_response(output: EcomReplicateOutput) -> EcomReplicatePlanOutput:
+def _output_download_url(
+    output: EcomReplicateOutput,
+    *,
+    storage: ObjectStorage | None,
+) -> str | None:
+    if storage is None or output.status != "succeeded" or not output.storage_key:
+        return None
+    return storage.presign_get_url(
+        output.storage_key,
+        expires_in=settings.engine_s3_presign_ttl,
+        download_filename=f"ecom-replicate-{output.job_id}-{output.index:02d}.png",
+    )
+
+
+def _output_response(
+    output: EcomReplicateOutput,
+    *,
+    storage: ObjectStorage | None = None,
+) -> EcomReplicatePlanOutput:
     return EcomReplicatePlanOutput(
         id=output.id,
         index=output.index,
@@ -592,6 +619,7 @@ def _output_response(output: EcomReplicateOutput) -> EcomReplicatePlanOutput:
         status=output.status,
         prompt=output.prompt,
         asset_id=output.asset_id,
+        download_url=_output_download_url(output, storage=storage),
         actual_width=output.actual_width,
         actual_height=output.actual_height,
     )
