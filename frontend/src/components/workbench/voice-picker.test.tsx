@@ -95,6 +95,24 @@ describe("VoicePicker (口播音色 · 选我的音色)", () => {
     expect(screen.getByText("无标音")).toBeInTheDocument();
   });
 
+  // 承重·真栈对齐（FE-INTEGRATION-0001）：BE read 侧 _brand_voice_read 返 canonical 长值
+  // doubao-voice-clone / cosyvoice-voice-clone —— 徽标必须认长值，否则真栈下徽标全部消失。
+  it("provider 徽标兼容 canonical 长值：doubao-voice-clone→豆包、cosyvoice-voice-clone→CosyVoice", () => {
+    render(
+      <VoicePicker
+        voices={[voice("v1", "知性女声")]}
+        brandVoices={[
+          bv("c1", "豆包音", { provider: "doubao-voice-clone" }),
+          bv("c2", "免费音", { provider: "cosyvoice-voice-clone" })
+        ]}
+        value="v1"
+        onChange={() => {}}
+      />
+    );
+    expect(screen.getByText(copy.brandVoice.providerDoubao)).toBeInTheDocument();
+    expect(screen.getByText(copy.brandVoice.providerCosyvoice)).toBeInTheDocument();
+  });
+
   it("processing 品牌音色 → 置灰不可选 + 「复刻中」，点击不触发 onChange", () => {
     const onChange = vi.fn();
     render(

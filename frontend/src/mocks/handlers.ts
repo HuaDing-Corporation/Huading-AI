@@ -35,12 +35,18 @@ interface MockBrandVoice {
   status: "processing" | "ready" | "failed";
   created_at: string;
   _polls: number; // GET 轮询计数：processing 第 2 次轮询后翻 ready，模拟异步克隆完成
-  provider?: string; // BRAND-VOICE-PICKER-UI-0001：doubao/cosyvoice；部分项**故意缺省**以验证前端兼容不显徽标
+  provider?: string; // canonical 长值（镜像 BE read 侧 _brand_voice_read）；部分项**故意缺省**以验证前端兼容不显徽标
 }
+// FE-INTEGRATION-0001 对齐真栈：BE read 侧 provider 返 canonical 长值（doubao-voice-clone / cosyvoice-voice-clone），
+// 请求侧收短值 Literal["doubao","cosyvoice"]（routes/brand_voices.py::_VOICE_CLONE_PROVIDER_ALIASES 归一化）。
+const VOICE_CLONE_CANONICAL: Record<string, string> = {
+  doubao: "doubao-voice-clone",
+  cosyvoice: "cosyvoice-voice-clone"
+};
 const brandVoices = new Map<string, MockBrandVoice>([
-  // provider：ready 项分别带 doubao/cosyvoice（picker 徽标 豆包/CosyVoice）；failed 项无 provider（picker 中隐藏，兼容缺省）。
-  ["bv-ready-1", { id: "bv-ready-1", name: "我的主播音", status: "ready", created_at: new Date(0).toISOString(), _polls: 99, provider: "doubao" }],
-  ["bv-ready-2", { id: "bv-ready-2", name: "免费复刻音", status: "ready", created_at: new Date(0).toISOString(), _polls: 99, provider: "cosyvoice" }],
+  // provider：ready 项分别带 doubao/cosyvoice 的 canonical（picker 徽标 豆包/CosyVoice）；failed 项无 provider（picker 中隐藏，兼容缺省）。
+  ["bv-ready-1", { id: "bv-ready-1", name: "我的主播音", status: "ready", created_at: new Date(0).toISOString(), _polls: 99, provider: "doubao-voice-clone" }],
+  ["bv-ready-2", { id: "bv-ready-2", name: "免费复刻音", status: "ready", created_at: new Date(0).toISOString(), _polls: 99, provider: "cosyvoice-voice-clone" }],
   ["bv-failed-1", { id: "bv-failed-1", name: "失败样例", status: "failed", created_at: new Date(0).toISOString(), _polls: 99 }]
 ]);
 let brandVoiceSeq = 0;
@@ -700,9 +706,13 @@ export const handlers = [
       // 错误码逐字对齐后端 routes/brand_voices.py(BRAND_VOICE_CONSENT_REQUIRED)。
       return err(422, "BRAND_VOICE_CONSENT_REQUIRED", "需确认授权并提供音频资源");
     }
+    // 请求侧 schema Literal["doubao","cosyvoice"]（缺省 doubao）：非法值 → 422（镜像 pydantic Literal）。
+    if (body.provider !== undefined && !(body.provider in VOICE_CLONE_CANONICAL)) {
+      return err(422, "VALIDATION_ERROR", "provider 非法（doubao / cosyvoice）");
+    }
     const id = `bv-${++brandVoiceSeq}`;
-    // provider 缺省回落 doubao（对齐 codex-a 真契约默认值）；存入以便列表/picker 徽标回放。
-    const provider = body.provider === "cosyvoice" ? "cosyvoice" : "doubao";
+    // 存/返 canonical 长值（镜像 BE：alias 归一化 → _brand_voice_read 返 canonical）。
+    const provider = VOICE_CLONE_CANONICAL[body.provider ?? "doubao"];
     brandVoices.set(id, { id, name: body.name || "未命名品牌音色", status: "processing", created_at: new Date(0).toISOString(), _polls: 0, provider });
     return ok({ id, name: body.name || "未命名品牌音色", status: "processing", created_at: new Date(0).toISOString(), provider });
   }),
