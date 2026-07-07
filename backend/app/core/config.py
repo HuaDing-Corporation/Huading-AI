@@ -164,7 +164,7 @@ class Settings(BaseSettings):
     engine_ecom_replicate_detail_size: str = "768x1024"
     engine_ecom_replicate_detail_fallback_size: str = "1024x1536"
     engine_ecom_replicate_quality: str = "high"
-    engine_ecom_replicate_max_retries: int = 2
+    engine_ecom_replicate_max_retry: int = 2
     engine_usd_cny_rate: float = 7.2
     engine_deepseek_cny_per_1k_input: float = 0.001008
     engine_deepseek_cny_per_1k_output: float = 0.002016

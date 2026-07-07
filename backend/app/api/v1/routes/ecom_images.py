@@ -30,6 +30,7 @@ from app.schemas.ecom_images import (
     EcomPosterTemplatesResponse,
     EcomReplicateAccepted,
     EcomReplicateConfirmAccepted,
+    EcomReplicatePlanOutput,
     EcomReplicateRequest,
 )
 from app.schemas.response import ApiResponse, ok
@@ -416,6 +417,33 @@ def confirm_replicate_plan(
     if should_enqueue:
         generate_ecom_replicate_task.apply_async(args=[job.id], task_id=job.id, queue="image")
     return ok(request, ecom_replicate.confirm_response(job))
+
+
+@router.post(
+    "/replicate/{job_id}/outputs/{output_index}/retry",
+    response_model=ApiResponse[EcomReplicatePlanOutput],
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def retry_replicate_output(
+    request: Request,
+    job_id: str,
+    output_index: int,
+    user: User = CreateEcomImagePermissionDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[EcomReplicatePlanOutput]:
+    job, output = ecom_replicate.prepare_output_retry(
+        db,
+        tenant_id=user.tenant_id,
+        job_id=job_id,
+        output_index=output_index,
+    )
+    db.commit()
+    generate_ecom_replicate_task.apply_async(
+        args=[job.id, output.index],
+        task_id=job.id,
+        queue="image",
+    )
+    return ok(request, ecom_replicate.output_response(output))
 
 
 @router.get(

@@ -872,6 +872,95 @@ def _ecom_replicate_provider_payload(
     }
 
 
+def _max_ecom_replicate_attempts() -> int:
+    max_retry = max(0, int(getattr(settings, "engine_ecom_replicate_max_retry", 2) or 0))
+    return max_retry + 1
+
+
+def _render_ecom_replicate_output_once(
+    db,
+    *,
+    job: EcomReplicateJob,
+    output: EcomReplicateOutput,
+    provider,
+    storage: ObjectStorage,
+) -> None:
+    reference = db.get(Asset, output.reference_asset_id)
+    product = db.get(Asset, output.product_asset_id)
+    if reference is None or product is None:
+        raise ValueError("Replicate output source asset is missing.")
+
+    provider_payload = _ecom_replicate_provider_payload(
+        output=output,
+        reference=reference,
+        product=product,
+        storage=storage,
+    )
+    result = asyncio.run(
+        invoke(
+            db,
+            tenant_id=job.tenant_id,
+            capability="image",
+            provider=provider.__class__.__name__,
+            operation=lambda payload=provider_payload: provider.generate_image(payload),
+            timeout_seconds=settings.engine_image_provider_timeout_seconds,
+        )
+    )
+    result_dict = dict(result)
+    image_bytes = _image_bytes(result_dict)
+    width, height = _image_dimensions(image_bytes)
+    output_key = _ecom_replicate_storage_key(job.tenant_id, job.id, output.index)
+    storage.put_bytes(output_key, image_bytes, content_type="image/png")
+
+    asset = Asset(
+        tenant_id=job.tenant_id,
+        type="generated_image",
+        source="generated",
+        provider=str(result_dict.get("provider") or "apimart"),
+        storage_key=output_key,
+        mime_type="image/png",
+        size_bytes=len(image_bytes),
+        width=width,
+        height=height,
+        status="ready",
+        metadata_={
+            "kind": "ecom_replicate",
+            "job_id": job.id,
+            "output_id": output.id,
+            "output_index": output.index,
+            "theme": output.theme,
+            "requested_size": output.requested_size,
+            "requested_aspect": output.requested_aspect,
+            "actual_width": width,
+            "actual_height": height,
+            "provider_raw_saved": True,
+        },
+    )
+    db.add(asset)
+    db.flush()
+    output.status = "succeeded"
+    output.asset_id = asset.id
+    output.storage_key = output_key
+    output.actual_width = width
+    output.actual_height = height
+    output.validation_json = {
+        "raw_provider_bytes_saved": True,
+        "requested_size": output.requested_size,
+        "actual_width": width,
+        "actual_height": height,
+    }
+    output.error_code = None
+    output.error_message = None
+    output.updated_at = datetime.now(UTC)
+    cost_cents = _ecom_replicate_result_cost_cents(result_dict)
+    record_render_cost(
+        db,
+        tenant_id=job.tenant_id,
+        result=result_dict,
+        fallback_cost_cents=cost_cents,
+    )
+
+
 def _mark_ecom_replicate_job_finished(
     db,
     job: EcomReplicateJob,
@@ -896,7 +985,7 @@ def _mark_ecom_replicate_job_finished(
     db.flush()
 
 
-def run_ecom_replicate_generation(job_id: str) -> dict[str, Any]:
+def run_ecom_replicate_generation(job_id: str, output_index: int | None = None) -> dict[str, Any]:
     storage = create_object_storage(settings)
     with SessionLocal() as db:
         job = db.get(EcomReplicateJob, job_id)
@@ -915,11 +1004,12 @@ def run_ecom_replicate_generation(job_id: str) -> dict[str, Any]:
             capability="image",
             provider="apimart",
         )
+        outputs_query = select(EcomReplicateOutput).where(EcomReplicateOutput.job_id == job.id)
+        if output_index is not None:
+            outputs_query = outputs_query.where(EcomReplicateOutput.index == output_index)
         outputs = list(
             db.scalars(
-                select(EcomReplicateOutput)
-                .where(EcomReplicateOutput.job_id == job.id)
-                .order_by(EcomReplicateOutput.index.asc())
+                outputs_query.order_by(EcomReplicateOutput.index.asc())
             )
         )
         if not outputs:
@@ -933,101 +1023,47 @@ def run_ecom_replicate_generation(job_id: str) -> dict[str, Any]:
         for output in outputs:
             if output.status == "succeeded":
                 continue
-            output.status = "generating"
-            output.updated_at = datetime.now(UTC)
-            db.flush()
-            try:
-                reference = db.get(Asset, output.reference_asset_id)
-                product = db.get(Asset, output.product_asset_id)
-                if reference is None or product is None:
-                    raise ValueError("Replicate output source asset is missing.")
-
-                provider_payload = _ecom_replicate_provider_payload(
-                    output=output,
-                    reference=reference,
-                    product=product,
-                    storage=storage,
-                )
-                result = asyncio.run(
-                    invoke(
-                        db,
-                        tenant_id=job.tenant_id,
-                        capability="image",
-                        provider=provider.__class__.__name__,
-                        operation=lambda payload=provider_payload: provider.generate_image(
-                            payload
-                        ),
-                        timeout_seconds=settings.engine_image_provider_timeout_seconds,
-                    )
-                )
-                result_dict = dict(result)
-                image_bytes = _image_bytes(result_dict)
-                width, height = _image_dimensions(image_bytes)
-                output_key = _ecom_replicate_storage_key(job.tenant_id, job.id, output.index)
-                storage.put_bytes(output_key, image_bytes, content_type="image/png")
-
-                asset = Asset(
-                    tenant_id=job.tenant_id,
-                    type="generated_image",
-                    source="generated",
-                    provider=str(result_dict.get("provider") or "apimart"),
-                    storage_key=output_key,
-                    mime_type="image/png",
-                    size_bytes=len(image_bytes),
-                    width=width,
-                    height=height,
-                    status="ready",
-                    metadata_={
-                        "kind": "ecom_replicate",
-                        "job_id": job.id,
-                        "output_id": output.id,
-                        "output_index": output.index,
-                        "theme": output.theme,
-                        "requested_size": output.requested_size,
-                        "requested_aspect": output.requested_aspect,
-                        "actual_width": width,
-                        "actual_height": height,
-                        "provider_raw_saved": True,
-                    },
-                )
-                db.add(asset)
+            last_error: Exception | None = None
+            max_attempts = _max_ecom_replicate_attempts()
+            for attempt in range(max_attempts):
+                output.status = "generating"
+                output.updated_at = datetime.now(UTC)
                 db.flush()
-                output.status = "succeeded"
-                output.asset_id = asset.id
-                output.storage_key = output_key
-                output.actual_width = width
-                output.actual_height = height
-                output.validation_json = {
-                    "raw_provider_bytes_saved": True,
-                    "requested_size": output.requested_size,
-                    "actual_width": width,
-                    "actual_height": height,
-                }
-                output.error_code = None
-                output.error_message = None
-                output.updated_at = datetime.now(UTC)
-                cost_cents = _ecom_replicate_result_cost_cents(result_dict)
-                record_render_cost(
-                    db,
-                    tenant_id=job.tenant_id,
-                    result=result_dict,
-                    fallback_cost_cents=cost_cents,
-                )
-                db.commit()
-            except Exception as exc:
+                try:
+                    _render_ecom_replicate_output_once(
+                        db,
+                        job=job,
+                        output=output,
+                        provider=provider,
+                        storage=storage,
+                    )
+                    db.commit()
+                    last_error = None
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    output.retry_count = int(output.retry_count or 0) + 1
+                    output.error_code = "ECOM_REPLICATE_RENDER_FAILED"
+                    output.error_message = _failure_message(exc)
+                    output.updated_at = datetime.now(UTC)
+                    logger.warning(
+                        "ecom_replicate_output_attempt_failed",
+                        tenant_id=job.tenant_id,
+                        job_id=job.id,
+                        output_id=output.id,
+                        output_index=output.index,
+                        attempt=attempt + 1,
+                        error=output.error_message,
+                    )
+                    if attempt + 1 >= max_attempts:
+                        output.status = "failed"
+                        db.commit()
+                    else:
+                        output.status = "planned"
+                        db.flush()
+            if last_error is not None and output.status != "failed":
                 output.status = "failed"
-                output.retry_count = int(output.retry_count or 0) + 1
-                output.error_code = "ECOM_REPLICATE_RENDER_FAILED"
-                output.error_message = _failure_message(exc)
-                output.updated_at = datetime.now(UTC)
-                logger.warning(
-                    "ecom_replicate_output_failed",
-                    tenant_id=job.tenant_id,
-                    job_id=job.id,
-                    output_id=output.id,
-                    output_index=output.index,
-                    error=output.error_message,
-                )
+                output.error_message = _failure_message(last_error)
                 db.commit()
 
         outputs = list(
@@ -1060,7 +1096,15 @@ def generate_image_task(self, params: dict[str, Any]) -> dict[str, Any]:
 
 
 @celery_app.task(bind=True, name="app.workers.image_gen.generate_ecom_replicate")
-def generate_ecom_replicate_task(self, job_id: str) -> dict[str, Any]:
+def generate_ecom_replicate_task(
+    self,
+    job_id: str,
+    output_index: int | None = None,
+) -> dict[str, Any]:
     task_job_id = str(job_id or self.request.id)
-    logger.info("ecom_replicate_generation.queued", job_id=task_job_id)
-    return run_ecom_replicate_generation(task_job_id)
+    logger.info(
+        "ecom_replicate_generation.queued",
+        job_id=task_job_id,
+        output_index=output_index,
+    )
+    return run_ecom_replicate_generation(task_job_id, output_index=output_index)

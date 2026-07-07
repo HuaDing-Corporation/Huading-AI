@@ -15,6 +15,7 @@ from app.db.models import (
     Asset,
     EcomReplicateJob,
     EcomReplicateOutput,
+    Subscription,
     UsageRecord,
     User,
 )
@@ -26,19 +27,29 @@ from app.schemas.ecom_images import (
     EcomReplicatePlanPayload,
     EcomReplicateRequest,
 )
-from app.services.quota import active_subscription, remaining_credits
+from app.services.quota import remaining_credits
 from app.services.storage.base import ObjectStorage
 
 _SOURCE_IMAGE_TYPES = {"avatar_image", "product_image", "generated_image"}
 _SOURCE_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
-_BANNED_COPY_TERMS = (
-    "全网最低",
-    "国家级",
-    "第一",
-    "唯一",
-    "最便宜",
-    "包治",
-    "根治",
+_SECTION_13_BANNED_COPY_TERMS = (
+    "\u7b2c\u4e00",
+    "\u9876\u7ea7",
+    "\u6700\u597d",
+    "\u5929\u82b1\u677f",
+    "\u7206\u6b3e",
+    "\u552f\u4e00",
+    "\u72ec\u5bb6",
+    "\u56fd\u5bb6\u7ea7",
+    "\u6c38\u4e45",
+    "100%",
+    "\u7edd\u5bf9",
+    "\u7acb\u523b\u89c1\u6548",
+    "\u5168\u7f51\u6700\u4f4e",
+    "\u9500\u91cf\u7b2c\u4e00",
+    "\u6700\u4fbf\u5b9c",
+    "\u5305\u6cbb",
+    "\u6839\u6cbb",
 )
 _MAIN_THEMES = (
     "layout_match",
@@ -215,7 +226,17 @@ def confirm_replicate_job(
     tenant_id: str,
     job_id: str,
 ) -> tuple[EcomReplicateJob, bool]:
-    job = job_or_404(db, tenant_id=tenant_id, job_id=job_id)
+    job = db.scalar(
+        select(EcomReplicateJob)
+        .where(EcomReplicateJob.id == job_id, EcomReplicateJob.tenant_id == tenant_id)
+        .with_for_update()
+    )
+    if job is None:
+        raise AppError(
+            "Replicate job not found.",
+            code="ECOM_REPLICATE_JOB_NOT_FOUND",
+            status_code=404,
+        )
     if job.status in {"generating", "completed", "partial_failed", "failed", "cancelled"}:
         return job, False
     if job.status != "plan_ready":
@@ -225,7 +246,7 @@ def confirm_replicate_job(
             status_code=409,
         )
 
-    subscription = active_subscription(db, tenant_id)
+    subscription = _active_subscription_for_update(db, tenant_id)
     charge_units = int(Decimal(job.total_credits).to_integral_value(rounding=ROUND_HALF_UP))
     if remaining_credits(subscription) < charge_units:
         raise AppError(
@@ -254,6 +275,28 @@ def confirm_replicate_job(
     )
     db.flush()
     return job, True
+
+
+def _active_subscription_for_update(db: Session, tenant_id: str) -> Subscription:
+    now = datetime.now(UTC)
+    subscription = db.scalar(
+        select(Subscription)
+        .where(
+            Subscription.tenant_id == tenant_id,
+            Subscription.status == "active",
+            Subscription.period_start <= now,
+            Subscription.period_end >= now,
+        )
+        .order_by(Subscription.period_end.desc())
+        .with_for_update()
+    )
+    if subscription is None:
+        raise AppError(
+            "Active subscription not found.",
+            code="SUBSCRIPTION_NOT_FOUND",
+            status_code=404,
+        )
+    return subscription
 
 
 def job_or_404(db: Session, *, tenant_id: str, job_id: str) -> EcomReplicateJob:
@@ -304,6 +347,62 @@ def confirm_response(job: EcomReplicateJob) -> EcomReplicateConfirmAccepted:
         output_count=job.output_count,
         total_credits=float(job.total_credits),
     )
+
+
+def prepare_output_retry(
+    db: Session,
+    *,
+    tenant_id: str,
+    job_id: str,
+    output_index: int,
+) -> tuple[EcomReplicateJob, EcomReplicateOutput]:
+    job = db.scalar(
+        select(EcomReplicateJob)
+        .where(EcomReplicateJob.id == job_id, EcomReplicateJob.tenant_id == tenant_id)
+        .with_for_update()
+    )
+    if job is None:
+        raise AppError(
+            "Replicate job not found.",
+            code="ECOM_REPLICATE_JOB_NOT_FOUND",
+            status_code=404,
+        )
+    output = db.scalar(
+        select(EcomReplicateOutput)
+        .where(
+            EcomReplicateOutput.job_id == job.id,
+            EcomReplicateOutput.tenant_id == tenant_id,
+            EcomReplicateOutput.index == output_index,
+        )
+        .with_for_update()
+    )
+    if output is None:
+        raise AppError(
+            "Replicate output not found.",
+            code="ECOM_REPLICATE_OUTPUT_NOT_FOUND",
+            status_code=404,
+        )
+    if job.status not in {"partial_failed", "completed"} or output.status != "failed":
+        raise AppError(
+            "Replicate output is not retryable.",
+            code="ECOM_REPLICATE_OUTPUT_NOT_RETRYABLE",
+            status_code=409,
+        )
+    output.status = "planned"
+    output.error_code = None
+    output.error_message = None
+    output.updated_at = datetime.now(UTC)
+    job.status = "generating"
+    job.error_code = None
+    job.error_message = None
+    job.finished_at = None
+    job.updated_at = datetime.now(UTC)
+    db.flush()
+    return job, output
+
+
+def output_response(output: EcomReplicateOutput) -> EcomReplicatePlanOutput:
+    return _output_response(output)
 
 
 def record_analysis_cost(
@@ -376,7 +475,7 @@ def _validate_copy(payload: EcomReplicateRequest) -> None:
             " ".join(str(item) for item in payload.selling_points),
         ]
     )
-    if any(term in text for term in _BANNED_COPY_TERMS):
+    if any(term in text for term in _SECTION_13_BANNED_COPY_TERMS):
         raise AppError(
             "Replicate copy contains forbidden marketing language.",
             code="ECOM_REPLICATE_TEXT_FORBIDDEN",
