@@ -211,7 +211,8 @@ export const copy = {
     ecomSubToolLabel: "电商图工具",
     ecomSubToolCutout: "白底图",
     ecomSubToolModel: "AI 模特",
-    ecomSubToolPoster: "营销海报",
+    ecomSubToolPoster: "营销海报", // 已下线（ECOM-REPLICATE-UI-0001）——保留键供 inert adapter/mock，不再入 SUBTOOLS
+    ecomSubToolDetail: "电商详情图",
     ecomModeGroupLabel: "生成方式",
     ecomModelTitle: "AI 模特",
     ecomModelSubtitle: "上传商品图，AI 生成上身模特展示图；支持批量",
@@ -235,6 +236,82 @@ export const copy = {
     ecomPosterTitlePlaceholder: "海报主标题，如：年中大促 全场 5 折",
     ecomPosterTaglineLabel: "自定义一行（可选）",
     ecomPosterTaglinePlaceholder: "副标题 / 卖点一行，如：限时 3 天 错过再等一年",
+    // 电商详情图·强制复刻向导 (ECOM-REPLICATE-UI-0001)
+    ecomDetailTitle: "电商详情图 · 复刻生成",
+    ecomDetailSubtitle: "上传参考图 + 商品图，AI 按参考图强制复刻，只换商品与文案（相似度 ≥80%）",
+    ecomDetailModeLabel: "出图模式",
+    ecomDetailModeMain: "主图（5 张）",
+    ecomDetailModeDetail: "详情页（12 张）",
+    ecomDetailRefLabel: "参考图（复刻模板，1+ 张）",
+    ecomDetailRefUpload: "上传参考图（JPG / PNG / WebP，≤10MB）",
+    ecomDetailProductLabel: "商品图（唯一商品依据，1+ 张）",
+    ecomDetailProductUpload: "上传商品图（JPG / PNG / WebP，≤10MB）",
+    ecomDetailInfoLabel: "商品信息",
+    ecomDetailInfoPlaceholder: "品类 / 材质 / 规格等（只用你提供的信息，AI 不补全材质、认证、功效、销量）",
+    ecomDetailPointsLabel: "核心卖点",
+    ecomDetailPointPlaceholder: "一条卖点，如：316 不锈钢，24 小时持续锁温",
+    ecomDetailAddPoint: "添加卖点",
+    ecomDetailRemovePoint: "删除该卖点",
+    ecomDetailPlan: "生成规划表",
+    ecomDetailPlanning: "分析参考图 · 生成规划中…",
+    // 规划表确认（§10 列 + 整套总价 + 扣费确认）
+    ecomPlanTitle: "生成规划（确认后按此复刻，仅确认一次）",
+    ecomPlanColPage: "页码",
+    ecomPlanColTheme: "页面主题",
+    ecomPlanColSize: "尺寸",
+    ecomPlanColPrompt: "生成要点",
+    ecomPlanColOutput: "最终输出",
+    ecomPlanNoCrop: "原图不裁剪",
+    // BE plan.outputs[].theme 为机器枚举键（backend _MAIN_THEMES/_DETAIL_THEMES）；本地化展示，未知键原样透出。
+    ecomReplicateTheme: (theme: string) =>
+      (({
+        layout_match: "版式复刻",
+        color_match: "配色复刻",
+        campaign_match: "营销卖点",
+        social_match: "种草风格",
+        white_background: "纯白底图",
+        hero: "首屏主视觉",
+        material: "材质细节",
+        function: "功能展示",
+        size: "尺寸规格",
+        scenario: "使用场景",
+        detail: "细节特写",
+        comparison: "对比展示",
+        packing: "包装展示",
+        care: "养护说明",
+        selling_point: "核心卖点",
+        closing: "信任收尾"
+      }) as Record<string, string>)[theme] ?? theme,
+    ecomPlanTotalPrice: (credits: number) => `整套预计 ${credits} 积分`,
+    ecomPlanConfirm: "确认并生成",
+    ecomPlanBack: "返回修改",
+    ecomChargeTitle: "确认扣费生成整套？",
+    ecomChargeMessage: (credits: number) =>
+      `将一次性扣除 ${credits} 积分生成整套图片，确认后开始复刻；质检失败的单张会自动重试、不重复扣费。`,
+    ecomChargeConfirm: "确认扣费生成",
+    // 生成中（禁分批展示，全部完成才一次性展示）
+    ecomGenTitle: "复刻生成中",
+    ecomGenProgress: (done: number, total: number) => `已完成 ${done} / ${total}，全部完成后一次性展示`,
+    ecomGenWait: "整套生成中，请稍候…全部完成后统一展示",
+    // 轮询瞬时失败（500/离线）：不放弃整套（已扣费、后端仍在生成），软提示 + 下一拍自动重试
+    ecomGenRetrying: "网络波动，正在重试…整套仍在后端生成，请勿离开",
+    // 结果（一次性 + 原始尺寸 + 平台建议 §18 + 下载原图 + 单张重试）
+    ecomResultTitle: "复刻结果（整套）",
+    ecomResultPageNo: (n: number) => `第 ${n} 张`,
+    ecomResultSizeMain: (actual: string) =>
+      `当前图片为 AI 原始输出尺寸：${actual}。平台建议主图尺寸：800x800。系统未自动裁剪，请下载后按平台要求自行裁剪或上传时调整。`,
+    ecomResultSizeDetail: (actual: string) =>
+      `当前图片为 AI 原始输出尺寸：${actual}。平台建议详情页尺寸：750x1000。系统未自动裁剪，请下载后按平台要求自行裁剪或上传时调整。`,
+    // actual_dimensions 缺失（后端未回）→ 不把请求尺寸冒充实际输出尺寸（原图尺寸透明红线）
+    ecomResultSizeUnknown: "AI 原图已生成，原始尺寸以下载文件为准。系统未自动裁剪，请下载后按平台要求自行调整。",
+    ecomResultDownload: "下载原图",
+    ecomResultDownloadUnavailable: "原图暂不可用",
+    ecomResultRetry: "重试该张",
+    ecomResultRetrying: "重试中…",
+    ecomResultFailed: "该张生成失败",
+    ecomResultPartialHint: "部分图片生成失败，可对失败图单张重试（不重复扣费）",
+    ecomResultAllFailed: "整套生成失败，可返回重新发起；已扣费问题请联系客服。",
+    ecomResultPreviewAlt: (n: number) => `复刻图第 ${n} 张`,
     // 提示词反推 第7模式 (REVERSE-PROMPT-UI-0001) — 上传图片反推提示词 + 一键带入
     modeReverse: "提示词反推",
     // 视频生成 第6模式 (VIDEOGEN-UI-0001) — 多参考图 + 不限 prompt + 时长/分辨率 + BGM
@@ -245,6 +322,8 @@ export const copy = {
     vgRefImagesUpload: "添加参考图",
     vgRefImagesRequired: "请至少上传 1 张参考图",
     vgRefOverLimit: "最多 9 张参考图，超出部分未添加",
+    // 名词中性 + 随上限动态（供复用 picker 如电商详情图·商品图 max=4，避免误显「参考图」「9 张」）
+    refImagesOverLimit: (max: number) => `最多 ${max} 张，超出部分未添加`,
     vgPromptLabel: "提示词",
     vgPromptPlaceholder: "描述你想要的画面、风格、运镜、氛围…（不限字数）",
     vgPromptRequired: "请填写提示词",
@@ -297,6 +376,14 @@ export const copy = {
     videoTooLong: "请上传 3–10 秒的单人出镜视频",
     videoResolution: "视频分辨率需在 360p–1080p",
     videoUnreadable: "无法读取视频信息，请换一个 MP4 文件",
+    // 电商详情图复刻·客户端校验（ECOM-REPLICATE-UI-0001）
+    ecomDetailNeedMode: "请选择生成模式：主图 / 详情页",
+    ecomDetailNeedRef: "请上传参考图（至少 1 张）",
+    ecomDetailNeedProduct: "请上传商品图（至少 1 张）",
+    ecomDetailNeedInfo: "请填写商品信息",
+    ecomDetailNeedPoint: "请至少填写 1 条核心卖点",
+    ecomDetailFailed: "生成规划失败，请稍后重试",
+    ecomDetailGenFailed: "生成失败，请稍后重试",
     // 后端二次校验专属码（FE-INTEGRATION-0001；前端预检读不到编码，回显后端码时用）
     videoCodec: "视频编码需为 H.264，请用常见工具重新导出 MP4",
     videoAudioCodec: "视频音轨需为 AAC，请用常见工具重新导出 MP4",

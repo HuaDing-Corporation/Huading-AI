@@ -107,7 +107,7 @@ describe("ReversePromptForm 状态机（上传→反推→带入）", () => {
     await waitFor(() => expect(reverse).toHaveBeenCalledWith({ source_asset_id: "aid-1" }));
     expect(await screen.findByText("中文提示词ZZZ")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: copy.reverse.applyAvatar })).toBeEnabled();
-    expect(screen.getByRole("button", { name: copy.reverse.applyEcomPoster })).toBeEnabled();
+    expect(screen.getByRole("button", { name: copy.reverse.applyEcomModel })).toBeEnabled();
   });
 
   it("点「带入·数字人口播」→ 以正确落点冒泡 onApplyPrefill", async () => {

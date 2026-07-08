@@ -159,8 +159,6 @@ export default function Home() {
               <EcomImageWorkbench
                 initialTool={pendingPrefill?.target === "ecom_image" ? pendingPrefill.tool : undefined}
                 initialCustom={pendingPrefill?.target === "ecom_image" ? pendingPrefill.custom : undefined}
-                initialTitle={pendingPrefill?.target === "ecom_image" ? pendingPrefill.title : undefined}
-                initialTagline={pendingPrefill?.target === "ecom_image" ? pendingPrefill.tagline : undefined}
                 onPrefillConsumed={clearPrefill}
               />
             ) : (

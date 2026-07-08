@@ -62,13 +62,8 @@ describe("fillTargetToPrefill · 带入 6 键落点（BE 载荷直落，不猜�
     });
   });
 
-  it("ecom_poster → 电商图·营销海报 title/subtitle", () => {
-    expect(fillTargetToPrefill("ecom_poster", FULL_FILL)).toEqual({
-      target: "ecom_image",
-      tool: "poster",
-      title: "年中大促",
-      tagline: "限时 5 折"
-    });
+  it("ecom_poster → null（营销海报已下线 ECOM-REPLICATE-UI-0001，无落点、按钮已移除）", () => {
+    expect(fillTargetToPrefill("ecom_poster", FULL_FILL)).toBeNull();
   });
 
   it("缺某 fill_target 键 → null（结果页据此置灰该模块「带入」）", () => {

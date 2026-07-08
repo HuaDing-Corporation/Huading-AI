@@ -337,6 +337,74 @@ function analyticsHandlers() {
   ];
 }
 
+// ── 电商详情图·强制复刻 (ECOM-REPLICATE-UI-0001 · FIX1) mock ── 镜像真实 BE PR #140 + FIX2 GET 契约：
+// POST /replicate(201, plan_ready, plan.outputs 全 planned, 不扣) → confirm(202, minimal, generating, 幂等一次扣) →
+// GET /replicate/{id}(轮询推进逐张 succeeded 带 actual_w/h + download_url) → outputs/{index}/retry(202, 单张, 不重复扣)。
+const ECOM_REPLICATE_RATE = 15; // credit/张（= BE engine_ecom_replicate_credits_per_image；前端从 total_credits 取，不硬编码）
+// BE theme 为机器枚举键（backend services/ecom_replicate.py _MAIN_THEMES/_DETAIL_THEMES）——mock 忠实返原键，UI 本地化。
+const ECOM_MAIN_THEMES = ["layout_match", "color_match", "campaign_match", "social_match", "white_background"];
+const ECOM_DETAIL_THEMES = ["hero", "material", "function", "size", "scenario", "detail", "comparison", "packing", "care", "selling_point", "white_background", "closing"];
+// APIMart 保比例不保精确像素（BE 记 requested vs actual）：mock 忠实映射实返尺寸（[w,h]）。
+const ECOM_ACTUAL_DIMS: Record<string, [number, number]> = { "1024x1024": [1254, 1254], "768x1024": [1086, 1448], "1024x1536": [1024, 1536] };
+const ECOM_ASPECTS: Record<string, string> = { "1024x1024": "1:1", "768x1024": "3:4", "1024x1536": "2:3" };
+// 真 BE EcomReplicatePlanOutput 字段全集（无 preview_url；FIX2 唯一图片 URL 为 download_url）。
+interface MockEcomOutput {
+  id: string; index: number; theme: string; reference_asset_id: string | null; product_asset_id: string | null;
+  requested_size: string; requested_aspect: string; status: string; prompt: string | null;
+  asset_id: string | null; download_url: string | null; actual_width: number | null; actual_height: number | null;
+}
+interface MockEcomJob {
+  job_id: string; status: string; output_mode: string; output_count: number; total_credits: number; credit_rate: number;
+  requested_size: string; requested_aspect: string; outputs: MockEcomOutput[]; _charged: boolean; _polls: number; _failIndex: number | null;
+}
+const ecomReplicateJobs = new Map<string, MockEcomJob>();
+let ecomReplicateSeq = 0;
+
+function ecomBuildOutputs(jobId: string, mode: string, refs: string[], products: string[], points: string[]): MockEcomOutput[] {
+  const count = mode === "main" ? 5 : 12;
+  const themes = mode === "main" ? ECOM_MAIN_THEMES : ECOM_DETAIL_THEMES;
+  const size = mode === "main" ? "1024x1024" : "768x1024";
+  const aspect = ECOM_ASPECTS[size] ?? "1:1";
+  const nRefs = Math.max(refs.length, 1);
+  const nProd = Math.max(products.length, 1);
+  const nPts = Math.max(points.length, 1);
+  return Array.from({ length: count }, (_, i) => ({
+    id: `${jobId}-o${i}`,
+    index: i,
+    theme: themes[i] ?? `page_${i}`,
+    reference_asset_id: refs[i % nRefs] ?? null,
+    product_asset_id: products[i % nProd] ?? null,
+    requested_size: size,
+    requested_aspect: aspect,
+    status: "planned",
+    prompt: `复刻参考图构图/摆位/光影，替换为商品；${points[i % nPts] || ""}`.trim(),
+    asset_id: null,
+    download_url: null,
+    actual_width: null,
+    actual_height: null
+  }));
+}
+// EcomReplicateAccepted 形状（POST /replicate 与 GET 共用）。
+function ecomAcceptedResponse(j: MockEcomJob) {
+  return {
+    job_id: j.job_id, status: j.status, output_mode: j.output_mode, output_count: j.output_count,
+    total_credits: j.total_credits, credit_rate: j.credit_rate, requested_size: j.requested_size, requested_aspect: j.requested_aspect,
+    plan: {
+      outputs: j.outputs.map((o) => ({
+        id: o.id, index: o.index, theme: o.theme, reference_asset_id: o.reference_asset_id, product_asset_id: o.product_asset_id,
+        requested_size: o.requested_size, requested_aspect: o.requested_aspect, status: o.status, prompt: o.prompt,
+        asset_id: o.asset_id, download_url: o.download_url, actual_width: o.actual_width, actual_height: o.actual_height
+      })),
+      reference_analysis_json: refs_analysis(j),
+      template_mapping_json: { strategy: "cycle_references_and_products" },
+      generation_plan_json: { mode: j.output_mode, count: j.output_count }
+    }
+  };
+}
+function refs_analysis(j: MockEcomJob): Record<string, unknown>[] {
+  return [{ summary: `${j.output_mode} 复刻规划`, outputs: j.output_count }];
+}
+
 export const handlers = [
   // Auth = M2 shapes (unchanged). Mocked so the (app) client auth-gate can be
   // passed during the MSW parallel period without a real backend.
@@ -692,6 +760,118 @@ export const handlers = [
       return { task_id: id, source_asset_id: it.source_asset_id, status: "queued" };
     });
     return ok({ batch_id: batchId, tasks });
+  }),
+
+  // ── 电商详情图·强制复刻 (ECOM-REPLICATE-UI-0001 · FIX1) 真契约四端点 /replicate ──
+  // POST /replicate（201）：创建 + 规划表（plan.outputs 全 planned），不扣费。请求体 product_info 为 dict。
+  http.post(`${BASE}/api/v1/ecom-images/replicate`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as {
+      output_mode?: string;
+      reference_image_asset_ids?: string[];
+      product_image_asset_ids?: string[];
+      product_info?: unknown;
+      selling_points?: string[];
+      size?: string;
+    };
+    const mode = body.output_mode;
+    if (mode !== "main" && mode !== "detail") return err(422, "ECOM_MODE_REQUIRED", "请选择生成模式：主图 / 详情页");
+    const refs = body.reference_image_asset_ids ?? [];
+    const products = body.product_image_asset_ids ?? [];
+    // BE Field 约束：refs/products 1–4；selling_points ≤8；product_info dict。
+    if (refs.length < 1 || refs.length > 4) return err(422, "ECOM_REF_REQUIRED", "请上传参考图（1–4 张）");
+    if (products.length < 1 || products.length > 4) return err(422, "ECOM_PRODUCT_REQUIRED", "请上传商品图（1–4 张）");
+    if ((body.selling_points ?? []).length > 8) return err(422, "ECOM_POINTS_LIMIT", "核心卖点最多 8 条");
+    if (typeof body.product_info !== "object" || body.product_info === null || Array.isArray(body.product_info)) {
+      return err(422, "ECOM_PRODUCT_INFO_INVALID", "商品信息格式不正确");
+    }
+    const points = (body.selling_points ?? []).map((p) => String(p).trim()).filter(Boolean);
+    const id = `ecomrep-${++ecomReplicateSeq}`;
+    const size = mode === "main" ? "1024x1024" : "768x1024";
+    const outputs = ecomBuildOutputs(id, mode, refs, products, points);
+    // 承重·retry 演示：product_info.description 含 __FAIL__ → 首张(index 0)生成失败（→ partial_failed，可单张重试）。
+    const infoText = JSON.stringify(body.product_info ?? {});
+    ecomReplicateJobs.set(id, {
+      job_id: id, status: "plan_ready", output_mode: mode, output_count: outputs.length,
+      total_credits: outputs.length * ECOM_REPLICATE_RATE, credit_rate: ECOM_REPLICATE_RATE,
+      requested_size: size, requested_aspect: ECOM_ASPECTS[size] ?? "1:1",
+      outputs, _charged: false, _polls: 0, _failIndex: infoText.includes("__FAIL__") ? 0 : null
+    });
+    // BE 真状态码 201 Created。
+    return HttpResponse.json(
+      { data: ecomAcceptedResponse(ecomReplicateJobs.get(id)!), error: null, request_id: "mock-req" },
+      { status: 201 }
+    );
+  }),
+  // POST /replicate/{id}/confirm（202）：一次性扣费 + 幂等 → generating；返回 minimal（不含 plan/outputs）。
+  http.post(`${BASE}/api/v1/ecom-images/replicate/:jobId/confirm`, ({ params }) => {
+    const j = ecomReplicateJobs.get(String(params.jobId));
+    if (!j) return err(404, "ECOM_REPLICATE_JOB_NOT_FOUND", "复刻任务不存在");
+    if (!j._charged) {
+      j._charged = true;
+      j.status = "generating";
+    }
+    // BE 真状态码 202 Accepted。
+    return HttpResponse.json(
+      { data: { job_id: j.job_id, status: j.status, output_count: j.output_count, total_credits: j.total_credits }, error: null, request_id: "mock-req" },
+      { status: 202 }
+    );
+  }),
+  // GET /replicate/{id}（FIX2）：轮询用。generating 时第 2 次起逐张出图，全部终态转 completed/partial_failed。
+  http.get(`${BASE}/api/v1/ecom-images/replicate/:jobId`, ({ params }) => {
+    const j = ecomReplicateJobs.get(String(params.jobId));
+    if (!j) return err(404, "ECOM_REPLICATE_JOB_NOT_FOUND", "复刻任务不存在");
+    if (j.status === "generating") {
+      j._polls += 1;
+      if (j._polls >= 2) {
+        for (const o of j.outputs) {
+          if (o.status === "succeeded" || o.status === "failed") continue;
+          if (j._failIndex === o.index) {
+            o.status = "failed";
+          } else {
+            o.status = "succeeded";
+            const url = `https://mock.local/ecom-replicate-${j.job_id}-${o.index}.png`;
+            o.asset_id = `ecomimg-${j.job_id}-${o.index}`;
+            o.download_url = `${url}?dl=1`; // FIX2 唯一图片 URL（预览+下载共用）
+            const [w, h] = ECOM_ACTUAL_DIMS[o.requested_size] ?? [null, null];
+            o.actual_width = w;
+            o.actual_height = h;
+          }
+        }
+        j.status = j.outputs.some((o) => o.status === "failed") ? "partial_failed" : "completed";
+      }
+    }
+    return ok(ecomAcceptedResponse(j));
+  }),
+  // POST /replicate/{id}/outputs/{index}/retry（202）：失败单张回 planned + 整单回 generating；返回该单张。不重复扣费。
+  http.post(`${BASE}/api/v1/ecom-images/replicate/:jobId/outputs/:outputIndex/retry`, ({ params }) => {
+    const j = ecomReplicateJobs.get(String(params.jobId));
+    if (!j) return err(404, "ECOM_REPLICATE_JOB_NOT_FOUND", "复刻任务不存在");
+    const index = Number(params.outputIndex);
+    const o = j.outputs.find((x) => x.index === index);
+    if (!o) return err(404, "ECOM_REPLICATE_OUTPUT_NOT_FOUND", "该张不存在");
+    if (o.status !== "failed") return err(409, "ECOM_REPLICATE_OUTPUT_NOT_RETRYABLE", "该张不可重试");
+    // 回 planned + 整单 generating（_charged 不动 → 不重复扣）；清失败标记，下轮 GET 出图成功。
+    o.status = "planned";
+    o.asset_id = null;
+    o.actual_width = null;
+    o.actual_height = null;
+    o.download_url = null;
+    j._failIndex = null;
+    j._polls = 0;
+    j.status = "generating";
+    // BE 真状态码 202 Accepted，返回该单张 EcomReplicatePlanOutput。
+    return HttpResponse.json(
+      {
+        data: {
+          id: o.id, index: o.index, theme: o.theme, reference_asset_id: o.reference_asset_id, product_asset_id: o.product_asset_id,
+          requested_size: o.requested_size, requested_aspect: o.requested_aspect, status: o.status, prompt: o.prompt,
+          asset_id: o.asset_id, download_url: o.download_url, actual_width: o.actual_width, actual_height: o.actual_height
+        },
+        error: null,
+        request_id: "mock-req"
+      },
+      { status: 202 }
+    );
   }),
 
   // ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001，FIX1 §8) — 三段式 CRUD mock ──

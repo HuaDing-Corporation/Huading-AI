@@ -51,10 +51,12 @@ async function gotoReverseResult(page: Page): Promise<{ errors: () => string[]; 
 test("带入·数字人口播 → 预填 topic + script，无 #130 白屏", async ({ page }) => {
   const g = await gotoReverseResult(page);
 
-  // 6 键「带入」齐备且可点（缺键会置灰）。
-  for (const name of ["带入 · 数字人口播", "带入 · 电商带货", "带入 · 视频生成", "带入 · 图片生成", "带入 · AI 模特", "带入 · 营销海报"]) {
+  // 5 键「带入」齐备且可点（营销海报已下线 ECOM-REPLICATE-UI-0001，无该按钮）。
+  for (const name of ["带入 · 数字人口播", "带入 · 电商带货", "带入 · 视频生成", "带入 · 图片生成", "带入 · AI 模特"]) {
     await expect(page.getByRole("button", { name })).toBeEnabled();
   }
+  // 海报入口彻底移除 → 无「带入 · 营销海报」按钮
+  await expect(page.getByRole("button", { name: "带入 · 营销海报" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "带入 · 数字人口播" }).click();
   // avatar_talk 落点：topic→#video-topic、script→#video-script（mock fill_targets.avatar_talk）。
@@ -65,12 +67,12 @@ test("带入·数字人口播 → 预填 topic + script，无 #130 白屏", asyn
   expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);
 });
 
-test("带入·营销海报 → 切电商图·海报子模式并预填标题（电商图档落点）", async ({ page }) => {
+test("带入·AI 模特 → 切电商图·AI 模特子工具并预填自定义补充（电商图档落点）", async ({ page }) => {
   const g = await gotoReverseResult(page);
 
-  // ecom_poster 落点：切到电商图 mode + 海报子工具，title→#ecom-poster-title（mock ecom_poster.title）。
-  await page.getByRole("button", { name: "带入 · 营销海报" }).click();
-  await expect(page.locator("#ecom-poster-title")).toHaveValue("年中大促", { timeout: 15_000 });
+  // ecom_model 落点：切到电商图 mode + AI 模特子工具，extra_prompt→#ecom-model-custom（mock ecom_model.extra_prompt）。
+  await page.getByRole("button", { name: "带入 · AI 模特" }).click();
+  await expect(page.locator("#ecom-model-custom")).toHaveValue("工作室柔光、简洁白底、突出质感", { timeout: 15_000 });
 
   expect(g.errors(), `page errors：\n${g.errors().join("\n")}`).toEqual([]);
   expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);

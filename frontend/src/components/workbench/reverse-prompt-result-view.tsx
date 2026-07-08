@@ -79,14 +79,13 @@ function TagRow({ label, tags, note }: { label: string; tags: string[]; note?: s
   );
 }
 
-// 6 个「带入」按键，逐一对齐 BE fill_targets 的 6 键 → 对应工作台模式。
+// 「带入」按键，对齐 BE fill_targets → 对应工作台模式。营销海报下线（ECOM-REPLICATE-UI-0001）→ 去 ecom_poster。
 const APPLY_BUTTONS: { key: ReversePromptFillTargetKey; label: string }[] = [
   { key: "avatar_talk", label: copy.reverse.applyAvatar },
   { key: "seedance_i2v", label: copy.reverse.applyEcomVideo },
   { key: "video_gen", label: copy.reverse.applyVideoGen },
   { key: "photo", label: copy.reverse.applyPhoto },
-  { key: "ecom_model", label: copy.reverse.applyEcomModel },
-  { key: "ecom_poster", label: copy.reverse.applyEcomPoster }
+  { key: "ecom_model", label: copy.reverse.applyEcomModel }
 ];
 
 export interface ReversePromptResultViewProps {

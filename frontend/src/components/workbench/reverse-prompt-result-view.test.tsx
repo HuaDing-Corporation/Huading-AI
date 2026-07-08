@@ -66,7 +66,7 @@ describe("ReversePromptResultView（反推结果 + 带入 4 模块）", () => {
     expect(screen.getByText(/82\s*%/)).toBeInTheDocument();
   });
 
-  it("带入 6 模块按钮齐备；全 fill_targets 在 → 均可点，点「数字人口播」以正确落点 apply", () => {
+  it("带入 5 模块按钮齐备（营销海报已下线）；全 fill_targets 在 → 均可点，点「数字人口播」以正确落点 apply", () => {
     const onApply = vi.fn();
     render(<ReversePromptResultView result={FULL} onApply={onApply} onRegenerate={noop} onSave={noop} />);
     for (const label of [
@@ -74,11 +74,12 @@ describe("ReversePromptResultView（反推结果 + 带入 4 模块）", () => {
       copy.reverse.applyEcomVideo,
       copy.reverse.applyVideoGen,
       copy.reverse.applyPhoto,
-      copy.reverse.applyEcomModel,
-      copy.reverse.applyEcomPoster
+      copy.reverse.applyEcomModel
     ]) {
       expect(screen.getByRole("button", { name: label })).toBeEnabled();
     }
+    // 营销海报入口已移除 → 无「带入·营销海报」按钮
+    expect(screen.queryByRole("button", { name: copy.reverse.applyEcomPoster })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyAvatar }));
     expect(onApply).toHaveBeenCalledWith({ target: "avatar_talk", topic: "保温杯种草", script: "大家好……" });
   });
@@ -104,13 +105,6 @@ describe("ReversePromptResultView（反推结果 + 带入 4 模块）", () => {
     expect(onApply).toHaveBeenCalledWith({ target: "ecom_image", tool: "model", custom: "白底柔光" });
   });
 
-  it("点「带入·营销海报」→ ecom_poster.title/subtitle 落 title/tagline（tool=poster）", () => {
-    const onApply = vi.fn();
-    render(<ReversePromptResultView result={FULL} onApply={onApply} onRegenerate={noop} onSave={noop} />);
-    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyEcomPoster }));
-    expect(onApply).toHaveBeenCalledWith({ target: "ecom_image", tool: "poster", title: "大促", tagline: "5 折" });
-  });
-
   it("承重：缺某 fill_target 键 → 该模块「带入」置灰不可点，且不触发 apply", () => {
     const onApply = vi.fn();
     const onlyAvatar = {
@@ -118,7 +112,7 @@ describe("ReversePromptResultView（反推结果 + 带入 4 模块）", () => {
       fill_targets: { avatar_talk: { topic: "x", script: "y" } }
     } as unknown as ReversePromptResult;
     render(<ReversePromptResultView result={onlyAvatar} onApply={onApply} onRegenerate={noop} onSave={noop} />);
-    const ecomBtn = screen.getByRole("button", { name: copy.reverse.applyEcomPoster });
+    const ecomBtn = screen.getByRole("button", { name: copy.reverse.applyEcomModel });
     expect(ecomBtn).toBeDisabled();
     fireEvent.click(ecomBtn);
     expect(onApply).not.toHaveBeenCalled();
