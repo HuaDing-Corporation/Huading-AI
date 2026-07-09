@@ -18,6 +18,7 @@ from app.providers.base import register_provider
 
 _DEFAULT_ENDPOINT = "https://openspeech.bytedance.com/api/v1/mega_tts/audio/upload"
 _DEFAULT_STATUS_ENDPOINT = "https://openspeech.bytedance.com/api/v1/mega_tts/status"
+_LEGACY_ENDPOINT = "https://openspeech.bytedance.com/api/v3/voice-clone"
 _DEFAULT_RESOURCE_ID = "volc.megatts.voiceclone"
 _DEFAULT_MODEL_TYPE = 4
 _PROVIDER_NAME = "doubao-voice-clone"
@@ -50,7 +51,7 @@ class DoubaoVoiceCloneProvider:
         self.access_token = access_token
         self.api_key = api_key
         self.resource_id = resource_id or _DEFAULT_RESOURCE_ID
-        self.endpoint = endpoint or _DEFAULT_ENDPOINT
+        self.endpoint = _canonical_upload_endpoint(endpoint)
         self.status_endpoint = status_endpoint or _DEFAULT_STATUS_ENDPOINT
         self.request_timeout_seconds = request_timeout_seconds
         self.poll_interval_seconds = poll_interval_seconds
@@ -174,6 +175,13 @@ def _first_value(data: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
             value = data[key]
             return value
     return None
+
+
+def _canonical_upload_endpoint(endpoint: str) -> str:
+    value = str(endpoint or _DEFAULT_ENDPOINT).strip()
+    if value.rstrip("/") == _LEGACY_ENDPOINT:
+        return _DEFAULT_ENDPOINT
+    return value
 
 
 def _payload_audio_bytes(payload: Mapping[str, Any]) -> bytes:

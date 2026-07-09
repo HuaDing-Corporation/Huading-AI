@@ -8,12 +8,15 @@ import re
 import subprocess
 import tempfile
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
+import redis
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -66,6 +69,9 @@ _SEEDANCE_I2V_PROGRESS_EPSILON = 0.001
 _APIMART_VIDEO_MIN_PRESIGN_TTL_SECONDS = 7200
 _SEEDANCE_I2V_RESOLUTIONS = {"480p", "720p", "1080p"}
 _CHANGE_LIPS_MODEL = "realman_change_lips"
+_CHANGE_LIPS_LOCK_KEY = "provider:omnihuman:change-lips"
+_CHANGE_LIPS_BUSY_MESSAGE = "改口型服务繁忙，请稍后重试。"
+_CHANGE_LIPS_LOCAL_LOCK = Lock()
 _CHANGE_LIPS_DURATION_TOLERANCE_SEC = 0.1
 _CHANGE_LIPS_OPTIONAL_FIELDS = {
     "align_audio_reverse",
@@ -101,6 +107,39 @@ _ECOMMERCE_SCRIPT_FORBIDDEN_TERMS = (
 
 class ChangeLipsOutputTooShort(RuntimeError):
     pass
+
+
+@contextmanager
+def _change_lips_serial_slot(store: ProgressStore):
+    client = getattr(store, "_redis", None)
+    if client is None:
+        with _CHANGE_LIPS_LOCAL_LOCK:
+            yield
+        return
+    lock_timeout = max(
+        float(settings.engine_omnihuman_timeout_seconds)
+        + 8 * float(settings.engine_omnihuman_request_timeout_seconds)
+        + 120,
+        120,
+    )
+    lock = client.lock(
+        _CHANGE_LIPS_LOCK_KEY,
+        timeout=lock_timeout,
+        blocking_timeout=lock_timeout,
+    )
+    try:
+        acquired = bool(lock.acquire(blocking=True))
+    except redis.RedisError as exc:
+        raise RuntimeError(_CHANGE_LIPS_BUSY_MESSAGE) from exc
+    if not acquired:
+        raise RuntimeError(_CHANGE_LIPS_BUSY_MESSAGE)
+    try:
+        yield
+    finally:
+        try:
+            lock.release()
+        except redis.RedisError:
+            logger.warning("change_lips_lock_release_failed")
 
 
 @dataclass
@@ -887,16 +926,17 @@ def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
 
         def generate_for_tier(selected_tier: str) -> bytes:
             payload["tier"] = selected_tier
-            result = asyncio.run(
-                invoke(
-                    ctx.db,
-                    tenant_id=ctx.tenant_id,
-                    capability="avatar",
-                    provider=provider.__class__.__name__,
-                    operation=lambda: provider.generate_change_lips(payload),
-                    timeout_seconds=settings.engine_omnihuman_timeout_seconds,
+            with _change_lips_serial_slot(ctx.store):
+                result = asyncio.run(
+                    invoke(
+                        ctx.db,
+                        tenant_id=ctx.tenant_id,
+                        capability="avatar",
+                        provider=provider.__class__.__name__,
+                        operation=lambda: provider.generate_change_lips(payload),
+                        timeout_seconds=settings.engine_omnihuman_timeout_seconds,
+                    )
                 )
-            )
             result_bytes = _download_bytes(str(result["video_url"]))
             return _fit_change_lips_video_to_tts(
                 result_bytes,

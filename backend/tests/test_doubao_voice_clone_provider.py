@@ -45,7 +45,7 @@ class _FakeHTTP:
 
 
 @pytest.mark.asyncio
-async def test_doubao_voice_clone_uploads_base64_audio_with_megatts_contract():
+async def test_doubao_voice_clone_rewrites_legacy_url_and_uses_megatts_contract():
     from app.providers.voice_clone.doubao import DoubaoVoiceCloneProvider
 
     http = _FakeHTTP(
@@ -58,7 +58,7 @@ async def test_doubao_voice_clone_uploads_base64_audio_with_megatts_contract():
         appid="doubao-appid",
         access_token="seed-token",
         resource_id="volc.megatts.voiceclone",
-        endpoint="https://openspeech.bytedance.com/api/v1/mega_tts/audio/upload",
+        endpoint="https://openspeech.bytedance.com/api/v3/voice-clone",
         status_endpoint="https://openspeech.bytedance.com/api/v1/mega_tts/status",
         http_client=http,
         request_timeout_seconds=15,
