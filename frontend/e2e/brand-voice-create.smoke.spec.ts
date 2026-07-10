@@ -14,7 +14,8 @@ test("创建·两档切换 + 缺省 doubao 扣费确认 + 移动端显示", asyn
     if (/Minified React error #130|error #130|client-side exception/.test(t)) errors.push(t);
   });
 
-  await page.goto("/");
+  // LANDING-ENTRY-UI-0001：未登录进站根已改落 /landing → helper 直达 /login（登录页行为不变）。
+  await page.goto("/login");
   await page.waitForFunction(() => !!navigator.serviceWorker?.controller, undefined, { timeout: 30_000 });
   if (await page.getByRole("button", { name: "登录" }).isVisible().catch(() => false)) {
     const inputs = page.locator("form input");
