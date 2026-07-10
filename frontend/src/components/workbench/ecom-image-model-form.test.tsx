@@ -81,6 +81,7 @@ describe("EcomImageModelForm (电商图 · AI 模特)", () => {
         source_asset_id: "asset-1",
         gender: "female",
         style_id: "studio",
+        aspect_ratio: "1:1",
         extra_prompt: undefined,
         apply_visible_label: false
       })
@@ -105,6 +106,7 @@ describe("EcomImageModelForm (电商图 · AI 模特)", () => {
         source_asset_id: "asset-1",
         gender: "female",
         style_id: "studio",
+        aspect_ratio: "1:1",
         extra_prompt: undefined,
         apply_visible_label: true
       })
@@ -128,6 +130,7 @@ describe("EcomImageModelForm (电商图 · AI 模特)", () => {
         source_asset_id: "asset-1",
         gender: "male",
         style_id: "studio",
+        aspect_ratio: "1:1",
         extra_prompt: "暖光街头微笑站姿",
         apply_visible_label: false
       })
@@ -178,8 +181,8 @@ describe("EcomImageModelForm (电商图 · AI 模特)", () => {
     await waitFor(() => expect(modelBatchMock.mutateAsync).toHaveBeenCalledTimes(1));
     expect(modelBatchMock.mutateAsync.mock.calls[0][0]).toEqual({
       items: [
-        { source_asset_id: "asset-1", gender: "female", style_id: "studio", extra_prompt: undefined, apply_visible_label: false },
-        { source_asset_id: "asset-1", gender: "female", style_id: "studio", extra_prompt: undefined, apply_visible_label: false }
+        { source_asset_id: "asset-1", gender: "female", style_id: "studio", aspect_ratio: "1:1", extra_prompt: undefined, apply_visible_label: false },
+        { source_asset_id: "asset-1", gender: "female", style_id: "studio", aspect_ratio: "1:1", extra_prompt: undefined, apply_visible_label: false }
       ]
     });
     expect(trackExistingMock).toHaveBeenCalledTimes(2);

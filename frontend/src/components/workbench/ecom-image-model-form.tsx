@@ -7,6 +7,7 @@ import { useModelBatch, useModelImage, useModelStyles } from "@/lib/api/hooks";
 import type { ModelGender } from "@/lib/api/types";
 import { AiTextField } from "@/components/workbench/ai-text-field";
 import { SelectableOption } from "@/components/ui/selectable-option";
+import { AspectRatioSelect, DEFAULT_IMAGE_ASPECT_RATIO, type ImageAspectRatio } from "@/components/workbench/aspect-ratio-select";
 import { EcomImageTool } from "@/components/workbench/ecom-image-tool";
 import { copy } from "@/lib/copy";
 
@@ -32,6 +33,7 @@ export function EcomImageModelForm({ initialCustom }: { initialCustom?: string }
 
   const [gender, setGender] = useState<ModelGender>("female");
   const [styleId, setStyleId] = useState<string | null>(null);
+  const [aspectRatio, setAspectRatio] = useState<ImageAspectRatio>(DEFAULT_IMAGE_ASPECT_RATIO); // 画面比例，默认 1:1
   // 提示词反推「带入 · 电商图(AI 模特)」惰性注入自定义补充(= extra_prompt)。
   const [custom, setCustom] = useState(() => (initialCustom ?? "").slice(0, MAX_CUSTOM));
 
@@ -53,13 +55,14 @@ export function EcomImageModelForm({ initialCustom }: { initialCustom?: string }
           gender,
           style_id: styleId as string,
           extra_prompt: extraPrompt,
+          aspect_ratio: aspectRatio,
           apply_visible_label: applyVisibleLabel
         });
         return [res.task_id];
       }}
       onSubmitBatch={async (assetIds, applyVisibleLabel) => {
         const res = await modelBatch.mutateAsync({
-          items: assetIds.map((id) => ({ source_asset_id: id, gender, style_id: styleId as string, extra_prompt: extraPrompt, apply_visible_label: applyVisibleLabel }))
+          items: assetIds.map((id) => ({ source_asset_id: id, gender, style_id: styleId as string, extra_prompt: extraPrompt, aspect_ratio: aspectRatio, apply_visible_label: applyVisibleLabel }))
         });
         return res.tasks.map((t) => t.task_id);
       }}
@@ -108,6 +111,9 @@ export function EcomImageModelForm({ initialCustom }: { initialCustom?: string }
         placeholder={copy.workbench.ecomCustomPlaceholder}
         footer={`${custom.length}/${MAX_CUSTOM}`}
       />
+
+      {/* 画面比例（默认 1:1） */}
+      <AspectRatioSelect value={aspectRatio} onValueChange={setAspectRatio} />
     </EcomImageTool>
   );
 }

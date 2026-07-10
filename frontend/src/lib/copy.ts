@@ -143,11 +143,11 @@ export const copy = {
     photoRefUpload: "上传参考图（JPG / PNG / WebP，≤10MB）",
     photoRefPreviewAlt: "参考图预览",
     photoRefHint: "上传参考图做换背景 / 修图；留空则纯文生图",
-    photoSizeLabel: "尺寸",
-    photoQualityLabel: "质量",
-    photoQuality: { low: "低", medium: "中", high: "高" },
-    photoQualityHint: "质量越高，图片越精细、消耗积分越多",
     photoResultAlt: "生成的图片",
+    // 画面比例（IMAGE-ASPECT-RATIO-UI-0001）——替代旧「尺寸 / 质量」下拉；8 定比 + 自适应，默认 1:1
+    aspectLabel: "画面比例",
+    aspectAuto: "自适应",
+    aspectAutoHint: "自适应：有输入图按输入图比例输出，无输入图默认 1:1",
     // 文案仿写 + 标题/话题生成（mode: copywriting）
     modeCopywriting: "文案仿写",
     copyTitle: "文案仿写",
