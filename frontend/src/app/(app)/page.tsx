@@ -22,15 +22,16 @@ import { copy } from "@/lib/copy";
 type WorkbenchMode = "avatar_talk" | "seedance_i2v" | "video_gen" | "photo" | "copywriting" | "ecom_image" | "reverse_prompt";
 type VideoMode = "avatar_talk" | "seedance_i2v";
 
-// Workbench modes: 数字人口播 (video) / 电商带货 i2v (video) / 视频生成 i2v (video) / 提示词反推 (image→prompt) / 照片·AI 图 (image) / 文案仿写 (text) / 电商图·白底图 (image).
+// Workbench modes 顺序（WORKBENCH-TAB-ORDER-0001，2026-07-10 用户指定）：
+// 数字人口播 / 提示词反推 / 图片生成·修改 / 电商图 / 文案仿写 / 电商带货 i2v / 视频生成 i2v。仅重排，id/label/图标/逻辑不变。
 const MODES: { id: WorkbenchMode; label: string; Icon: LucideIcon }[] = [
   { id: "avatar_talk", label: copy.workbench.modeAvatar, Icon: UserRound },
-  { id: "seedance_i2v", label: copy.workbench.modeEcom, Icon: Store },
-  { id: "video_gen", label: copy.workbench.modeVideoGen, Icon: Clapperboard },
   { id: "reverse_prompt", label: copy.workbench.modeReverse, Icon: ScanSearch },
   { id: "photo", label: copy.workbench.modePhoto, Icon: ImagePlus },
+  { id: "ecom_image", label: copy.workbench.modeEcomImage, Icon: Eraser },
   { id: "copywriting", label: copy.workbench.modeCopywriting, Icon: PenLine },
-  { id: "ecom_image", label: copy.workbench.modeEcomImage, Icon: Eraser }
+  { id: "seedance_i2v", label: copy.workbench.modeEcom, Icon: Store },
+  { id: "video_gen", label: copy.workbench.modeVideoGen, Icon: Clapperboard }
 ];
 
 export default function Home() {

@@ -1,5 +1,7 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+
+import { copy } from "@/lib/copy";
 
 // Mock the heavy children to markers — this test only asserts the mode switch.
 vi.mock("next/navigation", () => ({ useRouter: () => ({ back: vi.fn(), push: vi.fn() }) }));
@@ -49,25 +51,43 @@ describe("Workbench mode switch (数字人口播 / 电商带货)", () => {
     expect(screen.getByTestId("avatar-form")).toBeInTheDocument();
     expect(screen.queryByTestId("ecom-form")).not.toBeInTheDocument();
 
-    // Switch to 图片生成 / 修改 → photo form (third mode).
+    // Switch to 图片生成 / 修改 → photo form (WORKBENCH-TAB-ORDER-0001: 3rd tab). 名称匹配，与顺序无关。
     fireEvent.click(screen.getByRole("button", { name: /图片生成/ }));
     expect(screen.getByTestId("photo-form")).toBeInTheDocument();
     expect(screen.queryByTestId("avatar-form")).not.toBeInTheDocument();
 
-    // Switch to 文案仿写 → copywriting form (fourth mode).
+    // Switch to 文案仿写 → copywriting form (5th tab).
     fireEvent.click(screen.getByRole("button", { name: /文案仿写/ }));
     expect(screen.getByTestId("copywriting-form")).toBeInTheDocument();
     expect(screen.queryByTestId("photo-form")).not.toBeInTheDocument();
 
-    // Switch to 电商图 → cutout form (fifth mode).
+    // Switch to 电商图 → cutout form (4th tab).
     fireEvent.click(screen.getByRole("button", { name: /电商图/ }));
     expect(screen.getByTestId("ecom-image-form")).toBeInTheDocument();
     expect(screen.queryByTestId("copywriting-form")).not.toBeInTheDocument();
 
-    // Switch to 视频生成 → video-gen form (sixth mode, VIDEOGEN-UI-0001).
+    // Switch to 视频生成 → video-gen form (7th tab, VIDEOGEN-UI-0001).
     fireEvent.click(screen.getByRole("button", { name: /视频生成/ }));
     expect(screen.getByTestId("video-gen-form")).toBeInTheDocument();
     expect(screen.queryByTestId("ecom-image-form")).not.toBeInTheDocument();
+  });
+
+  // WORKBENCH-TAB-ORDER-0001：锁死 7 tab 顺序（用户 2026-07-10 指定），防未来误重排。
+  it("7 tab 顺序：数字人口播·提示词反推·图片生成/修改·电商图·文案仿写·电商带货·视频生成", () => {
+    render(<Home />);
+    const group = screen.getByRole("group", { name: "生成模式" });
+    const labels = within(group)
+      .getAllByRole("button")
+      .map((b) => b.textContent?.trim());
+    expect(labels).toEqual([
+      copy.workbench.modeAvatar,
+      copy.workbench.modeReverse,
+      copy.workbench.modePhoto,
+      copy.workbench.modeEcomImage,
+      copy.workbench.modeCopywriting,
+      copy.workbench.modeEcom,
+      copy.workbench.modeVideoGen
+    ]);
   });
 
   // FIX1 P1：5 模式 chip 容器需有窄屏溢出保护（横向滚动 + chip 不压缩），
