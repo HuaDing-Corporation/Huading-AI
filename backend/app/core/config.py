@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     # SSE progress stream cap (seconds) before emitting an sse_timeout event.
     sse_timeout_seconds: int = 600
     upload_max_bytes: int = 10 * 1024 * 1024
+    upload_video_max_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
 
     storage_backend: str = "local"
     storage_local_root: str = ".local-storage"
@@ -157,6 +158,7 @@ class Settings(BaseSettings):
     engine_apimart_reverse_prompt_model: str = "gemini-3.1-pro-preview"
     engine_apimart_reverse_prompt_input_credits_per_m: float = 16.0
     engine_apimart_reverse_prompt_output_credits_per_m: float = 96.0
+    engine_reverse_prompt_video_credits: float = Field(default=100.0, gt=0)
     engine_ecom_replicate_enabled: bool = True
     engine_ecom_replicate_credits_per_image: float = 15.0
     engine_ecom_replicate_analysis_cny_per_call: float = 0.14

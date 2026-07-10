@@ -49,6 +49,12 @@ def create_app() -> FastAPI:
         BodySizeLimitMiddleware,
         max_body_size=settings.upload_max_bytes,
         paths=(f"{settings.api_v1_prefix}/uploads",),
+        path_limits={
+            # Leave room for multipart headers; the handler still caps file bytes exactly.
+            f"{settings.api_v1_prefix}/uploads/videos": (
+                settings.upload_video_max_bytes + 1024 * 1024
+            ),
+        },
     )
     app.add_middleware(
         CORSMiddleware,

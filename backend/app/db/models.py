@@ -346,7 +346,8 @@ class CreditRate(Base):
     __table_args__ = (
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
-            "'publish', 'voice_clone', 'video_gen', 'reverse_prompt')",
+            "'publish', 'voice_clone', 'video_gen', 'reverse_prompt', "
+            "'reverse_prompt_video')",
             name="ck_credit_rates_capability",
         ),
         CheckConstraint(
@@ -755,7 +756,8 @@ class UsageRecord(Base):
     __table_args__ = (
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
-            "'publish', 'voice_clone', 'video_gen', 'reverse_prompt')",
+            "'publish', 'voice_clone', 'video_gen', 'reverse_prompt', "
+            "'reverse_prompt_video')",
             name="ck_usage_records_capability",
         ),
         CheckConstraint(
@@ -767,6 +769,7 @@ class UsageRecord(Base):
             name="ck_usage_records_status",
         ),
         Index("ix_usage_records_subscription_status", "subscription_id", "status"),
+        Index("ix_usage_records_reverse_prompt_status", "reverse_prompt_job_id", "status"),
         Index("ix_usage_records_tenant_created_at", "tenant_id", "created_at"),
         Index("ix_usage_records_status_created_at", "status", "created_at"),
         Index(
@@ -784,6 +787,9 @@ class UsageRecord(Base):
     )
     video_task_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("video_tasks.id"), nullable=True
+    )
+    reverse_prompt_job_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("reverse_prompt_jobs.id", ondelete="SET NULL"), nullable=True
     )
     capability: Mapped[str] = mapped_column(String(32))
     provider: Mapped[str] = mapped_column(String(40))

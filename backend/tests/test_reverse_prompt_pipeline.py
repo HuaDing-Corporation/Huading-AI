@@ -8,8 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.dialects import postgresql
 
+from app.core.exceptions import AppError
 from app.db.models import (
     Asset,
     CreditRate,
@@ -18,12 +20,14 @@ from app.db.models import (
     Subscription,
     Tenant,
     UsageRecord,
+    User,
 )
 from app.main import app
 from app.providers.reverse_prompt.apimart_gemini import (
     APIMartGeminiReversePromptProvider,
     normalize_product_validation_payload,
 )
+from app.services.reverse_prompt_video import extract_uniform_video_frames, frame_timestamps
 
 
 def test_reverse_prompt_seed_provider_id_fits_provider_config_column():
@@ -104,6 +108,61 @@ def test_reverse_prompt_seed_credit_rate_defaults_to_30():
     ]
 
 
+def test_reverse_prompt_video_migration_extends_billing_and_links_usage() -> None:
+    migration_path = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "20260710_0024_reverse_prompt_video.py"
+    )
+    source = migration_path.read_text(encoding="utf-8")
+
+    assert 'revision = "20260710_0024"' in source
+    assert 'down_revision = "20260710_0023"' in source
+    assert "reverse_prompt_video" in source
+    assert "reverse_prompt_job_id" in source
+    assert "ix_usage_records_reverse_prompt_status" in source
+    assert "UPDATE usage_records" in source
+    assert "UPDATE credit_rates" in source
+
+
+def test_reverse_prompt_video_quota_uses_configurable_fallback_and_tenant_override(
+    auth_db,
+    auth_context,
+    monkeypatch,
+) -> None:
+    env_example = (Path(__file__).parents[1] / ".env.example").read_text(encoding="utf-8")
+    assert "ENGINE_REVERSE_PROMPT_VIDEO_CREDITS=100" in env_example
+
+    from app.core.config import settings
+    from app.services.quota import estimate_reverse_prompt_video_quota
+
+    monkeypatch.setattr(settings, "engine_reverse_prompt_video_credits", 125.0)
+    db = auth_db()
+    fallback = estimate_reverse_prompt_video_quota(
+        db,
+        tenant_id=auth_context["tenant_id"],
+    )
+    assert fallback.estimated_credits == Decimal("125.00")
+
+    db.add(
+        CreditRate(
+            tenant_id=auth_context["tenant_id"],
+            capability="reverse_prompt_video",
+            unit="call",
+            credits_per_unit=Decimal("87.5000"),
+            is_active=True,
+        )
+    )
+    db.flush()
+    tenant_rate = estimate_reverse_prompt_video_quota(
+        db,
+        tenant_id=auth_context["tenant_id"],
+    )
+    assert tenant_rate.estimated_credits == Decimal("87.50")
+    db.close()
+
+
 class _Response:
     def __init__(self, payload: dict, status_code: int = 200) -> None:
         self._payload = payload
@@ -176,6 +235,50 @@ JSON_CONTENT = """{
   "confidence": 0.86
 }"""
 
+VIDEO_JSON_CONTENT = """{
+  "target_format": "seedance_2_0",
+  "prompt_zh": "香水瓶广告，镜头缓慢推进。",
+  "prompt_en": "Perfume bottle commercial with a slow push-in.",
+  "negative_prompt": "blurry, distorted logo",
+  "style_tags": ["commercial", "premium"],
+  "camera": "close-up",
+  "lighting": "soft studio light",
+  "composition": "centered",
+  "subject": "glass perfume bottle",
+  "scene": "white marble tabletop",
+  "motion_hint": "slow push-in",
+  "selling_points": ["premium texture"],
+  "text_in_media": ["PARFUM"],
+  "disclaimer": "Verify visible text before reuse.",
+  "confidence": 0.9,
+  "video_analysis": {
+    "duration_sec": 23.8,
+    "pacing": "variable",
+    "shot_list": [
+      {
+        "index": 0,
+        "start_sec": 0,
+        "end_sec": 12,
+        "visual": "A perfume bottle appears on marble.",
+        "camera": "close-up",
+        "motion": "slow push-in",
+        "transition": "cut"
+      },
+      {
+        "index": 1,
+        "start_sec": 12,
+        "end_sec": 24,
+        "visual": "The logo catches a soft highlight.",
+        "camera": "detail shot",
+        "motion": "small orbit",
+        "transition": "fade"
+      }
+    ],
+    "audio_transcript": "model must not populate phase-one audio",
+    "bgm_style": "model must not populate phase-one audio"
+  }
+}"""
+
 PRODUCT_IDENTITY_CONTENT = """{
   "product_identity": {
     "main_color": "celadon green",
@@ -243,6 +346,90 @@ def test_apimart_gemini_analyzes_structured_product_identity() -> None:
     assert "main_color" in instruction
     assert "glaze" in instruction
     assert "shape" in instruction
+
+
+def test_apimart_gemini_analyzes_video_frames_with_frozen_contract() -> None:
+    session = _Session([_chat_payload(VIDEO_JSON_CONTENT)])
+    provider = APIMartGeminiReversePromptProvider(api_key="api-test-key", session=session)
+    frame_urls = [f"data:image/jpeg;base64,frame-{index}" for index in range(8)]
+    timestamps_sec = [1.5, 4.5, 7.5, 10.5, 13.5, 16.5, 19.5, 22.5]
+
+    result = provider.reverse_video_frames_sync(
+        {
+            "image_urls": frame_urls,
+            "timestamps_sec": timestamps_sec,
+            "duration_sec": 24.0,
+        }
+    )
+
+    assert result["video_analysis"] == {
+        "duration_sec": 24.0,
+        "pacing": "variable",
+        "shot_list": [
+            {
+                "index": 0,
+                "start_sec": 0.0,
+                "end_sec": 12.0,
+                "visual": "A perfume bottle appears on marble.",
+                "camera": "close-up",
+                "motion": "slow push-in",
+                "transition": "cut",
+            },
+            {
+                "index": 1,
+                "start_sec": 12.0,
+                "end_sec": 24.0,
+                "visual": "The logo catches a soft highlight.",
+                "camera": "detail shot",
+                "motion": "small orbit",
+                "transition": "fade",
+            },
+        ],
+        "audio_transcript": None,
+        "bgm_style": None,
+    }
+    content = session.calls[0]["json"]["messages"][-1]["content"]
+    assert [part["image_url"]["url"] for part in content[1:]] == frame_urls
+    instruction = content[0]["text"]
+    assert "24.0 seconds" in instruction
+    assert "1.5, 4.5, 7.5" in instruction
+    assert "audio_transcript" in instruction
+
+
+def test_video_frame_extraction_uses_midpoints_8_or_12_and_768px_jpeg() -> None:
+    assert frame_timestamps(24.0) == [1.5, 4.5, 7.5, 10.5, 13.5, 16.5, 19.5, 22.5]
+    assert len(frame_timestamps(30.0)) == 8
+    assert len(frame_timestamps(30.001)) == 12
+
+    calls: list[dict[str, object]] = []
+
+    def fake_run(command, *, capture_output, check, timeout):
+        calls.append(
+            {
+                "command": command,
+                "capture_output": capture_output,
+                "check": check,
+                "timeout": timeout,
+            }
+        )
+        return SimpleNamespace(returncode=0, stdout=b"jpeg-frame", stderr=b"")
+
+    frames = extract_uniform_video_frames(
+        Path("source.mp4"),
+        duration_sec=24.0,
+        run=fake_run,
+    )
+
+    assert frames == [b"jpeg-frame"] * 8
+    assert len(calls) == 8
+    for call, timestamp in zip(calls, frame_timestamps(24.0), strict=True):
+        command = call["command"]
+        assert command[command.index("-ss") + 1] == f"{timestamp:.3f}"
+        assert command[command.index("-vf") + 1] == (
+            "scale=768:768:force_original_aspect_ratio=decrease"
+        )
+        assert command[-4:] == ["-f", "image2pipe", "-vcodec", "mjpeg"]
+        assert call["timeout"] == 30.0
 
 
 def test_apimart_gemini_validator_rejects_product_color_and_pattern_mismatch() -> None:
@@ -567,6 +754,766 @@ def _seed_image_asset(db, tenant_id: str) -> Asset:
     return asset
 
 
+def _seed_video_asset(db, tenant_id: str, *, duration_ms: int = 24_000) -> Asset:
+    asset = Asset(
+        tenant_id=tenant_id,
+        type="video",
+        source="upload",
+        storage_key=f"tenants/{tenant_id}/uploads/reverse-source.mp4",
+        mime_type="video/mp4",
+        size_bytes=12_345,
+        duration_ms=duration_ms,
+        width=720,
+        height=1280,
+        status="ready",
+        metadata_={
+            "purpose": "reverse_prompt",
+            "container": "mov,mp4,m4a,3gp,3g2,mj2",
+            "video_codec": "h264",
+            "audio_codec": "",
+        },
+    )
+    db.add(asset)
+    db.flush()
+    return asset
+
+
+def _capture_postgresql_selects(db) -> list[str]:
+    statements: list[str] = []
+
+    @event.listens_for(db, "do_orm_execute")
+    def _capture_statement(orm_execute_state) -> None:
+        if orm_execute_state.is_select:
+            statements.append(
+                str(orm_execute_state.statement.compile(dialect=postgresql.dialect()))
+            )
+
+    return statements
+
+
+def test_reverse_prompt_video_create_subscription_query_uses_for_update(
+    auth_db,
+    auth_context,
+):
+    from app.services.reverse_prompt import create_reverse_prompt_job
+
+    with auth_db() as db:
+        asset = _seed_video_asset(db, auth_context["tenant_id"])
+        user = db.get(User, auth_context["user_id"])
+        statements = _capture_postgresql_selects(db)
+
+        create_reverse_prompt_job(
+            db,
+            user=user,
+            source_asset_id=asset.id,
+            target_format="seedance_2_0",
+            storage=SimpleNamespace(),
+        )
+
+        subscription_queries = [sql for sql in statements if "FROM subscriptions" in sql]
+        assert len(subscription_queries) == 1
+        assert "FOR UPDATE" in subscription_queries[0]
+
+
+def test_reverse_prompt_video_regenerate_job_query_uses_for_update(
+    auth_db,
+    auth_context,
+):
+    from app.services.reverse_prompt import regenerate_reverse_prompt_job
+
+    with auth_db() as setup:
+        asset = _seed_video_asset(setup, auth_context["tenant_id"])
+        job = ReversePromptJob(
+            tenant_id=auth_context["tenant_id"],
+            created_by_user_id=auth_context["user_id"],
+            source_kind="video",
+            source_asset_id=asset.id,
+            source_storage_key=asset.storage_key,
+            target_format="seedance_2_0",
+            status="succeeded",
+        )
+        setup.add(job)
+        setup.commit()
+        job_id = job.id
+
+    with auth_db() as db:
+        user = db.get(User, auth_context["user_id"])
+        statements = _capture_postgresql_selects(db)
+        regenerate_reverse_prompt_job(
+            db,
+            user=user,
+            job_id=job_id,
+            storage=SimpleNamespace(),
+        )
+
+        decision_queries = [
+            sql
+            for sql in statements
+            if "FROM reverse_prompt_jobs" in sql
+            and "AND reverse_prompt_jobs.tenant_id =" in sql
+        ]
+        assert len(decision_queries) == 1
+        assert "FOR UPDATE" in decision_queries[0]
+
+
+def test_reverse_prompt_video_returns_202_queues_job_and_reserves_fixed_quota(
+    auth_db,
+    auth_context,
+    monkeypatch,
+):
+    session = auth_db()
+    _seed_reverse_prompt_provider(session)
+    asset = _seed_video_asset(session, auth_context["tenant_id"])
+    subscription = session.scalar(
+        select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+    )
+    asset_id = asset.id
+    initial_used = subscription.quota_credits_used
+    initial_reserved = subscription.quota_credits_reserved
+    session.commit()
+    session.close()
+
+    enqueued: dict[str, object] = {}
+
+    class _FakeTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            enqueued.update({"args": args, "task_id": task_id, "queue": queue})
+            return SimpleNamespace(status="PENDING")
+
+    from app.api.v1.routes import reverse_prompt as reverse_prompt_route
+
+    monkeypatch.setattr(
+        reverse_prompt_route,
+        "generate_reverse_prompt_video_task",
+        _FakeTask(),
+        raising=False,
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/reverse-prompt/jobs",
+        json={"source_asset_id": asset_id, "target_format": "seedance_2_0"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 202
+    body = response.json()["data"]
+    assert body["status"] == "queued"
+    assert body["source_kind"] == "video"
+    assert enqueued == {"args": [body["id"]], "task_id": body["id"], "queue": "image"}
+
+    db = auth_db()
+    usage = db.scalar(
+        select(UsageRecord).where(
+            UsageRecord.tenant_id == auth_context["tenant_id"],
+            UsageRecord.capability == "reverse_prompt_video",
+        )
+    )
+    subscription = db.scalar(
+        select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+    )
+    assert usage is not None
+    assert usage.status == "reserved"
+    assert usage.unit == "call"
+    assert usage.quantity == Decimal("1.000")
+    assert usage.credits == Decimal("100.00")
+    assert subscription.quota_credits_used == initial_used
+    assert subscription.quota_credits_reserved == initial_reserved + 100
+    db.close()
+
+
+def test_reverse_prompt_video_two_sessions_allow_only_one_create_when_balance_fits_once(
+    auth_db,
+    auth_context,
+):
+    setup = auth_db()
+    _seed_reverse_prompt_provider(setup)
+    asset = _seed_video_asset(setup, auth_context["tenant_id"])
+    subscription = setup.scalar(
+        select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+    )
+    subscription.quota_credits_total = 100
+    subscription.quota_credits_used = 0
+    subscription.quota_credits_reserved = 0
+    asset_id = asset.id
+    subscription_id = subscription.id
+    setup.commit()
+    setup.close()
+
+    from app.services.reverse_prompt import create_reverse_prompt_job
+
+    first = auth_db()
+    second = auth_db()
+    try:
+        first_subscription = first.get(Subscription, subscription_id)
+        second_subscription = second.get(Subscription, subscription_id)
+        first_user = first.get(User, auth_context["user_id"])
+        second_user = second.get(User, auth_context["user_id"])
+        assert first_subscription.quota_credits_reserved == 0
+        assert second_subscription.quota_credits_reserved == 0
+
+        created = create_reverse_prompt_job(
+            first,
+            user=first_user,
+            source_asset_id=asset_id,
+            target_format="seedance_2_0",
+            storage=SimpleNamespace(),
+        )
+        assert created.status == "queued"
+        assert second_subscription.quota_credits_reserved == 0
+
+        with pytest.raises(AppError) as exc_info:
+            create_reverse_prompt_job(
+                second,
+                user=second_user,
+                source_asset_id=asset_id,
+                target_format="seedance_2_0",
+                storage=SimpleNamespace(),
+            )
+        assert exc_info.value.code == "TENANT_QUOTA_EXCEEDED"
+        second.rollback()
+    finally:
+        first.close()
+        second.close()
+
+    with auth_db() as db:
+        jobs = list(
+            db.scalars(
+                select(ReversePromptJob).where(
+                    ReversePromptJob.tenant_id == auth_context["tenant_id"],
+                    ReversePromptJob.source_asset_id == asset_id,
+                )
+            )
+        )
+        reserved_records = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.tenant_id == auth_context["tenant_id"],
+                    UsageRecord.capability == "reverse_prompt_video",
+                    UsageRecord.status == "reserved",
+                )
+            )
+        )
+        subscription = db.get(Subscription, subscription_id)
+        assert len(jobs) == 1
+        assert len(reserved_records) == 1
+        assert subscription.quota_credits_reserved == sum(
+            int(record.credits) for record in reserved_records
+        )
+
+
+def test_reverse_prompt_video_queue_failure_releases_reserved_quota(
+    auth_db,
+    auth_context,
+    monkeypatch,
+):
+    session = auth_db()
+    _seed_reverse_prompt_provider(session)
+    asset = _seed_video_asset(session, auth_context["tenant_id"])
+    subscription = session.scalar(
+        select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+    )
+    asset_id = asset.id
+    initial_used = subscription.quota_credits_used
+    initial_reserved = subscription.quota_credits_reserved
+    session.commit()
+    session.close()
+
+    class _FailingTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            raise RuntimeError("broker unavailable")
+
+    from app.api.v1.routes import reverse_prompt as reverse_prompt_route
+
+    monkeypatch.setattr(
+        reverse_prompt_route,
+        "generate_reverse_prompt_video_task",
+        _FailingTask(),
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/reverse-prompt/jobs",
+        json={"source_asset_id": asset_id, "target_format": "seedance_2_0"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "REVERSE_PROMPT_QUEUE_FAILED"
+
+    db = auth_db()
+    job = db.scalar(
+        select(ReversePromptJob).where(
+            ReversePromptJob.tenant_id == auth_context["tenant_id"],
+            ReversePromptJob.source_asset_id == asset_id,
+        )
+    )
+    usage = db.scalar(
+        select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job.id)
+    )
+    subscription = db.scalar(
+        select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+    )
+    assert job.status == "failed"
+    assert job.error_code == "REVERSE_PROMPT_QUEUE_FAILED"
+    assert usage.status == "released"
+    assert subscription.quota_credits_used == initial_used
+    assert subscription.quota_credits_reserved == initial_reserved
+    db.close()
+
+
+def test_reverse_prompt_video_worker_succeeds_settles_once_and_is_pollable(
+    auth_db,
+    auth_context,
+    monkeypatch,
+):
+    session = auth_db()
+    _seed_reverse_prompt_provider(session)
+    asset = _seed_video_asset(session, auth_context["tenant_id"])
+    asset_id = asset.id
+    storage_key = asset.storage_key
+    session.commit()
+    session.close()
+
+    class _FakeTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            return SimpleNamespace(status="PENDING")
+
+    from app.api.v1.routes import reverse_prompt as reverse_prompt_route
+
+    monkeypatch.setattr(
+        reverse_prompt_route,
+        "generate_reverse_prompt_video_task",
+        _FakeTask(),
+    )
+    client = TestClient(app)
+    created = client.post(
+        "/api/v1/reverse-prompt/jobs",
+        json={"source_asset_id": asset_id, "target_format": "seedance_2_0"},
+        headers=auth_context["headers"],
+    )
+    assert created.status_code == 202
+    job_id = created.json()["data"]["id"]
+
+    from app.services import reverse_prompt_video
+
+    class _Storage:
+        def get_bytes(self, key: str) -> bytes:
+            assert key == storage_key
+            return b"fake-video-content"
+
+    extraction_calls: list[tuple[Path, float]] = []
+
+    def fake_extract(path: Path, *, duration_sec: float, run=None) -> list[bytes]:
+        assert path.exists()
+        extraction_calls.append((path, duration_sec))
+        return [f"jpeg-{index}".encode() for index in range(8)]
+
+    provider_calls: list[dict[str, object]] = []
+    provider_result = {
+        **jsonlib.loads(VIDEO_JSON_CONTENT),
+        "provider": "apimart",
+        "model": "gemini-3.1-pro-preview",
+        "prompt_tokens": 2000,
+        "completion_tokens": 800,
+        "total_tokens": 2800,
+        "credits": Decimal("0.1088"),
+        "cost_cents": 8,
+        "raw_model_json": jsonlib.loads(VIDEO_JSON_CONTENT),
+    }
+    provider_result["video_analysis"] = {
+        **provider_result["video_analysis"],
+        "duration_sec": 24.0,
+        "audio_transcript": None,
+        "bgm_style": None,
+    }
+    def fake_reverse_video_frames(payload):
+        provider_calls.append(dict(payload))
+        with auth_db() as running_db:
+            assert running_db.get(ReversePromptJob, job_id).status == "running"
+        return provider_result
+
+    fake_provider = SimpleNamespace(reverse_video_frames=fake_reverse_video_frames)
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "create_object_storage",
+        lambda _settings: _Storage(),
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "extract_uniform_video_frames",
+        fake_extract,
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "resolve",
+        lambda *args, **kwargs: fake_provider,
+    )
+
+    result = reverse_prompt_video.run_reverse_prompt_video_job(
+        job_id,
+        session_factory=auth_db,
+    )
+    repeated = reverse_prompt_video.run_reverse_prompt_video_job(
+        job_id,
+        session_factory=auth_db,
+    )
+
+    assert result == {"job_id": job_id, "status": "succeeded"}
+    assert repeated == {"job_id": job_id, "status": "succeeded"}
+    assert len(extraction_calls) == 1
+    assert not extraction_calls[0][0].exists()
+    assert len(provider_calls) == 1
+    assert provider_calls[0]["duration_sec"] == 24.0
+    assert provider_calls[0]["timestamps_sec"] == frame_timestamps(24.0)
+    assert len(provider_calls[0]["image_urls"]) == 8
+    assert all(
+        value.startswith("data:image/jpeg;base64,")
+        for value in provider_calls[0]["image_urls"]
+    )
+
+    polled = client.get(
+        f"/api/v1/reverse-prompt/jobs/{job_id}",
+        headers=auth_context["headers"],
+    )
+    assert polled.status_code == 200
+    body = polled.json()["data"]
+    assert body["status"] == "succeeded"
+    assert body["result"]["video_analysis"]["duration_sec"] == 24.0
+    assert body["result"]["video_analysis"]["audio_transcript"] is None
+    assert body["result"]["video_analysis"]["bgm_style"] is None
+
+    db = auth_db()
+    usage_records = list(
+        db.scalars(
+            select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id)
+        )
+    )
+    subscription = db.scalar(
+        select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+    )
+    assert len(usage_records) == 1
+    assert usage_records[0].status == "settled"
+    assert usage_records[0].unit == "token"
+    assert usage_records[0].quantity == Decimal("2800.000")
+    assert usage_records[0].credits == Decimal("100.00")
+    assert usage_records[0].cost_cents == 8
+    assert subscription.quota_credits_reserved == 0
+    assert subscription.quota_credits_used == 100
+    db.close()
+
+
+def test_reverse_prompt_video_job_can_be_claimed_only_once(
+    auth_db,
+    auth_context,
+    monkeypatch,
+):
+    session = auth_db()
+    _seed_reverse_prompt_provider(session)
+    asset = _seed_video_asset(session, auth_context["tenant_id"])
+    asset_id = asset.id
+    session.commit()
+    session.close()
+
+    class _FakeTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            return SimpleNamespace(status="PENDING")
+
+    from app.api.v1.routes import reverse_prompt as reverse_prompt_route
+
+    monkeypatch.setattr(
+        reverse_prompt_route,
+        "generate_reverse_prompt_video_task",
+        _FakeTask(),
+    )
+    client = TestClient(app)
+    created = client.post(
+        "/api/v1/reverse-prompt/jobs",
+        json={"source_asset_id": asset_id, "target_format": "seedance_2_0"},
+        headers=auth_context["headers"],
+    )
+    job_id = created.json()["data"]["id"]
+
+    from app.services.reverse_prompt_video import claim_reverse_prompt_video_job
+
+    first = auth_db()
+    second = auth_db()
+    try:
+        assert claim_reverse_prompt_video_job(first, job_id=job_id) is True
+        assert claim_reverse_prompt_video_job(second, job_id=job_id) is False
+    finally:
+        first.close()
+        second.close()
+
+    with auth_db() as db:
+        assert db.get(ReversePromptJob, job_id).status == "running"
+        usages = list(
+            db.scalars(
+                select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id)
+            )
+        )
+        assert len(usages) == 1
+        assert usages[0].status == "reserved"
+
+
+def test_reverse_prompt_video_regenerate_returns_202_and_reserves_one_new_call(
+    auth_db,
+    auth_context,
+    monkeypatch,
+):
+    session = auth_db()
+    _seed_reverse_prompt_provider(session)
+    asset = _seed_video_asset(session, auth_context["tenant_id"])
+    asset_id = asset.id
+    session.commit()
+    session.close()
+
+    enqueued: list[dict[str, object]] = []
+
+    class _FakeTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            enqueued.append({"args": args, "task_id": task_id, "queue": queue})
+            return SimpleNamespace(status="PENDING")
+
+    from app.api.v1.routes import reverse_prompt as reverse_prompt_route
+
+    monkeypatch.setattr(
+        reverse_prompt_route,
+        "generate_reverse_prompt_video_task",
+        _FakeTask(),
+    )
+    client = TestClient(app)
+    created = client.post(
+        "/api/v1/reverse-prompt/jobs",
+        json={"source_asset_id": asset_id, "target_format": "seedance_2_0"},
+        headers=auth_context["headers"],
+    )
+    assert created.status_code == 202
+    job_id = created.json()["data"]["id"]
+
+    from app.services.quota import settle_reverse_prompt_video_quota
+
+    db = auth_db()
+    job = db.get(ReversePromptJob, job_id)
+    settle_reverse_prompt_video_quota(
+        db,
+        tenant_id=auth_context["tenant_id"],
+        reverse_prompt_job_id=job_id,
+        provider="apimart",
+        model="gemini-3.1-pro-preview",
+        total_tokens=2500,
+        cost_cents=7,
+    )
+    job.status = "succeeded"
+    job.result_json = {
+        "target_format": "seedance_2_0",
+        "prompt_zh": "old",
+        "prompt_en": "old",
+        "fill_targets": {},
+    }
+    db.commit()
+    db.close()
+
+    regenerated = client.post(
+        f"/api/v1/reverse-prompt/jobs/{job_id}/regenerate",
+        headers=auth_context["headers"],
+    )
+    duplicate = client.post(
+        f"/api/v1/reverse-prompt/jobs/{job_id}/regenerate",
+        headers=auth_context["headers"],
+    )
+
+    assert regenerated.status_code == 202
+    assert regenerated.json()["data"]["status"] == "queued"
+    assert regenerated.json()["data"]["result"] is None
+    assert duplicate.status_code == 409
+    assert duplicate.json()["error"]["code"] == "REVERSE_PROMPT_ALREADY_RUNNING"
+    assert enqueued == [
+        {"args": [job_id], "task_id": job_id, "queue": "image"},
+        {"args": [job_id], "task_id": job_id, "queue": "image"},
+    ]
+
+    db = auth_db()
+    usages = list(
+        db.scalars(
+            select(UsageRecord)
+            .where(UsageRecord.reverse_prompt_job_id == job_id)
+            .order_by(UsageRecord.created_at)
+        )
+    )
+    subscription = db.scalar(
+        select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+    )
+    assert [usage.status for usage in usages] == ["settled", "reserved"]
+    assert subscription.quota_credits_used == 100
+    assert subscription.quota_credits_reserved == 100
+    db.close()
+
+
+def test_reverse_prompt_video_two_sessions_grant_only_one_regenerate(
+    auth_db,
+    auth_context,
+):
+    from app.services.quota import settle_reverse_prompt_video_quota
+    from app.services.reverse_prompt import (
+        create_reverse_prompt_job,
+        regenerate_reverse_prompt_job,
+    )
+
+    setup = auth_db()
+    _seed_reverse_prompt_provider(setup)
+    asset = _seed_video_asset(setup, auth_context["tenant_id"])
+    user = setup.get(User, auth_context["user_id"])
+    job = create_reverse_prompt_job(
+        setup,
+        user=user,
+        source_asset_id=asset.id,
+        target_format="seedance_2_0",
+        storage=SimpleNamespace(),
+    )
+    settle_reverse_prompt_video_quota(
+        setup,
+        tenant_id=auth_context["tenant_id"],
+        reverse_prompt_job_id=job.id,
+        provider="apimart",
+        model="gemini-3.1-pro-preview",
+        total_tokens=2500,
+        cost_cents=7,
+    )
+    job.status = "succeeded"
+    job.result_json = {
+        "target_format": "seedance_2_0",
+        "prompt_zh": "old",
+        "prompt_en": "old",
+        "fill_targets": {},
+    }
+    job_id = job.id
+    subscription_id = setup.scalar(
+        select(Subscription.id).where(
+            Subscription.tenant_id == auth_context["tenant_id"]
+        )
+    )
+    setup.commit()
+    setup.close()
+
+    first = auth_db()
+    second = auth_db()
+    try:
+        first_job = first.get(ReversePromptJob, job_id)
+        second_job = second.get(ReversePromptJob, job_id)
+        first_user = first.get(User, auth_context["user_id"])
+        second_user = second.get(User, auth_context["user_id"])
+        assert first_job.status == "succeeded"
+        assert second_job.status == "succeeded"
+
+        regenerated = regenerate_reverse_prompt_job(
+            first,
+            user=first_user,
+            job_id=job_id,
+            storage=SimpleNamespace(),
+        )
+        assert regenerated.status == "queued"
+        assert second_job.status == "succeeded"
+
+        with pytest.raises(AppError) as exc_info:
+            regenerate_reverse_prompt_job(
+                second,
+                user=second_user,
+                job_id=job_id,
+                storage=SimpleNamespace(),
+            )
+        assert exc_info.value.code == "REVERSE_PROMPT_ALREADY_RUNNING"
+        second.rollback()
+    finally:
+        first.close()
+        second.close()
+
+    with auth_db() as db:
+        usages = list(
+            db.scalars(
+                select(UsageRecord)
+                .where(UsageRecord.reverse_prompt_job_id == job_id)
+                .order_by(UsageRecord.created_at)
+            )
+        )
+        reserved_records = [usage for usage in usages if usage.status == "reserved"]
+        subscription = db.get(Subscription, subscription_id)
+        assert [usage.status for usage in usages] == ["settled", "reserved"]
+        assert len(reserved_records) == 1
+        assert subscription.quota_credits_reserved == sum(
+            int(record.credits) for record in reserved_records
+        )
+
+
+def test_reverse_prompt_video_worker_invalidated_source_fails_and_releases_quota(
+    auth_db,
+    auth_context,
+    monkeypatch,
+):
+    session = auth_db()
+    _seed_reverse_prompt_provider(session)
+    asset = _seed_video_asset(session, auth_context["tenant_id"])
+    asset_id = asset.id
+    session.commit()
+    session.close()
+
+    class _FakeTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            return SimpleNamespace(status="PENDING")
+
+    from app.api.v1.routes import reverse_prompt as reverse_prompt_route
+
+    monkeypatch.setattr(
+        reverse_prompt_route,
+        "generate_reverse_prompt_video_task",
+        _FakeTask(),
+    )
+    client = TestClient(app)
+    created = client.post(
+        "/api/v1/reverse-prompt/jobs",
+        json={"source_asset_id": asset_id, "target_format": "seedance_2_0"},
+        headers=auth_context["headers"],
+    )
+    assert created.status_code == 202
+    job_id = created.json()["data"]["id"]
+
+    db = auth_db()
+    db.get(Asset, asset_id).status = "failed"
+    db.commit()
+    db.close()
+
+    from app.services import reverse_prompt_video
+
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "create_object_storage",
+        lambda _settings: SimpleNamespace(),
+    )
+    with pytest.raises(
+        reverse_prompt_video.ReversePromptVideoProcessingError,
+        match="processing failed",
+    ):
+        reverse_prompt_video.run_reverse_prompt_video_job(
+            job_id,
+            session_factory=auth_db,
+        )
+
+    db = auth_db()
+    job = db.get(ReversePromptJob, job_id)
+    usage = db.scalar(
+        select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id)
+    )
+    subscription = db.scalar(
+        select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+    )
+    assert job.status == "failed"
+    assert job.error_code == "REVERSE_PROMPT_FAILED"
+    assert usage.status == "released"
+    assert subscription.quota_credits_reserved == 0
+    assert subscription.quota_credits_used == 0
+    db.close()
+
+
 def test_reverse_prompt_sync_creates_job_records_usage_and_returns_fill_targets(
     auth_db,
     auth_context,
@@ -643,6 +1590,7 @@ def test_reverse_prompt_sync_creates_job_records_usage_and_returns_fill_targets(
     assert body["result"]["fill_targets"]["video_gen"]["prompt"] == body["result"]["prompt_en"]
     assert body["result"]["fill_targets"]["seedance_i2v"]["scene_prompt"]
     assert body["result"]["fill_targets"]["avatar_talk"]["topic"]
+    assert body["result"]["video_analysis"] is None
     assert body["result"]["fill_targets"]["ecom_model"]["extra_prompt"]
 
     db = auth_db()
@@ -779,6 +1727,56 @@ def test_reverse_prompt_rejects_when_quota_is_exhausted(auth_db, auth_context, m
     assert response.json()["error"]["code"] == "TENANT_QUOTA_EXCEEDED"
 
 
+def test_reverse_prompt_video_quota_exhaustion_creates_no_job_or_reservation(
+    auth_db,
+    auth_context,
+    monkeypatch,
+):
+    session = auth_db()
+    _seed_reverse_prompt_provider(session)
+    asset = _seed_video_asset(session, auth_context["tenant_id"])
+    asset_id = asset.id
+    subscription = session.scalar(
+        select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+    )
+    subscription.quota_credits_used = subscription.quota_credits_total
+    session.commit()
+    session.close()
+
+    class _UnexpectedTask:
+        def apply_async(self, **kwargs):
+            raise AssertionError("quota rejection must not enqueue a task")
+
+    from app.api.v1.routes import reverse_prompt as reverse_prompt_route
+
+    monkeypatch.setattr(
+        reverse_prompt_route,
+        "generate_reverse_prompt_video_task",
+        _UnexpectedTask(),
+    )
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/reverse-prompt/jobs",
+        json={"source_asset_id": asset_id, "target_format": "seedance_2_0"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "TENANT_QUOTA_EXCEEDED"
+    with auth_db() as db:
+        assert db.scalar(
+            select(ReversePromptJob).where(
+                ReversePromptJob.tenant_id == auth_context["tenant_id"]
+            )
+        ) is None
+        assert db.scalar(
+            select(UsageRecord).where(
+                UsageRecord.tenant_id == auth_context["tenant_id"],
+                UsageRecord.capability == "reverse_prompt_video",
+            )
+        ) is None
+
+
 def test_reverse_prompt_regenerate_failure_marks_job_failed(auth_db, auth_context, monkeypatch):
     session = auth_db()
     _seed_reverse_prompt_provider(session)
@@ -839,6 +1837,8 @@ def test_reverse_prompt_rejects_cross_tenant_asset(auth_db, auth_context):
     db.flush()
     other = _seed_image_asset(db, "tenant-other")
     other_id = other.id
+    other_video = _seed_video_asset(db, "tenant-other")
+    other_video_id = other_video.id
     db.commit()
     db.close()
 
@@ -848,6 +1848,41 @@ def test_reverse_prompt_rejects_cross_tenant_asset(auth_db, auth_context):
         json={"source_asset_id": other_id, "target_format": "seedance_2_0"},
         headers=auth_context["headers"],
     )
+    video_response = client.post(
+        "/api/v1/reverse-prompt/jobs",
+        json={"source_asset_id": other_video_id, "target_format": "seedance_2_0"},
+        headers=auth_context["headers"],
+    )
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "REVERSE_PROMPT_SOURCE_NOT_FOUND"
+    assert video_response.status_code == 404
+    assert video_response.json()["error"]["code"] == "REVERSE_PROMPT_SOURCE_NOT_FOUND"
+
+
+def test_reverse_prompt_rejects_link_input_without_creating_job(auth_db, auth_context):
+    db = auth_db()
+    _seed_reverse_prompt_provider(db)
+    asset = _seed_image_asset(db, auth_context["tenant_id"])
+    asset_id = asset.id
+    db.commit()
+    db.close()
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/reverse-prompt/jobs",
+        json={
+            "source_asset_id": asset_id,
+            "target_format": "seedance_2_0",
+            "source_url": "https://example.test/video.mp4",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+    with auth_db() as db:
+        assert db.scalar(
+            select(ReversePromptJob).where(
+                ReversePromptJob.tenant_id == auth_context["tenant_id"]
+            )
+        ) is None

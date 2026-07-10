@@ -24,6 +24,24 @@ class ReversePromptFillTargets(BaseModel):
     ecom_poster: dict[str, str]
 
 
+class ReversePromptShot(BaseModel):
+    index: int = Field(ge=0)
+    start_sec: float = Field(ge=0)
+    end_sec: float = Field(gt=0)
+    visual: str
+    camera: str = ""
+    motion: str = ""
+    transition: str = ""
+
+
+class ReversePromptVideoAnalysis(BaseModel):
+    duration_sec: float = Field(gt=0)
+    pacing: Literal["slow", "medium", "fast", "variable"]
+    shot_list: list[ReversePromptShot] = Field(default_factory=list)
+    audio_transcript: str | None = None
+    bgm_style: str | None = None
+
+
 class ReversePromptResult(BaseModel):
     target_format: ReversePromptTargetFormat
     prompt_zh: str
@@ -41,6 +59,7 @@ class ReversePromptResult(BaseModel):
     disclaimer: str = ""
     confidence: float = 0.0
     fill_targets: ReversePromptFillTargets
+    video_analysis: ReversePromptVideoAnalysis | None = None
 
 
 class ReversePromptJobRead(BaseModel):

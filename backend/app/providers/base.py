@@ -74,6 +74,11 @@ class VoiceCloneProvider(Protocol):
 class ReversePromptProvider(Protocol):
     async def reverse_image(self, payload: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
+    async def reverse_video_frames(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]: ...
+
 
 Provider = (
     LLMProvider

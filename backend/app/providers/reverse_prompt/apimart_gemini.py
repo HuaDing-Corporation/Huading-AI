@@ -54,6 +54,9 @@ class APIMartGeminiReversePromptProvider:
     async def reverse_image(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         return await asyncio.to_thread(self.reverse_image_sync, payload)
 
+    async def reverse_video_frames(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        return await asyncio.to_thread(self.reverse_video_frames_sync, payload)
+
     async def analyze_product_identity(
         self,
         payload: Mapping[str, Any],
@@ -87,6 +90,54 @@ class APIMartGeminiReversePromptProvider:
             )
 
         normalized = normalize_reverse_prompt_payload(parsed)
+        return {
+            **normalized,
+            "provider": "apimart",
+            "model": self.model,
+            **_usage_cost_payload(response_payload, completion_payload),
+            "raw_model_json": parsed,
+        }
+
+    def reverse_video_frames_sync(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        raw_image_urls = payload.get("image_urls")
+        raw_timestamps = payload.get("timestamps_sec")
+        if not isinstance(raw_image_urls, list | tuple) or not isinstance(
+            raw_timestamps,
+            list | tuple,
+        ):
+            raise APIMartGeminiReversePromptError(
+                "image_urls and timestamps_sec must be lists."
+            )
+        image_urls = [
+            str(value).strip()
+            for value in raw_image_urls
+            if str(value).strip()
+        ]
+        timestamps_sec = [
+            _float_value(value)
+            for value in raw_timestamps
+        ]
+        duration_sec = _float_value(payload.get("duration_sec"))
+        if not image_urls or len(image_urls) != len(timestamps_sec):
+            raise APIMartGeminiReversePromptError(
+                "image_urls and timestamps_sec must be non-empty and have equal length."
+            )
+        if duration_sec <= 0:
+            raise APIMartGeminiReversePromptError("duration_sec must be positive.")
+
+        parsed, response_payload, completion_payload = self._structured_vision_json(
+            image_urls=image_urls,
+            instruction=_video_reverse_prompt_instruction(
+                duration_sec=duration_sec,
+                timestamps_sec=timestamps_sec,
+            ),
+            invalid_json_message="APIMart Gemini returned invalid video analysis JSON.",
+        )
+        normalized = normalize_reverse_prompt_payload(parsed)
+        normalized["video_analysis"] = normalize_video_analysis_payload(
+            parsed,
+            duration_sec=duration_sec,
+        )
         return {
             **normalized,
             "provider": "apimart",
@@ -307,6 +358,51 @@ def normalize_product_identity_payload(payload: Mapping[str, Any]) -> dict[str, 
     return identity
 
 
+def normalize_video_analysis_payload(
+    payload: Mapping[str, Any],
+    *,
+    duration_sec: float,
+) -> dict[str, Any]:
+    raw = payload.get("video_analysis")
+    if not isinstance(raw, Mapping):
+        raise APIMartGeminiReversePromptError(
+            "Video reverse prompt response must include video_analysis."
+        )
+    pacing = _clean_text(raw.get("pacing")).lower()
+    if pacing not in {"slow", "medium", "fast", "variable"}:
+        pacing = "variable"
+    raw_shots = raw.get("shot_list")
+    if not isinstance(raw_shots, list):
+        raw_shots = []
+    shots: list[dict[str, Any]] = []
+    for position, raw_shot in enumerate(raw_shots):
+        if not isinstance(raw_shot, Mapping):
+            continue
+        visual = _clean_text(raw_shot.get("visual"))
+        start_sec = max(0.0, min(duration_sec, _float_value(raw_shot.get("start_sec"))))
+        end_sec = max(0.0, min(duration_sec, _float_value(raw_shot.get("end_sec"))))
+        if not visual or end_sec <= start_sec:
+            continue
+        shots.append(
+            {
+                "index": max(0, _int_value(raw_shot.get("index"), default=position)),
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+                "visual": visual,
+                "camera": _clean_text(raw_shot.get("camera")),
+                "motion": _clean_text(raw_shot.get("motion")),
+                "transition": _clean_text(raw_shot.get("transition")),
+            }
+        )
+    return {
+        "duration_sec": duration_sec,
+        "pacing": pacing,
+        "shot_list": shots,
+        "audio_transcript": None,
+        "bgm_style": None,
+    }
+
+
 def normalize_product_validation_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     raw = payload.get("validation")
     if not isinstance(raw, Mapping):
@@ -342,6 +438,27 @@ def _reverse_prompt_instruction() -> str:
         "negative_prompt, style_tags, camera, lighting, composition, subject, scene, "
         "motion_hint, selling_points, text_in_media, disclaimer, confidence. "
         "target_format must be seedance_2_0. Keep prompt fields clean and directly usable."
+    )
+
+
+def _video_reverse_prompt_instruction(
+    *,
+    duration_sec: float,
+    timestamps_sec: list[float],
+) -> str:
+    timestamps = ", ".join(str(value) for value in timestamps_sec)
+    return (
+        f"Analyze these uniformly sampled frames from a {duration_sec} seconds video. "
+        f"Frame timestamps in seconds, in image order: {timestamps}. Reconstruct one "
+        "directly usable Seedance 2.0 generation prompt and the visual timeline. Return one "
+        "JSON object with all image reverse-prompt keys: target_format, prompt_zh, prompt_en, "
+        "negative_prompt, style_tags, camera, lighting, composition, subject, scene, "
+        "motion_hint, selling_points, text_in_media, disclaimer, confidence; plus "
+        "video_analysis with duration_sec, pacing, shot_list, audio_transcript, bgm_style. "
+        "pacing must be slow, medium, fast, or variable. Each shot must contain index, "
+        "start_sec, end_sec, visual, camera, motion, transition. Infer only visible content. "
+        "Set audio_transcript and bgm_style to null. target_format must be seedance_2_0. "
+        "Return JSON only."
     )
 
 
@@ -585,11 +702,18 @@ def _usage_cost_payload(
     }
 
 
-def _int_value(value: Any) -> int:
+def _int_value(value: Any, *, default: int = 0) -> int:
     try:
-        return max(0, int(value or 0))
+        return max(0, int(value if value not in (None, "") else default))
     except (TypeError, ValueError):
-        return 0
+        return max(0, default)
+
+
+def _float_value(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _clean_text(value: Any) -> str:

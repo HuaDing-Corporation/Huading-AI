@@ -364,6 +364,97 @@ def test_upload_videos_creates_avatar_source_asset_under_tenant_scope(
         assert storage.saved[asset.storage_key] == (b"fake mp4 bytes", "video/mp4")
 
 
+def test_upload_videos_reverse_prompt_allows_optional_or_non_aac_audio_only_for_purpose(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import uploads
+    from app.api.v1.routes.videos import _AvatarVideoProbe
+
+    def fake_probe(content: bytes, *, suffix: str) -> _AvatarVideoProbe:
+        if content == b"silent reverse video":
+            duration_ms, audio_codec, video_codec = 45_000, "", "h264"
+        elif content == b"opus reverse video":
+            duration_ms, audio_codec, video_codec = 59_000, "opus", "h264"
+        elif content == b"overlong reverse video":
+            duration_ms, audio_codec, video_codec = 60_001, "aac", "h264"
+        elif content == b"vp9 reverse video":
+            duration_ms, audio_codec, video_codec = 15_000, "aac", "vp9"
+        else:
+            duration_ms, audio_codec, video_codec = 9_500, "", "h264"
+        return _AvatarVideoProbe(
+            duration_ms=duration_ms,
+            width=1080,
+            height=1920,
+            container="mov,mp4,m4a,3gp,3g2,mj2",
+            video_codec=video_codec,
+            audio_codec=audio_codec,
+        )
+
+    storage = _FakeStorage()
+    monkeypatch.setattr(uploads, "_probe_avatar_video_bytes", fake_probe)
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        client = TestClient(app)
+        silent = client.post(
+            "/api/v1/uploads/videos?purpose=reverse_prompt",
+            files={"file": ("silent.mp4", b"silent reverse video", "video/mp4")},
+            headers=auth_context["headers"],
+        )
+        opus = client.post(
+            "/api/v1/uploads/videos?purpose=reverse_prompt",
+            files={"file": ("opus.mp4", b"opus reverse video", "video/mp4")},
+            headers=auth_context["headers"],
+        )
+        avatar_silent = client.post(
+            "/api/v1/uploads/videos",
+            files={"file": ("avatar-silent.mp4", b"avatar silent video", "video/mp4")},
+            headers=auth_context["headers"],
+        )
+        overlong = client.post(
+            "/api/v1/uploads/videos?purpose=reverse_prompt",
+            files={
+                "file": ("overlong.mp4", b"overlong reverse video", "video/mp4")
+            },
+            headers=auth_context["headers"],
+        )
+        vp9 = client.post(
+            "/api/v1/uploads/videos?purpose=reverse_prompt",
+            files={"file": ("vp9.mp4", b"vp9 reverse video", "video/mp4")},
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert silent.status_code == 201
+    assert opus.status_code == 201
+    assert avatar_silent.status_code == 422
+    assert avatar_silent.json()["error"]["code"] == "AVATAR_VIDEO_AUDIO_CODEC_INVALID"
+    assert overlong.status_code == 422
+    assert overlong.json()["error"]["code"] == "REVERSE_PROMPT_VIDEO_DURATION_INVALID"
+    assert vp9.status_code == 422
+    assert vp9.json()["error"]["code"] == "REVERSE_PROMPT_VIDEO_CODEC_INVALID"
+
+    with auth_db() as db:
+        assets = list(
+            db.scalars(
+                select(Asset)
+                .where(
+                    Asset.tenant_id == auth_context["tenant_id"],
+                    Asset.type == "video",
+                )
+                .order_by(Asset.duration_ms)
+            )
+        )
+        assert [asset.duration_ms for asset in assets] == [45_000, 59_000]
+        assert [asset.metadata_["purpose"] for asset in assets] == [
+            "reverse_prompt",
+            "reverse_prompt",
+        ]
+        assert [asset.metadata_["audio_codec"] for asset in assets] == ["", "opus"]
+
+
 def test_upload_videos_rejects_invalid_source_without_asset(
     monkeypatch,
     auth_context,
