@@ -12,6 +12,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import Settings
 from app.db.models import (
     Asset,
     Base,
@@ -2439,8 +2440,48 @@ def test_avatar_step_publishes_progress_heartbeat_during_provider_polling():
     Base.metadata.drop_all(engine)
 
 
+def test_change_lips_config_defaults_to_basic_with_super_resolution(monkeypatch) -> None:
+    for key in (
+        "ENGINE_OMNIHUMAN_CHANGE_LIPS_DEFAULT_TIER",
+        "ENGINE_OMNIHUMAN_CHANGE_LIPS_OPEN_SR",
+        "ENGINE_OMNIHUMAN_CHANGE_LIPS_BASIC_CNY_PER_SEC",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    config = Settings(_env_file=None, jwt_secret_key="test-jwt-secret-at-least-32-characters")
+
+    assert config.engine_omnihuman_change_lips_default_tier == "basic"
+    assert config.engine_omnihuman_change_lips_open_sr is True
+    assert config.engine_omnihuman_change_lips_basic_cny_per_sec == pytest.approx(1.05)
+
+
+def test_change_lips_config_accepts_env_overrides(monkeypatch) -> None:
+    monkeypatch.setenv("ENGINE_OMNIHUMAN_CHANGE_LIPS_DEFAULT_TIER", "lite")
+    monkeypatch.setenv("ENGINE_OMNIHUMAN_CHANGE_LIPS_OPEN_SR", "false")
+    monkeypatch.setenv("ENGINE_OMNIHUMAN_CHANGE_LIPS_BASIC_CNY_PER_SEC", "1.25")
+
+    config = Settings(_env_file=None, jwt_secret_key="test-jwt-secret-at-least-32-characters")
+
+    assert config.engine_omnihuman_change_lips_default_tier == "lite"
+    assert config.engine_omnihuman_change_lips_open_sr is False
+    assert config.engine_omnihuman_change_lips_basic_cny_per_sec == pytest.approx(1.25)
+
+
+@pytest.mark.parametrize(
+    ("tier", "open_sr_enabled", "requested_open_sr", "expects_open_sr"),
+    [
+        ("basic", True, None, True),
+        ("basic", False, True, False),
+        ("basic", True, False, False),
+        ("lite", True, True, False),
+    ],
+)
 def test_avatar_step_routes_video_source_to_change_lips_and_crops_to_tts(
     monkeypatch,
+    tier: str,
+    open_sr_enabled: bool,
+    requested_open_sr: bool | None,
+    expects_open_sr: bool,
 ):
     SessionTesting, engine = _session()
     tenant_id = "tenant-avatar-video-source"
@@ -2463,6 +2504,9 @@ def test_avatar_step_routes_video_source_to_change_lips_and_crops_to_tts(
             metadata_={"purpose": "avatar_source", "video_codec": "h264", "audio_codec": "aac"},
         )
         db.add(source_video)
+        task_params = {"avatar_video_asset_id": source_video.id}
+        if requested_open_sr is not None:
+            task_params["open_sr"] = requested_open_sr
         db.add(
             VideoTask(
                 id=unit_id,
@@ -2472,7 +2516,7 @@ def test_avatar_step_routes_video_source_to_change_lips_and_crops_to_tts(
                 status="running",
                 topic="avatar video source",
                 script="avatar video source script",
-                params={"avatar_video_asset_id": source_video.id},
+                params=task_params,
             )
         )
         db.add(TaskAsset(video_task_id=unit_id, asset_id=source_video.id, role="input_avatar"))
@@ -2510,7 +2554,7 @@ def test_avatar_step_routes_video_source_to_change_lips_and_crops_to_tts(
                 payload["progress_callback"]({"poll_count": 1, "status": "processing"})
                 return {
                     "video_url": "https://visual.example/change-lips.mp4",
-                    "tier": "lite",
+                    "tier": payload["tier"],
                 }
 
         def fake_fit(video_bytes: bytes, *, tts_duration_sec: float, work_dir: Path) -> bytes:
@@ -2529,7 +2573,13 @@ def test_avatar_step_routes_video_source_to_change_lips_and_crops_to_tts(
         monkeypatch.setattr(
             avatar_talk.settings,
             "engine_omnihuman_change_lips_default_tier",
-            "lite",
+            tier,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            avatar_talk.settings,
+            "engine_omnihuman_change_lips_open_sr",
+            open_sr_enabled,
             raising=False,
         )
         store = _Store()
@@ -2548,7 +2598,7 @@ def test_avatar_step_routes_video_source_to_change_lips_and_crops_to_tts(
 
         assert ctx.base_video_bytes == b"CROPPED-MP4"
         assert ctx.provider_model == "realman_change_lips"
-        assert ctx.change_lips_tier == "lite"
+        assert ctx.change_lips_tier == tier
         assert serial_events == ["lock_enter", "provider_call", "lock_exit"]
         assert captured_payloads[0]["video_url"].startswith(
             f"https://storage.test/tenants/{tenant_id}/uploads/avatar-source.mp4"
@@ -2556,6 +2606,10 @@ def test_avatar_step_routes_video_source_to_change_lips_and_crops_to_tts(
         assert captured_payloads[0]["audio_url"].startswith(
             f"https://storage.test/tenants/{tenant_id}/videos/{unit_id}/audio.mp3"
         )
+        if expects_open_sr:
+            assert captured_payloads[0]["open_sr"] is True
+        else:
+            assert "open_sr" not in captured_payloads[0]
 
     Base.metadata.drop_all(engine)
 
@@ -2597,11 +2651,11 @@ def test_avatar_step_retries_basic_when_lite_output_is_too_short(monkeypatch):
         db.add(TaskAsset(video_task_id=unit_id, asset_id=source_video.id, role="input_avatar"))
         db.commit()
 
-        captured_tiers: list[str] = []
+        captured_payloads: list[dict] = []
 
         class _AvatarProvider:
             async def generate_change_lips(self, payload: dict):
-                captured_tiers.append(str(payload["tier"]))
+                captured_payloads.append(dict(payload))
                 return {"video_url": f"https://visual.example/{payload['tier']}.mp4"}
 
             async def generate_avatar(self, _payload: dict):
@@ -2635,6 +2689,12 @@ def test_avatar_step_retries_basic_when_lite_output_is_too_short(monkeypatch):
             True,
             raising=False,
         )
+        monkeypatch.setattr(
+            avatar_talk.settings,
+            "engine_omnihuman_change_lips_open_sr",
+            True,
+            raising=False,
+        )
         ctx = avatar_talk.AvatarTalkContext(
             task_id=unit_id,
             tenant_id=tenant_id,
@@ -2647,7 +2707,9 @@ def test_avatar_step_retries_basic_when_lite_output_is_too_short(monkeypatch):
 
         avatar_talk.avatar_step(ctx)
 
-        assert captured_tiers == ["lite", "basic"]
+        assert [payload["tier"] for payload in captured_payloads] == ["lite", "basic"]
+        assert "open_sr" not in captured_payloads[0]
+        assert captured_payloads[1]["open_sr"] is True
         assert ctx.base_video_bytes == b"BASIC-MP4"
         assert ctx.change_lips_tier == "basic"
 

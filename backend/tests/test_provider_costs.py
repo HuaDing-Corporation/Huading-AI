@@ -12,6 +12,12 @@ def test_provider_costs_use_provider_specific_bases(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         provider_costs.settings,
+        "engine_omnihuman_change_lips_basic_cny_per_sec",
+        Decimal("1.05"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        provider_costs.settings,
         "engine_seedtts_cny_per_char",
         Decimal("0.0003"),
         raising=False,
@@ -31,6 +37,7 @@ def test_provider_costs_use_provider_specific_bases(monkeypatch) -> None:
 
     assert provider_costs.omnihuman_cost_cents(18) == 1800
     assert provider_costs.omnihuman_change_lips_cost_cents(18, tier="lite") == 540
+    assert provider_costs.omnihuman_change_lips_cost_cents(18, tier="basic") == 1890
     assert provider_costs.seed_tts_cost_cents(100) == 3
     assert provider_costs.deepseek_cost_cents(
         prompt_tokens=100_000,

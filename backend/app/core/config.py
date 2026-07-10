@@ -94,8 +94,9 @@ class Settings(BaseSettings):
     engine_omnihuman_change_lips_basic_req_key: str = "realman_change_lips_basic_chimera"
     engine_omnihuman_change_lips_region: str = "cn-beijing"
     engine_omnihuman_change_lips_lite_cny_per_sec: float = 0.3
-    engine_omnihuman_change_lips_basic_cny_per_sec: float = 0.3
-    engine_omnihuman_change_lips_default_tier: str = "lite"
+    engine_omnihuman_change_lips_basic_cny_per_sec: float = 1.05
+    engine_omnihuman_change_lips_default_tier: str = "basic"
+    engine_omnihuman_change_lips_open_sr: bool = True
     engine_omnihuman_change_lips_basic_retry_on_short_output: bool = False
     # Volcengine Doubao Seed-TTS. Credentials are env-only; when absent the
     # provider resolver keeps using edge-tts so CI/dev stays self-contained.

@@ -76,7 +76,6 @@ _CHANGE_LIPS_DURATION_TOLERANCE_SEC = 0.1
 _CHANGE_LIPS_OPTIONAL_FIELDS = {
     "align_audio_reverse",
     "templ_start_seconds",
-    "open_sr",
     "separate_vocal",
     "open_scenedet",
 }
@@ -472,8 +471,15 @@ def _fit_change_lips_video_to_tts(
 
 
 def _change_lips_tier() -> str:
-    value = str(settings.engine_omnihuman_change_lips_default_tier or "lite").lower()
+    value = str(settings.engine_omnihuman_change_lips_default_tier or "basic").lower()
     return "basic" if value == "basic" else "lite"
+
+
+def _change_lips_open_sr_enabled(task: VideoTask, *, tier: str) -> bool:
+    if tier != "basic" or not settings.engine_omnihuman_change_lips_open_sr:
+        return False
+    requested = (task.params or {}).get("open_sr")
+    return requested is not False
 
 
 def _change_lips_tts_limit_seconds(tier: str) -> float:
@@ -926,6 +932,9 @@ def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
 
         def generate_for_tier(selected_tier: str) -> bytes:
             payload["tier"] = selected_tier
+            payload.pop("open_sr", None)
+            if _change_lips_open_sr_enabled(task, tier=selected_tier):
+                payload["open_sr"] = True
             with _change_lips_serial_slot(ctx.store):
                 result = asyncio.run(
                     invoke(
