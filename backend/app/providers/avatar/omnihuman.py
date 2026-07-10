@@ -47,7 +47,7 @@ def _hmac_sha256(key: bytes, message: str) -> bytes:
 
 
 def _normalize_change_lips_tier(value: Any) -> str:
-    tier = str(value or settings.engine_omnihuman_change_lips_default_tier or "lite").lower()
+    tier = str(value or settings.engine_omnihuman_change_lips_default_tier or "basic").lower()
     return "basic" if tier == "basic" else "lite"
 
 
