@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.api.deps import get_object_storage
@@ -886,6 +887,56 @@ def test_image_history_rejects_foreign_storage_key_on_tenant_row(
     assert list_response.status_code == 200
     assert list_response.json()["data"]["items"] == []
     assert detail_response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("category", "params"),
+    [
+        ("image_gen", {}),
+        ("ecom_white", {"kind": "ecom_cutout", "background": "white"}),
+        ("ecom_model", {"kind": "ecom_model", "style_id": "street"}),
+    ],
+)
+def test_image_history_cover_ignores_foreign_thumbnail_key(
+    auth_context,
+    auth_db,
+    category: str,
+    params: dict[str, object],
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    task_id = f"thumbnail-scope-{category}"
+    task = _photo_task(
+        task_id=task_id,
+        tenant_id=tenant_id,
+        created_at=datetime.now(UTC),
+        topic="封面租户校验",
+        params=params,
+    )
+    safe_key = str(task.storage_key)
+    foreign_key = "tenants/another-tenant/thumbnails/foreign.png"
+    task.thumbnail_key = foreign_key
+    db = auth_db()
+    db.add(task)
+    db.commit()
+    db.close()
+
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app).get(
+            "/api/v1/history/images",
+            params={"category": category},
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 200
+    item = response.json()["data"]["items"][0]
+    assert safe_key in item["cover_url"]
+    assert foreign_key not in response.text
+    assert safe_key in storage.presigned_keys
+    assert foreign_key not in storage.presigned_keys
 
 
 def test_image_history_rejects_foreign_replicate_output_key(

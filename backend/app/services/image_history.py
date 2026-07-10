@@ -36,6 +36,39 @@ def _is_tenant_storage_key(tenant_id: str, storage_key: str) -> bool:
     return storage_key.startswith(f"tenants/{tenant_id}/")
 
 
+def _validated_tenant_storage_key(tenant_id: str, storage_key: str | None) -> str:
+    value = str(storage_key or "")
+    if not _is_tenant_storage_key(tenant_id, value):
+        raise AppError(
+            "Image history item not found.",
+            code="IMAGE_HISTORY_NOT_FOUND",
+            status_code=404,
+        )
+    return value
+
+
+def _photo_cover_storage_key(tenant_id: str, task: VideoTask) -> str:
+    thumbnail_key = str(task.thumbnail_key or "")
+    if _is_tenant_storage_key(tenant_id, thumbnail_key):
+        return thumbnail_key
+    return _validated_tenant_storage_key(tenant_id, task.storage_key)
+
+
+def _presign_tenant_storage_key(
+    storage: ObjectStorage,
+    *,
+    tenant_id: str,
+    storage_key: str | None,
+    download_filename: str | None = None,
+) -> str:
+    safe_key = _validated_tenant_storage_key(tenant_id, storage_key)
+    return storage.presign_get_url(
+        safe_key,
+        expires_in=settings.engine_s3_presign_ttl,
+        download_filename=download_filename,
+    )
+
+
 def _successful_photo_filters(tenant_id: str) -> tuple[object, ...]:
     return (
         VideoTask.tenant_id == tenant_id,
@@ -177,9 +210,10 @@ def _photo_history_item(
         id=str(row["id"]),
         category=category,
         title=_photo_title(category, first),
-        cover_url=storage.presign_get_url(
-            first.thumbnail_key or str(first.storage_key),
-            expires_in=settings.engine_s3_presign_ttl,
+        cover_url=_presign_tenant_storage_key(
+            storage,
+            tenant_id=tenant_id,
+            storage_key=_photo_cover_storage_key(tenant_id, first),
         ),
         created_at=row["created_at"],
         status="ready",
@@ -233,6 +267,7 @@ def _replicate_cover_url(
         job_id=job.id,
     )
     if safe_outputs:
+        _validated_tenant_storage_key(tenant_id, safe_outputs[0].storage_key)
         output = ecom_replicate.output_response(safe_outputs[0], storage=storage)
         if output.download_url:
             return output.download_url
@@ -250,9 +285,10 @@ def _replicate_cover_url(
             and asset.deleted_at is None
             and _is_tenant_storage_key(tenant_id, asset.storage_key)
         ):
-            return storage.presign_get_url(
-                asset.storage_key,
-                expires_in=settings.engine_s3_presign_ttl,
+            return _presign_tenant_storage_key(
+                storage,
+                tenant_id=tenant_id,
+                storage_key=asset.storage_key,
             )
     return ""
 
@@ -404,9 +440,10 @@ def _photo_history_detail(
         items.append(
             ImageHistoryDetailItem(
                 index=index,
-                download_url=storage.presign_get_url(
-                    storage_key,
-                    expires_in=settings.engine_s3_presign_ttl,
+                download_url=_presign_tenant_storage_key(
+                    storage,
+                    tenant_id=tenant_id,
+                    storage_key=storage_key,
                     download_filename=f"{task.id}.png",
                 ),
                 width=width,
@@ -452,6 +489,7 @@ def _replicate_history_detail(
     )
     items: list[ImageHistoryDetailItem] = []
     for output_row in safe_outputs:
+        _validated_tenant_storage_key(tenant_id, output_row.storage_key)
         output = ecom_replicate.output_response(output_row, storage=storage)
         if not output.download_url:  # pragma: no cover - safe rows always have storage keys
             continue
