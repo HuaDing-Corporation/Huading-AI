@@ -138,6 +138,19 @@ def create_replicate_plan(
         _analysis_payload(result, fallback_id=reference.id)
         for result, reference in zip(analyses, references, strict=True)
     ]
+    product_identity_results = [
+        _analyze_product_identity(
+            db,
+            tenant_id=user.tenant_id,
+            product=product,
+            storage=storage,
+        )
+        for product in products
+    ]
+    product_identities = {
+        product.id: _product_identity_payload(result)
+        for result, product in zip(product_identity_results, products, strict=True)
+    }
     generation_outputs: list[dict[str, object]] = []
     job = EcomReplicateJob(
         id=str(uuid4()),
@@ -153,6 +166,10 @@ def create_replicate_plan(
         product_info=dict(payload.product_info),
         selling_points=list(payload.selling_points),
         reference_analysis_json=analysis_json,
+        validation_json={
+            "status": "planned",
+            "product_identities": product_identities,
+        },
         template_mapping_json={
             "strategy": "cycle_references_and_products",
             "renderer": "apimart:gpt-image-2",
@@ -179,9 +196,11 @@ def create_replicate_plan(
         reference = references[index % len(references)]
         product = products[index % len(products)]
         analysis = analysis_json[index % len(analysis_json)]
+        product_identity = product_identities[product.id]
         prompt = _render_prompt(
             theme=theme,
             analysis=analysis,
+            product_identity=product_identity,
             product_info=dict(payload.product_info),
             selling_points=list(payload.selling_points),
         )
@@ -209,7 +228,11 @@ def create_replicate_plan(
                 requested_aspect=requested_aspect,
                 prompt=prompt,
                 reference_analysis_json=analysis,
-                template_mapping_json={"theme": theme, "source": "reference_analysis"},
+                template_mapping_json={
+                    "theme": theme,
+                    "source": "reference_analysis",
+                    "product_identity": product_identity,
+                },
                 validation_json={"status": "planned"},
                 created_at=datetime.now(UTC),
                 updated_at=datetime.now(UTC),
@@ -557,6 +580,35 @@ def _analyze_reference(
     return result_dict
 
 
+def _analyze_product_identity(
+    db: Session,
+    *,
+    tenant_id: str,
+    product: Asset,
+    storage: ObjectStorage,
+) -> dict[str, Any]:
+    provider = resolve_named_provider(
+        db,
+        tenant_id=tenant_id,
+        capability="reverse_prompt",
+        provider="apimart-gemini",
+    )
+    result = asyncio.run(
+        provider.analyze_product_identity(
+            {
+                "image_url": storage.presign_get_url(
+                    product.storage_key,
+                    expires_in=settings.engine_s3_presign_ttl,
+                ),
+                "source_product_image_id": product.id,
+            }
+        )
+    )
+    result_dict = dict(result)
+    record_analysis_cost(db, tenant_id=tenant_id, result=result_dict)
+    return result_dict
+
+
 def _analysis_payload(result: dict[str, Any], *, fallback_id: str) -> dict[str, object]:
     raw = result.get("reference_analysis_json")
     if isinstance(raw, dict):
@@ -570,16 +622,50 @@ def _analysis_payload(result: dict[str, Any], *, fallback_id: str) -> dict[str, 
     return analysis
 
 
+def _product_identity_payload(result: dict[str, Any]) -> dict[str, str]:
+    raw = result.get("product_identity")
+    if not isinstance(raw, dict):
+        raise AppError(
+            "Product identity analysis failed.",
+            code="ECOM_REPLICATE_PRODUCT_ANALYSIS_FAILED",
+            status_code=502,
+        )
+    identity = {
+        str(key): str(value).strip()
+        for key, value in raw.items()
+        if str(key).strip() and str(value).strip()
+    }
+    if not identity.get("main_color"):
+        raise AppError(
+            "Product identity analysis did not include main color.",
+            code="ECOM_REPLICATE_PRODUCT_ANALYSIS_FAILED",
+            status_code=502,
+        )
+    return identity
+
+
 def _render_prompt(
     *,
     theme: str,
     analysis: dict[str, object],
+    product_identity: dict[str, str],
     product_info: dict[str, object],
     selling_points: list[str],
 ) -> str:
     name = str(product_info.get("name") or "the product").strip()
     points = " / ".join(str(point).strip() for point in selling_points if str(point).strip())
+    identity_text = "; ".join(
+        f"{key}={value}" for key, value in product_identity.items() if str(value).strip()
+    )
+    main_color = product_identity["main_color"]
     return (
+        "NON-NEGOTIABLE PRODUCT FIDELITY. "
+        f"PRODUCT IDENTITY from the user's product image: {identity_text}. "
+        f"The output product MUST be exactly the user's product: {identity_text}. "
+        "COMPLETELY replace and remove the product shown in the reference image. "
+        "Do NOT reproduce the reference product's color, glaze, pattern, material, or shape. "
+        "The reference image is a LAYOUT/COMPOSITION template ONLY. "
+        f"Product color MUST be {main_color}. "
         "Use two input images: image 1 is the layout/style reference, image 2 is the exact "
         "product to preserve. Recreate the reference's ecommerce composition for theme "
         f"{theme}. Replace the reference product with {name}; keep product color, logo, "

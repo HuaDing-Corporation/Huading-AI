@@ -22,7 +22,7 @@ from app.db.models import Asset, EcomReplicateJob, EcomReplicateOutput, TaskAsse
 from app.db.session import SessionLocal
 from app.providers.base import invoke, resolve, resolve_named_provider
 from app.services.apimart_costs import apimart_cost_cents_from_result
-from app.services.ecom_replicate import record_render_cost
+from app.services.ecom_replicate import record_analysis_cost, record_render_cost
 from app.services.history import prune_video_history_best_effort
 from app.services.progress import build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
@@ -877,13 +877,56 @@ def _max_ecom_replicate_attempts() -> int:
     return max_retry + 1
 
 
+class EcomReplicateProductMismatch(RuntimeError):
+    pass
+
+
+def _ecom_replicate_product_identity(output: EcomReplicateOutput) -> dict[str, str]:
+    mapping = output.template_mapping_json or {}
+    raw = mapping.get("product_identity") if isinstance(mapping, Mapping) else None
+    if not isinstance(raw, Mapping):
+        raise ValueError("Replicate output product identity is missing.")
+    identity = {
+        str(key): str(value).strip()
+        for key, value in raw.items()
+        if str(key).strip() and str(value).strip()
+    }
+    if not identity.get("main_color"):
+        raise ValueError("Replicate output product main color is missing.")
+    return identity
+
+
+def _record_ecom_replicate_validation(
+    output: EcomReplicateOutput,
+    result: Mapping[str, Any],
+    *,
+    attempt: int,
+) -> dict[str, Any]:
+    previous = output.validation_json or {}
+    attempts = list(previous.get("attempts") or []) if isinstance(previous, Mapping) else []
+    record = {
+        "attempt": attempt,
+        "status": "passed" if result.get("passed") is True else "failed",
+        "passed": result.get("passed") is True,
+        "checks": dict(result.get("checks") or {}),
+        "reason": str(result.get("reason") or "").strip(),
+        "provider": str(result.get("provider") or "apimart"),
+        "model": str(result.get("model") or settings.engine_apimart_reverse_prompt_model),
+    }
+    attempts.append(record)
+    output.validation_json = {**record, "attempts": attempts}
+    return record
+
+
 def _render_ecom_replicate_output_once(
     db,
     *,
     job: EcomReplicateJob,
     output: EcomReplicateOutput,
     provider,
+    validator,
     storage: ObjectStorage,
+    attempt: int,
 ) -> None:
     reference = db.get(Asset, output.reference_asset_id)
     product = db.get(Asset, output.product_asset_id)
@@ -909,6 +952,50 @@ def _render_ecom_replicate_output_once(
     result_dict = dict(result)
     image_bytes = _image_bytes(result_dict)
     width, height = _image_dimensions(image_bytes)
+    cost_cents = _ecom_replicate_result_cost_cents(result_dict)
+    record_render_cost(
+        db,
+        tenant_id=job.tenant_id,
+        result=result_dict,
+        fallback_cost_cents=cost_cents,
+    )
+
+    product_identity = _ecom_replicate_product_identity(output)
+    product_bytes = storage.get_bytes(product.storage_key)
+    validation_result = asyncio.run(
+        invoke(
+            db,
+            tenant_id=job.tenant_id,
+            capability="reverse_prompt",
+            provider=validator.__class__.__name__,
+            operation=lambda: validator.validate_product_fidelity(
+                {
+                    "product_image_url": _input_image_data_uri(
+                        product.storage_key,
+                        product_bytes,
+                    ),
+                    "rendered_image_url": _input_image_data_uri(
+                        "rendered-output.png",
+                        image_bytes,
+                    ),
+                    "product_identity": product_identity,
+                }
+            ),
+            timeout_seconds=settings.engine_image_provider_timeout_seconds,
+        )
+    )
+    validation_dict = dict(validation_result)
+    record_analysis_cost(db, tenant_id=job.tenant_id, result=validation_dict)
+    validation = _record_ecom_replicate_validation(
+        output,
+        validation_dict,
+        attempt=attempt,
+    )
+    if not validation["passed"]:
+        raise EcomReplicateProductMismatch(
+            validation["reason"] or "Rendered product does not match the user's product."
+        )
+
     output_key = _ecom_replicate_storage_key(job.tenant_id, job.id, output.index)
     storage.put_bytes(output_key, image_bytes, content_type="image/png")
 
@@ -944,6 +1031,7 @@ def _render_ecom_replicate_output_once(
     output.actual_width = width
     output.actual_height = height
     output.validation_json = {
+        **dict(output.validation_json or {}),
         "raw_provider_bytes_saved": True,
         "requested_size": output.requested_size,
         "actual_width": width,
@@ -952,13 +1040,6 @@ def _render_ecom_replicate_output_once(
     output.error_code = None
     output.error_message = None
     output.updated_at = datetime.now(UTC)
-    cost_cents = _ecom_replicate_result_cost_cents(result_dict)
-    record_render_cost(
-        db,
-        tenant_id=job.tenant_id,
-        result=result_dict,
-        fallback_cost_cents=cost_cents,
-    )
 
 
 def _mark_ecom_replicate_job_finished(
@@ -1004,6 +1085,12 @@ def run_ecom_replicate_generation(job_id: str, output_index: int | None = None) 
             capability="image",
             provider="apimart",
         )
+        validator = resolve_named_provider(
+            db,
+            tenant_id=job.tenant_id,
+            capability="reverse_prompt",
+            provider="apimart-gemini",
+        )
         outputs_query = select(EcomReplicateOutput).where(EcomReplicateOutput.job_id == job.id)
         if output_index is not None:
             outputs_query = outputs_query.where(EcomReplicateOutput.index == output_index)
@@ -1035,7 +1122,9 @@ def run_ecom_replicate_generation(job_id: str, output_index: int | None = None) 
                         job=job,
                         output=output,
                         provider=provider,
+                        validator=validator,
                         storage=storage,
+                        attempt=attempt + 1,
                     )
                     db.commit()
                     last_error = None
@@ -1043,7 +1132,11 @@ def run_ecom_replicate_generation(job_id: str, output_index: int | None = None) 
                 except Exception as exc:
                     last_error = exc
                     output.retry_count = int(output.retry_count or 0) + 1
-                    output.error_code = "ECOM_REPLICATE_RENDER_FAILED"
+                    output.error_code = (
+                        "ECOM_REPLICATE_PRODUCT_MISMATCH"
+                        if isinstance(exc, EcomReplicateProductMismatch)
+                        else "ECOM_REPLICATE_RENDER_FAILED"
+                    )
                     output.error_message = _failure_message(exc)
                     output.updated_at = datetime.now(UTC)
                     logger.warning(
