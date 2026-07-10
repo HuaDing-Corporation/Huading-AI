@@ -110,12 +110,12 @@ def test_reverse_prompt_video_migration_extends_billing_and_links_usage() -> Non
         Path(__file__).parents[1]
         / "alembic"
         / "versions"
-        / "20260710_0023_reverse_prompt_video.py"
+        / "20260710_0024_reverse_prompt_video.py"
     )
     source = migration_path.read_text(encoding="utf-8")
 
-    assert 'revision = "20260710_0023"' in source
-    assert 'down_revision = "20260706_0022"' in source
+    assert 'revision = "20260710_0024"' in source
+    assert 'down_revision = "20260710_0023"' in source
     assert "reverse_prompt_video" in source
     assert "reverse_prompt_job_id" in source
     assert "ix_usage_records_reverse_prompt_status" in source
