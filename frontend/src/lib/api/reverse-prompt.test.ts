@@ -163,10 +163,16 @@ describe("视频反推异步（VIDEO-REVERSE-PROMPT-UI-0001）↔ MSW", () => {
     const va = poll2.result!.video_analysis!;
     expect(va.duration_sec).toBeGreaterThan(0);
     expect(va.shot_list.length).toBeGreaterThan(0);
-    // FIX1②：分镜字段 start_sec/end_sec/visual/camera/motion/transition。
-    expect(va.shot_list[0].visual).toBeTruthy();
-    expect(va.shot_list[0].start_sec).toBe(0);
-    expect(va.shot_list[0].end_sec).toBeGreaterThan(0);
+    // FIX2：pacing 是 BE 枚举（slow|medium|fast|variable，非中文串）。
+    expect(["slow", "medium", "fast", "variable"]).toContain(va.pacing);
+    // FIX1②/FIX2：分镜字段 index(必填,≥0)/start_sec/end_sec/visual/camera/motion/transition。
+    const shot0 = va.shot_list[0];
+    expect(shot0.index).toBe(0); // FIX2：每个 shot 必含 index
+    expect(va.shot_list.every((s) => Number.isInteger(s.index) && s.index >= 0)).toBe(true);
+    expect(shot0.visual).toBeTruthy();
+    expect(shot0.start_sec).toBe(0);
+    expect(shot0.end_sec).toBeGreaterThan(0);
+    expect(typeof shot0.camera).toBe("string"); // BE 默认 ""，恒 string
     expect(va.audio_transcript).toBeNull();
     expect(va.bgm_style).toBeNull();
   });

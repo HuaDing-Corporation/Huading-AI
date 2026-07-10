@@ -527,6 +527,8 @@ export const copy = {
     vaDuration: "时长",
     vaDurationValue: (sec: number) => `${sec} 秒`,
     vaPacing: "节奏",
+    // pacing 枚举 → 中文显示（BE slow|medium|fast|variable，不显裸英文）
+    vaPacingLabel: { slow: "慢", medium: "中", fast: "快", variable: "可变" } as Record<string, string>,
     vaShotList: "分镜列表",
     vaShot: (n: number) => `镜头 ${n}`,
     vaShotRange: (start: number, end: number) => `${start}–${end}s`,

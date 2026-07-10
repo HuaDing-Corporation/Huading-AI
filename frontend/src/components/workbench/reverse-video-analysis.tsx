@@ -14,6 +14,8 @@ const labelClass = "mb-1 block text-[12px] tracking-[.5px] text-ink-soft";
  */
 export function ReverseVideoAnalysisView({ analysis }: { analysis: ReverseVideoAnalysis }) {
   const shots = analysis.shot_list ?? [];
+  // pacing 是 BE 枚举（slow|medium|fast|variable）→ 映射中文显示；未知值兜底显原串（不裸奔英文场景外的鲁棒）。
+  const pacingText = copy.reverse.vaPacingLabel[analysis.pacing] ?? analysis.pacing;
   return (
     <Card animateIn>
       <div className="mb-3 flex items-center gap-1.5">
@@ -33,8 +35,8 @@ export function ReverseVideoAnalysisView({ analysis }: { analysis: ReverseVideoA
         </div>
         <div className="min-w-0">
           <span className={labelClass}>{copy.reverse.vaPacing}</span>
-          <p className="truncate text-[13px] text-ink" title={analysis.pacing ?? undefined}>
-            {analysis.pacing || "—"}
+          <p className="truncate text-[13px] text-ink" title={pacingText}>
+            {pacingText}
           </p>
         </div>
       </div>

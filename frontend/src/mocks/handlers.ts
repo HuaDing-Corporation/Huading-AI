@@ -105,19 +105,20 @@ const reverseJobRead = (id: string, status = "succeeded") => ({
   saved_at: null
 });
 
-// ── 视频反推异步 (VIDEO-REVERSE-PROMPT-UI-0001 · FIX1 对齐 BE 回执) mock ──
+// ── 视频反推异步 (VIDEO-REVERSE-PROMPT-UI-0001 · FIX2 逐字段对齐已合入真 BE schema) mock ──
 // POST /reverse-prompt 检测视频源(source_asset_id 以 "video-" 起)→ 202 status="queued"(无 result)；GET /jobs/{id}
 // 轮询第 2 次起 → succeeded + result（video_analysis **内嵌于 result**）。图片源仍同步 succeeded（零回归）。
-// FIX1 四点：① video_analysis→result.video_analysis；② shot 字段 start_sec/end_sec/visual/camera/motion/transition；
-// ③ 初始 queued(非 running)；④ credits=provider 引擎成本（非 100；租户固定 100 走 UsageRecord，此处不体现）。
+// 对齐 backend/app/schemas/reverse_prompt.py：pacing=Literal["slow","medium","fast","variable"]（枚举，非中文串）；
+// 每个 shot 必含 index(≥0)；shot 字段 index/start_sec/end_sec/visual/camera/motion/transition；
+// credits=provider 引擎成本（非 100；租户固定 100 走 UsageRecord，此处不体现）。
 const REVERSE_VIDEO_ANALYSIS = {
   duration_sec: 18,
-  pacing: "中速偏快，前 3 秒抓眼球，后段稳定展示",
+  pacing: "fast", // 合法枚举（前端映射为「快」显示）
   shot_list: [
-    { start_sec: 0, end_sec: 4, visual: "产品特写：保温杯置于大理石台面，暖光扫过", camera: "缓慢推近", motion: "蒸汽轻升", transition: "叠化" },
-    { start_sec: 4, end_sec: 10, visual: "使用场景：手部拧开杯盖，蒸汽升腾", camera: "手持跟拍", motion: "手部拧盖", transition: "硬切" },
-    { start_sec: 10, end_sec: 15, visual: "卖点字幕叠加：24 小时保温，便携轻巧", camera: "固定机位", motion: "字幕入场", transition: "淡出" },
-    { start_sec: 15, end_sec: 18, visual: "收尾定格：品牌 logo + 行动号召", camera: "环绕收尾", motion: "logo 定格", transition: "定格" }
+    { index: 0, start_sec: 0, end_sec: 4, visual: "产品特写：保温杯置于大理石台面，暖光扫过", camera: "缓慢推近", motion: "蒸汽轻升", transition: "叠化" },
+    { index: 1, start_sec: 4, end_sec: 10, visual: "使用场景：手部拧开杯盖，蒸汽升腾", camera: "手持跟拍", motion: "手部拧盖", transition: "硬切" },
+    { index: 2, start_sec: 10, end_sec: 15, visual: "卖点字幕叠加：24 小时保温，便携轻巧", camera: "固定机位", motion: "字幕入场", transition: "淡出" },
+    { index: 3, start_sec: 15, end_sec: 18, visual: "收尾定格：品牌 logo + 行动号召", camera: "环绕收尾", motion: "logo 定格", transition: "定格" }
   ],
   audio_transcript: null, // 一期未启用
   bgm_style: null // 一期未启用

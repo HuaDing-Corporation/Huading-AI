@@ -24,21 +24,26 @@ export interface ReversePromptFillTargets {
 export type ReversePromptFillTargetKey = keyof ReversePromptFillTargets;
 
 /**
- * 视频反推分析（VIDEO-REVERSE-PROMPT-UI-0001 · FIX1 对齐 BE 回执）。一期展示：时长 / 节奏 / 分镜列表 shot_list；
- * audio_transcript / bgm_style 一期未启用（空→前端标「未启用」）。**分镜字段随 BE FIX1 改为**
- * start_sec/end_sec/visual/camera/motion/transition（无 index/description/duration_sec）。
+ * 视频反推分析（VIDEO-REVERSE-PROMPT-UI-0001 · FIX2 逐字段对齐已合入的真 BE
+ * backend/app/schemas/reverse_prompt.py::ReversePromptVideoAnalysis / ReversePromptShot）。展示：时长 / 节奏 /
+ * 分镜列表 shot_list；audio_transcript / bgm_style 可空（空→前端标「未启用」）。
  */
+/** 节奏枚举（BE ReversePromptVideoAnalysis.pacing = Literal["slow","medium","fast","variable"]，非中文串）。 */
+export type ReverseVideoPacing = "slow" | "medium" | "fast" | "variable";
+
+/** 分镜（镜像 BE ReversePromptShot）：index 必填(≥0)；start_sec(≥0)/end_sec(>0)；camera/motion/transition BE 默认 ""。 */
 export interface ReverseVideoShot {
-  start_sec?: number | null; // 起始秒
-  end_sec?: number | null; // 结束秒
+  index: number; // 分镜序号（必填，≥0）—— FIX2 加回
+  start_sec: number; // 起始秒（≥0）
+  end_sec: number; // 结束秒（>0）
   visual: string; // 画面描述
-  camera?: string | null; // 运镜
-  motion?: string | null; // 主体动作
-  transition?: string | null; // 转场
+  camera: string; // 运镜（BE 默认 ""）
+  motion: string; // 主体动作（BE 默认 ""）
+  transition: string; // 转场（BE 默认 ""）
 }
 export interface ReverseVideoAnalysis {
-  duration_sec?: number | null;
-  pacing?: string | null; // 节奏描述
+  duration_sec: number; // 时长秒（>0）
+  pacing: ReverseVideoPacing; // 节奏枚举（前端映射中文显示，不显裸英文）
   shot_list: ReverseVideoShot[];
   audio_transcript?: string | null; // 一期空
   bgm_style?: string | null; // 一期空

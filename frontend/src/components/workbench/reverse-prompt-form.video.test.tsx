@@ -28,12 +28,13 @@ vi.mock("@/lib/media/reverse-video", () => media);
 
 import { ReversePromptForm } from "./reverse-prompt-form";
 
+// FIX2：pacing 合法枚举（非中文串）；每个 shot 含 index（对齐真 BE ReversePromptShot/VideoAnalysis）。
 const VIDEO_ANALYSIS = {
   duration_sec: 18,
-  pacing: "中速偏快",
+  pacing: "fast" as const,
   shot_list: [
-    { start_sec: 0, end_sec: 4, visual: "产品特写", camera: "推近", motion: "蒸汽", transition: "叠化" },
-    { start_sec: 4, end_sec: 10, visual: "使用场景", camera: "跟拍", motion: "拧盖", transition: "硬切" }
+    { index: 0, start_sec: 0, end_sec: 4, visual: "产品特写", camera: "推近", motion: "蒸汽", transition: "叠化" },
+    { index: 1, start_sec: 4, end_sec: 10, visual: "使用场景", camera: "跟拍", motion: "拧盖", transition: "硬切" }
   ],
   audio_transcript: null,
   bgm_style: null
@@ -145,6 +146,19 @@ describe("ReversePromptForm · 视频反推路径", () => {
     // 资金安全：视频结果隐藏「重新反推」（防二次扣费）；「带入」仍在。
     expect(screen.queryByRole("button", { name: copy.reverse.regenerate })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: copy.reverse.applyAvatar })).toBeInTheDocument();
+  });
+
+  // FIX2 P2：计费门防二次扣费——快速连点确认两次，只调一次 reverse（submitting guard + 按钮 disabled）。
+  it("计费门防连点：确认按钮连点两次 → reverse 只调一次、只扣一次", async () => {
+    reverseMut.mockResolvedValue(queuedJob());
+    api.getReversePromptJob.mockResolvedValue(succeededJob());
+    await switchToVideoAndUpload();
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
+    const confirm = await screen.findByRole("button", { name: copy.reverse.videoChargeConfirm });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm); // 快速二次确认应被拦截
+    await waitFor(() => expect(reverseMut).toHaveBeenCalledTimes(1));
+    expect(reverseMut).toHaveBeenCalledTimes(1);
   });
 
   it("轮询瞬时失败 → 软提示、不误跳结果页；下一拍自愈后展示", async () => {
