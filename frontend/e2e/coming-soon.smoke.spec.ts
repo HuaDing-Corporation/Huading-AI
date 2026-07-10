@@ -1,8 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
 
 /**
- * UI-COMINGSOON-TENANT-RENAME-0001 交互冒烟（生产构建 next start）：
- * 范围一「即将上线」：模板中心/品牌库/发布中心/团队 四项导航名带「（即将上线）」→ 点进去统一占位页「该功能即将上线」；
+ * UI-COMINGSOON-TENANT-RENAME-0001 / UI-COMINGSOON-COVER-0001 交互冒烟（生产构建 next start）：
+ * 范围一「即将上线」：模板中心/品牌库/封面工坊/发布中心/团队 五项导航名带「（即将上线）」→ 点进去统一占位页「该功能即将上线」；
  *   零回归：工作台/批量生产照常（非占位）。登录页文案（AUTH-UI-0001 后）显示「用户名」（无「用户标识」/无「租户」）。移动端 375 导航可见。
  * 全程无 #130 白屏 / 无 /api/api 双前缀。需以 NEXT_PUBLIC_USE_MOCK=1 构建后 next start 运行（webServer 已配）。
  */
@@ -36,12 +36,13 @@ async function login(page: Page): Promise<{ errors: () => string[]; doublePrefix
   return { errors: () => errors, doublePrefix: () => doublePrefix };
 }
 
-test("4 板块「即将上线」→ 点进统一占位页；工作台/批量生产零回归；移动端可见", async ({ page }) => {
+test("5 板块「即将上线」→ 点进统一占位页；工作台/批量生产零回归；移动端可见", async ({ page }) => {
   const g = await login(page);
 
   const soon: { name: string; path: string }[] = [
     { name: "模板中心（即将上线）", path: "/templates" },
     { name: "品牌库（即将上线）", path: "/brand-library" },
+    { name: "封面工坊（即将上线）", path: "/covers" }, // UI-COMINGSOON-COVER-0001
     { name: "发布中心（即将上线）", path: "/publish" },
     { name: "团队（即将上线）", path: "/team" }
   ];
