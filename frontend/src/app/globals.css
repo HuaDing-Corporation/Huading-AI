@@ -34,6 +34,7 @@
     --bd-gold: rgba(189, 154, 89, 0.64);
     --bd-glass: rgba(255, 255, 255, 0.78);
     --bd-sel: rgba(168, 134, 62, 0.9);
+    --grid-line: rgba(189, 154, 89, 0.13); /* 落地页暖色网格光栅线（--gold @0.13） */
 
     /* glass material */
     --glass-fill: rgba(255, 255, 255, 0.42);
@@ -108,6 +109,7 @@
     --bd-gold: rgba(189, 154, 89, 0.5);
     --bd-glass: rgba(255, 255, 255, 0.14);
     --bd-sel: rgba(214, 182, 122, 0.85);
+    --grid-line: rgba(214, 182, 122, 0.1); /* 暗色网格线（沿用暗调金 hue） */
 
     --glass-fill: rgba(255, 255, 255, 0.06);
     --glass-soft: rgba(255, 255, 255, 0.08);
@@ -196,8 +198,8 @@
 
   /* 暖色网格光栅：静态（动画预算留给流光/粒子/光晕），中心径向渐隐。 */
   .landing-grid-bg {
-    background-image: repeating-linear-gradient(0deg, rgba(189, 154, 89, 0.13) 0 1px, transparent 1px 56px),
-      repeating-linear-gradient(90deg, rgba(189, 154, 89, 0.13) 0 1px, transparent 1px 56px);
+    background-image: repeating-linear-gradient(0deg, var(--grid-line) 0 1px, transparent 1px 56px),
+      repeating-linear-gradient(90deg, var(--grid-line) 0 1px, transparent 1px 56px);
     -webkit-mask-image: radial-gradient(72% 64% at 50% 38%, #000 0%, transparent 100%);
     mask-image: radial-gradient(72% 64% at 50% 38%, #000 0%, transparent 100%);
   }
