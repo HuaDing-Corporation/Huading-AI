@@ -60,12 +60,16 @@ class _FakeProvider:
         image_bytes: bytes = b"photo-png",
         expected_input_bytes: bytes | None = b"input-image",
         cost_cents: int = 0,
+        provider_name: str = "apimart",
+        result_size: str | None = None,
         fail: bool = False,
         failure: Exception | None = None,
     ) -> None:
         self.image_bytes = image_bytes
         self.expected_input_bytes = expected_input_bytes
         self.cost_cents = cost_cents
+        self.provider_name = provider_name
+        self.result_size = result_size
         self.fail = fail
         self.failure = failure
         self.payloads: list[dict] = []
@@ -84,7 +88,11 @@ class _FakeProvider:
         return {
             "image_bytes": self.image_bytes,
             "mime_type": "image/png",
+            "provider": self.provider_name,
             "model": "gpt-image-2",
+            "size": self.result_size or payload.get("size"),
+            "resolution": payload.get("resolution"),
+            "quality": payload.get("quality"),
             "cost_cents": self.cost_cents,
         }
 
@@ -115,6 +123,22 @@ def _product_png_bytes() -> bytes:
             image.putpixel((x, y), (40, 120, 220, 255))
     buffer = BytesIO()
     image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _sized_png_bytes(width: int, height: int) -> bytes:
+    image = Image.new("RGB", (width, height), "white")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _exif_rotated_jpeg_bytes() -> bytes:
+    image = Image.new("RGB", (40, 80), "white")
+    exif = Image.Exif()
+    exif[274] = 6
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", exif=exif)
     return buffer.getvalue()
 
 
@@ -341,8 +365,9 @@ def test_image_worker_text_to_image_finishes_and_settles_quota(
     assert provider.payloads == [
         {
             "prompt": "premium product photo",
-            "size": "1024x1024",
-            "quality": "medium",
+            "size": "1:1",
+            "resolution": "1k",
+            "quality": "high",
             "n": 1,
         }
     ]
@@ -449,10 +474,107 @@ def test_image_worker_edit_resolves_tenant_upload_and_cleans_temp_file(
     assert mime_type == "image/png"
     assert input_bytes == b"input-image"
     assert provider.payloads[0]["image_urls"] == [provider.payloads[0]["input_image_url"]]
-    assert provider.payloads[0]["size"] == "1024x1536"
+    assert provider.payloads[0]["size"] == "2:3"
+    assert provider.payloads[0]["resolution"] == "1k"
     assert provider.payloads[0]["quality"] == "high"
     assert provider.input_path is not None
     assert not Path(provider.input_path).exists()
+
+
+def test_image_worker_auto_uses_exif_dimensions_and_records_three_sizes(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    task_id = "photo-auto-exif-unit"
+    source_bytes = _exif_rotated_jpeg_bytes()
+    output_bytes = _sized_png_bytes(160, 90)
+    with auth_db() as db:
+        _seed_reserved_photo(db, auth_context["tenant_id"], auth_context["user_id"], task_id)
+    storage = _FakeStorage()
+    storage.saved[f"tenants/{auth_context['tenant_id']}/uploads/product.jpg"] = (
+        source_bytes,
+        "image/jpeg",
+    )
+    store = _MemProgressStore()
+    provider = _FakeProvider(
+        image_bytes=output_bytes,
+        expected_input_bytes=source_bytes,
+        result_size="16:9",
+    )
+    image_gen = _patch_worker(monkeypatch, auth_db, storage, store, provider)
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": "preserve product",
+            "image_key": "uploads/product.jpg",
+            "aspect_ratio": "auto",
+        }
+    )
+
+    assert result["status"] == "SUCCESS"
+    payload = provider.payloads[0]
+    assert payload["size"] == "16:9"
+    assert payload["resolution"] == "1k"
+    assert payload["quality"] == "high"
+    assert "auto" not in payload.values()
+
+    output_key = f"tenants/{auth_context['tenant_id']}/photos/{task_id}/output.png"
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        asset = db.scalars(select(Asset).where(Asset.storage_key == output_key)).one()
+
+    assert task.params["requested_aspect_ratio"] == "auto"
+    assert task.params["resolved_aspect_ratio"] == "16:9"
+    assert task.params["actual_aspect_ratio"] == "16:9"
+    assert asset.width == 160
+    assert asset.height == 90
+    assert asset.metadata_["requested_aspect_ratio"] == "auto"
+    assert asset.metadata_["resolved_aspect_ratio"] == "16:9"
+    assert asset.metadata_["resolved_size"] == "16:9"
+    assert asset.metadata_["actual_aspect_ratio"] == "16:9"
+    assert asset.metadata_["actual_size"] == "160x90"
+
+
+def test_image_worker_records_openai_fallback_without_mislabeling_requested_ratio(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    task_id = "photo-openai-fallback-size-unit"
+    with auth_db() as db:
+        _seed_reserved_photo(db, auth_context["tenant_id"], auth_context["user_id"], task_id)
+    storage = _FakeStorage()
+    store = _MemProgressStore()
+    provider = _FakeProvider(
+        image_bytes=_sized_png_bytes(160, 90),
+        expected_input_bytes=None,
+        provider_name="openai",
+        result_size="1536x1024",
+    )
+    image_gen = _patch_worker(monkeypatch, auth_db, storage, store, provider)
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": "wide product campaign",
+            "aspect_ratio": "21:9",
+        }
+    )
+
+    assert result["status"] == "SUCCESS"
+    output_key = f"tenants/{auth_context['tenant_id']}/photos/{task_id}/output.png"
+    with auth_db() as db:
+        asset = db.scalars(select(Asset).where(Asset.storage_key == output_key)).one()
+
+    assert asset.provider == "openai"
+    assert asset.metadata_["requested_aspect_ratio"] == "21:9"
+    assert asset.metadata_["resolved_aspect_ratio"] == "3:2"
+    assert asset.metadata_["resolved_size"] == "1536x1024"
+    assert asset.metadata_["actual_aspect_ratio"] == "16:9"
 
 
 def test_image_worker_data_uri_mime_detection_uses_magic_suffix_and_png_default(
@@ -533,6 +655,21 @@ def test_image_worker_data_uri_size_guard_compresses_large_inputs(monkeypatch) -
     assert mime_type == "image/jpeg"
     assert len(compressed) <= 8 * 1024
     Image.open(BytesIO(compressed)).verify()
+
+
+def test_image_worker_data_uri_size_guard_applies_exif_before_compressing(monkeypatch) -> None:
+    from app.workers import image_gen
+
+    source_bytes = _exif_rotated_jpeg_bytes()
+    monkeypatch.setattr(image_gen, "_APIMART_INPUT_IMAGE_SAFE_BYTES", 500)
+
+    mime_type, compressed = _decode_data_uri(
+        image_gen._input_image_data_uri("tenants/t/uploads/rotated.jpg", source_bytes)
+    )
+
+    assert mime_type == "image/jpeg"
+    with Image.open(BytesIO(compressed)) as image:
+        assert image.size == (80, 40)
 
 
 def test_image_worker_failure_marks_failed_and_releases_quota(

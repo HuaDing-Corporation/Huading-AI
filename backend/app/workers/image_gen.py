@@ -12,11 +12,16 @@ from pathlib import Path
 from typing import Any
 
 import openai
-from PIL import Image, ImageChops, ImageDraw, ImageFont, UnidentifiedImageError
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps, UnidentifiedImageError
 from sqlalchemy import select
 
 from app.api.deps import scoped_task_id
 from app.core.config import settings
+from app.core.image_aspect_ratio import (
+    aspect_ratio_from_provider_size,
+    image_aspect_ratio_from_legacy_size,
+    resolve_image_aspect_ratio,
+)
 from app.core.logging import get_logger
 from app.db.models import Asset, EcomReplicateJob, EcomReplicateOutput, TaskAsset, VideoTask
 from app.db.session import SessionLocal
@@ -233,7 +238,7 @@ def _apimart_safe_input_image_bytes(
     try:
         with Image.open(BytesIO(image_bytes)) as image:
             image.load()
-            working = image.copy()
+            working = ImageOps.exif_transpose(image).copy()
     except UnidentifiedImageError as exc:
         raise ValueError("Input image is too large and cannot be compressed.") from exc
 
@@ -266,6 +271,41 @@ def _input_image_data_uri(storage_key: str, image_bytes: bytes) -> str:
     safe_bytes, safe_mime_type = _apimart_safe_input_image_bytes(image_bytes, mime_type)
     encoded = base64.b64encode(safe_bytes).decode("ascii")
     return f"data:{safe_mime_type};base64,{encoded}"
+
+
+def _requested_image_aspect_ratio(params: Mapping[str, Any]) -> str:
+    requested = str(params.get("aspect_ratio") or "").strip()
+    if requested:
+        return requested
+    return image_aspect_ratio_from_legacy_size(str(params.get("image_size") or ""))
+
+
+def _image_size_evidence(
+    *,
+    requested_aspect_ratio: str,
+    resolved_size: str,
+    actual_width: int | None,
+    actual_height: int | None,
+) -> dict[str, object]:
+    evidence: dict[str, object] = {
+        "requested_aspect_ratio": requested_aspect_ratio,
+        "resolved_aspect_ratio": aspect_ratio_from_provider_size(resolved_size),
+        "resolved_size": resolved_size,
+    }
+    if actual_width is not None and actual_height is not None:
+        evidence.update(
+            {
+                "actual_width": actual_width,
+                "actual_height": actual_height,
+                "actual_size": f"{actual_width}x{actual_height}",
+                "actual_aspect_ratio": resolve_image_aspect_ratio(
+                    "auto",
+                    width=actual_width,
+                    height=actual_height,
+                ),
+            }
+        )
+    return evidence
 
 
 def _image_bytes(result: Mapping[str, Any]) -> bytes:
@@ -584,6 +624,7 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             )
 
             input_path = None
+            primary_input_bytes: bytes | None = None
             input_image_urls: list[str] = []
             if not ecom_poster:
                 source_storage_keys = _source_storage_keys(params, tenant_id)
@@ -593,8 +634,9 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                         (storage_key, storage.get_bytes(storage_key))
                         for storage_key in source_storage_keys
                     ]
+                    primary_input_bytes = input_images[0][1]
                     input_path = _write_temp_image_bytes(
-                        input_images[0][1],
+                        primary_input_bytes,
                         suffix=Path(input_storage_key).suffix or ".png",
                         temp_paths=temp_paths,
                     )
@@ -608,6 +650,7 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                         str(params["image_key"]),
                     )
                     image_bytes = storage.get_bytes(input_storage_key)
+                    primary_input_bytes = image_bytes
                     input_path = _write_temp_image_bytes(
                         image_bytes,
                         suffix=Path(input_storage_key).suffix or ".png",
@@ -643,10 +686,22 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                 }
             else:
                 provider = resolve(db, tenant_id=tenant_id, capability="image")
+                requested_aspect_ratio = _requested_image_aspect_ratio(params)
+                input_width, input_height = (
+                    _image_dimensions(primary_input_bytes)
+                    if primary_input_bytes is not None
+                    else (None, None)
+                )
+                resolved_aspect_ratio = resolve_image_aspect_ratio(
+                    requested_aspect_ratio,
+                    width=input_width,
+                    height=input_height,
+                )
                 provider_payload = {
                     "prompt": prompt,
-                    "size": params.get("image_size") or "1024x1024",
-                    "quality": params.get("image_quality") or "medium",
+                    "size": resolved_aspect_ratio,
+                    "resolution": "1k",
+                    "quality": "high",
                     "n": 1,
                 }
                 if input_path is not None:
@@ -727,6 +782,18 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             )
             metadata["synthetic_label"] = label_metadata
 
+            actual_width, actual_height = _image_dimensions(image_bytes)
+            if not ecom_poster:
+                resolved_size = str(result.get("size") or provider_payload["size"])
+                size_evidence = _image_size_evidence(
+                    requested_aspect_ratio=requested_aspect_ratio,
+                    resolved_size=resolved_size,
+                    actual_width=actual_width,
+                    actual_height=actual_height,
+                )
+                metadata.update(size_evidence)
+                task.params = {**(task.params or {}), **size_evidence}
+
             storage.put_bytes(output_key, image_bytes, content_type="image/png")
 
             asset = Asset(
@@ -737,6 +804,8 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                 storage_key=output_key,
                 mime_type="image/png",
                 size_bytes=len(image_bytes),
+                width=actual_width,
+                height=actual_height,
                 status="ready",
                 metadata_=metadata,
             )
@@ -839,8 +908,9 @@ def _ecom_replicate_storage_key(tenant_id: str, job_id: str, output_index: int) 
 def _image_dimensions(image_bytes: bytes) -> tuple[int | None, int | None]:
     try:
         with Image.open(BytesIO(image_bytes)) as image:
-            image.load()
-            return int(image.width), int(image.height)
+            corrected = ImageOps.exif_transpose(image)
+            corrected.load()
+            return int(corrected.width), int(corrected.height)
     except UnidentifiedImageError:
         return None, None
 

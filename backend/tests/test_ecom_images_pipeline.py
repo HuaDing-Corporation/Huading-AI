@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
@@ -287,6 +288,7 @@ def test_ecom_model_single_creates_photo_task_clamps_prompt_and_reserves_quota(
                 "gender": "any",
                 "style_id": "studio_white",
                 "extra_prompt": long_extra,
+                "aspect_ratio": "21:9",
                 "apply_visible_label": True,
             },
             headers=auth_context["headers"],
@@ -307,6 +309,8 @@ def test_ecom_model_single_creates_photo_task_clamps_prompt_and_reserves_quota(
     assert payload["source_storage_key"] == source["storage_key"]
     assert payload["video_task_id"] == data["task_id"]
     assert payload["extra_prompt"] == long_extra[:200]
+    assert payload["aspect_ratio"] == "21:9"
+    assert payload["requested_aspect_ratio"] == "21:9"
     assert payload["apply_visible_label"] is True
     assert "female" not in payload["topic"].lower()
     assert "male" not in payload["topic"].lower()
@@ -321,15 +325,18 @@ def test_ecom_model_single_creates_photo_task_clamps_prompt_and_reserves_quota(
 
     assert task.mode == "photo"
     assert task.video_mode == "photo"
+    assert task.aspect_ratio == "21:9"
     assert task.params["kind"] == "ecom_model"
     assert task.params["gender"] == "any"
     assert task.params["style_id"] == "studio_white"
     assert task.params["extra_prompt"] == long_extra[:200]
+    assert task.params["aspect_ratio"] == "21:9"
+    assert task.params["requested_aspect_ratio"] == "21:9"
     assert task.params["source_storage_key"] == source["storage_key"]
     assert task.params["apply_visible_label"] is True
     assert usage.status == "reserved"
-    assert usage.credits == 40
-    assert subscription.quota_credits_reserved == 40
+    assert usage.credits == 10
+    assert subscription.quota_credits_reserved == 10
 
 
 def test_ecom_model_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
@@ -360,6 +367,7 @@ def test_ecom_model_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
                         "gender": "female" if index % 2 == 0 else "male",
                         "style_id": "lifestyle" if index % 2 == 0 else "street",
                         "extra_prompt": f"variant {index}",
+                        "aspect_ratio": "4:3" if index % 2 == 0 else "2:3",
                     }
                     for index, source in enumerate(sources)
                 ]
@@ -381,6 +389,7 @@ def test_ecom_model_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
     assert {call["args"][0]["batch_id"] for call in enqueued} == {data["batch_id"]}
     assert {call["args"][0]["kind"] for call in enqueued} == {"ecom_model"}
     assert {call["args"][0]["style_id"] for call in enqueued} == {"lifestyle", "street"}
+    assert {call["args"][0]["aspect_ratio"] for call in enqueued} == {"4:3", "2:3"}
 
     with auth_db() as db:
         task_count = db.scalar(
@@ -399,7 +408,7 @@ def test_ecom_model_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
     assert task_count == 20
     assert batch_rows == 0
     assert reserved_count == 20
-    assert subscription.quota_credits_reserved == 800
+    assert subscription.quota_credits_reserved == 200
 
 
 def test_ecom_model_rejects_unknown_style_id(
@@ -488,6 +497,7 @@ def test_ecom_cutout_single_creates_photo_task_and_reserves_quota(
             json={
                 "source_asset_id": source["id"],
                 "background": "transparent",
+                "aspect_ratio": "auto",
                 "apply_visible_label": True,
             },
             headers=auth_context["headers"],
@@ -508,6 +518,8 @@ def test_ecom_cutout_single_creates_photo_task_and_reserves_quota(
     assert payload["source_asset_id"] == source["id"]
     assert payload["source_storage_key"] == source["storage_key"]
     assert payload["video_task_id"] == data["task_id"]
+    assert payload["aspect_ratio"] == "auto"
+    assert payload["requested_aspect_ratio"] == "auto"
     assert payload["apply_visible_label"] is True
 
     with auth_db() as db:
@@ -519,14 +531,17 @@ def test_ecom_cutout_single_creates_photo_task_and_reserves_quota(
 
     assert task.mode == "photo"
     assert task.video_mode == "photo"
+    assert task.aspect_ratio == "auto"
     assert task.params["kind"] == "ecom_cutout"
     assert task.params["background"] == "transparent"
     assert task.params["source_asset_id"] == source["id"]
     assert task.params["source_storage_key"] == source["storage_key"]
+    assert task.params["aspect_ratio"] == "auto"
+    assert task.params["requested_aspect_ratio"] == "auto"
     assert task.params["apply_visible_label"] is True
     assert usage.status == "reserved"
-    assert usage.credits == 40
-    assert subscription.quota_credits_reserved == 40
+    assert usage.credits == 10
+    assert subscription.quota_credits_reserved == 10
 
 
 def test_ecom_cutout_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
@@ -552,8 +567,12 @@ def test_ecom_cutout_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
             "/api/v1/ecom-images/cutout/batch",
             json={
                 "items": [
-                    {"source_asset_id": source["id"], "background": "white"}
-                    for source in sources
+                    {
+                        "source_asset_id": source["id"],
+                        "background": "white",
+                        "aspect_ratio": "16:9" if index % 2 == 0 else "3:4",
+                    }
+                    for index, source in enumerate(sources)
                 ]
             },
             headers=auth_context["headers"],
@@ -572,6 +591,7 @@ def test_ecom_cutout_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
     assert all(item["status"] == "queued" for item in data["tasks"])
     assert {call["args"][0]["batch_id"] for call in enqueued} == {data["batch_id"]}
     assert {call["args"][0]["kind"] for call in enqueued} == {"ecom_cutout"}
+    assert {call["args"][0]["aspect_ratio"] for call in enqueued} == {"16:9", "3:4"}
 
     with auth_db() as db:
         task_count = db.scalar(
@@ -588,7 +608,28 @@ def test_ecom_cutout_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
     assert task_count == 20
     assert batch_rows == 0
     assert reserved_count == 20
-    assert subscription.quota_credits_reserved == 800
+    assert subscription.quota_credits_reserved == 200
+
+
+def test_ecom_image_ratio_defaults_square_and_rejects_unknown(auth_context) -> None:
+    from pydantic import ValidationError
+
+    from app.schemas.ecom_images import EcomCutoutRequest, EcomModelRequest
+
+    cutout = EcomCutoutRequest(source_asset_id="product-cutout-source")
+    model = EcomModelRequest(
+        source_asset_id="product-model-source",
+        gender="any",
+        style_id="studio_white",
+    )
+
+    assert cutout.aspect_ratio == "1:1"
+    assert model.aspect_ratio == "1:1"
+    with pytest.raises(ValidationError):
+        EcomCutoutRequest(
+            source_asset_id="product-cutout-source",
+            aspect_ratio="5:4",
+        )
 
 
 def test_ecom_cutout_rejects_cross_tenant_source_asset(

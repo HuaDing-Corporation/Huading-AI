@@ -51,8 +51,6 @@ _ECOM_POSTER_KIND = "ecom_poster"
 _BATCH_LIMIT = 20
 _SOURCE_IMAGE_TYPES = {"avatar_image", "product_image", "generated_image"}
 _SOURCE_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
-_DEFAULT_IMAGE_SIZE = "1024x1024"
-_DEFAULT_IMAGE_QUALITY = "medium"
 _MODEL_STYLES: tuple[EcomModelStyle, ...] = (
     EcomModelStyle(id="studio_white", name="Studio white"),
     EcomModelStyle(id="lifestyle", name="Lifestyle"),
@@ -181,8 +179,8 @@ def _task_params(
         "background": payload.background,
         "source_asset_id": source.id,
         "source_storage_key": source.storage_key,
-        "image_size": _DEFAULT_IMAGE_SIZE,
-        "image_quality": _DEFAULT_IMAGE_QUALITY,
+        "aspect_ratio": payload.aspect_ratio,
+        "requested_aspect_ratio": payload.aspect_ratio,
         "estimated": True,
         "apply_visible_label": payload.apply_visible_label,
     }
@@ -226,8 +224,8 @@ def _model_task_params(
         "style_id": payload.style_id,
         "source_asset_id": source.id,
         "source_storage_key": source.storage_key,
-        "image_size": _DEFAULT_IMAGE_SIZE,
-        "image_quality": _DEFAULT_IMAGE_QUALITY,
+        "aspect_ratio": payload.aspect_ratio,
+        "requested_aspect_ratio": payload.aspect_ratio,
         "estimated": True,
         "apply_visible_label": payload.apply_visible_label,
     }
@@ -255,6 +253,7 @@ def _create_cutout_task(
         mode="photo",
         video_mode="photo",
         progress=0,
+        aspect_ratio=payload.aspect_ratio,
         params=_task_params(payload, source=source, batch_id=batch_id),
     )
     db.add(task)
@@ -263,7 +262,6 @@ def _create_cutout_task(
         db,
         tenant_id=user.tenant_id,
         video_task_id=task.id,
-        quality=_DEFAULT_IMAGE_QUALITY,
         n=1,
     )
     return task
@@ -324,6 +322,7 @@ def _create_model_task(
         mode="photo",
         video_mode="photo",
         progress=0,
+        aspect_ratio=payload.aspect_ratio,
         params=_model_task_params(
             payload,
             source=source,
@@ -337,7 +336,6 @@ def _create_model_task(
         db,
         tenant_id=user.tenant_id,
         video_task_id=task.id,
-        quality=_DEFAULT_IMAGE_QUALITY,
         n=1,
     )
     return task

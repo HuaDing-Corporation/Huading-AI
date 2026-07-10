@@ -2,6 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.image_aspect_ratio import RequestedImageAspectRatio
+
 EcomCutoutBackground = Literal["white", "transparent"]
 EcomModelGender = Literal["female", "male", "any"]
 EcomReplicateOutputMode = Literal["main", "detail"]
@@ -12,6 +14,7 @@ class EcomCutoutRequest(BaseModel):
 
     source_asset_id: str = Field(min_length=1, max_length=36)
     background: EcomCutoutBackground = "white"
+    aspect_ratio: RequestedImageAspectRatio = "1:1"
     apply_visible_label: bool = False
 
 
@@ -53,6 +56,7 @@ class EcomModelRequest(BaseModel):
     gender: EcomModelGender
     style_id: str = Field(min_length=1, max_length=64)
     extra_prompt: str | None = None
+    aspect_ratio: RequestedImageAspectRatio = "1:1"
     apply_visible_label: bool = False
 
 

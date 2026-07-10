@@ -147,7 +147,8 @@ class VideoTask(TenantScopedMixin, Base):
             name="ck_video_tasks_status",
         ),
         CheckConstraint(
-            "aspect_ratio IN ('9:16', '16:9', '1:1')",
+            "aspect_ratio IN ('1:1', '4:3', '3:2', '16:9', '21:9', "
+            "'3:4', '2:3', '9:16', 'auto')",
             name="ck_video_tasks_aspect_ratio",
         ),
         Index("ix_video_tasks_tenant_created_at", "tenant_id", "created_at"),

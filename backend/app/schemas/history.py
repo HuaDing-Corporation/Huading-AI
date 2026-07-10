@@ -28,6 +28,11 @@ class ImageHistoryDetailItem(BaseModel):
     download_url: str
     width: int
     height: int
+    requested_aspect_ratio: str | None = None
+    resolved_aspect_ratio: str | None = None
+    resolved_size: str | None = None
+    actual_aspect_ratio: str | None = None
+    actual_size: str | None = None
     theme: str | None = None
     label: str | None = None
 

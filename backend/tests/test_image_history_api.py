@@ -121,7 +121,7 @@ def _link_photo_output(
     asset_id: str,
     width: int,
     height: int,
-) -> None:
+) -> Asset:
     asset = Asset(
         id=asset_id,
         tenant_id=task.tenant_id,
@@ -137,6 +137,65 @@ def _link_photo_output(
     db.add(asset)
     db.flush()
     db.add(TaskAsset(video_task_id=task.id, asset_id=asset.id, role="output_image"))
+    return asset
+
+
+def test_image_history_detail_exposes_each_output_size_evidence(
+    auth_context,
+    auth_db,
+) -> None:
+    task = _photo_task(
+        task_id="aspect-evidence-photo",
+        tenant_id=auth_context["tenant_id"],
+        created_at=datetime.now(UTC),
+        topic="宽幅商品图",
+        params={
+            "requested_aspect_ratio": "21:9",
+            "resolved_aspect_ratio": "3:2",
+            "resolved_size": "1536x1024",
+            "actual_aspect_ratio": "16:9",
+            "actual_size": "160x90",
+        },
+    )
+    task.aspect_ratio = "21:9"
+    with auth_db() as db:
+        db.add(task)
+        db.flush()
+        asset = _link_photo_output(
+            db,
+            task=task,
+            asset_id="aspect-evidence-asset",
+            width=160,
+            height=90,
+        )
+        asset.metadata_ = {
+            **(asset.metadata_ or {}),
+            "requested_aspect_ratio": "21:9",
+            "resolved_aspect_ratio": "3:2",
+            "resolved_size": "1536x1024",
+            "actual_aspect_ratio": "16:9",
+            "actual_size": "160x90",
+        }
+        db.commit()
+
+    app.dependency_overrides[get_object_storage] = lambda: _FakeStorage()
+    try:
+        response = TestClient(app).get(
+            "/api/v1/history/images/image_gen/aspect-evidence-photo",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 200
+    item = response.json()["data"]["items"][0]
+    assert item["requested_aspect_ratio"] == "21:9"
+    assert item["resolved_aspect_ratio"] == "3:2"
+    assert item["resolved_size"] == "1536x1024"
+    assert item["actual_aspect_ratio"] == "16:9"
+    assert item["actual_size"] == "160x90"
+    assert item["width"] == 160
+    assert item["height"] == 90
 
 
 def test_image_history_paginates_image_generation_newest_first(auth_context, auth_db) -> None:
