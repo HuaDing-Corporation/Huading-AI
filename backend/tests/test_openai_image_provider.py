@@ -126,6 +126,39 @@ async def test_openai_image_provider_generates_text_to_image() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("aspect_ratio", "expected_size"),
+    [
+        ("1:1", "1024x1024"),
+        ("4:3", "1536x1024"),
+        ("3:2", "1536x1024"),
+        ("16:9", "1536x1024"),
+        ("21:9", "1536x1024"),
+        ("3:4", "1024x1536"),
+        ("2:3", "1024x1536"),
+        ("9:16", "1024x1536"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_openai_image_provider_maps_ratio_to_native_size(
+    aspect_ratio: str,
+    expected_size: str,
+) -> None:
+    client = _FakeClient()
+    provider = OpenAIImageProvider(api_key="test-key", client=client)
+
+    result = await provider.generate_image(
+        {
+            "prompt": "studio product photo",
+            "size": aspect_ratio,
+            "quality": "high",
+        }
+    )
+
+    assert client.images.generate_calls[0]["size"] == expected_size
+    assert result["size"] == expected_size
+
+
 @pytest.mark.asyncio
 async def test_openai_image_provider_edits_without_unsupported_input_fidelity(
     tmp_path,

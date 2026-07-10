@@ -4,6 +4,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.image_aspect_ratio import (
+    VIDEO_ASPECT_RATIOS,
+    RequestedImageAspectRatio,
+    image_aspect_ratio_from_legacy_size,
+)
 from app.services.subtitle_styles import SUBTITLE_TEMPLATE_IDS, clamp_subtitle_font_size
 
 _ALLOWED_PIPELINES = {"standard", "custom"}
@@ -110,7 +115,7 @@ class VideoGenerateRequest(BaseModel):
     separate_vocal: bool | None = None
     open_scenedet: bool | None = None
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
-    aspect_ratio: Literal["9:16", "16:9", "1:1"] = Field(default="9:16")
+    aspect_ratio: RequestedImageAspectRatio = Field(default="9:16")
     subtitle_enabled: bool = True
     subtitle_style: SubtitleStyleRequest | None = None
     apply_visible_label: bool = False
@@ -128,13 +133,13 @@ class VideoGenerateRequest(BaseModel):
         default=None,
         description="Tenant-relative upload key from POST /uploads (seedance_i2v/photo input)",
     )
-    image_size: Literal["1024x1024", "1536x1024", "1024x1536"] = Field(
+    image_size: str = Field(
         default="1024x1024",
-        description="OpenAI photo output size.",
+        description="Deprecated photo size; translated only when aspect_ratio is omitted.",
     )
-    image_quality: Literal["low", "medium", "high"] = Field(
+    image_quality: str = Field(
         default="medium",
-        description="OpenAI photo quality tier.",
+        description="Deprecated photo quality; accepted for compatibility and ignored.",
     )
     purpose: Literal["cover"] | None = Field(
         default=None,
@@ -217,6 +222,12 @@ class VideoGenerateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_i2v_has_image(self) -> "VideoGenerateRequest":
+        if self.video_mode == "photo":
+            if "aspect_ratio" not in self.model_fields_set:
+                self.aspect_ratio = image_aspect_ratio_from_legacy_size(self.image_size)
+        elif self.aspect_ratio not in VIDEO_ASPECT_RATIOS:
+            raise ValueError("non-photo video modes support only 9:16, 16:9, or 1:1")
+
         if self.video_mode == "video_gen":
             prompt = (self.prompt or self.topic or "").strip()
             if not prompt:
@@ -311,6 +322,13 @@ class VideoRead(BaseModel):
     script: str | None = None
     voice_id: str | None = None
     aspect_ratio: str | None = None
+    requested_aspect_ratio: str | None = None
+    resolved_aspect_ratio: str | None = None
+    resolved_size: str | None = None
+    actual_aspect_ratio: str | None = None
+    actual_width: int | None = None
+    actual_height: int | None = None
+    actual_size: str | None = None
     subtitle_enabled: bool | None = None
     apply_visible_label: bool = False
     created_at: datetime

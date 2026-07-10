@@ -88,7 +88,6 @@ def test_repriced_credit_rates_match_bearing_estimates(auth_db, auth_context):
         image = quota.estimate_image_generation_quota(
             db,
             tenant_id=auth_context["tenant_id"],
-            quality="low",
         )
         copy = quota.estimate_copy_quota(db, tenant_id=auth_context["tenant_id"])
         reverse = quota.estimate_reverse_prompt_quota(

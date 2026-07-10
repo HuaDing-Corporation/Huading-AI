@@ -1,7 +1,9 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import func, select
 
 from app.api.deps import get_object_storage, get_progress_store
@@ -885,6 +887,7 @@ def test_photo_order_routes_before_avatar_when_voice_is_present(
         voice_id = voice.id
         avatar_id = avatar.id
         subscription_id = subscription.id
+        reserved_before = subscription.quota_credits_reserved
 
     enqueued: dict[str, object] = {}
 
@@ -909,8 +912,10 @@ def test_photo_order_routes_before_avatar_when_voice_is_present(
             "topic": "luxury leather handbag product photo",
             "video_mode": "photo",
             "image_key": "uploads/product.png",
-            "image_size": "1536x1024",
-            "image_quality": "high",
+            "aspect_ratio": "21:9",
+            "image_size": "1024x1536",
+            "image_quality": "medium",
+            "purpose": "cover",
             "voice_id": voice_id,
             "avatar_asset_id": avatar_id,
         },
@@ -923,24 +928,31 @@ def test_photo_order_routes_before_avatar_when_voice_is_present(
     assert enqueued["queue"] == "image"
     assert enqueued["args"][0]["video_mode"] == "photo"
     assert enqueued["args"][0]["image_key"] == "uploads/product.png"
-    assert enqueued["args"][0]["image_size"] == "1536x1024"
-    assert enqueued["args"][0]["image_quality"] == "high"
+    assert enqueued["args"][0]["aspect_ratio"] == "21:9"
+    assert enqueued["args"][0]["requested_aspect_ratio"] == "21:9"
+    assert enqueued["args"][0]["purpose"] == "cover"
+    assert "image_size" not in enqueued["args"][0]
+    assert "image_quality" not in enqueued["args"][0]
     with auth_db() as db:
         task = db.get(VideoTask, data["id"])
         assert task is not None
         assert task.mode == "photo"
         assert task.video_mode == "photo"
+        assert task.aspect_ratio == "21:9"
         assert task.params["image_key"] == "uploads/product.png"
-        assert task.params["image_size"] == "1536x1024"
-        assert task.params["image_quality"] == "high"
+        assert task.params["aspect_ratio"] == "21:9"
+        assert task.params["requested_aspect_ratio"] == "21:9"
+        assert task.params["purpose"] == "cover"
+        assert "image_size" not in task.params
+        assert "image_quality" not in task.params
         subscription = db.get(Subscription, subscription_id)
-        assert subscription.quota_credits_reserved == 155
+        assert subscription.quota_credits_reserved - reserved_before == 10
         reserved = db.query(UsageRecord).filter_by(video_task_id=data["id"]).one()
         assert reserved.status == "reserved"
         assert reserved.capability == "image"
         assert reserved.provider == "apimart"
         assert reserved.quantity == Decimal("1.000")
-        assert reserved.credits == Decimal("150.00")
+        assert reserved.credits == Decimal("10.00")
 
 
 def test_video_estimate_seedance_i2v_matches_reserved_quota_with_tenant_rate(
@@ -1009,7 +1021,7 @@ def test_video_estimate_seedance_i2v_matches_reserved_quota_with_tenant_rate(
         assert reserved.credits == Decimal("149.25")
 
 
-def test_video_estimate_photo_matches_reserved_quota_with_quality_rate(
+def test_video_estimate_photo_matches_flat_tenant_image_rate(
     monkeypatch,
     auth_context,
     auth_db,
@@ -1055,21 +1067,21 @@ def test_video_estimate_photo_matches_reserved_quota_with_quality_rate(
 
     assert estimate_resp.status_code == 200
     assert estimate_resp.json()["data"] == {
-        "estimated_credits": 8,
+        "estimated_credits": 2,
         "unit": "credits",
         "note": "Estimated reservation; final settlement uses actual generated duration.",
     }
     assert create_resp.status_code == 202
     with auth_db() as db:
         subscription = db.get(Subscription, subscription_id)
-        assert subscription.quota_credits_reserved - reserved_before == 8
+        assert subscription.quota_credits_reserved - reserved_before == 2
         reserved = db.query(UsageRecord).filter_by(
             video_task_id=create_resp.json()["data"]["id"]
         ).one()
         assert reserved.capability == "image"
         assert reserved.unit == "image"
         assert reserved.quantity == Decimal("1.000")
-        assert reserved.credits == Decimal("8.00")
+        assert reserved.credits == Decimal("2.00")
 
 
 def test_video_estimate_avatar_uses_existing_script_duration_and_tenant_rates(
@@ -1168,32 +1180,82 @@ def test_video_estimate_uses_video_generate_validation(auth_context) -> None:
     assert resp.status_code == 422
 
 
-def test_photo_schema_validates_topic_size_and_quality() -> None:
-    import pytest
-    from pydantic import ValidationError
-
+@pytest.mark.parametrize(
+    "aspect_ratio",
+    ["1:1", "4:3", "3:2", "16:9", "21:9", "3:4", "2:3", "9:16", "auto"],
+)
+def test_photo_schema_accepts_frozen_aspect_ratios(aspect_ratio: str) -> None:
     request = VideoGenerateRequest.model_validate(
         {
             "topic": "premium mug product image",
             "video_mode": "photo",
+            "aspect_ratio": aspect_ratio,
         }
     )
 
-    assert request.video_mode == "photo"
-    assert request.image_size == "1024x1024"
-    assert request.image_quality == "medium"
-    assert request.voice_id is None
-    assert request.avatar_asset_id is None
-    assert request.apply_visible_label is False
+    assert request.aspect_ratio == aspect_ratio
 
-    invalid_cases = [
-        {"topic": "premium mug", "video_mode": "photo", "image_size": "2048x2048"},
-        {"topic": "premium mug", "video_mode": "photo", "image_quality": "ultra"},
-        {"topic": "   ", "video_mode": "photo"},
-    ]
-    for payload in invalid_cases:
-        with pytest.raises(ValidationError):
-            VideoGenerateRequest.model_validate(payload)
+
+@pytest.mark.parametrize(
+    ("legacy_size", "expected_ratio"),
+    [
+        ("1024x1024", "1:1"),
+        ("1536x1024", "3:2"),
+        ("1024x1536", "2:3"),
+        ("2048x2048", "1:1"),
+        ("unknown-legacy-size-" + "x" * 64, "1:1"),
+    ],
+)
+def test_photo_schema_translates_legacy_size_only_when_ratio_is_missing(
+    legacy_size: str,
+    expected_ratio: str,
+) -> None:
+    translated = VideoGenerateRequest.model_validate(
+        {
+            "topic": "premium mug product image",
+            "video_mode": "photo",
+            "image_size": legacy_size,
+            "image_quality": "legacy-ui-quality-" + "x" * 64,
+        }
+    )
+    explicit = VideoGenerateRequest.model_validate(
+        {
+            "topic": "premium mug product image",
+            "video_mode": "photo",
+            "aspect_ratio": "21:9",
+            "image_size": legacy_size,
+        }
+    )
+
+    assert translated.aspect_ratio == expected_ratio
+    assert translated.image_quality == "legacy-ui-quality-" + "x" * 64
+    assert explicit.aspect_ratio == "21:9"
+
+
+def test_photo_schema_defaults_to_square_without_changing_video_defaults() -> None:
+    photo = VideoGenerateRequest.model_validate(
+        {"topic": "premium mug product image", "video_mode": "photo"}
+    )
+    video = VideoGenerateRequest.model_validate({"topic": "vertical product video"})
+
+    assert photo.aspect_ratio == "1:1"
+    assert video.aspect_ratio == "9:16"
+    assert photo.voice_id is None
+    assert photo.avatar_asset_id is None
+    assert photo.apply_visible_label is False
+
+
+@pytest.mark.parametrize("aspect_ratio", ["4:3", "3:2", "21:9", "3:4", "2:3", "auto"])
+def test_non_photo_schema_rejects_image_only_aspect_ratios(aspect_ratio: str) -> None:
+    with pytest.raises(ValidationError):
+        VideoGenerateRequest.model_validate(
+            {"topic": "vertical product video", "aspect_ratio": aspect_ratio}
+        )
+
+
+def test_photo_schema_still_rejects_blank_topic() -> None:
+    with pytest.raises(ValidationError):
+        VideoGenerateRequest.model_validate({"topic": "   ", "video_mode": "photo"})
 
 
 def test_video_estimate_implicit_avatar_requires_avatar_asset_id(auth_context) -> None:
@@ -1402,6 +1464,16 @@ def test_video_list_filters_photo_and_returns_image_urls(
                     status="done",
                     progress=100,
                     topic="premium mug",
+                    aspect_ratio="auto",
+                    params={
+                        "requested_aspect_ratio": "auto",
+                        "resolved_aspect_ratio": "16:9",
+                        "resolved_size": "16:9",
+                        "actual_aspect_ratio": "16:9",
+                        "actual_width": 160,
+                        "actual_height": 90,
+                        "actual_size": "160x90",
+                    },
                     storage_key=f"tenants/{auth_context['tenant_id']}/photos/history-photo-a/output.png",
                     content_type="image/png",
                 ),
@@ -1437,6 +1509,14 @@ def test_video_list_filters_photo_and_returns_image_urls(
     item = data["items"][0]
     assert item["id"] == "history-photo-a"
     assert item["mode"] == "photo"
+    assert item["aspect_ratio"] == "auto"
+    assert item["requested_aspect_ratio"] == "auto"
+    assert item["resolved_aspect_ratio"] == "16:9"
+    assert item["resolved_size"] == "16:9"
+    assert item["actual_aspect_ratio"] == "16:9"
+    assert item["actual_width"] == 160
+    assert item["actual_height"] == 90
+    assert item["actual_size"] == "160x90"
     assert item["apply_visible_label"] is False
     assert item["playback_url"].endswith("/output.png?ttl=3600")
     assert item["download_url"].endswith("/output.png?ttl=3600&download=1")

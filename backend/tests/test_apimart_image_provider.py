@@ -4,7 +4,11 @@ from pathlib import Path
 import pytest
 
 from app.db.models import ProviderConfig
-from app.providers.image.apimart import APIMartImageProvider, APIMartImageProviderError
+from app.providers.image.apimart import (
+    APIMartImageProvider,
+    APIMartImageProviderError,
+    _normalize_size_and_resolution,
+)
 
 
 class _FakeResponse:
@@ -60,6 +64,14 @@ class _FakeSession:
         if url.startswith("https://upload.apimart.ai/"):
             return self.download_response
         return self.task_responses.pop(0)
+
+
+@pytest.mark.parametrize(
+    "aspect_ratio",
+    ["1:1", "4:3", "3:2", "16:9", "21:9", "3:4", "2:3", "9:16"],
+)
+def test_apimart_preserves_resolved_ratio_and_defaults_to_1k(aspect_ratio: str) -> None:
+    assert _normalize_size_and_resolution(aspect_ratio, None) == (aspect_ratio, "1k")
 
 
 @pytest.mark.asyncio

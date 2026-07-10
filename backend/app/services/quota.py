@@ -25,11 +25,6 @@ _VIDEO_GEN_RESOLUTION_MULTIPLIERS = {
     "720p": Decimal("1.6250"),
     "1080p": Decimal("3.5000"),
 }
-_IMAGE_QUALITY_MULTIPLIERS = {
-    "low": Decimal("1"),
-    "medium": Decimal("4"),
-    "high": Decimal("15"),
-}
 _COSYVOICE_CLONE_PROVIDER = "cosyvoice-voice-clone"
 _VOICE_CLONE_DEFAULT_CREDITS = Decimal("30000.0000")
 
@@ -264,12 +259,8 @@ def estimate_image_generation_quota(
     db: Session,
     *,
     tenant_id: str,
-    quality: str,
     n: int = 1,
 ) -> QuotaEstimate:
-    multiplier = _IMAGE_QUALITY_MULTIPLIERS.get(quality)
-    if multiplier is None:
-        raise AppError("Invalid image quality.", code="VALIDATION_ERROR", status_code=422)
     count = max(1, int(n))
     image_rate = _rate(
         db,
@@ -278,7 +269,7 @@ def estimate_image_generation_quota(
         unit="image",
         default=Decimal("10.0000"),
     )
-    credits = (Decimal(count) * image_rate * multiplier).quantize(Decimal("0.01"))
+    credits = (Decimal(count) * image_rate).quantize(Decimal("0.01"))
     return QuotaEstimate(
         estimated_seconds=count,
         estimated_credits=credits,
@@ -626,14 +617,12 @@ def reserve_image_generation_quota(
     *,
     tenant_id: str,
     video_task_id: str,
-    quality: str,
     n: int = 1,
 ) -> Reservation:
     subscription = active_subscription(db, tenant_id)
     estimate = estimate_image_generation_quota(
         db,
         tenant_id=tenant_id,
-        quality=quality,
         n=n,
     )
     if remaining_credits(subscription) < estimate.reservation_units:

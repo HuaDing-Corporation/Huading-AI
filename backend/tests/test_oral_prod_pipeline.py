@@ -1097,7 +1097,7 @@ def test_prune_photo_history_skips_reserved_inflight_task_without_leaking_quota(
                 db,
                 tenant_id=auth_context["tenant_id"],
                 task_id="reserved-prune-photo",
-                expected_reserved=60,
+                expected_reserved=30,
             )
     assert oldest_terminal is None
     assert storage.deleted == [

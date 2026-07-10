@@ -385,6 +385,22 @@ def _photo_dimensions(task: VideoTask, asset: Asset | None) -> tuple[int, int]:
     return dimensions or (0, 0)
 
 
+def _photo_size_evidence(task: VideoTask, asset: Asset | None) -> dict[str, str]:
+    evidence: dict[str, str] = {}
+    for source in (task.params or {}, (asset.metadata_ or {}) if asset is not None else {}):
+        for key in (
+            "requested_aspect_ratio",
+            "resolved_aspect_ratio",
+            "resolved_size",
+            "actual_aspect_ratio",
+            "actual_size",
+        ):
+            value = source.get(key)
+            if value is not None:
+                evidence[key] = str(value)
+    return evidence
+
+
 def _photo_detail_meta(
     category: PhotoHistoryCategory,
     history_id: str,
@@ -436,6 +452,7 @@ def _photo_history_detail(
     for index, task in enumerate(tasks):
         asset = _photo_output_asset(db, tenant_id=tenant_id, task_id=task.id)
         width, height = _photo_dimensions(task, asset)
+        size_evidence = _photo_size_evidence(task, asset)
         storage_key = asset.storage_key if asset is not None else str(task.storage_key)
         items.append(
             ImageHistoryDetailItem(
@@ -448,6 +465,7 @@ def _photo_history_detail(
                 ),
                 width=width,
                 height=height,
+                **size_evidence,
             )
         )
     return ImageHistoryDetailResponse(

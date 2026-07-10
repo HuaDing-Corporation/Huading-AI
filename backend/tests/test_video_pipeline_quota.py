@@ -225,34 +225,26 @@ def test_settle_avatar_video_source_keeps_avatar_credits_and_updates_provider_co
         assert record.model == "realman_change_lips"
 
 
-def test_image_generation_quota_uses_quality_multipliers(auth_context, auth_db) -> None:
+def test_image_generation_quota_is_flat_per_image(auth_context, auth_db) -> None:
     with auth_db() as db:
         _seed_subscription(db, auth_context["tenant_id"], total=100)
 
-        low = quota.estimate_image_generation_quota(
+        single = quota.estimate_image_generation_quota(
             db,
             tenant_id=auth_context["tenant_id"],
-            quality="low",
         )
-        medium = quota.estimate_image_generation_quota(
+        batch = quota.estimate_image_generation_quota(
             db,
             tenant_id=auth_context["tenant_id"],
-            quality="medium",
-        )
-        high = quota.estimate_image_generation_quota(
-            db,
-            tenant_id=auth_context["tenant_id"],
-            quality="high",
+            n=3,
         )
 
-    assert low.capability == "image"
-    assert low.unit == "image"
-    assert low.reservation_units == 10
-    assert low.estimated_credits == Decimal("10.00")
-    assert medium.reservation_units == 40
-    assert medium.estimated_credits == Decimal("40.00")
-    assert high.reservation_units == 150
-    assert high.estimated_credits == Decimal("150.00")
+    assert single.capability == "image"
+    assert single.unit == "image"
+    assert single.reservation_units == 10
+    assert single.estimated_credits == Decimal("10.00")
+    assert batch.reservation_units == 30
+    assert batch.estimated_credits == Decimal("30.00")
 
 
 def test_reserve_image_generation_quota_creates_reserved_usage(auth_context, auth_db) -> None:
@@ -271,7 +263,6 @@ def test_reserve_image_generation_quota_creates_reserved_usage(auth_context, aut
             db,
             tenant_id=auth_context["tenant_id"],
             video_task_id="photo-reserve-unit",
-            quality="medium",
         )
         db.commit()
 
@@ -279,8 +270,8 @@ def test_reserve_image_generation_quota_creates_reserved_usage(auth_context, aut
         reserved = sub.quota_credits_reserved
 
     assert reservation.estimated_seconds == 1
-    assert reservation.estimated_credits == Decimal("40.00")
-    assert reserved == 40
+    assert reservation.estimated_credits == Decimal("10.00")
+    assert reserved == 10
     assert record.status == "reserved"
     assert record.capability == "image"
     assert record.provider == "apimart"

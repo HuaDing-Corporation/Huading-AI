@@ -9,6 +9,7 @@ from typing import Any
 from openai import DefaultHttpxClient, OpenAI
 
 from app.core.config import settings
+from app.core.image_aspect_ratio import IMAGE_ASPECT_RATIOS, openai_image_size
 from app.db.models import ProviderConfig
 from app.providers.base import register_provider
 
@@ -65,7 +66,12 @@ class OpenAIImageProvider:
         prompt = str(payload.get("prompt") or "").strip()
         if not prompt:
             raise OpenAIImageProviderError("Image prompt is required.")
-        size = str(payload.get("size") or payload.get("image_size") or _DEFAULT_SIZE)
+        requested_size = str(payload.get("size") or payload.get("image_size") or _DEFAULT_SIZE)
+        size = (
+            openai_image_size(requested_size)
+            if requested_size in IMAGE_ASPECT_RATIOS or requested_size == "auto"
+            else requested_size
+        )
         quality = str(
             payload.get("quality") or payload.get("image_quality") or _DEFAULT_QUALITY
         )

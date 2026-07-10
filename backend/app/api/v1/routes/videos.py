@@ -131,6 +131,10 @@ def _is_avatar_talk_requested(payload: VideoGenerateRequest) -> bool:
 
 def _worker_params(payload: VideoGenerateRequest) -> dict:
     params = payload.model_dump()
+    if payload.video_mode == "photo":
+        params.pop("image_size", None)
+        params.pop("image_quality", None)
+        params["requested_aspect_ratio"] = payload.aspect_ratio
     if payload.subtitle_style is None:
         params.pop("subtitle_style", None)
     else:
@@ -447,7 +451,6 @@ def _quota_estimate_for_payload(
         return estimate_image_generation_quota(
             db,
             tenant_id=tenant_id,
-            quality=payload.image_quality,
             n=1,
         )
     if payload.video_mode == "seedance_i2v":
@@ -530,6 +533,7 @@ def _video_read(
     download_url = None
     thumbnail_url = None
     mode = task.mode or task.video_mode
+    params = task.params or {}
     if status_value == "done" and task.storage_key:
         playback_url = storage.presign_get_url(
             task.storage_key, expires_in=settings.engine_s3_presign_ttl
@@ -557,11 +561,21 @@ def _video_read(
         script=task.script,
         voice_id=task.voice_id,
         aspect_ratio=task.aspect_ratio,
+        requested_aspect_ratio=(
+            params.get("requested_aspect_ratio") if mode == "photo" else None
+        )
+        or (task.aspect_ratio if mode == "photo" else None),
+        resolved_aspect_ratio=params.get("resolved_aspect_ratio"),
+        resolved_size=params.get("resolved_size"),
+        actual_aspect_ratio=params.get("actual_aspect_ratio"),
+        actual_width=params.get("actual_width"),
+        actual_height=params.get("actual_height"),
+        actual_size=params.get("actual_size"),
         subtitle_enabled=task.subtitle_enabled,
         created_at=task.created_at,
         duration_sec=task.duration_sec,
         duration_ms=int(task.duration_sec * 1000) if task.duration_sec is not None else None,
-        apply_visible_label=bool((task.params or {}).get("apply_visible_label", False)),
+        apply_visible_label=bool(params.get("apply_visible_label", False)),
         thumbnail_url=thumbnail_url,
         playback_url=playback_url,
         download_url=download_url,
@@ -910,8 +924,8 @@ def _create_photo_video(
     task_id = str(uuid4())
     params = {
         "image_key": payload.image_key,
-        "image_size": payload.image_size,
-        "image_quality": payload.image_quality,
+        "aspect_ratio": payload.aspect_ratio,
+        "requested_aspect_ratio": payload.aspect_ratio,
         "estimated": True,
         "apply_visible_label": payload.apply_visible_label,
     }
@@ -937,7 +951,6 @@ def _create_photo_video(
         db,
         tenant_id=user.tenant_id,
         video_task_id=task.id,
-        quality=payload.image_quality,
         n=1,
     )
     db.commit()
