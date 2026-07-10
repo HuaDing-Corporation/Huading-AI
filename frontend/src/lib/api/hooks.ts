@@ -2,7 +2,8 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 
 import { fetchMe } from "@/lib/api/auth";
 import { listAvatarPresets } from "@/lib/api/avatars";
-import { analyticsKeys, avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, labelSettingsKey, meKey, publishKeys, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
+import { analyticsKeys, avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, historyImageKeys, labelSettingsKey, meKey, publishKeys, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
+import { getHistoryImageSet, listHistoryImages, type HistoryCategory } from "@/lib/api/history-images";
 import { fetchAnalyticsByProvider, fetchAnalyticsByTenant, fetchAnalyticsOverview, fetchAnalyticsTimeseries, type AnalyticsRange } from "@/lib/api/analytics";
 import { cancelBatch, createBatch, estimateBatch, getBatch, listBatches } from "@/lib/api/batches";
 import { getQuota } from "@/lib/api/quota";
@@ -64,6 +65,29 @@ export function useVideoHistory(mode: string, kind?: string) {
 export function useVideo(id: string | undefined) {
   const { session } = useAuth();
   return useQuery({ queryKey: videoKeys.detail(id ?? ""), queryFn: () => getVideo(id as string), enabled: !!session && !!id });
+}
+// 图片历史·统一模块 (HISTORY-UI-0001)：按 category 分页拉列表（page 从 1 起，累计已加载数 < total 才有下一页）。
+export function useHistoryImages(category: HistoryCategory) {
+  const { session } = useAuth();
+  return useInfiniteQuery({
+    queryKey: historyImageKeys.list(category),
+    queryFn: ({ pageParam }) => listHistoryImages({ category, page: pageParam }),
+    initialPageParam: 1,
+    getNextPageParam: (lastPage, allPages) => {
+      const loaded = allPages.reduce((sum, page) => sum + page.items.length, 0);
+      return loaded < lastPage.total ? allPages.length + 1 : undefined;
+    },
+    enabled: !!session
+  });
+}
+// 重开整套：仅弹窗打开（id 存在）时拉详情。
+export function useHistoryImageSet(category: HistoryCategory | string, id: string | undefined) {
+  const { session } = useAuth();
+  return useQuery({
+    queryKey: historyImageKeys.detail(category, id ?? ""),
+    queryFn: () => getHistoryImageSet(category, id as string),
+    enabled: !!session && !!id
+  });
 }
 export function useCreateVideo() {
   const qc = useQueryClient();

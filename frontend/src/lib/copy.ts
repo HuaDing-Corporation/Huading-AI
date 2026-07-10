@@ -492,6 +492,42 @@ export const copy = {
     deleteFailed: "删除失败，请重试",
     clearFailed: "清空失败，请重试"
   },
+  // 图片历史·统一模块 (HISTORY-UI-0001) — 独立页 /history，4 tab（归一 category）。
+  historyImages: {
+    navEntry: "图片历史",
+    pageTitle: "图片历史",
+    pageSubtitle: "查看历史生成的图片，重开整套并下载原图",
+    tabImageGen: "图片生成/修改",
+    tabEcomWhite: "电商·白底图",
+    tabEcomModel: "电商·模特图",
+    tabEcomDetail: "电商·详情图",
+    empty: "该分类暂无历史记录",
+    emptyHint: "生成的图片会在这里归档，可随时重开整套、下载原图",
+    loading: "加载中…",
+    error: "加载失败，请重试",
+    retry: "重试",
+    loadMore: "加载更多",
+    itemCount: (n: number) => `${n} 张`,
+    // 状态徽标（归一 completed/partial_failed/failed/ready）
+    statusCompleted: "已完成",
+    statusPartial: "部分失败",
+    statusFailed: "失败",
+    statusReady: "已就绪",
+    // 重开整套弹窗
+    setTitle: "整套图片",
+    setLoading: "加载整套图片中…",
+    setError: "整套加载失败，请重试",
+    setEmpty: "该记录暂无可展示的图片",
+    setPartialHint: "本套部分图片生成失败（缺失项不可下载）",
+    setPageNo: (n: number) => `第 ${n} 张`,
+    previewAlt: (n: number) => `历史图片第 ${n} 张`,
+    // 原图红线（下载原始 bytes、显示原始尺寸、缺失禁用）
+    sizeLabel: (dims: string) => `原始尺寸：${dims}（下载为原图，未裁剪）`,
+    sizeUnknown: "原图尺寸以下载文件为准（未裁剪）",
+    download: "下载原图",
+    downloadUnavailable: "原图暂不可用",
+    close: "关闭"
+  },
   detail: { notFound: "视频不存在或无权访问", back: "返回", download: "下载 MP4", downloadImage: "下载图片" },
   status: { queued: "排队中", failed: "失败", done: "已完成", cancelled: "已取消" },
   // 封面制作（口播视频产物附属 ORAL-PROD-UI-0001）
