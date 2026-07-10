@@ -11,6 +11,7 @@ from app.api.v1.routes import (
     covers,
     ecom_images,
     health,
+    history,
     oral,
     publish,
     quota,
@@ -29,6 +30,7 @@ api_router.include_router(analytics.router, prefix="/admin/analytics", tags=["ad
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(health.alias_router, tags=["health"])
 api_router.include_router(health.router, prefix="/health", tags=["health"])
+api_router.include_router(history.router, prefix="/history", tags=["history"])
 api_router.include_router(quota.router, prefix="/quota", tags=["quota"])
 api_router.include_router(voices.router, prefix="/voices", tags=["voices"])
 api_router.include_router(brand_voices.router, prefix="/brand-voices", tags=["brand-voices"])
