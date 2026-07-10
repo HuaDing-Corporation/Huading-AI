@@ -5,6 +5,8 @@ import { apiUrl } from "./client";
 import {
   fillTargetToPrefill,
   friendlyReverseError,
+  getReversePromptJob,
+  isReverseSettled,
   regenerateReversePrompt,
   reverseFromAsset,
   saveReversePrompt,
@@ -140,5 +142,41 @@ describe("reverse-prompt API ↔ MSW（mock 镜像 BE 真形状：ReversePromptJ
     expect(res.id).toBe("rp-1");
     expect(res.status).toBe("saved");
     expect(res.saved_at).toBeTruthy();
+  });
+});
+
+describe("视频反推异步（VIDEO-REVERSE-PROMPT-UI-0001）↔ MSW", () => {
+  it("视频源(video-asset-*) → 202 running（无 result）→ 轮询 GET 第 2 次 succeeded + video_analysis + credits 100", async () => {
+    const created = await reverseFromAsset({ source_asset_id: "video-asset-1" });
+    expect(created.status).toBe("running");
+    expect(created.source_kind).toBe("video");
+    expect(created.result).toBeNull();
+    expect(created.credits).toBe(100);
+    // 轮询：第 1 次仍 running，第 2 次终态。
+    const poll1 = await getReversePromptJob(created.id);
+    expect(poll1.status).toBe("running");
+    const poll2 = await getReversePromptJob(created.id);
+    expect(poll2.status).toBe("succeeded");
+    expect(poll2.result?.prompt_zh).toBeTruthy();
+    // video_analysis：时长/节奏/分镜列表；audio/bgm 一期空
+    const va = poll2.video_analysis!;
+    expect(va.duration_sec).toBeGreaterThan(0);
+    expect(va.shot_list.length).toBeGreaterThan(0);
+    expect(va.audio_transcript).toBeNull();
+    expect(va.bgm_style).toBeNull();
+  });
+
+  it("图片源仍同步 succeeded（视频异步不回归图片路径）", async () => {
+    const job = await reverseFromAsset({ source_asset_id: "upload-9" });
+    expect(job.status).toBe("succeeded");
+    expect(job.source_kind).toBe("image");
+    expect(job.result).toBeTruthy();
+  });
+
+  it("isReverseSettled：succeeded/failed 终态；running/processing 未终态", () => {
+    expect(isReverseSettled("succeeded")).toBe(true);
+    expect(isReverseSettled("failed")).toBe(true);
+    expect(isReverseSettled("running")).toBe(false);
+    expect(isReverseSettled("processing")).toBe(false);
   });
 });

@@ -10,7 +10,7 @@ import { getQuota } from "@/lib/api/quota";
 import { clearCopyDrafts, deleteCopyDraft, generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
 import { generateScript } from "@/lib/api/scripts";
 import { regenerateReversePrompt, reverseFromAsset, saveReversePrompt, type ReverseFromAssetInput } from "@/lib/api/reverse-prompt";
-import { uploadAvatarVideo, uploadImage, uploadProductImage } from "@/lib/api/uploads";
+import { uploadAvatarVideo, uploadImage, uploadProductImage, uploadReverseVideo } from "@/lib/api/uploads";
 import { listBgmLibrary } from "@/lib/api/bgm";
 import { uploadAudio } from "@/lib/api/brand-voices";
 import { listVoices } from "@/lib/api/voices";
@@ -116,6 +116,10 @@ export function useEstimateVideo() {
 }
 export function useUploadImage() {
   return useMutation({ mutationFn: (file: File) => uploadImage(file) });
+}
+// 视频反推 source 上传（VIDEO-REVERSE-PROMPT-UI-0001）→ asset_id（作 reverseFromAsset 的 source_asset_id）。
+export function useUploadReverseVideo() {
+  return useMutation({ mutationFn: (file: File) => uploadReverseVideo(file) });
 }
 export function useUploadProductImage() {
   return useMutation({ mutationFn: (file: File) => uploadProductImage(file) });

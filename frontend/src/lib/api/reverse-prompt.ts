@@ -43,14 +43,33 @@ export interface ReversePromptResult {
   fill_targets: ReversePromptFillTargets;
 }
 
+/**
+ * 视频反推分析（VIDEO-REVERSE-PROMPT-UI-0001）——**mock 先行**，字段形状按任务包冻结契约设计，
+ * 待 BE-0001 真实回执核对（BE video_analysis 目前为引擎服务产出，schema 字段以回执为准）。一期只做：
+ * 时长 / 节奏 / 分镜列表 shot_list；audio_transcript / bgm_style 一期未启用（空→前端标「未启用」）。
+ */
+export interface ReverseVideoShot {
+  index: number;
+  description: string;
+  duration_sec?: number | null;
+}
+export interface ReverseVideoAnalysis {
+  duration_sec?: number | null;
+  pacing?: string | null; // 节奏描述
+  shot_list: ReverseVideoShot[];
+  audio_transcript?: string | null; // 一期空
+  bgm_style?: string | null; // 一期空
+}
+
 /** 镜像 BE ReversePromptJobRead（前端主要读 id/status/result/error_*，其余字段照收）。 */
 export interface ReversePromptJobRead {
   id: string;
-  status: string; // "succeeded" | "running" | "failed" | "saved"
-  source_kind: string; // "image"
+  status: string; // "succeeded" | "running" | "processing" | "failed" | "saved"
+  source_kind: string; // "image" | "video"
   source_asset_id?: string | null;
   target_format: string;
   result?: ReversePromptResult | null;
+  video_analysis?: ReverseVideoAnalysis | null; // 视频反推专有（mock 先行，待 BE 回执）
   error_code?: string | null;
   error_message?: string | null;
   provider?: string | null;
@@ -64,6 +83,14 @@ export interface ReversePromptJobRead {
   saved_at?: string | null;
 }
 
+/** 视频反推计费：100 积分/次（任务包冻结；确认弹窗展示，扣费在后端 submit 时发生）。 */
+export const REVERSE_VIDEO_CREDITS = 100;
+
+/** 反推任务是否终态（用于视频异步轮询判定；图片同步不经此路径）。 */
+export function isReverseSettled(status: string): boolean {
+  return status === "succeeded" || status === "failed";
+}
+
 export interface ReversePromptSavedResponse {
   id: string;
   status: "saved";
@@ -75,9 +102,18 @@ export interface ReverseFromAssetInput {
   source_asset_id: string;
 }
 
-/** 从已上传图片资产反推提示词（同步返回 succeeded + result）。 */
+/**
+ * 从已上传资产反推提示词。请求体仅 source_asset_id，**后端据资产推 source_kind**：
+ *  - 图片 → 同步返回 status="succeeded" + result；
+ *  - 视频 → 异步 202 返回 status="running"（无 result），前端轮询 getReversePromptJob 到终态。
+ */
 export function reverseFromAsset(input: ReverseFromAssetInput): Promise<ReversePromptJobRead> {
   return apiFetch<ReversePromptJobRead>("/api/v1/reverse-prompt", { method: "POST", body: input });
+}
+
+/** 轮询反推任务（视频异步用）。GET /reverse-prompt/jobs/{id}。 */
+export function getReversePromptJob(id: string): Promise<ReversePromptJobRead> {
+  return apiFetch<ReversePromptJobRead>(`/api/v1/reverse-prompt/jobs/${encodeURIComponent(id)}`, { method: "GET" });
 }
 
 /** 同一 job 重新反推（换一版结果）。 */

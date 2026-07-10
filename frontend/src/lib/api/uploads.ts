@@ -49,3 +49,11 @@ export async function uploadProductImage(file: File): Promise<{ image_key: strin
 export function uploadAvatarVideo(file: File): Promise<AvatarVideoUploadResponse> {
   return postImageUpload<AvatarVideoUploadResponse>("/api/v1/uploads/videos", file);
 }
+
+/**
+ * Upload a 视频反推 source video (提示词反推·视频) → `asset_id`. 复用 POST /uploads/videos，带 purpose=reverse_prompt
+ * 让后端按用途归类（VIDEO-REVERSE-PROMPT-UI-0001；端点/形状以 BE-0001 为准，mock 先行）。
+ */
+export function uploadReverseVideo(file: File): Promise<AvatarVideoUploadResponse> {
+  return postImageUpload<AvatarVideoUploadResponse>("/api/v1/uploads/videos?purpose=reverse_prompt", file);
+}

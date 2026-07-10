@@ -419,6 +419,8 @@ export const copy = {
     videoType: "仅支持 MP4 视频",
     videoTooLarge: "视频过大，请控制在 200MB 以内",
     videoTooLong: "请上传 3–10 秒的单人出镜视频",
+    reverseVideoDuration: "请上传 1–60 秒的视频",
+    reverseVideoFailed: "视频反推失败，请稍后重试",
     videoResolution: "视频分辨率需在 360p–1080p",
     videoUnreadable: "无法读取视频信息，请换一个 MP4 文件",
     // 电商详情图复刻·客户端校验（ECOM-REPLICATE-UI-0001）
@@ -499,7 +501,38 @@ export const copy = {
     applyPhoto: "带入 · 图片生成",
     applyEcomModel: "带入 · AI 模特",
     applyEcomPoster: "带入 · 营销海报",
-    applyUnavailable: "该模块暂无可带入内容"
+    applyUnavailable: "该模块暂无可带入内容",
+    // 视频反推（VIDEO-REVERSE-PROMPT-UI-0001）—— 一个入口两模式（图片同步 / 视频异步 + 计费门）
+    sourceLabel: "反推来源",
+    sourceImage: "图片",
+    sourceVideo: "视频",
+    videoTitle: "提示词反推 · 视频",
+    videoSubtitle: "上传一段视频，AI 分析分镜与节奏并反推可复用的提示词",
+    videoUpload: "上传视频",
+    videoUploadHint: "MP4（H.264），≤200MB，1–60 秒；音轨可选（不强制）",
+    videoReupload: "换一个视频",
+    videoValidating: "校验视频中…",
+    videoReady: "已上传，可反推",
+    videoUploading: "上传中…",
+    videoAnalyze: "反推视频提示词",
+    videoAnalyzing: "AI 正在分析视频并反推…",
+    videoPollRetrying: "网络波动，正在重试…视频仍在后端分析，请稍候",
+    // 计费门（视频反推 100 积分/次）
+    videoChargeTitle: "确认扣费反推视频？",
+    videoChargeMessage: (credits: number) => `视频反推将一次性扣除 ${credits} 积分（分析分镜 + 生成提示词）；确认后开始，取消不扣费。`,
+    videoChargeConfirm: "确认扣费反推",
+    videoChargeBadge: (credits: number) => `${credits} 积分 / 次`,
+    // 视频分析展示（在提示词结果之上）
+    vaTitle: "视频分析",
+    vaDuration: "时长",
+    vaDurationValue: (sec: number) => `${sec} 秒`,
+    vaPacing: "节奏",
+    vaShotList: "分镜列表",
+    vaShot: (n: number) => `镜头 ${n}`,
+    vaShotDuration: (sec: number) => `${sec}s`,
+    vaAudioTranscript: "音频转写",
+    vaBgmStyle: "背景音乐风格",
+    vaNotEnabled: "未启用（一期）"
   },
   tasks: {
     title: "生成任务",
