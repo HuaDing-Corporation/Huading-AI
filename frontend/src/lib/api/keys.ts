@@ -59,6 +59,13 @@ export const analyticsKeys = {
     [...analyticsKeys.all, "timeseries", from, to, granularity] as const
 };
 
+// 图片历史·统一模块 (HISTORY-UI-0001) — 按 category 分 key，切 tab 各自缓存不串数据。
+export const historyImageKeys = {
+  all: ["history-images"] as const,
+  list: (category: string) => [...historyImageKeys.all, "list", category] as const,
+  detail: (category: string, id: string) => [...historyImageKeys.all, "detail", category, id] as const
+};
+
 export const meKey = ["me"] as const;
 export const quotaKey = ["quota"] as const;
 export const voicesKey = ["voices"] as const;
