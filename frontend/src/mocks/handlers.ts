@@ -478,17 +478,36 @@ export const handlers = [
   http.post(`${BASE}/api/v1/auth/login`, () =>
     ok({ access_token: "mock-token", token_type: "bearer", tenant_id: "ten-mock", user_id: "u-mock", role: "admin" })
   ),
-  // 注册（AUTH-UI-0001）：镜像 BE POST /auth/register-tenant → {tenant,user,token}（201）。
-  // slug="taken" → 409 tenant_slug_taken（占用错误态的确定性触发，供 e2e/单测）。
+  // 注册（AUTH-UI-0001 · FIX1 硬化）：镜像 BE POST /auth/register-tenant → {tenant,user,token}（201）。
+  // 校验必填 + extra="forbid" + full_name≤200（防非法请求在 mock 假绿，P2）；slug="taken" → 409。
   http.post(`${BASE}/api/v1/auth/register-tenant`, async ({ request }) => {
-    const body = (await request.json()) as { tenant_slug?: string; tenant_name?: string; email?: string };
-    if (body.tenant_slug === "taken") return err(409, "tenant_slug_taken", "Tenant slug is already taken.");
-    const slug = body.tenant_slug ?? "new-team";
+    const body = (await request.json()) as Record<string, unknown>;
+    // 镜像 BE extra="forbid"：只允许这 5 键，多余即 422。
+    const ALLOWED = ["tenant_slug", "tenant_name", "email", "password", "full_name"];
+    const extra = Object.keys(body).filter((k) => !ALLOWED.includes(k));
+    if (extra.length) return err(422, "VALIDATION_ERROR", `Extra inputs are not permitted: ${extra.join(",")}`);
+    // 必填 + 基本长度（对齐 BE TenantRegisterRequest；防漏字段/超长假绿）。
+    const slug = body.tenant_slug;
+    const name = body.tenant_name;
+    const email = body.email;
+    const password = body.password;
+    const fullName = body.full_name;
+    if (typeof slug !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(slug) || slug.length < 2 || slug.length > 80)
+      return err(422, "VALIDATION_ERROR", "invalid tenant_slug");
+    if (typeof name !== "string" || name.length < 1 || name.length > 200)
+      return err(422, "VALIDATION_ERROR", "invalid tenant_name");
+    if (typeof email !== "string" || !email.includes("@") || email.length < 3 || email.length > 320)
+      return err(422, "VALIDATION_ERROR", "invalid email");
+    if (typeof password !== "string" || password.length < 8 || password.length > 128)
+      return err(422, "VALIDATION_ERROR", "invalid password");
+    if (fullName !== undefined && (typeof fullName !== "string" || fullName.length > 200))
+      return err(422, "VALIDATION_ERROR", "invalid full_name");
+    if (slug === "taken") return err(409, "tenant_slug_taken", "Tenant slug is already taken.");
     return HttpResponse.json(
       {
         data: {
-          tenant: { id: "ten-new", slug, name: body.tenant_name ?? "新团队（mock）" },
-          user: { id: "u-new", tenant_id: "ten-new", email: body.email ?? "new@huading.test", full_name: null, role: "admin" },
+          tenant: { id: "ten-new", slug, name },
+          user: { id: "u-new", tenant_id: "ten-new", email, full_name: (fullName as string) ?? null, role: "admin" },
           token: { access_token: "mock-token", token_type: "bearer", tenant_id: "ten-new", user_id: "u-new", role: "admin" }
         },
         error: null,

@@ -45,6 +45,27 @@ describe("RegisterPage (注册)", () => {
     expect(register).not.toHaveBeenCalled();
   });
 
+  // FIX1 承重（Codex B P1）：fullName 选填但超长(201 字)必须提交前拦截、不调 register。
+  it("姓名 201 字（超 BE 200 上界）→ friendly 拦截，不调 register", () => {
+    (auth.useAuth as Mock).mockReturnValue({ session: null, ready: true, register });
+    render(<RegisterPage />);
+    fill({ slug: "huading", team: "华鼎", email: "a@b.com", password: "pw123456", full: "名".repeat(201) });
+    fireEvent.click(screen.getByRole("button", { name: copy.auth.registerSubmit }));
+    expect(screen.getByText(copy.auth.errFullName)).toBeInTheDocument();
+    expect(register).not.toHaveBeenCalled();
+  });
+
+  // 边界：正好 200 字合法（不拦截，正常提交）。
+  it("姓名 200 字（=上界）→ 合法，正常调 register", async () => {
+    register.mockResolvedValue(undefined);
+    (auth.useAuth as Mock).mockReturnValue({ session: null, ready: true, register });
+    render(<RegisterPage />);
+    fill({ slug: "huading", team: "华鼎", email: "a@b.com", password: "pw123456", full: "名".repeat(200) });
+    fireEvent.click(screen.getByRole("button", { name: copy.auth.registerSubmit }));
+    await waitFor(() => expect(register).toHaveBeenCalledTimes(1));
+    expect((register.mock.calls[0][0] as { fullName?: string }).fullName).toHaveLength(200);
+  });
+
   it("合法提交 → register(五字段，含 fullName) + 进控制台 /", async () => {
     register.mockResolvedValue(undefined);
     (auth.useAuth as Mock).mockReturnValue({ session: null, ready: true, register });

@@ -42,6 +42,7 @@ export const copy = {
     errTeamName: "请填写团队 / 公司名称（不超过 200 字）",
     errEmail: "请输入有效邮箱地址",
     errPassword: "密码需 8–128 位",
+    errFullName: "姓名不超过 200 字",
     // 服务端错误映射（不泄露原始异常串）
     errSlugTaken: "该用户名已被占用，请换一个",
     errRegisterFailed: "注册失败，请稍后重试。"

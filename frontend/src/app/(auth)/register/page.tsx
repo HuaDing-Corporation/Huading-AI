@@ -51,6 +51,8 @@ export default function RegisterPage() {
     const mail = email.trim();
     if (!mail.includes("@") || mail.length < 3 || mail.length > 320) return copy.auth.errEmail;
     if (password.length < 8 || password.length > 128) return copy.auth.errPassword;
+    // full_name 选填：空则跳过/省略键；非空则 ≤200（对齐 BE，超长中文提交前拦截、不调 register）。
+    if (fullName.trim().length > 200) return copy.auth.errFullName;
     return null;
   };
 
@@ -154,6 +156,7 @@ export default function RegisterPage() {
               id="reg-fullname"
               name="reg-fullname"
               autoComplete="name"
+              maxLength={200}
               placeholder={copy.auth.fullNamePlaceholder}
               value={fullName}
               onChange={(e) => setFullName(e.target.value)}
