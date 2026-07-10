@@ -11,31 +11,20 @@ import type { CreateVideoRequest } from "@/lib/api/types";
 import { useVideoTasks } from "@/lib/videos/tasks-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from "@/components/ui/select";
 import { AiTextField } from "@/components/workbench/ai-text-field";
+import { AspectRatioSelect, DEFAULT_IMAGE_ASPECT_RATIO, type ImageAspectRatio } from "@/components/workbench/aspect-ratio-select";
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
 import { ImagePicker } from "@/components/workbench/image-picker";
 import { AiLabelToggle } from "@/components/label/ai-label-toggle";
 import { useLabelTogglePreference } from "@/lib/preferences/label-toggle";
 import { copy } from "@/lib/copy";
 
-const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
-
-const PHOTO_SIZES = ["1024x1024", "1536x1024", "1024x1536"] as const;
-const PHOTO_QUALITIES = ["low", "medium", "high"] as const;
-
 /**
  * 图片生成 / 修改 (video_mode="photo") workbench container — the third mode. Mirrors
  * the ecom form's reuse (useTrackedUpload / ConfirmGenerateDialog / errorText) but
- * the asset is an OPTIONAL reference image (upload = 换背景/修图; empty = 文生图)
- * and the submit body carries image_size + image_quality. The result is an image,
- * not a video. The ONLY hooks caller here.
+ * the asset is an OPTIONAL reference image (upload = 换背景/修图; empty = 文生图).
+ * IMAGE-ASPECT-RATIO-UI-0001：去掉「质量/尺寸」下拉，改「画面比例」（默认 1:1）；提交体带 aspect_ratio，
+ * 不再带 image_quality（BE 已忽略）、image_size 可不带。结果是图片，非视频。The ONLY hooks caller here.
  */
 export function PhotoImageForm({
   initialPrompt,
@@ -54,8 +43,7 @@ export function PhotoImageForm({
       onPrefillConsumed?.();
     }
   }, [initialPrompt, onPrefillConsumed]);
-  const [imageSize, setImageSize] = useState<string>(PHOTO_SIZES[0]);
-  const [imageQuality, setImageQuality] = useState<string>("medium");
+  const [aspectRatio, setAspectRatio] = useState<ImageAspectRatio>(DEFAULT_IMAGE_ASPECT_RATIO); // 默认 1:1
   const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）
   const [error, setError] = useState<string | null>(null);
 
@@ -78,8 +66,7 @@ export function PhotoImageForm({
       topic: trimmed,
       video_mode: "photo",
       image_key: refImage.value ?? undefined, // optional reference image
-      image_size: imageSize,
-      image_quality: imageQuality,
+      aspect_ratio: aspectRatio, // 画面比例（默认 1:1）；不再带 image_quality（BE 已忽略）、image_size 可不带
       apply_visible_label: applyLabel
     });
   };
@@ -113,39 +100,7 @@ export function PhotoImageForm({
       />
       <p className="mb-[15px] -mt-2 text-[12px] text-ink-faint">{copy.workbench.photoRefHint}</p>
 
-      <div className="mb-[15px] grid grid-cols-2 gap-3">
-        <div>
-          <label className={labelClass}>{copy.workbench.photoSizeLabel}</label>
-          <Select value={imageSize} onValueChange={setImageSize}>
-            <SelectTrigger className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {PHOTO_SIZES.map((s) => (
-                <SelectItem key={s} value={s}>
-                  {s.replace("x", " × ")}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div>
-          <label className={labelClass}>{copy.workbench.photoQualityLabel}</label>
-          <Select value={imageQuality} onValueChange={setImageQuality}>
-            <SelectTrigger className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {PHOTO_QUALITIES.map((q) => (
-                <SelectItem key={q} value={q}>
-                  {copy.workbench.photoQuality[q]}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-      <p className="mb-3 text-[12px] text-ink-faint">{copy.workbench.photoQualityHint}</p>
+      <AspectRatioSelect value={aspectRatio} onValueChange={setAspectRatio} />
 
       <AiLabelToggle checked={applyLabel} onChange={setApplyLabel} />
 

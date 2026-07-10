@@ -6,6 +6,7 @@ import { Eraser } from "lucide-react";
 import { useCutoutBatch, useCutoutImage } from "@/lib/api/hooks";
 import type { CutoutBackground } from "@/lib/api/types";
 import { SelectableOption } from "@/components/ui/selectable-option";
+import { AspectRatioSelect, DEFAULT_IMAGE_ASPECT_RATIO, type ImageAspectRatio } from "@/components/workbench/aspect-ratio-select";
 import { EcomImageTool } from "@/components/workbench/ecom-image-tool";
 import { copy } from "@/lib/copy";
 
@@ -31,6 +32,7 @@ export function EcomImageCutoutForm() {
   const cutout = useCutoutImage();
   const cutoutBatch = useCutoutBatch();
   const [background, setBackground] = useState<CutoutBackground>("white");
+  const [aspectRatio, setAspectRatio] = useState<ImageAspectRatio>(DEFAULT_IMAGE_ASPECT_RATIO); // 画面比例，默认 1:1
   // 透明装饰按「提交时」的背景快照，避免提交后改选未重新生成却变了预览底纹。
   const [submittedBg, setSubmittedBg] = useState<CutoutBackground>("white");
 
@@ -44,13 +46,13 @@ export function EcomImageCutoutForm() {
       resultDecoration={submittedBg === "transparent" ? checkerStyle : undefined}
       onSubmitSingle={async (assetId, applyVisibleLabel) => {
         setSubmittedBg(background);
-        const res = await cutout.mutateAsync({ source_asset_id: assetId, background, apply_visible_label: applyVisibleLabel });
+        const res = await cutout.mutateAsync({ source_asset_id: assetId, background, aspect_ratio: aspectRatio, apply_visible_label: applyVisibleLabel });
         return [res.task_id];
       }}
       onSubmitBatch={async (assetIds, applyVisibleLabel) => {
         setSubmittedBg(background);
         const res = await cutoutBatch.mutateAsync({
-          items: assetIds.map((id) => ({ source_asset_id: id, background, apply_visible_label: applyVisibleLabel }))
+          items: assetIds.map((id) => ({ source_asset_id: id, background, aspect_ratio: aspectRatio, apply_visible_label: applyVisibleLabel }))
         });
         return res.tasks.map((t) => t.task_id);
       }}
@@ -66,6 +68,9 @@ export function EcomImageCutoutForm() {
           ))}
         </div>
       </fieldset>
+
+      {/* 画面比例（默认 1:1） */}
+      <AspectRatioSelect value={aspectRatio} onValueChange={setAspectRatio} />
     </EcomImageTool>
   );
 }

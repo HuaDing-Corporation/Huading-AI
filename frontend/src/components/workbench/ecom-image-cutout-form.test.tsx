@@ -61,7 +61,7 @@ describe("EcomImageCutoutForm (电商图 · 白底图/抠图)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "生成" }));
     await waitFor(() =>
-      expect(cutoutMock.mutateAsync).toHaveBeenCalledWith({ source_asset_id: "asset-1", background: "white", apply_visible_label: false })
+      expect(cutoutMock.mutateAsync).toHaveBeenCalledWith({ source_asset_id: "asset-1", background: "white", aspect_ratio: "1:1", apply_visible_label: false })
     );
     expect(trackExistingMock).toHaveBeenCalledWith("t-1", expect.any(String), "photo", false);
     expect(await screen.findByRole("img", { name: copy.workbench.ecomResultsLabel })).toHaveAttribute(
@@ -78,7 +78,7 @@ describe("EcomImageCutoutForm (电商图 · 白底图/抠图)", () => {
     fireEvent.click(screen.getByRole("button", { name: "透明底" }));
     fireEvent.click(screen.getByRole("button", { name: "生成" }));
     await waitFor(() =>
-      expect(cutoutMock.mutateAsync).toHaveBeenCalledWith({ source_asset_id: "asset-1", background: "transparent", apply_visible_label: false })
+      expect(cutoutMock.mutateAsync).toHaveBeenCalledWith({ source_asset_id: "asset-1", background: "transparent", aspect_ratio: "1:1", apply_visible_label: false })
     );
   });
 
@@ -96,8 +96,8 @@ describe("EcomImageCutoutForm (电商图 · 白底图/抠图)", () => {
     await waitFor(() => expect(cutoutBatchMock.mutateAsync).toHaveBeenCalledTimes(1));
     expect(cutoutBatchMock.mutateAsync.mock.calls[0][0]).toEqual({
       items: [
-        { source_asset_id: "asset-1", background: "white", apply_visible_label: false },
-        { source_asset_id: "asset-1", background: "white", apply_visible_label: false }
+        { source_asset_id: "asset-1", background: "white", aspect_ratio: "1:1", apply_visible_label: false },
+        { source_asset_id: "asset-1", background: "white", aspect_ratio: "1:1", apply_visible_label: false }
       ]
     });
     expect(trackExistingMock).toHaveBeenCalledTimes(2);
@@ -167,7 +167,7 @@ describe("EcomImageCutoutForm (电商图 · 白底图/抠图)", () => {
     fireEvent.click(screen.getByRole("switch")); // 开启 AI 生成标识
     fireEvent.click(screen.getByRole("button", { name: "生成" }));
     await waitFor(() =>
-      expect(cutoutMock.mutateAsync).toHaveBeenCalledWith({ source_asset_id: "asset-1", background: "white", apply_visible_label: true })
+      expect(cutoutMock.mutateAsync).toHaveBeenCalledWith({ source_asset_id: "asset-1", background: "white", aspect_ratio: "1:1", apply_visible_label: true })
     );
     expect(trackExistingMock).toHaveBeenCalledWith("t-1", expect.any(String), "photo", true);
   });
@@ -182,8 +182,8 @@ describe("EcomImageCutoutForm (电商图 · 白底图/抠图)", () => {
     fireEvent.click(screen.getByRole("button", { name: "生成" }));
     await waitFor(() => expect(cutoutBatchMock.mutateAsync).toHaveBeenCalledTimes(1));
     expect(cutoutBatchMock.mutateAsync.mock.calls[0][0].items).toEqual([
-      { source_asset_id: "asset-1", background: "white", apply_visible_label: true },
-      { source_asset_id: "asset-1", background: "white", apply_visible_label: true }
+      { source_asset_id: "asset-1", background: "white", aspect_ratio: "1:1", apply_visible_label: true },
+      { source_asset_id: "asset-1", background: "white", aspect_ratio: "1:1", apply_visible_label: true }
     ]);
   });
 });

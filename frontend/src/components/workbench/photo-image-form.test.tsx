@@ -44,8 +44,11 @@ describe("PhotoImageForm (图片生成 / 修改)", () => {
     expect(generate).toBeEnabled();
   });
 
-  it("文生图: submits the photo body without image_key when no reference image", async () => {
+  it("文生图: 提交体带 aspect_ratio 默认 1:1、无 image_key；去质量/尺寸（IMAGE-ASPECT-RATIO-UI-0001）", async () => {
     render(<PhotoImageForm />);
+    // 去掉「质量」下拉：不再有质量文案
+    expect(screen.queryByText("质量")).not.toBeInTheDocument();
+    expect(screen.getByText("画面比例")).toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText(/描述想要的图片/), { target: { value: "一只橘猫" } });
     fireEvent.click(screen.getByRole("button", { name: /生成图片/ }));
     fireEvent.click(await screen.findByRole("button", { name: "确定" }));
@@ -56,13 +59,26 @@ describe("PhotoImageForm (图片生成 / 修改)", () => {
       topic: "一只橘猫",
       video_mode: "photo",
       image_key: undefined,
-      image_size: "1024x1024",
-      image_quality: "medium",
+      aspect_ratio: "1:1", // 默认 1:1
       apply_visible_label: false
     });
-    // photo body never carries the video-only fields.
+    // 不再带质量/尺寸；也不带 video-only 字段。
+    expect(request).not.toHaveProperty("image_quality");
+    expect(request).not.toHaveProperty("image_size");
     expect(request).not.toHaveProperty("voice_id");
     expect(request).not.toHaveProperty("duration_sec");
+  });
+
+  it("选画面比例 16:9 → 提交体 aspect_ratio:16:9（承重·选择接线）", async () => {
+    render(<PhotoImageForm />);
+    fireEvent.change(screen.getByPlaceholderText(/描述想要的图片/), { target: { value: "赛博城市" } });
+    // 打开画面比例下拉，选 16:9（Radix Select 触发器 role=combobox）。
+    fireEvent.click(screen.getByRole("combobox"));
+    fireEvent.click(await screen.findByRole("option", { name: /16:9/ }));
+    fireEvent.click(screen.getByRole("button", { name: /生成图片/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    expect(taskMocks.createAndTrack.mock.calls[0][0].aspect_ratio).toBe("16:9");
   });
 
   // LABEL-TOGGLE-UI-0001 承重：开启开关 → 提交体 apply_visible_label:true（锁 photo 面板接线）

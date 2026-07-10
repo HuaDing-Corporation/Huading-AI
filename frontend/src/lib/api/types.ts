@@ -90,10 +90,10 @@ export interface CreateVideoRequest {
   image_key?: string; // 电商带货 i2v 必填 / 照片 photo 可选参考图，来自 POST /uploads
   scene_prompt?: string; // 电商带货 i2v 画面提示词（与口播解耦，可 AI 生成）；空则后端回退 topic
   duration_sec?: number; // 电商带货 i2v 目标时长（秒，5–120，默认 30）；视频生成限 5/10/15
-  image_size?: string; // 照片 photo：1024x1024 / 1536x1024 / 1024x1536
-  image_quality?: string; // 照片 photo：low / medium / high（影响积分）
+  image_size?: string; // @deprecated 照片旧「尺寸」（IMAGE-ASPECT-RATIO-UI-0001 起改用 aspect_ratio；BE 仅在 aspect_ratio 省略时回退翻译）；cover 通路仍可带
+  image_quality?: string; // @deprecated 照片旧「质量」（IMAGE-ASPECT-RATIO-UI-0001 起去除；BE 已忽略）；cover 通路仍可带、不影响
   speed?: number; // 默认 1.0
-  aspect_ratio?: string; // 默认 "9:16"
+  aspect_ratio?: string; // 画面比例：1:1/4:3/3:2/16:9/21:9/3:4/2:3/9:16/auto（照片默认 1:1，视频默认 9:16）
   subtitle_enabled?: boolean; // 默认 true
   subtitle_style?: SubtitleStyle; // 数字人口播：字幕样式覆盖（ORAL-PROD-UI-0001）；缺省=与 0001 默认烧入一致（不回归）
   apply_visible_label?: boolean; // AI 生成显式标识开关（LABEL-TOGGLE-UI-0001）；默认关(false)，开=true。对齐后端 VideoGenerateRequest.apply_visible_label
@@ -357,6 +357,7 @@ export type CutoutBackground = "white" | "transparent";
 export interface CutoutRequest {
   source_asset_id: string;
   background: CutoutBackground;
+  aspect_ratio?: string; // 画面比例（IMAGE-ASPECT-RATIO-UI-0001；默认 1:1，对齐 BE RequestedImageAspectRatio）
   apply_visible_label?: boolean; // AI 显式标识开关（LABEL-TOGGLE-UI-0001，默认关）
 }
 export interface CutoutResponse {
@@ -368,6 +369,7 @@ export interface CutoutResponse {
 export interface CutoutBatchItem {
   source_asset_id: string;
   background: CutoutBackground;
+  aspect_ratio?: string; // 画面比例（每项独立，后端 batch item = EcomCutoutRequest）
   apply_visible_label?: boolean; // 批量每项独立标识（后端 batch item = EcomCutoutRequest）
 }
 export interface CutoutBatchRequest {
@@ -402,6 +404,7 @@ export interface ModelRequest {
   gender: ModelGender;
   style_id: string;
   extra_prompt?: string; // 自定义补充（前端 UI ≤200；后端无长度限制）
+  aspect_ratio?: string; // 画面比例（IMAGE-ASPECT-RATIO-UI-0001；默认 1:1）
   apply_visible_label?: boolean; // AI 显式标识开关（LABEL-TOGGLE-UI-0001，默认关）
 }
 export interface ModelResponse {
@@ -415,6 +418,7 @@ export interface ModelBatchItem {
   gender: ModelGender;
   style_id: string;
   extra_prompt?: string;
+  aspect_ratio?: string; // 画面比例（每项独立）
   apply_visible_label?: boolean; // 批量每项独立标识（后端 batch item = EcomModelRequest）
 }
 export interface ModelBatchRequest {
