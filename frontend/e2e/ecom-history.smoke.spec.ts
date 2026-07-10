@@ -46,16 +46,21 @@ test("电商视频历史真点渲染无 #130 白屏（运行时 undefined 组件
   // 真点「电商视频历史」tab → 渲染 seedance 历史项（TaskCard 各状态分支）。
   await page.getByRole("tab", { name: "电商视频历史" }).click();
 
+  // strict-safe（ECOM-HISTORY-SMOKE-FLAKE-FIX-0001）：seed 同时出现在顶部「生成任务」TaskList（hydrate 最近视频）
+  // 与本历史 tabpanel → page 级 getByText 会命中 2 个 → strict-mode 失败（自 #154 起并行偶发）。本用例意图是验
+  // **历史 tab** 渲染，故把内容断言 scope 到该 tabpanel（Radix 只挂活动 panel；aria-labelledby=触发器「电商视频历史」）。
+  const historyPanel = page.getByRole("tabpanel", { name: "电商视频历史" });
+
   // 历史正常渲染 seed 各状态项：若某状态分支渲染 undefined 组件白屏，错误边界会使这些可见性断言失败。
-  await expect(page.getByText("保温杯带货")).toBeVisible(); // done
-  await expect(page.getByText("台灯带货")).toBeVisible(); // failed
+  await expect(historyPanel.getByText("保温杯带货")).toBeVisible(); // done
+  await expect(historyPanel.getByText("台灯带货")).toBeVisible(); // failed
   // ⚠️ cancelled 是电商历史 #130 白屏真因（批量退分产生；曾漏 seed）——门必须覆盖：cancelled 项渲染「已取消」不白屏。
-  await expect(page.getByText("手电筒带货")).toBeVisible(); // cancelled
-  await expect(page.getByText("已取消")).toBeVisible();
+  await expect(historyPanel.getByText("手电筒带货")).toBeVisible(); // cancelled
+  await expect(historyPanel.getByText("已取消")).toBeVisible();
 
   // VIDEO-ERR-MAP-UI：失败项(error_code=VIDEO_TIMEOUT) → 友好中文映射，且**不露裸 error_message**（英文/技术串）。
-  await expect(page.getByText("生成超时，请稍后重试")).toBeVisible();
-  await expect(page.getByText(/Error code: 504/)).toHaveCount(0);
+  await expect(historyPanel.getByText("生成超时，请稍后重试")).toBeVisible();
+  await expect(historyPanel.getByText(/Error code: 504/)).toHaveCount(0);
 
   // 主门禁：无 #130 白屏。
   expect(pageErrors, `page errors（含 React #130 白屏）：\n${pageErrors.join("\n")}`).toEqual([]);
