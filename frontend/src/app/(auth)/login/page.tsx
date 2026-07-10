@@ -1,14 +1,16 @@
 "use client";
 
 import { type FormEvent, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { ApiError } from "@/lib/api/client";
 import { useAuth } from "@/lib/auth/auth-context";
 import { Button } from "@/components/ui/button";
-import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
+import { Card, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Logo } from "@/components/ui/logo";
+import { copy } from "@/lib/copy";
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 
@@ -31,10 +33,11 @@ export default function LoginPage() {
     setError(null);
     setSubmitting(true);
     try {
+      // 字段/逻辑不动（AUTH-UI-0001 只改显示文案）：仍 tenantSlug + email + password。
       await login({ tenantSlug: tenantSlug.trim(), email: email.trim(), password });
       router.replace("/");
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "登录失败，请重试。");
+      setError(err instanceof ApiError ? err.message : copy.auth.loginFailed);
     } finally {
       setSubmitting(false);
     }
@@ -48,40 +51,40 @@ export default function LoginPage() {
         <div className="mb-6 flex justify-center">
           <Logo />
         </div>
-        <CardTitle className="text-center">登录控制台</CardTitle>
-        <CardSubtitle className="mb-6 mt-1 text-center">输入用户与账号以继续</CardSubtitle>
+        {/* 副标题「输入用户与账号以继续」已删（AUTH-UI-0001） */}
+        <CardTitle className="mb-6 text-center">{copy.auth.loginTitle}</CardTitle>
 
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
           <div>
             <label htmlFor="tenant-slug" className={labelClass}>
-              用户标识 (tenant slug)
+              {copy.auth.usernameLabel}
             </label>
             <Input
               id="tenant-slug"
               name="tenant-slug"
               autoComplete="organization"
-              placeholder="huading"
+              placeholder={copy.auth.usernamePlaceholder}
               value={tenantSlug}
               onChange={(e) => setTenantSlug(e.target.value)}
             />
           </div>
           <div>
             <label htmlFor="email" className={labelClass}>
-              邮箱
+              {copy.auth.emailLabel}
             </label>
             <Input
               id="email"
               name="email"
               type="email"
               autoComplete="email"
-              placeholder="you@example.com"
+              placeholder={copy.auth.emailPlaceholder}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
             />
           </div>
           <div>
             <label htmlFor="password" className={labelClass}>
-              密码
+              {copy.auth.passwordLabel}
             </label>
             <Input
               id="password"
@@ -94,18 +97,26 @@ export default function LoginPage() {
           </div>
 
           {error && (
-            <p
-              role="alert"
-              className="rounded-field bg-error-bg px-3 py-2 text-[13px] text-error-fg"
-            >
+            <p role="alert" className="rounded-field bg-error-bg px-3 py-2 text-[13px] text-error-fg">
               {error}
             </p>
           )}
 
           <Button type="submit" variant="primary" size="lg" disabled={disabled} className="mt-1 w-full">
-            {submitting ? "登录中…" : "登录"}
+            {submitting ? copy.auth.loginSubmitting : copy.auth.loginSubmit}
           </Button>
         </form>
+
+        {/* 登录 ↔ 注册互链 */}
+        <p className="mt-5 text-center text-[13px] text-ink-soft">
+          {copy.auth.loginNoAccount}{" "}
+          <Link
+            href="/register"
+            className="rounded-pill font-medium text-gold-deep outline-none hover:underline focus-visible:shadow-focus-gold"
+          >
+            {copy.auth.loginToRegister}
+          </Link>
+        </p>
       </Card>
     </main>
   );

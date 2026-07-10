@@ -2,7 +2,14 @@
 
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 
-import { fetchMe, login as apiLogin, type LoginInput } from "@/lib/api/auth";
+import {
+  fetchMe,
+  login as apiLogin,
+  registerTenant as apiRegister,
+  type LoginInput,
+  type RegisterInput
+} from "@/lib/api/auth";
+import type { TokenResponse } from "@/lib/api/types";
 import { authStore, type Session } from "@/lib/auth/store";
 
 interface AuthContextValue {
@@ -10,6 +17,7 @@ interface AuthContextValue {
   /** True once localStorage has been read (avoids redirect flicker). */
   ready: boolean;
   login: (input: LoginInput) => Promise<void>;
+  register: (input: RegisterInput) => Promise<void>;
   logout: () => void;
 }
 
@@ -26,8 +34,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return authStore.subscribe(() => setSession(authStore.get()));
   }, []);
 
-  const login = useCallback(async (input: LoginInput) => {
-    const token = await apiLogin(input);
+  // 登录/注册共用同一「落 token → fetchMe 补全」路径：会话形状零分叉。
+  const landToken = useCallback(async (token: TokenResponse) => {
     authStore.set({
       token: token.access_token,
       tenantId: token.tenant_id,
@@ -43,10 +51,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const login = useCallback(
+    async (input: LoginInput) => {
+      await landToken(await apiLogin(input));
+    },
+    [landToken]
+  );
+
+  // 注册成功 → 后端已随响应发 token → 直接落会话进控制台（AUTH-UI-0001）。
+  const register = useCallback(
+    async (input: RegisterInput) => {
+      const res = await apiRegister(input);
+      await landToken(res.token);
+    },
+    [landToken]
+  );
+
   const logout = useCallback(() => authStore.clear(), []);
 
   return (
-    <AuthContext.Provider value={{ session, ready, login, logout }}>{children}</AuthContext.Provider>
+    <AuthContext.Provider value={{ session, ready, login, register, logout }}>{children}</AuthContext.Provider>
   );
 }
 

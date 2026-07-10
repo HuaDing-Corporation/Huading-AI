@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 /**
  * UI-COMINGSOON-TENANT-RENAME-0001 交互冒烟（生产构建 next start）：
  * 范围一「即将上线」：模板中心/品牌库/发布中心/团队 四项导航名带「（即将上线）」→ 点进去统一占位页「该功能即将上线」；
- *   零回归：工作台/批量生产照常（非占位）。范围二「租户→用户」：登录页显示「用户标识」（无「租户」）。移动端 375 导航可见。
+ *   零回归：工作台/批量生产照常（非占位）。登录页文案（AUTH-UI-0001 后）显示「用户名」（无「用户标识」/无「租户」）。移动端 375 导航可见。
  * 全程无 #130 白屏 / 无 /api/api 双前缀。需以 NEXT_PUBLIC_USE_MOCK=1 构建后 next start 运行（webServer 已配）。
  */
 async function login(page: Page): Promise<{ errors: () => string[]; doublePrefix: () => string[] }> {
@@ -21,9 +21,9 @@ async function login(page: Page): Promise<{ errors: () => string[]; doublePrefix
   await page.goto("/");
   await page.waitForFunction(() => !!navigator.serviceWorker?.controller, undefined, { timeout: 30_000 });
   if (await page.getByRole("button", { name: "登录" }).isVisible().catch(() => false)) {
-    // 范围二：登录页「租户」→「用户」（标识字段标签、副标题）。
-    await expect(page.getByText("用户标识 (tenant slug)")).toBeVisible();
-    await expect(page.getByText("输入用户与账号以继续")).toBeVisible();
+    // 登录页文案：AUTH-UI-0001 后为「用户名」（无「用户标识 (tenant slug)」/无旧副标题）；仍无「租户」。
+    await expect(page.getByText("用户名")).toBeVisible();
+    await expect(page.getByText("用户标识 (tenant slug)")).toHaveCount(0);
     await expect(page.getByText("租户", { exact: false })).toHaveCount(0);
     const inputs = page.locator("form input");
     await inputs.nth(0).fill("huading");

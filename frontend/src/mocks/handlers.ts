@@ -478,6 +478,25 @@ export const handlers = [
   http.post(`${BASE}/api/v1/auth/login`, () =>
     ok({ access_token: "mock-token", token_type: "bearer", tenant_id: "ten-mock", user_id: "u-mock", role: "admin" })
   ),
+  // 注册（AUTH-UI-0001）：镜像 BE POST /auth/register-tenant → {tenant,user,token}（201）。
+  // slug="taken" → 409 tenant_slug_taken（占用错误态的确定性触发，供 e2e/单测）。
+  http.post(`${BASE}/api/v1/auth/register-tenant`, async ({ request }) => {
+    const body = (await request.json()) as { tenant_slug?: string; tenant_name?: string; email?: string };
+    if (body.tenant_slug === "taken") return err(409, "tenant_slug_taken", "Tenant slug is already taken.");
+    const slug = body.tenant_slug ?? "new-team";
+    return HttpResponse.json(
+      {
+        data: {
+          tenant: { id: "ten-new", slug, name: body.tenant_name ?? "新团队（mock）" },
+          user: { id: "u-new", tenant_id: "ten-new", email: body.email ?? "new@huading.test", full_name: null, role: "admin" },
+          token: { access_token: "mock-token", token_type: "bearer", tenant_id: "ten-new", user_id: "u-new", role: "admin" }
+        },
+        error: null,
+        request_id: "mock-req"
+      },
+      { status: 201 } // 对齐 BE：注册成功 201 CREATED
+    );
+  }),
   http.get(`${BASE}/api/v1/auth/me`, () =>
     ok({
       tenant: { id: "ten-mock", slug: "huading", name: "华鼎（mock）" },
