@@ -36,6 +36,13 @@ export interface CurrentUserResponse {
   permissions: string[];
 }
 
+// 注册（AUTH-UI-0001）——镜像 BE TenantRegisterResponse（POST /auth/register-tenant，201）。
+export interface TenantRegisterResponse {
+  tenant: TenantRead;
+  user: UserRead;
+  token: TokenResponse;
+}
+
 // 后端 VideoTask.status 枚举含 cancelled（批量生产 cancel 退分产生）——db/models.py CHECK 5 档。
 // 前端此前只列 4 档，致 fromVideoRead 裸透传的 cancelled 在 thumbIcon 查不到 → #130（ECOM-HISTORY-CANCELLED-FIX-0001）。
 export type VideoStatus = "queued" | "running" | "done" | "failed" | "cancelled";

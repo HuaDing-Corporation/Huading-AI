@@ -9,6 +9,44 @@ export const copy = {
     desc: "敬请期待，我们正在加紧打造这一功能。",
     back: "返回工作台"
   },
+  // 登录 / 注册（AUTH-UI-0001）—— 暖金玻璃；「用户名」口径与后端 tenant_slug 对齐
+  auth: {
+    // 登录
+    loginTitle: "登录控制台",
+    loginSubmit: "登录",
+    loginSubmitting: "登录中…",
+    loginNoAccount: "没有账号？",
+    loginToRegister: "去注册",
+    loginFailed: "登录失败，请重试。",
+    // 注册
+    registerTitle: "创建账号",
+    registerSubtitle: "注册即可体验全部模块",
+    registerSubmit: "注册",
+    registerSubmitting: "注册中…",
+    registerHasAccount: "已有账号？",
+    registerToLogin: "去登录",
+    // 字段（登录/注册共用）
+    usernameLabel: "用户名",
+    usernamePlaceholder: "huading",
+    usernameHint: "小写字母、数字、连字符，2–80 位",
+    teamNameLabel: "团队 / 公司名称",
+    teamNamePlaceholder: "华鼎科技",
+    emailLabel: "邮箱",
+    emailPlaceholder: "you@example.com",
+    passwordLabel: "密码",
+    passwordHint: "至少 8 位",
+    fullNameLabel: "姓名（选填）",
+    fullNamePlaceholder: "你的姓名",
+    // 客户端校验（friendly 中文；对齐 BE 规则，提交前拦截）
+    errUsername: "用户名只能用小写字母、数字、连字符，且需 2–80 位",
+    errTeamName: "请填写团队 / 公司名称（不超过 200 字）",
+    errEmail: "请输入有效邮箱地址",
+    errPassword: "密码需 8–128 位",
+    errFullName: "姓名不超过 200 字",
+    // 服务端错误映射（不泄露原始异常串）
+    errSlugTaken: "该用户名已被占用，请换一个",
+    errRegisterFailed: "注册失败，请稍后重试。"
+  },
   // 管理员数据看板（ANALYTICS-UI-0001）
   analytics: {
     pageTitle: "数据看板",
