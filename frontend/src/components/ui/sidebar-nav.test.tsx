@@ -24,7 +24,8 @@ describe("SidebarNav (侧边栏路由 · FIX3)", () => {
     render(<SidebarNav items={navItems} />);
     expect(screen.getByRole("link", { name: "工作台" })).toHaveAttribute("href", "/");
     expect(screen.getByRole("link", { name: "批量生产" })).toHaveAttribute("href", "/batch");
-    expect(screen.getByRole("link", { name: "发布中心" })).toHaveAttribute("href", "/publish");
+    // 发布中心走 coming-soon gate（UI-COMINGSOON-TENANT-RENAME-0001）：名称带「（即将上线）」，仍为可点 Link → /publish。
+    expect(screen.getByRole("link", { name: "发布中心（即将上线）" })).toHaveAttribute("href", "/publish");
     // 数据看板转正（ANALYTICS-UI-0001）：SidebarNav 纯展示按 href 渲染为链接（仅管理员过滤由容器 Sidebar 负责）。
     expect(screen.getByRole("link", { name: "数据看板" })).toHaveAttribute("href", "/analytics");
   });
@@ -34,7 +35,7 @@ describe("SidebarNav (侧边栏路由 · FIX3)", () => {
     render(<SidebarNav items={navItems} />);
     expect(screen.getByRole("link", { name: "批量生产" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "工作台" })).not.toHaveAttribute("aria-current");
-    expect(screen.getByRole("link", { name: "发布中心" })).not.toHaveAttribute("aria-current");
+    expect(screen.getByRole("link", { name: "发布中心（即将上线）" })).not.toHaveAttribute("aria-current");
   });
 
   it("工作台仅在根路径精确高亮（在 /batch 不误高亮）", () => {
@@ -61,20 +62,36 @@ describe("SidebarNav (侧边栏路由 · FIX3)", () => {
   it("pathname 为 null（usePathname 兜底）→ 不抛错且无任何项高亮", () => {
     nav.pathname = null;
     render(<SidebarNav items={navItems} />);
-    for (const label of ["工作台", "批量生产", "发布中心"]) {
+    for (const label of ["工作台", "批量生产", "发布中心（即将上线）"]) {
       expect(screen.getByRole("link", { name: label })).not.toHaveAttribute("aria-current");
     }
   });
 
-  it("未开通项（模板中心/品牌库/封面工坊/团队）不是链接、无高亮、悬停「即将上线」（承重·点击不导航）", () => {
-    nav.pathname = "/batch"; // 即便在已高亮的路由下，占位项也绝不高亮
+  // UI-COMINGSOON-TENANT-RENAME-0001：模板中心/品牌库/团队 从占位升为 coming-soon 可点 Link（带后缀）；封面工坊仍是纯占位。
+  it("coming-soon 板块（模板中心/品牌库/团队）为可点 Link + 「（即将上线）」后缀，不误高亮", () => {
+    nav.pathname = "/batch"; // 即便在已高亮的路由下，coming-soon 项也不误高亮
     render(<SidebarNav items={navItems} />);
-    for (const label of ["模板中心", "品牌库", "封面工坊", "团队"]) {
-      expect(screen.queryByRole("link", { name: label })).not.toBeInTheDocument(); // 非链接 → 无路由目标
-      const btn = screen.getByRole("button", { name: label });
-      expect(btn).toHaveAttribute("title", copy.nav.comingSoon);
-      expect(btn).not.toHaveAttribute("aria-current"); // 不误高亮
-      expect(btn).not.toHaveAttribute("href");
+    const soon: [string, string][] = [
+      ["模板中心（即将上线）", "/templates"],
+      ["品牌库（即将上线）", "/brand-library"],
+      ["团队（即将上线）", "/team"]
+    ];
+    for (const [label, href] of soon) {
+      const link = screen.getByRole("link", { name: label });
+      expect(link).toHaveAttribute("href", href);
+      expect(link).not.toHaveAttribute("aria-current");
     }
+  });
+
+  it("封面工坊：未纳入 coming-soon gate → 仍是不可点占位（无后缀、非链接、悬停「即将上线」）", () => {
+    nav.pathname = "/batch";
+    render(<SidebarNav items={navItems} />);
+    expect(screen.queryByRole("link", { name: "封面工坊" })).not.toBeInTheDocument();
+    const btn = screen.getByRole("button", { name: "封面工坊" });
+    expect(btn).toHaveAttribute("title", copy.nav.comingSoon);
+    expect(btn).not.toHaveAttribute("aria-current");
+    expect(btn).not.toHaveAttribute("href");
+    // 无「（即将上线）」后缀（封面工坊不在 gate 内）
+    expect(screen.queryByText("封面工坊（即将上线）")).not.toBeInTheDocument();
   });
 });

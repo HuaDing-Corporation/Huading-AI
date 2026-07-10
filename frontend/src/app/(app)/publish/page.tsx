@@ -5,14 +5,20 @@ import { ChevronLeft } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 import { PublishCenter } from "@/components/publish/publish-center";
+import { ComingSoonPage } from "@/components/common/coming-soon-page";
 import { Sidebar } from "@/components/layout/sidebar";
 import { TopBar } from "@/components/layout/top-bar";
+import { isComingSoon } from "@/lib/coming-soon";
 import { copy } from "@/lib/copy";
 
 /** 发布中心页（PUBLISH-UI-0001）—— 独立路由 /publish。外壳仿工作台；PublishCenter 用
- *  useSearchParams 取产物来源，故包 Suspense(Next 静态渲染要求)。 */
+ *  useSearchParams 取产物来源，故包 Suspense(Next 静态渲染要求)。
+ *  UI-COMINGSOON-TENANT-RENAME-0001：coming-soon gate 开启时旁路真内容显示占位页（真组件 PublishCenter 保留、可逆）。 */
 export default function PublishPage() {
   const router = useRouter();
+
+  // 「即将上线」占位 gate（可逆）：置 COMING_SOON.publish=false 即恢复下方真发布中心。
+  if (isComingSoon("publish")) return <ComingSoonPage title={copy.publish.pageTitle} />;
   const onBack = () => {
     if (typeof window !== "undefined" && window.history.length > 1) router.back();
     else router.push("/");

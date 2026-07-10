@@ -243,7 +243,7 @@ const ANALYTICS_TENANTS = Array.from({ length: 46 }, (_, i) => {
   const failed = 2 + ((i * 5) % 30);
   return {
     tenant_id: `ten-${String(i + 1).padStart(3, "0")}`,
-    tenant_name: `租户 ${i + 1}`,
+    tenant_name: `用户 ${i + 1}`, // 展示串「租户」→「用户」（key/字段名 tenant_name 不变）
     credits_used,
     cost_cents: 1500 + i * 137,
     task_count: success + failed,
