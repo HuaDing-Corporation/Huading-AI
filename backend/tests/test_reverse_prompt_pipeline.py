@@ -8,7 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.dialects import postgresql
 
 from app.core.exceptions import AppError
 from app.db.models import (
@@ -775,6 +776,84 @@ def _seed_video_asset(db, tenant_id: str, *, duration_ms: int = 24_000) -> Asset
     db.add(asset)
     db.flush()
     return asset
+
+
+def _capture_postgresql_selects(db) -> list[str]:
+    statements: list[str] = []
+
+    @event.listens_for(db, "do_orm_execute")
+    def _capture_statement(orm_execute_state) -> None:
+        if orm_execute_state.is_select:
+            statements.append(
+                str(orm_execute_state.statement.compile(dialect=postgresql.dialect()))
+            )
+
+    return statements
+
+
+def test_reverse_prompt_video_create_subscription_query_uses_for_update(
+    auth_db,
+    auth_context,
+):
+    from app.services.reverse_prompt import create_reverse_prompt_job
+
+    with auth_db() as db:
+        asset = _seed_video_asset(db, auth_context["tenant_id"])
+        user = db.get(User, auth_context["user_id"])
+        statements = _capture_postgresql_selects(db)
+
+        create_reverse_prompt_job(
+            db,
+            user=user,
+            source_asset_id=asset.id,
+            target_format="seedance_2_0",
+            storage=SimpleNamespace(),
+        )
+
+        subscription_queries = [sql for sql in statements if "FROM subscriptions" in sql]
+        assert len(subscription_queries) == 1
+        assert "FOR UPDATE" in subscription_queries[0]
+
+
+def test_reverse_prompt_video_regenerate_job_query_uses_for_update(
+    auth_db,
+    auth_context,
+):
+    from app.services.reverse_prompt import regenerate_reverse_prompt_job
+
+    with auth_db() as setup:
+        asset = _seed_video_asset(setup, auth_context["tenant_id"])
+        job = ReversePromptJob(
+            tenant_id=auth_context["tenant_id"],
+            created_by_user_id=auth_context["user_id"],
+            source_kind="video",
+            source_asset_id=asset.id,
+            source_storage_key=asset.storage_key,
+            target_format="seedance_2_0",
+            status="succeeded",
+        )
+        setup.add(job)
+        setup.commit()
+        job_id = job.id
+
+    with auth_db() as db:
+        user = db.get(User, auth_context["user_id"])
+        statements = _capture_postgresql_selects(db)
+        regenerate_reverse_prompt_job(
+            db,
+            user=user,
+            job_id=job_id,
+            storage=SimpleNamespace(),
+        )
+
+        decision_queries = [
+            sql
+            for sql in statements
+            if "FROM reverse_prompt_jobs" in sql
+            and "AND reverse_prompt_jobs.tenant_id =" in sql
+        ]
+        assert len(decision_queries) == 1
+        assert "FOR UPDATE" in decision_queries[0]
 
 
 def test_reverse_prompt_video_returns_202_queues_job_and_reserves_fixed_quota(
