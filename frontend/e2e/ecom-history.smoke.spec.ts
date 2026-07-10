@@ -26,7 +26,8 @@ test("电商视频历史真点渲染无 #130 白屏（运行时 undefined 组件
     if (req.url().includes("/api/api")) doublePrefix.push(`${req.method()} ${req.url()}`);
   });
 
-  await page.goto("/");
+  // LANDING-ENTRY-UI-0001：未登录进站根已改落 /landing → helper 直达 /login（登录页行为不变）。
+  await page.goto("/login");
 
   // 等 MSW service worker 接管页面（冷启动）后再登录，否则登录 POST 会逃逸到真后端。就绪失败即此处明确超时。
   await page.waitForFunction(() => !!navigator.serviceWorker?.controller, undefined, { timeout: 30_000 });

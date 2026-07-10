@@ -34,6 +34,7 @@
     --bd-gold: rgba(189, 154, 89, 0.64);
     --bd-glass: rgba(255, 255, 255, 0.78);
     --bd-sel: rgba(168, 134, 62, 0.9);
+    --grid-line: rgba(189, 154, 89, 0.13); /* 落地页暖色网格光栅线（--gold @0.13） */
 
     /* glass material */
     --glass-fill: rgba(255, 255, 255, 0.42);
@@ -108,6 +109,7 @@
     --bd-gold: rgba(189, 154, 89, 0.5);
     --bd-glass: rgba(255, 255, 255, 0.14);
     --bd-sel: rgba(214, 182, 122, 0.85);
+    --grid-line: rgba(214, 182, 122, 0.1); /* 暗色网格线（沿用暗调金 hue） */
 
     --glass-fill: rgba(255, 255, 255, 0.06);
     --glass-soft: rgba(255, 255, 255, 0.08);
@@ -163,5 +165,93 @@
     .glass {
       background: var(--glass-fallback);
     }
+  }
+
+  /* ── 落地页·暖金科技动效层 (LANDING-ENTRY-UI-0001) ──
+     只叠动效不改色系：全部复用 :root 暖金 token；动画仅 transform/opacity/background-position
+     （GPU 友好，零重排）；prefers-reduced-motion 一律降级为静态（见文件尾守卫）。 */
+
+  /* 香槟金流动渐变标题：--grad-gold 拉宽 220% 后平移 background-position。 */
+  .landing-flow-text {
+    background-image: var(--grad-gold);
+    background-size: 220% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: landing-flow 6s ease-in-out infinite alternate;
+  }
+
+  /* 漂浮金色粒子（容器 aria-hidden；时长/延迟由内联 CSS 变量错峰）。 */
+  .landing-float {
+    animation: landing-float var(--float-dur, 12s) ease-in-out var(--float-delay, 0s) infinite;
+  }
+
+  /* 呼吸光晕球（scale + opacity）。 */
+  .landing-breathe {
+    animation: landing-breathe 8s ease-in-out var(--breathe-delay, 0s) infinite;
+  }
+
+  /* 样片墙金调微光（opacity-only）。 */
+  .landing-shimmer {
+    animation: landing-shimmer 5s ease-in-out infinite;
+  }
+
+  /* 暖色网格光栅：静态（动画预算留给流光/粒子/光晕），中心径向渐隐。 */
+  .landing-grid-bg {
+    background-image: repeating-linear-gradient(0deg, var(--grid-line) 0 1px, transparent 1px 56px),
+      repeating-linear-gradient(90deg, var(--grid-line) 0 1px, transparent 1px 56px);
+    -webkit-mask-image: radial-gradient(72% 64% at 50% 38%, #000 0%, transparent 100%);
+    mask-image: radial-gradient(72% 64% at 50% 38%, #000 0%, transparent 100%);
+  }
+}
+
+@keyframes landing-flow {
+  from {
+    background-position: 0% 50%;
+  }
+  to {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes landing-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-18px);
+  }
+}
+
+@keyframes landing-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1.07);
+    opacity: 0.85;
+  }
+}
+
+@keyframes landing-shimmer {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.65;
+  }
+}
+
+/* 无障碍：偏好减少动效 → 全部动效降级静态（流光标题退化为静态渐变文字，粒子/光晕/微光静止）。 */
+@media (prefers-reduced-motion: reduce) {
+  .landing-flow-text,
+  .landing-float,
+  .landing-breathe,
+  .landing-shimmer {
+    animation: none;
   }
 }

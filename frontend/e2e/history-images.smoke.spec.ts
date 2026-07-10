@@ -18,7 +18,8 @@ async function login(page: Page): Promise<{ errors: () => string[]; doublePrefix
     if (req.url().includes("/api/api")) doublePrefix.push(`${req.method()} ${req.url()}`);
   });
 
-  await page.goto("/");
+  // LANDING-ENTRY-UI-0001：未登录进站根已改落 /landing → helper 直达 /login（登录页行为不变）。
+  await page.goto("/login");
   await page.waitForFunction(() => !!navigator.serviceWorker?.controller, undefined, { timeout: 30_000 });
   if (await page.getByRole("button", { name: "登录" }).isVisible().catch(() => false)) {
     const inputs = page.locator("form input");

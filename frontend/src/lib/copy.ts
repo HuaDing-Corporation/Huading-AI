@@ -785,5 +785,73 @@ export const copy = {
     backToList: "返回列表",
     kindEcom: "商品表",
     kindPrompt: "提示词组"
+  },
+  // 落地页 (LANDING-ENTRY-UI-0001) —— 文案一字不差取需求冻结 §三（v3 定稿）
+  landing: {
+    skipToMain: "跳到主要内容",
+    brand: "华鼎AI · 短视频引擎",
+    navFeatures: "功能",
+    navSamples: "样片",
+    navSteps: "教学",
+    navAria: "落地页导航",
+    // 入口两态（右上角）
+    login: "登录",
+    register: "立即注册",
+    avatarAria: "账户菜单",
+    menuConsole: "进控制台",
+    menuLogout: "退出登录",
+    // Hero
+    heroBadge: "AI 驱动 · 全自动短视频生产",
+    heroTitle: "企业级 AI 短视频工厂",
+    heroSub:
+      "输入主题、商品或脚本，批量产出符合品牌规范、可直接分发到各平台的成片。数字人口播、电商图、文案、视频，一站式智能生产。",
+    ctaRegister: "立即免费注册",
+    ctaLogin: "登录控制台",
+    // 数据条（冻结 §三※：不用不实的「500+」）
+    statModules: "7 大模块",
+    statAuto: "全自动生产",
+    statDistribute: "多平台分发",
+    // 七大生产模块
+    modulesTitle: "七大生产模块",
+    modulesSub: "一个工作台，覆盖短视频生产全链路",
+    modAvatar: "数字人口播",
+    modAvatarDesc: "照片或本人出镜视频，一键生成真人口播",
+    modVideoGen: "视频生成",
+    modVideoGenDesc: "文生视频·图生视频，主题即成片",
+    modEcomImage: "电商图",
+    modEcomImageDesc: "白底图·模特图·详情图复刻",
+    modPhoto: "图片生成·修改",
+    modPhotoDesc: "AI 出图，多种画面比例自由选",
+    modCopywriting: "文案仿写",
+    modCopywritingDesc: "输入爆款，仿写你的品牌话术",
+    modEcomVideo: "电商带货",
+    modEcomVideoDesc: "商品图一键生成带货短视频",
+    modReverse: "提示词反推",
+    modReverseDesc: "图片·视频反推可复用提示词",
+    modMore: "更多能力持续上线",
+    // 效果样片（占位）
+    samplesTitle: "效果样片",
+    samplesSub: "真实由平台生成（占位，待替换你的样片）",
+    sampleAvatar: "口播样片",
+    sampleEcomImage: "电商图",
+    sampleEcomVideo: "带货视频",
+    sampleAiImage: "AI 图",
+    samplePlaceholder: "样片占位",
+    // 五步上手
+    stepsTitle: "五步上手",
+    step1: "注册并登录控制台",
+    step2: "在工作台选择模块（数字人口播/电商图/文案…）",
+    step3: "输入主题或上传素材（商品图、脚本、原视频）",
+    step4: "一键生成，实时查看进度",
+    step5: "下载原片或直接发布到各平台",
+    // 注册 CTA 区
+    ctaTitle: "现在开始，把视频生产变成流水线",
+    ctaSub: "新用户注册即可体验全部模块",
+    // 页脚
+    footerCopyright: "© 华鼎 · 企业级 AI 短视频引擎",
+    footerIcp: "备案号：占位",
+    footerAbout: "关于",
+    footerContact: "联系",
+    footerTerms: "服务条款"
   }
 } as const;
