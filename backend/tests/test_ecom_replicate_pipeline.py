@@ -170,6 +170,14 @@ class _MismatchThenPassReverseProvider(_FakeReverseProvider):
         }
 
 
+class _ShapeAdvisoryReverseProvider(_FakeReverseProvider):
+    async def validate_product_fidelity(self, payload: dict) -> dict:
+        result = await super().validate_product_fidelity(payload)
+        result["checks"]["shape_match"] = False
+        result["reason"] = "Product identity matches; display arrangement differs."
+        return result
+
+
 class _FakeImageProvider:
     def __init__(self) -> None:
         self.calls: list[dict] = []
@@ -1018,6 +1026,56 @@ def test_ecom_replicate_product_mismatch_retries_before_persisting_output(
     assert len(tenant_charges) == 1
     assert tenant_charges[0].credits == 75
     assert len(render_costs) == 6
+
+
+def test_ecom_replicate_shape_advisory_does_not_trigger_retry(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    reverse = _ShapeAdvisoryReverseProvider()
+    image = _FakeImageProvider()
+    _patch_replicate_providers(monkeypatch, reverse=reverse, image=image)
+    _stub_replicate_task(monkeypatch)
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    monkeypatch.setattr(image_gen, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(image_gen, "SessionLocal", auth_db)
+    monkeypatch.setattr(image_gen.settings, "engine_ecom_replicate_max_retry", 2, raising=False)
+    try:
+        plan = _create_main_replicate_plan(
+            auth_context=auth_context,
+            auth_db=auth_db,
+            reference_id="shape-advisory-reference",
+            product_id="shape-advisory-product",
+        )
+        TestClient(app).post(
+            f"/api/v1/ecom-images/replicate/{plan['job_id']}/confirm",
+            headers=auth_context["headers"],
+        )
+
+        result = image_gen.run_ecom_replicate_generation(plan["job_id"])
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert result["status"] == "SUCCESS"
+    assert len(image.calls) == 5
+    assert len(reverse.validation_calls) == 5
+    assert len(storage.put_calls) == 5
+    with auth_db() as db:
+        outputs = db.scalars(
+            select(EcomReplicateOutput)
+            .where(EcomReplicateOutput.job_id == plan["job_id"])
+            .order_by(EcomReplicateOutput.index.asc())
+        ).all()
+
+    assert all(output.status == "succeeded" for output in outputs)
+    assert all(output.retry_count == 0 for output in outputs)
+    assert all(output.validation_json["status"] == "passed" for output in outputs)
+    assert all(
+        output.validation_json["checks"]["shape_match"] is False
+        for output in outputs
+    )
 
 
 def test_ecom_replicate_product_mismatch_exhaustion_never_persists_bad_output(
