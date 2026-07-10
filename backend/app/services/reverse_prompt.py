@@ -38,7 +38,32 @@ def create_reverse_prompt_job(
             code="REVERSE_PROMPT_TARGET_INVALID",
             status_code=422,
         )
-    source = source_image_asset_or_raise(db, tenant_id=user.tenant_id, asset_id=source_asset_id)
+    source_kind, source = source_asset_or_raise(
+        db,
+        tenant_id=user.tenant_id,
+        asset_id=source_asset_id,
+    )
+    if source_kind == "video":
+        job = ReversePromptJob(
+            id=str(uuid4()),
+            tenant_id=user.tenant_id,
+            created_by_user_id=user.id,
+            source_kind="video",
+            source_asset_id=source.id,
+            source_storage_key=source.storage_key,
+            target_format=_TARGET_FORMAT,
+            status="queued",
+        )
+        db.add(job)
+        db.flush()
+        quota.reserve_reverse_prompt_video_quota(
+            db,
+            tenant_id=user.tenant_id,
+            reverse_prompt_job_id=job.id,
+        )
+        db.commit()
+        db.refresh(job)
+        return job
     quota.ensure_reverse_prompt_quota_available(db, tenant_id=user.tenant_id)
     job = ReversePromptJob(
         id=str(uuid4()),
@@ -61,13 +86,13 @@ def create_reverse_prompt_job(
                 expires_in=settings.engine_s3_presign_ttl,
             ),
         )
-        _mark_job_succeeded(db, job=job, result=result)
+        mark_reverse_prompt_job_succeeded(db, job=job, result=result)
         _record_usage(db, tenant_id=user.tenant_id, job=job, result=result)
     except AppError:
-        _mark_job_failed(db, job=job, message="Reverse prompt failed.")
+        mark_reverse_prompt_job_failed(db, job=job, message="Reverse prompt failed.")
         raise
     except Exception as exc:
-        _mark_job_failed(db, job=job, message=str(exc)[:1000])
+        mark_reverse_prompt_job_failed(db, job=job, message=str(exc)[:1000])
         raise AppError(
             "Reverse prompt failed.",
             code="REVERSE_PROMPT_FAILED",
@@ -86,6 +111,53 @@ def regenerate_reverse_prompt_job(
     storage: ObjectStorage,
 ) -> ReversePromptJob:
     job = reverse_prompt_job_or_404(db, tenant_id=user.tenant_id, job_id=job_id)
+    if job.source_kind == "video":
+        if job.status in {"queued", "running"}:
+            raise AppError(
+                "Reverse prompt job is already running.",
+                code="REVERSE_PROMPT_ALREADY_RUNNING",
+                status_code=409,
+            )
+        if not job.source_asset_id:
+            raise AppError(
+                "Reverse prompt job has no video source.",
+                code="REVERSE_PROMPT_SOURCE_NOT_FOUND",
+                status_code=404,
+            )
+        source_kind, source = source_asset_or_raise(
+            db,
+            tenant_id=user.tenant_id,
+            asset_id=job.source_asset_id,
+        )
+        if source_kind != "video":
+            raise AppError(
+                "Reverse prompt source must be a ready video asset.",
+                code="REVERSE_PROMPT_SOURCE_INVALID",
+                status_code=422,
+            )
+        job.source_storage_key = source.storage_key
+        job.status = "queued"
+        job.result_json = None
+        job.raw_model_json = None
+        job.error_code = None
+        job.error_message = None
+        job.provider = None
+        job.model = None
+        job.prompt_tokens = 0
+        job.completion_tokens = 0
+        job.credits = Decimal("0")
+        job.cost_cents = 0
+        job.saved_at = None
+        job.updated_at = datetime.now(UTC)
+        db.flush()
+        quota.reserve_reverse_prompt_video_quota(
+            db,
+            tenant_id=user.tenant_id,
+            reverse_prompt_job_id=job.id,
+        )
+        db.commit()
+        db.refresh(job)
+        return job
     if not job.source_asset_id:
         raise AppError(
             "Reverse prompt job has no image source.",
@@ -107,13 +179,13 @@ def regenerate_reverse_prompt_job(
                 expires_in=settings.engine_s3_presign_ttl,
             ),
         )
-        _mark_job_succeeded(db, job=job, result=result)
+        mark_reverse_prompt_job_succeeded(db, job=job, result=result)
         _record_usage(db, tenant_id=user.tenant_id, job=job, result=result)
     except AppError:
-        _mark_job_failed(db, job=job, message="Reverse prompt failed.")
+        mark_reverse_prompt_job_failed(db, job=job, message="Reverse prompt failed.")
         raise
     except Exception as exc:
-        _mark_job_failed(db, job=job, message=str(exc)[:1000])
+        mark_reverse_prompt_job_failed(db, job=job, message=str(exc)[:1000])
         raise AppError(
             "Reverse prompt failed.",
             code="REVERSE_PROMPT_FAILED",
@@ -156,7 +228,12 @@ def reverse_prompt_job_or_404(db: Session, *, tenant_id: str, job_id: str) -> Re
     return job
 
 
-def source_image_asset_or_raise(db: Session, *, tenant_id: str, asset_id: str) -> Asset:
+def source_asset_or_raise(
+    db: Session,
+    *,
+    tenant_id: str,
+    asset_id: str,
+) -> tuple[str, Asset]:
     source = db.get(Asset, asset_id)
     if source is None or source.tenant_id != tenant_id:
         raise AppError(
@@ -164,15 +241,26 @@ def source_image_asset_or_raise(db: Session, *, tenant_id: str, asset_id: str) -
             code="REVERSE_PROMPT_SOURCE_NOT_FOUND",
             status_code=404,
         )
-    mime_type = (source.mime_type or "").lower()
-    if (
-        source.status != "ready"
-        or source.deleted_at is not None
-        or source.type not in _SOURCE_IMAGE_TYPES
-        or mime_type not in _SOURCE_IMAGE_MIME_TYPES
-    ):
+    if source.status != "ready" or source.deleted_at is not None:
         raise AppError(
-            "Reverse prompt source must be a ready image asset.",
+            "Reverse prompt source must be a ready image or video asset.",
+            code="REVERSE_PROMPT_SOURCE_INVALID",
+            status_code=422,
+        )
+    mime_type = (source.mime_type or "").lower()
+    if source.type in _SOURCE_IMAGE_TYPES and mime_type in _SOURCE_IMAGE_MIME_TYPES:
+        source_kind = "image"
+    elif (
+        source.type == "video"
+        and mime_type == "video/mp4"
+        and (source.metadata_ or {}).get("purpose") == "reverse_prompt"
+        and source.duration_ms is not None
+        and 1_000 <= source.duration_ms <= 60_000
+    ):
+        source_kind = "video"
+    else:
+        raise AppError(
+            "Reverse prompt source must be a supported ready image or video asset.",
             code="REVERSE_PROMPT_SOURCE_INVALID",
             status_code=422,
         )
@@ -187,7 +275,37 @@ def source_image_asset_or_raise(db: Session, *, tenant_id: str, asset_id: str) -
             code="REVERSE_PROMPT_SOURCE_INVALID",
             status_code=422,
         )
+    return source_kind, source
+
+
+def source_image_asset_or_raise(db: Session, *, tenant_id: str, asset_id: str) -> Asset:
+    source_kind, source = source_asset_or_raise(db, tenant_id=tenant_id, asset_id=asset_id)
+    if source_kind != "image":
+        raise AppError(
+            "Reverse prompt source must be a ready image asset.",
+            code="REVERSE_PROMPT_SOURCE_INVALID",
+            status_code=422,
+        )
     return source
+
+
+def fail_reverse_prompt_video_dispatch(
+    db: Session,
+    *,
+    job: ReversePromptJob,
+    message: str,
+) -> None:
+    quota.release_reverse_prompt_video_quota(
+        db,
+        tenant_id=job.tenant_id,
+        reverse_prompt_job_id=job.id,
+    )
+    mark_reverse_prompt_job_failed(
+        db,
+        job=job,
+        message=message,
+        code="REVERSE_PROMPT_QUEUE_FAILED",
+    )
 
 
 def job_to_read(job: ReversePromptJob) -> dict[str, Any]:
@@ -220,7 +338,7 @@ def _invoke_reverse_provider(db: Session, *, tenant_id: str, image_url: str) -> 
     return operation
 
 
-def _mark_job_succeeded(
+def mark_reverse_prompt_job_succeeded(
     db: Session,
     *,
     job: ReversePromptJob,
@@ -232,17 +350,23 @@ def _mark_job_succeeded(
     job.raw_model_json = _dict_or_empty(result.get("raw_model_json"))
     job.provider = str(result.get("provider") or "apimart")
     job.model = str(result.get("model") or settings.engine_apimart_reverse_prompt_model)
-    job.prompt_tokens = _int_value(result.get("prompt_tokens"))
-    job.completion_tokens = _int_value(result.get("completion_tokens"))
+    job.prompt_tokens = nonnegative_int(result.get("prompt_tokens"))
+    job.completion_tokens = nonnegative_int(result.get("completion_tokens"))
     job.credits = Decimal(str(result.get("credits") or "0"))
-    job.cost_cents = _int_value(result.get("cost_cents"))
+    job.cost_cents = nonnegative_int(result.get("cost_cents"))
     job.updated_at = datetime.now(UTC)
     db.flush()
 
 
-def _mark_job_failed(db: Session, *, job: ReversePromptJob, message: str) -> None:
+def mark_reverse_prompt_job_failed(
+    db: Session,
+    *,
+    job: ReversePromptJob,
+    message: str,
+    code: str = "REVERSE_PROMPT_FAILED",
+) -> None:
     job.status = "failed"
-    job.error_code = "REVERSE_PROMPT_FAILED"
+    job.error_code = code
     job.error_message = message
     job.updated_at = datetime.now(UTC)
     db.commit()
@@ -255,8 +379,9 @@ def _record_usage(
     job: ReversePromptJob,
     result: Mapping[str, Any],
 ) -> None:
-    total_tokens = _int_value(result.get("total_tokens")) or (
-        _int_value(result.get("prompt_tokens")) + _int_value(result.get("completion_tokens"))
+    total_tokens = nonnegative_int(result.get("total_tokens")) or (
+        nonnegative_int(result.get("prompt_tokens"))
+        + nonnegative_int(result.get("completion_tokens"))
     )
     quota.charge_reverse_prompt_quota(
         db,
@@ -264,7 +389,7 @@ def _record_usage(
         provider=str(result.get("provider") or "apimart"),
         model=str(result.get("model") or settings.engine_apimart_reverse_prompt_model),
         total_tokens=total_tokens,
-        cost_cents=_int_value(result.get("cost_cents")),
+        cost_cents=nonnegative_int(result.get("cost_cents")),
     )
 
 
@@ -285,11 +410,16 @@ def _result_payload(result: Mapping[str, Any]) -> dict[str, Any]:
         "text_in_media": _clean_list(result.get("text_in_media")),
         "disclaimer": _clean_text(result.get("disclaimer")),
         "confidence": _confidence(result.get("confidence")),
+        "video_analysis": (
+            dict(result["video_analysis"])
+            if isinstance(result.get("video_analysis"), Mapping)
+            else None
+        ),
     }
     payload["fill_targets"] = fill_targets(payload)
-    # Validate shape before storing; this catches accidental missing fields in tests.
-    ReversePromptResult.model_validate(payload)
-    return payload
+    # Normalize nested models before storing so provider-only fields never leak to the API.
+    validated = ReversePromptResult.model_validate(payload)
+    return validated.model_dump(mode="json")
 
 
 def fill_targets(result: Mapping[str, Any]) -> dict[str, dict[str, str]]:
@@ -328,7 +458,7 @@ def _dict_or_empty(value: Any) -> dict[str, object]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
-def _int_value(value: Any) -> int:
+def nonnegative_int(value: Any) -> int:
     try:
         return max(0, int(value or 0))
     except (TypeError, ValueError):

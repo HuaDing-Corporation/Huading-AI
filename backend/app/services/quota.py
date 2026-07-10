@@ -351,6 +351,28 @@ def estimate_reverse_prompt_quota(
     )
 
 
+def estimate_reverse_prompt_video_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+) -> QuotaEstimate:
+    reverse_prompt_rate = _rate(
+        db,
+        tenant_id=tenant_id,
+        capability="reverse_prompt_video",
+        unit="call",
+        default=Decimal(str(settings.engine_reverse_prompt_video_credits)),
+    )
+    credits = reverse_prompt_rate.quantize(Decimal("0.01"))
+    return QuotaEstimate(
+        estimated_seconds=1,
+        estimated_credits=credits,
+        reservation_units=_credit_units(credits),
+        capability="reverse_prompt_video",
+        unit="call",
+    )
+
+
 def ensure_reverse_prompt_quota_available(db: Session, *, tenant_id: str) -> None:
     subscription = active_subscription(db, tenant_id)
     estimate = estimate_reverse_prompt_quota(db, tenant_id=tenant_id)
@@ -520,6 +542,43 @@ def reserve_avatar_talk_quota(
     )
 
 
+def reserve_reverse_prompt_video_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    reverse_prompt_job_id: str,
+) -> Reservation:
+    subscription = active_subscription(db, tenant_id)
+    estimate = estimate_reverse_prompt_video_quota(db, tenant_id=tenant_id)
+    if remaining_credits(subscription) < estimate.reservation_units:
+        raise AppError(
+            "Insufficient tenant quota.",
+            code="TENANT_QUOTA_EXCEEDED",
+            status_code=403,
+        )
+    subscription.quota_credits_reserved += estimate.reservation_units
+    usage_record = UsageRecord(
+        tenant_id=tenant_id,
+        subscription_id=subscription.id,
+        reverse_prompt_job_id=reverse_prompt_job_id,
+        capability="reverse_prompt_video",
+        provider="apimart",
+        model=settings.engine_apimart_reverse_prompt_model,
+        unit="call",
+        quantity=Decimal("1.000"),
+        credits=estimate.estimated_credits,
+        cost_cents=0,
+        status="reserved",
+    )
+    db.add(usage_record)
+    return Reservation(
+        subscription,
+        usage_record,
+        estimate.estimated_seconds,
+        estimate.estimated_credits,
+    )
+
+
 def reserve_seedance_i2v_quota(
     db: Session,
     *,
@@ -662,6 +721,83 @@ def _reserved_record(db: Session, *, tenant_id: str, video_task_id: str) -> Usag
             UsageRecord.status == "reserved",
         )
     )
+
+
+def _reserved_reverse_prompt_record(
+    db: Session,
+    *,
+    tenant_id: str,
+    reverse_prompt_job_id: str,
+) -> UsageRecord | None:
+    return db.scalar(
+        select(UsageRecord)
+        .where(
+            UsageRecord.tenant_id == tenant_id,
+            UsageRecord.reverse_prompt_job_id == reverse_prompt_job_id,
+            UsageRecord.capability == "reverse_prompt_video",
+            UsageRecord.status == "reserved",
+        )
+        .order_by(UsageRecord.created_at.desc())
+    )
+
+
+def release_reverse_prompt_video_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    reverse_prompt_job_id: str,
+) -> None:
+    record = _reserved_reverse_prompt_record(
+        db,
+        tenant_id=tenant_id,
+        reverse_prompt_job_id=reverse_prompt_job_id,
+    )
+    if record is None or record.subscription_id is None:
+        return
+    subscription = db.get(Subscription, record.subscription_id)
+    if subscription is None:
+        return
+    subscription.quota_credits_reserved = max(
+        0,
+        subscription.quota_credits_reserved - _credit_units(Decimal(record.credits)),
+    )
+    record.status = "released"
+    record.settled_at = datetime.now(UTC)
+
+
+def settle_reverse_prompt_video_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    reverse_prompt_job_id: str,
+    provider: str,
+    model: str | None,
+    total_tokens: int,
+    cost_cents: int,
+) -> None:
+    record = _reserved_reverse_prompt_record(
+        db,
+        tenant_id=tenant_id,
+        reverse_prompt_job_id=reverse_prompt_job_id,
+    )
+    if record is None or record.subscription_id is None:
+        return
+    subscription = db.get(Subscription, record.subscription_id)
+    if subscription is None:
+        return
+    reserved_units = _credit_units(Decimal(record.credits))
+    subscription.quota_credits_reserved = max(
+        0,
+        subscription.quota_credits_reserved - reserved_units,
+    )
+    subscription.quota_credits_used += reserved_units
+    record.provider = provider
+    record.model = model
+    record.unit = "token"
+    record.quantity = Decimal(max(0, total_tokens)).quantize(Decimal("0.001"))
+    record.cost_cents = max(0, int(cost_cents))
+    record.status = "settled"
+    record.settled_at = datetime.now(UTC)
 
 
 def release_reserved_quota(db: Session, *, tenant_id: str, video_task_id: str) -> None:

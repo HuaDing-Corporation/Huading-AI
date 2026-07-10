@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -18,18 +19,29 @@ class BodySizeLimitMiddleware:
         *,
         max_body_size: int,
         paths: tuple[str, ...],
+        path_limits: Mapping[str, int] | None = None,
     ) -> None:
         self.app = app
         self.max_body_size = max_body_size
         self.paths = paths
+        self.path_limits = dict(path_limits or {})
 
-    def _limited_scope(self, scope: Scope) -> bool:
+    def _body_limit(self, scope: Scope) -> int | None:
         if scope["type"] != "http":
-            return False
+            return None
         if scope.get("method") not in {"POST", "PUT", "PATCH"}:
-            return False
+            return None
         path = str(scope.get("path") or "")
-        return any(path == item or path.startswith(f"{item}/") for item in self.paths)
+        for item, limit in sorted(
+            self.path_limits.items(),
+            key=lambda pair: len(pair[0]),
+            reverse=True,
+        ):
+            if path == item or path.startswith(f"{item}/"):
+                return limit
+        if any(path == item or path.startswith(f"{item}/") for item in self.paths):
+            return self.max_body_size
+        return None
 
     def _content_length(self, scope: Scope) -> int | None:
         for name, value in scope.get("headers", []):
@@ -41,13 +53,14 @@ class BodySizeLimitMiddleware:
         return None
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if not self._limited_scope(scope):
+        body_limit = self._body_limit(scope)
+        if body_limit is None:
             await self.app(scope, receive, send)
             return
 
         content_length = self._content_length(scope)
-        if content_length is not None and content_length > self.max_body_size:
-            await self._send_413(send)
+        if content_length is not None and content_length > body_limit:
+            await self._send_413(send, max_body_size=body_limit)
             return
 
         received = 0
@@ -58,7 +71,7 @@ class BodySizeLimitMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.max_body_size:
+                if received > body_limit:
                     raise BodyTooLargeError
             return message
 
@@ -72,15 +85,15 @@ class BodySizeLimitMiddleware:
             await self.app(scope, limited_receive, tracking_send)
         except BodyTooLargeError:
             if not response_started:
-                await self._send_413(send)
+                await self._send_413(send, max_body_size=body_limit)
 
-    async def _send_413(self, send: Send) -> None:
+    async def _send_413(self, send: Send, *, max_body_size: int) -> None:
         payload = {
             "data": None,
             "error": {
                 "code": "REQUEST_BODY_TOO_LARGE",
-                "message": f"Request body too large; limit is {self.max_body_size} bytes.",
-                "detail": {"limit": self.max_body_size},
+                "message": f"Request body too large; limit is {max_body_size} bytes.",
+                "detail": {"limit": max_body_size},
             },
             "request_id": None,
         }

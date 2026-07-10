@@ -1,6 +1,7 @@
 import uuid
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Request, UploadFile, status
 from sqlalchemy.orm import Session
@@ -12,7 +13,7 @@ from app.api.deps import (
     tenant_storage_key,
 )
 from app.api.v1.routes.videos import (
-    _AVATAR_VIDEO_SOURCE_MAX_BYTES,
+    _AvatarVideoProbe,
     _probe_avatar_video_bytes,
     _validate_avatar_video_probe,
 )
@@ -49,6 +50,10 @@ _ALLOWED_AVATAR_VIDEO_TYPES: dict[str, str] = {
 }
 _MAX_BYTES = settings.upload_max_bytes
 _UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
+_REVERSE_PROMPT_VIDEO_MIN_DURATION_MS = 1_000
+_REVERSE_PROMPT_VIDEO_MAX_DURATION_MS = 60_000
+_REVERSE_PROMPT_VIDEO_MIN_DIMENSION = 240
+_REVERSE_PROMPT_VIDEO_MAX_DIMENSION = 2160
 
 
 async def _read_limited_upload(file: UploadFile, *, max_bytes: int = _MAX_BYTES) -> bytes:
@@ -201,6 +206,7 @@ async def upload_avatar_image(
 async def upload_avatar_video(
     request: Request,
     file: UploadFile,
+    purpose: Literal["avatar_source", "reverse_prompt"] = "avatar_source",
     user: User = UploadPermissionDependency,
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
@@ -215,13 +221,13 @@ async def upload_avatar_video(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
         )
 
-    content = await _read_limited_upload(file, max_bytes=_AVATAR_VIDEO_SOURCE_MAX_BYTES)
+    content = await _read_limited_upload(file, max_bytes=settings.upload_video_max_bytes)
     if not content:
         raise AppError("Uploaded file is empty.", code="EMPTY_UPLOAD", status_code=400)
 
     probe = _probe_avatar_video_bytes(content, suffix=extension)
     metadata = {
-        "purpose": "avatar_source",
+        "purpose": purpose,
         "container": probe.container,
         "video_codec": probe.video_codec,
         "audio_codec": probe.audio_codec,
@@ -239,7 +245,10 @@ async def upload_avatar_video(
         status="ready",
         metadata_=metadata,
     )
-    _validate_avatar_video_probe(candidate, probe)
+    if purpose == "reverse_prompt":
+        _validate_reverse_prompt_video_probe(candidate, probe)
+    else:
+        _validate_avatar_video_probe(candidate, probe)
 
     storage_key = tenant_storage_key(user.tenant_id, f"uploads/{uuid.uuid4().hex}{extension}")
     storage.put_bytes(storage_key, content, content_type=content_type)
@@ -260,6 +269,55 @@ async def upload_avatar_video(
     db.commit()
     db.refresh(asset)
     return ok(request, UploadImageResponse(asset_id=asset.id, type=asset.type, status=asset.status))
+
+
+def _validate_reverse_prompt_video_probe(asset: Asset, probe: _AvatarVideoProbe) -> None:
+    if base_mime(asset.mime_type) != "video/mp4":
+        raise AppError(
+            "Reverse prompt video must be MP4.",
+            code="REVERSE_PROMPT_VIDEO_UNSUPPORTED_FORMAT",
+            status_code=422,
+        )
+    if asset.size_bytes is not None and asset.size_bytes > settings.upload_video_max_bytes:
+        raise AppError(
+            f"Reverse prompt video is too large; limit is {settings.upload_video_max_bytes} bytes.",
+            code="REVERSE_PROMPT_VIDEO_TOO_LARGE",
+            status_code=413,
+        )
+    if (
+        probe.duration_ms is None
+        or probe.duration_ms < _REVERSE_PROMPT_VIDEO_MIN_DURATION_MS
+        or probe.duration_ms > _REVERSE_PROMPT_VIDEO_MAX_DURATION_MS
+    ):
+        raise AppError(
+            "Reverse prompt video must be between 1 and 60 seconds.",
+            code="REVERSE_PROMPT_VIDEO_DURATION_INVALID",
+            status_code=422,
+        )
+    width = int(probe.width or 0)
+    height = int(probe.height or 0)
+    if (
+        min(width, height) < _REVERSE_PROMPT_VIDEO_MIN_DIMENSION
+        or max(width, height) > _REVERSE_PROMPT_VIDEO_MAX_DIMENSION
+    ):
+        raise AppError(
+            "Reverse prompt video dimensions must be between 240 and 2160 pixels.",
+            code="REVERSE_PROMPT_VIDEO_RESOLUTION_INVALID",
+            status_code=422,
+        )
+    container = (probe.container or "").lower()
+    if "mp4" not in container:
+        raise AppError(
+            "Reverse prompt video must be MP4.",
+            code="REVERSE_PROMPT_VIDEO_UNSUPPORTED_FORMAT",
+            status_code=422,
+        )
+    if (probe.video_codec or "").lower() != "h264":
+        raise AppError(
+            "Reverse prompt video must use H.264 video.",
+            code="REVERSE_PROMPT_VIDEO_CODEC_INVALID",
+            status_code=422,
+        )
 
 
 def _probe_audio_duration_ms(content: bytes, *, extension: str) -> int | None:
