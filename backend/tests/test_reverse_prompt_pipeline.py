@@ -20,7 +20,10 @@ from app.db.models import (
     UsageRecord,
 )
 from app.main import app
-from app.providers.reverse_prompt.apimart_gemini import APIMartGeminiReversePromptProvider
+from app.providers.reverse_prompt.apimart_gemini import (
+    APIMartGeminiReversePromptProvider,
+    normalize_product_validation_payload,
+)
 
 
 def test_reverse_prompt_seed_provider_id_fits_provider_config_column():
@@ -172,6 +175,178 @@ JSON_CONTENT = """{
   "disclaimer": "Text may be approximate; verify brand and label details before reuse.",
   "confidence": 0.86
 }"""
+
+PRODUCT_IDENTITY_CONTENT = """{
+  "product_identity": {
+    "main_color": "celadon green",
+    "material": "ceramic",
+    "glaze": "glossy celadon glaze",
+    "decorative_trim": "gold rim",
+    "shape": "round plate, bowl, and handled cup",
+    "key_pattern": "solid green with no blue marble veining"
+  }
+}"""
+
+PRODUCT_MISMATCH_CONTENT = """{
+  "validation": {
+    "status": "failed",
+    "main_color_match": false,
+    "pattern_match": false,
+    "shape_match": true,
+    "reason": "The rendered product is blue-white marble instead of celadon green."
+  }
+}"""
+
+PRODUCT_MATCH_CONTENT = """{
+  "validation": {
+    "status": "passed",
+    "main_color_match": true,
+    "pattern_match": true,
+    "shape_match": true,
+    "reason": "The rendered product preserves the celadon color, plain glaze, and shape."
+  }
+}"""
+
+PRODUCT_SHAPE_ADVISORY_CONTENT = """{
+  "validation": {
+    "status": "failed",
+    "main_color_match": true,
+    "pattern_match": true,
+    "shape_match": false,
+    "reason": "The product color and pattern match, but the display omits one cup."
+  }
+}"""
+
+
+def test_apimart_gemini_analyzes_structured_product_identity() -> None:
+    session = _Session([_chat_payload(PRODUCT_IDENTITY_CONTENT)])
+    provider = APIMartGeminiReversePromptProvider(api_key="api-test-key", session=session)
+
+    result = provider.analyze_product_identity_sync(
+        {
+            "image_url": "https://assets.test/green-celadon.png",
+            "source_product_image_id": "product-green-celadon",
+        }
+    )
+
+    assert result["product_identity"] == {
+        "main_color": "celadon green",
+        "material": "ceramic",
+        "glaze": "glossy celadon glaze",
+        "decorative_trim": "gold rim",
+        "shape": "round plate, bowl, and handled cup",
+        "key_pattern": "solid green with no blue marble veining",
+    }
+    assert result["prompt_tokens"] == 1000
+    instruction = session.calls[0]["json"]["messages"][-1]["content"][0]["text"]
+    assert "product_identity" in instruction
+    assert "main_color" in instruction
+    assert "glaze" in instruction
+    assert "shape" in instruction
+
+
+def test_apimart_gemini_validator_rejects_product_color_and_pattern_mismatch() -> None:
+    session = _Session([_chat_payload(PRODUCT_MISMATCH_CONTENT)])
+    provider = APIMartGeminiReversePromptProvider(api_key="api-test-key", session=session)
+
+    result = provider.validate_product_fidelity_sync(
+        {
+            "product_image_url": "https://assets.test/green-celadon.png",
+            "rendered_image_url": "https://assets.test/blue-marble-output.png",
+            "product_identity": {
+                "main_color": "celadon green",
+                "material": "ceramic",
+                "glaze": "glossy celadon glaze",
+                "decorative_trim": "gold rim",
+                "shape": "round tableware set",
+                "key_pattern": "solid green with no marble veining",
+            },
+        }
+    )
+
+    assert result["status"] == "failed"
+    assert result["passed"] is False
+    assert result["checks"] == {
+        "main_color_match": False,
+        "pattern_match": False,
+        "shape_match": True,
+    }
+    assert "blue-white marble" in result["reason"]
+    content = session.calls[0]["json"]["messages"][-1]["content"]
+    assert len([part for part in content if part["type"] == "image_url"]) == 2
+    instruction = content[0]["text"]
+    assert "Image 1" in instruction and "ground truth" in instruction
+    assert "Image 2" in instruction and "rendered candidate" in instruction
+    assert "celadon green" in instruction
+
+
+def test_apimart_gemini_validator_accepts_explicit_product_match() -> None:
+    session = _Session([_chat_payload(PRODUCT_MATCH_CONTENT)])
+    provider = APIMartGeminiReversePromptProvider(api_key="api-test-key", session=session)
+
+    result = provider.validate_product_fidelity_sync(
+        {
+            "product_image_url": "https://assets.test/green-celadon.png",
+            "rendered_image_url": "https://assets.test/green-celadon-output.png",
+            "product_identity": {
+                "main_color": "celadon green",
+                "shape": "round tableware set",
+            },
+        }
+    )
+
+    assert result["status"] == "passed"
+    assert result["passed"] is True
+    assert all(result["checks"].values())
+
+
+def test_apimart_gemini_validator_treats_shape_mismatch_as_advisory() -> None:
+    session = _Session([_chat_payload(PRODUCT_SHAPE_ADVISORY_CONTENT)])
+    provider = APIMartGeminiReversePromptProvider(api_key="api-test-key", session=session)
+
+    result = provider.validate_product_fidelity_sync(
+        {
+            "product_image_url": "https://assets.test/green-celadon.png",
+            "rendered_image_url": "https://assets.test/green-celadon-layout-variant.png",
+            "product_identity": {
+                "main_color": "celadon green",
+                "shape": "round plate, bowl, and handled cup",
+            },
+        }
+    )
+
+    assert result["status"] == "passed"
+    assert result["passed"] is True
+    assert result["checks"] == {
+        "main_color_match": True,
+        "pattern_match": True,
+        "shape_match": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("main_color_match", "pattern_match"),
+    [(False, True), (True, False)],
+)
+def test_apimart_gemini_validator_requires_color_and_pattern_match(
+    main_color_match: bool,
+    pattern_match: bool,
+) -> None:
+    result = normalize_product_validation_payload(
+        {
+            "validation": {
+                "status": "passed",
+                "main_color_match": main_color_match,
+                "pattern_match": pattern_match,
+                "shape_match": True,
+                "reason": "One blocking identity attribute differs.",
+            }
+        }
+    )
+
+    assert result["status"] == "failed"
+    assert result["passed"] is False
+    assert result["checks"]["shape_match"] is True
 
 
 def test_apimart_gemini_provider_uses_token_pricing_when_chat_response_has_no_credits(monkeypatch):
