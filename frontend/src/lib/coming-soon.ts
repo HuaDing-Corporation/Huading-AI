@@ -5,6 +5,7 @@
 export const COMING_SOON: Record<string, boolean> = {
   templates: true, // 模板中心
   brand: true, // 品牌库
+  covers: true, // 封面工坊（UI-COMINGSOON-COVER-0001；「做封面」子功能仍在视频详情，工坊入口待建）
   publish: true, // 发布中心（真组件保留，gate 旁路）
   team: true // 团队
 };

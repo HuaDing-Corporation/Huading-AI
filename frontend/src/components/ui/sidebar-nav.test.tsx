@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SidebarNav } from "./sidebar-nav";
 import { navItems } from "@/lib/nav";
-import { copy } from "@/lib/copy";
 
 // 受控 pathname：各用例前置 nav.pathname 模拟“当前路由/直达”。null 用于验证 usePathname() ?? "" 兜底。
 const nav = vi.hoisted(() => ({ pathname: "/" as string | null }));
@@ -67,13 +66,14 @@ describe("SidebarNav (侧边栏路由 · FIX3)", () => {
     }
   });
 
-  // UI-COMINGSOON-TENANT-RENAME-0001：模板中心/品牌库/团队 从占位升为 coming-soon 可点 Link（带后缀）；封面工坊仍是纯占位。
-  it("coming-soon 板块（模板中心/品牌库/团队）为可点 Link + 「（即将上线）」后缀，不误高亮", () => {
+  // coming-soon 板块（含封面工坊 UI-COMINGSOON-COVER-0001）：占位升为可点 Link（带后缀），不误高亮。
+  it("coming-soon 板块（模板中心/品牌库/封面工坊/团队）为可点 Link + 「（即将上线）」后缀，不误高亮", () => {
     nav.pathname = "/batch"; // 即便在已高亮的路由下，coming-soon 项也不误高亮
     render(<SidebarNav items={navItems} />);
     const soon: [string, string][] = [
       ["模板中心（即将上线）", "/templates"],
       ["品牌库（即将上线）", "/brand-library"],
+      ["封面工坊（即将上线）", "/covers"],
       ["团队（即将上线）", "/team"]
     ];
     for (const [label, href] of soon) {
@@ -83,15 +83,13 @@ describe("SidebarNav (侧边栏路由 · FIX3)", () => {
     }
   });
 
-  it("封面工坊：未纳入 coming-soon gate → 仍是不可点占位（无后缀、非链接、悬停「即将上线」）", () => {
-    nav.pathname = "/batch";
+  it("封面工坊：纳入 coming-soon gate 后为可点 Link（不再是无 href 占位按钮）", () => {
+    nav.pathname = "/covers";
     render(<SidebarNav items={navItems} />);
-    expect(screen.queryByRole("link", { name: "封面工坊" })).not.toBeInTheDocument();
-    const btn = screen.getByRole("button", { name: "封面工坊" });
-    expect(btn).toHaveAttribute("title", copy.nav.comingSoon);
-    expect(btn).not.toHaveAttribute("aria-current");
-    expect(btn).not.toHaveAttribute("href");
-    // 无「（即将上线）」后缀（封面工坊不在 gate 内）
-    expect(screen.queryByText("封面工坊（即将上线）")).not.toBeInTheDocument();
+    // 已升为 Link → 无原占位 button；名称带后缀；当前路由高亮。
+    expect(screen.queryByRole("button", { name: /封面工坊/ })).not.toBeInTheDocument();
+    const link = screen.getByRole("link", { name: "封面工坊（即将上线）" });
+    expect(link).toHaveAttribute("href", "/covers");
+    expect(link).toHaveAttribute("aria-current", "page");
   });
 });
