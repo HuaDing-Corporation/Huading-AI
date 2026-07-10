@@ -23,6 +23,32 @@ export interface ReversePromptFillTargets {
 /** BE fill_targets 的 6 个键（「带入」按键即此）。 */
 export type ReversePromptFillTargetKey = keyof ReversePromptFillTargets;
 
+/**
+ * 视频反推分析（VIDEO-REVERSE-PROMPT-UI-0001 · FIX2 逐字段对齐已合入的真 BE
+ * backend/app/schemas/reverse_prompt.py::ReversePromptVideoAnalysis / ReversePromptShot）。展示：时长 / 节奏 /
+ * 分镜列表 shot_list；audio_transcript / bgm_style 可空（空→前端标「未启用」）。
+ */
+/** 节奏枚举（BE ReversePromptVideoAnalysis.pacing = Literal["slow","medium","fast","variable"]，非中文串）。 */
+export type ReverseVideoPacing = "slow" | "medium" | "fast" | "variable";
+
+/** 分镜（镜像 BE ReversePromptShot）：index 必填(≥0)；start_sec(≥0)/end_sec(>0)；camera/motion/transition BE 默认 ""。 */
+export interface ReverseVideoShot {
+  index: number; // 分镜序号（必填，≥0）—— FIX2 加回
+  start_sec: number; // 起始秒（≥0）
+  end_sec: number; // 结束秒（>0）
+  visual: string; // 画面描述
+  camera: string; // 运镜（BE 默认 ""）
+  motion: string; // 主体动作（BE 默认 ""）
+  transition: string; // 转场（BE 默认 ""）
+}
+export interface ReverseVideoAnalysis {
+  duration_sec: number; // 时长秒（>0）
+  pacing: ReverseVideoPacing; // 节奏枚举（前端映射中文显示，不显裸英文）
+  shot_list: ReverseVideoShot[];
+  audio_transcript?: string | null; // 一期空
+  bgm_style?: string | null; // 一期空
+}
+
 /** 扁平反推结果（镜像 BE ReversePromptResult）。negative_prompt/disclaimer 默认空串，数组默认空。 */
 export interface ReversePromptResult {
   target_format: string; // "seedance_2_0"
@@ -41,27 +67,40 @@ export interface ReversePromptResult {
   disclaimer: string; // 近似重建红线（BE 默认空串 → 前端兜底文案）
   confidence: number; // 0–1
   fill_targets: ReversePromptFillTargets;
+  // FIX1：视频源反推的 video_analysis **内嵌于 result**（job.result.video_analysis），非 job 顶层；图片源为空。
+  video_analysis?: ReverseVideoAnalysis | null;
 }
 
 /** 镜像 BE ReversePromptJobRead（前端主要读 id/status/result/error_*，其余字段照收）。 */
 export interface ReversePromptJobRead {
   id: string;
-  status: string; // "succeeded" | "running" | "failed" | "saved"
-  source_kind: string; // "image"
+  status: string; // "succeeded" | "running" | "processing" | "failed" | "saved"
+  source_kind: string; // "image" | "video"
   source_asset_id?: string | null;
   target_format: string;
-  result?: ReversePromptResult | null;
+  result?: ReversePromptResult | null; // FIX1：视频源的 video_analysis 内嵌于此（result.video_analysis）
   error_code?: string | null;
   error_message?: string | null;
   provider?: string | null;
   model?: string | null;
   prompt_tokens: number;
   completion_tokens: number;
-  credits: number;
+  credits: number; // FIX1：**provider credits**（引擎调用成本），非租户扣费；租户固定 100 积分由 BE UsageRecord 记
   cost_cents: number;
   created_at: string;
   updated_at: string;
   saved_at?: string | null;
+}
+
+/**
+ * 视频反推·租户计费：固定 100 积分/次（确认弹窗展示；扣费在后端 submit 时以 UsageRecord 记，与 job.credits 无关）。
+ * 注意区分：本常量=租户扣费口径；job.credits=provider 引擎成本，二者语义不同，界面计费门只用本常量。
+ */
+export const REVERSE_VIDEO_CREDITS = 100;
+
+/** 反推任务是否终态（用于视频异步轮询判定；图片同步不经此路径）。 */
+export function isReverseSettled(status: string): boolean {
+  return status === "succeeded" || status === "failed";
 }
 
 export interface ReversePromptSavedResponse {
@@ -75,9 +114,18 @@ export interface ReverseFromAssetInput {
   source_asset_id: string;
 }
 
-/** 从已上传图片资产反推提示词（同步返回 succeeded + result）。 */
+/**
+ * 从已上传资产反推提示词。请求体仅 source_asset_id，**后端据资产推 source_kind**：
+ *  - 图片 → 同步返回 status="succeeded" + result；
+ *  - 视频 → 异步 202 返回 status="running"（无 result），前端轮询 getReversePromptJob 到终态。
+ */
 export function reverseFromAsset(input: ReverseFromAssetInput): Promise<ReversePromptJobRead> {
   return apiFetch<ReversePromptJobRead>("/api/v1/reverse-prompt", { method: "POST", body: input });
+}
+
+/** 轮询反推任务（视频异步用）。GET /reverse-prompt/jobs/{id}。 */
+export function getReversePromptJob(id: string): Promise<ReversePromptJobRead> {
+  return apiFetch<ReversePromptJobRead>(`/api/v1/reverse-prompt/jobs/${encodeURIComponent(id)}`, { method: "GET" });
 }
 
 /** 同一 job 重新反推（换一版结果）。 */

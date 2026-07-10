@@ -105,6 +105,47 @@ const reverseJobRead = (id: string, status = "succeeded") => ({
   saved_at: null
 });
 
+// ── 视频反推异步 (VIDEO-REVERSE-PROMPT-UI-0001 · FIX2 逐字段对齐已合入真 BE schema) mock ──
+// POST /reverse-prompt 检测视频源(source_asset_id 以 "video-" 起)→ 202 status="queued"(无 result)；GET /jobs/{id}
+// 轮询第 2 次起 → succeeded + result（video_analysis **内嵌于 result**）。图片源仍同步 succeeded（零回归）。
+// 对齐 backend/app/schemas/reverse_prompt.py：pacing=Literal["slow","medium","fast","variable"]（枚举，非中文串）；
+// 每个 shot 必含 index(≥0)；shot 字段 index/start_sec/end_sec/visual/camera/motion/transition；
+// credits=provider 引擎成本（非 100；租户固定 100 走 UsageRecord，此处不体现）。
+const REVERSE_VIDEO_ANALYSIS = {
+  duration_sec: 18,
+  pacing: "fast", // 合法枚举（前端映射为「快」显示）
+  shot_list: [
+    { index: 0, start_sec: 0, end_sec: 4, visual: "产品特写：保温杯置于大理石台面，暖光扫过", camera: "缓慢推近", motion: "蒸汽轻升", transition: "叠化" },
+    { index: 1, start_sec: 4, end_sec: 10, visual: "使用场景：手部拧开杯盖，蒸汽升腾", camera: "手持跟拍", motion: "手部拧盖", transition: "硬切" },
+    { index: 2, start_sec: 10, end_sec: 15, visual: "卖点字幕叠加：24 小时保温，便携轻巧", camera: "固定机位", motion: "字幕入场", transition: "淡出" },
+    { index: 3, start_sec: 15, end_sec: 18, visual: "收尾定格：品牌 logo + 行动号召", camera: "环绕收尾", motion: "logo 定格", transition: "定格" }
+  ],
+  audio_transcript: null, // 一期未启用
+  bgm_style: null // 一期未启用
+};
+interface MockReverseVideoJob { id: string; status: string; _polls: number; }
+const reverseVideoJobs = new Map<string, MockReverseVideoJob>();
+const reverseVideoJobRead = (j: MockReverseVideoJob) => ({
+  id: j.id,
+  status: j.status,
+  source_kind: "video",
+  source_asset_id: "video-asset-1",
+  target_format: "seedance_2_0",
+  // FIX1①：video_analysis 内嵌于 result（succeeded 才有）。
+  result: j.status === "succeeded" ? { ...REVERSE_RESULT, video_analysis: REVERSE_VIDEO_ANALYSIS } : null,
+  error_code: null,
+  error_message: null,
+  provider: "apimart",
+  model: "gemini-2.5-flash",
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  credits: 6, // FIX1④：provider 引擎成本；租户固定 100 积分走 BE UsageRecord，不等于此字段。
+  cost_cents: 0,
+  created_at: new Date(0).toISOString(),
+  updated_at: new Date(0).toISOString(),
+  saved_at: null
+});
+
 // ── 深度合成标识设置 (LABEL-UI-0001) mock store ──
 // 忠实契约：enabled 只读恒真(合规不可关)；PUT 校验 text 非空 ≤20(否则 422)；非伪造。
 const labelSettings = { position: "br", text: "AI 生成", enabled: true };
@@ -571,13 +612,32 @@ export const handlers = [
   // ReversePromptJobRead(status="succeeded" + result)。读 .id（非 jobId）。
   http.post(`${BASE}/api/v1/reverse-prompt`, async ({ request }) => {
     const body = (await request.json()) as Record<string, unknown>;
-    if (!body.source_asset_id) return err(422, "VALIDATION_ERROR", "source_asset_id is required");
+    const sourceAssetId = body.source_asset_id;
+    if (!sourceAssetId) return err(422, "VALIDATION_ERROR", "source_asset_id is required");
     // 镜像 BE extra="forbid"：多余键即 422（守住「请求体只发 source_asset_id」）。
     const extra = Object.keys(body).filter((k) => k !== "source_asset_id" && k !== "target_format");
     if (extra.length) return err(422, "VALIDATION_ERROR", `Extra inputs are not permitted: ${extra.join(",")}`);
+    // 后端据资产推 source_kind：视频源（video-asset-*）→ 异步 202 queued（无 result），前端轮询 GET 到终态。
+    if (typeof sourceAssetId === "string" && sourceAssetId.startsWith("video-")) {
+      const id = `rpv-${++reverseSeq}`;
+      const job: MockReverseVideoJob = { id, status: "queued", _polls: 0 }; // FIX1③：BE 202 queued（非 running）
+      reverseVideoJobs.set(id, job);
+      return HttpResponse.json({ data: reverseVideoJobRead(job), error: null, request_id: "mock-req" }, { status: 202 });
+    }
+    // 图片源：同步 succeeded + result（零回归）。
     return ok(reverseJobRead(`rp-${++reverseSeq}`));
   }),
-  http.get(`${BASE}/api/v1/reverse-prompt/jobs/:id`, ({ params }) => ok(reverseJobRead(String(params.id)))),
+  http.get(`${BASE}/api/v1/reverse-prompt/jobs/:id`, ({ params }) => {
+    const vj = reverseVideoJobs.get(String(params.id));
+    if (vj) {
+      if (vj.status !== "succeeded" && vj.status !== "failed") {
+        vj._polls += 1;
+        if (vj._polls >= 2) vj.status = "succeeded"; // queued → 第 2 次轮询起完成（含 result.video_analysis）
+      }
+      return ok(reverseVideoJobRead(vj));
+    }
+    return ok(reverseJobRead(String(params.id)));
+  }),
   http.post(`${BASE}/api/v1/reverse-prompt/jobs/:id/regenerate`, ({ params }) => ok(reverseJobRead(String(params.id)))),
   http.post(`${BASE}/api/v1/reverse-prompt/jobs/:id/save`, ({ params }) =>
     ok({ id: String(params.id), status: "saved", saved_at: new Date(0).toISOString() })

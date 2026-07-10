@@ -96,6 +96,8 @@ export interface ReversePromptResultViewProps {
   regenerating?: boolean;
   saving?: boolean;
   saved?: boolean;
+  /** 视频反推：重新反推会二次扣费（100 积分/次），一期无二次计费门 → 隐藏「重新反推」避免误扣（VIDEO-REVERSE-PROMPT-UI-0001）。 */
+  hideRegenerate?: boolean;
 }
 
 /**
@@ -110,7 +112,8 @@ export function ReversePromptResultView({
   onSave,
   regenerating,
   saving,
-  saved
+  saved,
+  hideRegenerate
 }: ReversePromptResultViewProps) {
   const confidencePct = Math.round((result.confidence ?? 0) * 100);
   const disclaimer = result.disclaimer?.trim() || copy.reverse.disclaimer;
@@ -159,9 +162,11 @@ export function ReversePromptResultView({
         <Button variant="soft" size="sm" onClick={onSave} disabled={saving}>
           <Save size={14} strokeWidth={2} /> {saved ? copy.reverse.saved : saving ? copy.reverse.saving : copy.reverse.save}
         </Button>
-        <Button variant="soft" size="sm" onClick={onRegenerate} disabled={regenerating}>
-          <RefreshCw size={14} strokeWidth={2} /> {regenerating ? copy.reverse.regenerating : copy.reverse.regenerate}
-        </Button>
+        {!hideRegenerate && (
+          <Button variant="soft" size="sm" onClick={onRegenerate} disabled={regenerating}>
+            <RefreshCw size={14} strokeWidth={2} /> {regenerating ? copy.reverse.regenerating : copy.reverse.regenerate}
+          </Button>
+        )}
       </div>
 
       {/* 带入生成 —— 缺 fill_target 的模块置灰 */}

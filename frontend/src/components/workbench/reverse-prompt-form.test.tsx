@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/api/hooks", () => ({
   useUploadImage: vi.fn(),
+  useUploadReverseVideo: vi.fn(),
   useReverseFromAsset: vi.fn(),
   useRegenerateReversePrompt: vi.fn(),
   useSaveReversePrompt: vi.fn()
@@ -12,7 +13,8 @@ import {
   useRegenerateReversePrompt,
   useReverseFromAsset,
   useSaveReversePrompt,
-  useUploadImage
+  useUploadImage,
+  useUploadReverseVideo
 } from "@/lib/api/hooks";
 import type { Mock } from "vitest";
 import { ApiError } from "@/lib/api/client";
@@ -66,6 +68,7 @@ const JOB: ReversePromptJobRead = {
 
 function stubHooks(reverseImpl: Mock) {
   (useUploadImage as Mock).mockReturnValue({ mutateAsync: vi.fn().mockResolvedValue({ asset_id: "aid-1" }), isPending: false });
+  (useUploadReverseVideo as Mock).mockReturnValue({ mutateAsync: vi.fn().mockResolvedValue({ asset_id: "video-asset-1" }), isPending: false });
   (useReverseFromAsset as Mock).mockReturnValue({ mutateAsync: reverseImpl, isPending: false });
   (useRegenerateReversePrompt as Mock).mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
   (useSaveReversePrompt as Mock).mockReturnValue({ mutateAsync: vi.fn().mockResolvedValue({ saved: true }), isPending: false });
