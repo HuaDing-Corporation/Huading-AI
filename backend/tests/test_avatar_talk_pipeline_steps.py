@@ -2479,12 +2479,33 @@ def test_avatar_step_routes_video_source_to_change_lips_and_crops_to_tts(
         db.commit()
 
         captured_payloads: list[dict] = []
+        serial_events: list[str] = []
+
+        class _SerialLock:
+            def acquire(self, *, blocking: bool):
+                assert blocking is True
+                serial_events.append("lock_enter")
+                return True
+
+            def release(self):
+                serial_events.append("lock_exit")
+
+        class _SerialRedis:
+            def lock(self, name: str, *, timeout: float, blocking_timeout: float):
+                assert name == "provider:omnihuman:change-lips"
+                assert timeout >= 120
+                assert blocking_timeout == timeout
+                return _SerialLock()
+
+            def close(self):
+                return None
 
         class _AvatarProvider:
             async def generate_avatar(self, _payload: dict):
                 raise AssertionError("video avatar source must not use image avatar generation")
 
             async def generate_change_lips(self, payload: dict):
+                serial_events.append("provider_call")
                 captured_payloads.append(dict(payload))
                 payload["progress_callback"]({"poll_count": 1, "status": "processing"})
                 return {
@@ -2511,11 +2532,13 @@ def test_avatar_step_routes_video_source_to_change_lips_and_crops_to_tts(
             "lite",
             raising=False,
         )
+        store = _Store()
+        store._redis = _SerialRedis()
         ctx = avatar_talk.AvatarTalkContext(
             task_id=unit_id,
             tenant_id=tenant_id,
             db=db,
-            store=_Store(),
+            store=store,
             storage=storage,
             duration_sec=8.0,
         )
@@ -2526,6 +2549,7 @@ def test_avatar_step_routes_video_source_to_change_lips_and_crops_to_tts(
         assert ctx.base_video_bytes == b"CROPPED-MP4"
         assert ctx.provider_model == "realman_change_lips"
         assert ctx.change_lips_tier == "lite"
+        assert serial_events == ["lock_enter", "provider_call", "lock_exit"]
         assert captured_payloads[0]["video_url"].startswith(
             f"https://storage.test/tenants/{tenant_id}/uploads/avatar-source.mp4"
         )

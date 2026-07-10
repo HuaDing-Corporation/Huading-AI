@@ -70,6 +70,8 @@ def _change_lips_result_url(data: Mapping[str, Any]) -> str:
 
 def _friendly_change_lips_error(message: str) -> str:
     raw = str(message or "")
+    if "concurrent limit" in raw.lower():
+        return "改口型服务繁忙，请稍后重试。"
     if "ECVideoDecodeError" in raw:
         return "视频文件无法解码，请上传 MP4/H.264/AAC 源视频。"
     if "ECVideoSizeLimited" in raw:
@@ -79,6 +81,26 @@ def _friendly_change_lips_error(message: str) -> str:
     if any(token in raw for token in ("face", "Face", "人脸", "ECFace", "detect")):
         return "未能识别到清晰单人正脸，请更换数字人源视频。"
     return raw or "OmniHuman change-lips request failed."
+
+
+def _response_result(payload: Mapping[str, Any]) -> dict[str, Any]:
+    result = payload.get("Result")
+    return dict(result) if isinstance(result, Mapping) else dict(payload)
+
+
+def _response_metadata_error(payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    metadata = payload.get("ResponseMetadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    error = metadata.get("Error")
+    return error if isinstance(error, Mapping) else None
+
+
+def _provider_code(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class OmniHumanProviderError(RuntimeError):
@@ -314,11 +336,24 @@ class OmniHumanProvider:
                 headers=headers,
                 timeout=self.request_timeout_seconds,
             )
-            data = response.json()
-            code = int(data.get("code") or 0)
-            if code == 10000:
+            response_payload = response.json()
+            data = _response_result(response_payload)
+            metadata_error = _response_metadata_error(response_payload)
+            code = _provider_code(data.get("code") or data.get("status"))
+            if metadata_error is None and code == 10000:
                 return data
-            message = str(data.get("message") or data.get("msg") or data)
+            if metadata_error is not None:
+                metadata_code = _provider_code(metadata_error.get("Code"))
+                code = metadata_code if metadata_code is not None else code
+                if code == 10000:
+                    code = None
+                message = str(
+                    metadata_error.get("Message")
+                    or metadata_error.get("message")
+                    or metadata_error
+                )
+            else:
+                message = str(data.get("message") or data.get("msg") or data)
             error = OmniHumanProviderError(
                 _friendly_change_lips_error(message) if "ChangeLips" in action else message,
                 provider_code=code,

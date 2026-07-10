@@ -359,6 +359,143 @@ def test_omnihuman_keeps_media_urls_strict_when_result_suffix_configured() -> No
     assert http.calls == []
 
 
+def test_omnihuman_change_lips_accepts_real_volcengine_result_envelope(monkeypatch) -> None:
+    http = _Http(
+        [
+            {
+                "ResponseMetadata": {
+                    "Action": "RealmanChangeLipsSubmitTask",
+                    "RequestId": "request-submit",
+                },
+                "Result": {
+                    "code": 10000,
+                    "message": "Success",
+                    "data": {"task_id": "change-lips-real-envelope"},
+                },
+            },
+            {
+                "ResponseMetadata": {
+                    "Action": "RealmanChangeLipsGetResult",
+                    "RequestId": "request-poll",
+                },
+                "Result": {
+                    "code": 10000,
+                    "message": "Success",
+                    "data": {
+                        "status": "done",
+                        "resp_data": json.dumps(
+                            {"url": "https://visual.example/change-lips-real.mp4"}
+                        ),
+                    },
+                },
+            },
+        ]
+    )
+    monkeypatch.setattr("app.providers.avatar.omnihuman.time.sleep", lambda *_: None)
+    provider = OmniHumanProvider(
+        access_key="ak",
+        secret_key="sk",
+        region="cn-north-1",
+        http_client=http,
+        poll_interval_seconds=0,
+        timeout_seconds=30,
+        allowed_hosts={"assets.example", "visual.example", "visual.volcengineapi.com"},
+    )
+
+    result = provider.generate_change_lips_sync(
+        {
+            "video_url": "https://assets.example/avatar-source.mp4",
+            "audio_url": "https://assets.example/voice.mp3",
+            "tier": "lite",
+        }
+    )
+
+    assert result == {
+        "task_id": "change-lips-real-envelope",
+        "video_url": "https://visual.example/change-lips-real.mp4",
+        "tier": "lite",
+    }
+
+
+def test_omnihuman_change_lips_retries_nested_concurrency_limit_with_friendly_error(
+    monkeypatch,
+) -> None:
+    concurrent_limit_response = {
+        "ResponseMetadata": {
+            "Action": "RealmanChangeLipsSubmitTask",
+            "RequestId": "request-concurrent-limit",
+        },
+        "Result": {
+            "code": 50430,
+            "message": "Request Has Reached API Concurrent Limit",
+        },
+    }
+    http = _Http([concurrent_limit_response] * 3)
+    sleeps: list[float] = []
+    monkeypatch.setattr("app.providers.avatar.omnihuman.time.sleep", sleeps.append)
+    provider = OmniHumanProvider(
+        access_key="ak",
+        secret_key="sk",
+        region="cn-north-1",
+        http_client=http,
+        max_retries=2,
+        allowed_hosts={"assets.example", "visual.volcengineapi.com"},
+    )
+
+    with pytest.raises(OmniHumanProviderError, match="服务繁忙") as exc_info:
+        provider.generate_change_lips_sync(
+            {
+                "video_url": "https://assets.example/avatar-source.mp4",
+                "audio_url": "https://assets.example/voice.mp3",
+                "tier": "lite",
+            }
+        )
+
+    assert exc_info.value.provider_code == 50430
+    assert len(http.calls) == 3
+    assert sleeps == [1, 2]
+
+
+def test_omnihuman_change_lips_rejects_metadata_error_even_with_result_success() -> None:
+    http = _Http(
+        [
+            {
+                "ResponseMetadata": {
+                    "Action": "RealmanChangeLipsSubmitTask",
+                    "Error": {
+                        "Code": "50411",
+                        "Message": "ECVideoDecodeError: invalid source",
+                    },
+                },
+                "Result": {
+                    "code": 10000,
+                    "message": "Success",
+                    "data": {"task_id": "must-not-be-used"},
+                },
+            }
+        ]
+    )
+    provider = OmniHumanProvider(
+        access_key="ak",
+        secret_key="sk",
+        region="cn-north-1",
+        http_client=http,
+        allowed_hosts={"assets.example", "visual.volcengineapi.com"},
+    )
+
+    with pytest.raises(OmniHumanProviderError, match="无法解码") as exc_info:
+        provider.generate_change_lips_sync(
+            {
+                "video_url": "https://assets.example/avatar-source.mp4",
+                "audio_url": "https://assets.example/voice.mp3",
+                "tier": "lite",
+            }
+        )
+
+    assert exc_info.value.provider_code == 50411
+    assert len(http.calls) == 1
+
+
 def test_omnihuman_change_lips_submit_poll_prefers_resp_data_url(monkeypatch) -> None:
     http = _Http(
         [
