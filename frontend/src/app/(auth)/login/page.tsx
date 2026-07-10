@@ -49,12 +49,12 @@ export default function LoginPage() {
           <Logo />
         </div>
         <CardTitle className="text-center">登录控制台</CardTitle>
-        <CardSubtitle className="mb-6 mt-1 text-center">输入租户与账号以继续</CardSubtitle>
+        <CardSubtitle className="mb-6 mt-1 text-center">输入用户与账号以继续</CardSubtitle>
 
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
           <div>
             <label htmlFor="tenant-slug" className={labelClass}>
-              租户标识 (tenant slug)
+              用户标识 (tenant slug)
             </label>
             <Input
               id="tenant-slug"

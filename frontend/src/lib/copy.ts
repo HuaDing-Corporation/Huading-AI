@@ -2,10 +2,17 @@ export const copy = {
   common: { cancel: "取消", processing: "处理中…" },
   // 侧边栏导航（BATCH-PROD-UI-0001-FIX3）
   nav: { comingSoon: "即将上线" },
+  // 板块「即将上线」占位（UI-COMINGSOON-TENANT-RENAME-0001）—— 导航后缀 + 统一友好占位页
+  comingSoon: {
+    navSuffix: "（即将上线）",
+    title: "该功能即将上线",
+    desc: "敬请期待，我们正在加紧打造这一功能。",
+    back: "返回工作台"
+  },
   // 管理员数据看板（ANALYTICS-UI-0001）
   analytics: {
     pageTitle: "数据看板",
-    pageSubtitle: "管理员专属 · 全租户用量、成本与趋势总览",
+    pageSubtitle: "管理员专属 · 全用户用量、成本与趋势总览",
     // 日期区间
     rangeLabel: "日期区间",
     rangeFrom: "起",
@@ -21,13 +28,13 @@ export const copy = {
     ovTasksHint: "成功 + 失败",
     ovSuccess: "成功",
     ovFailed: "失败",
-    ovTenants: "租户数",
+    ovTenants: "用户数",
     ovReserved: "预留积分",
-    ovReservedHintAll: (n: number) => `全 ${n} 租户合计 · 与已消耗分列`,
-    ovReservedHintTop: (n: number) => `消耗榜前 ${n} 租户 · 与已消耗分列`,
-    // 租户排行表
-    tenantTitle: "租户排行",
-    colTenant: "租户",
+    ovReservedHintAll: (n: number) => `全 ${n} 用户合计 · 与已消耗分列`,
+    ovReservedHintTop: (n: number) => `消耗榜前 ${n} 用户 · 与已消耗分列`,
+    // 用户排行表（数据模型仍为 tenant，仅展示文案改「用户」）
+    tenantTitle: "用户排行",
+    colTenant: "用户",
     colCredits: "消耗积分",
     colCost: "成本",
     colTasks: "任务量",

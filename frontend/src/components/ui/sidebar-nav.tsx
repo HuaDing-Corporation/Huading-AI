@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { LucideIcon } from "lucide-react";
 
+import { isComingSoon } from "@/lib/coming-soon";
 import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
 
@@ -38,6 +39,9 @@ export function SidebarNav({ items }: { items: NavItem[] }) {
     <nav className="flex flex-col gap-1">
       {items.map((item) => {
         const Icon = item.icon;
+        // 「即将上线」板块：名称追加后缀（点进去是统一占位页）。
+        const soon = isComingSoon(item.key);
+        const label = soon ? `${item.label}${copy.comingSoon.navSuffix}` : item.label;
         if (item.href) {
           const active = isActive(pathname, item.href);
           return (
@@ -48,7 +52,7 @@ export function SidebarNav({ items }: { items: NavItem[] }) {
               className={cn(baseClass, active ? activeClass : idleClass)}
             >
               <Icon size={19} className="w-5 flex-none" strokeWidth={1.8} />
-              <span>{item.label}</span>
+              <span>{label}</span>
             </Link>
           );
         }
@@ -62,7 +66,7 @@ export function SidebarNav({ items }: { items: NavItem[] }) {
             className={cn(baseClass, idleClass, "cursor-default")}
           >
             <Icon size={19} className="w-5 flex-none" strokeWidth={1.8} />
-            <span>{item.label}</span>
+            <span>{label}</span>
           </button>
         );
       })}
