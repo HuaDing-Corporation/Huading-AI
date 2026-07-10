@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -112,6 +113,11 @@ def regenerate_reverse_prompt_job(
 ) -> ReversePromptJob:
     job = reverse_prompt_job_or_404(db, tenant_id=user.tenant_id, job_id=job_id)
     if job.source_kind == "video":
+        job = _reverse_prompt_job_for_update_or_404(
+            db,
+            tenant_id=user.tenant_id,
+            job_id=job_id,
+        )
         if job.status in {"queued", "running"}:
             raise AppError(
                 "Reverse prompt job is already running.",
@@ -220,6 +226,27 @@ def save_reverse_prompt_job(
 def reverse_prompt_job_or_404(db: Session, *, tenant_id: str, job_id: str) -> ReversePromptJob:
     job = db.get(ReversePromptJob, job_id)
     if job is None or job.tenant_id != tenant_id:
+        raise AppError(
+            "Reverse prompt job not found.",
+            code="REVERSE_PROMPT_JOB_NOT_FOUND",
+            status_code=404,
+        )
+    return job
+
+
+def _reverse_prompt_job_for_update_or_404(
+    db: Session,
+    *,
+    tenant_id: str,
+    job_id: str,
+) -> ReversePromptJob:
+    job = db.scalar(
+        select(ReversePromptJob)
+        .where(ReversePromptJob.id == job_id, ReversePromptJob.tenant_id == tenant_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if job is None:
         raise AppError(
             "Reverse prompt job not found.",
             code="REVERSE_PROMPT_JOB_NOT_FOUND",

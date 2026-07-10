@@ -67,6 +67,29 @@ def active_subscription(db: Session, tenant_id: str) -> Subscription:
     return subscription
 
 
+def _active_subscription_for_update(db: Session, tenant_id: str) -> Subscription:
+    now = datetime.now(UTC)
+    subscription = db.scalar(
+        select(Subscription)
+        .where(
+            Subscription.tenant_id == tenant_id,
+            Subscription.status == "active",
+            Subscription.period_start <= now,
+            Subscription.period_end >= now,
+        )
+        .order_by(Subscription.period_end.desc())
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if subscription is None:
+        raise AppError(
+            "Active subscription not found.",
+            code="SUBSCRIPTION_NOT_FOUND",
+            status_code=404,
+        )
+    return subscription
+
+
 def remaining_credits(subscription: Subscription) -> int:
     return (
         subscription.quota_credits_total
@@ -548,7 +571,7 @@ def reserve_reverse_prompt_video_quota(
     tenant_id: str,
     reverse_prompt_job_id: str,
 ) -> Reservation:
-    subscription = active_subscription(db, tenant_id)
+    subscription = _active_subscription_for_update(db, tenant_id)
     estimate = estimate_reverse_prompt_video_quota(db, tenant_id=tenant_id)
     if remaining_credits(subscription) < estimate.reservation_units:
         raise AppError(

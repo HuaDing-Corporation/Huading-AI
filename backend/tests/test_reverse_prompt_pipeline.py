@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app.core.exceptions import AppError
 from app.db.models import (
     Asset,
     CreditRate,
@@ -18,6 +19,7 @@ from app.db.models import (
     Subscription,
     Tenant,
     UsageRecord,
+    User,
 )
 from app.main import app
 from app.providers.reverse_prompt.apimart_gemini import (
@@ -841,6 +843,86 @@ def test_reverse_prompt_video_returns_202_queues_job_and_reserves_fixed_quota(
     db.close()
 
 
+def test_reverse_prompt_video_two_sessions_allow_only_one_create_when_balance_fits_once(
+    auth_db,
+    auth_context,
+):
+    setup = auth_db()
+    _seed_reverse_prompt_provider(setup)
+    asset = _seed_video_asset(setup, auth_context["tenant_id"])
+    subscription = setup.scalar(
+        select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+    )
+    subscription.quota_credits_total = 100
+    subscription.quota_credits_used = 0
+    subscription.quota_credits_reserved = 0
+    asset_id = asset.id
+    subscription_id = subscription.id
+    setup.commit()
+    setup.close()
+
+    from app.services.reverse_prompt import create_reverse_prompt_job
+
+    first = auth_db()
+    second = auth_db()
+    try:
+        first_subscription = first.get(Subscription, subscription_id)
+        second_subscription = second.get(Subscription, subscription_id)
+        first_user = first.get(User, auth_context["user_id"])
+        second_user = second.get(User, auth_context["user_id"])
+        assert first_subscription.quota_credits_reserved == 0
+        assert second_subscription.quota_credits_reserved == 0
+
+        created = create_reverse_prompt_job(
+            first,
+            user=first_user,
+            source_asset_id=asset_id,
+            target_format="seedance_2_0",
+            storage=SimpleNamespace(),
+        )
+        assert created.status == "queued"
+        assert second_subscription.quota_credits_reserved == 0
+
+        with pytest.raises(AppError) as exc_info:
+            create_reverse_prompt_job(
+                second,
+                user=second_user,
+                source_asset_id=asset_id,
+                target_format="seedance_2_0",
+                storage=SimpleNamespace(),
+            )
+        assert exc_info.value.code == "TENANT_QUOTA_EXCEEDED"
+        second.rollback()
+    finally:
+        first.close()
+        second.close()
+
+    with auth_db() as db:
+        jobs = list(
+            db.scalars(
+                select(ReversePromptJob).where(
+                    ReversePromptJob.tenant_id == auth_context["tenant_id"],
+                    ReversePromptJob.source_asset_id == asset_id,
+                )
+            )
+        )
+        reserved_records = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.tenant_id == auth_context["tenant_id"],
+                    UsageRecord.capability == "reverse_prompt_video",
+                    UsageRecord.status == "reserved",
+                )
+            )
+        )
+        subscription = db.get(Subscription, subscription_id)
+        assert len(jobs) == 1
+        assert len(reserved_records) == 1
+        assert subscription.quota_credits_reserved == sum(
+            int(record.credits) for record in reserved_records
+        )
+
+
 def test_reverse_prompt_video_queue_failure_releases_reserved_quota(
     auth_db,
     auth_context,
@@ -1187,6 +1269,101 @@ def test_reverse_prompt_video_regenerate_returns_202_and_reserves_one_new_call(
     assert subscription.quota_credits_used == 100
     assert subscription.quota_credits_reserved == 100
     db.close()
+
+
+def test_reverse_prompt_video_two_sessions_grant_only_one_regenerate(
+    auth_db,
+    auth_context,
+):
+    from app.services.quota import settle_reverse_prompt_video_quota
+    from app.services.reverse_prompt import (
+        create_reverse_prompt_job,
+        regenerate_reverse_prompt_job,
+    )
+
+    setup = auth_db()
+    _seed_reverse_prompt_provider(setup)
+    asset = _seed_video_asset(setup, auth_context["tenant_id"])
+    user = setup.get(User, auth_context["user_id"])
+    job = create_reverse_prompt_job(
+        setup,
+        user=user,
+        source_asset_id=asset.id,
+        target_format="seedance_2_0",
+        storage=SimpleNamespace(),
+    )
+    settle_reverse_prompt_video_quota(
+        setup,
+        tenant_id=auth_context["tenant_id"],
+        reverse_prompt_job_id=job.id,
+        provider="apimart",
+        model="gemini-3.1-pro-preview",
+        total_tokens=2500,
+        cost_cents=7,
+    )
+    job.status = "succeeded"
+    job.result_json = {
+        "target_format": "seedance_2_0",
+        "prompt_zh": "old",
+        "prompt_en": "old",
+        "fill_targets": {},
+    }
+    job_id = job.id
+    subscription_id = setup.scalar(
+        select(Subscription.id).where(
+            Subscription.tenant_id == auth_context["tenant_id"]
+        )
+    )
+    setup.commit()
+    setup.close()
+
+    first = auth_db()
+    second = auth_db()
+    try:
+        first_job = first.get(ReversePromptJob, job_id)
+        second_job = second.get(ReversePromptJob, job_id)
+        first_user = first.get(User, auth_context["user_id"])
+        second_user = second.get(User, auth_context["user_id"])
+        assert first_job.status == "succeeded"
+        assert second_job.status == "succeeded"
+
+        regenerated = regenerate_reverse_prompt_job(
+            first,
+            user=first_user,
+            job_id=job_id,
+            storage=SimpleNamespace(),
+        )
+        assert regenerated.status == "queued"
+        assert second_job.status == "succeeded"
+
+        with pytest.raises(AppError) as exc_info:
+            regenerate_reverse_prompt_job(
+                second,
+                user=second_user,
+                job_id=job_id,
+                storage=SimpleNamespace(),
+            )
+        assert exc_info.value.code == "REVERSE_PROMPT_ALREADY_RUNNING"
+        second.rollback()
+    finally:
+        first.close()
+        second.close()
+
+    with auth_db() as db:
+        usages = list(
+            db.scalars(
+                select(UsageRecord)
+                .where(UsageRecord.reverse_prompt_job_id == job_id)
+                .order_by(UsageRecord.created_at)
+            )
+        )
+        reserved_records = [usage for usage in usages if usage.status == "reserved"]
+        subscription = db.get(Subscription, subscription_id)
+        assert [usage.status for usage in usages] == ["settled", "reserved"]
+        assert len(reserved_records) == 1
+        assert subscription.quota_credits_reserved == sum(
+            int(record.credits) for record in reserved_records
+        )
 
 
 def test_reverse_prompt_video_worker_invalidated_source_fails_and_releases_quota(
