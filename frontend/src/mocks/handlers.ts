@@ -105,17 +105,19 @@ const reverseJobRead = (id: string, status = "succeeded") => ({
   saved_at: null
 });
 
-// ── 视频反推异步 (VIDEO-REVERSE-PROMPT-UI-0001) mock ── 镜像任务包冻结契约（mock 先行，待 BE-0001 回执核对）：
-// POST /reverse-prompt 检测视频源(source_asset_id 以 "video-" 起)→ 202 status="running"(无 result)；GET /jobs/{id}
-// 轮询第 2 次起 → succeeded + result + video_analysis + credits=100。图片源仍同步 succeeded（零回归）。
+// ── 视频反推异步 (VIDEO-REVERSE-PROMPT-UI-0001 · FIX1 对齐 BE 回执) mock ──
+// POST /reverse-prompt 检测视频源(source_asset_id 以 "video-" 起)→ 202 status="queued"(无 result)；GET /jobs/{id}
+// 轮询第 2 次起 → succeeded + result（video_analysis **内嵌于 result**）。图片源仍同步 succeeded（零回归）。
+// FIX1 四点：① video_analysis→result.video_analysis；② shot 字段 start_sec/end_sec/visual/camera/motion/transition；
+// ③ 初始 queued(非 running)；④ credits=provider 引擎成本（非 100；租户固定 100 走 UsageRecord，此处不体现）。
 const REVERSE_VIDEO_ANALYSIS = {
   duration_sec: 18,
   pacing: "中速偏快，前 3 秒抓眼球，后段稳定展示",
   shot_list: [
-    { index: 0, description: "产品特写：保温杯置于大理石台面，暖光扫过", duration_sec: 4 },
-    { index: 1, description: "使用场景：手部拧开杯盖，蒸汽升腾", duration_sec: 6 },
-    { index: 2, description: "卖点字幕叠加：24 小时保温，便携轻巧", duration_sec: 5 },
-    { index: 3, description: "收尾定格：品牌 logo + 行动号召", duration_sec: 3 }
+    { start_sec: 0, end_sec: 4, visual: "产品特写：保温杯置于大理石台面，暖光扫过", camera: "缓慢推近", motion: "蒸汽轻升", transition: "叠化" },
+    { start_sec: 4, end_sec: 10, visual: "使用场景：手部拧开杯盖，蒸汽升腾", camera: "手持跟拍", motion: "手部拧盖", transition: "硬切" },
+    { start_sec: 10, end_sec: 15, visual: "卖点字幕叠加：24 小时保温，便携轻巧", camera: "固定机位", motion: "字幕入场", transition: "淡出" },
+    { start_sec: 15, end_sec: 18, visual: "收尾定格：品牌 logo + 行动号召", camera: "环绕收尾", motion: "logo 定格", transition: "定格" }
   ],
   audio_transcript: null, // 一期未启用
   bgm_style: null // 一期未启用
@@ -128,15 +130,15 @@ const reverseVideoJobRead = (j: MockReverseVideoJob) => ({
   source_kind: "video",
   source_asset_id: "video-asset-1",
   target_format: "seedance_2_0",
-  result: j.status === "succeeded" ? REVERSE_RESULT : null,
-  video_analysis: j.status === "succeeded" ? REVERSE_VIDEO_ANALYSIS : null,
+  // FIX1①：video_analysis 内嵌于 result（succeeded 才有）。
+  result: j.status === "succeeded" ? { ...REVERSE_RESULT, video_analysis: REVERSE_VIDEO_ANALYSIS } : null,
   error_code: null,
   error_message: null,
   provider: "apimart",
   model: "gemini-2.5-flash",
   prompt_tokens: 0,
   completion_tokens: 0,
-  credits: 100, // 视频反推 100 积分/次（后端 submit 时扣）
+  credits: 6, // FIX1④：provider 引擎成本；租户固定 100 积分走 BE UsageRecord，不等于此字段。
   cost_cents: 0,
   created_at: new Date(0).toISOString(),
   updated_at: new Date(0).toISOString(),
@@ -614,10 +616,10 @@ export const handlers = [
     // 镜像 BE extra="forbid"：多余键即 422（守住「请求体只发 source_asset_id」）。
     const extra = Object.keys(body).filter((k) => k !== "source_asset_id" && k !== "target_format");
     if (extra.length) return err(422, "VALIDATION_ERROR", `Extra inputs are not permitted: ${extra.join(",")}`);
-    // 后端据资产推 source_kind：视频源（video-asset-*）→ 异步 202 running（无 result），前端轮询 GET 到终态。
+    // 后端据资产推 source_kind：视频源（video-asset-*）→ 异步 202 queued（无 result），前端轮询 GET 到终态。
     if (typeof sourceAssetId === "string" && sourceAssetId.startsWith("video-")) {
       const id = `rpv-${++reverseSeq}`;
-      const job: MockReverseVideoJob = { id, status: "running", _polls: 0 };
+      const job: MockReverseVideoJob = { id, status: "queued", _polls: 0 }; // FIX1③：BE 202 queued（非 running）
       reverseVideoJobs.set(id, job);
       return HttpResponse.json({ data: reverseVideoJobRead(job), error: null, request_id: "mock-req" }, { status: 202 });
     }
@@ -627,9 +629,9 @@ export const handlers = [
   http.get(`${BASE}/api/v1/reverse-prompt/jobs/:id`, ({ params }) => {
     const vj = reverseVideoJobs.get(String(params.id));
     if (vj) {
-      if (vj.status === "running") {
+      if (vj.status !== "succeeded" && vj.status !== "failed") {
         vj._polls += 1;
-        if (vj._polls >= 2) vj.status = "succeeded"; // 第 2 次轮询起完成（含 video_analysis）
+        if (vj._polls >= 2) vj.status = "succeeded"; // queued → 第 2 次轮询起完成（含 result.video_analysis）
       }
       return ok(reverseVideoJobRead(vj));
     }

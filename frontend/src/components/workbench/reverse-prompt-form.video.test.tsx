@@ -32,8 +32,8 @@ const VIDEO_ANALYSIS = {
   duration_sec: 18,
   pacing: "中速偏快",
   shot_list: [
-    { index: 0, description: "产品特写", duration_sec: 4 },
-    { index: 1, description: "使用场景", duration_sec: 6 }
+    { start_sec: 0, end_sec: 4, visual: "产品特写", camera: "推近", motion: "蒸汽", transition: "叠化" },
+    { start_sec: 4, end_sec: 10, visual: "使用场景", camera: "跟拍", motion: "拧盖", transition: "硬切" }
   ],
   audio_transcript: null,
   bgm_style: null
@@ -63,12 +63,14 @@ const RESULT = {
     ecom_poster: { title: "促", subtitle: "5 折" }
   }
 };
-const runningJob = (): ReversePromptJobRead => ({
-  id: "rpv-1", status: "running", source_kind: "video", target_format: "seedance_2_0", result: null, video_analysis: null,
-  error_code: null, error_message: null, prompt_tokens: 0, completion_tokens: 0, credits: 100, cost_cents: 0,
+// FIX1③：初始 queued（BE 202 queued，非 running）；④ credits=provider 引擎成本（非租户 100 扣费）。
+const queuedJob = (): ReversePromptJobRead => ({
+  id: "rpv-1", status: "queued", source_kind: "video", target_format: "seedance_2_0", result: null,
+  error_code: null, error_message: null, prompt_tokens: 0, completion_tokens: 0, credits: 6, cost_cents: 0,
   created_at: "1970-01-01T00:00:00Z", updated_at: "1970-01-01T00:00:00Z", saved_at: null
 });
-const succeededJob = (): ReversePromptJobRead => ({ ...runningJob(), status: "succeeded", result: RESULT, video_analysis: VIDEO_ANALYSIS });
+// FIX1①：video_analysis 内嵌于 result（result.video_analysis）。
+const succeededJob = (): ReversePromptJobRead => ({ ...queuedJob(), status: "succeeded", result: { ...RESULT, video_analysis: VIDEO_ANALYSIS } });
 
 const reverseMut = vi.fn();
 function stub() {
@@ -130,7 +132,7 @@ describe("ReversePromptForm · 视频反推路径", () => {
   });
 
   it("计费门：确认 → reverse 恰一次(source_asset_id)；轮询至完成 → 视频分析 + 提示词 + 重新反推隐藏", async () => {
-    reverseMut.mockResolvedValue(runningJob());
+    reverseMut.mockResolvedValue(queuedJob());
     api.getReversePromptJob.mockResolvedValue(succeededJob());
     await switchToVideoAndUpload();
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
@@ -146,7 +148,7 @@ describe("ReversePromptForm · 视频反推路径", () => {
   });
 
   it("轮询瞬时失败 → 软提示、不误跳结果页；下一拍自愈后展示", async () => {
-    reverseMut.mockResolvedValue(runningJob());
+    reverseMut.mockResolvedValue(queuedJob());
     api.getReversePromptJob.mockRejectedValueOnce(new Error("boom")).mockResolvedValue(succeededJob());
     await switchToVideoAndUpload();
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));

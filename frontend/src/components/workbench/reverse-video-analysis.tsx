@@ -39,25 +39,38 @@ export function ReverseVideoAnalysisView({ analysis }: { analysis: ReverseVideoA
         </div>
       </div>
 
-      {/* 分镜列表 */}
+      {/* 分镜列表（FIX1：字段 start_sec/end_sec/visual/camera/motion/transition） */}
       {shots.length > 0 && (
         <div className="mb-3">
           <span className={labelClass}>{copy.reverse.vaShotList}</span>
           <ol className="flex flex-col gap-1.5">
-            {shots.map((shot) => (
-              <li
-                key={shot.index}
-                className="flex items-start gap-2 rounded-field border border-line-gold bg-glass-soft px-3 py-2 text-[12.5px] text-ink"
-              >
-                <span className="flex-none rounded-pill bg-chip-sel px-2 py-0.5 text-[11px] font-medium text-gold-deep">
-                  {copy.reverse.vaShot(shot.index + 1)}
-                </span>
-                <span className="min-w-0 flex-1">{shot.description}</span>
-                {shot.duration_sec ? (
-                  <span className="flex-none text-[11px] text-ink-faint">{copy.reverse.vaShotDuration(shot.duration_sec)}</span>
-                ) : null}
-              </li>
-            ))}
+            {shots.map((shot, i) => {
+              const meta = [
+                shot.camera && `${copy.reverse.vaShotCamera}：${shot.camera}`,
+                shot.motion && `${copy.reverse.vaShotMotion}：${shot.motion}`,
+                shot.transition && `${copy.reverse.vaShotTransition}：${shot.transition}`
+              ].filter(Boolean);
+              const hasRange = shot.start_sec != null && shot.end_sec != null;
+              return (
+                <li
+                  key={i}
+                  className="flex flex-col gap-1 rounded-field border border-line-gold bg-glass-soft px-3 py-2 text-[12.5px] text-ink"
+                >
+                  <div className="flex items-start gap-2">
+                    <span className="flex-none rounded-pill bg-chip-sel px-2 py-0.5 text-[11px] font-medium text-gold-deep">
+                      {copy.reverse.vaShot(i + 1)}
+                    </span>
+                    <span className="min-w-0 flex-1">{shot.visual}</span>
+                    {hasRange ? (
+                      <span className="flex-none text-[11px] text-ink-faint">
+                        {copy.reverse.vaShotRange(shot.start_sec as number, shot.end_sec as number)}
+                      </span>
+                    ) : null}
+                  </div>
+                  {meta.length > 0 && <p className="text-[11.5px] text-ink-faint">{meta.join(" · ")}</p>}
+                </li>
+              );
+            })}
           </ol>
         </div>
       )}

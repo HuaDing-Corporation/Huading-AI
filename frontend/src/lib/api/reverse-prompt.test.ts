@@ -146,22 +146,27 @@ describe("reverse-prompt API ↔ MSW（mock 镜像 BE 真形状：ReversePromptJ
 });
 
 describe("视频反推异步（VIDEO-REVERSE-PROMPT-UI-0001）↔ MSW", () => {
-  it("视频源(video-asset-*) → 202 running（无 result）→ 轮询 GET 第 2 次 succeeded + video_analysis + credits 100", async () => {
+  it("视频源(video-asset-*) → 202 queued（无 result）→ 轮询 GET 第 2 次 succeeded + result.video_analysis；job.credits=provider（非 100）", async () => {
     const created = await reverseFromAsset({ source_asset_id: "video-asset-1" });
-    expect(created.status).toBe("running");
+    expect(created.status).toBe("queued"); // FIX1③：BE 202 queued（非 running）
     expect(created.source_kind).toBe("video");
     expect(created.result).toBeNull();
-    expect(created.credits).toBe(100);
-    // 轮询：第 1 次仍 running，第 2 次终态。
+    // FIX1④：job.credits=provider 引擎成本，非租户固定 100 扣费（100 走 BE UsageRecord）。
+    expect(created.credits).not.toBe(100);
+    // 轮询：第 1 次仍 queued，第 2 次终态。
     const poll1 = await getReversePromptJob(created.id);
-    expect(poll1.status).toBe("running");
+    expect(poll1.status).toBe("queued");
     const poll2 = await getReversePromptJob(created.id);
     expect(poll2.status).toBe("succeeded");
     expect(poll2.result?.prompt_zh).toBeTruthy();
-    // video_analysis：时长/节奏/分镜列表；audio/bgm 一期空
-    const va = poll2.video_analysis!;
+    // FIX1①：video_analysis 内嵌于 result。
+    const va = poll2.result!.video_analysis!;
     expect(va.duration_sec).toBeGreaterThan(0);
     expect(va.shot_list.length).toBeGreaterThan(0);
+    // FIX1②：分镜字段 start_sec/end_sec/visual/camera/motion/transition。
+    expect(va.shot_list[0].visual).toBeTruthy();
+    expect(va.shot_list[0].start_sec).toBe(0);
+    expect(va.shot_list[0].end_sec).toBeGreaterThan(0);
     expect(va.audio_transcript).toBeNull();
     expect(va.bgm_style).toBeNull();
   });
@@ -173,9 +178,10 @@ describe("视频反推异步（VIDEO-REVERSE-PROMPT-UI-0001）↔ MSW", () => {
     expect(job.result).toBeTruthy();
   });
 
-  it("isReverseSettled：succeeded/failed 终态；running/processing 未终态", () => {
+  it("isReverseSettled：succeeded/failed 终态；queued/running/processing 未终态", () => {
     expect(isReverseSettled("succeeded")).toBe(true);
     expect(isReverseSettled("failed")).toBe(true);
+    expect(isReverseSettled("queued")).toBe(false); // FIX1③
     expect(isReverseSettled("running")).toBe(false);
     expect(isReverseSettled("processing")).toBe(false);
   });

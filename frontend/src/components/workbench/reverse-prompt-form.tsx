@@ -38,7 +38,7 @@ type SourceType = "image" | "video";
  * 提示词反推 (REVERSE-PROMPT-UI / VIDEO-REVERSE-PROMPT-UI-0001) 工作台容器 —— 唯一 hooks 调用方。一个入口两模式：
  *  - 图片：完全维持现状（同步 /reverse-prompt → succeeded+result；零回归）。
  *  - 视频（一期只上传文件、无链接入口）：上传视频(/uploads/videos?purpose=reverse_prompt，客户端预检 MP4/≤200MB/1–60s)
- *    → 计费门 ConfirmDialog(100 积分/次，确认一次扣/取消不扣) → 提交(202 running) → 轮询 GET /jobs/{id} 到终态
+ *    → 计费门 ConfirmDialog(100 积分/次，确认一次扣/取消不扣) → 提交(202 queued) → 轮询 GET /jobs/{id} 到终态
  *    （瞬时失败软提示、不误跳结果页）→ 结果先展示视频分析(video_analysis) 再展示 Seedance 提示词；「带入」沿用现有 fill_targets。
  * 请求体仅 { source_asset_id }（BE 据资产推 source_kind）。带入落点由结果视图据 BE 载荷直落，冒泡至 page 切模式并预填。
  */
@@ -410,8 +410,8 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
         />
       </Card>
 
-      {/* 结果：视频分析在上，Seedance 提示词在下 */}
-      {job?.video_analysis && <ReverseVideoAnalysisView analysis={job.video_analysis} />}
+      {/* 结果：视频分析在上，Seedance 提示词在下（FIX1：video_analysis 内嵌于 result） */}
+      {job?.result?.video_analysis && <ReverseVideoAnalysisView analysis={job.result.video_analysis} />}
       {job?.result && (
         <ReversePromptResultView
           result={job.result}

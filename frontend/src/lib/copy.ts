@@ -529,7 +529,10 @@ export const copy = {
     vaPacing: "节奏",
     vaShotList: "分镜列表",
     vaShot: (n: number) => `镜头 ${n}`,
-    vaShotDuration: (sec: number) => `${sec}s`,
+    vaShotRange: (start: number, end: number) => `${start}–${end}s`,
+    vaShotCamera: "运镜",
+    vaShotMotion: "动作",
+    vaShotTransition: "转场",
     vaAudioTranscript: "音频转写",
     vaBgmStyle: "背景音乐风格",
     vaNotEnabled: "未启用（一期）"
