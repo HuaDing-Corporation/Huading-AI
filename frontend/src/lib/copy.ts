@@ -50,7 +50,8 @@ export const copy = {
   // 管理员数据看板（ANALYTICS-UI-0001）
   analytics: {
     pageTitle: "数据看板",
-    pageSubtitle: "管理员专属 · 全用户用量、成本与趋势总览",
+    // ADMIN-VIP-GATE-UI-0001：门禁改为「管理员 或 huading plan」→ 副标题与友好页口径一致（不再仅「管理员专属」）
+    pageSubtitle: "管理员 / huading plan 专属 · 全站用量、成本与趋势总览",
     // 日期区间
     rangeLabel: "日期区间",
     rangeFrom: "起",
@@ -107,10 +108,11 @@ export const copy = {
     error: "加载失败，请重试",
     retry: "重试",
     empty: "该区间暂无数据",
-    // 非管理员 403
-    forbiddenTitle: "无权限访问",
-    forbiddenDesc: "数据看板仅管理员可见。",
-    forbiddenBack: "返回工作台"
+    // VIP 门禁友好页（ADMIN-VIP-GATE-UI-0001）：非管理员且非 huading plan → 403 code=ANALYTICS_PLAN_REQUIRED。
+    // 与「即将上线」占位页视觉/文案区分——这是「权限不足·VIP 专享」，不是「即将上线」。
+    planRequiredTitle: "仅 huading plan 用户可查看",
+    planRequiredDesc: "数据看板为 huading plan 专属。开通后可查看全站用量、成本与趋势总览；如需开通请联系我们。",
+    planRequiredBack: "返回工作台"
   },
   workbench: {
     topicLabel: "视频主题",
@@ -885,7 +887,8 @@ export const copy = {
     heroTitle: "企业级 AI 短视频工厂",
     heroSub:
       "输入主题、商品或脚本，批量产出符合品牌规范、可直接分发到各平台的成片。数字人口播、电商图、文案、视频，一站式智能生产。",
-    ctaRegister: "立即免费注册",
+    // ADMIN-VIP-GATE-UI-0001：新注册余额=0 → 去掉「免费」暗示（不承诺免费额度）
+    ctaRegister: "立即注册",
     ctaLogin: "登录控制台",
     // 数据条（冻结 §三※：不用不实的「500+」）
     statModules: "7 大模块",
@@ -919,14 +922,15 @@ export const copy = {
     samplePlaceholder: "样片占位",
     // 五步上手
     stepsTitle: "五步上手",
-    step1: "注册并登录控制台",
+    // ADMIN-VIP-GATE-UI-0001：新注册余额=0，注册后需开通额度才能生成 → 第 1 步点明，避免「注册即可生成」假暗示
+    step1: "注册并登录控制台（开通额度后即可生成）",
     step2: "在工作台选择模块（数字人口播/电商图/文案…）",
     step3: "输入主题或上传素材（商品图、脚本、原视频）",
     step4: "一键生成，实时查看进度",
     step5: "下载原片或直接发布到各平台",
-    // 注册 CTA 区
+    // 注册 CTA 区（ADMIN-VIP-GATE-UI-0001：新注册余额=0，不承诺免费体验 → 引导联系开通额度）
     ctaTitle: "现在开始，把视频生产变成流水线",
-    ctaSub: "新用户注册即可体验全部模块",
+    ctaSub: "注册后联系我们开通额度",
     // 页脚
     footerCopyright: "© 华鼎 · 企业级 AI 短视频引擎",
     footerIcp: "备案号：占位",

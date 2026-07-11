@@ -293,9 +293,12 @@ const ANALYTICS_TENANTS = Array.from({ length: 46 }, (_, i) => {
   };
 });
 
-function analyticsForbidden(): boolean {
+// ADMIN-VIP-GATE-UI-0001：VIP 门禁模拟——localStorage["hd_mock_analytics_plan"]==="none" → 403
+// ANALYTICS_PLAN_REQUIRED（MSW resolver 运行在页面上下文，可直读 localStorage，不受跨源 API base 影响；
+// e2e 用 page.evaluate 设置后 reload 即切未授权态）。默认（未设）= 授权 → 正常返数据，零回归。
+function analyticsPlanRequired(): boolean {
   try {
-    return typeof localStorage !== "undefined" && localStorage.getItem("hd_mock_non_admin") === "1";
+    return typeof localStorage !== "undefined" && localStorage.getItem("hd_mock_analytics_plan") === "none";
   } catch {
     return false;
   }
@@ -303,7 +306,8 @@ function analyticsForbidden(): boolean {
 
 function analyticsHandlers() {
   const A = `${BASE}/api/v1/admin/analytics`;
-  const guard = () => (analyticsForbidden() ? err(403, "FORBIDDEN", "Insufficient permission.") : null);
+  const guard = () =>
+    analyticsPlanRequired() ? err(403, "ANALYTICS_PLAN_REQUIRED", "Analytics requires the huading plan.") : null;
   const sortTenants = (sort: string) => {
     const field = sort.replace(/_(asc|desc)$/, "");
     const dir = sort.endsWith("_asc") ? 1 : -1;
@@ -1244,6 +1248,7 @@ export const handlers = [
   }),
 
   // ── 管理员数据看板 (ANALYTICS-UI-0001) ── /api/v1/admin/analytics/*，require_admin。
-  // 非管理员模拟：localStorage["hd_mock_non_admin"]==="1" → 403 FORBIDDEN（供 Playwright 403 态验证）。
+  // VIP 门禁模拟（ADMIN-VIP-GATE-UI-0001）：localStorage["hd_mock_analytics_plan"]="none" → 403
+  // ANALYTICS_PLAN_REQUIRED（供 Playwright 未授权友好页验证；默认未设=授权正常返数据）。
   ...analyticsHandlers()
 ];

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { ShieldAlert } from "lucide-react";
+import { Crown } from "lucide-react";
 
 import { ApiError } from "@/lib/api/client";
 import type { AnalyticsRange } from "@/lib/api/analytics";
@@ -15,19 +15,37 @@ import { ProviderTable } from "@/components/analytics/provider-table";
 import { TrendChart } from "@/components/analytics/trend-chart";
 import { copy } from "@/lib/copy";
 
-/** ApiError 403（后端 require_admin 拒绝）判定。 */
+/** VIP 门禁判定（ADMIN-VIP-GATE-UI-0001）：BE 403 + code=ANALYTICS_PLAN_REQUIRED（非管理员且非 huading plan）。 */
+export function isPlanRequired(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 403 && err.code === "ANALYTICS_PLAN_REQUIRED";
+}
+
+/** 任意 403 兜底（BE 未带 code 的边界）——同样当作无访问权，走同一 VIP 友好页。 */
 export function isForbidden(err: unknown): boolean {
   return err instanceof ApiError && err.status === 403;
 }
 
-function ForbiddenState() {
+/**
+ * VIP 门禁友好页（ADMIN-VIP-GATE-UI-0001）——非管理员且非 huading plan 用户看到此页，不白屏、不透传 403 报错。
+ * 视觉与「即将上线」占位页刻意区分：Crown + 金渐变实心圆（VIP 专享质感）vs coming-soon 的 Sparkles + 扁平玻璃圆。
+ */
+function PlanRequiredState() {
   return (
-    <div className="flex flex-col items-center gap-3 rounded-card border border-line-gold bg-glass-fill px-6 py-16 text-center">
-      <ShieldAlert size={40} strokeWidth={1.6} className="text-ink-faint" />
-      <h2 className="text-[17px] font-semibold text-ink">{copy.analytics.forbiddenTitle}</h2>
-      <p className="text-[13.5px] text-ink-soft">{copy.analytics.forbiddenDesc}</p>
-      <Link href="/" className="mt-1 rounded-field border border-line-gold bg-glass-fill px-4 py-2 text-[13px] text-gold-deep hover:bg-glass-hover">
-        {copy.analytics.forbiddenBack}
+    <div
+      className="flex flex-col items-center gap-3 rounded-card border border-line-gold bg-glass-fill px-6 py-16 text-center"
+      role="status"
+      aria-live="polite"
+    >
+      <span className="flex h-14 w-14 items-center justify-center rounded-full bg-grad-gold text-ink shadow-avatar">
+        <Crown size={26} strokeWidth={1.8} aria-hidden />
+      </span>
+      <h2 className="text-[17px] font-semibold text-ink">{copy.analytics.planRequiredTitle}</h2>
+      <p className="max-w-sm text-[13.5px] leading-relaxed text-ink-soft">{copy.analytics.planRequiredDesc}</p>
+      <Link
+        href="/"
+        className="mt-1 rounded-field border border-line-gold bg-glass-fill px-4 py-2 text-[13px] text-gold-deep hover:bg-glass-hover"
+      >
+        {copy.analytics.planRequiredBack}
       </Link>
     </div>
   );
@@ -46,9 +64,15 @@ export function DashboardInner({ range, onRangeChange }: { range: AnalyticsRange
   const reservedComplete =
     reserved.data && overview.data ? reservedItems.length >= overview.data.tenant_count : undefined;
 
-  // 非管理员：任一 admin 端点 403 → 整块优雅无权限态（不白屏、不靠前端隐藏兜底）。
-  if (isForbidden(overview.error) || isForbidden(reserved.error)) {
-    return <ForbiddenState />;
+  // VIP 门禁（ADMIN-VIP-GATE-UI-0001）：非管理员且非 huading plan → 任一 admin 端点 403（ANALYTICS_PLAN_REQUIRED
+  // 优先，任意 403 兜底）→ 整块渲染 VIP 友好页（不白屏、不透传 403、不靠前端隐藏）。
+  if (
+    isPlanRequired(overview.error) ||
+    isPlanRequired(reserved.error) ||
+    isForbidden(overview.error) ||
+    isForbidden(reserved.error)
+  ) {
+    return <PlanRequiredState />;
   }
 
   return (
@@ -75,7 +99,7 @@ export function DashboardInner({ range, onRangeChange }: { range: AnalyticsRange
 
 /**
  * 数据看板编排（ANALYTICS-UI-0001）。range 用 effect 客户端初始化（默认近 30 天），避免 SSR 预渲染与
- * hydration 的 new Date() 日期错位。四区块以 range 联动刷新；非管理员优雅 403。
+ * hydration 的 new Date() 日期错位。四区块以 range 联动刷新；非授权（非管理员且非 huading plan）→ 403 优雅友好页。
  */
 export function AnalyticsDashboard() {
   const [range, setRange] = useState<AnalyticsRange | null>(null);

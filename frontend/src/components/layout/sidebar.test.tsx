@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// 数据看板入口「仅管理员显示」（ANALYTICS-UI-0001）。
+// 数据看板入口「始终显示」（ADMIN-VIP-GATE-UI-0001：去 adminOnly 隐藏，门禁移到页面友好页）。
 const auth = vi.hoisted(() => ({ role: "admin" as string | undefined }));
 vi.mock("@/lib/auth/auth-context", () => ({ useAuth: () => ({ session: auth.role ? { role: auth.role } : null }) }));
 vi.mock("@/lib/api/hooks", () => ({ useQuota: () => ({ data: undefined }) }));
@@ -18,7 +18,7 @@ afterEach(() => {
   auth.role = "admin";
 });
 
-describe("Sidebar (数据看板·仅管理员)", () => {
+describe("Sidebar (数据看板·始终显示 · ADMIN-VIP-GATE-UI-0001)", () => {
   it("管理员：显示「数据看板」入口（链接指向 /analytics）", () => {
     auth.role = "admin";
     render(<Sidebar />);
@@ -26,18 +26,19 @@ describe("Sidebar (数据看板·仅管理员)", () => {
     expect(screen.getByRole("link", { name: "工作台" })).toBeInTheDocument();
   });
 
-  it("非管理员（creator）：不显示「数据看板」，其余项照常（承重·仅管理员过滤）", () => {
+  // 承重：不再按 adminOnly 隐藏——非管理员也显示「数据看板」（点进去看 VIP 友好页，不在此隐藏）。
+  it("非管理员（creator）：仍显示「数据看板」入口（去 adminOnly 隐藏）", () => {
     auth.role = "creator";
     render(<Sidebar />);
-    expect(screen.queryByText("数据看板")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "数据看板" })).toHaveAttribute("href", "/analytics");
     expect(screen.getByRole("link", { name: "工作台" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "批量生产" })).toBeInTheDocument();
   });
 
-  it("未登录（无 session）：同样不显示「数据看板」", () => {
+  it("未登录（无 session）：同样显示「数据看板」入口", () => {
     auth.role = undefined;
     render(<Sidebar />);
-    expect(screen.queryByText("数据看板")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "数据看板" })).toHaveAttribute("href", "/analytics");
   });
 });
 
