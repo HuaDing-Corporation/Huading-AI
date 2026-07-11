@@ -11,7 +11,7 @@ from app.db.models import Plan, Subscription
 
 logger = structlog.get_logger(__name__)
 
-_DEFAULT_PLAN_CODE = "basic"
+_DEFAULT_PLAN_CODE = "free"
 
 
 def _period_end(start: datetime, period: str) -> datetime:
@@ -27,7 +27,7 @@ def _period_end(start: datetime, period: str) -> datetime:
 
 
 def default_plan(db: Session) -> Plan | None:
-    """The plan a new tenant subscribes to: 'basic' if present, else cheapest active."""
+    """The plan a new tenant subscribes to: 'free' if present, else cheapest active."""
     plan = db.scalar(select(Plan).where(Plan.code == _DEFAULT_PLAN_CODE, Plan.is_active.is_(True)))
     if plan is not None:
         return plan

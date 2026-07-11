@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from datetime import UTC, datetime
 
 import redis
 import structlog
@@ -10,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings, get_settings
 from app.core.exceptions import AppError
 from app.core.security import decode_access_token
-from app.db.models import Role, Tenant, User
+from app.db.models import Plan, Role, Subscription, Tenant, User
 from app.db.session import SessionLocal
 from app.services.progress import ProgressStore, build_progress_store
 from app.services.storage.base import ObjectStorage
@@ -168,6 +169,34 @@ def require_admin(user: User = CurrentUserDependency) -> User:
             status_code=status.HTTP_403_FORBIDDEN,
         )
     return user
+
+
+def require_analytics_access(
+    db: Session = DbSessionDependency,
+    user: User = CurrentUserDependency,
+) -> User:
+    if user.role == Role.ADMIN.value:
+        return user
+    now = datetime.now(UTC)
+    subscription_id = db.scalar(
+        select(Subscription.id)
+        .join(Plan, Plan.id == Subscription.plan_id)
+        .where(
+            Subscription.tenant_id == user.tenant_id,
+            Subscription.status == "active",
+            Subscription.period_start <= now,
+            Subscription.period_end >= now,
+            Plan.code == "huading",
+        )
+        .limit(1)
+    )
+    if subscription_id is not None:
+        return user
+    raise AppError(
+        "Analytics access requires the Huading plan.",
+        code="ANALYTICS_PLAN_REQUIRED",
+        status_code=status.HTTP_403_FORBIDDEN,
+    )
 
 
 def scoped_task_id(tenant_id: str, task_id: str) -> str:

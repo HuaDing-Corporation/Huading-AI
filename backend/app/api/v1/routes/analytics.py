@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
-from app.api.deps import DbSessionDependency, require_admin
+from app.api.deps import DbSessionDependency, require_analytics_access
 from app.schemas.analytics import (
     AnalyticsByProviderResponse,
     AnalyticsByTenantResponse,
@@ -25,7 +25,7 @@ from app.services.analytics import (
     resolve_date_range,
 )
 
-router = APIRouter(dependencies=[Depends(require_admin)])
+router = APIRouter(dependencies=[Depends(require_analytics_access)])
 FromDateQuery = Annotated[date | None, Query(alias="from")]
 ToDateQuery = Annotated[date | None, Query()]
 TenantSortQuery = Annotated[AnalyticsTenantSort, Query()]

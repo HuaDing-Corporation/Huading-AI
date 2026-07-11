@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.db.models import Plan, Subscription, Tenant, UsageRecord, User, VideoTask
 from app.main import app
@@ -268,7 +268,7 @@ def _seed_analytics_fixture(auth_db, tenant_id: str) -> str:
         "/api/v1/admin/analytics/timeseries",
     ],
 )
-def test_analytics_endpoints_require_admin(path, auth_context, auth_db) -> None:
+def test_analytics_endpoints_require_admin_or_huading_plan(path, auth_context, auth_db) -> None:
     with auth_db() as db:
         user = db.get(User, auth_context["user_id"])
         assert user is not None
@@ -278,7 +278,54 @@ def test_analytics_endpoints_require_admin(path, auth_context, auth_db) -> None:
     response = TestClient(app).get(path, headers=auth_context["headers"])
 
     assert response.status_code == 403
-    assert response.json()["error"]["code"] == "FORBIDDEN"
+    assert response.json()["error"]["code"] == "ANALYTICS_PLAN_REQUIRED"
+
+
+def test_analytics_access_allows_huading_plan_creator(auth_context, auth_db) -> None:
+    with auth_db() as db:
+        user = db.get(User, auth_context["user_id"])
+        subscription = db.scalar(
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+        )
+        huading = Plan(
+            code="huading",
+            name="Huading Plan",
+            price_cents=0,
+            period="monthly",
+            quota_credits=0,
+            is_active=True,
+        )
+        db.add(huading)
+        db.flush()
+        user.role = "creator"
+        subscription.plan_id = huading.id
+        db.commit()
+
+    response = TestClient(app).get(
+        "/api/v1/admin/analytics/overview",
+        params=PERIOD_PARAMS,
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+
+
+def test_analytics_access_allows_admin_without_subscription(auth_context, auth_db) -> None:
+    with auth_db() as db:
+        user = db.get(User, auth_context["user_id"])
+        assert user.role == "admin"
+        db.execute(
+            delete(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+        )
+        db.commit()
+
+    response = TestClient(app).get(
+        "/api/v1/admin/analytics/overview",
+        params=PERIOD_PARAMS,
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
 
 
 def test_overview_counts_only_settled_usage_and_failed_rate_denominator(
