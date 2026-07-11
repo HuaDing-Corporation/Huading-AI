@@ -21,8 +21,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.exceptions import AppError
 from app.core.logging import get_logger
-from app.db.models import Asset, BrandVoice, TaskAsset, VideoTask, Voice
+from app.db.models import Asset, BrandVoice, TaskAsset, User, VideoTask, Voice
 from app.db.session import SessionLocal
 from app.providers.base import invoke, resolve, resolve_named_provider
 from app.providers.url_guard import (
@@ -39,6 +40,10 @@ from app.services.apimart_costs import (
 )
 from app.services.batches import refresh_batch_job
 from app.services.history import prune_video_history_best_effort
+from app.services.plan_access import (
+    require_doubao_voice_clone_access,
+    uses_doubao_voice_clone,
+)
 from app.services.progress import ProgressStore, build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
 from app.services.storage.base import ObjectStorage
@@ -767,6 +772,18 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         task,
         tenant_id=ctx.tenant_id,
     )
+    if voice_source == "brand_voice" and uses_doubao_voice_clone(brand_voice_provider):
+        creator = ctx.db.get(User, task.created_by_user_id) if task.created_by_user_id else None
+        creator_role = (
+            creator.role
+            if creator is not None and creator.tenant_id == ctx.tenant_id
+            else ""
+        )
+        require_doubao_voice_clone_access(
+            ctx.db,
+            tenant_id=ctx.tenant_id,
+            role=creator_role,
+        )
     provider, capability = _tts_provider_for_voice(
         ctx.db,
         tenant_id=ctx.tenant_id,
@@ -847,23 +864,19 @@ def _tts_voice_for_task(
     params = task.params or {}
     brand_voice_id = task.brand_voice_id or str(params.get("brand_voice_id") or "")
     if brand_voice_id:
-        speaker_id = str(params.get("tts_speaker_id") or "").strip()
-        brand_voice_provider = str(params.get("brand_voice_provider") or "").strip()
-        if not speaker_id or not brand_voice_provider:
-            brand_voice = db.get(BrandVoice, brand_voice_id)
-            if (
-                brand_voice is not None
-                and brand_voice.tenant_id == tenant_id
-                and brand_voice.deleted_at is None
-                and brand_voice.status == "ready"
-            ):
-                if not speaker_id:
-                    speaker_id = str(brand_voice.speaker_id or "").strip()
-                if not brand_voice_provider:
-                    brand_voice_provider = str(brand_voice.provider or "").strip()
+        brand_voice = db.get(BrandVoice, brand_voice_id)
+        if (
+            brand_voice is None
+            or brand_voice.tenant_id != tenant_id
+            or brand_voice.deleted_at is not None
+            or brand_voice.status != "ready"
+        ):
+            raise RuntimeError("Brand voice not found for video task.")
+        speaker_id = str(brand_voice.speaker_id or "").strip()
         if not speaker_id:
-            raise RuntimeError("Brand voice speaker not found for avatar_talk.")
-        return speaker_id, "brand_voice", brand_voice_provider or "doubao-voice-clone"
+            raise RuntimeError("Brand voice speaker not found for video task.")
+        provider = str(brand_voice.provider or "doubao-voice-clone").strip()
+        return speaker_id, "brand_voice", provider
 
     voice = db.get(Voice, task.voice_id) if task.voice_id else None
     if voice is None:
@@ -2012,6 +2025,12 @@ ECOM_I2V_STEPS = [
 ]
 
 
+def _pipeline_error_details(exc: Exception, *, fallback_code: str) -> tuple[str, str]:
+    if isinstance(exc, AppError):
+        return exc.code, exc.message
+    return fallback_code, str(exc)
+
+
 def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
     store = build_progress_store(settings.redis_url)
     storage = create_object_storage(settings)
@@ -2110,10 +2129,14 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
             )
             return {"task_id": task_id, "status": "done"}
         except Exception as exc:
+            error_code, error_message = _pipeline_error_details(
+                exc,
+                fallback_code="AVATAR_TALK_FAILED",
+            )
             task.status = "failed"
-            task.error_code = "AVATAR_TALK_FAILED"
-            task.error_message = str(exc)
-            task.error = str(exc)
+            task.error_code = error_code
+            task.error_message = error_message
+            task.error = error_message
             task.finished_at = datetime.now(UTC)
             release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
             refresh_batch_job(db, batch_id=task.batch_id)
@@ -2131,8 +2154,8 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 status="failed",
                 progress=failed_progress,
                 step="failed",
-                error_code="AVATAR_TALK_FAILED",
-                error_message=str(exc),
+                error_code=error_code,
+                error_message=error_message,
             )
             raise
 
@@ -2234,10 +2257,14 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
             )
             return {"task_id": task_id, "status": "done"}
         except Exception as exc:
+            error_code, error_message = _pipeline_error_details(
+                exc,
+                fallback_code="SEEDANCE_I2V_FAILED",
+            )
             task.status = "failed"
-            task.error_code = "SEEDANCE_I2V_FAILED"
-            task.error_message = str(exc)
-            task.error = str(exc)
+            task.error_code = error_code
+            task.error_message = error_message
+            task.error = error_message
             task.finished_at = datetime.now(UTC)
             release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
             refresh_batch_job(db, batch_id=task.batch_id)
@@ -2255,8 +2282,8 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
                 status="failed",
                 progress=failed_progress,
                 step="failed",
-                error_code="SEEDANCE_I2V_FAILED",
-                error_message=str(exc),
+                error_code=error_code,
+                error_message=error_message,
             )
             raise
 

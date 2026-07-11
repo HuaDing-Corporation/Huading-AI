@@ -27,11 +27,9 @@ from app.core.utils import base_mime
 from app.db.models import (
     Asset,
     BgmLibraryTrack,
-    BrandVoice,
     TaskAsset,
     User,
     VideoTask,
-    Voice,
 )
 from app.providers.base import invoke, resolve
 from app.schemas.response import ApiResponse, ok
@@ -55,6 +53,10 @@ from app.services.history import (
     prune_video_history,
     video_mode_filter,
 )
+from app.services.plan_access import (
+    require_doubao_voice_clone_access,
+    uses_doubao_voice_clone,
+)
 from app.services.progress import ProgressStore
 from app.services.quota import (
     QuotaEstimate,
@@ -70,6 +72,7 @@ from app.services.quota import (
     seedance_i2v_target_seconds,
 )
 from app.services.storage.base import ObjectStorage
+from app.services.voices import resolve_narration_voice
 from app.workers.avatar_talk import (
     build_seedance_scene_prompt_payload,
     generate_avatar_talk_task,
@@ -167,27 +170,6 @@ def _subtitle_style_params(payload: VideoGenerateRequest) -> dict | None:
     if payload.subtitle_style is None:
         return None
     return payload.subtitle_style.model_dump(exclude_none=True)
-
-
-def _resolve_avatar_talk_voice(
-    db: Session,
-    *,
-    tenant_id: str,
-    voice_id: str,
-) -> tuple[Voice | None, BrandVoice | None]:
-    voice = db.get(Voice, voice_id)
-    if voice is not None and voice.is_active:
-        return voice, None
-    brand_voice = db.get(BrandVoice, voice_id)
-    if (
-        brand_voice is not None
-        and brand_voice.tenant_id == tenant_id
-        and brand_voice.deleted_at is None
-        and brand_voice.status == "ready"
-        and brand_voice.speaker_id
-    ):
-        return None, brand_voice
-    raise AppError("Voice not found.", code="VOICE_NOT_FOUND", status_code=404)
 
 
 def _avatar_source_count(payload: VideoGenerateRequest) -> int:
@@ -643,11 +625,17 @@ def _create_avatar_talk_video(
             code="VALIDATION_ERROR",
             status_code=422,
         )
-    voice, brand_voice = _resolve_avatar_talk_voice(
+    voice, brand_voice = resolve_narration_voice(
         db,
         tenant_id=user.tenant_id,
         voice_id=payload.voice_id,
     )
+    if brand_voice is not None and uses_doubao_voice_clone(brand_voice.provider):
+        require_doubao_voice_clone_access(
+            db,
+            tenant_id=user.tenant_id,
+            role=user.role,
+        )
     if payload.avatar_video_asset_id:
         avatar = _avatar_video_asset_or_404(
             db,
@@ -735,9 +723,17 @@ def _create_seedance_i2v_video(
 ) -> str:
     if not payload.voice_id:
         raise AppError("seedance_i2v requires voice_id.", code="VALIDATION_ERROR", status_code=422)
-    voice = db.get(Voice, payload.voice_id)
-    if voice is None or not voice.is_active:
-        raise AppError("Voice not found.", code="VOICE_NOT_FOUND", status_code=404)
+    voice, brand_voice = resolve_narration_voice(
+        db,
+        tenant_id=user.tenant_id,
+        voice_id=payload.voice_id,
+    )
+    if brand_voice is not None and uses_doubao_voice_clone(brand_voice.provider):
+        require_doubao_voice_clone_access(
+            db,
+            tenant_id=user.tenant_id,
+            role=user.role,
+        )
 
     task_id = str(uuid4())
     script = payload.script
@@ -753,6 +749,15 @@ def _create_seedance_i2v_video(
     subtitle_style = _subtitle_style_params(payload)
     if subtitle_style is not None:
         params["subtitle_style"] = subtitle_style
+    if brand_voice is not None:
+        params.update(
+            {
+                "voice_source": "brand_voice",
+                "brand_voice_id": brand_voice.id,
+                "tts_speaker_id": brand_voice.speaker_id,
+                "brand_voice_provider": brand_voice.provider,
+            }
+        )
     task = VideoTask(
         id=task_id,
         tenant_id=user.tenant_id,
@@ -763,7 +768,8 @@ def _create_seedance_i2v_video(
         mode="seedance_i2v",
         video_mode="seedance_i2v",
         progress=0,
-        voice_id=payload.voice_id,
+        voice_id=voice.id if voice is not None else None,
+        brand_voice_id=brand_voice.id if brand_voice is not None else None,
         speed=Decimal(str(payload.speed)),
         aspect_ratio=payload.aspect_ratio,
         subtitle_enabled=payload.subtitle_enabled,

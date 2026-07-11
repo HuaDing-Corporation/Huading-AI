@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import tenant_storage_key
 from app.core.config import settings
 from app.core.exceptions import AppError
-from app.db.models import Asset, BatchJob, BgmLibraryTrack, VideoTask, Voice
+from app.db.models import Asset, BatchJob, BgmLibraryTrack, BrandVoice, VideoTask, Voice
 from app.providers.url_guard import ProviderUrlError, ensure_public_https_url
 from app.schemas.batches import BatchRequest
 from app.services.bgm_library import ensure_default_bgm_tracks
@@ -26,6 +26,7 @@ from app.services.quota import (
     seedance_i2v_target_seconds,
 )
 from app.services.storage.base import ObjectStorage
+from app.services.voices import resolve_narration_voice
 
 _IMAGE_MIME_EXTENSIONS = {
     "image/jpeg": ".jpg",
@@ -154,13 +155,13 @@ def image_asset_or_raise(db: Session, *, tenant_id: str, asset_id: str) -> Asset
     return asset
 
 
-def validate_voice_or_raise(db: Session, *, voice_id: str | None) -> Voice:
-    if not voice_id:
-        raise AppError("voice_id is required.", code="VALIDATION_ERROR", status_code=422)
-    voice = db.get(Voice, voice_id)
-    if voice is None or not voice.is_active:
-        raise AppError("Voice not found.", code="VOICE_NOT_FOUND", status_code=404)
-    return voice
+def validate_voice_or_raise(
+    db: Session,
+    *,
+    tenant_id: str,
+    voice_id: str | None,
+) -> tuple[Voice | None, BrandVoice | None]:
+    return resolve_narration_voice(db, tenant_id=tenant_id, voice_id=voice_id)
 
 
 def tenant_relative_upload_key(asset: Asset, *, tenant_id: str) -> str:

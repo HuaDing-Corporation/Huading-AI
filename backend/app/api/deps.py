@@ -1,5 +1,4 @@
 from collections.abc import Generator
-from datetime import UTC, datetime
 
 import redis
 import structlog
@@ -11,8 +10,9 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings, get_settings
 from app.core.exceptions import AppError
 from app.core.security import decode_access_token
-from app.db.models import Plan, Role, Subscription, Tenant, User
+from app.db.models import Role, Tenant, User
 from app.db.session import SessionLocal
+from app.services.plan_access import has_huading_access
 from app.services.progress import ProgressStore, build_progress_store
 from app.services.storage.base import ObjectStorage
 from app.services.storage.factory import create_object_storage
@@ -175,22 +175,7 @@ def require_analytics_access(
     db: Session = DbSessionDependency,
     user: User = CurrentUserDependency,
 ) -> User:
-    if user.role == Role.ADMIN.value:
-        return user
-    now = datetime.now(UTC)
-    subscription_id = db.scalar(
-        select(Subscription.id)
-        .join(Plan, Plan.id == Subscription.plan_id)
-        .where(
-            Subscription.tenant_id == user.tenant_id,
-            Subscription.status == "active",
-            Subscription.period_start <= now,
-            Subscription.period_end >= now,
-            Plan.code == "huading",
-        )
-        .limit(1)
-    )
-    if subscription_id is not None:
+    if has_huading_access(db, tenant_id=user.tenant_id, role=user.role):
         return user
     raise AppError(
         "Analytics access requires the Huading plan.",

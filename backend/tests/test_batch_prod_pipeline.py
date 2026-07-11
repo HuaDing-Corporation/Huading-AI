@@ -12,7 +12,17 @@ from sqlalchemy import func, select
 
 from app.api.deps import get_object_storage
 from app.core.config import settings
-from app.db.models import Asset, BatchJob, Subscription, TaskAsset, UsageRecord, VideoTask, Voice
+from app.db.models import (
+    Asset,
+    BatchJob,
+    BrandVoice,
+    Subscription,
+    TaskAsset,
+    UsageRecord,
+    User,
+    VideoTask,
+    Voice,
+)
 from app.main import app
 
 
@@ -782,6 +792,124 @@ def test_batch_create_ecom_table_download_failure_marks_one_row_failed_not_whole
         assert queued_task.params["resolution"] == "480p"
         assert db.scalar(select(func.count()).select_from(UsageRecord)) == 1
         assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 803
+
+
+def test_batch_ecom_rejects_doubao_brand_voice_without_huading_access(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    seedance_calls, _video_calls = _stub_batch_tasks(monkeypatch)
+    with auth_db() as db:
+        _set_quota(db, auth_context["tenant_id"], total=5000)
+        user = db.get(User, auth_context["user_id"])
+        assert user is not None
+        user.role = "creator"
+        brand_voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            name="Batch Premium Voice",
+            provider="doubao-voice-clone",
+            speaker_id="batch-premium-speaker",
+            status="ready",
+            consent_confirmed=True,
+            consent_confirmed_at=datetime.now(UTC),
+        )
+        image = _seed_image_asset(db, tenant_id=auth_context["tenant_id"])
+        db.add(brand_voice)
+        db.commit()
+        brand_voice_id = brand_voice.id
+        image_id = image.id
+
+    response = TestClient(app).post(
+        "/api/v1/batches",
+        json={
+            "kind": "ecom_table",
+            "rows": [
+                {
+                    "product_name": "premium cup",
+                    "selling_points": "keeps drinks warm",
+                    "image_asset_id": image_id,
+                }
+            ],
+            "common": {
+                "video_mode": "seedance_i2v",
+                "voice_id": brand_voice_id,
+                "duration_sec": 10,
+                "resolution": "480p",
+            },
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "VOICE_CLONE_PLAN_REQUIRED"
+    assert seedance_calls == []
+    with auth_db() as db:
+        assert db.scalar(select(func.count()).select_from(BatchJob)) == 0
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == 0
+
+
+def test_batch_ecom_allows_cosyvoice_brand_voice_on_free_plan(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    seedance_calls, _video_calls = _stub_batch_tasks(monkeypatch)
+    with auth_db() as db:
+        _set_quota(db, auth_context["tenant_id"], total=5000)
+        user = db.get(User, auth_context["user_id"])
+        assert user is not None
+        user.role = "creator"
+        brand_voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            name="Batch Free Voice",
+            provider="cosyvoice-voice-clone",
+            speaker_id="batch-cosy-speaker",
+            status="ready",
+            consent_confirmed=True,
+            consent_confirmed_at=datetime.now(UTC),
+        )
+        image = _seed_image_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="asset-batch-cosy-product",
+        )
+        db.add(brand_voice)
+        db.commit()
+        brand_voice_id = brand_voice.id
+        image_id = image.id
+
+    response = TestClient(app).post(
+        "/api/v1/batches",
+        json={
+            "kind": "ecom_table",
+            "rows": [
+                {
+                    "product_name": "free cup",
+                    "selling_points": "dishwasher safe",
+                    "image_asset_id": image_id,
+                }
+            ],
+            "common": {
+                "video_mode": "seedance_i2v",
+                "voice_id": brand_voice_id,
+                "duration_sec": 10,
+                "resolution": "480p",
+            },
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 202
+    assert len(seedance_calls) == 1
+    task_id = response.json()["data"]["task_ids"][0]
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        assert task.voice_id is None
+        assert task.brand_voice_id == brand_voice_id
+        assert task.params["voice_source"] == "brand_voice"
+        assert task.params["tts_speaker_id"] == "batch-cosy-speaker"
+        assert task.params["brand_voice_provider"] == "cosyvoice-voice-clone"
 
 
 def test_batch_cancel_releases_queued_tasks_and_leaves_running_tasks(

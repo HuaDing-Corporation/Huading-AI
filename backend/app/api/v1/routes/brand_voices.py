@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, status
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
@@ -29,6 +29,7 @@ from app.schemas.brand_voices import (
     BrandVoiceUpdateRequest,
 )
 from app.schemas.response import ApiResponse, ok
+from app.services.plan_access import require_doubao_voice_clone_access
 from app.services.quota import charge_voice_clone_quota
 from app.services.storage.base import ObjectStorage
 
@@ -50,6 +51,7 @@ _ALLOWED_AUDIO_TYPES = {
 _MIN_SOURCE_AUDIO_MS = 5_000
 _VOICE_CLONE_PROVIDER = "doubao-voice-clone"
 _VOICE_CLONE_MODEL = "volc.megatts.voiceclone"
+_PLATFORM_SLOT_POOL_LOCK_ID = 7_619_542_610_467_367
 _COSYVOICE_CLONE_PROVIDER = "cosyvoice-voice-clone"
 _CLONE_ERROR_TEXT_LIMIT = 1000
 _VOICE_CLONE_PROVIDER_ALIASES = {
@@ -78,6 +80,13 @@ def create_brand_voice(
             code="BRAND_VOICE_CONSENT_REQUIRED",
             status_code=422,
         )
+    requested_provider = _voice_clone_provider_name(payload.provider)
+    if _uses_doubao_clone_slot(requested_provider):
+        require_doubao_voice_clone_access(
+            db,
+            tenant_id=user.tenant_id,
+            role=user.role,
+        )
     source_audio = _source_audio_or_404(
         db,
         tenant_id=user.tenant_id,
@@ -85,7 +94,6 @@ def create_brand_voice(
     )
 
     now = datetime.now(UTC)
-    requested_provider = _voice_clone_provider_name(payload.provider)
     brand_voice = BrandVoice(
         tenant_id=user.tenant_id,
         name=payload.name,
@@ -332,6 +340,19 @@ def _allocate_voice_clone_speaker_id(
     brand_voice_id: str,
 ) -> str:
     config = _voice_clone_provider_config(db, tenant_id=tenant_id, for_update=True)
+    if config is None:
+        _lock_platform_voice_clone_slot_pool(db)
+        config = _voice_clone_provider_config(db, tenant_id=tenant_id, for_update=True)
+        if config is None:
+            config = ProviderConfig(
+                tenant_id=None,
+                capability="voice_clone",
+                provider=_VOICE_CLONE_PROVIDER,
+                config={},
+                is_active=True,
+            )
+            db.add(config)
+            db.flush()
     values = dict(config.config or {}) if config is not None else {}
     has_db_speaker_ids = "speaker_ids" in values
     speaker_ids = _configured_speaker_ids(values)
@@ -351,9 +372,16 @@ def _allocate_voice_clone_speaker_id(
     if has_db_speaker_ids:
         values["speaker_ids"] = speaker_ids
     values["used_speaker_ids"] = used
-    if config is not None:
-        config.config = values
+    config.config = values
     return speaker_id
+
+
+def _lock_platform_voice_clone_slot_pool(db: Session) -> None:
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_id)"),
+            {"lock_id": _PLATFORM_SLOT_POOL_LOCK_ID},
+        )
 
 
 def _configured_speaker_ids(values: dict[str, Any]) -> list[str]:

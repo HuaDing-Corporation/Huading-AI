@@ -5,12 +5,22 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.db.models import Asset, Plan, Subscription, Tenant, UsageRecord, User, VideoTask
+from app.db.models import (
+    Asset,
+    Plan,
+    ProviderConfig,
+    Subscription,
+    Tenant,
+    UsageRecord,
+    User,
+    VideoTask,
+)
 from app.main import app
 
 
@@ -438,3 +448,181 @@ def test_billing_reset_cli_requires_backup_and_defaults_to_dry_run(
         assert subscription.quota_credits_total == 10_000_000
         assert subscription.quota_credits_used == 0
         assert subscription.quota_credits_reserved == 0
+
+
+def test_assign_speaker_slot_is_idempotent_and_does_not_touch_platform_pool(auth_db) -> None:
+    from scripts.ops.reset_billing_and_admin import (
+        SpeakerSlotAssignmentError,
+        assign_speaker_slot,
+    )
+
+    with auth_db() as db:
+        tenant = Tenant(slug="vip-studio", name="VIP Studio")
+        platform_config = ProviderConfig(
+            tenant_id=None,
+            capability="voice_clone",
+            provider="doubao-voice-clone",
+            config={
+                "speaker_ids": ["S_platform_001"],
+                "used_speaker_ids": {"S_platform_001": "platform-brand"},
+            },
+            is_active=True,
+        )
+        db.add_all([tenant, platform_config])
+        db.commit()
+        tenant_id = tenant.id
+
+        preview = assign_speaker_slot(
+            db,
+            tenant_slug="vip-studio",
+            speaker_id="S_tenant_exclusive_001",
+            apply=False,
+        )
+        assert preview.apply is False
+        assert preview.changed is True
+        assert preview.config_created is True
+        assert preview.speaker_ids == ("S_tenant_exclusive_001",)
+        assert db.scalar(
+            select(ProviderConfig).where(ProviderConfig.tenant_id == tenant_id)
+        ) is None
+
+        applied = assign_speaker_slot(
+            db,
+            tenant_slug="vip-studio",
+            speaker_id="S_tenant_exclusive_001",
+            apply=True,
+        )
+        db.commit()
+        assert applied.apply is True
+        assert applied.changed is True
+        assert applied.config_created is True
+
+        repeated = assign_speaker_slot(
+            db,
+            tenant_slug="vip-studio",
+            speaker_id="S_tenant_exclusive_001",
+            apply=True,
+        )
+        db.commit()
+        assert repeated.changed is False
+        assert repeated.config_created is False
+        assert repeated.speaker_ids == ("S_tenant_exclusive_001",)
+
+        tenant_config = db.scalar(
+            select(ProviderConfig).where(
+                ProviderConfig.tenant_id == tenant_id,
+                ProviderConfig.capability == "voice_clone",
+                ProviderConfig.provider == "doubao-voice-clone",
+            )
+        )
+        assert tenant_config is not None
+        assert tenant_config.config == {"speaker_ids": ["S_tenant_exclusive_001"]}
+        db.refresh(platform_config)
+        assert platform_config.config == {
+            "speaker_ids": ["S_platform_001"],
+            "used_speaker_ids": {"S_platform_001": "platform-brand"},
+        }
+
+        other_tenant = Tenant(slug="other-vip-studio", name="Other VIP Studio")
+        db.add(other_tenant)
+        db.commit()
+        with pytest.raises(
+            SpeakerSlotAssignmentError,
+            match="another tenant",
+        ):
+            assign_speaker_slot(
+                db,
+                tenant_slug="other-vip-studio",
+                speaker_id="S_tenant_exclusive_001",
+                apply=True,
+            )
+        assert db.scalar(
+            select(ProviderConfig).where(
+                ProviderConfig.tenant_id == other_tenant.id,
+                ProviderConfig.capability == "voice_clone",
+            )
+        ) is None
+
+
+def test_assign_speaker_slot_rejects_slot_from_env_platform_pool(
+    auth_db,
+    monkeypatch,
+) -> None:
+    from scripts.ops import reset_billing_and_admin as ops
+
+    monkeypatch.setattr(
+        ops,
+        "settings",
+        SimpleNamespace(
+            engine_doubao_voice_clone_speaker_ids=["S_env_platform_001"]
+        ),
+        raising=False,
+    )
+    with auth_db() as db:
+        tenant = Tenant(slug="env-pool-vip", name="Env Pool VIP")
+        db.add(tenant)
+        db.commit()
+
+        with pytest.raises(
+            ops.SpeakerSlotAssignmentError,
+            match="platform pool",
+        ):
+            ops.assign_speaker_slot(
+                db,
+                tenant_slug="env-pool-vip",
+                speaker_id="S_env_platform_001",
+                apply=True,
+            )
+
+        assert db.scalar(
+            select(ProviderConfig).where(ProviderConfig.tenant_id == tenant.id)
+        ) is None
+
+
+def test_assign_speaker_slot_cli_defaults_to_dry_run_and_requires_apply(
+    auth_db,
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    from scripts.ops import reset_billing_and_admin as ops
+
+    with auth_db() as db:
+        tenant = Tenant(slug="cli-vip-studio", name="CLI VIP Studio")
+        db.add(tenant)
+        db.commit()
+        tenant_id = tenant.id
+
+    backup = tmp_path / "valid.dump"
+    backup.write_bytes(b"PGDMP" + b"\x00" * 2048)
+    monkeypatch.setattr(ops, "SessionLocal", auth_db, raising=False)
+    base_args = [
+        "assign-speaker-slot",
+        "--backup",
+        str(backup),
+        "--tenant-slug",
+        "cli-vip-studio",
+        "--speaker-id",
+        "S_cli_exclusive_001",
+    ]
+
+    assert ops.main(base_args) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["operation"] == "assign-speaker-slot"
+    assert preview["apply"] is False
+    assert preview["changed"] is True
+    with auth_db() as db:
+        assert db.scalar(
+            select(ProviderConfig).where(ProviderConfig.tenant_id == tenant_id)
+        ) is None
+
+    assert ops.main([*base_args, "--apply"]) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["apply"] is True
+    assert applied["speaker_ids"] == ["S_cli_exclusive_001"]
+    with auth_db() as db:
+        config = db.scalar(
+            select(ProviderConfig).where(ProviderConfig.tenant_id == tenant_id)
+        )
+        assert config is not None
+        assert config.config == {"speaker_ids": ["S_cli_exclusive_001"]}

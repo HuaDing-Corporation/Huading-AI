@@ -4,18 +4,22 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.api.deps import get_object_storage
+from app.core.exceptions import AppError
 from app.db.models import (
     Asset,
     BrandVoice,
     CreditRate,
+    Plan,
     ProviderConfig,
     Subscription,
     Tenant,
     UsageRecord,
+    User,
     VideoTask,
     Voice,
 )
@@ -295,6 +299,101 @@ def test_create_brand_voice_clones_and_charges_once(auth_context, auth_db, monke
         assert config.config["used_speaker_ids"] == {"S_brand_slot_001": data["id"]}
 
 
+def test_create_doubao_brand_voice_requires_admin_or_huading_plan(
+    auth_context,
+    auth_db,
+    monkeypatch,
+):
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+
+    provider = _CloneProvider()
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "resolve_named_provider",
+        lambda *_args, **_kwargs: provider,
+    )
+    with auth_db() as db:
+        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
+        user = db.get(User, auth_context["user_id"])
+        assert user is not None
+        user.role = "creator"
+        db.commit()
+
+    response = TestClient(app).post(
+        "/api/v1/brand-voices",
+        json={
+            "name": "Premium Voice",
+            "source_audio_asset_id": asset_id,
+            "consent_confirmed": True,
+            "provider": "doubao",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "VOICE_CLONE_PLAN_REQUIRED"
+    assert provider.clone_calls == []
+    with auth_db() as db:
+        assert db.scalar(select(BrandVoice)) is None
+        assert db.scalar(select(UsageRecord)) is None
+
+
+def test_create_doubao_brand_voice_allows_huading_plan_creator(
+    auth_context,
+    auth_db,
+    monkeypatch,
+):
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+
+    provider = _CloneProvider()
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "resolve_named_provider",
+        lambda *_args, **_kwargs: provider,
+    )
+    with auth_db() as db:
+        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        huading = Plan(
+            code="huading",
+            name="Huading Plan",
+            price_cents=0,
+            period="monthly",
+            quota_credits=0,
+            is_active=True,
+        )
+        db.add(huading)
+        db.flush()
+        subscription = _active_subscription(db, auth_context["tenant_id"])
+        subscription.plan_id = huading.id
+        user = db.get(User, auth_context["user_id"])
+        assert user is not None
+        user.role = "creator"
+        asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
+        db.commit()
+
+    storage = _Storage()
+    storage.objects[f"tenants/{auth_context['tenant_id']}/uploads/brand-voice.wav"] = b"WAV"
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app).post(
+            "/api/v1/brand-voices",
+            json={
+                "name": "Huading Voice",
+                "source_audio_asset_id": asset_id,
+                "consent_confirmed": True,
+                "provider": "doubao",
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 201
+    assert response.json()["data"]["provider"] == "doubao-voice-clone"
+    assert len(provider.clone_calls) == 1
+
+
 def test_create_brand_voice_routes_cosyvoice_provider(auth_context, auth_db, monkeypatch):
     from app.api.v1.routes import brand_voices as brand_voice_routes
 
@@ -309,7 +408,14 @@ def test_create_brand_voice_routes_cosyvoice_provider(auth_context, auth_db, mon
     monkeypatch.setattr(brand_voice_routes, "resolve_named_provider", fake_resolve_named)
     with auth_db() as db:
         subscription_id = _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription is not None
+        subscription.quota_credits_total = 0
         asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
+        user = db.get(User, auth_context["user_id"])
+        assert user is not None
+        user.role = "creator"
+        db.commit()
 
     storage = _Storage()
     app.dependency_overrides[get_object_storage] = lambda: storage
@@ -512,6 +618,59 @@ def test_create_brand_voice_uses_env_speaker_slots_when_config_pool_missing(
         assert config.config["used_speaker_ids"] == {"S_env_slot_001": data["id"]}
 
 
+def test_missing_provider_config_persists_env_slot_ownership_across_tenants(
+    auth_context,
+    auth_db,
+    monkeypatch,
+):
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "settings",
+        SimpleNamespace(
+            engine_doubao_voice_clone_speaker_ids=["S_env_pool_001", "S_env_pool_002"]
+        ),
+    )
+    with auth_db() as db:
+        other_tenant = Tenant(slug="other-slot-tenant", name="Other Slot Tenant")
+        db.add(other_tenant)
+        db.commit()
+        other_tenant_id = other_tenant.id
+
+        first_slot = brand_voice_routes._allocate_voice_clone_speaker_id(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            brand_voice_id="first-brand-voice",
+        )
+        db.commit()
+
+    with auth_db() as db:
+        second_slot = brand_voice_routes._allocate_voice_clone_speaker_id(
+            db,
+            tenant_id=other_tenant_id,
+            brand_voice_id="second-brand-voice",
+        )
+        db.commit()
+
+        config = db.scalar(
+            select(ProviderConfig).where(
+                ProviderConfig.tenant_id.is_(None),
+                ProviderConfig.capability == "voice_clone",
+                ProviderConfig.provider == "doubao-voice-clone",
+            )
+        )
+        assert config is not None
+        assert config.config["used_speaker_ids"] == {
+            first_slot: "first-brand-voice",
+            second_slot: "second-brand-voice",
+        }
+
+    assert first_slot == "S_env_pool_001"
+    assert second_slot == "S_env_pool_002"
+    assert first_slot != second_slot
+
+
 def test_create_brand_voice_prefers_db_speaker_slots_over_env(
     auth_context,
     auth_db,
@@ -686,6 +845,58 @@ def test_release_voice_clone_speaker_id_keeps_slot_owned_by_other_voice(auth_con
     with auth_db() as db:
         config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
         assert config.config["used_speaker_ids"] == {"S_shared_slot_001": "brand-owner"}
+
+
+def test_tenant_speaker_slot_allocation_and_release_do_not_touch_platform_pool(
+    auth_context,
+    auth_db,
+):
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+
+    platform_values = {
+        "speaker_ids": ["S_platform_only_001"],
+        "used_speaker_ids": {"S_platform_only_001": "platform-brand"},
+    }
+    with auth_db() as db:
+        platform_config = ProviderConfig(
+            tenant_id=None,
+            capability="voice_clone",
+            provider="doubao-voice-clone",
+            config=platform_values,
+            is_active=True,
+        )
+        tenant_config = ProviderConfig(
+            tenant_id=auth_context["tenant_id"],
+            capability="voice_clone",
+            provider="doubao-voice-clone",
+            config={"speaker_ids": ["S_tenant_only_001"]},
+            is_active=True,
+        )
+        db.add_all([platform_config, tenant_config])
+        db.commit()
+
+        speaker_id = brand_voice_routes._allocate_voice_clone_speaker_id(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            brand_voice_id="tenant-brand",
+        )
+        assert speaker_id == "S_tenant_only_001"
+        assert tenant_config.config["used_speaker_ids"] == {
+            "S_tenant_only_001": "tenant-brand"
+        }
+        assert platform_config.config == platform_values
+
+        brand_voice_routes._release_voice_clone_speaker_id(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            speaker_id=speaker_id,
+            brand_voice_id="tenant-brand",
+        )
+        db.commit()
+        db.refresh(tenant_config)
+        db.refresh(platform_config)
+        assert tenant_config.config["used_speaker_ids"] == {}
+        assert platform_config.config == platform_values
 
 
 def test_clone_http_error_details_truncates_long_response_text():
@@ -1085,6 +1296,235 @@ def test_avatar_talk_accepts_brand_voice_and_worker_uses_speaker_id(
 
     assert captured_tts_payloads[0]["voice"] == "oral-brand-speaker"
     assert captured_tts_payloads[0]["voice_source"] == "brand_voice"
+
+
+def test_avatar_talk_rejects_doubao_brand_voice_without_huading_access(
+    auth_context,
+    auth_db,
+    monkeypatch,
+):
+    with auth_db() as db:
+        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        avatar_id = _seed_avatar_asset(db, auth_context["tenant_id"])
+        user = db.get(User, auth_context["user_id"])
+        assert user is not None
+        user.role = "creator"
+        brand_voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            name="Premium Oral Voice",
+            provider="doubao-voice-clone",
+            speaker_id="premium-oral-speaker",
+            status="ready",
+            consent_confirmed=True,
+            consent_confirmed_at=datetime.now(UTC),
+        )
+        db.add(brand_voice)
+        db.commit()
+        brand_voice_id = brand_voice.id
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.videos.generate_avatar_talk_task.apply_async",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a rejected task must not be queued")
+        ),
+    )
+    response = TestClient(app).post(
+        "/api/v1/videos",
+        json={
+            "topic": "premium voice gate",
+            "script": "this must not be queued",
+            "voice_id": brand_voice_id,
+            "avatar_asset_id": avatar_id,
+            "video_mode": "avatar_talk",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "VOICE_CLONE_PLAN_REQUIRED"
+    with auth_db() as db:
+        assert db.scalar(select(VideoTask)) is None
+
+
+def test_seedance_i2v_rejects_doubao_brand_voice_without_huading_access(
+    auth_context,
+    auth_db,
+    monkeypatch,
+):
+    with auth_db() as db:
+        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        user = db.get(User, auth_context["user_id"])
+        assert user is not None
+        user.role = "creator"
+        brand_voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            name="Ecommerce Premium Voice",
+            provider="doubao-voice-clone",
+            speaker_id="ecom-premium-speaker",
+            status="ready",
+            consent_confirmed=True,
+            consent_confirmed_at=datetime.now(UTC),
+        )
+        db.add(brand_voice)
+        db.commit()
+        brand_voice_id = brand_voice.id
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.videos.generate_seedance_i2v_task.apply_async",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a rejected task must not be queued")
+        ),
+    )
+    response = TestClient(app).post(
+        "/api/v1/videos",
+        json={
+            "topic": "premium ecommerce voice gate",
+            "video_mode": "seedance_i2v",
+            "image_key": "uploads/product.png",
+            "voice_id": brand_voice_id,
+            "duration_sec": 15,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "VOICE_CLONE_PLAN_REQUIRED"
+    with auth_db() as db:
+        assert db.scalar(select(VideoTask)) is None
+
+
+def test_seedance_i2v_allows_cosyvoice_brand_voice_on_free_plan(
+    auth_context,
+    auth_db,
+    monkeypatch,
+):
+    enqueued: dict[str, Any] = {}
+
+    class _FakeI2VTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            enqueued.update({"args": args, "task_id": task_id, "queue": queue})
+
+    with auth_db() as db:
+        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        db.add(
+            CreditRate(
+                tenant_id=None,
+                capability="video",
+                unit="second",
+                credits_per_unit=Decimal("1.0000"),
+            )
+        )
+        user = db.get(User, auth_context["user_id"])
+        assert user is not None
+        user.role = "creator"
+        brand_voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            name="Ecommerce Free Voice",
+            provider="cosyvoice-voice-clone",
+            speaker_id="cosy-ecom-speaker",
+            status="ready",
+            consent_confirmed=True,
+            consent_confirmed_at=datetime.now(UTC),
+        )
+        db.add(brand_voice)
+        db.commit()
+        brand_voice_id = brand_voice.id
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.videos.generate_seedance_i2v_task",
+        _FakeI2VTask(),
+    )
+    response = TestClient(app).post(
+        "/api/v1/videos",
+        json={
+            "topic": "free ecommerce voice",
+            "video_mode": "seedance_i2v",
+            "image_key": "uploads/product.png",
+            "voice_id": brand_voice_id,
+            "duration_sec": 15,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 202
+    task_id = response.json()["data"]["id"]
+    assert enqueued["task_id"] == task_id
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        assert task.voice_id is None
+        assert task.brand_voice_id == brand_voice_id
+        assert task.params["voice_source"] == "brand_voice"
+        assert task.params["tts_speaker_id"] == "cosy-ecom-speaker"
+        assert task.params["brand_voice_provider"] == "cosyvoice-voice-clone"
+
+
+def test_avatar_talk_worker_rechecks_doubao_brand_voice_plan_access(
+    auth_context,
+    auth_db,
+    monkeypatch,
+):
+    unit_id = "doubao-worker-plan-gate"
+    with auth_db() as db:
+        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        user = db.get(User, auth_context["user_id"])
+        assert user is not None
+        user.role = "creator"
+        brand_voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            name="Worker Premium Voice",
+            provider="doubao-voice-clone",
+            speaker_id="worker-premium-speaker",
+            status="ready",
+            consent_confirmed=True,
+            consent_confirmed_at=datetime.now(UTC),
+        )
+        db.add(brand_voice)
+        db.flush()
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=auth_context["tenant_id"],
+                created_by_user_id=user.id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                script="premium worker gate",
+                brand_voice_id=brand_voice.id,
+                params={
+                    "brand_voice_id": brand_voice.id,
+                    "tts_speaker_id": brand_voice.speaker_id,
+                    "brand_voice_provider": "cosyvoice-voice-clone",
+                },
+            )
+        )
+        db.commit()
+
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("TTS provider must not be called")
+            ),
+        )
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve_named_provider",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("spoofed task params must not select a provider")
+            ),
+        )
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=auth_context["tenant_id"],
+            db=db,
+            store=_Store(),
+            storage=_Storage(),
+        )
+        with pytest.raises(AppError) as exc_info:
+            avatar_talk.tts_step(ctx)
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.code == "VOICE_CLONE_PLAN_REQUIRED"
 
 
 def test_avatar_talk_cosyvoice_brand_voice_uses_cosyvoice_synthesizer(

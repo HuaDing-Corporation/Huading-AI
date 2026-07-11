@@ -13,6 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings
+from app.core.exceptions import AppError
 from app.db.models import (
     Asset,
     Base,
@@ -1151,6 +1152,102 @@ def test_seedance_i2v_runner_releases_quota_on_failure(monkeypatch):
             assert usage.status == "released"
         assert store.events[-1][1]["status"] == "failed"
         assert store.events[-1][1]["error_code"] == "SEEDANCE_I2V_FAILED"
+    finally:
+        Base.metadata.drop_all(engine)
+
+
+def test_avatar_talk_runner_preserves_friendly_app_error_code(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-avatar-plan-gate"
+    unit_id = "avatar-plan-gate-job"
+    store = _Store()
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="avatar-plan-gate", name="Avatar Plan Gate"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="queued",
+                topic="premium voice",
+            )
+        )
+        db.commit()
+
+    def fail_step(ctx):
+        raise AppError(
+            "Doubao premium voice cloning requires the Huading plan.",
+            code="VOICE_CLONE_PLAN_REQUIRED",
+            status_code=403,
+        )
+
+    monkeypatch.setattr(avatar_talk, "SessionLocal", SessionTesting)
+    monkeypatch.setattr(avatar_talk, "build_progress_store", lambda _url: store)
+    monkeypatch.setattr(avatar_talk, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(avatar_talk, "AVATAR_TALK_STEPS", [("tts", 25, fail_step)])
+
+    try:
+        with pytest.raises(AppError) as exc_info:
+            avatar_talk.run_avatar_talk_pipeline(tenant_id=tenant_id, task_id=unit_id)
+
+        assert exc_info.value.code == "VOICE_CLONE_PLAN_REQUIRED"
+        with SessionTesting() as db:
+            task = db.get(VideoTask, unit_id)
+            assert task.status == "failed"
+            assert task.error_code == "VOICE_CLONE_PLAN_REQUIRED"
+            assert "Huading plan" in task.error_message
+        assert store.events[-1][1]["status"] == "failed"
+        assert store.events[-1][1]["error_code"] == "VOICE_CLONE_PLAN_REQUIRED"
+    finally:
+        Base.metadata.drop_all(engine)
+
+
+def test_seedance_i2v_runner_preserves_friendly_app_error_code(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-i2v-plan-gate"
+    unit_id = "i2v-plan-gate-job"
+    store = _Store()
+    storage = _Storage()
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="i2v-plan-gate", name="I2V Plan Gate"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="queued",
+                topic="premium ecommerce voice",
+            )
+        )
+        db.commit()
+
+    def fail_step(ctx):
+        raise AppError(
+            "Doubao premium voice cloning requires the Huading plan.",
+            code="VOICE_CLONE_PLAN_REQUIRED",
+            status_code=403,
+        )
+
+    monkeypatch.setattr(avatar_talk, "SessionLocal", SessionTesting)
+    monkeypatch.setattr(avatar_talk, "build_progress_store", lambda _url: store)
+    monkeypatch.setattr(avatar_talk, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(avatar_talk, "ECOM_I2V_STEPS", [("tts", 25, fail_step)])
+
+    try:
+        with pytest.raises(AppError) as exc_info:
+            avatar_talk.run_seedance_i2v_pipeline(tenant_id=tenant_id, task_id=unit_id)
+
+        assert exc_info.value.code == "VOICE_CLONE_PLAN_REQUIRED"
+        with SessionTesting() as db:
+            task = db.get(VideoTask, unit_id)
+            assert task.status == "failed"
+            assert task.error_code == "VOICE_CLONE_PLAN_REQUIRED"
+            assert "Huading plan" in task.error_message
+        assert store.events[-1][1]["status"] == "failed"
+        assert store.events[-1][1]["error_code"] == "VOICE_CLONE_PLAN_REQUIRED"
     finally:
         Base.metadata.drop_all(engine)
 
