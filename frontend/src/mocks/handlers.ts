@@ -304,6 +304,17 @@ function analyticsPlanRequired(): boolean {
   }
 }
 
+// ADMIN-VIP-GATE-UI-0001 §二之二：VIP 音色门禁模拟——localStorage["hd_mock_non_vip"]==="1" → 当前用户非
+// huading（且非 admin）：login/me 回 role="creator" + 无 voice_clone_vip 权限；doubao 创建 → 403 VOICE_CLONE_PLAN_REQUIRED。
+// 默认（未设）= admin + voice_clone_vip（doubao 可用），零回归。
+function mockNonVip(): boolean {
+  try {
+    return typeof localStorage !== "undefined" && localStorage.getItem("hd_mock_non_vip") === "1";
+  } catch {
+    return false;
+  }
+}
+
 function analyticsHandlers() {
   const A = `${BASE}/api/v1/admin/analytics`;
   const guard = () =>
@@ -521,7 +532,7 @@ export const handlers = [
   // Auth = M2 shapes (unchanged). Mocked so the (app) client auth-gate can be
   // passed during the MSW parallel period without a real backend.
   http.post(`${BASE}/api/v1/auth/login`, () =>
-    ok({ access_token: "mock-token", token_type: "bearer", tenant_id: "ten-mock", user_id: "u-mock", role: "admin" })
+    ok({ access_token: "mock-token", token_type: "bearer", tenant_id: "ten-mock", user_id: "u-mock", role: mockNonVip() ? "creator" : "admin" })
   ),
   // 注册（AUTH-UI-0001 · FIX1 硬化）：镜像 BE POST /auth/register-tenant → {tenant,user,token}（201）。
   // 校验必填 + extra="forbid" + full_name≤200（防非法请求在 mock 假绿，P2）；slug="taken" → 409。
@@ -561,13 +572,15 @@ export const handlers = [
       { status: 201 } // 对齐 BE：注册成功 201 CREATED
     );
   }),
-  http.get(`${BASE}/api/v1/auth/me`, () =>
-    ok({
+  http.get(`${BASE}/api/v1/auth/me`, () => {
+    const nonVip = mockNonVip();
+    return ok({
       tenant: { id: "ten-mock", slug: "huading", name: "华鼎（mock）" },
-      user: { id: "u-mock", tenant_id: "ten-mock", email: "qa@huading.test", full_name: "QA 测试", role: "admin" },
-      permissions: ["video:create", "video:read"]
-    })
-  ),
+      user: { id: "u-mock", tenant_id: "ten-mock", email: "qa@huading.test", full_name: "QA 测试", role: nonVip ? "creator" : "admin" },
+      // 默认（VIP/admin）带 voice_clone_vip；hd_mock_non_vip → 去掉该权限，doubao 通路被门禁（§二之二）。
+      permissions: nonVip ? ["video:create", "video:read"] : ["video:create", "video:read", "voice_clone_vip"]
+    });
+  }),
   http.get(`${BASE}/api/v1/quota`, () => ok({ total: 1000, used: 120, reserved: 36, remaining: 844 })),
   http.get(`${BASE}/api/v1/voices`, () => {
     // 系统音色(source:preset) + ready 克隆音色(source:brand_voice，对应 brand-voices ready 记录)，供 picker 分组(§8)。
@@ -1076,9 +1089,14 @@ export const handlers = [
     if (body.provider !== undefined && !(body.provider in VOICE_CLONE_CANONICAL)) {
       return err(422, "VALIDATION_ERROR", "provider 非法（doubao / cosyvoice）");
     }
-    const id = `bv-${++brandVoiceSeq}`;
     // 存/返 canonical 长值（镜像 BE：alias 归一化 → _brand_voice_read 返 canonical）。
     const provider = VOICE_CLONE_CANONICAL[body.provider ?? "doubao"];
+    // VIP 门禁（§二之二）：doubao 通路对非授权用户 → 403 VOICE_CLONE_PLAN_REQUIRED（防选了再撞的兜底；正常前端已置灰）。
+    // cosyvoice 免费档不受门禁——任何用户可建（含 0 余额新注册）。
+    if (provider === "doubao-voice-clone" && mockNonVip()) {
+      return err(403, "VOICE_CLONE_PLAN_REQUIRED", "Voice clone (doubao) requires the huading plan.");
+    }
+    const id = `bv-${++brandVoiceSeq}`;
     brandVoices.set(id, { id, name: body.name || "未命名品牌音色", status: "processing", created_at: new Date(0).toISOString(), _polls: 0, provider });
     return ok({ id, name: body.name || "未命名品牌音色", status: "processing", created_at: new Date(0).toISOString(), provider });
   }),

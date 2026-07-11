@@ -461,6 +461,8 @@ export const copy = {
     audioType: "仅支持 WAV / MP3 / M4A 音频",
     audioTooLarge: "音频过大，请控制在 20MB 以内",
     audioTooShort: "音频时长需至少 5 秒，请重录或换更长的音频",
+    // VIP 门禁（ADMIN-VIP-GATE-UI-0001 §二之二）：doubao 通路无权限 → 友好中文（不透传英文；与「槽位空」区分）
+    voiceClonePlanRequired: "「升级版 VIP」需开通 huading plan 后可创建，可先使用免费档 CosyVoice",
     // 提示词反推失败（REVERSE-PROMPT-UI-0001）——通用兜底，绝不回落裸 error_message/技术串
     reverseFailed: "提示词反推失败，请稍后重试"
   },
@@ -686,6 +688,10 @@ export const copy = {
     providerCosyDesc: "CosyVoice-v3.5-plus · 免费",
     providerDoubaoTitle: "升级版 VIP 永久高端定制音色",
     providerDoubaoDesc: "豆包 · 300 元（30000 积分）",
+    // VIP 门禁（ADMIN-VIP-GATE-UI-0001 §二之二）：非 huading（且非 admin）→ doubao 卡置灰 + 此提示（与「仅 huading plan 用户可查看」同口径）
+    providerVipLocked: "开通 huading plan 后可创建",
+    // 「选我的音色」picker：doubao 音色无权限 → 置灰 + 此提示（区别于「暂无可用音色槽位」= 有权限池空）
+    pickerVipLocked: "开通 huading plan 后可用",
     chargeConfirmTitle: "确认开通高端定制音色？",
     chargeConfirmMessage: (credits: number) =>
       `将消耗 ${credits} 积分（约 300 元）开通豆包 VIP 永久高端定制音色，确认后立即扣费，克隆结果生成后不可退。`,

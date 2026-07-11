@@ -1,11 +1,13 @@
 "use client";
 
-import { useRef, useState, type ChangeEvent } from "react";
-import { Mic, Square, Trash2, Upload } from "lucide-react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { Lock, Mic, Square, Trash2, Upload } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
 import { useCreateBrandVoice } from "@/lib/api/hooks";
 import type { BrandVoiceProvider } from "@/lib/api/types";
+import { useAuth } from "@/lib/auth/auth-context";
+import { canUseVipVoiceClone } from "@/lib/auth/vip";
 import { useAudioRecorder } from "@/lib/media/use-audio-recorder";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
@@ -35,6 +37,7 @@ const ALLOWED_AUDIO_TYPES = ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp
 export function BrandVoiceCreate() {
   const recorder = useAudioRecorder();
   const create = useCreateBrandVoice();
+  const { session, ready } = useAuth();
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
   const [name, setName] = useState("");
@@ -44,6 +47,14 @@ export function BrandVoiceCreate() {
   const [provider, setProvider] = useState<BrandVoiceProvider>("doubao");
   const [chargeOpen, setChargeOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // VIP 门禁（ADMIN-VIP-GATE-UI-0001 §二之二）：非 huading（且非 admin）→ doubao 卡置灰、不可选。
+  // vipLocked 仅在 session 就绪后为真（避免加载态误判）；非授权时把缺省 doubao 自动切到免费档 cosyvoice，
+  // 使表单落在可用通路（不让用户停在被禁选项、也不让提交撞 403）。
+  const vipLocked = ready && !canUseVipVoiceClone(session);
+  useEffect(() => {
+    if (vipLocked && provider === "doubao") setProvider("cosyvoice");
+  }, [vipLocked, provider]);
 
   // 录音(已知时长)时长不足 5s 拦截；上传文件时长未知(durationSec=0)，仅校验类型/大小。
   const tooShort = recorder.durationSec > 0 && recorder.durationSec < MIN_DURATION_SEC;
@@ -100,6 +111,11 @@ export function BrandVoiceCreate() {
     // load-bearing：授权未勾绝不发创建请求（先红后绿守此 guard）。
     if (!consent) {
       setError(copy.brandVoice.consentRequired);
+      return;
+    }
+    // VIP 门禁 defensive backstop：非授权用户绝不发 doubao 创建请求（正常已被置灰 + 自动切 cosyvoice，此为兜底）。
+    if (provider === "doubao" && vipLocked) {
+      setError(copy.errors.voiceClonePlanRequired);
       return;
     }
     // doubao 付费通路：创建前明确扣费确认（30000 积分）；cosyvoice 免费直建。
@@ -209,14 +225,25 @@ export function BrandVoiceCreate() {
       <fieldset className="mb-[15px] m-0 min-w-0 border-0 p-0">
         <legend className={labelClass}>{copy.brandVoice.providerSectionLabel}</legend>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {PROVIDERS.map((p) => (
-            <SelectableOption key={p.id} selected={provider === p.id} onSelect={() => setProvider(p.id)}>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-ink">{p.title}</span>
-                <span className="block truncate text-[11.5px] text-ink-faint">{p.desc}</span>
-              </span>
-            </SelectableOption>
-          ))}
+          {PROVIDERS.map((p) => {
+            const locked = p.id === "doubao" && vipLocked; // VIP 通路对非授权用户置灰
+            return (
+              <SelectableOption
+                key={p.id}
+                selected={provider === p.id}
+                disabled={locked}
+                onSelect={() => setProvider(p.id)}
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-ink">{p.title}</span>
+                  <span className="block truncate text-[11.5px] text-ink-faint">
+                    {locked ? copy.brandVoice.providerVipLocked : p.desc}
+                  </span>
+                </span>
+                {locked && <Lock size={14} strokeWidth={1.8} className="flex-none text-ink-faint" aria-hidden />}
+              </SelectableOption>
+            );
+          })}
         </div>
       </fieldset>
 

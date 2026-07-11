@@ -24,6 +24,8 @@ const AVATAR_VIDEO_ERROR_COPY: Record<string, string> = {
 export function errorText(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.code === "tenant_quota_exceeded") return copy.errors.quota;
+    // VIP 门禁（ADMIN-VIP-GATE-UI-0001 §二之二）：doubao 通路无权限 → 友好中文；与「槽位空」(VOICE_CLONE_SLOT_UNAVAILABLE) 区分。
+    if (err.code === "VOICE_CLONE_PLAN_REQUIRED") return copy.errors.voiceClonePlanRequired;
     // 出镜视频源校验码 → 友好中文（BE 权威二次校验，含前端读不到的 codec/容器）。
     const videoErr = err.code ? AVATAR_VIDEO_ERROR_COPY[err.code] : undefined;
     if (videoErr) return videoErr;

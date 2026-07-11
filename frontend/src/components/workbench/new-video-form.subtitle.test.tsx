@@ -24,6 +24,7 @@ vi.mock("@/lib/api/hooks", () => ({
   useEstimateVideo: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, data: { estimated_credits: 8, unit: "credits" } })
 }));
 vi.mock("@/lib/videos/tasks-context", () => ({ useVideoTasks: () => taskMocks }));
+vi.mock("@/lib/auth/auth-context", () => ({ useAuth: () => ({ session: { role: "admin" }, ready: true }) }));
 
 import { NewVideoForm } from "./new-video-form";
 

@@ -9,6 +9,13 @@ vi.mock("@/lib/api/hooks", () => ({
   useCreateBrandVoice: () => ({ mutateAsync: createMock.mutateAsync, isPending: createMock.isPending })
 }));
 
+// VIP 门禁（§二之二）：默认 admin（doubao 可用）；VIP 测试改 session 为非授权。
+const authMock = vi.hoisted(() => ({
+  session: { role: "admin", user: { permissions: [] } } as { role: string; user?: { permissions: string[] } } | null,
+  ready: true
+}));
+vi.mock("@/lib/auth/auth-context", () => ({ useAuth: () => authMock }));
+
 import { BrandVoiceCreate } from "./brand-voice-create";
 
 const mp3 = (name = "a.mp3") => new File(["xxxxxx"], name, { type: "audio/mpeg" });
@@ -23,6 +30,8 @@ beforeEach(() => {
   URL.revokeObjectURL = vi.fn();
   createMock.isPending = false;
   createMock.mutateAsync.mockResolvedValue({ id: "bv-1", name: "我的音", status: "processing", created_at: "" });
+  authMock.session = { role: "admin", user: { permissions: [] } }; // 每用例复位为 VIP 可用
+  authMock.ready = true;
 });
 afterEach(() => vi.clearAllMocks());
 
@@ -61,6 +70,32 @@ describe("BrandVoiceCreate (品牌音色创建)", () => {
   });
 
   // 承重·缺省 doubao（兼容承现状）：不选卡片时默认 doubao → 点创建即弹扣费确认（现状即豆包付费）。
+  // ADMIN-VIP-GATE-UI-0001 §二之二：非 huading（且非 admin）→ doubao「升级版 VIP」置灰 + 提示（区别于「槽位空」）。
+  it("VIP 门禁：非 huading（creator）→ doubao 卡置灰 + 「开通 huading plan 后可创建」（区别于「暂无可用音色槽位」）", () => {
+    authMock.session = { role: "creator", user: { permissions: [] } };
+    render(<BrandVoiceCreate />);
+    expect(screen.getByText(copy.brandVoice.providerVipLocked)).toBeInTheDocument();
+    // 置灰态：doubao 定价描述被锁定提示替换。
+    expect(screen.queryByText(copy.brandVoice.providerDoubaoDesc)).not.toBeInTheDocument();
+    // 免费档 cosyvoice 不受门禁，仍可见。
+    expect(screen.getByText(copy.brandVoice.providerCosyTitle)).toBeInTheDocument();
+  });
+
+  it("VIP 门禁：非 huading 提交 → 缺省自动切 cosyvoice 免费直建（无扣费窗、provider:cosyvoice），绝不发 doubao", async () => {
+    authMock.session = { role: "creator", user: { permissions: [] } };
+    const file = mp3();
+    render(<BrandVoiceCreate />);
+    uploadAudio(file);
+    fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "免费音" } });
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
+    expect(screen.queryByText(copy.brandVoice.chargeConfirmTitle)).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(createMock.mutateAsync).toHaveBeenCalledWith(expect.objectContaining({ provider: "cosyvoice" }))
+    );
+  });
+
+  // 管理员（默认）：doubao 可用，缺省仍走扣费确认（零回归）。
   it("缺省 doubao：不选卡片点创建 → 弹扣费确认，确认后带 provider:doubao", async () => {
     const file = mp3();
     render(<BrandVoiceCreate />);

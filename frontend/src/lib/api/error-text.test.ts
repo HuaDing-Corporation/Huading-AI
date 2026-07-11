@@ -30,4 +30,11 @@ describe("errorText · AVATAR_VIDEO_* 后端校验码 → 友好中文", () => {
       "Active subscription not found."
     );
   });
+
+  // ADMIN-VIP-GATE-UI-0001 §二之二：VIP 门禁码 → 友好中文，不透传英文串（与「槽位空」区分）。
+  it("VOICE_CLONE_PLAN_REQUIRED → 友好中文，不露后端英文 message", () => {
+    const out = errorText(new ApiError("Voice clone (doubao) requires the huading plan.", "VOICE_CLONE_PLAN_REQUIRED", 403));
+    expect(out).toBe(copy.errors.voiceClonePlanRequired);
+    expect(out).not.toMatch(/huading plan\.$/);
+  });
 });

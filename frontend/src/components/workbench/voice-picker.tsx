@@ -19,6 +19,17 @@ export interface VoicePickerProps {
    */
   brandVoices?: BrandVoice[];
   brandVoicesLoading?: boolean;
+  /**
+   * VIP 门禁（ADMIN-VIP-GATE-UI-0001 §二之二）：当前租户是否可用 doubao 通路（admin OR huading plan）。
+   * 缺省(undefined) = 不门禁（视为 true）——保护未接入消费者零回归。为 false 时：doubao 品牌音色置灰 + 提示
+   * 「开通 huading plan 后可用」（区别于「暂无可用音色槽位」= 有权限池空）。
+   */
+  canUseVip?: boolean;
+}
+
+/** doubao 通路判定（兼容短值与 canonical 长值，同 providerLabel）。 */
+function isDoubaoProvider(provider?: string | null): boolean {
+  return provider === "doubao" || provider === "doubao-voice-clone";
 }
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
@@ -76,19 +87,31 @@ function VoiceOption({ voice, selected, onSelect }: { voice: Voice; selected: bo
   );
 }
 
-/** 品牌音色（声音复刻）选项：ready 可选，processing 置灰 + 复刻中；provider 徽标（缺省不显）。 */
-function BrandVoiceOption({ voice, selected, onSelect }: { voice: BrandVoice; selected: boolean; onSelect: () => void }) {
+/** 品牌音色（声音复刻）选项：ready 可选，processing 置灰复刻中；vipLocked（doubao 无权限）置灰 + 提示；provider 徽标。 */
+function BrandVoiceOption({
+  voice,
+  selected,
+  onSelect,
+  vipLocked = false
+}: {
+  voice: BrandVoice;
+  selected: boolean;
+  onSelect: () => void;
+  vipLocked?: boolean;
+}) {
   const processing = voice.status === "processing";
   const provider = providerLabel(voice.provider);
   return (
-    <SelectableOption selected={selected} disabled={processing} onSelect={onSelect}>
+    <SelectableOption selected={selected} disabled={processing || vipLocked} onSelect={onSelect}>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-ink">{voice.name}</span>
-        {processing && (
+        {processing ? (
           <span className="mt-0.5 flex items-center gap-1 text-[11.5px] text-ink-faint">
             <Loader2 size={11} strokeWidth={2.2} className="animate-spin" /> {copy.brandVoice.pickerCloning}
           </span>
-        )}
+        ) : vipLocked ? (
+          <span className="mt-0.5 block text-[11.5px] text-ink-faint">{copy.brandVoice.pickerVipLocked}</span>
+        ) : null}
       </span>
       {provider && (
         <span className="flex-none rounded-pill border border-line-gold bg-glass-fill px-2 py-0.5 text-[11px] text-ink-soft">
@@ -106,8 +129,10 @@ function BrandVoiceOption({ voice, selected, onSelect }: { voice: BrandVoice; se
  * 品牌组一律取自 brandVoices，避免重复渲染。
  * 不传 brandVoices → 完全退化为历史行为（按 voices.source 分组），保护未接入消费者（批量电商）零回归。
  */
-export function VoicePicker({ voices, value, onChange, brandVoices, brandVoicesLoading }: VoicePickerProps) {
+export function VoicePicker({ voices, value, onChange, brandVoices, brandVoicesLoading, canUseVip }: VoicePickerProps) {
   const standard = voices.filter((v) => v.source !== "brand_voice");
+  const vipAllowed = canUseVip ?? true; // 缺省不门禁（零回归）
+  const brandVipLocked = (v: BrandVoice) => !vipAllowed && isDoubaoProvider(v.provider);
 
   // Legacy：不传 brandVoices → 忠实还原历史 VoicePicker（品牌组来自 voices 中 source==="brand_voice" 项）。
   if (brandVoices === undefined) {
@@ -167,7 +192,13 @@ export function VoicePicker({ voices, value, onChange, brandVoices, brandVoicesL
         ) : (
           <div className={gridClass}>
             {ready.map((v) => (
-              <BrandVoiceOption key={v.id} voice={v} selected={value === v.id} onSelect={() => onChange(v.id)} />
+              <BrandVoiceOption
+                key={v.id}
+                voice={v}
+                selected={value === v.id}
+                onSelect={() => onChange(v.id)}
+                vipLocked={brandVipLocked(v)}
+              />
             ))}
             {processing.map((v) => (
               <BrandVoiceOption key={v.id} voice={v} selected={false} onSelect={() => undefined} />

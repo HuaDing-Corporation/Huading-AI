@@ -113,6 +113,47 @@ describe("VoicePicker (口播音色 · 选我的音色)", () => {
     expect(screen.getByText(copy.brandVoice.providerCosyvoice)).toBeInTheDocument();
   });
 
+  // ADMIN-VIP-GATE-UI-0001 §二之二：canUseVip=false → doubao 品牌音色置灰 + 提示（区别于「暂无可用音色槽位」）。
+  it("VIP 门禁：canUseVip=false → doubao 音色置灰 + 「开通 huading plan 后可用」，点击不选中；cosyvoice 不受限可选", () => {
+    const onChange = vi.fn();
+    render(
+      <VoicePicker
+        voices={[voice("v1", "知性女声")]}
+        value="v1"
+        onChange={onChange}
+        brandVoices={[
+          bv("c1", "豆包音", { provider: "doubao-voice-clone" }),
+          bv("c2", "免费音", { provider: "cosyvoice-voice-clone" })
+        ]}
+        canUseVip={false}
+      />
+    );
+    expect(screen.getByText(copy.brandVoice.pickerVipLocked)).toBeInTheDocument();
+    // doubao 置灰不可选。
+    expect(screen.getByText("豆包音").closest("button")!).toBeDisabled();
+    fireEvent.click(screen.getByText("豆包音"));
+    expect(onChange).not.toHaveBeenCalledWith("c1");
+    // cosyvoice 不受门禁，正常可选。
+    expect(screen.getByText("免费音").closest("button")!).not.toBeDisabled();
+    fireEvent.click(screen.getByText("免费音"));
+    expect(onChange).toHaveBeenCalledWith("c2");
+  });
+
+  it("VIP 门禁：canUseVip 缺省/true → doubao 音色正常可选（零回归，无锁提示）", () => {
+    const onChange = vi.fn();
+    render(
+      <VoicePicker
+        voices={[voice("v1", "知性女声")]}
+        value="v1"
+        onChange={onChange}
+        brandVoices={[bv("c1", "豆包音", { provider: "doubao-voice-clone" })]}
+      />
+    );
+    expect(screen.queryByText(copy.brandVoice.pickerVipLocked)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("豆包音"));
+    expect(onChange).toHaveBeenCalledWith("c1");
+  });
+
   it("processing 品牌音色 → 置灰不可选 + 「复刻中」，点击不触发 onChange", () => {
     const onChange = vi.fn();
     render(
