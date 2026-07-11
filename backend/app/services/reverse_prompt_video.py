@@ -74,6 +74,7 @@ def extract_uniform_video_frames(
             "image2pipe",
             "-vcodec",
             "mjpeg",
+            "-",
         ]
         result = run(
             command,
