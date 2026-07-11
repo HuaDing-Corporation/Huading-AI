@@ -1,6 +1,7 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic_core import PydanticCustomError
 
 from app.core.image_aspect_ratio import RequestedImageAspectRatio
 
@@ -126,12 +127,27 @@ class EcomPosterBatchAccepted(BaseModel):
 class EcomReplicateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    reference_image_asset_ids: list[str] = Field(min_length=1, max_length=4)
+    reference_image_asset_ids: list[str] = Field(min_length=1)
     product_image_asset_ids: list[str] = Field(min_length=1, max_length=4)
     product_info: dict[str, object] = Field(default_factory=dict)
     selling_points: list[str] = Field(default_factory=list, max_length=8)
     output_mode: EcomReplicateOutputMode = "main"
     size: str | None = Field(default=None, max_length=20)
+
+    @model_validator(mode="after")
+    def _validate_reference_image_limit(self) -> "EcomReplicateRequest":
+        if self.output_mode == "detail":
+            limit = 12
+            mode_label = "详情模式"
+        else:
+            limit = 5
+            mode_label = "主图模式"
+        if len(self.reference_image_asset_ids) > limit:
+            raise PydanticCustomError(
+                "ecom_replicate_reference_limit",
+                f"{mode_label}最多 {limit} 张参考图",
+            )
+        return self
 
 
 class EcomReplicatePlanOutput(BaseModel):

@@ -4,8 +4,10 @@ import inspect
 from io import BytesIO
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.api.deps import get_object_storage, get_progress_store
@@ -19,6 +21,7 @@ from app.db.models import (
     VideoTask,
 )
 from app.main import app
+from app.schemas.ecom_images import EcomReplicateRequest
 from app.services import ecom_replicate
 from app.workers import image_gen
 
@@ -345,6 +348,71 @@ def _register_tenant(*, slug: str, email: str) -> dict:
     }
 
 
+@pytest.mark.parametrize(
+    ("output_mode", "reference_count", "message"),
+    [
+        ("main", 6, "主图模式最多 5 张参考图"),
+        ("detail", 13, "详情模式最多 12 张参考图"),
+    ],
+)
+def test_ecom_replicate_rejects_mode_reference_limit_with_friendly_message(
+    auth_context,
+    output_mode: str,
+    reference_count: int,
+    message: str,
+) -> None:
+    response = TestClient(app).post(
+        "/api/v1/ecom-images/replicate",
+        json={
+            "reference_image_asset_ids": [
+                f"reference-{index}" for index in range(reference_count)
+            ],
+            "product_image_asset_ids": ["product-1"],
+            "output_mode": output_mode,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    validation_messages = [item["msg"] for item in body["error"]["detail"]]
+    assert message in validation_messages
+    assert all("List should have at most" not in item for item in validation_messages)
+
+
+def test_ecom_replicate_preserves_product_limit_and_nonempty_references() -> None:
+    accepted = EcomReplicateRequest.model_validate(
+        {
+            "reference_image_asset_ids": ["reference-1"],
+            "product_image_asset_ids": [
+                f"product-{index}" for index in range(4)
+            ],
+        }
+    )
+    assert len(accepted.product_image_asset_ids) == 4
+
+    with pytest.raises(ValidationError) as product_error:
+        EcomReplicateRequest.model_validate(
+            {
+                "reference_image_asset_ids": ["reference-1"],
+                "product_image_asset_ids": [
+                    f"product-{index}" for index in range(5)
+                ],
+            }
+        )
+    assert product_error.value.errors()[0]["loc"] == ("product_image_asset_ids",)
+
+    with pytest.raises(ValidationError) as reference_error:
+        EcomReplicateRequest.model_validate(
+            {
+                "reference_image_asset_ids": [],
+                "product_image_asset_ids": ["product-1"],
+            }
+        )
+    assert reference_error.value.errors()[0]["loc"] == ("reference_image_asset_ids",)
+
+
 def test_ecom_replicate_plan_creates_plan_ready_job_with_total_price(
     monkeypatch,
     auth_context,
@@ -362,7 +430,7 @@ def test_ecom_replicate_plan_creates_plan_ready_job_with_total_price(
                     asset_id=f"rep-ref-{index}",
                     purpose="ecom_ref",
                 )
-                for index in range(4)
+                for index in range(5)
             ]
             product = _seed_image_asset(
                 db,
@@ -378,8 +446,8 @@ def test_ecom_replicate_plan_creates_plan_ready_job_with_total_price(
         response = TestClient(app).post(
             "/api/v1/ecom-images/replicate",
             json={
-                    "reference_image_asset_ids": ref_ids,
-                    "product_image_asset_ids": [product_id],
+                "reference_image_asset_ids": ref_ids,
+                "product_image_asset_ids": [product_id],
                 "product_info": {"name": "清爽随行杯"},
                 "selling_points": ["大容量", "便携提手", "清洗方便"],
                 "output_mode": "main",
@@ -395,7 +463,7 @@ def test_ecom_replicate_plan_creates_plan_ready_job_with_total_price(
     assert body["output_count"] == 5
     assert body["total_credits"] == 75
     assert len(body["plan"]["outputs"]) == 5
-    assert len(reverse.calls) == 4
+    assert len(reverse.calls) == 5
 
     with auth_db() as db:
         job = db.get(EcomReplicateJob, body["job_id"])
@@ -470,33 +538,38 @@ def test_ecom_replicate_plan_anchors_every_prompt_to_product_identity(
         assert "Product color MUST be celadon green" in prompt
 
 
-def test_ecom_replicate_detail_reuses_short_reference_set_for_12_outputs(
+@pytest.mark.parametrize("reference_count", [1, 12])
+def test_ecom_replicate_detail_supports_short_and_full_reference_sets(
     monkeypatch,
     auth_context,
     auth_db,
+    reference_count: int,
 ) -> None:
     _patch_replicate_providers(monkeypatch)
     with auth_db() as db:
-        ref = _seed_image_asset(
-            db,
-            tenant_id=auth_context["tenant_id"],
-            asset_id="detail-ref",
-            purpose="ecom_ref",
-        )
+        refs = [
+            _seed_image_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                asset_id=f"detail-ref-{index}",
+                purpose="ecom_ref",
+            )
+            for index in range(reference_count)
+        ]
         product = _seed_image_asset(
             db,
             tenant_id=auth_context["tenant_id"],
             asset_id="detail-product",
             purpose="ecom_product",
         )
-        ref_id = ref.id
+        ref_ids = [asset.id for asset in refs]
         product_id = product.id
         db.commit()
 
     response = TestClient(app).post(
         "/api/v1/ecom-images/replicate",
         json={
-            "reference_image_asset_ids": [ref_id],
+            "reference_image_asset_ids": ref_ids,
             "product_image_asset_ids": [product_id],
             "product_info": {"name": "清爽随行杯"},
             "selling_points": ["大容量"],
@@ -512,6 +585,9 @@ def test_ecom_replicate_detail_reuses_short_reference_set_for_12_outputs(
     themes = [item["theme"] for item in data["plan"]["outputs"]]
     assert len(themes) == 12
     assert len(set(themes)) == 12
+    assert {
+        item["reference_asset_id"] for item in data["plan"]["outputs"]
+    } == set(ref_ids)
 
 
 def test_ecom_replicate_confirm_charges_once_and_enqueues_generation(
