@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import importlib.util
 import json as jsonlib
+import os
+import subprocess
 from decimal import Decimal
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 from sqlalchemy import event, select
 from sqlalchemy.dialects import postgresql
 
@@ -428,8 +432,62 @@ def test_video_frame_extraction_uses_midpoints_8_or_12_and_768px_jpeg() -> None:
         assert command[command.index("-vf") + 1] == (
             "scale=768:768:force_original_aspect_ratio=decrease"
         )
-        assert command[-4:] == ["-f", "image2pipe", "-vcodec", "mjpeg"]
+        assert command[-5:] == ["-f", "image2pipe", "-vcodec", "mjpeg", "-"]
         assert call["timeout"] == 30.0
+
+
+@pytest.fixture(scope="module")
+def reverse_prompt_video_fixture(tmp_path_factory) -> Path:
+    video_path = tmp_path_factory.mktemp("reverse-prompt-video") / "fixture.mp4"
+    result = subprocess.run(
+        [
+            os.environ.get("FFMPEG_BINARY", "ffmpeg"),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=800x450:r=2:d=31",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-y",
+            str(video_path),
+        ],
+        capture_output=True,
+        check=False,
+        timeout=30.0,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    assert video_path.stat().st_size > 0
+    return video_path
+
+
+@pytest.mark.parametrize(("duration_sec", "expected_count"), [(2.0, 8), (31.0, 12)])
+def test_extract_uniform_video_frames_runs_real_ffmpeg(
+    reverse_prompt_video_fixture: Path,
+    duration_sec: float,
+    expected_count: int,
+) -> None:
+    frames = extract_uniform_video_frames(
+        reverse_prompt_video_fixture,
+        duration_sec=duration_sec,
+    )
+
+    assert len(frames) == expected_count
+    for frame in frames:
+        assert frame
+        with Image.open(BytesIO(frame)) as image:
+            image.load()
+            assert image.format == "JPEG"
+            assert max(image.size) == 768
 
 
 def test_apimart_gemini_validator_rejects_product_color_and_pattern_mismatch() -> None:
