@@ -76,18 +76,33 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     )
 
 
+def _validation_message(errors: list[dict[str, object]]) -> str:
+    for error in errors:
+        error_type = error.get("type")
+        message = error.get("msg")
+        if (
+            isinstance(error_type, str)
+            and error_type.startswith("friendly_")
+            and isinstance(message, str)
+            and message
+        ):
+            return message
+    return "Request validation failed."
+
+
 async def validation_exception_handler(
     request: Request,
     exc: RequestValidationError,
 ) -> JSONResponse:
     # jsonable_encoder makes the errors JSON-safe: custom validators raise
     # ValueError, which pydantic puts in ctx as a non-serializable object.
+    errors = jsonable_encoder(exc.errors())
     return _error_response(
         request,
         status_code=422,
         code="VALIDATION_ERROR",
-        message="Request validation failed.",
-        detail=jsonable_encoder(exc.errors()),
+        message=_validation_message(errors),
+        detail=errors,
     )
 
 

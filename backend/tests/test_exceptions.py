@@ -14,4 +14,5 @@ def test_validation_errors_use_response_envelope(auth_context) -> None:
     body = response.json()
     assert body["data"] is None
     assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert body["error"]["message"] == "Request validation failed."
     assert body["request_id"]

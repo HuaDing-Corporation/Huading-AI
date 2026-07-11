@@ -144,7 +144,7 @@ class EcomReplicateRequest(BaseModel):
             mode_label = "主图模式"
         if len(self.reference_image_asset_ids) > limit:
             raise PydanticCustomError(
-                "ecom_replicate_reference_limit",
+                "friendly_ecom_replicate_reference_limit",
                 f"{mode_label}最多 {limit} 张参考图",
             )
         return self

@@ -376,6 +376,7 @@ def test_ecom_replicate_rejects_mode_reference_limit_with_friendly_message(
     assert response.status_code == 422
     body = response.json()
     assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert body["error"]["message"] == message
     validation_messages = [item["msg"] for item in body["error"]["detail"]]
     assert message in validation_messages
     assert all("List should have at most" not in item for item in validation_messages)
