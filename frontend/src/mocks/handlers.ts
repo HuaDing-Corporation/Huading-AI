@@ -942,8 +942,9 @@ export const handlers = [
     if (mode !== "main" && mode !== "detail") return err(422, "ECOM_MODE_REQUIRED", "请选择生成模式：主图 / 详情页");
     const refs = body.reference_image_asset_ids ?? [];
     const products = body.product_image_asset_ids ?? [];
-    // BE Field 约束：refs/products 1–4；selling_points ≤8；product_info dict。
-    if (refs.length < 1 || refs.length > 4) return err(422, "ECOM_REF_REQUIRED", "请上传参考图（1–4 张）");
+    // BE Field 约束（ECOM-REF-LIMIT-BE-0001）：参考图随模式（主图 ≤5 / 详情 ≤12）；商品图 ≤4；selling_points ≤8；product_info dict。
+    const refMax = mode === "main" ? 5 : 12;
+    if (refs.length < 1 || refs.length > refMax) return err(422, "ECOM_REF_REQUIRED", `请上传参考图（1–${refMax} 张）`);
     if (products.length < 1 || products.length > 4) return err(422, "ECOM_PRODUCT_REQUIRED", "请上传商品图（1–4 张）");
     if ((body.selling_points ?? []).length > 8) return err(422, "ECOM_POINTS_LIMIT", "核心卖点最多 8 条");
     if (typeof body.product_info !== "object" || body.product_info === null || Array.isArray(body.product_info)) {

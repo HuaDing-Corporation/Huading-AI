@@ -77,8 +77,13 @@ export interface EcomReplicatePlanInput {
   size?: string;
 }
 
-/** 参考图 / 商品图上限（BE Field max_length=4）。 */
+/** 商品图上限（BE Field max_length=4，不随模式变）。 */
 export const ECOM_REPLICATE_MAX_IMAGES = 4;
+/**
+ * 参考图上限**随出图模式动态**（ECOM-REF-LIMIT-UI-0001，对齐 BE ECOM-REF-LIMIT-BE-0001）：
+ * 主图 ≤5、详情/套图 ≤12。商品图仍 4（见上）。
+ */
+export const ECOM_REPLICATE_REF_MAX: Record<EcomReplicateMode, number> = { main: 5, detail: 12 };
 /** 核心卖点上限（BE Field max_length=8）。 */
 export const ECOM_REPLICATE_MAX_POINTS = 8;
 

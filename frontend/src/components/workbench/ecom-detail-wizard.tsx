@@ -9,6 +9,7 @@ import {
   ecomReplicateActualDimensions,
   ECOM_REPLICATE_MAX_IMAGES,
   ECOM_REPLICATE_MAX_POINTS,
+  ECOM_REPLICATE_REF_MAX,
   getEcomReplicateJob,
   isEcomReplicateSettled,
   planEcomReplicate,
@@ -118,7 +119,7 @@ function ResultTile({
 
 /**
  * 电商详情图·强制复刻向导（ECOM-REPLICATE-UI-0001 · FIX1 对齐真实 BE 契约）。4 Step 状态机：
- * 上传(模式二选一 + 参考图1–4/商品图1–4/商品信息 dict/卖点≤8) → 规划表确认(渲染 plan.outputs + total_credits
+ * 上传(模式二选一 + 参考图 主图1–5/详情1–12 · 商品图1–4/商品信息 dict/卖点≤8；超限显式拦截不静默丢图) → 规划表确认(渲染 plan.outputs + total_credits
  * 后端取 + 扣费 ConfirmDialog 恰一次) → 生成中(轮询 GET、禁分批、全部完成才展示) → 结果(一次性 + 原始尺寸
  * actual_w/h §18 + 下载原图 + 单张按 index 重试不二次扣)。契约走 lib/api/ecom-replicate。
  */
@@ -170,10 +171,19 @@ export function EcomDetailWizard() {
 
   const cleanPoints = points.map((p) => p.trim()).filter(Boolean);
   const canAddPoint = points.length < ECOM_REPLICATE_MAX_POINTS;
+  // 参考图上限随模式（主图 5 / 详情 12）；mode 未选时用较大值(detail)，实际拦截以选定模式为准。商品图恒 4。
+  const refMax = ECOM_REPLICATE_REF_MAX[mode ?? "detail"];
   const validateUpload = (): string | null => {
     if (!mode) return copy.errors.ecomDetailNeedMode;
     if (refIds.length < 1) return copy.errors.ecomDetailNeedRef;
+    // ECOM-REF-LIMIT-UI-0001：切模式后超上限 → 明确拦截让用户删减，**绝不 slice 静默丢图**（口径对齐 BE 422）。
+    if (refIds.length > ECOM_REPLICATE_REF_MAX[mode]) {
+      return copy.errors.ecomDetailRefOverLimit(ECOM_REPLICATE_REF_MAX[mode]);
+    }
     if (productIds.length < 1) return copy.errors.ecomDetailNeedProduct;
+    if (productIds.length > ECOM_REPLICATE_MAX_IMAGES) {
+      return copy.errors.ecomDetailProductOverLimit(ECOM_REPLICATE_MAX_IMAGES); // 商品图专属文案（防御，正常 picker 已封顶 4，不随模式变）
+    }
     if (!productInfo.trim()) return copy.errors.ecomDetailNeedInfo;
     if (cleanPoints.length < 1) return copy.errors.ecomDetailNeedPoint;
     return null;
@@ -190,8 +200,9 @@ export function EcomDetailWizard() {
     try {
       const planned = await planEcomReplicate({
         output_mode: mode as EcomReplicateMode,
-        reference_image_asset_ids: refIds.slice(0, ECOM_REPLICATE_MAX_IMAGES),
-        product_image_asset_ids: productIds.slice(0, ECOM_REPLICATE_MAX_IMAGES),
+        // 不再 slice 静默截断：越限已在 validateUpload 显式拦截；此处发真实数量（对齐 BE 上限校验）。
+        reference_image_asset_ids: refIds,
+        product_image_asset_ids: productIds,
         // 真契约：product_info 为 dict（非字符串）。单一「商品信息」自由文本落 description 键。
         product_info: { description: productInfo.trim() },
         selling_points: cleanPoints.slice(0, ECOM_REPLICATE_MAX_POINTS)
@@ -271,17 +282,19 @@ export function EcomDetailWizard() {
           </div>
         </fieldset>
 
+        {/* 参考图上限随模式（主图 5 / 详情 12）——超限在 validateUpload 显式拦截，不静默截断 */}
         <ReferenceImagesPicker
           inputId="ecom-detail-ref"
-          label={copy.workbench.ecomDetailRefLabel}
+          label={copy.workbench.ecomDetailRefLabel(refMax)}
           uploadLabel={copy.workbench.ecomDetailRefUpload}
-          overLimitError={copy.workbench.refImagesOverLimit(ECOM_REPLICATE_MAX_IMAGES)}
-          max={ECOM_REPLICATE_MAX_IMAGES}
+          overLimitError={copy.workbench.refImagesOverLimit(refMax)}
+          max={refMax}
           onChange={setRefIds}
         />
+        {/* 商品图恒 ≤4（不随模式变） */}
         <ReferenceImagesPicker
           inputId="ecom-detail-product"
-          label={copy.workbench.ecomDetailProductLabel}
+          label={copy.workbench.ecomDetailProductLabel(ECOM_REPLICATE_MAX_IMAGES)}
           uploadLabel={copy.workbench.ecomDetailProductUpload}
           overLimitError={copy.workbench.refImagesOverLimit(ECOM_REPLICATE_MAX_IMAGES)}
           max={ECOM_REPLICATE_MAX_IMAGES}

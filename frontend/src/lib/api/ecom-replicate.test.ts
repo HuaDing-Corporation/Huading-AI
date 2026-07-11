@@ -57,12 +57,20 @@ describe("planEcomReplicate · POST /replicate（201，规划表，不扣费）"
     expect(job.plan.outputs[0].asset_id).toBeNull();
   });
 
-  it("缺模式/参考图/商品图/超 4 张/超 8 卖点/非 dict → 422", async () => {
+  it("缺模式/参考图/商品图/超上限(主图>5·详情>12·商品>4)/超 8 卖点/非 dict → 422", async () => {
     await expect(planEcomReplicate(baseInput({ output_mode: "x" as never }))).rejects.toMatchObject({ status: 422 });
     await expect(planEcomReplicate(baseInput({ reference_image_asset_ids: [] }))).rejects.toMatchObject({ status: 422 });
     await expect(planEcomReplicate(baseInput({ product_image_asset_ids: [] }))).rejects.toMatchObject({ status: 422 });
+    // ECOM-REF-LIMIT：参考图上限随模式——主图 5 合法、6 超限 422；详情 12 合法、13 超限 422。
     await expect(
-      planEcomReplicate(baseInput({ reference_image_asset_ids: ["a", "b", "c", "d", "e"] }))
+      planEcomReplicate(baseInput({ output_mode: "main", reference_image_asset_ids: Array.from({ length: 6 }, (_, i) => `r${i}`) }))
+    ).rejects.toMatchObject({ status: 422 });
+    await expect(
+      planEcomReplicate(baseInput({ output_mode: "detail", reference_image_asset_ids: Array.from({ length: 13 }, (_, i) => `r${i}`) }))
+    ).rejects.toMatchObject({ status: 422 });
+    // 商品图恒 ≤4：5 张超限 422。
+    await expect(
+      planEcomReplicate(baseInput({ product_image_asset_ids: ["a", "b", "c", "d", "e"] }))
     ).rejects.toMatchObject({ status: 422 });
     await expect(
       planEcomReplicate(baseInput({ selling_points: Array.from({ length: 9 }, (_, i) => `p${i}`) }))
