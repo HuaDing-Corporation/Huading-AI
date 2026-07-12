@@ -293,6 +293,10 @@ const ANALYTICS_TENANTS = Array.from({ length: 46 }, (_, i) => {
   };
 });
 
+// 平台全站消耗积分合计——既是 overview 平台方 total_credits_used，又是 VIP 缩放「我的占比」的分母（by-provider/timeseries）。
+// 三处必须同源，故收拢为具名常量（改动需一致）。
+const PLATFORM_TOTAL_CREDITS = 48213.5;
+
 // VIP 客户（有 analytics_view 无 analytics_platform）只看**自己**的数据（BE 已按租户过滤）——mock 忠实返单租户，
 // 不泄漏任何其它租户名/全站合计。前端另会隐藏「用户排行」（双保险）。
 const OWN_TENANT = {
@@ -380,7 +384,7 @@ function analyticsHandlers() {
       const ownSuccess = Math.round(OWN_TENANT.task_count * OWN_TENANT.success_rate);
       // 全站合计（平台）vs 我的合计（VIP）——VIP 绝不返全站数字（那也是一种泄漏）。
       return ok({
-        total_credits_used: platform ? 48213.5 : OWN_TENANT.credits_used,
+        total_credits_used: platform ? PLATFORM_TOTAL_CREDITS : OWN_TENANT.credits_used,
         total_cost_cents: platform ? 1892340 : OWN_TENANT.cost_cents,
         task_count: platform ? 5230 : OWN_TENANT.task_count,
         success_count: platform ? 4890 : ownSuccess,
@@ -403,7 +407,7 @@ function analyticsHandlers() {
       const g = guard();
       if (g) return g;
       // VIP（非平台）→ 按自己占比缩放为「我的」拆分，不返全站聚合（share_pct 是占比，不随缩放变）。
-      const s = mockPlatform() ? 1 : OWN_TENANT.credits_used / 48213.5;
+      const s = mockPlatform() ? 1 : OWN_TENANT.credits_used / PLATFORM_TOTAL_CREDITS;
       const scaleRow = (r: { provider: string; model: string | null; credits_used: number; cost_cents: number; task_count: number; share_pct: number }) => ({
         ...r,
         credits_used: Math.round(r.credits_used * s * 10) / 10,
@@ -429,7 +433,7 @@ function analyticsHandlers() {
       const count = granularity === "week" ? 6 : 14;
       const base = from ? new Date(`${from}T00:00:00`) : new Date("2026-06-01T00:00:00");
       // VIP（非平台）→ 趋势缩放为「我的」用量，不返全站曲线。
-      const s = mockPlatform() ? 1 : OWN_TENANT.credits_used / 48213.5;
+      const s = mockPlatform() ? 1 : OWN_TENANT.credits_used / PLATFORM_TOTAL_CREDITS;
       const buckets = Array.from({ length: count }, (_, i) => {
         const d = new Date(base);
         d.setDate(d.getDate() + i * step);
