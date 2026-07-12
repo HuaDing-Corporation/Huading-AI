@@ -11,10 +11,14 @@ beforeEach(() => localStorage.clear());
 afterEach(() => localStorage.clear());
 
 describe("mock /auth/me · VIP entitlement 按套餐派生（不伪造权限）", () => {
-  it("默认（未设旋钮）= admin → 含 voice_clone_vip（零回归）", async () => {
+  it("默认（未设旋钮）= admin → 含 voice_clone_vip；permissions 已 sorted（对齐真 BE sorted()）", async () => {
     const me = await fetchMe();
     expect(me.user.role).toBe("admin");
     expect(me.permissions).toContain("voice_clone_vip");
+    // 角色基础权限逐字镜像 BE _ROLE_PERMISSIONS[admin]（含 tenant:admin，非 creator 所有）。
+    expect(me.permissions).toContain("tenant:admin");
+    // 真 BE /auth/me 返回 sorted()——mock 亦须有序。
+    expect(me.permissions).toEqual([...me.permissions].sort());
   });
 
   it("承重·真实付费用户：creator + huading → 含 voice_clone_vip（旧 mock 会漏，正是被误伤的那类）", async () => {
@@ -25,12 +29,15 @@ describe("mock /auth/me · VIP entitlement 按套餐派生（不伪造权限）"
     expect(me.permissions).toContain("voice_clone_vip");
   });
 
-  it("creator + free → 不含 voice_clone_vip（无套餐即无 entitlement）", async () => {
+  it("creator + free → 不含 voice_clone_vip（无套餐即无 entitlement）；权限为角色特异（无 tenant:admin）", async () => {
     localStorage.setItem("hd_mock_role", "creator");
     localStorage.setItem("hd_mock_plan", "free");
     const me = await fetchMe();
     expect(me.user.role).toBe("creator");
     expect(me.permissions).not.toContain("voice_clone_vip");
+    // creator 基础权限逐字镜像 BE _ROLE_PERMISSIONS[creator]={video:create}——不含 admin 专属项。
+    expect(me.permissions).toContain("video:create");
+    expect(me.permissions).not.toContain("tenant:admin");
   });
 
   it("admin + free → 仍含 voice_clone_vip（admin 无视套餐，与 BE「admin OR plan=huading」一致）", async () => {
@@ -46,8 +53,9 @@ describe("mock /auth/me · VIP entitlement 按套餐派生（不伪造权限）"
     const free = await fetchMe();
     expect(free.permissions).toContain("video:create");
     localStorage.setItem("hd_mock_plan", "huading");
+    expect(free.permissions).not.toContain("voice_clone_vip");
     const paid = await fetchMe();
-    // 仅 voice_clone_vip 因套餐变化而增加，基础权限不变。
-    expect(paid.permissions).toEqual([...free.permissions, "voice_clone_vip"]);
+    // 仅 voice_clone_vip 因套餐变化而增加，基础权限集合不变（顺序无关，对齐 sorted()）。
+    expect(new Set(paid.permissions)).toEqual(new Set([...free.permissions, "voice_clone_vip"]));
   });
 });

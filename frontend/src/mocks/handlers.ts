@@ -304,11 +304,11 @@ function analyticsPlanRequired(): boolean {
   }
 }
 
-// ADMIN-VIP-GATE-UI-0001 §二之二 · FIX1：VIP 音色 entitlement **按「角色 + 套餐」派生**，镜像真实 BE
-// (VIP-ENTITLEMENT-BE-0001)——/auth/me.permissions = permissions_for_role(role) ∪
-// （role==="admin" 或 租户 active 订阅 plan.code==="huading" 时加 "voice_clone_vip"）。
-// **mock 不再凭空塞权限**（旧版把 voice_clone_vip 写死进 admin，致 creator+huading 真实付费用户被误伤 → 假绿）。
-// 测试/e2e 通过 localStorage 双旋钮切场景（默认 admin+huading → 有权限，零回归）：
+// ADMIN-VIP-GATE-UI-0001 §二之二 · FIX1：VIP 音色 entitlement **按「角色 + 套餐」派生**，逐字镜像真实 BE
+// (#162 VIP-ENTITLEMENT-BE-0001)——/auth/me.permissions = sorted(permissions_for_role(role) ∪
+// {"voice_clone_vip"} if has_huading_access)，has_huading_access = role==ADMIN 或 租户 active 订阅 plan.code=="huading"
+// （app/services/plan_access.py，实时计算）。**mock 不再凭空塞权限**（旧版把 voice_clone_vip 写死进 admin，致
+// creator+huading 真实付费用户被误伤 → 假绿）。测试/e2e 通过 localStorage 双旋钮切场景（默认 admin+huading → 有权限，零回归）：
 //   hd_mock_role: "admin"（默认）| "creator"
 //   hd_mock_plan: "huading"（默认）| "free"   —— 代表租户当前套餐 code
 function readLS(key: string): string | null {
@@ -324,14 +324,21 @@ function mockRole(): "admin" | "creator" {
 function mockPlan(): "huading" | "free" {
   return readLS("hd_mock_plan") === "free" ? "free" : "huading";
 }
-// VIP 通路 entitlement——镜像 BE「admin OR plan=huading」，是 voice_clone_vip 权限的**唯一来源**。
+// VIP 通路 entitlement——镜像 BE has_huading_access「role==ADMIN OR active huading 订阅」，voice_clone_vip 的**唯一来源**。
 function mockVipEntitled(): boolean {
   return mockRole() === "admin" || mockPlan() === "huading";
 }
-// 角色基础权限（镜像 BE permissions_for_role）；voice_clone_vip **不写死进角色**，由 entitlement 派生。
-const BASE_PERMISSIONS = ["video:create", "video:read"];
+// 角色基础权限：逐字镜像 BE deps.py::_ROLE_PERMISSIONS（mock 仅用 admin/creator 两档；真 BE 无 "video:read"）。
+// voice_clone_vip **不写死进角色**，由 entitlement 派生。
+const ROLE_PERMISSIONS: Record<"admin" | "creator", string[]> = {
+  admin: ["tenant:admin", "content:operate", "video:create", "video:review", "dev:access"],
+  creator: ["video:create"]
+};
+// /auth/me.permissions = sorted(角色权限 ∪ {voice_clone_vip} if entitled)——镜像 BE session_permissions_for_user + sorted()。
 function mockPermissions(): string[] {
-  return mockVipEntitled() ? [...BASE_PERMISSIONS, "voice_clone_vip"] : [...BASE_PERMISSIONS];
+  const perms = new Set(ROLE_PERMISSIONS[mockRole()]);
+  if (mockVipEntitled()) perms.add("voice_clone_vip");
+  return [...perms].sort();
 }
 
 function analyticsHandlers() {
