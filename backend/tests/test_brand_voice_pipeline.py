@@ -120,8 +120,23 @@ def _seed_brand_voice_billing(
     tenant_id: str,
     *,
     speaker_ids: tuple[str, ...] = ("S_brand_slot_001",),
+    huading_access: bool = True,
 ) -> str:
     subscription = _active_subscription(db, tenant_id)
+    if huading_access:
+        plan = db.scalar(select(Plan).where(Plan.code == "huading"))
+        if plan is None:
+            plan = Plan(
+                code="huading",
+                name="Huading Plan",
+                price_cents=0,
+                period="monthly",
+                quota_credits=0,
+                is_active=True,
+            )
+            db.add(plan)
+            db.flush()
+        subscription.plan_id = plan.id
     subscription.quota_credits_total = 100000
     subscription.quota_credits_used = 0
     subscription.quota_credits_reserved = 0
@@ -299,7 +314,7 @@ def test_create_brand_voice_clones_and_charges_once(auth_context, auth_db, monke
         assert config.config["used_speaker_ids"] == {"S_brand_slot_001": data["id"]}
 
 
-def test_create_doubao_brand_voice_requires_admin_or_huading_plan(
+def test_create_doubao_brand_voice_requires_huading_or_platform_tenant(
     auth_context,
     auth_db,
     monkeypatch,
@@ -313,7 +328,11 @@ def test_create_doubao_brand_voice_requires_admin_or_huading_plan(
         lambda *_args, **_kwargs: provider,
     )
     with auth_db() as db:
-        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        _seed_brand_voice_billing(
+            db,
+            auth_context["tenant_id"],
+            huading_access=False,
+        )
         asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
         user = db.get(User, auth_context["user_id"])
         assert user is not None
@@ -353,7 +372,11 @@ def test_create_doubao_brand_voice_allows_huading_plan_creator(
         lambda *_args, **_kwargs: provider,
     )
     with auth_db() as db:
-        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        _seed_brand_voice_billing(
+            db,
+            auth_context["tenant_id"],
+            huading_access=False,
+        )
         huading = Plan(
             code="huading",
             name="Huading Plan",
@@ -458,7 +481,11 @@ def test_create_brand_voice_routes_cosyvoice_provider(auth_context, auth_db, mon
 
 def test_create_brand_voice_rejects_unknown_provider(auth_context, auth_db):
     with auth_db() as db:
-        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        _seed_brand_voice_billing(
+            db,
+            auth_context["tenant_id"],
+            huading_access=False,
+        )
         asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
 
     client = TestClient(app)
@@ -1304,7 +1331,11 @@ def test_avatar_talk_rejects_doubao_brand_voice_without_huading_access(
     monkeypatch,
 ):
     with auth_db() as db:
-        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        _seed_brand_voice_billing(
+            db,
+            auth_context["tenant_id"],
+            huading_access=False,
+        )
         avatar_id = _seed_avatar_asset(db, auth_context["tenant_id"])
         user = db.get(User, auth_context["user_id"])
         assert user is not None
@@ -1352,7 +1383,11 @@ def test_seedance_i2v_rejects_doubao_brand_voice_without_huading_access(
     monkeypatch,
 ):
     with auth_db() as db:
-        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        _seed_brand_voice_billing(
+            db,
+            auth_context["tenant_id"],
+            huading_access=False,
+        )
         user = db.get(User, auth_context["user_id"])
         assert user is not None
         user.role = "creator"
@@ -1405,7 +1440,11 @@ def test_seedance_i2v_allows_cosyvoice_brand_voice_on_free_plan(
             enqueued.update({"args": args, "task_id": task_id, "queue": queue})
 
     with auth_db() as db:
-        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        _seed_brand_voice_billing(
+            db,
+            auth_context["tenant_id"],
+            huading_access=False,
+        )
         db.add(
             CreditRate(
                 tenant_id=None,
@@ -1465,7 +1504,11 @@ def test_avatar_talk_worker_rechecks_doubao_brand_voice_plan_access(
 ):
     unit_id = "doubao-worker-plan-gate"
     with auth_db() as db:
-        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        _seed_brand_voice_billing(
+            db,
+            auth_context["tenant_id"],
+            huading_access=False,
+        )
         user = db.get(User, auth_context["user_id"])
         assert user is not None
         user.role = "creator"

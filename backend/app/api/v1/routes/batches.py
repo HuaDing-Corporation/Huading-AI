@@ -314,7 +314,6 @@ def _create_ecom_table_tasks(
         require_doubao_voice_clone_access(
             db,
             tenant_id=user.tenant_id,
-            role=user.role,
         )
     brand_voice_params: dict[str, object] = {}
     if brand_voice is not None:

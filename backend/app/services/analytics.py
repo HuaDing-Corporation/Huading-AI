@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import Float, and_, cast, desc, func, select
+from sqlalchemy import Float, and_, cast, desc, func, select, true
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
@@ -55,7 +55,12 @@ def resolve_date_range(from_date: date | None, to_date: date | None) -> Analytic
     return AnalyticsDateRange(start=start, end=end)
 
 
-def analytics_overview(db: Session, period: AnalyticsDateRange) -> AnalyticsOverviewResponse:
+def analytics_overview(
+    db: Session,
+    period: AnalyticsDateRange,
+    *,
+    tenant_id: str | None,
+) -> AnalyticsOverviewResponse:
     credits, cost_cents, tenant_count = db.execute(
         select(
             func.coalesce(func.sum(UsageRecord.credits), 0),
@@ -64,10 +69,11 @@ def analytics_overview(db: Session, period: AnalyticsDateRange) -> AnalyticsOver
         ).where(
             UsageRecord.status == "settled",
             _usage_in_period(period),
+            _usage_tenant_scope(tenant_id),
         )
     ).one()
-    success_count = _success_count(db, period)
-    failed_count = _failed_count(db, period)
+    success_count = _success_count(db, period, tenant_id=tenant_id)
+    failed_count = _failed_count(db, period, tenant_id=tenant_id)
     return AnalyticsOverviewResponse(
         total_credits_used=_float(credits),
         total_cost_cents=int(cost_cents or 0),
@@ -86,10 +92,11 @@ def analytics_by_tenant(
     sort: AnalyticsTenantSort,
     limit: int,
     offset: int,
+    tenant_id: str | None,
 ) -> AnalyticsByTenantResponse:
-    settled = _settled_by_tenant(period)
-    successful = _successful_by_tenant(period)
-    failed = _failed_by_tenant(period)
+    settled = _settled_by_tenant(period, tenant_id=tenant_id)
+    successful = _successful_by_tenant(period, tenant_id=tenant_id)
+    failed = _failed_by_tenant(period, tenant_id=tenant_id)
     credits_expr = func.coalesce(settled.c.credits_used, 0)
     cost_expr = func.coalesce(settled.c.cost_cents, 0)
     success_expr = func.coalesce(successful.c.success_count, 0)
@@ -110,7 +117,15 @@ def analytics_by_tenant(
         "success_rate_desc": desc(success_rate_expr),
         "success_rate_asc": success_rate_expr.asc(),
     }[sort]
-    total = db.scalar(select(func.count(Tenant.id)).where(Tenant.deleted_at.is_(None))) or 0
+    total = (
+        db.scalar(
+            select(func.count(Tenant.id)).where(
+                Tenant.deleted_at.is_(None),
+                _tenant_scope(tenant_id),
+            )
+        )
+        or 0
+    )
     rows = db.execute(
         select(
             Tenant.id,
@@ -130,7 +145,7 @@ def analytics_by_tenant(
         .outerjoin(settled, settled.c.tenant_id == Tenant.id)
         .outerjoin(successful, successful.c.tenant_id == Tenant.id)
         .outerjoin(failed, failed.c.tenant_id == Tenant.id)
-        .where(Tenant.deleted_at.is_(None))
+        .where(Tenant.deleted_at.is_(None), _tenant_scope(tenant_id))
         .order_by(sort_expr, Tenant.created_at.asc(), Tenant.id.asc())
         .limit(limit)
         .offset(offset)
@@ -163,7 +178,12 @@ def analytics_by_tenant(
     )
 
 
-def analytics_by_provider(db: Session, period: AnalyticsDateRange) -> AnalyticsByProviderResponse:
+def analytics_by_provider(
+    db: Session,
+    period: AnalyticsDateRange,
+    *,
+    tenant_id: str | None,
+) -> AnalyticsByProviderResponse:
     rows = db.execute(
         select(
             UsageRecord.provider,
@@ -175,6 +195,7 @@ def analytics_by_provider(db: Session, period: AnalyticsDateRange) -> AnalyticsB
         .where(
             UsageRecord.status == "settled",
             _usage_in_period(period),
+            _usage_tenant_scope(tenant_id),
         )
         .group_by(UsageRecord.provider, UsageRecord.model)
         .order_by(desc("credits_used"), UsageRecord.provider.asc(), UsageRecord.model.asc())
@@ -195,7 +216,12 @@ def analytics_by_provider(db: Session, period: AnalyticsDateRange) -> AnalyticsB
     )
 
 
-def analytics_timeseries(db: Session, period: AnalyticsDateRange) -> AnalyticsTimeseriesResponse:
+def analytics_timeseries(
+    db: Session,
+    period: AnalyticsDateRange,
+    *,
+    tenant_id: str | None,
+) -> AnalyticsTimeseriesResponse:
     day_expr = func.date(UsageRecord.created_at)
     rows = db.execute(
         select(
@@ -207,6 +233,7 @@ def analytics_timeseries(db: Session, period: AnalyticsDateRange) -> AnalyticsTi
         .where(
             UsageRecord.status == "settled",
             _usage_in_period(period),
+            _usage_tenant_scope(tenant_id),
         )
         .group_by(day_expr)
     ).all()
@@ -229,8 +256,10 @@ def analytics_timeseries(db: Session, period: AnalyticsDateRange) -> AnalyticsTi
 def analytics_timeseries_week(
     db: Session,
     period: AnalyticsDateRange,
+    *,
+    tenant_id: str | None,
 ) -> AnalyticsTimeseriesResponse:
-    daily = analytics_timeseries(db, period)
+    daily = analytics_timeseries(db, period, tenant_id=tenant_id)
     by_week: dict[date, tuple[float, int, int]] = {
         week_start: (0.0, 0, 0) for week_start in _weeks(period)
     }
@@ -262,7 +291,7 @@ def _usage_in_period(period: AnalyticsDateRange):
     )
 
 
-def _settled_by_tenant(period: AnalyticsDateRange):
+def _settled_by_tenant(period: AnalyticsDateRange, *, tenant_id: str | None):
     return (
         select(
             UsageRecord.tenant_id.label("tenant_id"),
@@ -272,13 +301,14 @@ def _settled_by_tenant(period: AnalyticsDateRange):
         .where(
             UsageRecord.status == "settled",
             _usage_in_period(period),
+            _usage_tenant_scope(tenant_id),
         )
         .group_by(UsageRecord.tenant_id)
         .subquery()
     )
 
 
-def _successful_by_tenant(period: AnalyticsDateRange):
+def _successful_by_tenant(period: AnalyticsDateRange, *, tenant_id: str | None):
     return (
         select(
             UsageRecord.tenant_id.label("tenant_id"),
@@ -290,13 +320,14 @@ def _successful_by_tenant(period: AnalyticsDateRange):
             UsageRecord.video_task_id.is_not(None),
             UsageRecord.status == "settled",
             VideoTask.status == "done",
+            _usage_tenant_scope(tenant_id),
         )
         .group_by(UsageRecord.tenant_id)
         .subquery()
     )
 
 
-def _failed_by_tenant(period: AnalyticsDateRange):
+def _failed_by_tenant(period: AnalyticsDateRange, *, tenant_id: str | None):
     return (
         select(
             UsageRecord.tenant_id.label("tenant_id"),
@@ -308,13 +339,19 @@ def _failed_by_tenant(period: AnalyticsDateRange):
             UsageRecord.video_task_id.is_not(None),
             UsageRecord.status != "settled",
             VideoTask.status.in_(FAILED_TASK_STATUSES),
+            _usage_tenant_scope(tenant_id),
         )
         .group_by(UsageRecord.tenant_id)
         .subquery()
     )
 
 
-def _success_count(db: Session, period: AnalyticsDateRange) -> int:
+def _success_count(
+    db: Session,
+    period: AnalyticsDateRange,
+    *,
+    tenant_id: str | None,
+) -> int:
     return int(
         db.scalar(
             select(func.count(func.distinct(UsageRecord.video_task_id)))
@@ -324,13 +361,19 @@ def _success_count(db: Session, period: AnalyticsDateRange) -> int:
                 UsageRecord.video_task_id.is_not(None),
                 UsageRecord.status == "settled",
                 VideoTask.status == "done",
+                _usage_tenant_scope(tenant_id),
             )
         )
         or 0
     )
 
 
-def _failed_count(db: Session, period: AnalyticsDateRange) -> int:
+def _failed_count(
+    db: Session,
+    period: AnalyticsDateRange,
+    *,
+    tenant_id: str | None,
+) -> int:
     return int(
         db.scalar(
             select(func.count(func.distinct(UsageRecord.video_task_id)))
@@ -340,10 +383,23 @@ def _failed_count(db: Session, period: AnalyticsDateRange) -> int:
                 UsageRecord.video_task_id.is_not(None),
                 UsageRecord.status != "settled",
                 VideoTask.status.in_(FAILED_TASK_STATUSES),
+                _usage_tenant_scope(tenant_id),
             )
         )
         or 0
     )
+
+
+def _usage_tenant_scope(tenant_id: str | None):
+    if tenant_id is None:
+        return true()
+    return UsageRecord.tenant_id == tenant_id
+
+
+def _tenant_scope(tenant_id: str | None):
+    if tenant_id is None:
+        return true()
+    return Tenant.id == tenant_id
 
 
 def _balance(total: int | None, used: int | None, reserved: int | None) -> AnalyticsBalance:

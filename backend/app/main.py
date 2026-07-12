@@ -14,15 +14,40 @@ from app.middleware.body_size_limit import BodySizeLimitMiddleware
 from app.middleware.request_id import RequestIdMiddleware
 from app.middleware.tenant_context import TenantContextMiddleware
 from app.services.bgm_library import seed_bgm_library
+from app.services.plan_access import (
+    configured_platform_tenant_slugs,
+    platform_tenant_configuration_issues,
+)
 from app.services.storage.factory import create_object_storage
 
 logger = get_logger(__name__)
+
+
+def _warn_platform_tenant_configuration() -> None:
+    if not configured_platform_tenant_slugs():
+        return
+    try:
+        with SessionLocal() as db:
+            issues = platform_tenant_configuration_issues(db)
+    except Exception as exc:
+        logger.warning(
+            "platform_tenant.configuration_check_failed",
+            error_type=type(exc).__name__,
+        )
+        return
+    for slug, reason in issues:
+        logger.warning(
+            "platform_tenant.configuration_warning",
+            slug=slug,
+            reason=reason,
+        )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging(settings.log_level)
     logger.info("app.starting", app_name=settings.app_name, version=settings.app_version)
+    _warn_platform_tenant_configuration()
     if settings.engine_bgm_seed_on_startup:
         seed_bgm_library(
             SessionLocal,

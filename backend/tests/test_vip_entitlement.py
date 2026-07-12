@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -41,12 +43,15 @@ def _assert_me_matches_doubao_gate(
     headers: dict[str, str],
     expected_entitlement: bool,
     expected_role_permission: str,
+    expected_analytics_platform: bool = False,
 ) -> None:
     me_response = client.get("/api/v1/auth/me", headers=headers)
     assert me_response.status_code == 200
     permissions = set(me_response.json()["data"]["permissions"])
     assert expected_role_permission in permissions
     assert ("voice_clone_vip" in permissions) is expected_entitlement
+    assert ("analytics_view" in permissions) is expected_entitlement
+    assert ("analytics_platform" in permissions) is expected_analytics_platform
 
     clone_response = client.post(
         "/api/v1/brand-voices",
@@ -104,10 +109,19 @@ def test_creator_me_entitlement_tracks_live_plan_and_matches_doubao_gate(
     )
 
 
-def test_admin_me_has_voice_clone_entitlement_without_subscription(
+def test_platform_tenant_me_has_entitlements_without_subscription(
     auth_context,
     auth_db,
+    monkeypatch,
 ) -> None:
+    from app.services import plan_access
+
+    monkeypatch.setattr(
+        plan_access,
+        "settings",
+        SimpleNamespace(engine_platform_tenant_slugs={"acme"}),
+        raising=False,
+    )
     with auth_db() as db:
         user = db.get(User, auth_context["user_id"])
         assert user is not None
@@ -120,6 +134,7 @@ def test_admin_me_has_voice_clone_entitlement_without_subscription(
         headers=auth_context["headers"],
         expected_entitlement=True,
         expected_role_permission="tenant:admin",
+        expected_analytics_platform=True,
     )
 
     admin_check = TestClient(app).get(

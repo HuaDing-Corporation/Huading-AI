@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.api.deps import get_object_storage
-from app.db.models import Asset, BrandVoice, ProviderConfig
+from app.db.models import Asset, BrandVoice, Plan, ProviderConfig, Subscription
 from app.main import app
 
 
@@ -45,6 +45,26 @@ class _CloneProvider:
 
     async def delete_voice(self, payload: dict[str, Any]) -> dict[str, Any]:
         return {"released": True}
+
+
+def _grant_huading_access(db, tenant_id: str) -> None:
+    plan = db.scalar(select(Plan).where(Plan.code == "huading"))
+    if plan is None:
+        plan = Plan(
+            code="huading",
+            name="Huading Plan",
+            price_cents=0,
+            period="monthly",
+            quota_credits=0,
+            is_active=True,
+        )
+        db.add(plan)
+        db.flush()
+    subscription = db.scalar(
+        select(Subscription).where(Subscription.tenant_id == tenant_id)
+    )
+    assert subscription is not None
+    subscription.plan_id = plan.id
 
 
 def test_upload_audio_creates_tenant_scoped_audio_asset(auth_context, auth_db, monkeypatch):
@@ -202,6 +222,7 @@ def test_upload_audio_then_create_brand_voice_without_direct_db_audio_seed(
     )
     provider_obj = provider
     with auth_db() as db:
+        _grant_huading_access(db, auth_context["tenant_id"])
         db.add(
             ProviderConfig(
                 tenant_id=None,
@@ -265,6 +286,7 @@ def test_create_brand_voice_accepts_historical_codec_param_audio_asset(
     )
     provider_obj = provider
     with auth_db() as db:
+        _grant_huading_access(db, auth_context["tenant_id"])
         db.add(
             ProviderConfig(
                 tenant_id=None,

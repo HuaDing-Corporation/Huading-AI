@@ -634,7 +634,6 @@ def _create_avatar_talk_video(
         require_doubao_voice_clone_access(
             db,
             tenant_id=user.tenant_id,
-            role=user.role,
         )
     if payload.avatar_video_asset_id:
         avatar = _avatar_video_asset_or_404(
@@ -732,7 +731,6 @@ def _create_seedance_i2v_video(
         require_doubao_voice_clone_access(
             db,
             tenant_id=user.tenant_id,
-            role=user.role,
         )
 
     task_id = str(uuid4())
