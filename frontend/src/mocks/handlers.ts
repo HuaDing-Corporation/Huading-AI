@@ -304,15 +304,34 @@ function analyticsPlanRequired(): boolean {
   }
 }
 
-// ADMIN-VIP-GATE-UI-0001 §二之二：VIP 音色门禁模拟——localStorage["hd_mock_non_vip"]==="1" → 当前用户非
-// huading（且非 admin）：login/me 回 role="creator" + 无 voice_clone_vip 权限；doubao 创建 → 403 VOICE_CLONE_PLAN_REQUIRED。
-// 默认（未设）= admin + voice_clone_vip（doubao 可用），零回归。
-function mockNonVip(): boolean {
+// ADMIN-VIP-GATE-UI-0001 §二之二 · FIX1：VIP 音色 entitlement **按「角色 + 套餐」派生**，镜像真实 BE
+// (VIP-ENTITLEMENT-BE-0001)——/auth/me.permissions = permissions_for_role(role) ∪
+// （role==="admin" 或 租户 active 订阅 plan.code==="huading" 时加 "voice_clone_vip"）。
+// **mock 不再凭空塞权限**（旧版把 voice_clone_vip 写死进 admin，致 creator+huading 真实付费用户被误伤 → 假绿）。
+// 测试/e2e 通过 localStorage 双旋钮切场景（默认 admin+huading → 有权限，零回归）：
+//   hd_mock_role: "admin"（默认）| "creator"
+//   hd_mock_plan: "huading"（默认）| "free"   —— 代表租户当前套餐 code
+function readLS(key: string): string | null {
   try {
-    return typeof localStorage !== "undefined" && localStorage.getItem("hd_mock_non_vip") === "1";
+    return typeof localStorage !== "undefined" ? localStorage.getItem(key) : null;
   } catch {
-    return false;
+    return null;
   }
+}
+function mockRole(): "admin" | "creator" {
+  return readLS("hd_mock_role") === "creator" ? "creator" : "admin";
+}
+function mockPlan(): "huading" | "free" {
+  return readLS("hd_mock_plan") === "free" ? "free" : "huading";
+}
+// VIP 通路 entitlement——镜像 BE「admin OR plan=huading」，是 voice_clone_vip 权限的**唯一来源**。
+function mockVipEntitled(): boolean {
+  return mockRole() === "admin" || mockPlan() === "huading";
+}
+// 角色基础权限（镜像 BE permissions_for_role）；voice_clone_vip **不写死进角色**，由 entitlement 派生。
+const BASE_PERMISSIONS = ["video:create", "video:read"];
+function mockPermissions(): string[] {
+  return mockVipEntitled() ? [...BASE_PERMISSIONS, "voice_clone_vip"] : [...BASE_PERMISSIONS];
 }
 
 function analyticsHandlers() {
@@ -532,7 +551,7 @@ export const handlers = [
   // Auth = M2 shapes (unchanged). Mocked so the (app) client auth-gate can be
   // passed during the MSW parallel period without a real backend.
   http.post(`${BASE}/api/v1/auth/login`, () =>
-    ok({ access_token: "mock-token", token_type: "bearer", tenant_id: "ten-mock", user_id: "u-mock", role: mockNonVip() ? "creator" : "admin" })
+    ok({ access_token: "mock-token", token_type: "bearer", tenant_id: "ten-mock", user_id: "u-mock", role: mockRole() })
   ),
   // 注册（AUTH-UI-0001 · FIX1 硬化）：镜像 BE POST /auth/register-tenant → {tenant,user,token}（201）。
   // 校验必填 + extra="forbid" + full_name≤200（防非法请求在 mock 假绿，P2）；slug="taken" → 409。
@@ -573,12 +592,12 @@ export const handlers = [
     );
   }),
   http.get(`${BASE}/api/v1/auth/me`, () => {
-    const nonVip = mockNonVip();
+    // permissions 按「角色 + 套餐」派生（镜像真实 BE），voice_clone_vip 唯一来源 = admin 或 plan=huading。
+    // creator + huading 真实付费用户在此**拿得到** voice_clone_vip（旧 mock 的误伤点）。
     return ok({
       tenant: { id: "ten-mock", slug: "huading", name: "华鼎（mock）" },
-      user: { id: "u-mock", tenant_id: "ten-mock", email: "qa@huading.test", full_name: "QA 测试", role: nonVip ? "creator" : "admin" },
-      // 默认（VIP/admin）带 voice_clone_vip；hd_mock_non_vip → 去掉该权限，doubao 通路被门禁（§二之二）。
-      permissions: nonVip ? ["video:create", "video:read"] : ["video:create", "video:read", "voice_clone_vip"]
+      user: { id: "u-mock", tenant_id: "ten-mock", email: "qa@huading.test", full_name: "QA 测试", role: mockRole() },
+      permissions: mockPermissions()
     });
   }),
   http.get(`${BASE}/api/v1/quota`, () => ok({ total: 1000, used: 120, reserved: 36, remaining: 844 })),
@@ -1091,9 +1110,10 @@ export const handlers = [
     }
     // 存/返 canonical 长值（镜像 BE：alias 归一化 → _brand_voice_read 返 canonical）。
     const provider = VOICE_CLONE_CANONICAL[body.provider ?? "doubao"];
-    // VIP 门禁（§二之二）：doubao 通路对非授权用户 → 403 VOICE_CLONE_PLAN_REQUIRED（防选了再撞的兜底；正常前端已置灰）。
+    // VIP 门禁（§二之二）：doubao 通路对无 entitlement 用户 → 403 VOICE_CLONE_PLAN_REQUIRED（防选了再撞的兜底；正常前端已置灰）。
+    // entitlement 与 /me 同源（admin 或 plan=huading）——creator+huading 付费用户在此**放行**。
     // cosyvoice 免费档不受门禁——任何用户可建（含 0 余额新注册）。
-    if (provider === "doubao-voice-clone" && mockNonVip()) {
+    if (provider === "doubao-voice-clone" && !mockVipEntitled()) {
       return err(403, "VOICE_CLONE_PLAN_REQUIRED", "Voice clone (doubao) requires the huading plan.");
     }
     const id = `bv-${++brandVoiceSeq}`;

@@ -95,6 +95,27 @@ describe("BrandVoiceCreate (品牌音色创建)", () => {
     );
   });
 
+  // 承重·真实付费用户（Codex B P1 · FIX1）：creator + huading 套餐 → /me 已含 voice_clone_vip →
+  // 「升级版 VIP」**不置灰、可选**，缺省 doubao 照走扣费确认，绝不被误伤为免费档。这条正是旧 mock 假绿掩盖的场景。
+  it("VIP 门禁：creator + huading（permissions 含 voice_clone_vip）→ doubao 可选、无锁提示、走扣费确认（不误伤付费用户）", async () => {
+    authMock.session = { role: "creator", user: { permissions: ["video:create", "voice_clone_vip"] } };
+    const file = mp3();
+    render(<BrandVoiceCreate />);
+    // 无锁定提示；doubao 定价描述照常在（未被替换）。
+    expect(screen.queryByText(copy.brandVoice.providerVipLocked)).not.toBeInTheDocument();
+    expect(screen.getByText(copy.brandVoice.providerDoubaoDesc)).toBeInTheDocument();
+    uploadAudio(file);
+    fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "付费音" } });
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
+    // 缺省 doubao 未被误切 cosyvoice → 弹扣费确认（付费通路可走）。
+    expect(screen.getByText(copy.brandVoice.chargeConfirmTitle)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.chargeConfirmBtn }));
+    await waitFor(() =>
+      expect(createMock.mutateAsync).toHaveBeenCalledWith(expect.objectContaining({ provider: "doubao" }))
+    );
+  });
+
   // 管理员（默认）：doubao 可用，缺省仍走扣费确认（零回归）。
   it("缺省 doubao：不选卡片点创建 → 弹扣费确认，确认后带 provider:doubao", async () => {
     const file = mp3();
