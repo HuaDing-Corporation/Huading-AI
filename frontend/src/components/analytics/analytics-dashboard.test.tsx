@@ -15,27 +15,40 @@ vi.mock("@/components/analytics/tenant-table", () => ({ TenantTable: () => <div 
 vi.mock("@/components/analytics/provider-table", () => ({ ProviderTable: () => <div data-testid="provider" /> }));
 vi.mock("@/components/analytics/trend-chart", () => ({ TrendChart: () => <div data-testid="trend" /> }));
 
-import { AnalyticsDashboard, DashboardInner, isForbidden } from "./analytics-dashboard";
+import { AnalyticsDashboard, DashboardInner, isForbidden, isPlanRequired } from "./analytics-dashboard";
 
 const okOverview = { data: { total_credits_used: 1, total_cost_cents: 1, task_count: 1, success_count: 1, failed_count: 0, tenant_count: 1, period: { from: "", to: "" } }, isLoading: false, isError: false, error: null };
 const okTenant = { data: { items: [], total: 0 }, isLoading: false, isError: false, error: null };
 
-describe("AnalyticsDashboard (坑③·403 优雅分流)", () => {
-  it("isForbidden：仅对 ApiError status=403 为真", () => {
+describe("AnalyticsDashboard (VIP 门禁·403 优雅分流 · ADMIN-VIP-GATE-UI-0001)", () => {
+  it("isPlanRequired：仅对 ApiError code=ANALYTICS_PLAN_REQUIRED 为真；isForbidden：任意 403 为真", () => {
+    expect(isPlanRequired(new ApiError("x", "ANALYTICS_PLAN_REQUIRED", 403))).toBe(true);
+    expect(isPlanRequired(new ApiError("x", "FORBIDDEN", 403))).toBe(false);
+    expect(isPlanRequired(new Error("x"))).toBe(false);
     expect(isForbidden(new ApiError("x", "FORBIDDEN", 403))).toBe(true);
     expect(isForbidden(new ApiError("x", "NOT_FOUND", 404))).toBe(false);
-    expect(isForbidden(new Error("x"))).toBe(false);
   });
 
-  it("overview 命中 403 → 无权限态（含返回工作台），四区块均不渲染（承重·不白屏）", async () => {
-    useAnalyticsOverview.mockReturnValue({ data: undefined, isLoading: false, isError: true, error: new ApiError("Insufficient permission.", "FORBIDDEN", 403) });
-    useAnalyticsByTenant.mockReturnValue({ data: undefined, isLoading: false, isError: true, error: new ApiError("Insufficient permission.", "FORBIDDEN", 403) });
+  it("overview 命中 403 ANALYTICS_PLAN_REQUIRED → VIP 友好页「仅 huading plan 用户可查看」，四区块均不渲染（承重·不白屏/不透传 403）", async () => {
+    const planErr = new ApiError("Analytics requires the huading plan.", "ANALYTICS_PLAN_REQUIRED", 403);
+    useAnalyticsOverview.mockReturnValue({ data: undefined, isLoading: false, isError: true, error: planErr });
+    useAnalyticsByTenant.mockReturnValue({ data: undefined, isLoading: false, isError: true, error: planErr });
     render(<AnalyticsDashboard />);
-    await waitFor(() => expect(screen.getByText(copy.analytics.forbiddenTitle)).toBeInTheDocument());
-    expect(screen.getByText(copy.analytics.forbiddenBack)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(copy.analytics.planRequiredTitle)).toBeInTheDocument());
+    expect(screen.getByText(copy.analytics.planRequiredBack)).toBeInTheDocument();
+    // 不透传后端英文原串。
+    expect(screen.queryByText(/huading plan\.$/)).not.toBeInTheDocument();
     expect(screen.queryByTestId("tenant")).not.toBeInTheDocument();
     expect(screen.queryByTestId("provider")).not.toBeInTheDocument();
     expect(screen.queryByTestId("trend")).not.toBeInTheDocument();
+  });
+
+  it("兜底：任意 403（未带 code）也走同一 VIP 友好页（不白屏）", async () => {
+    const bareForbidden = new ApiError("Insufficient permission.", "FORBIDDEN", 403);
+    useAnalyticsOverview.mockReturnValue({ data: undefined, isLoading: false, isError: true, error: bareForbidden });
+    useAnalyticsByTenant.mockReturnValue({ data: undefined, isLoading: false, isError: true, error: bareForbidden });
+    render(<AnalyticsDashboard />);
+    await waitFor(() => expect(screen.getByText(copy.analytics.planRequiredTitle)).toBeInTheDocument());
   });
 
   it("非法区间(from>to) → overview/reserved 查询 enabled=false 不发请求（承重·避免后端 422）", () => {
@@ -63,6 +76,6 @@ describe("AnalyticsDashboard (坑③·403 优雅分流)", () => {
     expect(screen.getByTestId("tenant")).toBeInTheDocument();
     expect(screen.getByTestId("provider")).toBeInTheDocument();
     expect(screen.getByTestId("trend")).toBeInTheDocument();
-    expect(screen.queryByText(copy.analytics.forbiddenTitle)).not.toBeInTheDocument();
+    expect(screen.queryByText(copy.analytics.planRequiredTitle)).not.toBeInTheDocument();
   });
 });

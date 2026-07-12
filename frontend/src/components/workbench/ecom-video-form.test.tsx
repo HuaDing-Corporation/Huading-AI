@@ -25,6 +25,8 @@ vi.mock("@/lib/api/hooks", () => ({
   })
 }));
 vi.mock("@/lib/videos/tasks-context", () => ({ useVideoTasks: () => taskMocks }));
+// VIP 门禁（§二之二）：默认 admin（doubao 品牌音色可用，零回归）。
+vi.mock("@/lib/auth/auth-context", () => ({ useAuth: () => ({ session: { role: "admin" }, ready: true }) }));
 
 import { EcomVideoForm } from "./ecom-video-form";
 

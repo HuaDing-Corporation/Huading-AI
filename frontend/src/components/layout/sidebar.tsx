@@ -12,7 +12,8 @@ export function Sidebar() {
   // Single quota source (same useQuota as the top-bar QuotaBadge); hide the
   // panel until real data loads so we never show a fabricated number.
   const { data: quota } = useQuota();
-  // 仅管理员可见项（数据看板）：非管理员从导航过滤掉；页面本身仍优雅处理后端 403（不靠此兜底）。
+  // adminOnly 过滤机制保留备未来管理员专属项；ADMIN-VIP-GATE-UI-0001 后数据看板去 adminOnly → 始终显示
+  // （VIP 门禁移到 /analytics 页友好页，不在此隐藏）。当前无 adminOnly 项，故两分支等价。
   const { session } = useAuth();
   const isAdmin = session?.role === "admin";
   const items = isAdmin ? navItems : navItems.filter((item) => !item.adminOnly);

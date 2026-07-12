@@ -25,6 +25,8 @@ vi.mock("@/lib/api/hooks", () => ({
   useEstimateVideo: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, data: undefined })
 }));
 vi.mock("@/lib/videos/tasks-context", () => ({ useVideoTasks: () => ({ createAndTrack: vi.fn() }) }));
+// VIP 门禁（§二之二）：默认 admin（doubao 品牌音色可用，零回归）。
+vi.mock("@/lib/auth/auth-context", () => ({ useAuth: () => ({ session: { role: "admin" }, ready: true }) }));
 
 import { NewVideoForm } from "./new-video-form";
 

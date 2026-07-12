@@ -293,17 +293,58 @@ const ANALYTICS_TENANTS = Array.from({ length: 46 }, (_, i) => {
   };
 });
 
-function analyticsForbidden(): boolean {
+// ADMIN-VIP-GATE-UI-0001：VIP 门禁模拟——localStorage["hd_mock_analytics_plan"]==="none" → 403
+// ANALYTICS_PLAN_REQUIRED（MSW resolver 运行在页面上下文，可直读 localStorage，不受跨源 API base 影响；
+// e2e 用 page.evaluate 设置后 reload 即切未授权态）。默认（未设）= 授权 → 正常返数据，零回归。
+function analyticsPlanRequired(): boolean {
   try {
-    return typeof localStorage !== "undefined" && localStorage.getItem("hd_mock_non_admin") === "1";
+    return typeof localStorage !== "undefined" && localStorage.getItem("hd_mock_analytics_plan") === "none";
   } catch {
     return false;
   }
 }
 
+// ADMIN-VIP-GATE-UI-0001 §二之二 · FIX1：VIP 音色 entitlement **按「角色 + 套餐」派生**，逐字镜像真实 BE
+// (#162 VIP-ENTITLEMENT-BE-0001)——/auth/me.permissions = sorted(permissions_for_role(role) ∪
+// {"voice_clone_vip"} if has_huading_access)，has_huading_access = role==ADMIN 或 租户 active 订阅 plan.code=="huading"
+// （app/services/plan_access.py，实时计算）。**mock 不再凭空塞权限**（旧版把 voice_clone_vip 写死进 admin，致
+// creator+huading 真实付费用户被误伤 → 假绿）。测试/e2e 通过 localStorage 双旋钮切场景（默认 admin+huading → 有权限，零回归）：
+//   hd_mock_role: "admin"（默认）| "creator"
+//   hd_mock_plan: "huading"（默认）| "free"   —— 代表租户当前套餐 code
+function readLS(key: string): string | null {
+  try {
+    return typeof localStorage !== "undefined" ? localStorage.getItem(key) : null;
+  } catch {
+    return null;
+  }
+}
+function mockRole(): "admin" | "creator" {
+  return readLS("hd_mock_role") === "creator" ? "creator" : "admin";
+}
+function mockPlan(): "huading" | "free" {
+  return readLS("hd_mock_plan") === "free" ? "free" : "huading";
+}
+// VIP 通路 entitlement——镜像 BE has_huading_access「role==ADMIN OR active huading 订阅」，voice_clone_vip 的**唯一来源**。
+function mockVipEntitled(): boolean {
+  return mockRole() === "admin" || mockPlan() === "huading";
+}
+// 角色基础权限：逐字镜像 BE deps.py::_ROLE_PERMISSIONS（mock 仅用 admin/creator 两档；真 BE 无 "video:read"）。
+// voice_clone_vip **不写死进角色**，由 entitlement 派生。
+const ROLE_PERMISSIONS: Record<"admin" | "creator", string[]> = {
+  admin: ["tenant:admin", "content:operate", "video:create", "video:review", "dev:access"],
+  creator: ["video:create"]
+};
+// /auth/me.permissions = sorted(角色权限 ∪ {voice_clone_vip} if entitled)——镜像 BE session_permissions_for_user + sorted()。
+function mockPermissions(): string[] {
+  const perms = new Set(ROLE_PERMISSIONS[mockRole()]);
+  if (mockVipEntitled()) perms.add("voice_clone_vip");
+  return [...perms].sort();
+}
+
 function analyticsHandlers() {
   const A = `${BASE}/api/v1/admin/analytics`;
-  const guard = () => (analyticsForbidden() ? err(403, "FORBIDDEN", "Insufficient permission.") : null);
+  const guard = () =>
+    analyticsPlanRequired() ? err(403, "ANALYTICS_PLAN_REQUIRED", "Analytics requires the huading plan.") : null;
   const sortTenants = (sort: string) => {
     const field = sort.replace(/_(asc|desc)$/, "");
     const dir = sort.endsWith("_asc") ? 1 : -1;
@@ -517,7 +558,7 @@ export const handlers = [
   // Auth = M2 shapes (unchanged). Mocked so the (app) client auth-gate can be
   // passed during the MSW parallel period without a real backend.
   http.post(`${BASE}/api/v1/auth/login`, () =>
-    ok({ access_token: "mock-token", token_type: "bearer", tenant_id: "ten-mock", user_id: "u-mock", role: "admin" })
+    ok({ access_token: "mock-token", token_type: "bearer", tenant_id: "ten-mock", user_id: "u-mock", role: mockRole() })
   ),
   // 注册（AUTH-UI-0001 · FIX1 硬化）：镜像 BE POST /auth/register-tenant → {tenant,user,token}（201）。
   // 校验必填 + extra="forbid" + full_name≤200（防非法请求在 mock 假绿，P2）；slug="taken" → 409。
@@ -557,13 +598,15 @@ export const handlers = [
       { status: 201 } // 对齐 BE：注册成功 201 CREATED
     );
   }),
-  http.get(`${BASE}/api/v1/auth/me`, () =>
-    ok({
+  http.get(`${BASE}/api/v1/auth/me`, () => {
+    // permissions 按「角色 + 套餐」派生（镜像真实 BE），voice_clone_vip 唯一来源 = admin 或 plan=huading。
+    // creator + huading 真实付费用户在此**拿得到** voice_clone_vip（旧 mock 的误伤点）。
+    return ok({
       tenant: { id: "ten-mock", slug: "huading", name: "华鼎（mock）" },
-      user: { id: "u-mock", tenant_id: "ten-mock", email: "qa@huading.test", full_name: "QA 测试", role: "admin" },
-      permissions: ["video:create", "video:read"]
-    })
-  ),
+      user: { id: "u-mock", tenant_id: "ten-mock", email: "qa@huading.test", full_name: "QA 测试", role: mockRole() },
+      permissions: mockPermissions()
+    });
+  }),
   http.get(`${BASE}/api/v1/quota`, () => ok({ total: 1000, used: 120, reserved: 36, remaining: 844 })),
   http.get(`${BASE}/api/v1/voices`, () => {
     // 系统音色(source:preset) + ready 克隆音色(source:brand_voice，对应 brand-voices ready 记录)，供 picker 分组(§8)。
@@ -1072,9 +1115,15 @@ export const handlers = [
     if (body.provider !== undefined && !(body.provider in VOICE_CLONE_CANONICAL)) {
       return err(422, "VALIDATION_ERROR", "provider 非法（doubao / cosyvoice）");
     }
-    const id = `bv-${++brandVoiceSeq}`;
     // 存/返 canonical 长值（镜像 BE：alias 归一化 → _brand_voice_read 返 canonical）。
     const provider = VOICE_CLONE_CANONICAL[body.provider ?? "doubao"];
+    // VIP 门禁（§二之二）：doubao 通路对无 entitlement 用户 → 403 VOICE_CLONE_PLAN_REQUIRED（防选了再撞的兜底；正常前端已置灰）。
+    // entitlement 与 /me 同源（admin 或 plan=huading）——creator+huading 付费用户在此**放行**。
+    // cosyvoice 免费档不受门禁——任何用户可建（含 0 余额新注册）。
+    if (provider === "doubao-voice-clone" && !mockVipEntitled()) {
+      return err(403, "VOICE_CLONE_PLAN_REQUIRED", "Voice clone (doubao) requires the huading plan.");
+    }
+    const id = `bv-${++brandVoiceSeq}`;
     brandVoices.set(id, { id, name: body.name || "未命名品牌音色", status: "processing", created_at: new Date(0).toISOString(), _polls: 0, provider });
     return ok({ id, name: body.name || "未命名品牌音色", status: "processing", created_at: new Date(0).toISOString(), provider });
   }),
@@ -1244,6 +1293,7 @@ export const handlers = [
   }),
 
   // ── 管理员数据看板 (ANALYTICS-UI-0001) ── /api/v1/admin/analytics/*，require_admin。
-  // 非管理员模拟：localStorage["hd_mock_non_admin"]==="1" → 403 FORBIDDEN（供 Playwright 403 态验证）。
+  // VIP 门禁模拟（ADMIN-VIP-GATE-UI-0001）：localStorage["hd_mock_analytics_plan"]="none" → 403
+  // ANALYTICS_PLAN_REQUIRED（供 Playwright 未授权友好页验证；默认未设=授权正常返数据）。
   ...analyticsHandlers()
 ];

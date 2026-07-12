@@ -38,9 +38,13 @@ test("未登录进站=落地页；登录→控制台；已登录访 /landing=头
   // 数据条可信表述，无「500+」。
   await expect(page.getByText("7 大模块")).toBeVisible();
   await expect(page.getByText("500+")).toHaveCount(0);
-  // CTA 指向。
+  // ADMIN-VIP-GATE-UI-0001：0 余额文案——CTA 无「免费」、注册 CTA 区改「注册后联系我们开通额度」。
+  await expect(page.getByText("免费")).toHaveCount(0);
+  await expect(page.getByText("立即免费注册")).toHaveCount(0);
+  await expect(page.getByText("注册后联系我们开通额度")).toBeVisible();
+  // CTA 指向（现为「立即注册」）。
   const hero = page.locator("main");
-  await expect(hero.getByRole("link", { name: "立即免费注册" }).first()).toHaveAttribute("href", "/register");
+  await expect(hero.getByRole("link", { name: "立即注册" }).first()).toHaveAttribute("href", "/register");
   await expect(hero.getByRole("link", { name: "登录控制台" })).toHaveAttribute("href", "/login");
   // 顶栏未登录态：登录 + 立即注册。
   const header = page.locator("header");

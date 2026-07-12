@@ -8,7 +8,10 @@ import { Sidebar } from "@/components/layout/sidebar";
 import { TopBar } from "@/components/layout/top-bar";
 import { copy } from "@/lib/copy";
 
-/** 管理员数据看板页（ANALYTICS-UI-0001）—— 路由 /analytics（侧边栏「数据看板」仅管理员）。外壳仿工作台/批量。 */
+/**
+ * 数据看板页（ANALYTICS-UI-0001 / ADMIN-VIP-GATE-UI-0001）—— 路由 /analytics。侧边栏「数据看板」**始终显示**；
+ * 门禁在 AnalyticsDashboard：非管理员且非 huading plan → 403 ANALYTICS_PLAN_REQUIRED → VIP 友好页。外壳仿工作台/批量。
+ */
 export default function AnalyticsPage() {
   const router = useRouter();
   const onBack = () => {

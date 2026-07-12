@@ -16,7 +16,7 @@ describe("LandingPage (/landing 落地页)", () => {
     render(<LandingPage />);
     expect(screen.getByRole("heading", { level: 1, name: copy.landing.heroTitle })).toBeInTheDocument();
     expect(screen.getByText(copy.landing.heroSub)).toBeInTheDocument();
-    // 双 CTA：立即免费注册 → /register；登录控制台 → /login。
+    // 双 CTA：立即注册 → /register；登录控制台 → /login。
     const registers = screen.getAllByRole("link", { name: copy.landing.ctaRegister });
     expect(registers.length).toBeGreaterThanOrEqual(2); // Hero + 注册 CTA 区
     registers.forEach((a) => expect(a).toHaveAttribute("href", "/register"));
@@ -26,6 +26,20 @@ describe("LandingPage (/landing 落地页)", () => {
     expect(screen.getByText(copy.landing.statAuto)).toBeInTheDocument();
     expect(screen.getByText(copy.landing.statDistribute)).toBeInTheDocument();
     expect(screen.queryByText(/500\+/)).not.toBeInTheDocument();
+  });
+
+  // ADMIN-VIP-GATE-UI-0001：新注册余额=0 → 落地页不得承诺「免费」/「免费额度/免费体验/注册即可体验全部模块」。
+  it("0 余额文案修正：CTA 无「免费」、注册 CTA 区改「注册后联系我们开通额度」、五步第 1 步点明开通额度", () => {
+    const { container } = render(<LandingPage />);
+    // 全页无「免费」承诺（去掉「立即免费注册」的「免费」暗示）。
+    expect(container.textContent).not.toContain("免费");
+    expect(screen.queryByText(/立即免费注册/)).not.toBeInTheDocument();
+    // 注册 CTA 区新文案（不承诺免费体验）。
+    expect(screen.getByText(copy.landing.ctaSub)).toBeInTheDocument();
+    expect(screen.getByText("注册后联系我们开通额度")).toBeInTheDocument();
+    expect(screen.queryByText(/注册即可体验全部模块|体验全部模块/)).not.toBeInTheDocument();
+    // 五步第 1 步点明开通额度后才能生成。
+    expect(screen.getByText(/开通额度后即可生成/)).toBeInTheDocument();
   });
 
   it("七大模块 + 「更多能力持续上线」= 8 卡；样片墙 4 占位；五步上手 5 条", () => {

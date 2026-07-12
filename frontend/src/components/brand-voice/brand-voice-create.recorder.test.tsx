@@ -21,6 +21,8 @@ vi.mock("@/lib/media/use-audio-recorder", () => ({
 vi.mock("@/lib/api/hooks", () => ({
   useCreateBrandVoice: () => ({ mutateAsync: createMock.mutateAsync, isPending: createMock.isPending })
 }));
+// VIP 门禁（§二之二）：默认 admin（doubao 可用，录音用例零回归）。
+vi.mock("@/lib/auth/auth-context", () => ({ useAuth: () => ({ session: { role: "admin" }, ready: true }) }));
 
 import { BrandVoiceCreate } from "./brand-voice-create";
 

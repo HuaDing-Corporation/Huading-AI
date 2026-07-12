@@ -27,6 +27,8 @@ import { AvatarVideoPicker } from "@/components/workbench/avatar-video-picker";
 import { MoreSettings } from "@/components/workbench/more-settings";
 import { ScriptReview } from "@/components/workbench/script-review";
 import { VoicePicker } from "@/components/workbench/voice-picker";
+import { useAuth } from "@/lib/auth/auth-context";
+import { canUseVipVoiceClone } from "@/lib/auth/vip";
 import { SubtitleStylePicker, isSubtitleStyleValid } from "@/components/workbench/subtitle-style-picker";
 import { AiLabelToggle } from "@/components/label/ai-label-toggle";
 import { useLabelTogglePreference } from "@/lib/preferences/label-toggle";
@@ -50,6 +52,7 @@ export function NewVideoForm({
   const scriptGen = useScriptGenerate();
   const uploadImg = useUploadImage();
   const uploadVideo = useUploadAvatarVideo();
+  const { session, ready: authReady } = useAuth(); // VIP 门禁（§二之二）：doubao 品牌音色可用性
   const voices = useVoices();
   const brandVoices = useBrandVoices(); // 「选我的音色」：品牌音色(声音复刻)全状态
   const presets = useAvatarPresets();
@@ -208,6 +211,8 @@ export function NewVideoForm({
         onChange={setVoiceId}
         brandVoices={brandVoices.data ?? []}
         brandVoicesLoading={brandVoices.isLoading}
+        // 加载态(!ready)不锁，避免 huading 非 admin 用户在 /me 到达前 doubao 音色瞬时误锁（与 create 卡 ready 门对齐）
+        canUseVip={!authReady || canUseVipVoiceClone(session)}
       />
 
       <SubtitleStylePicker
