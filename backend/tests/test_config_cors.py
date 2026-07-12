@@ -54,6 +54,25 @@ def test_engine_cors_origins_override_legacy_cors_env(monkeypatch) -> None:
     ]
 
 
+def test_platform_tenant_slugs_are_normalized_and_deduplicated(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "ENGINE_PLATFORM_TENANT_SLUGS",
+        " Huading, ACME,huading ,, ",
+    )
+
+    settings = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    assert settings.engine_platform_tenant_slugs == {"huading", "acme"}
+
+
+def test_platform_tenant_slugs_default_to_empty(monkeypatch) -> None:
+    monkeypatch.delenv("ENGINE_PLATFORM_TENANT_SLUGS", raising=False)
+
+    settings = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    assert settings.engine_platform_tenant_slugs == set()
+
+
 @pytest.mark.parametrize("raw", ["", "   "])
 def test_empty_string(monkeypatch, raw: str) -> None:
     s = _settings_with_cors(monkeypatch, raw)

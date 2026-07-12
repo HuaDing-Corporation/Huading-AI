@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
-from app.db.models import Asset, BrandVoice, TaskAsset, User, VideoTask, Voice
+from app.db.models import Asset, BrandVoice, TaskAsset, VideoTask, Voice
 from app.db.session import SessionLocal
 from app.providers.base import invoke, resolve, resolve_named_provider
 from app.providers.url_guard import (
@@ -773,16 +773,9 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         tenant_id=ctx.tenant_id,
     )
     if voice_source == "brand_voice" and uses_doubao_voice_clone(brand_voice_provider):
-        creator = ctx.db.get(User, task.created_by_user_id) if task.created_by_user_id else None
-        creator_role = (
-            creator.role
-            if creator is not None and creator.tenant_id == ctx.tenant_id
-            else ""
-        )
         require_doubao_voice_clone_access(
             ctx.db,
             tenant_id=ctx.tenant_id,
-            role=creator_role,
         )
     provider, capability = _tts_provider_for_voice(
         ctx.db,

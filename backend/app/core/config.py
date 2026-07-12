@@ -6,6 +6,22 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
+def _split_list_setting(value: str | list[str] | set[str]) -> list[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        return [item.strip() for item in text.split(",") if item.strip()]
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
 class Settings(BaseSettings):
     app_name: str = "Huading API"
     app_version: str = "0.1.0"
@@ -19,6 +35,9 @@ class Settings(BaseSettings):
         default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000"]
     )
     engine_cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    engine_platform_tenant_slugs: Annotated[set[str], NoDecode] = Field(
+        default_factory=set
+    )
 
     database_url: str = "postgresql+psycopg://huading:huading@localhost:5432/huading"
     redis_url: str = "redis://localhost:6379/0"
@@ -198,19 +217,15 @@ class Settings(BaseSettings):
     @classmethod
     def split_list_setting(cls, value: str | list[str]) -> list[str]:
         # Accept a JSON array, a comma-separated string, or a single URL.
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                return []
-            if text.startswith("["):
-                try:
-                    parsed = json.loads(text)
-                except json.JSONDecodeError:
-                    parsed = None
-                if isinstance(parsed, list):
-                    return [str(item).strip() for item in parsed if str(item).strip()]
-            return [item.strip() for item in text.split(",") if item.strip()]
-        return value
+        return _split_list_setting(value)
+
+    @field_validator("engine_platform_tenant_slugs", mode="before")
+    @classmethod
+    def normalize_platform_tenant_slugs(
+        cls,
+        value: str | list[str] | set[str],
+    ) -> set[str]:
+        return {item.lower() for item in _split_list_setting(value)}
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,6 +12,34 @@ from app.db.models import Plan, Subscription, Tenant, UsageRecord, User, VideoTa
 from app.main import app
 
 PERIOD_PARAMS = {"from": "2026-06-01", "to": "2026-06-30"}
+
+
+@pytest.fixture
+def no_platform_tenants(monkeypatch) -> set[str]:
+    from app.services import plan_access
+
+    slugs: set[str] = set()
+    monkeypatch.setattr(
+        plan_access,
+        "settings",
+        SimpleNamespace(engine_platform_tenant_slugs=slugs),
+        raising=False,
+    )
+    return slugs
+
+
+@pytest.fixture
+def platform_acme(monkeypatch) -> set[str]:
+    from app.services import plan_access
+
+    slugs = {"acme"}
+    monkeypatch.setattr(
+        plan_access,
+        "settings",
+        SimpleNamespace(engine_platform_tenant_slugs=slugs),
+        raising=False,
+    )
+    return slugs
 
 
 def _dt(day: int) -> datetime:
@@ -59,6 +88,27 @@ def _tenant(db, *, slug: str, name: str) -> Tenant:
     db.add(tenant)
     db.flush()
     return tenant
+
+
+def _set_plan(db, *, tenant_id: str, plan_code: str) -> None:
+    plan = db.scalar(select(Plan).where(Plan.code == plan_code))
+    if plan is None:
+        plan = Plan(
+            code=plan_code,
+            name=f"{plan_code.title()} Plan",
+            price_cents=0,
+            period="monthly",
+            quota_credits=0,
+            is_active=True,
+        )
+        db.add(plan)
+        db.flush()
+    subscription = db.scalar(
+        select(Subscription).where(Subscription.tenant_id == tenant_id)
+    )
+    assert subscription is not None
+    subscription.plan_id = plan.id
+    db.commit()
 
 
 def _usage(
@@ -259,29 +309,56 @@ def _seed_analytics_fixture(auth_db, tenant_id: str) -> str:
         return beta.id
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
+def test_self_registered_admin_free_has_no_vip_or_analytics_access(
+    auth_context,
+    auth_db,
+    no_platform_tenants,
+) -> None:
+    assert no_platform_tenants == set()
+    with auth_db() as db:
+        user = db.get(User, auth_context["user_id"])
+        assert user is not None
+        assert user.role == "admin"
+        _set_plan(db, tenant_id=auth_context["tenant_id"], plan_code="free")
+
+    client = TestClient(app)
+    for path in (
         "/api/v1/admin/analytics/overview",
         "/api/v1/admin/analytics/by-tenant",
         "/api/v1/admin/analytics/by-provider",
         "/api/v1/admin/analytics/timeseries",
-    ],
-)
-def test_analytics_endpoints_require_admin_or_huading_plan(path, auth_context, auth_db) -> None:
-    with auth_db() as db:
-        user = db.get(User, auth_context["user_id"])
-        assert user is not None
-        user.role = "creator"
-        db.commit()
+    ):
+        response = client.get(path, headers=auth_context["headers"])
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "ANALYTICS_PLAN_REQUIRED"
 
-    response = TestClient(app).get(path, headers=auth_context["headers"])
+    me = client.get("/api/v1/auth/me", headers=auth_context["headers"])
+    assert me.status_code == 200
+    permissions = set(me.json()["data"]["permissions"])
+    assert permissions.isdisjoint(
+        {"voice_clone_vip", "analytics_view", "analytics_platform"}
+    )
 
-    assert response.status_code == 403
-    assert response.json()["error"]["code"] == "ANALYTICS_PLAN_REQUIRED"
+    clone = client.post(
+        "/api/v1/brand-voices",
+        json={
+            "name": "Gate Probe",
+            "source_audio_asset_id": "missing-audio-asset",
+            "consent_confirmed": True,
+            "provider": "doubao",
+        },
+        headers=auth_context["headers"],
+    )
+    assert clone.status_code == 403
+    assert clone.json()["error"]["code"] == "VOICE_CLONE_PLAN_REQUIRED"
 
 
-def test_analytics_access_allows_huading_plan_creator(auth_context, auth_db) -> None:
+def test_analytics_access_allows_huading_plan_creator(
+    auth_context,
+    auth_db,
+    no_platform_tenants,
+) -> None:
+    assert no_platform_tenants == set()
     with auth_db() as db:
         user = db.get(User, auth_context["user_id"])
         subscription = db.scalar(
@@ -310,7 +387,12 @@ def test_analytics_access_allows_huading_plan_creator(auth_context, auth_db) -> 
     assert response.status_code == 200
 
 
-def test_analytics_access_allows_admin_without_subscription(auth_context, auth_db) -> None:
+def test_tenant_admin_without_subscription_is_denied(
+    auth_context,
+    auth_db,
+    no_platform_tenants,
+) -> None:
+    assert no_platform_tenants == set()
     with auth_db() as db:
         user = db.get(User, auth_context["user_id"])
         assert user.role == "admin"
@@ -325,13 +407,163 @@ def test_analytics_access_allows_admin_without_subscription(auth_context, auth_d
         headers=auth_context["headers"],
     )
 
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "ANALYTICS_PLAN_REQUIRED"
+
+
+@pytest.mark.parametrize("role", ["creator", "admin"])
+def test_huading_customer_analytics_are_scoped_to_own_tenant(
+    role,
+    auth_context,
+    auth_db,
+    no_platform_tenants,
+) -> None:
+    assert no_platform_tenants == set()
+    with auth_db() as db:
+        user = db.get(User, auth_context["user_id"])
+        assert user is not None
+        user.role = role
+        _set_plan(db, tenant_id=auth_context["tenant_id"], plan_code="huading")
+    beta_id = _seed_analytics_fixture(auth_db, auth_context["tenant_id"])
+
+    client = TestClient(app)
+    overview = client.get(
+        "/api/v1/admin/analytics/overview",
+        params=PERIOD_PARAMS,
+        headers=auth_context["headers"],
+    )
+    assert overview.status_code == 200
+    assert overview.json()["data"] == {
+        "total_credits_used": 17.0,
+        "total_cost_cents": 200,
+        "task_count": 3,
+        "success_count": 2,
+        "failed_count": 1,
+        "tenant_count": 1,
+        "period": {"from": "2026-06-01", "to": "2026-06-30"},
+    }
+
+    by_tenant = client.get(
+        "/api/v1/admin/analytics/by-tenant",
+        params=PERIOD_PARAMS | {"limit": 100},
+        headers=auth_context["headers"],
+    )
+    assert by_tenant.status_code == 200
+    tenant_data = by_tenant.json()["data"]
+    assert tenant_data["total"] == 1
+    assert tenant_data["items"] == [
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "tenant_name": "Acme Studio",
+            "credits_used": 17.0,
+            "cost_cents": 200,
+            "task_count": 3,
+            "success_rate": pytest.approx(0.6667),
+            "balance": {
+                "total": 1000,
+                "used": 120,
+                "reserved": 30,
+                "remaining": 850,
+            },
+        }
+    ]
+    assert beta_id not in str(tenant_data)
+    assert "Beta LLC" not in str(tenant_data)
+
+    by_provider = client.get(
+        "/api/v1/admin/analytics/by-provider",
+        params=PERIOD_PARAMS,
+        headers=auth_context["headers"],
+    )
+    assert by_provider.status_code == 200
+    assert by_provider.json()["data"]["items"] == [
+        {
+            "provider": "apimart",
+            "model": "gpt-image-2",
+            "credits_used": 10.5,
+            "cost_cents": 120,
+            "task_count": 1,
+            "share_pct": 61.76,
+        },
+        {
+            "provider": "doubao",
+            "model": "seed-tts",
+            "credits_used": 4.5,
+            "cost_cents": 60,
+            "task_count": 1,
+            "share_pct": 26.47,
+        },
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "credits_used": 2.0,
+            "cost_cents": 20,
+            "task_count": 1,
+            "share_pct": 11.76,
+        },
+    ]
+
+    timeseries = client.get(
+        "/api/v1/admin/analytics/timeseries",
+        params=PERIOD_PARAMS,
+        headers=auth_context["headers"],
+    )
+    assert timeseries.status_code == 200
+    buckets = timeseries.json()["data"]["buckets"]
+    assert sum(bucket["credits_used"] for bucket in buckets) == 17.0
+    assert sum(bucket["cost_cents"] for bucket in buckets) == 200
+    assert sum(bucket["task_count"] for bucket in buckets) == 3
+
+    weekly = client.get(
+        "/api/v1/admin/analytics/timeseries",
+        params=PERIOD_PARAMS | {"granularity": "week"},
+        headers=auth_context["headers"],
+    )
+    assert weekly.status_code == 200
+    week_buckets = weekly.json()["data"]["buckets"]
+    assert sum(bucket["credits_used"] for bucket in week_buckets) == 17.0
+    assert sum(bucket["cost_cents"] for bucket in week_buckets) == 200
+    assert sum(bucket["task_count"] for bucket in week_buckets) == 3
+
+
+def test_platform_tenant_sees_all_tenants_and_gets_platform_entitlements(
+    auth_context,
+    auth_db,
+    platform_acme,
+) -> None:
+    assert platform_acme == {"acme"}
+    beta_id = _seed_analytics_fixture(auth_db, auth_context["tenant_id"])
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/v1/admin/analytics/by-tenant",
+        params=PERIOD_PARAMS | {"limit": 100},
+        headers=auth_context["headers"],
+    )
     assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["total"] == 2
+    assert {item["tenant_id"] for item in data["items"]} == {
+        auth_context["tenant_id"],
+        beta_id,
+    }
+
+    me = client.get("/api/v1/auth/me", headers=auth_context["headers"])
+    assert me.status_code == 200
+    permissions = set(me.json()["data"]["permissions"])
+    assert {
+        "voice_clone_vip",
+        "analytics_view",
+        "analytics_platform",
+    }.issubset(permissions)
 
 
 def test_overview_counts_only_settled_usage_and_failed_rate_denominator(
     auth_context,
     auth_db,
+    platform_acme,
 ) -> None:
+    assert platform_acme == {"acme"}
     _seed_analytics_fixture(auth_db, auth_context["tenant_id"])
 
     response = TestClient(app).get(
@@ -356,7 +588,9 @@ def test_overview_counts_only_settled_usage_and_failed_rate_denominator(
 def test_by_tenant_returns_balance_sorting_pagination_and_success_rate(
     auth_context,
     auth_db,
+    platform_acme,
 ) -> None:
+    assert platform_acme == {"acme"}
     _seed_analytics_fixture(auth_db, auth_context["tenant_id"])
 
     response = TestClient(app).get(
@@ -401,7 +635,12 @@ def test_by_tenant_returns_balance_sorting_pagination_and_success_rate(
     }
 
 
-def test_by_provider_groups_provider_model_and_share_pct(auth_context, auth_db) -> None:
+def test_by_provider_groups_provider_model_and_share_pct(
+    auth_context,
+    auth_db,
+    platform_acme,
+) -> None:
+    assert platform_acme == {"acme"}
     _seed_analytics_fixture(auth_db, auth_context["tenant_id"])
 
     response = TestClient(app).get(
@@ -439,7 +678,12 @@ def test_by_provider_groups_provider_model_and_share_pct(auth_context, auth_db) 
     ]
 
 
-def test_timeseries_returns_day_and_week_buckets(auth_context, auth_db) -> None:
+def test_timeseries_returns_day_and_week_buckets(
+    auth_context,
+    auth_db,
+    platform_acme,
+) -> None:
+    assert platform_acme == {"acme"}
     _seed_analytics_fixture(auth_db, auth_context["tenant_id"])
 
     day_response = TestClient(app).get(
@@ -477,7 +721,8 @@ def test_timeseries_returns_day_and_week_buckets(auth_context, auth_db) -> None:
     }
 
 
-def test_analytics_empty_data_and_invalid_period(auth_context) -> None:
+def test_analytics_empty_data_and_invalid_period(auth_context, platform_acme) -> None:
+    assert platform_acme == {"acme"}
     client = TestClient(app)
     empty = client.get(
         "/api/v1/admin/analytics/overview",

@@ -12,7 +12,11 @@ from app.core.exceptions import AppError
 from app.core.security import decode_access_token
 from app.db.models import Role, Tenant, User
 from app.db.session import SessionLocal
-from app.services.plan_access import has_huading_access
+from app.services.plan_access import (
+    AnalyticsScope,
+    analytics_scope_for_tenant,
+    tenant_entitlements,
+)
 from app.services.progress import ProgressStore, build_progress_store
 from app.services.storage.base import ObjectStorage
 from app.services.storage.factory import create_object_storage
@@ -71,8 +75,7 @@ def permissions_for_role(role: Role | str) -> set[str]:
 
 def session_permissions_for_user(db: Session, *, user: User) -> set[str]:
     permissions = set(permissions_for_role(user.role))
-    if has_huading_access(db, tenant_id=user.tenant_id, role=user.role):
-        permissions.add("voice_clone_vip")
+    permissions.update(tenant_entitlements(db, tenant_id=user.tenant_id))
     return permissions
 
 
@@ -181,9 +184,10 @@ def require_admin(user: User = CurrentUserDependency) -> User:
 def require_analytics_access(
     db: Session = DbSessionDependency,
     user: User = CurrentUserDependency,
-) -> User:
-    if has_huading_access(db, tenant_id=user.tenant_id, role=user.role):
-        return user
+) -> AnalyticsScope:
+    scope = analytics_scope_for_tenant(db, tenant_id=user.tenant_id)
+    if scope is not None:
+        return scope
     raise AppError(
         "Analytics access requires the Huading plan.",
         code="ANALYTICS_PLAN_REQUIRED",

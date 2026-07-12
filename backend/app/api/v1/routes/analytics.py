@@ -24,8 +24,10 @@ from app.services.analytics import (
     analytics_timeseries_week,
     resolve_date_range,
 )
+from app.services.plan_access import AnalyticsScope
 
-router = APIRouter(dependencies=[Depends(require_analytics_access)])
+router = APIRouter()
+AnalyticsScopeDependency = Annotated[AnalyticsScope, Depends(require_analytics_access)]
 FromDateQuery = Annotated[date | None, Query(alias="from")]
 ToDateQuery = Annotated[date | None, Query()]
 TenantSortQuery = Annotated[AnalyticsTenantSort, Query()]
@@ -37,17 +39,19 @@ GranularityQuery = Annotated[AnalyticsGranularity, Query()]
 @router.get("/overview", response_model=ApiResponse[AnalyticsOverviewResponse])
 def overview(
     request: Request,
+    scope: AnalyticsScopeDependency,
     from_: FromDateQuery = None,
     to: ToDateQuery = None,
     db: Session = DbSessionDependency,
 ) -> ApiResponse[AnalyticsOverviewResponse]:
     period = resolve_date_range(from_, to)
-    return ok(request, analytics_overview(db, period))
+    return ok(request, analytics_overview(db, period, tenant_id=scope.tenant_id))
 
 
 @router.get("/by-tenant", response_model=ApiResponse[AnalyticsByTenantResponse])
 def by_tenant(
     request: Request,
+    scope: AnalyticsScopeDependency,
     from_: FromDateQuery = None,
     to: ToDateQuery = None,
     sort: TenantSortQuery = "credits_desc",
@@ -64,6 +68,7 @@ def by_tenant(
             sort=sort,
             limit=limit,
             offset=offset,
+            tenant_id=scope.tenant_id,
         ),
     )
 
@@ -71,17 +76,19 @@ def by_tenant(
 @router.get("/by-provider", response_model=ApiResponse[AnalyticsByProviderResponse])
 def by_provider(
     request: Request,
+    scope: AnalyticsScopeDependency,
     from_: FromDateQuery = None,
     to: ToDateQuery = None,
     db: Session = DbSessionDependency,
 ) -> ApiResponse[AnalyticsByProviderResponse]:
     period = resolve_date_range(from_, to)
-    return ok(request, analytics_by_provider(db, period))
+    return ok(request, analytics_by_provider(db, period, tenant_id=scope.tenant_id))
 
 
 @router.get("/timeseries", response_model=ApiResponse[AnalyticsTimeseriesResponse])
 def timeseries(
     request: Request,
+    scope: AnalyticsScopeDependency,
     from_: FromDateQuery = None,
     to: ToDateQuery = None,
     granularity: GranularityQuery = "day",
@@ -89,5 +96,11 @@ def timeseries(
 ) -> ApiResponse[AnalyticsTimeseriesResponse]:
     period = resolve_date_range(from_, to)
     if granularity == "week":
-        return ok(request, analytics_timeseries_week(db, period))
-    return ok(request, analytics_timeseries(db, period))
+        return ok(
+            request,
+            analytics_timeseries_week(db, period, tenant_id=scope.tenant_id),
+        )
+    return ok(
+        request,
+        analytics_timeseries(db, period, tenant_id=scope.tenant_id),
+    )

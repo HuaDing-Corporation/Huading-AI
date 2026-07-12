@@ -85,7 +85,6 @@ def create_brand_voice(
         require_doubao_voice_clone_access(
             db,
             tenant_id=user.tenant_id,
-            role=user.role,
         )
     source_audio = _source_audio_or_404(
         db,
