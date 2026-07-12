@@ -356,6 +356,23 @@ function mockPermissions(): string[] {
   return [...perms].sort();
 }
 
+// PROD-P0-...-FIX1：真实注册链驱动的「新注册身份」。POST /register-tenant 成功后写入（见该 handler），
+// /auth/me 优先返回它 → 反映刚注册的租户（ten-new）而非默认 ten-mock。permissions 仍由旋钮派生
+// （注册同时把 platform/plan 切成「非平台 free」→ 三 entitlement 全无），故无需在此存权限。
+interface RegisteredIdentity {
+  tenant: { id: string; slug: string; name: string };
+  user: { id: string; tenant_id: string; email: string; full_name: string | null; role: "admin" };
+}
+function readRegistered(): RegisteredIdentity | null {
+  const raw = readLS("hd_mock_registered");
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as RegisteredIdentity;
+  } catch {
+    return null;
+  }
+}
+
 function analyticsHandlers() {
   const A = `${BASE}/api/v1/admin/analytics`;
   // 门禁：无 analytics_view（= 非平台租户且非 huading）→ 403 ANALYTICS_PLAN_REQUIRED（与 /me entitlement 同源）。
@@ -616,11 +633,28 @@ export const handlers = [
     if (fullName !== undefined && (typeof fullName !== "string" || fullName.length > 200))
       return err(422, "VALIDATION_ERROR", "invalid full_name");
     if (slug === "taken") return err(409, "tenant_slug_taken", "Tenant slug is already taken.");
+    const registered = {
+      tenant: { id: "ten-new", slug, name },
+      user: { id: "u-new", tenant_id: "ten-new", email, full_name: (fullName as string) ?? null, role: "admin" as const }
+    };
+    // 🔴 PROD-P0-...-FIX1：真实注册链必须切状态——自助注册 = **非平台 + free 新租户**（owner 在真实 BE 就是 ADMIN，
+    // 保留此事实，正是它把线上坑出来）。register() 成功后必调 /auth/me，若不切状态，/me 读默认旋钮 → 三 entitlement
+    // 全给 + 返 ten-mock（Codex B 坐实的假绿）。此处把后续 /me 驱动成「刚注册的非平台 free 租户，三权限全无」。
+    try {
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem("hd_mock_platform", "0");
+        localStorage.setItem("hd_mock_plan", "free");
+        localStorage.setItem("hd_mock_role", "admin");
+        localStorage.setItem("hd_mock_registered", JSON.stringify(registered));
+      }
+    } catch {
+      /* localStorage 不可用则退回默认旋钮（下方 /me 仍可跑，只是身份为 ten-mock） */
+    }
     return HttpResponse.json(
       {
         data: {
-          tenant: { id: "ten-new", slug, name },
-          user: { id: "u-new", tenant_id: "ten-new", email, full_name: (fullName as string) ?? null, role: "admin" },
+          tenant: registered.tenant,
+          user: registered.user,
           token: { access_token: "mock-token", token_type: "bearer", tenant_id: "ten-new", user_id: "u-new", role: "admin" }
         },
         error: null,
@@ -630,12 +664,16 @@ export const handlers = [
     );
   }),
   http.get(`${BASE}/api/v1/auth/me`, () => {
+    // 身份：走过真实注册链则返回刚注册的租户（ten-new），否则默认 ten-mock（登录/联调）。
     // permissions 按「平台租户 / 套餐」派生（镜像真实 BE，见 mockPermissions）——entitlement 来源 = 平台租户 OR huading，
     // **不含 role==admin**（P0：自助注册 owner=role admin 但非平台方，绝不因 role 拿到 voice_clone_vip/analytics_*）。
+    const registered = readRegistered();
     return ok({
-      tenant: { id: "ten-mock", slug: "huading", name: "华鼎（mock）" },
-      user: { id: "u-mock", tenant_id: "ten-mock", email: "qa@huading.test", full_name: "QA 测试", role: mockRole() },
-      permissions: mockPermissions()
+      tenant: registered?.tenant ?? { id: "ten-mock", slug: "huading", name: "华鼎（mock）" },
+      user: registered?.user ?? { id: "u-mock", tenant_id: "ten-mock", email: "qa@huading.test", full_name: "QA 测试", role: mockRole() },
+      // 身份与权限**同源**：走过注册链 = 非平台 free 新租户 → 权限只有角色基础、零 entitlement（不依赖旋钮，
+      // 杜绝「注册身份 + 残留旋钮 → 带 entitlement」的错配假绿）。未注册 → 按旋钮派生（登录 / 联调 / 平台方）。
+      permissions: registered ? [...ROLE_PERMISSIONS[registered.user.role]].sort() : mockPermissions()
     });
   }),
   http.get(`${BASE}/api/v1/quota`, () => ok({ total: 1000, used: 120, reserved: 36, remaining: 844 })),
