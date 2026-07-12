@@ -41,6 +41,10 @@ from app.services.batches import (
     validate_voice_or_raise,
     video_gen_reference_assets_or_raise,
 )
+from app.services.plan_access import (
+    require_doubao_voice_clone_access,
+    uses_doubao_voice_clone,
+)
 from app.services.quota import (
     release_reserved_quota,
     reserve_seedance_i2v_quota,
@@ -301,7 +305,25 @@ def _create_ecom_table_tasks(
 ) -> list[str]:
     rows = ecom_rows_or_raise(payload)
     common = payload.common
-    validate_voice_or_raise(db, voice_id=common.voice_id)
+    voice, brand_voice = validate_voice_or_raise(
+        db,
+        tenant_id=user.tenant_id,
+        voice_id=common.voice_id,
+    )
+    if brand_voice is not None and uses_doubao_voice_clone(brand_voice.provider):
+        require_doubao_voice_clone_access(
+            db,
+            tenant_id=user.tenant_id,
+            role=user.role,
+        )
+    brand_voice_params: dict[str, object] = {}
+    if brand_voice is not None:
+        brand_voice_params = {
+            "voice_source": "brand_voice",
+            "brand_voice_id": brand_voice.id,
+            "tts_speaker_id": brand_voice.speaker_id,
+            "brand_voice_provider": brand_voice.provider,
+        }
     target_duration_sec = seedance_i2v_target_seconds(common.duration_sec)
     task_ids: list[str] = []
     for index, row in enumerate(rows):
@@ -341,7 +363,8 @@ def _create_ecom_table_tasks(
                 mode="seedance_i2v",
                 video_mode="seedance_i2v",
                 progress=100,
-                voice_id=common.voice_id,
+                voice_id=voice.id if voice is not None else None,
+                brand_voice_id=brand_voice.id if brand_voice is not None else None,
                 aspect_ratio=common.aspect_ratio,
                 subtitle_enabled=common.subtitle_enabled,
                 duration_sec=target_duration_sec,
@@ -350,6 +373,7 @@ def _create_ecom_table_tasks(
                     "batch_id": batch.id,
                     "batch_row_index": index,
                     "resolution": common.resolution,
+                    **brand_voice_params,
                 },
             )
             db.add(failed)
@@ -368,6 +392,7 @@ def _create_ecom_table_tasks(
             "batch_id": batch.id,
             "batch_row_index": index,
             "source_asset_id": source_asset.id,
+            **brand_voice_params,
         }
         task = VideoTask(
             id=task_id,
@@ -378,7 +403,8 @@ def _create_ecom_table_tasks(
             mode="seedance_i2v",
             video_mode="seedance_i2v",
             progress=0,
-            voice_id=common.voice_id,
+            voice_id=voice.id if voice is not None else None,
+            brand_voice_id=brand_voice.id if brand_voice is not None else None,
             aspect_ratio=common.aspect_ratio,
             subtitle_enabled=common.subtitle_enabled,
             duration_sec=target_duration_sec,

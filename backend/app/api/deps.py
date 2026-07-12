@@ -12,6 +12,7 @@ from app.core.exceptions import AppError
 from app.core.security import decode_access_token
 from app.db.models import Role, Tenant, User
 from app.db.session import SessionLocal
+from app.services.plan_access import has_huading_access
 from app.services.progress import ProgressStore, build_progress_store
 from app.services.storage.base import ObjectStorage
 from app.services.storage.factory import create_object_storage
@@ -168,6 +169,19 @@ def require_admin(user: User = CurrentUserDependency) -> User:
             status_code=status.HTTP_403_FORBIDDEN,
         )
     return user
+
+
+def require_analytics_access(
+    db: Session = DbSessionDependency,
+    user: User = CurrentUserDependency,
+) -> User:
+    if has_huading_access(db, tenant_id=user.tenant_id, role=user.role):
+        return user
+    raise AppError(
+        "Analytics access requires the Huading plan.",
+        code="ANALYTICS_PLAN_REQUIRED",
+        status_code=status.HTTP_403_FORBIDDEN,
+    )
 
 
 def scoped_task_id(tenant_id: str, task_id: str) -> str:
