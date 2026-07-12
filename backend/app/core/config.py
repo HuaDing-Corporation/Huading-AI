@@ -5,6 +5,8 @@ from typing import Annotated
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from app.core.utils import normalize_tenant_slug
+
 
 def _split_list_setting(value: str | list[str] | set[str]) -> list[str]:
     if isinstance(value, str):
@@ -225,7 +227,11 @@ class Settings(BaseSettings):
         cls,
         value: str | list[str] | set[str],
     ) -> set[str]:
-        return {item.lower() for item in _split_list_setting(value)}
+        return {
+            normalized
+            for item in _split_list_setting(value)
+            if (normalized := normalize_tenant_slug(item))
+        }
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

@@ -23,11 +23,20 @@ from app.schemas.auth import (
     UserRead,
 )
 from app.schemas.response import ApiResponse, ok
+from app.services.plan_access import is_platform_tenant_slug
 from app.services.subscription import create_default_subscription
 
 router = APIRouter()
 CurrentTenantDependency = Depends(get_current_tenant)
 AdminPermissionDependency = Depends(require_permission("tenant:admin"))
+
+
+def _tenant_slug_taken_error() -> AppError:
+    return AppError(
+        "Tenant slug is already taken.",
+        code="tenant_slug_taken",
+        status_code=status.HTTP_409_CONFLICT,
+    )
 
 
 def _token_for(user: User) -> TokenResponse:
@@ -53,12 +62,10 @@ def register_tenant(
     # Fast, friendly path for the common (sequential) duplicate: a clear 409 without
     # hitting the DB constraint. This only narrows the race window — correctness does
     # NOT depend on it; the try/except below closes a genuine concurrent race (P1-①).
-    if db.scalar(select(Tenant).where(Tenant.slug == payload.tenant_slug)) is not None:
-        raise AppError(
-            "Tenant slug is already taken.",
-            code="tenant_slug_taken",
-            status_code=status.HTTP_409_CONFLICT,
-        )
+    if is_platform_tenant_slug(payload.tenant_slug) or db.scalar(
+        select(Tenant).where(Tenant.slug == payload.tenant_slug)
+    ) is not None:
+        raise _tenant_slug_taken_error()
 
     # The whole write — tenant/user/org/subscription create + flush + commit — runs in
     # ONE try so an IntegrityError from EITHER flush (the tenant INSERT) or commit is
@@ -89,11 +96,7 @@ def register_tenant(
         db.rollback()
         # A concurrent register won the race between our pre-check and flush/commit —
         # the slug is taken (only tenants.slug can violate here; see above).
-        raise AppError(
-            "Tenant slug is already taken.",
-            code="tenant_slug_taken",
-            status_code=status.HTTP_409_CONFLICT,
-        ) from exc
+        raise _tenant_slug_taken_error() from exc
 
     db.refresh(tenant)
     db.refresh(user)
