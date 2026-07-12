@@ -24,12 +24,25 @@ vi.mock("@/lib/api/ecom-replicate", async (importOriginal) => {
   return { ...actual, ...api };
 });
 
-// 参考图/商品图上传占位：按 inputId 区分（隔离上传，reference-images-picker 有专测），点击即上抛 asset_id。
+// 参考图/商品图上传占位：按 inputId 区分（隔离上传，reference-images-picker 有专测）。渲染 label（供上限文案断言）；
+// set=注入 1 张、fill12=注入 12 张（供 ECOM-REF-LIMIT 超模式上限承重）。
 vi.mock("@/components/workbench/reference-images-picker", () => ({
-  ReferenceImagesPicker: ({ onChange, inputId }: { onChange?: (ids: string[]) => void; inputId?: string }) => (
-    <button type="button" onClick={() => onChange?.([`${inputId}-a1`])}>
-      {`set-${inputId}`}
-    </button>
+  ReferenceImagesPicker: ({
+    onChange,
+    inputId,
+    label
+  }: {
+    onChange?: (ids: string[]) => void;
+    inputId?: string;
+    label?: string;
+  }) => (
+    <div>
+      <span>{label}</span>
+      <button type="button" onClick={() => onChange?.([`${inputId}-a1`])}>{`set-${inputId}`}</button>
+      <button type="button" onClick={() => onChange?.(Array.from({ length: 12 }, (_, i) => `${inputId}-x${i}`))}>
+        {`fill12-${inputId}`}
+      </button>
+    </div>
   )
 }));
 
@@ -191,6 +204,43 @@ describe("EcomDetailWizard (电商详情图向导 · FIX1 真契约)", () => {
       selling_points: ["锁温"]
     });
     expect(api.confirmEcomReplicate).not.toHaveBeenCalled();
+  });
+
+  // ── ECOM-REF-LIMIT-UI-0001：参考图上限随模式动态（主图 5 / 详情 12）+ 修静默截断 ──
+  it("参考图上限文案随模式：主图「1–5」/ 详情「1–12」；商品图恒「1–4」", () => {
+    render(<EcomDetailWizard />);
+    expect(screen.getByText(copy.workbench.ecomDetailProductLabel(4))).toBeInTheDocument(); // 商品图恒 4
+    fireEvent.click(screen.getByRole("button", { name: copy.workbench.ecomDetailModeMain }));
+    expect(screen.getByText(copy.workbench.ecomDetailRefLabel(5))).toBeInTheDocument(); // 主图 5
+    fireEvent.click(screen.getByRole("button", { name: copy.workbench.ecomDetailModeDetail }));
+    expect(screen.getByText(copy.workbench.ecomDetailRefLabel(12))).toBeInTheDocument(); // 详情 12
+  });
+
+  it("详情模式传满 12 张参考图 → planEcomReplicate 带 12 张（不 slice 静默截断）", async () => {
+    api.planEcomReplicate.mockResolvedValue(mainPlanJob());
+    render(<EcomDetailWizard />);
+    fireEvent.click(screen.getByRole("button", { name: copy.workbench.ecomDetailModeDetail }));
+    fireEvent.click(screen.getByText("fill12-ecom-detail-ref"));
+    fireEvent.click(screen.getByText("set-ecom-detail-product"));
+    fireEvent.change(screen.getByPlaceholderText(copy.workbench.ecomDetailInfoPlaceholder), { target: { value: "保温杯" } });
+    fireEvent.change(screen.getByPlaceholderText(copy.workbench.ecomDetailPointPlaceholder), { target: { value: "锁温" } });
+    fireEvent.click(screen.getByRole("button", { name: copy.workbench.ecomDetailPlan }));
+    await screen.findByText(copy.workbench.ecomPlanTitle);
+    expect((api.planEcomReplicate.mock.calls[0][0] as { reference_image_asset_ids: string[] }).reference_image_asset_ids).toHaveLength(12);
+  });
+
+  it("🔴 详情传满 12 → 切主图（上限 5）→ 明确越限提示 + 不发 plan（绝不静默丢 7 张）", () => {
+    render(<EcomDetailWizard />);
+    fireEvent.click(screen.getByRole("button", { name: copy.workbench.ecomDetailModeDetail }));
+    fireEvent.click(screen.getByText("fill12-ecom-detail-ref"));
+    fireEvent.click(screen.getByText("set-ecom-detail-product"));
+    fireEvent.change(screen.getByPlaceholderText(copy.workbench.ecomDetailInfoPlaceholder), { target: { value: "保温杯" } });
+    fireEvent.change(screen.getByPlaceholderText(copy.workbench.ecomDetailPointPlaceholder), { target: { value: "锁温" } });
+    // 切主图：已传 12 > 主图上限 5。
+    fireEvent.click(screen.getByRole("button", { name: copy.workbench.ecomDetailModeMain }));
+    fireEvent.click(screen.getByRole("button", { name: copy.workbench.ecomDetailPlan }));
+    expect(screen.getByText(copy.errors.ecomDetailRefOverLimit(5))).toBeInTheDocument();
+    expect(api.planEcomReplicate).not.toHaveBeenCalled();
   });
 
   it("规划表渲染：页码/主题(本地化)/尺寸/生成要点/原图不裁剪；总价取后端 total_credits（不硬编码）", async () => {

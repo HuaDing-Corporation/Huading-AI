@@ -287,9 +287,10 @@ export const copy = {
     ecomDetailModeLabel: "出图模式",
     ecomDetailModeMain: "主图（5 张）",
     ecomDetailModeDetail: "详情页（12 张）",
-    ecomDetailRefLabel: "参考图（复刻模板，1+ 张）",
+    // ECOM-REF-LIMIT-UI-0001：参考图上限随模式（主图 1–5 / 详情 1–12）；商品图仍 1–4。
+    ecomDetailRefLabel: (max: number) => `参考图（复刻模板，1–${max} 张）`,
     ecomDetailRefUpload: "上传参考图（JPG / PNG / WebP，≤10MB）",
-    ecomDetailProductLabel: "商品图（唯一商品依据，1+ 张）",
+    ecomDetailProductLabel: (max: number) => `商品图（唯一商品依据，1–${max} 张）`,
     ecomDetailProductUpload: "上传商品图（JPG / PNG / WebP，≤10MB）",
     ecomDetailInfoLabel: "商品信息",
     ecomDetailInfoPlaceholder: "品类 / 材质 / 规格等（只用你提供的信息，AI 不补全材质、认证、功效、销量）",
@@ -426,6 +427,9 @@ export const copy = {
     // 电商详情图复刻·客户端校验（ECOM-REPLICATE-UI-0001）
     ecomDetailNeedMode: "请选择生成模式：主图 / 详情页",
     ecomDetailNeedRef: "请上传参考图（至少 1 张）",
+    // ECOM-REF-LIMIT-UI-0001：切换模式后已传数量超新上限 → 明确拦截、绝不静默丢图（口径对齐 BE 422）。
+    ecomDetailRefOverLimit: (max: number) => `参考图最多 ${max} 张（当前模式），请删减到 ${max} 张以内后再生成`,
+    ecomDetailProductOverLimit: (max: number) => `商品图最多 ${max} 张，请删减到 ${max} 张以内后再生成`,
     ecomDetailNeedProduct: "请上传商品图（至少 1 张）",
     ecomDetailNeedInfo: "请填写商品信息",
     ecomDetailNeedPoint: "请至少填写 1 条核心卖点",
