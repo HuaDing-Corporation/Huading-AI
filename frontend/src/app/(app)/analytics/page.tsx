@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation";
 import { AnalyticsDashboard } from "@/components/analytics/analytics-dashboard";
 import { Sidebar } from "@/components/layout/sidebar";
 import { TopBar } from "@/components/layout/top-bar";
+import { useAuth } from "@/lib/auth/auth-context";
+import { canViewAnalytics, canViewPlatformAnalytics } from "@/lib/auth/vip";
 import { copy } from "@/lib/copy";
 
 /**
@@ -14,6 +16,13 @@ import { copy } from "@/lib/copy";
  */
 export default function AnalyticsPage() {
   const router = useRouter();
+  const { session } = useAuth();
+  // 副标题据 entitlement：平台方（analytics_platform）「全站」；VIP 客户（有 analytics_view 无 platform）「我的用量」；
+  // 无权限（走友好页）沿用平台文案（不误导为个人视图）。
+  const subtitle =
+    canViewAnalytics(session) && !canViewPlatformAnalytics(session)
+      ? copy.analytics.pageSubtitleOwn
+      : copy.analytics.pageSubtitle;
   const onBack = () => {
     if (typeof window !== "undefined" && window.history.length > 1) router.back();
     else router.push("/");
@@ -40,7 +49,7 @@ export default function AnalyticsPage() {
 
           <header className="px-1">
             <h1 className="text-[27px] font-semibold tracking-[1px] text-ink">{copy.analytics.pageTitle}</h1>
-            <p className="mt-1 text-[13.5px] text-ink-soft">{copy.analytics.pageSubtitle}</p>
+            <p className="mt-1 text-[13.5px] text-ink-soft">{subtitle}</p>
           </header>
 
           <AnalyticsDashboard />

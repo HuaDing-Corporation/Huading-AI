@@ -28,6 +28,8 @@ async function loginAs(page: Page, role: "admin" | "creator", plan: "huading" | 
   await page.waitForFunction(() => !!navigator.serviceWorker?.controller, undefined, { timeout: 30_000 });
   await page.evaluate(
     ([r, p]) => {
+      // 普通租户（platform=0）→ voice_clone_vip 仅由 huading 套餐决定；否则默认平台方会一律授予、free 也不置灰。
+      window.localStorage.setItem("hd_mock_platform", "0");
       window.localStorage.setItem("hd_mock_role", r);
       window.localStorage.setItem("hd_mock_plan", p);
     },

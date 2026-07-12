@@ -7,6 +7,8 @@ import { Crown } from "lucide-react";
 import { ApiError } from "@/lib/api/client";
 import type { AnalyticsRange } from "@/lib/api/analytics";
 import { useAnalyticsByTenant, useAnalyticsOverview } from "@/lib/api/hooks";
+import { useAuth } from "@/lib/auth/auth-context";
+import { canViewPlatformAnalytics } from "@/lib/auth/vip";
 import { DEFAULT_RANGE_DAYS, lastNDaysRange } from "@/lib/analytics/date";
 import { DateRangePicker } from "@/components/analytics/date-range-picker";
 import { OverviewCards } from "@/components/analytics/overview-cards";
@@ -52,6 +54,10 @@ function PlanRequiredState() {
 }
 
 export function DashboardInner({ range, onRangeChange }: { range: AnalyticsRange; onRangeChange: (r: AnalyticsRange) => void }) {
+  // 全站视图仅限平台租户（permissions 含 analytics_platform）；VIP 客户（有 analytics_view 无 platform）
+  // 只看自己的数据 → 隐藏枚举全站租户的「用户排行」（PROD-P0-ANALYTICS-TENANT-LEAK-UI-0001，防租户数据泄漏）。
+  const { session } = useAuth();
+  const platform = canViewPlatformAnalytics(session);
   const valid = range.from <= range.to;
   // 非法区间(from>to)不发请求（enabled=valid），避免后端 422 ANALYTICS_INVALID_PERIOD。
   const overview = useAnalyticsOverview(range, valid);
@@ -88,7 +94,7 @@ export function DashboardInner({ range, onRangeChange }: { range: AnalyticsRange
             reservedCount={reservedCount}
             reservedComplete={reservedComplete}
           />
-          <TenantTable range={range} />
+          {platform && <TenantTable range={range} />}
           <ProviderTable range={range} />
           <TrendChart range={range} />
         </>
