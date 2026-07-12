@@ -7,8 +7,8 @@ from app.api.deps import (
     CurrentUserDependency,
     DbSessionDependency,
     get_current_tenant,
-    permissions_for_role,
     require_permission,
+    session_permissions_for_user,
 )
 from app.core.exceptions import AppError
 from app.core.security import create_access_token, hash_password, verify_password
@@ -139,11 +139,12 @@ def me(
     request: Request,
     user: User = CurrentUserDependency,
     tenant: Tenant = CurrentTenantDependency,
+    db: Session = DbSessionDependency,
 ) -> ApiResponse[CurrentUserResponse]:
     data = CurrentUserResponse(
         tenant=TenantRead.model_validate(tenant),
         user=UserRead.model_validate(user),
-        permissions=sorted(permissions_for_role(user.role)),
+        permissions=sorted(session_permissions_for_user(db, user=user)),
     )
     return ok(request, data)
 
@@ -153,10 +154,11 @@ def admin_check(
     request: Request,
     user: User = AdminPermissionDependency,
     tenant: Tenant = CurrentTenantDependency,
+    db: Session = DbSessionDependency,
 ) -> ApiResponse[CurrentUserResponse]:
     data = CurrentUserResponse(
         tenant=TenantRead.model_validate(tenant),
         user=UserRead.model_validate(user),
-        permissions=sorted(permissions_for_role(user.role)),
+        permissions=sorted(session_permissions_for_user(db, user=user)),
     )
     return ok(request, data)

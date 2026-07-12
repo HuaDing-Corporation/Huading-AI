@@ -69,6 +69,13 @@ def permissions_for_role(role: Role | str) -> set[str]:
     return _ROLE_PERMISSIONS[role_value]
 
 
+def session_permissions_for_user(db: Session, *, user: User) -> set[str]:
+    permissions = set(permissions_for_role(user.role))
+    if has_huading_access(db, tenant_id=user.tenant_id, role=user.role):
+        permissions.add("voice_clone_vip")
+    return permissions
+
+
 def get_current_user(
     request: Request,
     token: str | None = TokenDependency,
