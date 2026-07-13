@@ -19,6 +19,7 @@ from app.schemas.admin_console import (
     AdminCreditsAdjustResponse,
     AdminPlanChangeRequest,
     AdminPlanChangeResponse,
+    AdminTaskFamily,
     AdminTaskPage,
     AdminTaskRetryResponse,
     AdminTenantDetail,
@@ -34,7 +35,8 @@ from app.schemas.response import ApiResponse, ok
 from app.services import admin_console
 from app.services.voice_slots import SpeakerSlotAssignmentError
 from app.workers.avatar_talk import generate_avatar_talk_task, generate_seedance_i2v_task
-from app.workers.image_gen import generate_image_task
+from app.workers.image_gen import generate_ecom_replicate_task, generate_image_task
+from app.workers.reverse_prompt import generate_reverse_prompt_video_task
 from app.workers.video_gen import generate_video_gen_task
 from app.workers.video_tasks import generate_video_task
 
@@ -306,8 +308,9 @@ def export_usage(
 @router.get("/tasks", response_model=ApiResponse[AdminTaskPage])
 def get_tasks(
     request: Request,
+    task_family: AdminTaskFamily | None = None,
     tenant_id: str | None = None,
-    status: Literal["queued", "running", "done", "failed", "cancelled"] | None = None,
+    status: Literal["queued", "running", "succeeded", "failed", "cancelled"] | None = None,
     from_: FromDateQuery = None,
     to: ToDateQuery = None,
     page: PageQuery = 1,
@@ -318,6 +321,7 @@ def get_tasks(
         request,
         admin_console.list_tasks(
             db,
+            task_family=task_family,
             tenant_id=tenant_id,
             status=status,
             from_=from_,
@@ -350,22 +354,84 @@ def _enqueue_task_retry(task: VideoTask) -> None:
 def retry_task(
     request: Request,
     task_id: str,
+    task_family: AdminTaskFamily | None = None,
     user: User = CurrentUserDependency,
     db: Session = DbSessionDependency,
 ) -> ApiResponse[AdminTaskRetryResponse]:
+    retried_output_indexes: list[int] = []
     try:
-        task = admin_console.prepare_task_retry(db, actor=user, task_id=task_id)
+        resolved_family = admin_console.resolve_task_family(
+            db,
+            task_id=task_id,
+            requested_family=task_family,
+        )
+        if resolved_family == "video":
+            task = admin_console.prepare_task_retry(db, actor=user, task_id=task_id)
+        elif resolved_family == "reverse_prompt":
+            task = admin_console.prepare_reverse_prompt_retry(
+                db,
+                actor=user,
+                job_id=task_id,
+            )
+        else:
+            task, outputs = admin_console.prepare_ecom_replicate_retry(
+                db,
+                actor=user,
+                job_id=task_id,
+            )
+            retried_output_indexes = [output.index for output in outputs]
         response = AdminTaskRetryResponse(
             id=task.id,
+            task_family=resolved_family,
             tenant_id=task.tenant_id,
             status="queued",
-            progress=task.progress,
+            progress=task.progress if resolved_family == "video" else 0,
         )
         db.commit()
     except Exception:
         db.rollback()
         raise
-    _enqueue_task_retry(task)
+    try:
+        if resolved_family == "video":
+            _enqueue_task_retry(task)
+        elif resolved_family == "reverse_prompt":
+            generate_reverse_prompt_video_task.apply_async(
+                args=[task.id], task_id=task.id, queue="image"
+            )
+        else:
+            generate_ecom_replicate_task.apply_async(
+                args=[task.id], task_id=task.id, queue="image"
+            )
+    except Exception as exc:
+        try:
+            if resolved_family == "video":
+                admin_console.compensate_task_retry_enqueue_failure(
+                    db,
+                    actor=user,
+                    task_id=task.id,
+                )
+            elif resolved_family == "reverse_prompt":
+                admin_console.compensate_reverse_prompt_retry_enqueue_failure(
+                    db,
+                    actor=user,
+                    job_id=task.id,
+                )
+            else:
+                admin_console.compensate_ecom_replicate_retry_enqueue_failure(
+                    db,
+                    actor=user,
+                    job_id=task.id,
+                    output_indexes=retried_output_indexes,
+                )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        raise AppError(
+            "Task retry could not be queued. Please retry.",
+            code="TASK_RETRY_ENQUEUE_FAILED",
+            status_code=503,
+        ) from exc
     return ok(request, response)
 
 

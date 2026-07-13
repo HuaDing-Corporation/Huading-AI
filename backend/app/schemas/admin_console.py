@@ -7,6 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_core import PydanticCustomError
 
 AdminPlanCode = Literal["free", "basic", "huading"]
+AdminTaskFamily = Literal["video", "reverse_prompt", "ecom_replicate"]
+AdminTaskStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+
+
 class AdminSubscriptionSnapshot(BaseModel):
     id: str
     total: int
@@ -46,19 +50,22 @@ class AdminUsageItem(BaseModel):
 
 class AdminTaskItem(BaseModel):
     id: str
+    task_family: AdminTaskFamily
     tenant_id: str
     tenant_slug: str
     tenant_name: str
     mode: str
-    video_mode: str
-    status: str
-    progress: int
+    label: str | None
+    video_mode: str | None
+    status: AdminTaskStatus
+    progress: int | None
     error_code: str | None
     error_message: str | None
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
     duration_seconds: float | None
+    retryable: bool
 
 
 class AdminVoiceSlotItem(BaseModel):
@@ -192,6 +199,7 @@ class AdminTenantStatusResponse(BaseModel):
 
 class AdminTaskRetryResponse(BaseModel):
     id: str
+    task_family: AdminTaskFamily
     tenant_id: str
     status: Literal["queued"]
     progress: int

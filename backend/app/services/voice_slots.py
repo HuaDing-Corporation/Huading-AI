@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -48,6 +49,7 @@ def assign_speaker_slot(
     if not SPEAKER_ID_PATTERN.fullmatch(normalized_speaker_id):
         raise SpeakerSlotAssignmentError("Speaker ID must match S_[A-Za-z0-9_-]+.")
 
+    _lock_speaker_slot(db, normalized_speaker_id)
     tenant = db.scalar(select(Tenant).where(Tenant.slug == slug))
     if tenant is None:
         raise SpeakerSlotAssignmentError("Target tenant was not found.")
@@ -128,4 +130,18 @@ def assign_speaker_slot(
         config_created=config_created,
         changed=changed,
         speaker_ids=tuple(assigned_ids),
+    )
+
+
+def _speaker_slot_lock_id(speaker_id: str) -> int:
+    digest = hashlib.sha256(f"huading:voice-slot:{speaker_id}".encode()).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def _lock_speaker_slot(db: Session, speaker_id: str) -> None:
+    if db.get_bind().dialect.name != "postgresql":
+        return
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_id)"),
+        {"lock_id": _speaker_slot_lock_id(speaker_id)},
     )

@@ -16,9 +16,13 @@ from sqlalchemy.dialects import postgresql
 from app.db import models
 from app.db.models import (
     AdminAuditLog,
+    Asset,
     BrandVoice,
+    EcomReplicateJob,
+    EcomReplicateOutput,
     Plan,
     ProviderConfig,
+    ReversePromptJob,
     Subscription,
     Tenant,
     UsageRecord,
@@ -295,6 +299,78 @@ def _seed_console_read_fixture(auth_db, auth_context) -> dict[str, str]:
         }
 
 
+def _seed_non_video_task_families(auth_db, fixture: dict[str, str]) -> dict[str, str]:
+    with auth_db() as db:
+        source = Asset(
+            tenant_id=fixture["tenant_id"],
+            type="video",
+            source="upload",
+            storage_key=f"tenants/{fixture['tenant_id']}/uploads/reverse-source.mp4",
+            mime_type="video/mp4",
+            duration_ms=8_000,
+            status="ready",
+            metadata_={"purpose": "reverse_prompt"},
+        )
+        db.add(source)
+        db.flush()
+        reverse_job = ReversePromptJob(
+            tenant_id=fixture["tenant_id"],
+            created_by_user_id=fixture["owner_id"],
+            source_kind="video",
+            source_asset_id=source.id,
+            source_storage_key=source.storage_key,
+            target_format="seedance_2_0",
+            status="failed",
+            error_code="REVERSE_PROMPT_FAILED",
+            error_message="fixture reverse failure",
+        )
+        image_reverse_job = ReversePromptJob(
+            tenant_id=fixture["tenant_id"],
+            created_by_user_id=fixture["owner_id"],
+            source_kind="image",
+            target_format="seedance_2_0",
+            status="failed",
+            error_code="REVERSE_PROMPT_FAILED",
+            error_message="fixture image reverse failure",
+        )
+        replicate_job = EcomReplicateJob(
+            tenant_id=fixture["tenant_id"],
+            created_by_user_id=fixture["owner_id"],
+            status="partial_failed",
+            output_mode="main",
+            requested_size="1024x1024",
+            requested_aspect="1:1",
+            output_count=2,
+            total_credits=Decimal("30"),
+            credit_rate=Decimal("15"),
+            error_code="ECOM_REPLICATE_PARTIAL_FAILED",
+            error_message="one or more outputs failed",
+        )
+        db.add_all([reverse_job, image_reverse_job, replicate_job])
+        db.flush()
+        failed_outputs = [
+            EcomReplicateOutput(
+                job_id=replicate_job.id,
+                tenant_id=fixture["tenant_id"],
+                index=index,
+                theme=f"fixture-{index}",
+                status="failed",
+                requested_size="1024x1024",
+                requested_aspect="1:1",
+                error_code="ECOM_REPLICATE_RENDER_FAILED",
+                error_message="fixture render failure",
+            )
+            for index in (0, 1)
+        ]
+        db.add_all(failed_outputs)
+        db.commit()
+        return {
+            "reverse_job_id": reverse_job.id,
+            "image_reverse_job_id": image_reverse_job.id,
+            "replicate_job_id": replicate_job.id,
+        }
+
+
 def test_admin_console_read_endpoints_return_cross_tenant_operational_data(
     auth_context,
     auth_db,
@@ -388,6 +464,66 @@ def test_admin_console_read_endpoints_return_cross_tenant_operational_data(
     )
     assert audits.status_code == 200
     assert audits.json()["data"]["items"][0]["id"] == fixture["audit_id"]
+
+
+def test_admin_task_monitor_normalizes_all_task_families_and_filters_them(
+    auth_context,
+    auth_db,
+    platform_acme,
+) -> None:
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    jobs = _seed_non_video_task_families(auth_db, fixture)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/v1/admin/console/tasks",
+        params={"tenant_id": fixture["tenant_id"], "page_size": 20},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    items = {item["id"]: item for item in response.json()["data"]["items"]}
+    assert {item["task_family"] for item in items.values()} == {
+        "video",
+        "reverse_prompt",
+        "ecom_replicate",
+    }
+    assert items[fixture["task_id"]]["status"] == "failed"
+    assert items[fixture["task_id"]]["retryable"] is True
+    reverse_item = items[jobs["reverse_job_id"]]
+    assert {key: reverse_item[key] for key in (
+        "task_family",
+        "mode",
+        "label",
+        "status",
+        "progress",
+        "retryable",
+    )} == {
+        "task_family": "reverse_prompt",
+        "mode": "video",
+        "label": "seedance_2_0",
+        "status": "failed",
+        "progress": 100,
+        "retryable": True,
+    }
+    assert items[jobs["image_reverse_job_id"]]["retryable"] is False
+    assert items[jobs["replicate_job_id"]]["status"] == "failed"
+    assert items[jobs["replicate_job_id"]]["retryable"] is True
+
+    filtered = client.get(
+        "/api/v1/admin/console/tasks",
+        params={
+            "tenant_id": fixture["tenant_id"],
+            "task_family": "reverse_prompt",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert filtered.status_code == 200
+    assert filtered.json()["data"]["total"] == 2
+    assert {
+        item["task_family"] for item in filtered.json()["data"]["items"]
+    } == {"reverse_prompt"}
 
 
 def test_admin_console_tenant_mutations_are_transactional_and_audited(
@@ -617,6 +753,344 @@ def test_failed_task_retry_requeues_without_new_usage_record(
     )
     assert second.status_code == 409
     assert second.json()["error"]["code"] == "TASK_NOT_RETRYABLE"
+
+
+def test_failed_task_retry_dispatch_failure_is_compensated_and_can_retry(
+    auth_context,
+    auth_db,
+    platform_acme,
+    monkeypatch,
+) -> None:
+    from app.api.v1.routes import admin_console as route
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    attempts = 0
+
+    def flaky_apply_async(*, args, task_id, queue):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("broker unavailable")
+
+    monkeypatch.setattr(route.generate_image_task, "apply_async", flaky_apply_async)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    failed_dispatch = client.post(
+        f"/api/v1/admin/console/tasks/{fixture['task_id']}/retry",
+        headers=auth_context["headers"],
+    )
+
+    assert failed_dispatch.status_code == 503
+    assert failed_dispatch.json()["error"]["code"] == "TASK_RETRY_ENQUEUE_FAILED"
+    with auth_db() as db:
+        task = db.get(VideoTask, fixture["task_id"])
+        audits = list(
+            db.scalars(
+                select(AdminAuditLog)
+                .where(
+                    AdminAuditLog.action == "task_retry",
+                    AdminAuditLog.target_id == fixture["task_id"],
+                )
+                .order_by(AdminAuditLog.created_at.asc(), AdminAuditLog.id.asc())
+            )
+        )
+        assert task.status == "failed"
+        assert task.error_code == "TASK_RETRY_ENQUEUE_FAILED"
+        assert len(audits) == 2
+        assert audits[-1].before == {"status": "queued", "progress": 0}
+        assert audits[-1].after == {
+            "status": "failed",
+            "progress": 0,
+            "error_code": "TASK_RETRY_ENQUEUE_FAILED",
+        }
+
+    retried = client.post(
+        f"/api/v1/admin/console/tasks/{fixture['task_id']}/retry",
+        headers=auth_context["headers"],
+    )
+
+    assert retried.status_code == 202
+    assert retried.json()["data"]["status"] == "queued"
+    assert attempts == 2
+
+
+def test_admin_task_retry_reuses_reverse_video_and_replicate_output_paths(
+    auth_context,
+    auth_db,
+    platform_acme,
+    monkeypatch,
+) -> None:
+    from app.api.v1.routes import admin_console as route
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    jobs = _seed_non_video_task_families(auth_db, fixture)
+    reverse_calls: list[dict[str, object]] = []
+    replicate_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        route.generate_reverse_prompt_video_task,
+        "apply_async",
+        lambda **kwargs: reverse_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        route.generate_ecom_replicate_task,
+        "apply_async",
+        lambda **kwargs: replicate_calls.append(kwargs),
+    )
+    with auth_db() as db:
+        usage_before = db.scalar(select(func.count(UsageRecord.id)))
+    client = TestClient(app)
+
+    reverse_response = client.post(
+        f"/api/v1/admin/console/tasks/{jobs['reverse_job_id']}/retry",
+        params={"task_family": "reverse_prompt"},
+        headers=auth_context["headers"],
+    )
+    replicate_response = client.post(
+        f"/api/v1/admin/console/tasks/{jobs['replicate_job_id']}/retry",
+        params={"task_family": "ecom_replicate"},
+        headers=auth_context["headers"],
+    )
+    image_response = client.post(
+        f"/api/v1/admin/console/tasks/{jobs['image_reverse_job_id']}/retry",
+        params={"task_family": "reverse_prompt"},
+        headers=auth_context["headers"],
+    )
+
+    assert reverse_response.status_code == 202
+    assert reverse_response.json()["data"]["task_family"] == "reverse_prompt"
+    assert reverse_calls == [
+        {"args": [jobs["reverse_job_id"]], "task_id": jobs["reverse_job_id"], "queue": "image"}
+    ]
+    assert replicate_response.status_code == 202
+    assert replicate_response.json()["data"]["task_family"] == "ecom_replicate"
+    assert replicate_calls == [
+        {
+            "args": [jobs["replicate_job_id"]],
+            "task_id": jobs["replicate_job_id"],
+            "queue": "image",
+        }
+    ]
+    assert image_response.status_code == 409
+    assert image_response.json()["error"]["code"] == "TASK_NOT_RETRYABLE"
+
+    with auth_db() as db:
+        reverse_job = db.get(ReversePromptJob, jobs["reverse_job_id"])
+        replicate_job = db.get(EcomReplicateJob, jobs["replicate_job_id"])
+        outputs = list(
+            db.scalars(
+                select(EcomReplicateOutput)
+                .where(EcomReplicateOutput.job_id == jobs["replicate_job_id"])
+                .order_by(EcomReplicateOutput.index)
+            )
+        )
+        usage_after = db.scalar(select(func.count(UsageRecord.id)))
+        reverse_reservations = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.reverse_prompt_job_id == jobs["reverse_job_id"],
+                    UsageRecord.status == "reserved",
+                )
+            )
+        )
+        retry_audits = list(
+            db.scalars(
+                select(AdminAuditLog).where(
+                    AdminAuditLog.action == "task_retry",
+                    AdminAuditLog.target_id.in_(
+                        (jobs["reverse_job_id"], jobs["replicate_job_id"])
+                    ),
+                )
+            )
+        )
+        assert reverse_job.status == "queued"
+        assert len(reverse_reservations) == 1
+        assert replicate_job.status == "generating"
+        assert [output.status for output in outputs] == ["planned", "planned"]
+        assert usage_after == usage_before + 1  # Reverse video reservation only.
+        assert len(retry_audits) == 2
+
+
+def test_non_video_admin_retry_dispatch_failures_are_compensated(
+    auth_context,
+    auth_db,
+    platform_acme,
+    monkeypatch,
+) -> None:
+    from app.api.v1.routes import admin_console as route
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    jobs = _seed_non_video_task_families(auth_db, fixture)
+    reverse_attempts = 0
+    replicate_attempts = 0
+
+    def flaky_reverse(**kwargs):
+        nonlocal reverse_attempts
+        reverse_attempts += 1
+        if reverse_attempts == 1:
+            raise RuntimeError("reverse broker unavailable")
+
+    def flaky_replicate(**kwargs):
+        nonlocal replicate_attempts
+        replicate_attempts += 1
+        if replicate_attempts == 1:
+            raise RuntimeError("replicate broker unavailable")
+
+    monkeypatch.setattr(route.generate_reverse_prompt_video_task, "apply_async", flaky_reverse)
+    monkeypatch.setattr(route.generate_ecom_replicate_task, "apply_async", flaky_replicate)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    reverse_failed = client.post(
+        f"/api/v1/admin/console/tasks/{jobs['reverse_job_id']}/retry",
+        params={"task_family": "reverse_prompt"},
+        headers=auth_context["headers"],
+    )
+    replicate_failed = client.post(
+        f"/api/v1/admin/console/tasks/{jobs['replicate_job_id']}/retry",
+        params={"task_family": "ecom_replicate"},
+        headers=auth_context["headers"],
+    )
+
+    assert reverse_failed.status_code == 503
+    assert replicate_failed.status_code == 503
+    with auth_db() as db:
+        reverse_job = db.get(ReversePromptJob, jobs["reverse_job_id"])
+        replicate_job = db.get(EcomReplicateJob, jobs["replicate_job_id"])
+        outputs = list(
+            db.scalars(
+                select(EcomReplicateOutput).where(
+                    EcomReplicateOutput.job_id == jobs["replicate_job_id"]
+                )
+            )
+        )
+        reserved = db.scalar(
+            select(func.count(UsageRecord.id)).where(
+                UsageRecord.reverse_prompt_job_id == jobs["reverse_job_id"],
+                UsageRecord.status == "reserved",
+            )
+        )
+        assert reverse_job.status == "failed"
+        assert reverse_job.error_code == "TASK_RETRY_ENQUEUE_FAILED"
+        assert reserved == 0
+        assert replicate_job.status == "failed"
+        assert {output.status for output in outputs} == {"failed"}
+
+    reverse_retried = client.post(
+        f"/api/v1/admin/console/tasks/{jobs['reverse_job_id']}/retry",
+        params={"task_family": "reverse_prompt"},
+        headers=auth_context["headers"],
+    )
+    replicate_retried = client.post(
+        f"/api/v1/admin/console/tasks/{jobs['replicate_job_id']}/retry",
+        params={"task_family": "ecom_replicate"},
+        headers=auth_context["headers"],
+    )
+    assert reverse_retried.status_code == 202
+    assert replicate_retried.status_code == 202
+    assert reverse_attempts == 2
+    assert replicate_attempts == 2
+
+
+def test_admin_retry_runs_legacy_worker_without_charging_tenant_credits_again(
+    auth_context,
+    auth_db,
+    platform_acme,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from app.api.v1.routes import admin_console as route
+    from app.services import admin_console as admin_console_service
+    from app.services.provider_costs import DeepSeekUsageCost
+    from app.workers import video_tasks
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    video_path = tmp_path / "legacy-worker-output.mp4"
+    video_path.write_bytes(b"fixture-mp4")
+
+    class FakeProgressStore:
+        def update(self, *args, **kwargs) -> None:
+            return None
+
+    class FakeStorage:
+        bucket = "test-bucket"
+
+        def put_bytes(self, key, data, *, content_type) -> None:
+            return None
+
+    async def fake_generate(params, progress_cb):
+        return {
+            "video_path": str(video_path),
+            "duration": 3.0,
+            "file_size": video_path.stat().st_size,
+        }
+
+    with auth_db() as db:
+        task = db.get(VideoTask, fixture["task_id"])
+        task.video_mode = "static_template"
+        task.mode = "static_template"
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        used_before = subscription.quota_credits_used
+        positive_usage_before = db.scalar(
+            select(func.count(UsageRecord.id)).where(UsageRecord.credits > 0)
+        )
+        db.commit()
+
+    monkeypatch.setattr(route.generate_video_task, "apply_async", lambda **kwargs: None)
+    response = TestClient(app).post(
+        f"/api/v1/admin/console/tasks/{fixture['task_id']}/retry",
+        headers=auth_context["headers"],
+    )
+    assert response.status_code == 202
+
+    with auth_db() as db:
+        task = db.get(VideoTask, fixture["task_id"])
+        payload = admin_console_service.task_retry_payload(task)
+
+    monkeypatch.setattr(video_tasks, "SessionLocal", auth_db)
+    monkeypatch.setattr(video_tasks, "build_progress_store", lambda url: FakeProgressStore())
+    monkeypatch.setattr(video_tasks, "_generate_with_engine", fake_generate)
+    monkeypatch.setattr(video_tasks, "create_object_storage", lambda settings: FakeStorage())
+    monkeypatch.setattr(
+        video_tasks,
+        "_apply_synthetic_video_label",
+        lambda **kwargs: kwargs["video_bytes"],
+    )
+    monkeypatch.setattr(video_tasks.provider_costs, "begin_deepseek_usage_capture", object)
+    monkeypatch.setattr(
+        video_tasks.provider_costs,
+        "finish_deepseek_usage_capture",
+        lambda token: DeepSeekUsageCost(
+            provider="deepseek",
+            model="deepseek-chat",
+            prompt_tokens=10,
+            completion_tokens=5,
+            total_tokens=15,
+            cost_cents=1,
+        ),
+    )
+
+    result = video_tasks.generate_video_task.run(payload)
+
+    assert result["status"] == "SUCCESS"
+    with auth_db() as db:
+        task = db.get(VideoTask, fixture["task_id"])
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        positive_usage_after = db.scalar(
+            select(func.count(UsageRecord.id)).where(UsageRecord.credits > 0)
+        )
+        cost_records = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.video_task_id == fixture["task_id"],
+                    UsageRecord.capability == "llm",
+                )
+            )
+        )
+        assert task.status == "done"
+        assert subscription.quota_credits_used == used_before
+        assert positive_usage_after == positive_usage_before
+        assert len(cost_records) == 1
+        assert cost_records[0].credits == 0
+        assert cost_records[0].cost_cents == 1
 
 
 def test_plan_change_updates_target_auth_entitlements_immediately(

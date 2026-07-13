@@ -113,53 +113,10 @@ def regenerate_reverse_prompt_job(
 ) -> ReversePromptJob:
     job = reverse_prompt_job_or_404(db, tenant_id=user.tenant_id, job_id=job_id)
     if job.source_kind == "video":
-        job = _reverse_prompt_job_for_update_or_404(
+        job = prepare_reverse_prompt_video_retry(
             db,
             tenant_id=user.tenant_id,
             job_id=job_id,
-        )
-        if job.status in {"queued", "running"}:
-            raise AppError(
-                "Reverse prompt job is already running.",
-                code="REVERSE_PROMPT_ALREADY_RUNNING",
-                status_code=409,
-            )
-        if not job.source_asset_id:
-            raise AppError(
-                "Reverse prompt job has no video source.",
-                code="REVERSE_PROMPT_SOURCE_NOT_FOUND",
-                status_code=404,
-            )
-        source_kind, source = source_asset_or_raise(
-            db,
-            tenant_id=user.tenant_id,
-            asset_id=job.source_asset_id,
-        )
-        if source_kind != "video":
-            raise AppError(
-                "Reverse prompt source must be a ready video asset.",
-                code="REVERSE_PROMPT_SOURCE_INVALID",
-                status_code=422,
-            )
-        job.source_storage_key = source.storage_key
-        job.status = "queued"
-        job.result_json = None
-        job.raw_model_json = None
-        job.error_code = None
-        job.error_message = None
-        job.provider = None
-        job.model = None
-        job.prompt_tokens = 0
-        job.completion_tokens = 0
-        job.credits = Decimal("0")
-        job.cost_cents = 0
-        job.saved_at = None
-        job.updated_at = datetime.now(UTC)
-        db.flush()
-        quota.reserve_reverse_prompt_video_quota(
-            db,
-            tenant_id=user.tenant_id,
-            reverse_prompt_job_id=job.id,
         )
         db.commit()
         db.refresh(job)
@@ -199,6 +156,71 @@ def regenerate_reverse_prompt_job(
         ) from exc
     db.commit()
     db.refresh(job)
+    return job
+
+
+def prepare_reverse_prompt_video_retry(
+    db: Session,
+    *,
+    tenant_id: str,
+    job_id: str,
+    failed_only: bool = False,
+) -> ReversePromptJob:
+    job = _reverse_prompt_job_for_update_or_404(
+        db,
+        tenant_id=tenant_id,
+        job_id=job_id,
+    )
+    if job.source_kind != "video" or (failed_only and job.status != "failed"):
+        raise AppError(
+            "Reverse prompt job is not retryable.",
+            code="TASK_NOT_RETRYABLE",
+            status_code=409,
+        )
+    if job.status in {"queued", "running"}:
+        raise AppError(
+            "Reverse prompt job is already running.",
+            code="REVERSE_PROMPT_ALREADY_RUNNING",
+            status_code=409,
+        )
+    if not job.source_asset_id:
+        raise AppError(
+            "Reverse prompt job has no video source.",
+            code="REVERSE_PROMPT_SOURCE_NOT_FOUND",
+            status_code=404,
+        )
+    source_kind, source = source_asset_or_raise(
+        db,
+        tenant_id=tenant_id,
+        asset_id=job.source_asset_id,
+    )
+    if source_kind != "video":
+        raise AppError(
+            "Reverse prompt source must be a ready video asset.",
+            code="REVERSE_PROMPT_SOURCE_INVALID",
+            status_code=422,
+        )
+    job.source_storage_key = source.storage_key
+    job.status = "queued"
+    job.result_json = None
+    job.raw_model_json = None
+    job.error_code = None
+    job.error_message = None
+    job.provider = None
+    job.model = None
+    job.prompt_tokens = 0
+    job.completion_tokens = 0
+    job.credits = Decimal("0")
+    job.cost_cents = 0
+    job.saved_at = None
+    job.updated_at = datetime.now(UTC)
+    db.flush()
+    quota.reserve_reverse_prompt_video_quota(
+        db,
+        tenant_id=tenant_id,
+        reverse_prompt_job_id=job.id,
+    )
+    db.flush()
     return job
 
 

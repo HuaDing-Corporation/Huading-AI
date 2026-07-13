@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, date, datetime, time, timedelta
+from typing import Any
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session, aliased
 
 from app.core.config import settings
@@ -10,8 +12,11 @@ from app.core.exceptions import AppError
 from app.db.models import (
     AdminAuditLog,
     BrandVoice,
+    EcomReplicateJob,
+    EcomReplicateOutput,
     Plan,
     ProviderConfig,
+    ReversePromptJob,
     Subscription,
     Tenant,
     UsageRecord,
@@ -31,6 +36,7 @@ from app.schemas.admin_console import (
     AdminVoiceSlotItem,
     AdminVoiceSlotsResponse,
 )
+from app.services import ecom_replicate, quota, reverse_prompt
 from app.services.plan_access import is_platform_tenant
 from app.services.voice_slots import (
     DOUBAO_VOICE_CLONE_PROVIDER,
@@ -421,6 +427,246 @@ def prepare_task_retry(
     return task
 
 
+def compensate_task_retry_enqueue_failure(
+    db: Session,
+    *,
+    actor: User,
+    task_id: str,
+) -> VideoTask:
+    task = db.scalar(select(VideoTask).where(VideoTask.id == task_id).with_for_update())
+    if task is None or task.status != "queued":
+        raise AppError(
+            "Task retry dispatch could not be compensated.",
+            code="TASK_RETRY_COMPENSATION_FAILED",
+            status_code=500,
+        )
+    before = {"status": task.status, "progress": task.progress}
+    now = datetime.now(UTC)
+    task.status = "failed"
+    task.error = "Task retry could not be queued."
+    task.error_code = "TASK_RETRY_ENQUEUE_FAILED"
+    task.error_message = "Task retry could not be queued. Please retry."
+    task.finished_at = now
+    task.updated_at = now
+    after = {
+        "status": "failed",
+        "progress": task.progress,
+        "error_code": task.error_code,
+    }
+    record_audit(
+        db,
+        actor=actor,
+        action="task_retry",
+        target_tenant_id=task.tenant_id,
+        target_id=task.id,
+        before=before,
+        after=after,
+        reason="Celery enqueue failed; retry state was compensated.",
+    )
+    db.flush()
+    return task
+
+
+def resolve_task_family(
+    db: Session,
+    *,
+    task_id: str,
+    requested_family: str | None,
+) -> str:
+    models = {
+        "video": VideoTask,
+        "reverse_prompt": ReversePromptJob,
+        "ecom_replicate": EcomReplicateJob,
+    }
+    families = (requested_family,) if requested_family else tuple(models)
+    for family in families:
+        model = models[family]
+        item = db.get(model, task_id)
+        if item is not None and not (
+            family == "video" and getattr(item, "deleted_at", None) is not None
+        ):
+            return family
+    raise AppError("Task not found.", code="TASK_NOT_FOUND", status_code=404)
+
+
+def prepare_reverse_prompt_retry(
+    db: Session,
+    *,
+    actor: User,
+    job_id: str,
+) -> ReversePromptJob:
+    existing = db.get(ReversePromptJob, job_id)
+    if existing is None:
+        raise AppError("Task not found.", code="TASK_NOT_FOUND", status_code=404)
+    before = {
+        "status": existing.status,
+        "error_code": existing.error_code,
+        "error_message": existing.error_message,
+    }
+    job = reverse_prompt.prepare_reverse_prompt_video_retry(
+        db,
+        tenant_id=existing.tenant_id,
+        job_id=existing.id,
+        failed_only=True,
+    )
+    record_audit(
+        db,
+        actor=actor,
+        action="task_retry",
+        target_tenant_id=job.tenant_id,
+        target_id=job.id,
+        before=before,
+        after={"status": "queued", "progress": 0},
+        reason=None,
+    )
+    db.flush()
+    return job
+
+
+def prepare_ecom_replicate_retry(
+    db: Session,
+    *,
+    actor: User,
+    job_id: str,
+) -> tuple[EcomReplicateJob, list[EcomReplicateOutput]]:
+    existing = db.get(EcomReplicateJob, job_id)
+    if existing is None:
+        raise AppError("Task not found.", code="TASK_NOT_FOUND", status_code=404)
+    before = {"status": existing.status, "failed_output_indexes": []}
+    job, outputs = ecom_replicate.prepare_failed_outputs_retry(
+        db,
+        tenant_id=existing.tenant_id,
+        job_id=existing.id,
+    )
+    indexes = [output.index for output in outputs]
+    before["failed_output_indexes"] = indexes
+    record_audit(
+        db,
+        actor=actor,
+        action="task_retry",
+        target_tenant_id=job.tenant_id,
+        target_id=job.id,
+        before=before,
+        after={"status": "generating", "retried_output_indexes": indexes},
+        reason=None,
+    )
+    db.flush()
+    return job, outputs
+
+
+def compensate_reverse_prompt_retry_enqueue_failure(
+    db: Session,
+    *,
+    actor: User,
+    job_id: str,
+) -> ReversePromptJob:
+    job = db.scalar(
+        select(ReversePromptJob)
+        .where(ReversePromptJob.id == job_id)
+        .with_for_update()
+    )
+    if job is None or job.status != "queued":
+        raise AppError(
+            "Reverse prompt retry dispatch could not be compensated.",
+            code="TASK_RETRY_COMPENSATION_FAILED",
+            status_code=500,
+        )
+    quota.release_reverse_prompt_video_quota(
+        db,
+        tenant_id=job.tenant_id,
+        reverse_prompt_job_id=job.id,
+    )
+    before = {"status": "queued", "progress": 0}
+    job.status = "failed"
+    job.error_code = "TASK_RETRY_ENQUEUE_FAILED"
+    job.error_message = "Task retry could not be queued. Please retry."
+    job.updated_at = datetime.now(UTC)
+    record_audit(
+        db,
+        actor=actor,
+        action="task_retry",
+        target_tenant_id=job.tenant_id,
+        target_id=job.id,
+        before=before,
+        after={
+            "status": "failed",
+            "progress": 100,
+            "error_code": job.error_code,
+        },
+        reason="Celery enqueue failed; retry state was compensated.",
+    )
+    db.flush()
+    return job
+
+
+def compensate_ecom_replicate_retry_enqueue_failure(
+    db: Session,
+    *,
+    actor: User,
+    job_id: str,
+    output_indexes: list[int],
+) -> EcomReplicateJob:
+    job = db.scalar(
+        select(EcomReplicateJob)
+        .where(EcomReplicateJob.id == job_id)
+        .with_for_update()
+    )
+    outputs = list(
+        db.scalars(
+            select(EcomReplicateOutput)
+            .where(
+                EcomReplicateOutput.job_id == job_id,
+                EcomReplicateOutput.index.in_(output_indexes),
+                EcomReplicateOutput.status == "planned",
+            )
+            .with_for_update()
+        )
+    )
+    if job is None or job.status != "generating" or len(outputs) != len(output_indexes):
+        raise AppError(
+            "Replicate retry dispatch could not be compensated.",
+            code="TASK_RETRY_COMPENSATION_FAILED",
+            status_code=500,
+        )
+    now = datetime.now(UTC)
+    for output in outputs:
+        output.status = "failed"
+        output.error_code = "TASK_RETRY_ENQUEUE_FAILED"
+        output.error_message = "Task retry could not be queued. Please retry."
+        output.updated_at = now
+    has_succeeded = db.scalar(
+        select(EcomReplicateOutput.id).where(
+            EcomReplicateOutput.job_id == job.id,
+            EcomReplicateOutput.status == "succeeded",
+        )
+    )
+    job.status = "partial_failed" if has_succeeded is not None else "failed"
+    job.error_code = (
+        "ECOM_REPLICATE_PARTIAL_FAILED"
+        if has_succeeded is not None
+        else "ECOM_REPLICATE_FAILED"
+    )
+    job.error_message = "Task retry could not be queued. Please retry."
+    job.finished_at = now
+    job.updated_at = now
+    record_audit(
+        db,
+        actor=actor,
+        action="task_retry",
+        target_tenant_id=job.tenant_id,
+        target_id=job.id,
+        before={"status": "generating", "retried_output_indexes": output_indexes},
+        after={
+            "status": job.status,
+            "failed_output_indexes": output_indexes,
+            "error_code": "TASK_RETRY_ENQUEUE_FAILED",
+        },
+        reason="Celery enqueue failed; retry state was compensated.",
+    )
+    db.flush()
+    return job
+
+
 def task_retry_payload(task: VideoTask) -> dict[str, object]:
     payload = dict(task.params or {})
     payload.update(
@@ -591,32 +837,141 @@ def export_usage_rows(db: Session, **filters) -> list[AdminUsageItem]:
     return [_usage_item(row) for row in db.execute(statement)]
 
 
-def _task_item(row) -> AdminTaskItem:
-    task: VideoTask = row[0]
+def _task_item(row: Mapping[str, Any]) -> AdminTaskItem:
     duration = None
-    if task.started_at is not None and task.finished_at is not None:
-        duration = max(0.0, (task.finished_at - task.started_at).total_seconds())
+    if row["started_at"] is not None and row["finished_at"] is not None:
+        duration = max(0.0, (row["finished_at"] - row["started_at"]).total_seconds())
     return AdminTaskItem(
-        id=task.id,
-        tenant_id=task.tenant_id,
-        tenant_slug=row[1],
-        tenant_name=row[2],
-        mode=task.mode,
-        video_mode=task.video_mode,
-        status=task.status,
-        progress=task.progress,
-        error_code=task.error_code,
-        error_message=task.error_message or task.error,
-        created_at=task.created_at,
-        started_at=task.started_at,
-        finished_at=task.finished_at,
+        id=row["id"],
+        task_family=row["task_family"],
+        tenant_id=row["tenant_id"],
+        tenant_slug=row["tenant_slug"],
+        tenant_name=row["tenant_name"],
+        mode=row["mode"],
+        label=row["label"],
+        video_mode=row["video_mode"],
+        status=row["status"],
+        progress=row["progress"],
+        error_code=row["error_code"],
+        error_message=row["error_message"],
+        created_at=row["created_at"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
         duration_seconds=duration,
+        retryable=bool(row["retryable"]),
     )
+
+
+def _task_union():
+    video = (
+        select(
+            VideoTask.id.label("id"),
+            literal("video").label("task_family"),
+            VideoTask.tenant_id.label("tenant_id"),
+            Tenant.slug.label("tenant_slug"),
+            Tenant.name.label("tenant_name"),
+            VideoTask.video_mode.label("mode"),
+            VideoTask.topic.label("label"),
+            VideoTask.video_mode.label("video_mode"),
+            case((VideoTask.status == "done", "succeeded"), else_=VideoTask.status).label(
+                "status"
+            ),
+            VideoTask.progress.label("progress"),
+            VideoTask.error_code.label("error_code"),
+            func.coalesce(VideoTask.error_message, VideoTask.error).label("error_message"),
+            VideoTask.created_at.label("created_at"),
+            VideoTask.started_at.label("started_at"),
+            VideoTask.finished_at.label("finished_at"),
+            (VideoTask.status == "failed").label("retryable"),
+        )
+        .join(Tenant, Tenant.id == VideoTask.tenant_id)
+        .where(VideoTask.deleted_at.is_(None))
+    )
+    reverse_status = case(
+        (ReversePromptJob.status.in_(("succeeded", "saved")), "succeeded"),
+        else_=ReversePromptJob.status,
+    )
+    reverse = select(
+        ReversePromptJob.id.label("id"),
+        literal("reverse_prompt").label("task_family"),
+        ReversePromptJob.tenant_id.label("tenant_id"),
+        Tenant.slug.label("tenant_slug"),
+        Tenant.name.label("tenant_name"),
+        ReversePromptJob.source_kind.label("mode"),
+        ReversePromptJob.target_format.label("label"),
+        literal(None).label("video_mode"),
+        reverse_status.label("status"),
+        case(
+            (ReversePromptJob.status == "queued", 0),
+            (ReversePromptJob.status == "running", 50),
+            else_=100,
+        ).label("progress"),
+        ReversePromptJob.error_code.label("error_code"),
+        ReversePromptJob.error_message.label("error_message"),
+        ReversePromptJob.created_at.label("created_at"),
+        case(
+            (ReversePromptJob.status.in_(("running", "succeeded", "failed", "saved")),
+             ReversePromptJob.created_at),
+            else_=None,
+        ).label("started_at"),
+        case(
+            (ReversePromptJob.status.in_(("succeeded", "failed", "saved")),
+             ReversePromptJob.updated_at),
+            else_=None,
+        ).label("finished_at"),
+        (
+            (ReversePromptJob.source_kind == "video")
+            & (ReversePromptJob.status == "failed")
+        ).label("retryable"),
+    ).join(Tenant, Tenant.id == ReversePromptJob.tenant_id)
+    failed_output_exists = (
+        select(EcomReplicateOutput.id)
+        .where(
+            EcomReplicateOutput.job_id == EcomReplicateJob.id,
+            EcomReplicateOutput.status == "failed",
+        )
+        .exists()
+    )
+    replicate_status = case(
+        (EcomReplicateJob.status == "completed", "succeeded"),
+        (EcomReplicateJob.status.in_(("partial_failed", "failed")), "failed"),
+        (EcomReplicateJob.status == "cancelled", "cancelled"),
+        (EcomReplicateJob.status.in_(("planning", "generating")), "running"),
+        else_="queued",
+    )
+    replicate = select(
+        EcomReplicateJob.id.label("id"),
+        literal("ecom_replicate").label("task_family"),
+        EcomReplicateJob.tenant_id.label("tenant_id"),
+        Tenant.slug.label("tenant_slug"),
+        Tenant.name.label("tenant_name"),
+        EcomReplicateJob.output_mode.label("mode"),
+        EcomReplicateJob.output_mode.label("label"),
+        literal(None).label("video_mode"),
+        replicate_status.label("status"),
+        case(
+            (EcomReplicateJob.status == "planning", 10),
+            (EcomReplicateJob.status == "plan_ready", 25),
+            (EcomReplicateJob.status == "generating", 50),
+            else_=100,
+        ).label("progress"),
+        EcomReplicateJob.error_code.label("error_code"),
+        EcomReplicateJob.error_message.label("error_message"),
+        EcomReplicateJob.created_at.label("created_at"),
+        EcomReplicateJob.started_at.label("started_at"),
+        EcomReplicateJob.finished_at.label("finished_at"),
+        (
+            EcomReplicateJob.status.in_(("partial_failed", "failed", "completed"))
+            & failed_output_exists
+        ).label("retryable"),
+    ).join(Tenant, Tenant.id == EcomReplicateJob.tenant_id)
+    return union_all(video, reverse, replicate).subquery("admin_task_monitor")
 
 
 def list_tasks(
     db: Session,
     *,
+    task_family: str | None,
     tenant_id: str | None,
     status: str | None,
     from_: date | None,
@@ -625,25 +980,24 @@ def list_tasks(
     page_size: int,
 ) -> dict[str, object]:
     start, end = _date_bounds(from_, to)
-    statement = (
-        select(VideoTask, Tenant.slug, Tenant.name)
-        .join(Tenant, Tenant.id == VideoTask.tenant_id)
-        .where(VideoTask.deleted_at.is_(None))
-    )
+    tasks = _task_union()
+    statement = select(tasks)
+    if task_family:
+        statement = statement.where(tasks.c.task_family == task_family)
     if tenant_id:
-        statement = statement.where(VideoTask.tenant_id == tenant_id)
+        statement = statement.where(tasks.c.tenant_id == tenant_id)
     if status:
-        statement = statement.where(VideoTask.status == status)
+        statement = statement.where(tasks.c.status == status)
     if start:
-        statement = statement.where(VideoTask.created_at >= start)
+        statement = statement.where(tasks.c.created_at >= start)
     if end:
-        statement = statement.where(VideoTask.created_at < end)
+        statement = statement.where(tasks.c.created_at < end)
     total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
     rows = db.execute(
-        statement.order_by(VideoTask.created_at.desc(), VideoTask.id.desc())
+        statement.order_by(tasks.c.created_at.desc(), tasks.c.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
-    )
+    ).mappings()
     return _page(
         [_task_item(row) for row in rows],
         total=total,
@@ -655,6 +1009,7 @@ def list_tasks(
 def recent_tasks(db: Session, *, tenant_id: str, limit: int = 10) -> list[AdminTaskItem]:
     page = list_tasks(
         db,
+        task_family=None,
         tenant_id=tenant_id,
         status=None,
         from_=None,
