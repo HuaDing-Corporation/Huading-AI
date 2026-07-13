@@ -63,8 +63,17 @@ test("② VIP 客户（huading，非平台）：看板渲染但隐藏「用户�
   const g = watch(page);
   await loginAs(page, { platform: "0", plan: "huading" });
 
+  // 🔴 数据级硬化（FIX3）：拦 /by-tenant 真实响应，证明 scope 只来自 1 个租户——不靠 TenantTable 隐藏判断。
+  const byTenantResp = page.waitForResponse(
+    (r) => /\/admin\/analytics\/by-tenant/.test(r.url()) && r.status() === 200,
+    { timeout: 20_000 }
+  );
   await page.getByRole("link", { name: "数据看板" }).click();
   await page.waitForURL(/\/analytics$/, { timeout: 15_000 });
+  const byTenant = (await (await byTenantResp).json()) as { data: { total: number; items: { tenant_id: string }[] } };
+  expect(byTenant.data.total, "VIP /by-tenant 必须只含 1 个租户").toBe(1);
+  expect(byTenant.data.items).toHaveLength(1);
+  expect(byTenant.data.items[0].tenant_id).toBe("ten-mock");
   // 能进（非友好页）+ 概览渲染。
   await expect(page.getByText("仅 huading plan 用户可查看")).toHaveCount(0);
   await expect(page.getByText("日期区间")).toBeVisible({ timeout: 15_000 });
