@@ -870,7 +870,7 @@ def _task_union():
             VideoTask.tenant_id.label("tenant_id"),
             Tenant.slug.label("tenant_slug"),
             Tenant.name.label("tenant_name"),
-            VideoTask.video_mode.label("mode"),
+            VideoTask.mode.label("mode"),
             VideoTask.topic.label("label"),
             VideoTask.video_mode.label("video_mode"),
             case((VideoTask.status == "done", "succeeded"), else_=VideoTask.status).label(
@@ -987,6 +987,7 @@ def list_tasks(
     if tenant_id:
         statement = statement.where(tasks.c.tenant_id == tenant_id)
     if status:
+        status = "succeeded" if status == "done" else status
         statement = statement.where(tasks.c.status == status)
     if start:
         statement = statement.where(tasks.c.created_at >= start)

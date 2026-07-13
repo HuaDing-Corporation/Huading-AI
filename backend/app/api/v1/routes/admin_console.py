@@ -310,7 +310,8 @@ def get_tasks(
     request: Request,
     task_family: AdminTaskFamily | None = None,
     tenant_id: str | None = None,
-    status: Literal["queued", "running", "succeeded", "failed", "cancelled"] | None = None,
+    status: Literal["queued", "running", "done", "succeeded", "failed", "cancelled"]
+    | None = None,
     from_: FromDateQuery = None,
     to: ToDateQuery = None,
     page: PageQuery = 1,

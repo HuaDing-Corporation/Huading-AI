@@ -473,6 +473,20 @@ def test_admin_task_monitor_normalizes_all_task_families_and_filters_them(
 ) -> None:
     fixture = _seed_console_read_fixture(auth_db, auth_context)
     jobs = _seed_non_video_task_families(auth_db, fixture)
+    with auth_db() as db:
+        failed_video = db.get(VideoTask, fixture["task_id"])
+        failed_video.mode = "generate"
+        completed_video = VideoTask(
+            tenant_id=fixture["tenant_id"],
+            status="done",
+            mode="static_template",
+            video_mode="avatar_talk",
+            topic="completed fixture",
+            progress=100,
+        )
+        db.add(completed_video)
+        db.commit()
+        completed_video_id = completed_video.id
     client = TestClient(app)
 
     response = client.get(
@@ -490,6 +504,9 @@ def test_admin_task_monitor_normalizes_all_task_families_and_filters_them(
     }
     assert items[fixture["task_id"]]["status"] == "failed"
     assert items[fixture["task_id"]]["retryable"] is True
+    assert items[fixture["task_id"]]["mode"] == "generate"
+    assert items[fixture["task_id"]]["video_mode"] == "photo"
+    assert items[completed_video_id]["status"] == "succeeded"
     reverse_item = items[jobs["reverse_job_id"]]
     assert {key: reverse_item[key] for key in (
         "task_family",
@@ -524,6 +541,16 @@ def test_admin_task_monitor_normalizes_all_task_families_and_filters_them(
     assert {
         item["task_family"] for item in filtered.json()["data"]["items"]
     } == {"reverse_prompt"}
+
+    legacy_done_filter = client.get(
+        "/api/v1/admin/console/tasks",
+        params={"tenant_id": fixture["tenant_id"], "status": "done"},
+        headers=auth_context["headers"],
+    )
+    assert legacy_done_filter.status_code == 200
+    assert [
+        item["id"] for item in legacy_done_filter.json()["data"]["items"]
+    ] == [completed_video_id]
 
 
 def test_admin_console_tenant_mutations_are_transactional_and_audited(
