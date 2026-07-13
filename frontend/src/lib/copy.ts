@@ -50,8 +50,10 @@ export const copy = {
   // 管理员数据看板（ANALYTICS-UI-0001）
   analytics: {
     pageTitle: "数据看板",
-    // ADMIN-VIP-GATE-UI-0001：门禁改为「管理员 或 huading plan」→ 副标题与友好页口径一致（不再仅「管理员专属」）
-    pageSubtitle: "管理员 / huading plan 专属 · 全站用量、成本与趋势总览",
+    // PROD-P0-ANALYTICS-TENANT-LEAK-UI-0001：副标题据 entitlement 分「全站」（平台方 analytics_platform）与
+    // 「我的用量」（VIP 客户 analytics_view，只看自己数据）。去掉误导的「管理员专属」措辞（门禁走 permissions，非 role）。
+    pageSubtitle: "全站用量、成本与趋势总览",
+    pageSubtitleOwn: "我的用量、成本与趋势总览",
     // 日期区间
     rangeLabel: "日期区间",
     rangeFrom: "起",

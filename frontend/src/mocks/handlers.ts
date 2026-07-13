@@ -293,24 +293,27 @@ const ANALYTICS_TENANTS = Array.from({ length: 46 }, (_, i) => {
   };
 });
 
-// ADMIN-VIP-GATE-UI-0001：VIP 门禁模拟——localStorage["hd_mock_analytics_plan"]==="none" → 403
-// ANALYTICS_PLAN_REQUIRED（MSW resolver 运行在页面上下文，可直读 localStorage，不受跨源 API base 影响；
-// e2e 用 page.evaluate 设置后 reload 即切未授权态）。默认（未设）= 授权 → 正常返数据，零回归。
-function analyticsPlanRequired(): boolean {
-  try {
-    return typeof localStorage !== "undefined" && localStorage.getItem("hd_mock_analytics_plan") === "none";
-  } catch {
-    return false;
-  }
-}
+// 平台全站消耗积分合计——既是 overview 平台方 total_credits_used，又是 VIP 缩放「我的占比」的分母（by-provider/timeseries）。
+// 三处必须同源，故收拢为具名常量（改动需一致）。
+const PLATFORM_TOTAL_CREDITS = 48213.5;
 
-// ADMIN-VIP-GATE-UI-0001 §二之二 · FIX1：VIP 音色 entitlement **按「角色 + 套餐」派生**，逐字镜像真实 BE
-// (#162 VIP-ENTITLEMENT-BE-0001)——/auth/me.permissions = sorted(permissions_for_role(role) ∪
-// {"voice_clone_vip"} if has_huading_access)，has_huading_access = role==ADMIN 或 租户 active 订阅 plan.code=="huading"
-// （app/services/plan_access.py，实时计算）。**mock 不再凭空塞权限**（旧版把 voice_clone_vip 写死进 admin，致
-// creator+huading 真实付费用户被误伤 → 假绿）。测试/e2e 通过 localStorage 双旋钮切场景（默认 admin+huading → 有权限，零回归）：
-//   hd_mock_role: "admin"（默认）| "creator"
-//   hd_mock_plan: "huading"（默认）| "free"   —— 代表租户当前套餐 code
+// VIP 客户（有 analytics_view 无 analytics_platform）只看**自己**的数据（BE 已按租户过滤）——mock 忠实返单租户，
+// 不泄漏任何其它租户名/全站合计。前端另会隐藏「用户排行」（双保险）。
+const OWN_TENANT = {
+  tenant_id: "ten-mock",
+  tenant_name: "华鼎（mock）",
+  credits_used: 1280.5,
+  cost_cents: 48200,
+  task_count: 96,
+  success_rate: 0.94,
+  balance: { total: 1000, used: 120, reserved: 36, remaining: 844 }
+};
+
+// PROD-P0-ANALYTICS-TENANT-LEAK-UI-0001（FIX2 · 单一状态源）：整个 mock 的「我是谁 / 有什么权限 / analytics 能看什么」
+// 收敛到唯一解析函数 resolveMockState()——所有消费方（/me 身份、mockPermissions、analyticsHandlers 的门禁与 scope、
+// 品牌音色 doubao 兜底等）**一律走它**，不再各读各的 localStorage（FIX1 的「/me 走 registered、analytics 走旋钮」两套源已并线）。
+// **绝不按 role 派生 entitlement**——自助注册 owner 在真 BE 也是 role=ADMIN（租户管理员 ≠ 平台超管），按 role 会让 free
+// 新注册用户绕过门禁（线上事故：看到别租户数据 + 升级版卡不置灰）。
 function readLS(key: string): string | null {
   try {
     return typeof localStorage !== "undefined" ? localStorage.getItem(key) : null;
@@ -318,33 +321,70 @@ function readLS(key: string): string | null {
     return null;
   }
 }
-function mockRole(): "admin" | "creator" {
-  return readLS("hd_mock_role") === "creator" ? "creator" : "admin";
+
+// 真实注册链驱动的新注册身份（POST /register-tenant 成功后**只写这一个 key**；platform/plan/role 全由它推导，无需另写）。
+interface RegisteredIdentity {
+  tenant: { id: string; slug: string; name: string };
+  user: { id: string; tenant_id: string; email: string; full_name: string | null; role: "admin" };
 }
-function mockPlan(): "huading" | "free" {
-  return readLS("hd_mock_plan") === "free" ? "free" : "huading";
+function readRegistered(): RegisteredIdentity | null {
+  const raw = readLS("hd_mock_registered");
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as RegisteredIdentity;
+  } catch {
+    return null;
+  }
 }
-// VIP 通路 entitlement——镜像 BE has_huading_access「role==ADMIN OR active huading 订阅」，voice_clone_vip 的**唯一来源**。
-function mockVipEntitled(): boolean {
-  return mockRole() === "admin" || mockPlan() === "huading";
+
+interface MockState {
+  isPlatform: boolean;
+  plan: "huading" | "free";
+  role: "admin" | "creator";
+  identity: RegisteredIdentity | null;
 }
-// 角色基础权限：逐字镜像 BE deps.py::_ROLE_PERMISSIONS（mock 仅用 admin/creator 两档；真 BE 无 "video:read"）。
-// voice_clone_vip **不写死进角色**，由 entitlement 派生。
+// 唯一状态源。走过真实注册链（有 hd_mock_registered）→ 以注册身份为权威：非平台 + free + role admin（正是线上那个坑，
+// self-serve owner=ADMIN 保留）。否则回落三旋钮（默认平台租户「华鼎AI」→ 全权限，保后台/联调零回归）：
+//   hd_mock_platform: 平台租户？默认 "1"；"0" → 普通租户 · hd_mock_plan: "huading"（默认）| "free" · hd_mock_role: "admin"（默认）| "creator"
+function resolveMockState(): MockState {
+  const identity = readRegistered();
+  if (identity) {
+    return { isPlatform: false, plan: "free", role: "admin", identity };
+  }
+  return {
+    isPlatform: readLS("hd_mock_platform") !== "0",
+    plan: readLS("hd_mock_plan") === "free" ? "free" : "huading",
+    role: readLS("hd_mock_role") === "creator" ? "creator" : "admin",
+    identity: null
+  };
+}
+// huading 通路 entitlement——逐字镜像已上线 BE plan_access.py「平台租户 OR huading 订阅」（**不含 role**）。
+function mockHuadingAccess(state: MockState): boolean {
+  return state.isPlatform || state.plan === "huading";
+}
+// 角色基础权限：逐字镜像 BE deps.py::_ROLE_PERMISSIONS（真 BE 无 "video:read"）。entitlement 权限不写死进角色。
 const ROLE_PERMISSIONS: Record<"admin" | "creator", string[]> = {
   admin: ["tenant:admin", "content:operate", "video:create", "video:review", "dev:access"],
   creator: ["video:create"]
 };
-// /auth/me.permissions = sorted(角色权限 ∪ {voice_clone_vip} if entitled)——镜像 BE session_permissions_for_user + sorted()。
-function mockPermissions(): string[] {
-  const perms = new Set(ROLE_PERMISSIONS[mockRole()]);
-  if (mockVipEntitled()) perms.add("voice_clone_vip");
+// /auth/me.permissions = sorted(角色权限 ∪ {voice_clone_vip, analytics_view} if huadingAccess ∪ {analytics_platform} if isPlatform)。
+function mockPermissions(state: MockState): string[] {
+  const perms = new Set(ROLE_PERMISSIONS[state.role]);
+  if (mockHuadingAccess(state)) {
+    perms.add("voice_clone_vip");
+    perms.add("analytics_view");
+  }
+  if (state.isPlatform) perms.add("analytics_platform");
   return [...perms].sort();
 }
 
 function analyticsHandlers() {
   const A = `${BASE}/api/v1/admin/analytics`;
+  // 门禁与 scope 走**单一状态源** resolveMockState()（与 /me entitlement 同源，不再直读旋钮）。
+  // 无 analytics_view（= 非平台租户且非 huading）→ 403 ANALYTICS_PLAN_REQUIRED；平台方 → 全站 46 租户，VIP 客户 → 只本租户。
   const guard = () =>
-    analyticsPlanRequired() ? err(403, "ANALYTICS_PLAN_REQUIRED", "Analytics requires the huading plan.") : null;
+    mockHuadingAccess(resolveMockState()) ? null : err(403, "ANALYTICS_PLAN_REQUIRED", "Analytics requires the huading plan.");
+  const scopedTenants = () => (resolveMockState().isPlatform ? ANALYTICS_TENANTS : [OWN_TENANT]);
   const sortTenants = (sort: string) => {
     const field = sort.replace(/_(asc|desc)$/, "");
     const dir = sort.endsWith("_asc") ? 1 : -1;
@@ -355,20 +395,23 @@ function analyticsHandlers() {
       success_rate: (t) => t.success_rate
     };
     const fn = key[field] ?? key.credits;
-    return [...ANALYTICS_TENANTS].sort((a, b) => (fn(a) - fn(b)) * dir);
+    return [...scopedTenants()].sort((a, b) => (fn(a) - fn(b)) * dir);
   };
   return [
     http.get(`${A}/overview`, ({ request }) => {
       const g = guard();
       if (g) return g;
       const url = new URL(request.url);
+      const platform = resolveMockState().isPlatform;
+      const ownSuccess = Math.round(OWN_TENANT.task_count * OWN_TENANT.success_rate);
+      // 全站合计（平台）vs 我的合计（VIP）——VIP 绝不返全站数字（那也是一种泄漏）。
       return ok({
-        total_credits_used: 48213.5,
-        total_cost_cents: 1892340,
-        task_count: 5230,
-        success_count: 4890,
-        failed_count: 340,
-        tenant_count: ANALYTICS_TENANTS.length,
+        total_credits_used: platform ? PLATFORM_TOTAL_CREDITS : OWN_TENANT.credits_used,
+        total_cost_cents: platform ? 1892340 : OWN_TENANT.cost_cents,
+        task_count: platform ? 5230 : OWN_TENANT.task_count,
+        success_count: platform ? 4890 : ownSuccess,
+        failed_count: platform ? 340 : OWN_TENANT.task_count - ownSuccess,
+        tenant_count: platform ? ANALYTICS_TENANTS.length : 1,
         period: { from: url.searchParams.get("from") ?? "", to: url.searchParams.get("to") ?? "" }
       });
     }),
@@ -380,18 +423,26 @@ function analyticsHandlers() {
       const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") ?? 20)));
       const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0));
       const sorted = sortTenants(sort);
-      return ok({ items: sorted.slice(offset, offset + limit), total: ANALYTICS_TENANTS.length });
+      return ok({ items: sorted.slice(offset, offset + limit), total: scopedTenants().length });
     }),
     http.get(`${A}/by-provider`, () => {
       const g = guard();
       if (g) return g;
+      // VIP（非平台）→ 按自己占比缩放为「我的」拆分，不返全站聚合（share_pct 是占比，不随缩放变）。
+      const s = resolveMockState().isPlatform ? 1 : OWN_TENANT.credits_used / PLATFORM_TOTAL_CREDITS;
+      const scaleRow = (r: { provider: string; model: string | null; credits_used: number; cost_cents: number; task_count: number; share_pct: number }) => ({
+        ...r,
+        credits_used: Math.round(r.credits_used * s * 10) / 10,
+        cost_cents: Math.round(r.cost_cents * s),
+        task_count: Math.round(r.task_count * s)
+      });
       return ok({
         items: [
           { provider: "seedance", model: "i2v-v1", credits_used: 21500, cost_cents: 812000, task_count: 2100, share_pct: 44.6 },
           { provider: "video_gen", model: "vg-pro", credits_used: 15200, cost_cents: 540300, task_count: 1630, share_pct: 31.5 },
           { provider: "copywriting", model: null, credits_used: 6800, cost_cents: 210400, task_count: 980, share_pct: 14.1 },
           { provider: "image", model: "flux-1", credits_used: 4713.5, cost_cents: 329640, task_count: 520, share_pct: 9.8 }
-        ]
+        ].map(scaleRow)
       });
     }),
     http.get(`${A}/timeseries`, ({ request }) => {
@@ -403,15 +454,17 @@ function analyticsHandlers() {
       const step = granularity === "week" ? 7 : 1;
       const count = granularity === "week" ? 6 : 14;
       const base = from ? new Date(`${from}T00:00:00`) : new Date("2026-06-01T00:00:00");
+      // VIP（非平台）→ 趋势缩放为「我的」用量，不返全站曲线。
+      const s = resolveMockState().isPlatform ? 1 : OWN_TENANT.credits_used / PLATFORM_TOTAL_CREDITS;
       const buckets = Array.from({ length: count }, (_, i) => {
         const d = new Date(base);
         d.setDate(d.getDate() + i * step);
         const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
         return {
           date: iso,
-          credits_used: Math.round((800 + Math.sin(i) * 300 + i * 40) * 10) / 10,
-          cost_cents: 30000 + i * 4200 + (i % 3) * 1500,
-          task_count: 120 + i * 9 + (i % 4) * 15
+          credits_used: Math.round((800 + Math.sin(i) * 300 + i * 40) * s * 10) / 10,
+          cost_cents: Math.round((30000 + i * 4200 + (i % 3) * 1500) * s),
+          task_count: Math.round((120 + i * 9 + (i % 4) * 15) * s)
         };
       });
       return ok({ buckets });
@@ -558,7 +611,7 @@ export const handlers = [
   // Auth = M2 shapes (unchanged). Mocked so the (app) client auth-gate can be
   // passed during the MSW parallel period without a real backend.
   http.post(`${BASE}/api/v1/auth/login`, () =>
-    ok({ access_token: "mock-token", token_type: "bearer", tenant_id: "ten-mock", user_id: "u-mock", role: mockRole() })
+    ok({ access_token: "mock-token", token_type: "bearer", tenant_id: "ten-mock", user_id: "u-mock", role: resolveMockState().role })
   ),
   // 注册（AUTH-UI-0001 · FIX1 硬化）：镜像 BE POST /auth/register-tenant → {tenant,user,token}（201）。
   // 校验必填 + extra="forbid" + full_name≤200（防非法请求在 mock 假绿，P2）；slug="taken" → 409。
@@ -585,11 +638,26 @@ export const handlers = [
     if (fullName !== undefined && (typeof fullName !== "string" || fullName.length > 200))
       return err(422, "VALIDATION_ERROR", "invalid full_name");
     if (slug === "taken") return err(409, "tenant_slug_taken", "Tenant slug is already taken.");
+    const registered = {
+      tenant: { id: "ten-new", slug, name },
+      user: { id: "u-new", tenant_id: "ten-new", email, full_name: (fullName as string) ?? null, role: "admin" as const }
+    };
+    // 🔴 PROD-P0-...-FIX2：真实注册链**只写 hd_mock_registered 这一个 key**——resolveMockState() 见它即权威推导
+    // 「非平台 + free + role admin」（owner 在真实 BE 就是 ADMIN，保留此事实，正是线上那个坑）。register() 成功后必调
+    // /auth/me；单一状态源保证 /me 身份(ten-new) + 权限(三 entitlement 全无) + analytics 门禁(403) **全部一致**，
+    // 不再需要另写 platform/plan/role 旋钮（它们由注册身份直接推导）。
+    try {
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem("hd_mock_registered", JSON.stringify(registered));
+      }
+    } catch {
+      /* localStorage 不可用 → 无注册身份，resolveMockState 回落旋钮（身份为 ten-mock；仅极端环境） */
+    }
     return HttpResponse.json(
       {
         data: {
-          tenant: { id: "ten-new", slug, name },
-          user: { id: "u-new", tenant_id: "ten-new", email, full_name: (fullName as string) ?? null, role: "admin" },
+          tenant: registered.tenant,
+          user: registered.user,
           token: { access_token: "mock-token", token_type: "bearer", tenant_id: "ten-new", user_id: "u-new", role: "admin" }
         },
         error: null,
@@ -599,12 +667,13 @@ export const handlers = [
     );
   }),
   http.get(`${BASE}/api/v1/auth/me`, () => {
-    // permissions 按「角色 + 套餐」派生（镜像真实 BE），voice_clone_vip 唯一来源 = admin 或 plan=huading。
-    // creator + huading 真实付费用户在此**拿得到** voice_clone_vip（旧 mock 的误伤点）。
+    // 身份 + 权限**同源** resolveMockState()：走过注册链 → 刚注册的 ten-new + 非平台 free（三 entitlement 全无）；
+    // 否则默认 ten-mock + 旋钮派生。与 analyticsHandlers 读同一状态源，杜绝「/me 说没权限、analytics 却返全站」的错配。
+    const state = resolveMockState();
     return ok({
-      tenant: { id: "ten-mock", slug: "huading", name: "华鼎（mock）" },
-      user: { id: "u-mock", tenant_id: "ten-mock", email: "qa@huading.test", full_name: "QA 测试", role: mockRole() },
-      permissions: mockPermissions()
+      tenant: state.identity?.tenant ?? { id: "ten-mock", slug: "huading", name: "华鼎（mock）" },
+      user: state.identity?.user ?? { id: "u-mock", tenant_id: "ten-mock", email: "qa@huading.test", full_name: "QA 测试", role: state.role },
+      permissions: mockPermissions(state)
     });
   }),
   http.get(`${BASE}/api/v1/quota`, () => ok({ total: 1000, used: 120, reserved: 36, remaining: 844 })),
@@ -1117,10 +1186,10 @@ export const handlers = [
     }
     // 存/返 canonical 长值（镜像 BE：alias 归一化 → _brand_voice_read 返 canonical）。
     const provider = VOICE_CLONE_CANONICAL[body.provider ?? "doubao"];
-    // VIP 门禁（§二之二）：doubao 通路对无 entitlement 用户 → 403 VOICE_CLONE_PLAN_REQUIRED（防选了再撞的兜底；正常前端已置灰）。
-    // entitlement 与 /me 同源（admin 或 plan=huading）——creator+huading 付费用户在此**放行**。
+    // VIP 门禁：doubao 通路对无 entitlement 用户 → 403 VOICE_CLONE_PLAN_REQUIRED（防选了再撞的兜底；正常前端已置灰）。
+    // entitlement 与 /me 同源（mockHuadingAccess = 平台租户 OR plan=huading，**不含 role==admin**）——新注册 free 用户在此被拦。
     // cosyvoice 免费档不受门禁——任何用户可建（含 0 余额新注册）。
-    if (provider === "doubao-voice-clone" && !mockVipEntitled()) {
+    if (provider === "doubao-voice-clone" && !mockHuadingAccess(resolveMockState())) {
       return err(403, "VOICE_CLONE_PLAN_REQUIRED", "Voice clone (doubao) requires the huading plan.");
     }
     const id = `bv-${++brandVoiceSeq}`;
@@ -1292,8 +1361,8 @@ export const handlers = [
     return ok({ batch_id: b.id, cancelled, running });
   }),
 
-  // ── 管理员数据看板 (ANALYTICS-UI-0001) ── /api/v1/admin/analytics/*，require_admin。
-  // VIP 门禁模拟（ADMIN-VIP-GATE-UI-0001）：localStorage["hd_mock_analytics_plan"]="none" → 403
-  // ANALYTICS_PLAN_REQUIRED（供 Playwright 未授权友好页验证；默认未设=授权正常返数据）。
+  // ── 数据看板 (ANALYTICS-UI-0001 / PROD-P0-ANALYTICS-TENANT-LEAK-UI-0001) ── /api/v1/admin/analytics/*。
+  // 门禁与数据 scope 均按 entitlement 派生（无 analytics_view → 403；无 analytics_platform → 只返自己单租户）。
+  // 场景切换用 hd_mock_platform / hd_mock_plan（默认平台租户 → 全站正常，零回归）。
   ...analyticsHandlers()
 ];

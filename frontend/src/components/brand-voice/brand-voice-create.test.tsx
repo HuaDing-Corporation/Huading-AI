@@ -9,9 +9,10 @@ vi.mock("@/lib/api/hooks", () => ({
   useCreateBrandVoice: () => ({ mutateAsync: createMock.mutateAsync, isPending: createMock.isPending })
 }));
 
-// VIP 门禁（§二之二）：默认 admin（doubao 可用）；VIP 测试改 session 为非授权。
+// VIP 门禁：门禁唯一信号 = permissions 含 voice_clone_vip（不看 role）。默认授权（含该权限，doubao 可用）；
+// VIP 置灰测试改 session 为无该权限。
 const authMock = vi.hoisted(() => ({
-  session: { role: "admin", user: { permissions: [] } } as { role: string; user?: { permissions: string[] } } | null,
+  session: { role: "admin", user: { permissions: ["voice_clone_vip"] } } as { role: string; user?: { permissions: string[] } } | null,
   ready: true
 }));
 vi.mock("@/lib/auth/auth-context", () => ({ useAuth: () => authMock }));
@@ -30,7 +31,7 @@ beforeEach(() => {
   URL.revokeObjectURL = vi.fn();
   createMock.isPending = false;
   createMock.mutateAsync.mockResolvedValue({ id: "bv-1", name: "我的音", status: "processing", created_at: "" });
-  authMock.session = { role: "admin", user: { permissions: [] } }; // 每用例复位为 VIP 可用
+  authMock.session = { role: "admin", user: { permissions: ["voice_clone_vip"] } }; // 每用例复位为 VIP 可用（含权限）
   authMock.ready = true;
 });
 afterEach(() => vi.clearAllMocks());

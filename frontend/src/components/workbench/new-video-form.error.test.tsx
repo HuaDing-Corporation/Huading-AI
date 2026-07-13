@@ -27,7 +27,7 @@ vi.mock("@/lib/api/hooks", () => ({
   })
 }));
 vi.mock("@/lib/videos/tasks-context", () => ({ useVideoTasks: () => taskMocks }));
-vi.mock("@/lib/auth/auth-context", () => ({ useAuth: () => ({ session: { role: "admin" }, ready: true }) }));
+vi.mock("@/lib/auth/auth-context", () => ({ useAuth: () => ({ session: { role: "admin", user: { permissions: ["voice_clone_vip"] } }, ready: true }) }));
 
 import { NewVideoForm } from "./new-video-form";
 

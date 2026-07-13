@@ -21,7 +21,7 @@ vi.mock("@/lib/api/hooks", () => ({
   useEstimateVideo: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, data: { estimated_credits: 8, unit: "credits" } })
 }));
 vi.mock("@/lib/videos/tasks-context", () => ({ useVideoTasks: () => taskMocks }));
-vi.mock("@/lib/auth/auth-context", () => ({ useAuth: () => ({ session: { role: "admin" }, ready: true }) }));
+vi.mock("@/lib/auth/auth-context", () => ({ useAuth: () => ({ session: { role: "admin", user: { permissions: ["voice_clone_vip"] } }, ready: true }) }));
 // 预检在 jsdom 无法真跑（无视频解码）；注入通过，专注验证「切换 + 二选一提交」接线（预检矩阵已由 avatar-video.test 锁）。
 vi.mock("@/lib/media/avatar-video", () => ({
   validateAvatarVideo: vi.fn().mockResolvedValue(null),
