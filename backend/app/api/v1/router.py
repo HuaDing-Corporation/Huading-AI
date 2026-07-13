@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.v1.routes import (
+    admin_console,
     analytics,
     auth,
     avatars,
@@ -26,6 +27,11 @@ from app.api.v1.routes import (
 )
 
 api_router = APIRouter()
+api_router.include_router(
+    admin_console.router,
+    prefix="/admin/console",
+    tags=["admin-console"],
+)
 api_router.include_router(analytics.router, prefix="/admin/analytics", tags=["admin-analytics"])
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(health.alias_router, tags=["health"])

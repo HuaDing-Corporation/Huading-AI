@@ -15,6 +15,7 @@ from app.db.session import SessionLocal
 from app.services.plan_access import (
     AnalyticsScope,
     analytics_scope_for_tenant,
+    is_platform_tenant,
     tenant_entitlements,
 )
 from app.services.progress import ProgressStore, build_progress_store
@@ -115,6 +116,13 @@ def get_current_user(
             code="USER_NOT_FOUND",
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
+    tenant = db.get(Tenant, tenant_id)
+    if tenant is None or tenant.status != "active" or tenant.deleted_at is not None:
+        raise AppError(
+            "Tenant is inactive or does not exist.",
+            code="TENANT_INACTIVE",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
     request.state.tenant_id = tenant_id
     request.state.user_id = user.id
     request.state.role = user.role
@@ -131,10 +139,10 @@ def get_current_tenant(
     user: User = CurrentUserDependency,
 ) -> Tenant:
     tenant = db.get(Tenant, user.tenant_id)
-    if tenant is None:
+    if tenant is None or tenant.status != "active" or tenant.deleted_at is not None:
         raise AppError(
-            "Tenant does not exist.",
-            code="TENANT_NOT_FOUND",
+            "Tenant is inactive or does not exist.",
+            code="TENANT_INACTIVE",
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
     return tenant
@@ -179,6 +187,19 @@ def require_admin(user: User = CurrentUserDependency) -> User:
             status_code=status.HTTP_403_FORBIDDEN,
         )
     return user
+
+
+def require_platform_admin(
+    db: Session = DbSessionDependency,
+    user: User = CurrentUserDependency,
+) -> User:
+    if is_platform_tenant(db, tenant_id=user.tenant_id):
+        return user
+    raise AppError(
+        "Platform administrator access is required.",
+        code="PLATFORM_ADMIN_REQUIRED",
+        status_code=status.HTTP_403_FORBIDDEN,
+    )
 
 
 def require_analytics_access(

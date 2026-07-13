@@ -117,6 +117,8 @@ def login(
             User.email == payload.email,
             User.is_active.is_(True),
             Tenant.slug == payload.tenant_slug,
+            Tenant.status == "active",
+            Tenant.deleted_at.is_(None),
         )
     )
     users = db.scalars(query).all()

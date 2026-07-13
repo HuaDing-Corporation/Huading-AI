@@ -1,0 +1,397 @@
+from __future__ import annotations
+
+import csv
+import io
+from datetime import date
+from typing import Annotated, Literal
+
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi import status as http_status
+from fastapi.responses import Response
+from sqlalchemy.orm import Session
+
+from app.api.deps import CurrentUserDependency, DbSessionDependency, require_platform_admin
+from app.core.exceptions import AppError
+from app.db.models import User, VideoTask
+from app.schemas.admin_console import (
+    AdminAuditLogPage,
+    AdminCreditsAdjustRequest,
+    AdminCreditsAdjustResponse,
+    AdminPlanChangeRequest,
+    AdminPlanChangeResponse,
+    AdminTaskPage,
+    AdminTaskRetryResponse,
+    AdminTenantDetail,
+    AdminTenantPage,
+    AdminTenantStatusRequest,
+    AdminTenantStatusResponse,
+    AdminUsagePage,
+    AdminVoiceSlotAssignRequest,
+    AdminVoiceSlotAssignResponse,
+    AdminVoiceSlotsResponse,
+)
+from app.schemas.response import ApiResponse, ok
+from app.services import admin_console
+from app.services.voice_slots import SpeakerSlotAssignmentError
+from app.workers.avatar_talk import generate_avatar_talk_task, generate_seedance_i2v_task
+from app.workers.image_gen import generate_image_task
+from app.workers.video_gen import generate_video_gen_task
+from app.workers.video_tasks import generate_video_task
+
+router = APIRouter(dependencies=[Depends(require_platform_admin)])
+
+PageQuery = Annotated[int, Query(ge=1)]
+PageSizeQuery = Annotated[int, Query(ge=1, le=100)]
+FromDateQuery = Annotated[date | None, Query(alias="from")]
+ToDateQuery = Annotated[date | None, Query()]
+
+
+@router.get("/tenants", response_model=ApiResponse[AdminTenantPage])
+def list_tenants(
+    request: Request,
+    q: str | None = Query(default=None, max_length=200),
+    plan: Literal["free", "basic", "huading"] | None = None,
+    status: Literal["active", "suspended", "closed"] | None = None,
+    sort: Literal["credits_used", "created_at", "balance"] = "created_at",
+    order: Literal["asc", "desc"] = "desc",
+    page: PageQuery = 1,
+    page_size: PageSizeQuery = 20,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[AdminTenantPage]:
+    return ok(
+        request,
+        admin_console.list_tenants(
+            db,
+            q=q,
+            plan=plan,
+            status=status,
+            sort=sort,
+            order=order,
+            page=page,
+            page_size=page_size,
+        ),
+    )
+
+
+@router.get("/tenants/{tenant_id}", response_model=ApiResponse[AdminTenantDetail])
+def get_tenant(
+    request: Request,
+    tenant_id: str,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[AdminTenantDetail]:
+    tenant = admin_console.tenant_item_or_404(db, tenant_id=tenant_id)
+    slots = [item for item in admin_console.voice_slots(db).items if item.tenant_id == tenant_id]
+    return ok(
+        request,
+        AdminTenantDetail(
+            tenant=tenant,
+            recent_tasks=admin_console.recent_tasks(db, tenant_id=tenant_id),
+            recent_usage=admin_console.recent_usage(db, tenant_id=tenant_id),
+            voice_slots=slots,
+        ),
+    )
+
+
+@router.post(
+    "/tenants/{tenant_id}/credits",
+    response_model=ApiResponse[AdminCreditsAdjustResponse],
+)
+def adjust_tenant_credits(
+    request: Request,
+    tenant_id: str,
+    payload: AdminCreditsAdjustRequest,
+    user: User = CurrentUserDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[AdminCreditsAdjustResponse]:
+    try:
+        result = admin_console.adjust_credits(
+            db,
+            actor=user,
+            tenant_id=tenant_id,
+            delta=payload.delta,
+            reason=payload.reason,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return ok(request, result)
+
+
+@router.patch(
+    "/tenants/{tenant_id}/plan",
+    response_model=ApiResponse[AdminPlanChangeResponse],
+)
+def change_tenant_plan(
+    request: Request,
+    tenant_id: str,
+    payload: AdminPlanChangeRequest,
+    user: User = CurrentUserDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[AdminPlanChangeResponse]:
+    try:
+        result = admin_console.change_plan(
+            db,
+            actor=user,
+            tenant_id=tenant_id,
+            plan_code=payload.plan_code,
+            reason=payload.reason,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return ok(request, result)
+
+
+@router.patch(
+    "/tenants/{tenant_id}/status",
+    response_model=ApiResponse[AdminTenantStatusResponse],
+)
+def change_tenant_status(
+    request: Request,
+    tenant_id: str,
+    payload: AdminTenantStatusRequest,
+    user: User = CurrentUserDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[AdminTenantStatusResponse]:
+    try:
+        result = admin_console.change_tenant_status(
+            db,
+            actor=user,
+            tenant_id=tenant_id,
+            active=payload.active,
+            reason=payload.reason,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return ok(request, result)
+
+
+@router.get("/voice-slots", response_model=ApiResponse[AdminVoiceSlotsResponse])
+def get_voice_slots(
+    request: Request,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[AdminVoiceSlotsResponse]:
+    return ok(request, admin_console.voice_slots(db))
+
+
+@router.post(
+    "/tenants/{tenant_id}/voice-slots",
+    response_model=ApiResponse[AdminVoiceSlotAssignResponse],
+)
+def assign_voice_slot(
+    request: Request,
+    tenant_id: str,
+    payload: AdminVoiceSlotAssignRequest,
+    user: User = CurrentUserDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[AdminVoiceSlotAssignResponse]:
+    try:
+        result = admin_console.assign_tenant_voice_slot(
+            db,
+            actor=user,
+            tenant_id=tenant_id,
+            speaker_id=payload.speaker_id,
+            reason=payload.reason,
+        )
+        db.commit()
+    except SpeakerSlotAssignmentError as exc:
+        db.rollback()
+        raise AppError(
+            str(exc),
+            code="VOICE_SLOT_ASSIGNMENT_FAILED",
+            status_code=422,
+        ) from exc
+    except Exception:
+        db.rollback()
+        raise
+    return ok(request, result)
+
+
+@router.get("/usage", response_model=ApiResponse[AdminUsagePage])
+def get_usage(
+    request: Request,
+    tenant_id: str | None = None,
+    from_: FromDateQuery = None,
+    to: ToDateQuery = None,
+    capability: str | None = Query(default=None, max_length=32),
+    provider: str | None = Query(default=None, max_length=40),
+    status: Literal["reserved", "settled", "released"] | None = None,
+    page: PageQuery = 1,
+    page_size: PageSizeQuery = 20,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[AdminUsagePage]:
+    return ok(
+        request,
+        admin_console.list_usage(
+            db,
+            tenant_id=tenant_id,
+            from_=from_,
+            to=to,
+            capability=capability,
+            provider=provider,
+            status=status,
+            page=page,
+            page_size=page_size,
+        ),
+    )
+
+
+@router.get("/usage/export", response_class=Response)
+def export_usage(
+    tenant_id: str | None = None,
+    from_: FromDateQuery = None,
+    to: ToDateQuery = None,
+    capability: str | None = Query(default=None, max_length=32),
+    provider: str | None = Query(default=None, max_length=40),
+    status: Literal["reserved", "settled", "released"] | None = None,
+    db: Session = DbSessionDependency,
+) -> Response:
+    rows = admin_console.export_usage_rows(
+        db,
+        tenant_id=tenant_id,
+        from_=from_,
+        to=to,
+        capability=capability,
+        provider=provider,
+        status=status,
+    )
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "created_at",
+            "tenant_id",
+            "tenant_slug",
+            "tenant_name",
+            "capability",
+            "provider",
+            "model",
+            "quantity",
+            "unit",
+            "credits",
+            "cost_cents",
+            "status",
+            "video_task_id",
+        ]
+    )
+    for item in rows:
+        writer.writerow(
+            [
+                item.created_at.isoformat(),
+                item.tenant_id,
+                item.tenant_slug,
+                item.tenant_name,
+                item.capability,
+                item.provider,
+                item.model or "",
+                item.quantity,
+                item.unit,
+                item.credits,
+                item.cost_cents,
+                item.status,
+                item.video_task_id or "",
+            ]
+        )
+    return Response(
+        content="\ufeff" + output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="usage-records.csv"'},
+    )
+
+
+@router.get("/tasks", response_model=ApiResponse[AdminTaskPage])
+def get_tasks(
+    request: Request,
+    tenant_id: str | None = None,
+    status: Literal["queued", "running", "done", "failed", "cancelled"] | None = None,
+    from_: FromDateQuery = None,
+    to: ToDateQuery = None,
+    page: PageQuery = 1,
+    page_size: PageSizeQuery = 20,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[AdminTaskPage]:
+    return ok(
+        request,
+        admin_console.list_tasks(
+            db,
+            tenant_id=tenant_id,
+            status=status,
+            from_=from_,
+            to=to,
+            page=page,
+            page_size=page_size,
+        ),
+    )
+
+
+def _enqueue_task_retry(task: VideoTask) -> None:
+    payload = admin_console.task_retry_payload(task)
+    if task.video_mode == "photo":
+        generate_image_task.apply_async(args=[payload], task_id=task.id, queue="image")
+    elif task.video_mode == "seedance_i2v":
+        generate_seedance_i2v_task.apply_async(args=[payload], task_id=task.id, queue="video")
+    elif task.video_mode == "video_gen":
+        generate_video_gen_task.apply_async(args=[payload], task_id=task.id, queue="video")
+    elif task.video_mode == "avatar_talk":
+        generate_avatar_talk_task.apply_async(args=[payload], task_id=task.id, queue="avatar")
+    else:
+        generate_video_task.apply_async(args=[payload], task_id=task.id, queue="default")
+
+
+@router.post(
+    "/tasks/{task_id}/retry",
+    response_model=ApiResponse[AdminTaskRetryResponse],
+    status_code=http_status.HTTP_202_ACCEPTED,
+)
+def retry_task(
+    request: Request,
+    task_id: str,
+    user: User = CurrentUserDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[AdminTaskRetryResponse]:
+    try:
+        task = admin_console.prepare_task_retry(db, actor=user, task_id=task_id)
+        response = AdminTaskRetryResponse(
+            id=task.id,
+            tenant_id=task.tenant_id,
+            status="queued",
+            progress=task.progress,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    _enqueue_task_retry(task)
+    return ok(request, response)
+
+
+@router.get("/audit-logs", response_model=ApiResponse[AdminAuditLogPage])
+def get_audit_logs(
+    request: Request,
+    action: Literal[
+        "credits_adjust",
+        "plan_change",
+        "status_change",
+        "voice_slot_assign",
+        "task_retry",
+    ]
+    | None = None,
+    target_tenant_id: str | None = None,
+    page: PageQuery = 1,
+    page_size: PageSizeQuery = 20,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[AdminAuditLogPage]:
+    return ok(
+        request,
+        admin_console.list_audit_logs(
+            db,
+            action=action,
+            target_tenant_id=target_tenant_id,
+            page=page,
+            page_size=page_size,
+        ),
+    )
