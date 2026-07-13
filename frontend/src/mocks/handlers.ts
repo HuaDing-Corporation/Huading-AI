@@ -367,14 +367,19 @@ const ROLE_PERMISSIONS: Record<"admin" | "creator", string[]> = {
   admin: ["tenant:admin", "content:operate", "video:create", "video:review", "dev:access"],
   creator: ["video:create"]
 };
-// /auth/me.permissions = sorted(角色权限 ∪ {voice_clone_vip, analytics_view} if huadingAccess ∪ {analytics_platform} if isPlatform)。
+// /auth/me.permissions = sorted(角色权限 ∪ {voice_clone_vip, analytics_view} if huadingAccess
+// ∪ {analytics_platform, admin_console} if isPlatform)。admin_console 与 analytics_platform **同源派生**
+// （= 平台租户，ADMIN-CONSOLE-UI-0001），不凭空塞、不引入第二套旋钮。
 function mockPermissions(state: MockState): string[] {
   const perms = new Set(ROLE_PERMISSIONS[state.role]);
   if (mockHuadingAccess(state)) {
     perms.add("voice_clone_vip");
     perms.add("analytics_view");
   }
-  if (state.isPlatform) perms.add("analytics_platform");
+  if (state.isPlatform) {
+    perms.add("analytics_platform");
+    perms.add("admin_console");
+  }
   return [...perms].sort();
 }
 
@@ -468,6 +473,246 @@ function analyticsHandlers() {
         };
       });
       return ok({ buckets });
+    })
+  ];
+}
+
+// ── 管理员后台 (ADMIN-CONSOLE-UI-0001) mock ── /api/v1/admin/console/*，统一 require_platform_admin。
+// 门禁走单一状态源 resolveMockState()（与 /me 的 admin_console entitlement 同源）；写操作全部落审计（内存态，
+// 页面即时可见）。契约按冻结文档拟定，BE (ADMIN-CONSOLE-BE-0001) 合并后逐字段核对。
+interface MockAdminTenant {
+  tenant_id: string; slug: string; name: string; owner_email: string;
+  plan_code: "free" | "basic" | "huading"; status: "active" | "disabled"; is_platform: boolean;
+  balance: { total: number; used: number; reserved: number; remaining: number };
+  created_at: string; task_count: number;
+}
+const adminTenants = new Map<string, MockAdminTenant>([
+  ["ten-mock", { tenant_id: "ten-mock", slug: "huading", name: "华鼎（mock）", owner_email: "qa@huading.test", plan_code: "huading", status: "active", is_platform: true, balance: { total: 1000, used: 120, reserved: 36, remaining: 844 }, created_at: "2026-01-01T08:00:00Z", task_count: 96 }],
+  ["ten-acme", { tenant_id: "ten-acme", slug: "acme", name: "Acme 电商", owner_email: "owner@acme.test", plan_code: "huading", status: "active", is_platform: false, balance: { total: 20000, used: 5000, reserved: 1000, remaining: 14000 }, created_at: "2026-06-02T09:30:00Z", task_count: 42 }],
+  ["ten-beta", { tenant_id: "ten-beta", slug: "beta", name: "贝塔传媒", owner_email: "ops@beta.test", plan_code: "free", status: "active", is_platform: false, balance: { total: 0, used: 0, reserved: 0, remaining: 0 }, created_at: "2026-07-01T14:00:00Z", task_count: 3 }],
+  ["ten-gamma", { tenant_id: "ten-gamma", slug: "gamma", name: "伽马食品", owner_email: "boss@gamma.test", plan_code: "basic", status: "disabled", is_platform: false, balance: { total: 5000, used: 4200, reserved: 600, remaining: 200 }, created_at: "2026-05-20T11:00:00Z", task_count: 17 }]
+]);
+interface MockAdminTask {
+  id: string; tenant_slug: string; mode: string; status: "queued" | "running" | "done" | "failed" | "cancelled";
+  progress: number; error_code: string | null; error_message: string | null;
+  created_at: string; started_at: string | null; finished_at: string | null; duration_seconds: number | null;
+}
+const adminTasks = new Map<string, MockAdminTask>([
+  ["task-f1", { id: "task-f1", tenant_slug: "acme", mode: "avatar", status: "failed", progress: 35, error_code: "PROVIDER_TIMEOUT", error_message: "上游生成超时，已释放预留额度", created_at: "2026-07-12T10:00:00Z", started_at: "2026-07-12T10:01:00Z", finished_at: "2026-07-12T10:06:00Z", duration_seconds: 300 }],
+  ["task-f2", { id: "task-f2", tenant_slug: "gamma", mode: "ecom", status: "failed", progress: 0, error_code: "tenant_quota_exceeded", error_message: "额度不足，任务未启动", created_at: "2026-07-12T11:00:00Z", started_at: null, finished_at: null, duration_seconds: null }],
+  ["task-r1", { id: "task-r1", tenant_slug: "acme", mode: "avatar", status: "running", progress: 60, error_code: null, error_message: null, created_at: "2026-07-13T08:00:00Z", started_at: "2026-07-13T08:01:00Z", finished_at: null, duration_seconds: null }],
+  ["task-d1", { id: "task-d1", tenant_slug: "beta", mode: "copywriting", status: "done", progress: 100, error_code: null, error_message: null, created_at: "2026-07-11T09:00:00Z", started_at: "2026-07-11T09:00:30Z", finished_at: "2026-07-11T09:02:00Z", duration_seconds: 90 }],
+  ["task-q1", { id: "task-q1", tenant_slug: "acme", mode: "ecom", status: "queued", progress: 0, error_code: null, error_message: null, created_at: "2026-07-13T09:00:00Z", started_at: null, finished_at: null, duration_seconds: null }]
+]);
+// 用量流水（6 条，> EXPORT_MAX_ROWS=3 → 无筛选导出走 422 上限路径；按租户筛后 ≤3 → 200 CSV。两条路径都可测）。
+const ADMIN_USAGE = [
+  { id: "u-1", created_at: "2026-07-10T10:00:00Z", tenant_slug: "acme", capability: "video_generate", provider: "seedance", model: "i2v-v1", quantity: 1, unit: "视频", credits: 300, cost_cents: 4200, status: "settled", task_id: "task-f1" },
+  { id: "u-2", created_at: "2026-07-10T12:00:00Z", tenant_slug: "acme", capability: "image_generate", provider: "apimart", model: "flux-1", quantity: 5, unit: "张", credits: 75, cost_cents: 900, status: "settled", task_id: null },
+  { id: "u-3", created_at: "2026-07-11T09:02:00Z", tenant_slug: "beta", capability: "copywriting", provider: "deepseek", model: "v3", quantity: 1, unit: "篇", credits: 10, cost_cents: 30, status: "settled", task_id: "task-d1" },
+  { id: "u-4", created_at: "2026-07-12T10:06:00Z", tenant_slug: "acme", capability: "video_generate", provider: "seedance", model: "i2v-v1", quantity: 1, unit: "视频", credits: 300, cost_cents: 0, status: "released", task_id: "task-f1" },
+  { id: "u-5", created_at: "2026-07-12T15:00:00Z", tenant_slug: "gamma", capability: "voice_clone", provider: "doubao", model: null, quantity: 1, unit: "音色", credits: 30000, cost_cents: 990000, status: "settled", task_id: null },
+  { id: "u-6", created_at: "2026-07-13T08:01:00Z", tenant_slug: "acme", capability: "video_generate", provider: "seedance", model: "i2v-v1", quantity: 1, unit: "视频", credits: 300, cost_cents: 4200, status: "reserved", task_id: "task-r1" }
+] as const;
+const EXPORT_MAX_ROWS = 3; // mock 行数上限（镜像「BE 有行数上限」的形状；真实上限 BE 合并后核对）
+// 音色槽位：平台池 + 租户专属（分配幂等）。
+const voiceSlotPool = [
+  { speaker_id: "S_pool_001", occupied_by: { tenant_slug: "acme", voice_name: "我的主播音" } as { tenant_slug: string; voice_name: string | null } | null },
+  { speaker_id: "S_pool_002", occupied_by: null },
+  { speaker_id: "S_pool_003", occupied_by: null }
+];
+const tenantVoiceSlots: { tenant_slug: string; speaker_id: string; voice_name: string | null }[] = [
+  { tenant_slug: "acme", speaker_id: "S_acme_001", voice_name: "我的主播音" }
+];
+// 审计日志（只写不改不删）。时间戳用序号合成（确定性，不用 Date.now）。
+let auditSeq = 1;
+const adminAudit: { id: string; created_at: string; actor_email: string; action: string; target_tenant_slug: string; before: Record<string, unknown>; after: Record<string, unknown>; reason: string | null }[] = [
+  { id: "audit-0", created_at: "2026-07-13T09:00:00Z", actor_email: "qa@huading.test", action: "voice_slot_assign", target_tenant_slug: "acme", before: {}, after: { speaker_id: "S_acme_001" }, reason: "首批客户开通" }
+];
+function pushAudit(action: string, targetSlug: string, before: Record<string, unknown>, after: Record<string, unknown>, reason: string | null) {
+  auditSeq += 1;
+  adminAudit.unshift({
+    id: `audit-${auditSeq}`,
+    created_at: `2026-07-13T10:${String(auditSeq).padStart(2, "0")}:00Z`,
+    actor_email: "qa@huading.test",
+    action, target_tenant_slug: targetSlug, before, after, reason
+  });
+}
+function adminConsoleHandlers() {
+  const C = `${BASE}/api/v1/admin/console`;
+  // 统一平台门禁（镜像 BE require_platform_admin）——与 /me 的 admin_console 同源（resolveMockState）。
+  const guard = () =>
+    resolveMockState().isPlatform ? null : err(403, "PLATFORM_ADMIN_REQUIRED", "Platform admin required.");
+  const paginate = <T,>(rows: T[], url: URL) => {
+    const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") ?? 20)));
+    const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0));
+    return { items: rows.slice(offset, offset + limit), total: rows.length };
+  };
+  const filterUsage = (url: URL) => {
+    const p = (k: string) => url.searchParams.get(k) ?? "";
+    return ADMIN_USAGE.filter((r) => {
+      const tenant = p("tenant_id");
+      if (tenant && adminTenants.get(tenant)?.slug !== r.tenant_slug) return false;
+      if (p("capability") && r.capability !== p("capability")) return false;
+      if (p("provider") && r.provider !== p("provider")) return false;
+      if (p("status") && r.status !== p("status")) return false;
+      if (p("from") && r.created_at.slice(0, 10) < p("from")) return false;
+      if (p("to") && r.created_at.slice(0, 10) > p("to")) return false;
+      return true;
+    });
+  };
+  return [
+    http.get(`${C}/tenants`, ({ request }) => {
+      const g = guard();
+      if (g) return g;
+      const url = new URL(request.url);
+      const search = (url.searchParams.get("search") ?? "").toLowerCase();
+      const plan = url.searchParams.get("plan") ?? "";
+      const status = url.searchParams.get("status") ?? "";
+      const sort = url.searchParams.get("sort") ?? "created_desc";
+      let rows = [...adminTenants.values()];
+      if (search) rows = rows.filter((t) => t.slug.includes(search) || t.name.toLowerCase().includes(search) || t.owner_email.toLowerCase().includes(search));
+      if (plan) rows = rows.filter((t) => t.plan_code === plan);
+      if (status) rows = rows.filter((t) => t.status === status);
+      const key: Record<string, (t: MockAdminTenant) => number | string> = {
+        created: (t) => t.created_at, remaining: (t) => t.balance.remaining, used: (t) => t.balance.used
+      };
+      const field = sort.replace(/_(asc|desc)$/, "");
+      const dir = sort.endsWith("_asc") ? 1 : -1;
+      const fn = key[field] ?? key.created;
+      rows.sort((a, b) => (fn(a) < fn(b) ? -1 : fn(a) > fn(b) ? 1 : 0) * dir);
+      return ok(paginate(rows, url));
+    }),
+    http.get(`${C}/tenants/:id`, ({ params }) => {
+      const g = guard();
+      if (g) return g;
+      const t = adminTenants.get(params.id as string);
+      if (!t) return err(404, "NOT_FOUND", "Tenant not found.");
+      return ok({
+        tenant: t,
+        recent_tasks: [...adminTasks.values()].filter((x) => x.tenant_slug === t.slug).slice(0, 5).map((x) => ({ id: x.id, mode: x.mode, status: x.status, created_at: x.created_at })),
+        recent_usage: ADMIN_USAGE.filter((u) => u.tenant_slug === t.slug).slice(0, 5).map((u) => ({ created_at: u.created_at, capability: u.capability, credits: u.credits })),
+        voice_slots: tenantVoiceSlots.filter((s) => s.tenant_slug === t.slug).map((s) => ({ speaker_id: s.speaker_id, voice_name: s.voice_name }))
+      });
+    }),
+    // 余额增减：锁订阅 + 下限保护（调整后 total 不得 < 已用+预留）→ 422 中文 message 原样展示；落审计。
+    http.post(`${C}/tenants/:id/credits`, async ({ params, request }) => {
+      const g = guard();
+      if (g) return g;
+      const t = adminTenants.get(params.id as string);
+      if (!t) return err(404, "NOT_FOUND", "Tenant not found.");
+      const body = (await request.json()) as { delta?: number; reason?: string };
+      if (typeof body.delta !== "number" || !Number.isFinite(body.delta) || body.delta === 0)
+        return err(422, "VALIDATION_ERROR", "delta 必须为非 0 数字");
+      if (!body.reason?.trim()) return err(422, "VALIDATION_ERROR", "理由必填");
+      const newTotal = t.balance.total + body.delta;
+      const committed = t.balance.used + t.balance.reserved;
+      if (newTotal < committed)
+        return err(422, "CREDITS_BELOW_COMMITTED", `扣减后额度（${newTotal}）会低于已用+预留（${committed}），已拒绝`);
+      const before = { quota_credits_total: t.balance.total };
+      t.balance.total = newTotal;
+      t.balance.remaining = newTotal - committed;
+      pushAudit("credits_adjust", t.slug, before, { quota_credits_total: newTotal }, body.reason.trim());
+      return ok({ balance: { ...t.balance } });
+    }),
+    http.post(`${C}/tenants/:id/plan`, async ({ params, request }) => {
+      const g = guard();
+      if (g) return g;
+      const t = adminTenants.get(params.id as string);
+      if (!t) return err(404, "NOT_FOUND", "Tenant not found.");
+      const body = (await request.json()) as { plan_code?: string };
+      if (!["free", "basic", "huading"].includes(body.plan_code ?? "")) return err(422, "VALIDATION_ERROR", "plan_code 非法");
+      const before = { plan: t.plan_code };
+      t.plan_code = body.plan_code as MockAdminTenant["plan_code"];
+      pushAudit("plan_change", t.slug, before, { plan: t.plan_code }, null);
+      return ok({ plan_code: t.plan_code });
+    }),
+    http.post(`${C}/tenants/:id/status`, async ({ params, request }) => {
+      const g = guard();
+      if (g) return g;
+      const t = adminTenants.get(params.id as string);
+      if (!t) return err(404, "NOT_FOUND", "Tenant not found.");
+      const body = (await request.json()) as { status?: string };
+      if (!["active", "disabled"].includes(body.status ?? "")) return err(422, "VALIDATION_ERROR", "status 非法");
+      // 纵深防御：禁止停用平台租户自己（前端置灰 + BE 422 双保险）。
+      if (t.is_platform && body.status === "disabled") return err(422, "PLATFORM_TENANT_PROTECTED", "平台租户不可停用");
+      const before = { status: t.status };
+      t.status = body.status as MockAdminTenant["status"];
+      pushAudit("status_change", t.slug, before, { status: t.status }, null);
+      return ok({ status: t.status });
+    }),
+    http.get(`${C}/voice-slots`, () => {
+      const g = guard();
+      if (g) return g;
+      return ok({ platform_pool: voiceSlotPool.map((s) => ({ ...s })), tenant_slots: tenantVoiceSlots.map((s) => ({ ...s })) });
+    }),
+    // 分配幂等：同租户同 speaker 重复挂 → 200 assigned:true，不重复占用、不报错；落审计（首次）。
+    http.post(`${C}/voice-slots/assign`, async ({ request }) => {
+      const g = guard();
+      if (g) return g;
+      const body = (await request.json()) as { tenant_id?: string; speaker_id?: string };
+      const t = adminTenants.get(body.tenant_id ?? "");
+      if (!t) return err(422, "VALIDATION_ERROR", "租户不存在");
+      if (!/^S_[A-Za-z0-9_-]{1,157}$/.test(body.speaker_id ?? "")) return err(422, "VALIDATION_ERROR", "speaker_id 格式不正确");
+      const exists = tenantVoiceSlots.some((s) => s.tenant_slug === t.slug && s.speaker_id === body.speaker_id);
+      if (!exists) {
+        tenantVoiceSlots.push({ tenant_slug: t.slug, speaker_id: body.speaker_id as string, voice_name: null });
+        pushAudit("voice_slot_assign", t.slug, {}, { speaker_id: body.speaker_id as string }, null);
+      }
+      return ok({ assigned: true });
+    }),
+    http.get(`${C}/usage`, ({ request }) => {
+      const g = guard();
+      if (g) return g;
+      return ok(paginate(filterUsage(new URL(request.url)), new URL(request.url)));
+    }),
+    // CSV 导出：裸 text/csv（非信封）；行数超上限 → 422 中文（UI 原样展示）。
+    http.get(`${C}/usage/export`, ({ request }) => {
+      const g = guard();
+      if (g) return g;
+      const rows = filterUsage(new URL(request.url));
+      if (rows.length > EXPORT_MAX_ROWS)
+        return err(422, "EXPORT_LIMIT_EXCEEDED", `导出行数（${rows.length}）超出上限（${EXPORT_MAX_ROWS}），请缩小筛选范围`);
+      const head = "time,tenant,capability,provider,model,quantity,unit,credits,cost_cents,status,task_id";
+      const lines = rows.map((r) => [r.created_at, r.tenant_slug, r.capability, r.provider, r.model ?? "", r.quantity, r.unit, r.credits, r.cost_cents, r.status, r.task_id ?? ""].join(","));
+      return new HttpResponse([head, ...lines].join("\n"), { status: 200, headers: { "Content-Type": "text/csv" } });
+    }),
+    http.get(`${C}/tasks`, ({ request }) => {
+      const g = guard();
+      if (g) return g;
+      const url = new URL(request.url);
+      const p = (k: string) => url.searchParams.get(k) ?? "";
+      let rows = [...adminTasks.values()];
+      if (p("status")) rows = rows.filter((r) => r.status === p("status"));
+      if (p("tenant_id")) rows = rows.filter((r) => adminTenants.get(p("tenant_id"))?.slug === r.tenant_slug);
+      if (p("from")) rows = rows.filter((r) => r.created_at.slice(0, 10) >= p("from"));
+      if (p("to")) rows = rows.filter((r) => r.created_at.slice(0, 10) <= p("to"));
+      rows.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+      return ok(paginate(rows, url));
+    }),
+    // 重跑失败任务：状态回 queued；**首版不重复扣费**（charged:false，冻结文档口径；BE 合并后核对）；落审计。
+    http.post(`${C}/tasks/:id/retry`, ({ params }) => {
+      const g = guard();
+      if (g) return g;
+      const t = adminTasks.get(params.id as string);
+      if (!t) return err(404, "NOT_FOUND", "Task not found.");
+      if (t.status !== "failed") return err(422, "TASK_NOT_RETRYABLE", "仅失败任务可重跑");
+      const before = { status: t.status };
+      t.status = "queued";
+      t.progress = 0;
+      pushAudit("task_retry", t.tenant_slug, before, { status: "queued" }, null);
+      return ok({ task_id: t.id, status: t.status, charged: false });
+    }),
+    http.get(`${C}/audit`, ({ request }) => {
+      const g = guard();
+      if (g) return g;
+      const url = new URL(request.url);
+      const p = (k: string) => url.searchParams.get(k) ?? "";
+      let rows = [...adminAudit];
+      if (p("action")) rows = rows.filter((r) => r.action === p("action"));
+      if (p("tenant_id")) rows = rows.filter((r) => adminTenants.get(p("tenant_id"))?.slug === r.target_tenant_slug);
+      if (p("from")) rows = rows.filter((r) => r.created_at.slice(0, 10) >= p("from"));
+      if (p("to")) rows = rows.filter((r) => r.created_at.slice(0, 10) <= p("to"));
+      return ok(paginate(rows, url));
     })
   ];
 }
@@ -1364,5 +1609,8 @@ export const handlers = [
   // ── 数据看板 (ANALYTICS-UI-0001 / PROD-P0-ANALYTICS-TENANT-LEAK-UI-0001) ── /api/v1/admin/analytics/*。
   // 门禁与数据 scope 均按 entitlement 派生（无 analytics_view → 403；无 analytics_platform → 只返自己单租户）。
   // 场景切换用 hd_mock_platform / hd_mock_plan（默认平台租户 → 全站正常，零回归）。
-  ...analyticsHandlers()
+  ...analyticsHandlers(),
+
+  // ── 管理员后台 (ADMIN-CONSOLE-UI-0001) ── /api/v1/admin/console/*，门禁与数据全走 resolveMockState 单一源。
+  ...adminConsoleHandlers()
 ];

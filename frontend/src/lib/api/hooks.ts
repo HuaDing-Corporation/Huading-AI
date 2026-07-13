@@ -1,6 +1,23 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { fetchMe } from "@/lib/api/auth";
+import {
+  adjustTenantCredits,
+  assignVoiceSlot,
+  changeTenantPlan,
+  changeTenantStatus,
+  fetchAdminAudit,
+  fetchAdminTasks,
+  fetchAdminTenantDetail,
+  fetchAdminTenants,
+  fetchAdminUsage,
+  fetchAdminVoiceSlots,
+  retryAdminTask,
+  type AdminTenantListQuery,
+  type AdminUsageQuery,
+  type PlanCode,
+  type TenantStatus
+} from "@/lib/api/admin-console";
 import { listAvatarPresets } from "@/lib/api/avatars";
 import { analyticsKeys, avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, historyImageKeys, labelSettingsKey, meKey, publishKeys, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
 import { getHistoryImageSet, listHistoryImages, type HistoryCategory } from "@/lib/api/history-images";
@@ -423,4 +440,80 @@ export function useAnalyticsTimeseries(range: AnalyticsRange, granularity: Analy
     queryFn: () => fetchAnalyticsTimeseries(range, granularity),
     enabled: !!session && enabled
   });
+}
+
+// ── 管理员后台 (ADMIN-CONSOLE-UI-0001) ── /admin/console/*。写操作成功后失效整棵 admin 前缀（列表 + 审计同刷，写全落审计）。
+const adminKeys = {
+  all: ["admin-console"] as const,
+  tenants: (q: AdminTenantListQuery) => ["admin-console", "tenants", q] as const,
+  tenantDetail: (id: string) => ["admin-console", "tenant", id] as const,
+  voiceSlots: ["admin-console", "voice-slots"] as const,
+  usage: (q: AdminUsageQuery) => ["admin-console", "usage", q] as const,
+  tasks: (q: Record<string, unknown>) => ["admin-console", "tasks", q] as const,
+  audit: (q: Record<string, unknown>) => ["admin-console", "audit", q] as const
+};
+
+export function useAdminTenants(query: AdminTenantListQuery) {
+  const { session } = useAuth();
+  return useQuery({ queryKey: adminKeys.tenants(query), queryFn: () => fetchAdminTenants(query), enabled: !!session });
+}
+export function useAdminTenantDetail(tenantId: string | null) {
+  const { session } = useAuth();
+  return useQuery({
+    queryKey: adminKeys.tenantDetail(tenantId ?? ""),
+    queryFn: () => fetchAdminTenantDetail(tenantId as string),
+    enabled: !!session && !!tenantId
+  });
+}
+export function useAdjustTenantCredits() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { tenantId: string; delta: number; reason: string }) =>
+      adjustTenantCredits(input.tenantId, { delta: input.delta, reason: input.reason }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: adminKeys.all })
+  });
+}
+export function useChangeTenantPlan() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { tenantId: string; planCode: PlanCode }) => changeTenantPlan(input.tenantId, input.planCode),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: adminKeys.all })
+  });
+}
+export function useChangeTenantStatus() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { tenantId: string; status: TenantStatus }) => changeTenantStatus(input.tenantId, input.status),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: adminKeys.all })
+  });
+}
+export function useAdminVoiceSlots() {
+  const { session } = useAuth();
+  return useQuery({ queryKey: adminKeys.voiceSlots, queryFn: fetchAdminVoiceSlots, enabled: !!session });
+}
+export function useAssignVoiceSlot() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { tenant_id: string; speaker_id: string }) => assignVoiceSlot(input),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: adminKeys.all })
+  });
+}
+export function useAdminUsage(query: AdminUsageQuery) {
+  const { session } = useAuth();
+  return useQuery({ queryKey: adminKeys.usage(query), queryFn: () => fetchAdminUsage(query), enabled: !!session });
+}
+export function useAdminTasks(query: { status?: string; tenant_id?: string; from?: string; to?: string; limit: number; offset: number }) {
+  const { session } = useAuth();
+  return useQuery({ queryKey: adminKeys.tasks(query), queryFn: () => fetchAdminTasks(query), enabled: !!session });
+}
+export function useRetryAdminTask() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (taskId: string) => retryAdminTask(taskId),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: adminKeys.all })
+  });
+}
+export function useAdminAudit(query: { action?: string; tenant_id?: string; from?: string; to?: string; limit: number; offset: number }) {
+  const { session } = useAuth();
+  return useQuery({ queryKey: adminKeys.audit(query), queryFn: () => fetchAdminAudit(query), enabled: !!session });
 }
