@@ -309,15 +309,11 @@ const OWN_TENANT = {
   balance: { total: 1000, used: 120, reserved: 36, remaining: 844 }
 };
 
-// PROD-P0-ANALYTICS-TENANT-LEAK-UI-0001：entitlement **按「平台租户 / 套餐」派生**，镜像未来 BE
-// (PROD-P0-ANALYTICS-TENANT-LEAK-BE-0001)。**绝不按 role 派生**——自助注册的租户 owner 在后端也是 role=ADMIN
-// （租户管理员 ≠ 平台超管），按 role 会让 free 新注册用户绕过门禁（线上事故：看到别租户数据 + 升级版卡不置灰）。
-// 三个 entitlement（voice_clone_vip / analytics_view / analytics_platform）统一进 /auth/me.permissions，前端只认 permissions。
-// localStorage 三旋钮（默认 = 平台租户「华鼎AI」→ 全权限，保后台/联调零回归）：
-//   hd_mock_platform: 平台租户？默认 "1"（是）；"0" → 普通租户
-//   hd_mock_plan:     "huading"（默认）| "free"     —— 租户当前套餐 code
-//   hd_mock_role:     "admin"（默认）| "creator"    —— 仅决定角色基础权限，**不参与 entitlement**
-// 线上出事态（新注册普通用户）= 普通租户 + free + role admin：hd_mock_platform="0" + hd_mock_plan="free"。
+// PROD-P0-ANALYTICS-TENANT-LEAK-UI-0001（FIX2 · 单一状态源）：整个 mock 的「我是谁 / 有什么权限 / analytics 能看什么」
+// 收敛到唯一解析函数 resolveMockState()——所有消费方（/me 身份、mockPermissions、analyticsHandlers 的门禁与 scope、
+// 品牌音色 doubao 兜底等）**一律走它**，不再各读各的 localStorage（FIX1 的「/me 走 registered、analytics 走旋钮」两套源已并线）。
+// **绝不按 role 派生 entitlement**——自助注册 owner 在真 BE 也是 role=ADMIN（租户管理员 ≠ 平台超管），按 role 会让 free
+// 新注册用户绕过门禁（线上事故：看到别租户数据 + 升级版卡不置灰）。
 function readLS(key: string): string | null {
   try {
     return typeof localStorage !== "undefined" ? localStorage.getItem(key) : null;
@@ -325,40 +321,8 @@ function readLS(key: string): string | null {
     return null;
   }
 }
-function mockPlatform(): boolean {
-  return readLS("hd_mock_platform") !== "0"; // 默认平台租户（华鼎AI）
-}
-function mockRole(): "admin" | "creator" {
-  return readLS("hd_mock_role") === "creator" ? "creator" : "admin";
-}
-function mockPlan(): "huading" | "free" {
-  return readLS("hd_mock_plan") === "free" ? "free" : "huading";
-}
-// huading 通路 entitlement——镜像 BE has_huading_access「平台租户 OR active huading 订阅」（**不含 role==admin**）。
-// 是 voice_clone_vip 与 analytics_view 的共同来源。
-function mockHuadingAccess(): boolean {
-  return mockPlatform() || mockPlan() === "huading";
-}
-// 角色基础权限：逐字镜像 BE deps.py::_ROLE_PERMISSIONS（mock 仅用 admin/creator；真 BE 无 "video:read"）。
-// entitlement 权限（voice_clone_vip/analytics_*）**不写死进角色**，由派生规则补入。
-const ROLE_PERMISSIONS: Record<"admin" | "creator", string[]> = {
-  admin: ["tenant:admin", "content:operate", "video:create", "video:review", "dev:access"],
-  creator: ["video:create"]
-};
-// /auth/me.permissions = sorted(角色权限 ∪ {voice_clone_vip, analytics_view} if huadingAccess ∪ {analytics_platform} if platform)。
-function mockPermissions(): string[] {
-  const perms = new Set(ROLE_PERMISSIONS[mockRole()]);
-  if (mockHuadingAccess()) {
-    perms.add("voice_clone_vip");
-    perms.add("analytics_view");
-  }
-  if (mockPlatform()) perms.add("analytics_platform");
-  return [...perms].sort();
-}
 
-// PROD-P0-...-FIX1：真实注册链驱动的「新注册身份」。POST /register-tenant 成功后写入（见该 handler），
-// /auth/me 优先返回它 → 反映刚注册的租户（ten-new）而非默认 ten-mock。permissions 仍由旋钮派生
-// （注册同时把 platform/plan 切成「非平台 free」→ 三 entitlement 全无），故无需在此存权限。
+// 真实注册链驱动的新注册身份（POST /register-tenant 成功后**只写这一个 key**；platform/plan/role 全由它推导，无需另写）。
 interface RegisteredIdentity {
   tenant: { id: string; slug: string; name: string };
   user: { id: string; tenant_id: string; email: string; full_name: string | null; role: "admin" };
@@ -373,13 +337,54 @@ function readRegistered(): RegisteredIdentity | null {
   }
 }
 
+interface MockState {
+  isPlatform: boolean;
+  plan: "huading" | "free";
+  role: "admin" | "creator";
+  identity: RegisteredIdentity | null;
+}
+// 唯一状态源。走过真实注册链（有 hd_mock_registered）→ 以注册身份为权威：非平台 + free + role admin（正是线上那个坑，
+// self-serve owner=ADMIN 保留）。否则回落三旋钮（默认平台租户「华鼎AI」→ 全权限，保后台/联调零回归）：
+//   hd_mock_platform: 平台租户？默认 "1"；"0" → 普通租户 · hd_mock_plan: "huading"（默认）| "free" · hd_mock_role: "admin"（默认）| "creator"
+function resolveMockState(): MockState {
+  const identity = readRegistered();
+  if (identity) {
+    return { isPlatform: false, plan: "free", role: "admin", identity };
+  }
+  return {
+    isPlatform: readLS("hd_mock_platform") !== "0",
+    plan: readLS("hd_mock_plan") === "free" ? "free" : "huading",
+    role: readLS("hd_mock_role") === "creator" ? "creator" : "admin",
+    identity: null
+  };
+}
+// huading 通路 entitlement——逐字镜像已上线 BE plan_access.py「平台租户 OR huading 订阅」（**不含 role**）。
+function mockHuadingAccess(state: MockState): boolean {
+  return state.isPlatform || state.plan === "huading";
+}
+// 角色基础权限：逐字镜像 BE deps.py::_ROLE_PERMISSIONS（真 BE 无 "video:read"）。entitlement 权限不写死进角色。
+const ROLE_PERMISSIONS: Record<"admin" | "creator", string[]> = {
+  admin: ["tenant:admin", "content:operate", "video:create", "video:review", "dev:access"],
+  creator: ["video:create"]
+};
+// /auth/me.permissions = sorted(角色权限 ∪ {voice_clone_vip, analytics_view} if huadingAccess ∪ {analytics_platform} if isPlatform)。
+function mockPermissions(state: MockState): string[] {
+  const perms = new Set(ROLE_PERMISSIONS[state.role]);
+  if (mockHuadingAccess(state)) {
+    perms.add("voice_clone_vip");
+    perms.add("analytics_view");
+  }
+  if (state.isPlatform) perms.add("analytics_platform");
+  return [...perms].sort();
+}
+
 function analyticsHandlers() {
   const A = `${BASE}/api/v1/admin/analytics`;
-  // 门禁：无 analytics_view（= 非平台租户且非 huading）→ 403 ANALYTICS_PLAN_REQUIRED（与 /me entitlement 同源）。
+  // 门禁与 scope 走**单一状态源** resolveMockState()（与 /me entitlement 同源，不再直读旋钮）。
+  // 无 analytics_view（= 非平台租户且非 huading）→ 403 ANALYTICS_PLAN_REQUIRED；平台方 → 全站 46 租户，VIP 客户 → 只本租户。
   const guard = () =>
-    mockHuadingAccess() ? null : err(403, "ANALYTICS_PLAN_REQUIRED", "Analytics requires the huading plan.");
-  // 数据 scope：平台租户 → 全站 46 租户；VIP 客户（无 analytics_platform）→ 只自己的单租户（BE 已过滤，防泄漏）。
-  const scopedTenants = () => (mockPlatform() ? ANALYTICS_TENANTS : [OWN_TENANT]);
+    mockHuadingAccess(resolveMockState()) ? null : err(403, "ANALYTICS_PLAN_REQUIRED", "Analytics requires the huading plan.");
+  const scopedTenants = () => (resolveMockState().isPlatform ? ANALYTICS_TENANTS : [OWN_TENANT]);
   const sortTenants = (sort: string) => {
     const field = sort.replace(/_(asc|desc)$/, "");
     const dir = sort.endsWith("_asc") ? 1 : -1;
@@ -397,7 +402,7 @@ function analyticsHandlers() {
       const g = guard();
       if (g) return g;
       const url = new URL(request.url);
-      const platform = mockPlatform();
+      const platform = resolveMockState().isPlatform;
       const ownSuccess = Math.round(OWN_TENANT.task_count * OWN_TENANT.success_rate);
       // 全站合计（平台）vs 我的合计（VIP）——VIP 绝不返全站数字（那也是一种泄漏）。
       return ok({
@@ -424,7 +429,7 @@ function analyticsHandlers() {
       const g = guard();
       if (g) return g;
       // VIP（非平台）→ 按自己占比缩放为「我的」拆分，不返全站聚合（share_pct 是占比，不随缩放变）。
-      const s = mockPlatform() ? 1 : OWN_TENANT.credits_used / PLATFORM_TOTAL_CREDITS;
+      const s = resolveMockState().isPlatform ? 1 : OWN_TENANT.credits_used / PLATFORM_TOTAL_CREDITS;
       const scaleRow = (r: { provider: string; model: string | null; credits_used: number; cost_cents: number; task_count: number; share_pct: number }) => ({
         ...r,
         credits_used: Math.round(r.credits_used * s * 10) / 10,
@@ -450,7 +455,7 @@ function analyticsHandlers() {
       const count = granularity === "week" ? 6 : 14;
       const base = from ? new Date(`${from}T00:00:00`) : new Date("2026-06-01T00:00:00");
       // VIP（非平台）→ 趋势缩放为「我的」用量，不返全站曲线。
-      const s = mockPlatform() ? 1 : OWN_TENANT.credits_used / PLATFORM_TOTAL_CREDITS;
+      const s = resolveMockState().isPlatform ? 1 : OWN_TENANT.credits_used / PLATFORM_TOTAL_CREDITS;
       const buckets = Array.from({ length: count }, (_, i) => {
         const d = new Date(base);
         d.setDate(d.getDate() + i * step);
@@ -606,7 +611,7 @@ export const handlers = [
   // Auth = M2 shapes (unchanged). Mocked so the (app) client auth-gate can be
   // passed during the MSW parallel period without a real backend.
   http.post(`${BASE}/api/v1/auth/login`, () =>
-    ok({ access_token: "mock-token", token_type: "bearer", tenant_id: "ten-mock", user_id: "u-mock", role: mockRole() })
+    ok({ access_token: "mock-token", token_type: "bearer", tenant_id: "ten-mock", user_id: "u-mock", role: resolveMockState().role })
   ),
   // 注册（AUTH-UI-0001 · FIX1 硬化）：镜像 BE POST /auth/register-tenant → {tenant,user,token}（201）。
   // 校验必填 + extra="forbid" + full_name≤200（防非法请求在 mock 假绿，P2）；slug="taken" → 409。
@@ -637,18 +642,16 @@ export const handlers = [
       tenant: { id: "ten-new", slug, name },
       user: { id: "u-new", tenant_id: "ten-new", email, full_name: (fullName as string) ?? null, role: "admin" as const }
     };
-    // 🔴 PROD-P0-...-FIX1：真实注册链必须切状态——自助注册 = **非平台 + free 新租户**（owner 在真实 BE 就是 ADMIN，
-    // 保留此事实，正是它把线上坑出来）。register() 成功后必调 /auth/me，若不切状态，/me 读默认旋钮 → 三 entitlement
-    // 全给 + 返 ten-mock（Codex B 坐实的假绿）。此处把后续 /me 驱动成「刚注册的非平台 free 租户，三权限全无」。
+    // 🔴 PROD-P0-...-FIX2：真实注册链**只写 hd_mock_registered 这一个 key**——resolveMockState() 见它即权威推导
+    // 「非平台 + free + role admin」（owner 在真实 BE 就是 ADMIN，保留此事实，正是线上那个坑）。register() 成功后必调
+    // /auth/me；单一状态源保证 /me 身份(ten-new) + 权限(三 entitlement 全无) + analytics 门禁(403) **全部一致**，
+    // 不再需要另写 platform/plan/role 旋钮（它们由注册身份直接推导）。
     try {
       if (typeof localStorage !== "undefined") {
-        localStorage.setItem("hd_mock_platform", "0");
-        localStorage.setItem("hd_mock_plan", "free");
-        localStorage.setItem("hd_mock_role", "admin");
         localStorage.setItem("hd_mock_registered", JSON.stringify(registered));
       }
     } catch {
-      /* localStorage 不可用则退回默认旋钮（下方 /me 仍可跑，只是身份为 ten-mock） */
+      /* localStorage 不可用 → 无注册身份，resolveMockState 回落旋钮（身份为 ten-mock；仅极端环境） */
     }
     return HttpResponse.json(
       {
@@ -664,16 +667,13 @@ export const handlers = [
     );
   }),
   http.get(`${BASE}/api/v1/auth/me`, () => {
-    // 身份：走过真实注册链则返回刚注册的租户（ten-new），否则默认 ten-mock（登录/联调）。
-    // permissions 按「平台租户 / 套餐」派生（镜像真实 BE，见 mockPermissions）——entitlement 来源 = 平台租户 OR huading，
-    // **不含 role==admin**（P0：自助注册 owner=role admin 但非平台方，绝不因 role 拿到 voice_clone_vip/analytics_*）。
-    const registered = readRegistered();
+    // 身份 + 权限**同源** resolveMockState()：走过注册链 → 刚注册的 ten-new + 非平台 free（三 entitlement 全无）；
+    // 否则默认 ten-mock + 旋钮派生。与 analyticsHandlers 读同一状态源，杜绝「/me 说没权限、analytics 却返全站」的错配。
+    const state = resolveMockState();
     return ok({
-      tenant: registered?.tenant ?? { id: "ten-mock", slug: "huading", name: "华鼎（mock）" },
-      user: registered?.user ?? { id: "u-mock", tenant_id: "ten-mock", email: "qa@huading.test", full_name: "QA 测试", role: mockRole() },
-      // 身份与权限**同源**：走过注册链 = 非平台 free 新租户 → 权限只有角色基础、零 entitlement（不依赖旋钮，
-      // 杜绝「注册身份 + 残留旋钮 → 带 entitlement」的错配假绿）。未注册 → 按旋钮派生（登录 / 联调 / 平台方）。
-      permissions: registered ? [...ROLE_PERMISSIONS[registered.user.role]].sort() : mockPermissions()
+      tenant: state.identity?.tenant ?? { id: "ten-mock", slug: "huading", name: "华鼎（mock）" },
+      user: state.identity?.user ?? { id: "u-mock", tenant_id: "ten-mock", email: "qa@huading.test", full_name: "QA 测试", role: state.role },
+      permissions: mockPermissions(state)
     });
   }),
   http.get(`${BASE}/api/v1/quota`, () => ok({ total: 1000, used: 120, reserved: 36, remaining: 844 })),
@@ -1189,7 +1189,7 @@ export const handlers = [
     // VIP 门禁：doubao 通路对无 entitlement 用户 → 403 VOICE_CLONE_PLAN_REQUIRED（防选了再撞的兜底；正常前端已置灰）。
     // entitlement 与 /me 同源（mockHuadingAccess = 平台租户 OR plan=huading，**不含 role==admin**）——新注册 free 用户在此被拦。
     // cosyvoice 免费档不受门禁——任何用户可建（含 0 余额新注册）。
-    if (provider === "doubao-voice-clone" && !mockHuadingAccess()) {
+    if (provider === "doubao-voice-clone" && !mockHuadingAccess(resolveMockState())) {
       return err(403, "VOICE_CLONE_PLAN_REQUIRED", "Voice clone (doubao) requires the huading plan.");
     }
     const id = `bv-${++brandVoiceSeq}`;
