@@ -165,6 +165,7 @@ def prepare_reverse_prompt_video_retry(
     tenant_id: str,
     job_id: str,
     failed_only: bool = False,
+    reserve_quota: bool = True,
 ) -> ReversePromptJob:
     job = _reverse_prompt_job_for_update_or_404(
         db,
@@ -215,11 +216,12 @@ def prepare_reverse_prompt_video_retry(
     job.saved_at = None
     job.updated_at = datetime.now(UTC)
     db.flush()
-    quota.reserve_reverse_prompt_video_quota(
-        db,
-        tenant_id=tenant_id,
-        reverse_prompt_job_id=job.id,
-    )
+    if reserve_quota:
+        quota.reserve_reverse_prompt_video_quota(
+            db,
+            tenant_id=tenant_id,
+            reverse_prompt_job_id=job.id,
+        )
     db.flush()
     return job
 

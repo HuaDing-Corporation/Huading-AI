@@ -203,6 +203,8 @@ class AdminTaskRetryResponse(BaseModel):
     tenant_id: str
     status: Literal["queued"]
     progress: int
+    charged: bool
+    credits: int = Field(ge=0)
 
 
 class AdminVoiceSlotAssignResponse(BaseModel):

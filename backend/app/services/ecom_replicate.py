@@ -392,6 +392,7 @@ def _reset_outputs_for_retry(
     job.status = "generating"
     job.error_code = None
     job.error_message = None
+    job.started_at = None
     job.finished_at = None
     job.updated_at = now
     db.flush()

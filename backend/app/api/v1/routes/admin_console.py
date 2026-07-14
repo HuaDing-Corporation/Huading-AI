@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUserDependency, DbSessionDependency, require_platform_admin
 from app.core.exceptions import AppError
+from app.core.logging import get_logger
 from app.db.models import User, VideoTask
 from app.schemas.admin_console import (
     AdminAuditLogPage,
@@ -41,6 +42,7 @@ from app.workers.video_gen import generate_video_gen_task
 from app.workers.video_tasks import generate_video_task
 
 router = APIRouter(dependencies=[Depends(require_platform_admin)])
+logger = get_logger(__name__)
 
 PageQuery = Annotated[int, Query(ge=1)]
 PageSizeQuery = Annotated[int, Query(ge=1, le=100)]
@@ -347,6 +349,47 @@ def _enqueue_task_retry(task: VideoTask) -> None:
         generate_video_task.apply_async(args=[payload], task_id=task.id, queue="default")
 
 
+def _compensate_retry_dispatch_failure(
+    db: Session,
+    *,
+    actor_id: str,
+    task_family: AdminTaskFamily,
+    task_id: str,
+    output_indexes: list[int],
+) -> None:
+    try:
+        with Session(bind=db.get_bind()) as compensation_db:
+            actor = compensation_db.get(User, actor_id)
+            if actor is None:
+                raise RuntimeError("Retry compensation actor was not found.")
+            if task_family == "video":
+                admin_console.compensate_task_retry_enqueue_failure(
+                    compensation_db,
+                    actor=actor,
+                    task_id=task_id,
+                )
+            elif task_family == "reverse_prompt":
+                admin_console.compensate_reverse_prompt_retry_enqueue_failure(
+                    compensation_db,
+                    actor=actor,
+                    job_id=task_id,
+                )
+            else:
+                admin_console.compensate_ecom_replicate_retry_enqueue_failure(
+                    compensation_db,
+                    actor=actor,
+                    job_id=task_id,
+                    output_indexes=output_indexes,
+                )
+            compensation_db.commit()
+    except Exception:
+        logger.exception(
+            "admin_task_retry_compensation_failed",
+            task_family=task_family,
+            task_id=task_id,
+        )
+
+
 @router.post(
     "/tasks/{task_id}/retry",
     response_model=ApiResponse[AdminTaskRetryResponse],
@@ -359,7 +402,6 @@ def retry_task(
     user: User = CurrentUserDependency,
     db: Session = DbSessionDependency,
 ) -> ApiResponse[AdminTaskRetryResponse]:
-    retried_output_indexes: list[int] = []
     try:
         resolved_family = admin_console.resolve_task_family(
             db,
@@ -367,26 +409,29 @@ def retry_task(
             requested_family=task_family,
         )
         if resolved_family == "video":
-            task = admin_console.prepare_task_retry(db, actor=user, task_id=task_id)
+            preparation = admin_console.prepare_task_retry(db, actor=user, task_id=task_id)
         elif resolved_family == "reverse_prompt":
-            task = admin_console.prepare_reverse_prompt_retry(
+            preparation = admin_console.prepare_reverse_prompt_retry(
                 db,
                 actor=user,
                 job_id=task_id,
             )
         else:
-            task, outputs = admin_console.prepare_ecom_replicate_retry(
+            preparation = admin_console.prepare_ecom_replicate_retry(
                 db,
                 actor=user,
                 job_id=task_id,
             )
-            retried_output_indexes = [output.index for output in outputs]
+        task = preparation.task
+        retried_output_indexes = list(preparation.output_indexes)
         response = AdminTaskRetryResponse(
             id=task.id,
             task_family=resolved_family,
             tenant_id=task.tenant_id,
             status="queued",
             progress=task.progress if resolved_family == "video" else 0,
+            charged=preparation.charged,
+            credits=preparation.credits,
         )
         db.commit()
     except Exception:
@@ -404,30 +449,13 @@ def retry_task(
                 args=[task.id], task_id=task.id, queue="image"
             )
     except Exception as exc:
-        try:
-            if resolved_family == "video":
-                admin_console.compensate_task_retry_enqueue_failure(
-                    db,
-                    actor=user,
-                    task_id=task.id,
-                )
-            elif resolved_family == "reverse_prompt":
-                admin_console.compensate_reverse_prompt_retry_enqueue_failure(
-                    db,
-                    actor=user,
-                    job_id=task.id,
-                )
-            else:
-                admin_console.compensate_ecom_replicate_retry_enqueue_failure(
-                    db,
-                    actor=user,
-                    job_id=task.id,
-                    output_indexes=retried_output_indexes,
-                )
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
+        _compensate_retry_dispatch_failure(
+            db,
+            actor_id=user.id,
+            task_family=resolved_family,
+            task_id=task.id,
+            output_indexes=retried_output_indexes,
+        )
         raise AppError(
             "Task retry could not be queued. Please retry.",
             code="TASK_RETRY_ENQUEUE_FAILED",

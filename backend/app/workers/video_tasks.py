@@ -29,6 +29,7 @@ from app.services.synthetic_label import (
     label_artifact_bytes,
     label_settings_for_tenant,
 )
+from app.services.task_claims import claim_video_task_for_worker
 from app.workers.celery_app import celery_app
 
 logger = get_logger(__name__)
@@ -280,6 +281,13 @@ async def _generate_with_seedance(params: dict[str, Any], progress_cb) -> dict[s
 def generate_video_task(self, params: dict[str, Any]) -> dict[str, Any]:
     task_id = self.request.id or params.get("video_task_id") or "eager"
     tenant_id = _safe_task_id(str(params["tenant_id"]))
+    claim = claim_video_task_for_worker(
+        tenant_id=tenant_id,
+        task_id=str(task_id),
+        session_factory=SessionLocal,
+    )
+    if not claim.claimed:
+        return {"task_id": str(task_id), "status": claim.status}
     progress_task_id = f"{tenant_id}:{task_id}"
     store = build_progress_store(settings.redis_url)
     store.update(progress_task_id, status="STARTED", progress=0.0, stage="queued")

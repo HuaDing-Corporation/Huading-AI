@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from decimal import ROUND_CEILING, Decimal
 from typing import Any
 
 from sqlalchemy import case, func, literal, or_, select, union_all
@@ -43,6 +45,14 @@ from app.services.voice_slots import (
     assign_speaker_slot,
     speaker_ids,
 )
+
+
+@dataclass(frozen=True)
+class TaskRetryPreparation:
+    task: VideoTask | ReversePromptJob | EcomReplicateJob
+    charged: bool
+    credits: int
+    output_indexes: tuple[int, ...] = ()
 
 
 def _page(items: list[object], *, total: int, page: int, page_size: int) -> dict[str, object]:
@@ -345,17 +355,6 @@ def assign_tenant_voice_slot(
     tenant = db.get(Tenant, tenant_id)
     if tenant is None or tenant.deleted_at is not None:
         raise AppError("Tenant not found.", code="TENANT_NOT_FOUND", status_code=404)
-    existing_config = db.scalar(
-        select(ProviderConfig).where(
-            ProviderConfig.tenant_id == tenant.id,
-            ProviderConfig.capability == "voice_clone",
-            ProviderConfig.provider == DOUBAO_VOICE_CLONE_PROVIDER,
-        )
-        .with_for_update()
-    )
-    before_ids = speaker_ids(
-        (existing_config.config or {}).get("speaker_ids") if existing_config is not None else []
-    )
     summary = assign_speaker_slot(
         db,
         tenant_slug=tenant.slug,
@@ -368,7 +367,7 @@ def assign_tenant_voice_slot(
         action="voice_slot_assign",
         target_tenant_id=tenant.id,
         target_id=tenant.id,
-        before={"speaker_ids": before_ids},
+        before={"speaker_ids": list(summary.previous_speaker_ids)},
         after={
             "speaker_ids": list(summary.speaker_ids),
             "speaker_id": summary.speaker_id,
@@ -384,15 +383,58 @@ def assign_tenant_voice_slot(
     )
 
 
+def _credit_units(value: Decimal) -> int:
+    return int(Decimal(value).to_integral_value(rounding=ROUND_CEILING))
+
+
+def _is_stale(updated_at: datetime) -> bool:
+    value = updated_at
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    threshold = datetime.now(UTC) - timedelta(
+        seconds=settings.engine_admin_retry_stale_seconds
+    )
+    return value <= threshold
+
+
+def _reserved_retry_charge(db: Session, *criteria: Any) -> tuple[bool, int]:
+    reservation = db.scalar(
+        select(UsageRecord)
+        .where(
+            *criteria,
+            UsageRecord.status == "reserved",
+            UsageRecord.credits > 0,
+        )
+        .order_by(UsageRecord.created_at.desc(), UsageRecord.id.desc())
+    )
+    if reservation is None:
+        return False, 0
+    return True, _credit_units(Decimal(reservation.credits))
+
+
 def prepare_task_retry(
     db: Session,
     *,
     actor: User,
     task_id: str,
-) -> VideoTask:
+) -> TaskRetryPreparation:
     task = db.scalar(select(VideoTask).where(VideoTask.id == task_id).with_for_update())
     if task is None or task.deleted_at is not None:
         raise AppError("Task not found.", code="TASK_NOT_FOUND", status_code=404)
+    if (
+        task.status == "queued"
+        and task.started_at is None
+        and _is_stale(task.updated_at)
+    ):
+        charged, credits = _reserved_retry_charge(
+            db,
+            UsageRecord.video_task_id == task.id,
+        )
+        return TaskRetryPreparation(
+            task=task,
+            charged=charged,
+            credits=credits,
+        )
     if task.status != "failed":
         raise AppError(
             "Only failed tasks can be retried.",
@@ -405,6 +447,11 @@ def prepare_task_retry(
         "error_code": task.error_code,
         "error_message": task.error_message,
     }
+    quota.reserve_released_video_task_quota(
+        db,
+        tenant_id=task.tenant_id,
+        video_task_id=task.id,
+    )
     task.status = "queued"
     task.progress = 0
     task.error = None
@@ -424,7 +471,11 @@ def prepare_task_retry(
         reason=None,
     )
     db.flush()
-    return task
+    charged, credits = _reserved_retry_charge(
+        db,
+        UsageRecord.video_task_id == task.id,
+    )
+    return TaskRetryPreparation(task=task, charged=charged, credits=credits)
 
 
 def compensate_task_retry_enqueue_failure(
@@ -432,14 +483,15 @@ def compensate_task_retry_enqueue_failure(
     *,
     actor: User,
     task_id: str,
-) -> VideoTask:
+) -> VideoTask | None:
     task = db.scalar(select(VideoTask).where(VideoTask.id == task_id).with_for_update())
     if task is None or task.status != "queued":
-        raise AppError(
-            "Task retry dispatch could not be compensated.",
-            code="TASK_RETRY_COMPENSATION_FAILED",
-            status_code=500,
-        )
+        return task
+    quota.release_reserved_quota(
+        db,
+        tenant_id=task.tenant_id,
+        video_task_id=task.id,
+    )
     before = {"status": task.status, "progress": task.progress}
     now = datetime.now(UTC)
     task.status = "failed"
@@ -494,20 +546,42 @@ def prepare_reverse_prompt_retry(
     *,
     actor: User,
     job_id: str,
-) -> ReversePromptJob:
-    existing = db.get(ReversePromptJob, job_id)
+) -> TaskRetryPreparation:
+    existing = db.scalar(
+        select(ReversePromptJob)
+        .where(ReversePromptJob.id == job_id)
+        .with_for_update()
+    )
     if existing is None:
         raise AppError("Task not found.", code="TASK_NOT_FOUND", status_code=404)
+    if existing.status == "queued" and _is_stale(existing.updated_at):
+        charged, credits = _reserved_retry_charge(
+            db,
+            UsageRecord.reverse_prompt_job_id == existing.id,
+        )
+        return TaskRetryPreparation(
+            task=existing,
+            charged=charged,
+            credits=credits,
+        )
     before = {
         "status": existing.status,
         "error_code": existing.error_code,
         "error_message": existing.error_message,
     }
+    settled = db.scalar(
+        select(UsageRecord.id).where(
+            UsageRecord.reverse_prompt_job_id == existing.id,
+            UsageRecord.status == "settled",
+            UsageRecord.credits > 0,
+        )
+    )
     job = reverse_prompt.prepare_reverse_prompt_video_retry(
         db,
         tenant_id=existing.tenant_id,
         job_id=existing.id,
         failed_only=True,
+        reserve_quota=settled is None,
     )
     record_audit(
         db,
@@ -520,7 +594,11 @@ def prepare_reverse_prompt_retry(
         reason=None,
     )
     db.flush()
-    return job
+    charged, credits = _reserved_retry_charge(
+        db,
+        UsageRecord.reverse_prompt_job_id == job.id,
+    )
+    return TaskRetryPreparation(task=job, charged=charged, credits=credits)
 
 
 def prepare_ecom_replicate_retry(
@@ -528,10 +606,35 @@ def prepare_ecom_replicate_retry(
     *,
     actor: User,
     job_id: str,
-) -> tuple[EcomReplicateJob, list[EcomReplicateOutput]]:
-    existing = db.get(EcomReplicateJob, job_id)
+) -> TaskRetryPreparation:
+    existing = db.scalar(
+        select(EcomReplicateJob)
+        .where(EcomReplicateJob.id == job_id)
+        .with_for_update()
+    )
     if existing is None:
         raise AppError("Task not found.", code="TASK_NOT_FOUND", status_code=404)
+    if (
+        existing.status == "generating"
+        and existing.started_at is None
+        and _is_stale(existing.updated_at)
+    ):
+        indexes = tuple(
+            db.scalars(
+                select(EcomReplicateOutput.index)
+                .where(
+                    EcomReplicateOutput.job_id == existing.id,
+                    EcomReplicateOutput.status == "planned",
+                )
+                .order_by(EcomReplicateOutput.index)
+            )
+        )
+        return TaskRetryPreparation(
+            task=existing,
+            charged=False,
+            credits=0,
+            output_indexes=indexes,
+        )
     before = {"status": existing.status, "failed_output_indexes": []}
     job, outputs = ecom_replicate.prepare_failed_outputs_retry(
         db,
@@ -551,7 +654,12 @@ def prepare_ecom_replicate_retry(
         reason=None,
     )
     db.flush()
-    return job, outputs
+    return TaskRetryPreparation(
+        task=job,
+        charged=False,
+        credits=0,
+        output_indexes=tuple(indexes),
+    )
 
 
 def compensate_reverse_prompt_retry_enqueue_failure(
@@ -559,18 +667,14 @@ def compensate_reverse_prompt_retry_enqueue_failure(
     *,
     actor: User,
     job_id: str,
-) -> ReversePromptJob:
+) -> ReversePromptJob | None:
     job = db.scalar(
         select(ReversePromptJob)
         .where(ReversePromptJob.id == job_id)
         .with_for_update()
     )
     if job is None or job.status != "queued":
-        raise AppError(
-            "Reverse prompt retry dispatch could not be compensated.",
-            code="TASK_RETRY_COMPENSATION_FAILED",
-            status_code=500,
-        )
+        return job
     quota.release_reverse_prompt_video_quota(
         db,
         tenant_id=job.tenant_id,
@@ -605,7 +709,7 @@ def compensate_ecom_replicate_retry_enqueue_failure(
     actor: User,
     job_id: str,
     output_indexes: list[int],
-) -> EcomReplicateJob:
+) -> EcomReplicateJob | None:
     job = db.scalar(
         select(EcomReplicateJob)
         .where(EcomReplicateJob.id == job_id)
@@ -623,11 +727,7 @@ def compensate_ecom_replicate_retry_enqueue_failure(
         )
     )
     if job is None or job.status != "generating" or len(outputs) != len(output_indexes):
-        raise AppError(
-            "Replicate retry dispatch could not be compensated.",
-            code="TASK_RETRY_COMPENSATION_FAILED",
-            status_code=500,
-        )
+        return job
     now = datetime.now(UTC)
     for output in outputs:
         output.status = "failed"
@@ -863,6 +963,14 @@ def _task_item(row: Mapping[str, Any]) -> AdminTaskItem:
 
 
 def _task_union():
+    stale_before = datetime.now(UTC) - timedelta(
+        seconds=settings.engine_admin_retry_stale_seconds
+    )
+    video_stale = (
+        (VideoTask.status == "queued")
+        & VideoTask.started_at.is_(None)
+        & (VideoTask.updated_at <= stale_before)
+    )
     video = (
         select(
             VideoTask.id.label("id"),
@@ -882,7 +990,7 @@ def _task_union():
             VideoTask.created_at.label("created_at"),
             VideoTask.started_at.label("started_at"),
             VideoTask.finished_at.label("finished_at"),
-            (VideoTask.status == "failed").label("retryable"),
+            ((VideoTask.status == "failed") | video_stale).label("retryable"),
         )
         .join(Tenant, Tenant.id == VideoTask.tenant_id)
         .where(VideoTask.deleted_at.is_(None))
@@ -890,6 +998,10 @@ def _task_union():
     reverse_status = case(
         (ReversePromptJob.status.in_(("succeeded", "saved")), "succeeded"),
         else_=ReversePromptJob.status,
+    )
+    reverse_stale = (
+        (ReversePromptJob.status == "queued")
+        & (ReversePromptJob.updated_at <= stale_before)
     )
     reverse = select(
         ReversePromptJob.id.label("id"),
@@ -921,7 +1033,7 @@ def _task_union():
         ).label("finished_at"),
         (
             (ReversePromptJob.source_kind == "video")
-            & (ReversePromptJob.status == "failed")
+            & ((ReversePromptJob.status == "failed") | reverse_stale)
         ).label("retryable"),
     ).join(Tenant, Tenant.id == ReversePromptJob.tenant_id)
     failed_output_exists = (
@@ -936,8 +1048,18 @@ def _task_union():
         (EcomReplicateJob.status == "completed", "succeeded"),
         (EcomReplicateJob.status.in_(("partial_failed", "failed")), "failed"),
         (EcomReplicateJob.status == "cancelled", "cancelled"),
+        (
+            (EcomReplicateJob.status == "generating")
+            & EcomReplicateJob.started_at.is_(None),
+            "queued",
+        ),
         (EcomReplicateJob.status.in_(("planning", "generating")), "running"),
         else_="queued",
+    )
+    replicate_stale = (
+        (EcomReplicateJob.status == "generating")
+        & EcomReplicateJob.started_at.is_(None)
+        & (EcomReplicateJob.updated_at <= stale_before)
     )
     replicate = select(
         EcomReplicateJob.id.label("id"),
@@ -951,6 +1073,11 @@ def _task_union():
         replicate_status.label("status"),
         case(
             (EcomReplicateJob.status == "planning", 10),
+            (
+                (EcomReplicateJob.status == "generating")
+                & EcomReplicateJob.started_at.is_(None),
+                0,
+            ),
             (EcomReplicateJob.status == "plan_ready", 25),
             (EcomReplicateJob.status == "generating", 50),
             else_=100,
@@ -961,8 +1088,11 @@ def _task_union():
         EcomReplicateJob.started_at.label("started_at"),
         EcomReplicateJob.finished_at.label("finished_at"),
         (
-            EcomReplicateJob.status.in_(("partial_failed", "failed", "completed"))
-            & failed_output_exists
+            (
+                EcomReplicateJob.status.in_(("partial_failed", "failed", "completed"))
+                & failed_output_exists
+            )
+            | replicate_stale
         ).label("retryable"),
     ).join(Tenant, Tenant.id == EcomReplicateJob.tenant_id)
     return union_all(video, reverse, replicate).subquery("admin_task_monitor")

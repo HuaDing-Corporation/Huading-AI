@@ -37,6 +37,10 @@ from app.services.synthetic_label import (
     label_artifact_bytes,
     synthetic_label_context,
 )
+from app.services.task_claims import (
+    claim_ecom_replicate_job_for_worker,
+    claim_video_task_for_worker,
+)
 from app.workers.celery_app import celery_app
 from app.workers.video_tasks import _safe_task_id, _tenant_upload_storage_key
 
@@ -1249,6 +1253,13 @@ def run_ecom_replicate_generation(job_id: str, output_index: int | None = None) 
 def generate_image_task(self, params: dict[str, Any]) -> dict[str, Any]:
     payload = dict(params)
     payload.setdefault("video_task_id", self.request.id)
+    claim = claim_video_task_for_worker(
+        tenant_id=str(payload["tenant_id"]),
+        task_id=str(payload["video_task_id"]),
+        session_factory=SessionLocal,
+    )
+    if not claim.claimed:
+        return {"task_id": str(payload["video_task_id"]), "status": claim.status}
     logger.info(
         "image_generation.queued",
         task_id=payload.get("video_task_id"),
@@ -1265,6 +1276,12 @@ def generate_ecom_replicate_task(
     output_index: int | None = None,
 ) -> dict[str, Any]:
     task_job_id = str(job_id or self.request.id)
+    claim = claim_ecom_replicate_job_for_worker(
+        job_id=task_job_id,
+        session_factory=SessionLocal,
+    )
+    if not claim.claimed:
+        return {"job_id": task_job_id, "status": claim.status}
     logger.info(
         "ecom_replicate_generation.queued",
         job_id=task_job_id,

@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     celery_broker_url: str = "redis://localhost:6379/1"
     celery_result_backend: str = "redis://localhost:6379/2"
     celery_task_always_eager: bool = False
+    engine_admin_retry_stale_seconds: int = Field(default=60, ge=0)
 
     jwt_secret_key: str = Field(min_length=32)
     jwt_algorithm: str = "HS256"

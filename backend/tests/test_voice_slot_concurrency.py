@@ -73,12 +73,12 @@ def test_speaker_slot_assignment_locks_the_global_speaker_id_before_scanning(
     not os.getenv("TEST_POSTGRES_URL"),
     reason="TEST_POSTGRES_URL is required for the real advisory-lock test.",
 )
-def test_postgres_concurrent_tenants_cannot_claim_the_same_speaker_id() -> None:
-    from app.db.models import Base, ProviderConfig, Tenant
-    from app.services.voice_slots import (
-        SpeakerSlotAssignmentError,
-        assign_speaker_slot,
-    )
+def test_postgres_admin_path_uses_advisory_lock_before_existing_config_rows(
+    monkeypatch,
+) -> None:
+    from app.db.models import AdminAuditLog, Base, ProviderConfig, Tenant, User
+    from app.services import admin_console
+    from app.services.voice_slots import SpeakerSlotAssignmentError
 
     engine = create_engine(os.environ["TEST_POSTGRES_URL"], pool_pre_ping=True)
     schema = f"voice_slot_{uuid4().hex}"
@@ -87,82 +87,110 @@ def test_postgres_concurrent_tenants_cannot_claim_the_same_speaker_id() -> None:
     scoped_engine = engine.execution_options(schema_translate_map={None: schema})
     Base.metadata.create_all(
         scoped_engine,
-        tables=[Tenant.__table__, ProviderConfig.__table__],
+        tables=[
+            Tenant.__table__,
+            User.__table__,
+            ProviderConfig.__table__,
+            AdminAuditLog.__table__,
+        ],
     )
     Session = sessionmaker(bind=scoped_engine, autoflush=False, autocommit=False)
-    first_prepared = threading.Event()
-    release_first = threading.Event()
-    second_done = threading.Event()
+    start_together = threading.Barrier(2)
     outcomes: list[tuple[str, str]] = []
-    first: threading.Thread | None = None
-    second: threading.Thread | None = None
+    threads: list[threading.Thread] = []
+    real_assign = admin_console.assign_speaker_slot
+
+    def synchronized_assign(*args, **kwargs):
+        start_together.wait(timeout=5)
+        return real_assign(*args, **kwargs)
+
+    monkeypatch.setattr(admin_console, "assign_speaker_slot", synchronized_assign)
 
     try:
         with Session() as db:
+            platform = Tenant(id="platform", slug="platform", name="Platform")
+            tenant_one = Tenant(id="tenant-one", slug="tenant-one", name="Tenant One")
+            tenant_two = Tenant(id="tenant-two", slug="tenant-two", name="Tenant Two")
+            db.add_all([platform, tenant_one, tenant_two])
+            db.flush()
             db.add_all(
                 [
-                    Tenant(id="tenant-one", slug="tenant-one", name="Tenant One"),
-                    Tenant(id="tenant-two", slug="tenant-two", name="Tenant Two"),
+                    User(
+                        id="platform-user",
+                        tenant_id=platform.id,
+                        email="platform@example.test",
+                        password_hash="not-used",
+                        role="admin",
+                    ),
+                    ProviderConfig(
+                        tenant_id=tenant_one.id,
+                        capability="voice_clone",
+                        provider="doubao-voice-clone",
+                        config={"speaker_ids": []},
+                        is_active=True,
+                    ),
+                    ProviderConfig(
+                        tenant_id=tenant_two.id,
+                        capability="voice_clone",
+                        provider="doubao-voice-clone",
+                        config={"speaker_ids": []},
+                        is_active=True,
+                    ),
                 ]
             )
             db.commit()
 
-        def claim_first() -> None:
-            with Session() as db:
-                assign_speaker_slot(
-                    db,
-                    tenant_slug="tenant-one",
-                    speaker_id="S_global_unique",
-                    apply=True,
-                    platform_speaker_ids=[],
-                )
-                first_prepared.set()
-                release_first.wait(timeout=5)
-                db.commit()
-                outcomes.append(("tenant-one", "assigned"))
-
-        def claim_second() -> None:
+        def claim(tenant_id: str) -> None:
             try:
                 with Session() as db:
-                    assign_speaker_slot(
+                    actor = db.get(User, "platform-user")
+                    admin_console.assign_tenant_voice_slot(
                         db,
-                        tenant_slug="tenant-two",
+                        actor=actor,
+                        tenant_id=tenant_id,
                         speaker_id="S_global_unique",
-                        apply=True,
-                        platform_speaker_ids=[],
+                        reason="concurrency test",
                     )
                     db.commit()
-                    outcomes.append(("tenant-two", "assigned"))
+                    outcomes.append((tenant_id, "assigned"))
             except SpeakerSlotAssignmentError:
-                outcomes.append(("tenant-two", "rejected"))
-            finally:
-                second_done.set()
+                outcomes.append((tenant_id, "rejected"))
+            except Exception as exc:  # noqa: BLE001 - a deadlock must fail with its real type.
+                outcomes.append((tenant_id, f"unexpected:{type(exc).__name__}"))
 
-        first = threading.Thread(target=claim_first, daemon=True)
-        second = threading.Thread(target=claim_second, daemon=True)
-        first.start()
-        assert first_prepared.wait(timeout=5)
-        second.start()
-        assert not second_done.wait(timeout=0.25)
-        release_first.set()
-        first.join(timeout=5)
-        second.join(timeout=5)
-
-        assert sorted(outcomes) == [
-            ("tenant-one", "assigned"),
-            ("tenant-two", "rejected"),
+        threads = [
+            threading.Thread(target=claim, args=(tenant_id,), daemon=True)
+            for tenant_id in ("tenant-one", "tenant-two")
         ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert sorted(status for _, status in outcomes) == ["assigned", "rejected"]
         with Session() as db:
-            configs = list(db.scalars(select(ProviderConfig)))
-            assert len(configs) == 1
-            assert configs[0].tenant_id == "tenant-one"
-            assert configs[0].config == {"speaker_ids": ["S_global_unique"]}
+            configs = list(
+                db.scalars(
+                    select(ProviderConfig)
+                    .where(ProviderConfig.tenant_id.is_not(None))
+                    .order_by(ProviderConfig.tenant_id)
+                )
+            )
+            assert len(configs) == 2
+            assigned = [
+                config.tenant_id
+                for config in configs
+                if config.config == {"speaker_ids": ["S_global_unique"]}
+            ]
+            assert len(assigned) == 1
     finally:
-        release_first.set()
-        if first is not None:
-            first.join(timeout=5)
-        if second is not None:
-            second.join(timeout=5)
+        try:
+            start_together.abort()
+        except threading.BrokenBarrierError:
+            pass
+        for thread in threads:
+            thread.join(timeout=5)
         with engine.begin() as connection:
             connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         engine.dispose()

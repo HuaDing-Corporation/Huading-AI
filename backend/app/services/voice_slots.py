@@ -26,6 +26,7 @@ class SpeakerSlotAssignmentSummary:
     speaker_id: str
     config_created: bool
     changed: bool
+    previous_speaker_ids: tuple[str, ...]
     speaker_ids: tuple[str, ...]
 
 
@@ -100,6 +101,7 @@ def assign_speaker_slot(
 
     values = dict(tenant_config.config or {}) if tenant_config is not None else {}
     assigned_ids = speaker_ids(values.get("speaker_ids"))
+    previous_speaker_ids = tuple(assigned_ids)
     slot_added = normalized_speaker_id not in assigned_ids
     if slot_added:
         assigned_ids.append(normalized_speaker_id)
@@ -129,6 +131,7 @@ def assign_speaker_slot(
         speaker_id=normalized_speaker_id,
         config_created=config_created,
         changed=changed,
+        previous_speaker_ids=previous_speaker_ids,
         speaker_ids=tuple(assigned_ids),
     )
 

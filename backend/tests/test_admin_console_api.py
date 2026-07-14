@@ -730,7 +730,7 @@ def test_failed_admin_mutation_rolls_back_value_and_audit(
         assert audits == 0
 
 
-def test_failed_task_retry_requeues_without_new_usage_record(
+def test_settled_video_task_retry_requeues_without_charging_again(
     auth_context,
     auth_db,
     platform_acme,
@@ -746,6 +746,25 @@ def test_failed_task_retry_requeues_without_new_usage_record(
 
     monkeypatch.setattr(route.generate_image_task, "apply_async", fake_apply_async)
     with auth_db() as db:
+        settled = db.get(UsageRecord, fixture["usage_id"])
+        db.add(
+            UsageRecord(
+                tenant_id=settled.tenant_id,
+                subscription_id=settled.subscription_id,
+                video_task_id=settled.video_task_id,
+                capability=settled.capability,
+                provider=settled.provider,
+                model=settled.model,
+                unit=settled.unit,
+                quantity=settled.quantity,
+                credits=settled.credits,
+                cost_cents=0,
+                status="released",
+                created_at=settled.created_at - timedelta(minutes=1),
+                settled_at=settled.created_at,
+            )
+        )
+        db.commit()
         usage_before = db.scalar(select(func.count(UsageRecord.id)))
 
     response = TestClient(app).post(
@@ -753,7 +772,15 @@ def test_failed_task_retry_requeues_without_new_usage_record(
         headers=auth_context["headers"],
     )
     assert response.status_code == 202
-    assert response.json()["data"]["status"] == "queued"
+    assert response.json()["data"] == {
+        "id": fixture["task_id"],
+        "task_family": "video",
+        "tenant_id": fixture["tenant_id"],
+        "status": "queued",
+        "progress": 0,
+        "charged": False,
+        "credits": 0,
+    }
     assert enqueued["task_id"] == fixture["task_id"]
     assert enqueued["queue"] == "image"
     assert enqueued["args"][0]["topic"] == "fixture prompt"
@@ -780,6 +807,74 @@ def test_failed_task_retry_requeues_without_new_usage_record(
     )
     assert second.status_code == 409
     assert second.json()["error"]["code"] == "TASK_NOT_RETRYABLE"
+
+
+def test_released_video_task_retry_reserves_and_settles_exactly_ten_credits(
+    auth_context,
+    auth_db,
+    platform_acme,
+    monkeypatch,
+) -> None:
+    from app.api.v1.routes import admin_console as route
+    from app.services.quota import settle_reserved_quota
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    monkeypatch.setattr(route.generate_image_task, "apply_async", lambda **kwargs: None)
+    with auth_db() as db:
+        usage = db.get(UsageRecord, fixture["usage_id"])
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        usage.status = "released"
+        used_before = subscription.quota_credits_used
+        reserved_before = subscription.quota_credits_reserved
+        db.commit()
+
+    response = TestClient(app).post(
+        f"/api/v1/admin/console/tasks/{fixture['task_id']}/retry",
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 202
+    assert response.json()["data"]["charged"] is True
+    assert response.json()["data"]["credits"] == 10
+    with auth_db() as db:
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        reservations = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.video_task_id == fixture["task_id"],
+                    UsageRecord.status == "reserved",
+                    UsageRecord.credits > 0,
+                )
+            )
+        )
+        assert len(reservations) == 1
+        assert reservations[0].credits == Decimal("10")
+        assert subscription.quota_credits_used == used_before
+        assert subscription.quota_credits_reserved == reserved_before + 10
+        settle_reserved_quota(
+            db,
+            tenant_id=fixture["tenant_id"],
+            video_task_id=fixture["task_id"],
+            actual_seconds=1,
+            cost_cents=4,
+        )
+        db.commit()
+
+    with auth_db() as db:
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        settled = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.video_task_id == fixture["task_id"],
+                    UsageRecord.status == "settled",
+                    UsageRecord.credits > 0,
+                )
+            )
+        )
+        assert subscription.quota_credits_used == used_before + 10
+        assert subscription.quota_credits_reserved == reserved_before
+        assert len(settled) == 1
+        assert settled[0].credits == Decimal("10")
 
 
 def test_failed_task_retry_dispatch_failure_is_compensated_and_can_retry(
@@ -841,6 +936,156 @@ def test_failed_task_retry_dispatch_failure_is_compensated_and_can_retry(
     assert attempts == 2
 
 
+def test_compensation_failure_leaves_a_stale_queued_task_redispatchable(
+    auth_context,
+    auth_db,
+    platform_acme,
+    monkeypatch,
+) -> None:
+    from app.api.v1.routes import admin_console as route
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    attempts = 0
+
+    def flaky_apply_async(**kwargs) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("broker unavailable")
+
+    def failed_compensation(*args, **kwargs):
+        raise RuntimeError("compensation database unavailable")
+
+    monkeypatch.setattr(route.generate_image_task, "apply_async", flaky_apply_async)
+    monkeypatch.setattr(
+        route.admin_console,
+        "compensate_task_retry_enqueue_failure",
+        failed_compensation,
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+
+    first = client.post(
+        f"/api/v1/admin/console/tasks/{fixture['task_id']}/retry",
+        headers=auth_context["headers"],
+    )
+
+    assert first.status_code == 503
+    assert first.json()["error"]["code"] == "TASK_RETRY_ENQUEUE_FAILED"
+    with auth_db() as db:
+        task = db.get(VideoTask, fixture["task_id"])
+        task.updated_at = datetime.now(UTC) - timedelta(seconds=61)
+        db.commit()
+
+    second = client.post(
+        f"/api/v1/admin/console/tasks/{fixture['task_id']}/retry",
+        headers=auth_context["headers"],
+    )
+
+    assert second.status_code == 202
+    assert second.json()["data"]["charged"] is False
+    assert second.json()["data"]["credits"] == 0
+    assert attempts == 2
+    with auth_db() as db:
+        audits = db.scalar(
+            select(func.count(AdminAuditLog.id)).where(
+                AdminAuditLog.action == "task_retry",
+                AdminAuditLog.target_id == fixture["task_id"],
+            )
+        )
+        assert audits == 1
+
+
+def test_committed_but_never_dispatched_retry_can_be_redispatched_without_second_audit(
+    auth_context,
+    auth_db,
+    platform_acme,
+    monkeypatch,
+) -> None:
+    from app.api.v1.routes import admin_console as route
+    from app.services import admin_console as admin_console_service
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    with auth_db() as db:
+        actor = db.get(User, auth_context["user_id"])
+        admin_console_service.prepare_task_retry(
+            db,
+            actor=actor,
+            task_id=fixture["task_id"],
+        )
+        db.commit()
+    with auth_db() as db:
+        task = db.get(VideoTask, fixture["task_id"])
+        task.updated_at = datetime.now(UTC) - timedelta(seconds=61)
+        db.commit()
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        route.generate_image_task,
+        "apply_async",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    response = TestClient(app).post(
+        f"/api/v1/admin/console/tasks/{fixture['task_id']}/retry",
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 202
+    assert response.json()["data"]["charged"] is False
+    assert len(calls) == 1
+    assert calls[0]["task_id"] == fixture["task_id"]
+    assert calls[0]["queue"] == "image"
+    assert calls[0]["args"][0]["topic"] == "fixture prompt"
+    with auth_db() as db:
+        audits = db.scalar(
+            select(func.count(AdminAuditLog.id)).where(
+                AdminAuditLog.action == "task_retry",
+                AdminAuditLog.target_id == fixture["task_id"],
+            )
+        )
+        assert audits == 1
+
+
+def test_retry_enqueue_compensation_is_idempotent(
+    auth_context,
+    auth_db,
+    platform_acme,
+) -> None:
+    from app.services import admin_console as admin_console_service
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    with auth_db() as db:
+        actor = db.get(User, auth_context["user_id"])
+        admin_console_service.prepare_task_retry(
+            db,
+            actor=actor,
+            task_id=fixture["task_id"],
+        )
+        db.commit()
+    for _ in range(2):
+        with auth_db() as db:
+            actor = db.get(User, auth_context["user_id"])
+            admin_console_service.compensate_task_retry_enqueue_failure(
+                db,
+                actor=actor,
+                task_id=fixture["task_id"],
+            )
+            db.commit()
+
+    with auth_db() as db:
+        task = db.get(VideoTask, fixture["task_id"])
+        audits = list(
+            db.scalars(
+                select(AdminAuditLog).where(
+                    AdminAuditLog.action == "task_retry",
+                    AdminAuditLog.target_id == fixture["task_id"],
+                )
+            )
+        )
+        assert task.status == "failed"
+        assert task.error_code == "TASK_RETRY_ENQUEUE_FAILED"
+        assert len(audits) == 2
+
+
 def test_admin_task_retry_reuses_reverse_video_and_replicate_output_paths(
     auth_context,
     auth_db,
@@ -885,11 +1130,15 @@ def test_admin_task_retry_reuses_reverse_video_and_replicate_output_paths(
 
     assert reverse_response.status_code == 202
     assert reverse_response.json()["data"]["task_family"] == "reverse_prompt"
+    assert reverse_response.json()["data"]["charged"] is True
+    assert reverse_response.json()["data"]["credits"] == 100
     assert reverse_calls == [
         {"args": [jobs["reverse_job_id"]], "task_id": jobs["reverse_job_id"], "queue": "image"}
     ]
     assert replicate_response.status_code == 202
     assert replicate_response.json()["data"]["task_family"] == "ecom_replicate"
+    assert replicate_response.json()["data"]["charged"] is False
+    assert replicate_response.json()["data"]["credits"] == 0
     assert replicate_calls == [
         {
             "args": [jobs["replicate_job_id"]],
@@ -935,6 +1184,131 @@ def test_admin_task_retry_reuses_reverse_video_and_replicate_output_paths(
         assert [output.status for output in outputs] == ["planned", "planned"]
         assert usage_after == usage_before + 1  # Reverse video reservation only.
         assert len(retry_audits) == 2
+
+
+def test_reverse_retry_released_charge_settles_once_and_replicate_retry_stays_free(
+    auth_context,
+    auth_db,
+    platform_acme,
+    monkeypatch,
+) -> None:
+    from app.api.v1.routes import admin_console as route
+    from app.services.quota import settle_reverse_prompt_video_quota
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    jobs = _seed_non_video_task_families(auth_db, fixture)
+    monkeypatch.setattr(
+        route.generate_reverse_prompt_video_task,
+        "apply_async",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        route.generate_ecom_replicate_task,
+        "apply_async",
+        lambda **kwargs: None,
+    )
+    with auth_db() as db:
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        db.add_all(
+            [
+                UsageRecord(
+                    tenant_id=fixture["tenant_id"],
+                    subscription_id=subscription.id,
+                    reverse_prompt_job_id=jobs["reverse_job_id"],
+                    capability="reverse_prompt_video",
+                    provider="apimart",
+                    model="gemini-3.1-pro-preview",
+                    unit="call",
+                    quantity=Decimal("1"),
+                    credits=Decimal("100"),
+                    cost_cents=0,
+                    status="released",
+                ),
+                UsageRecord(
+                    tenant_id=fixture["tenant_id"],
+                    subscription_id=subscription.id,
+                    capability="image",
+                    provider="huading",
+                    model="ecom-replicate",
+                    unit="image",
+                    quantity=Decimal("2"),
+                    credits=Decimal("30"),
+                    cost_cents=0,
+                    status="settled",
+                    settled_at=datetime.now(UTC),
+                ),
+            ]
+        )
+        db.flush()
+        used_before = subscription.quota_credits_used
+        reserved_before = subscription.quota_credits_reserved
+        positive_before = db.scalar(
+            select(func.count(UsageRecord.id)).where(UsageRecord.credits > 0)
+        )
+        db.commit()
+
+    client = TestClient(app)
+    reverse_response = client.post(
+        f"/api/v1/admin/console/tasks/{jobs['reverse_job_id']}/retry",
+        params={"task_family": "reverse_prompt"},
+        headers=auth_context["headers"],
+    )
+    replicate_response = client.post(
+        f"/api/v1/admin/console/tasks/{jobs['replicate_job_id']}/retry",
+        params={"task_family": "ecom_replicate"},
+        headers=auth_context["headers"],
+    )
+
+    assert reverse_response.status_code == 202
+    assert reverse_response.json()["data"]["charged"] is True
+    assert reverse_response.json()["data"]["credits"] == 100
+    assert replicate_response.status_code == 202
+    assert replicate_response.json()["data"]["charged"] is False
+    assert replicate_response.json()["data"]["credits"] == 0
+    with auth_db() as db:
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        positive_after_retry = db.scalar(
+            select(func.count(UsageRecord.id)).where(UsageRecord.credits > 0)
+        )
+        reservations = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.reverse_prompt_job_id == jobs["reverse_job_id"],
+                    UsageRecord.status == "reserved",
+                )
+            )
+        )
+        assert positive_after_retry == positive_before + 1
+        assert len(reservations) == 1
+        assert reservations[0].credits == Decimal("100")
+        assert subscription.quota_credits_used == used_before
+        assert subscription.quota_credits_reserved == reserved_before + 100
+        settle_reverse_prompt_video_quota(
+            db,
+            tenant_id=fixture["tenant_id"],
+            reverse_prompt_job_id=jobs["reverse_job_id"],
+            provider="apimart",
+            model="gemini-3.1-pro-preview",
+            total_tokens=123,
+            cost_cents=7,
+        )
+        db.commit()
+
+    with auth_db() as db:
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        settled_retry_records = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.reverse_prompt_job_id == jobs["reverse_job_id"],
+                    UsageRecord.status == "settled",
+                    UsageRecord.credits > 0,
+                )
+            )
+        )
+        assert subscription.quota_credits_used == used_before + 100
+        assert subscription.quota_credits_reserved == reserved_before
+        assert len(settled_retry_records) == 1
+        assert settled_retry_records[0].credits == Decimal("100")
 
 
 def test_non_video_admin_retry_dispatch_failures_are_compensated(
@@ -1017,6 +1391,197 @@ def test_non_video_admin_retry_dispatch_failures_are_compensated(
     assert replicate_attempts == 2
 
 
+def test_non_video_stale_retries_redispatch_without_duplicate_charge_or_audit(
+    auth_context,
+    auth_db,
+    platform_acme,
+    monkeypatch,
+) -> None:
+    from app.api.v1.routes import admin_console as route
+    from app.services import admin_console as admin_console_service
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    jobs = _seed_non_video_task_families(auth_db, fixture)
+    with auth_db() as db:
+        actor = db.get(User, auth_context["user_id"])
+        admin_console_service.prepare_reverse_prompt_retry(
+            db,
+            actor=actor,
+            job_id=jobs["reverse_job_id"],
+        )
+        admin_console_service.prepare_ecom_replicate_retry(
+            db,
+            actor=actor,
+            job_id=jobs["replicate_job_id"],
+        )
+        db.commit()
+    with auth_db() as db:
+        reverse_job = db.get(ReversePromptJob, jobs["reverse_job_id"])
+        replicate_job = db.get(EcomReplicateJob, jobs["replicate_job_id"])
+        reverse_job.updated_at = datetime.now(UTC) - timedelta(seconds=61)
+        replicate_job.updated_at = datetime.now(UTC) - timedelta(seconds=61)
+        usage_before = db.scalar(select(func.count(UsageRecord.id)))
+        db.commit()
+
+    reverse_calls: list[dict[str, object]] = []
+    replicate_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        route.generate_reverse_prompt_video_task,
+        "apply_async",
+        lambda **kwargs: reverse_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        route.generate_ecom_replicate_task,
+        "apply_async",
+        lambda **kwargs: replicate_calls.append(kwargs),
+    )
+    client = TestClient(app)
+    reverse = client.post(
+        f"/api/v1/admin/console/tasks/{jobs['reverse_job_id']}/retry",
+        params={"task_family": "reverse_prompt"},
+        headers=auth_context["headers"],
+    )
+    replicate = client.post(
+        f"/api/v1/admin/console/tasks/{jobs['replicate_job_id']}/retry",
+        params={"task_family": "ecom_replicate"},
+        headers=auth_context["headers"],
+    )
+
+    assert reverse.status_code == 202
+    assert reverse.json()["data"]["charged"] is True
+    assert reverse.json()["data"]["credits"] == 100
+    assert replicate.status_code == 202
+    assert replicate.json()["data"]["charged"] is False
+    assert replicate.json()["data"]["credits"] == 0
+    assert len(reverse_calls) == 1
+    assert len(replicate_calls) == 1
+    with auth_db() as db:
+        assert db.scalar(select(func.count(UsageRecord.id))) == usage_before
+        audits = list(
+            db.scalars(
+                select(AdminAuditLog).where(
+                    AdminAuditLog.action == "task_retry",
+                    AdminAuditLog.target_id.in_(
+                        (jobs["reverse_job_id"], jobs["replicate_job_id"])
+                    ),
+                )
+            )
+        )
+        assert len(audits) == 2
+
+
+def test_task_monitor_exposes_all_stale_unclaimed_retries_as_retryable_queued(
+    auth_context,
+    auth_db,
+    platform_acme,
+) -> None:
+    from app.services import admin_console as admin_console_service
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    jobs = _seed_non_video_task_families(auth_db, fixture)
+    with auth_db() as db:
+        actor = db.get(User, auth_context["user_id"])
+        admin_console_service.prepare_task_retry(
+            db,
+            actor=actor,
+            task_id=fixture["task_id"],
+        )
+        admin_console_service.prepare_reverse_prompt_retry(
+            db,
+            actor=actor,
+            job_id=jobs["reverse_job_id"],
+        )
+        admin_console_service.prepare_ecom_replicate_retry(
+            db,
+            actor=actor,
+            job_id=jobs["replicate_job_id"],
+        )
+        db.commit()
+    with auth_db() as db:
+        for model, item_id in (
+            (VideoTask, fixture["task_id"]),
+            (ReversePromptJob, jobs["reverse_job_id"]),
+            (EcomReplicateJob, jobs["replicate_job_id"]),
+        ):
+            item = db.get(model, item_id)
+            item.updated_at = datetime.now(UTC) - timedelta(seconds=61)
+        db.commit()
+
+    response = TestClient(app).get(
+        "/api/v1/admin/console/tasks",
+        params={"page_size": 100},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    items = {item["id"]: item for item in response.json()["data"]["items"]}
+    for item_id in (
+        fixture["task_id"],
+        jobs["reverse_job_id"],
+        jobs["replicate_job_id"],
+    ):
+        assert items[item_id]["status"] == "queued"
+        assert items[item_id]["retryable"] is True
+
+
+def test_non_video_retry_enqueue_compensations_are_idempotent(
+    auth_context,
+    auth_db,
+    platform_acme,
+) -> None:
+    from app.services import admin_console as admin_console_service
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    jobs = _seed_non_video_task_families(auth_db, fixture)
+    with auth_db() as db:
+        actor = db.get(User, auth_context["user_id"])
+        admin_console_service.prepare_reverse_prompt_retry(
+            db,
+            actor=actor,
+            job_id=jobs["reverse_job_id"],
+        )
+        replicate = admin_console_service.prepare_ecom_replicate_retry(
+            db,
+            actor=actor,
+            job_id=jobs["replicate_job_id"],
+        )
+        output_indexes = list(replicate.output_indexes)
+        db.commit()
+
+    for _ in range(2):
+        with auth_db() as db:
+            actor = db.get(User, auth_context["user_id"])
+            admin_console_service.compensate_reverse_prompt_retry_enqueue_failure(
+                db,
+                actor=actor,
+                job_id=jobs["reverse_job_id"],
+            )
+            admin_console_service.compensate_ecom_replicate_retry_enqueue_failure(
+                db,
+                actor=actor,
+                job_id=jobs["replicate_job_id"],
+                output_indexes=output_indexes,
+            )
+            db.commit()
+
+    with auth_db() as db:
+        reverse_job = db.get(ReversePromptJob, jobs["reverse_job_id"])
+        replicate_job = db.get(EcomReplicateJob, jobs["replicate_job_id"])
+        audits = list(
+            db.scalars(
+                select(AdminAuditLog).where(
+                    AdminAuditLog.action == "task_retry",
+                    AdminAuditLog.target_id.in_(
+                        (jobs["reverse_job_id"], jobs["replicate_job_id"])
+                    ),
+                )
+            )
+        )
+        assert reverse_job.status == "failed"
+        assert replicate_job.status == "failed"
+        assert len(audits) == 4
+
+
 def test_admin_retry_runs_legacy_worker_without_charging_tenant_credits_again(
     auth_context,
     auth_db,
@@ -1032,6 +1597,7 @@ def test_admin_retry_runs_legacy_worker_without_charging_tenant_credits_again(
     fixture = _seed_console_read_fixture(auth_db, auth_context)
     video_path = tmp_path / "legacy-worker-output.mp4"
     video_path.write_bytes(b"fixture-mp4")
+    generate_calls = 0
 
     class FakeProgressStore:
         def update(self, *args, **kwargs) -> None:
@@ -1044,6 +1610,8 @@ def test_admin_retry_runs_legacy_worker_without_charging_tenant_credits_again(
             return None
 
     async def fake_generate(params, progress_cb):
+        nonlocal generate_calls
+        generate_calls += 1
         return {
             "video_path": str(video_path),
             "duration": 3.0,
@@ -1067,6 +1635,8 @@ def test_admin_retry_runs_legacy_worker_without_charging_tenant_credits_again(
         headers=auth_context["headers"],
     )
     assert response.status_code == 202
+    assert response.json()["data"]["charged"] is False
+    assert response.json()["data"]["credits"] == 0
 
     with auth_db() as db:
         task = db.get(VideoTask, fixture["task_id"])
@@ -1096,8 +1666,11 @@ def test_admin_retry_runs_legacy_worker_without_charging_tenant_credits_again(
     )
 
     result = video_tasks.generate_video_task.run(payload)
+    duplicate = video_tasks.generate_video_task.run(payload)
 
     assert result["status"] == "SUCCESS"
+    assert duplicate["status"] == "done"
+    assert generate_calls == 1
     with auth_db() as db:
         task = db.get(VideoTask, fixture["task_id"])
         subscription = db.get(Subscription, fixture["subscription_id"])
@@ -1118,6 +1691,97 @@ def test_admin_retry_runs_legacy_worker_without_charging_tenant_credits_again(
         assert len(cost_records) == 1
         assert cost_records[0].credits == 0
         assert cost_records[0].cost_cents == 1
+
+
+@pytest.mark.parametrize(
+    ("module_name", "task_name", "runner_name"),
+    (
+        ("app.workers.image_gen", "generate_image_task", "run_image_generation"),
+        ("app.workers.avatar_talk", "generate_avatar_talk_task", "run_avatar_talk_pipeline"),
+        (
+            "app.workers.avatar_talk",
+            "generate_seedance_i2v_task",
+            "run_seedance_i2v_pipeline",
+        ),
+        ("app.workers.video_gen", "generate_video_gen_task", "run_video_gen_pipeline"),
+    ),
+)
+def test_video_worker_entry_claims_queued_task_once_before_running_pipeline(
+    auth_context,
+    auth_db,
+    module_name,
+    task_name,
+    runner_name,
+    monkeypatch,
+) -> None:
+    import importlib
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    with auth_db() as db:
+        task = db.get(VideoTask, fixture["task_id"])
+        task.status = "queued"
+        task.started_at = None
+        task.finished_at = None
+        db.commit()
+
+    module = importlib.import_module(module_name)
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(module, "SessionLocal", auth_db)
+    monkeypatch.setattr(
+        module,
+        runner_name,
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {"status": "executed"},
+    )
+    payload = {
+        "tenant_id": fixture["tenant_id"],
+        "video_task_id": fixture["task_id"],
+        "topic": "fixture prompt",
+    }
+    celery_task = getattr(module, task_name)
+
+    first = celery_task.run(payload)
+    duplicate = celery_task.run(payload)
+
+    assert first["status"] == "executed"
+    assert duplicate["status"] == "running"
+    assert len(calls) == 1
+
+
+def test_ecom_replicate_worker_entry_claims_job_once_before_rendering(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    from app.workers import image_gen
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    jobs = _seed_non_video_task_families(auth_db, fixture)
+    with auth_db() as db:
+        job = db.get(EcomReplicateJob, jobs["replicate_job_id"])
+        job.status = "generating"
+        job.started_at = None
+        job.finished_at = None
+        for output in db.scalars(
+            select(EcomReplicateOutput).where(EcomReplicateOutput.job_id == job.id)
+        ):
+            output.status = "planned"
+        db.commit()
+
+    calls: list[tuple[str, int | None]] = []
+    monkeypatch.setattr(image_gen, "SessionLocal", auth_db)
+    monkeypatch.setattr(
+        image_gen,
+        "run_ecom_replicate_generation",
+        lambda job_id, output_index=None: calls.append((job_id, output_index))
+        or {"status": "executed"},
+    )
+
+    first = image_gen.generate_ecom_replicate_task.run(jobs["replicate_job_id"])
+    duplicate = image_gen.generate_ecom_replicate_task.run(jobs["replicate_job_id"])
+
+    assert first["status"] == "executed"
+    assert duplicate["status"] == "generating"
+    assert calls == [(jobs["replicate_job_id"], None)]
 
 
 def test_plan_change_updates_target_auth_entitlements_immediately(

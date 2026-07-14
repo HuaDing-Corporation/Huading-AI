@@ -53,6 +53,7 @@ from app.services.synthetic_label import (
     label_artifact_bytes,
     synthetic_label_context,
 )
+from app.services.task_claims import claim_video_task_for_worker
 from app.workers.celery_app import celery_app
 
 logger = get_logger(__name__)
@@ -2285,6 +2286,13 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
 def generate_avatar_talk_task(self, params: dict[str, Any]) -> dict[str, Any]:
     task_id = self.request.id or params.get("video_task_id") or "unknown"
     tenant_id = str(params["tenant_id"])
+    claim = claim_video_task_for_worker(
+        tenant_id=tenant_id,
+        task_id=str(task_id),
+        session_factory=SessionLocal,
+    )
+    if not claim.claimed:
+        return {"task_id": str(task_id), "status": claim.status}
     logger.info(
         "avatar_talk.queued",
         task_id=task_id,
@@ -2298,6 +2306,13 @@ def generate_avatar_talk_task(self, params: dict[str, Any]) -> dict[str, Any]:
 def generate_seedance_i2v_task(self, params: dict[str, Any]) -> dict[str, Any]:
     task_id = self.request.id or params.get("video_task_id") or "unknown"
     tenant_id = str(params["tenant_id"])
+    claim = claim_video_task_for_worker(
+        tenant_id=tenant_id,
+        task_id=str(task_id),
+        session_factory=SessionLocal,
+    )
+    if not claim.claimed:
+        return {"task_id": str(task_id), "status": claim.status}
     logger.info(
         "seedance_i2v.queued",
         task_id=task_id,
