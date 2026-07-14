@@ -780,6 +780,7 @@ def test_settled_video_task_retry_requeues_without_charging_again(
         "progress": 0,
         "charged": False,
         "credits": 0,
+        "is_estimate": False,
     }
     assert enqueued["task_id"] == fixture["task_id"]
     assert enqueued["queue"] == "image"
@@ -836,6 +837,7 @@ def test_released_video_task_retry_reserves_and_settles_exactly_ten_credits(
     assert response.status_code == 202
     assert response.json()["data"]["charged"] is True
     assert response.json()["data"]["credits"] == 10
+    assert response.json()["data"]["is_estimate"] is False
     with auth_db() as db:
         subscription = db.get(Subscription, fixture["subscription_id"])
         reservations = list(
@@ -875,6 +877,95 @@ def test_released_video_task_retry_reserves_and_settles_exactly_ten_credits(
         assert subscription.quota_credits_reserved == reserved_before
         assert len(settled) == 1
         assert settled[0].credits == Decimal("10")
+
+
+def test_avatar_retry_discloses_estimate_and_settles_once_at_actual_duration(
+    auth_context,
+    auth_db,
+    platform_acme,
+    monkeypatch,
+) -> None:
+    from app.api.v1.routes import admin_console as route
+    from app.services.quota import settle_reserved_quota
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    monkeypatch.setattr(route.generate_avatar_talk_task, "apply_async", lambda **kwargs: None)
+    with auth_db() as db:
+        task = db.get(VideoTask, fixture["task_id"])
+        usage = db.get(UsageRecord, fixture["usage_id"])
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        task.mode = "avatar_talk"
+        task.video_mode = "avatar_talk"
+        task.script = "abcdefghij"
+        usage.capability = "avatar"
+        usage.provider = "omnihuman"
+        usage.model = "jimeng_realman_avatar_picture_omni_v15"
+        usage.unit = "second"
+        usage.quantity = Decimal("10")
+        usage.credits = Decimal("1501")
+        usage.status = "released"
+        subscription.quota_credits_total = 10_000
+        used_before = subscription.quota_credits_used
+        reserved_before = subscription.quota_credits_reserved
+        db.commit()
+
+    response = TestClient(app).post(
+        f"/api/v1/admin/console/tasks/{fixture['task_id']}/retry",
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 202
+    assert response.json()["data"]["charged"] is True
+    assert response.json()["data"]["credits"] == 1501
+    assert response.json()["data"]["is_estimate"] is True
+    with auth_db() as db:
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        assert subscription.quota_credits_used == used_before
+        assert subscription.quota_credits_reserved == reserved_before + 1501
+        settle_reserved_quota(
+            db,
+            tenant_id=fixture["tenant_id"],
+            video_task_id=fixture["task_id"],
+            actual_seconds=12,
+            cost_cents=1800,
+        )
+        db.commit()
+
+    with auth_db() as db:
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        settled = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.video_task_id == fixture["task_id"],
+                    UsageRecord.status == "settled",
+                    UsageRecord.credits > 0,
+                )
+            )
+        )
+        assert subscription.quota_credits_used == used_before + 1801
+        assert subscription.quota_credits_reserved == reserved_before
+        assert len(settled) == 1
+        assert settled[0].credits == Decimal("1801")
+        settle_reserved_quota(
+            db,
+            tenant_id=fixture["tenant_id"],
+            video_task_id=fixture["task_id"],
+            actual_seconds=12,
+            cost_cents=1800,
+        )
+        db.commit()
+
+    with auth_db() as db:
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        settled_count = db.scalar(
+            select(func.count(UsageRecord.id)).where(
+                UsageRecord.video_task_id == fixture["task_id"],
+                UsageRecord.status == "settled",
+                UsageRecord.credits > 0,
+            )
+        )
+        assert subscription.quota_credits_used == used_before + 1801
+        assert settled_count == 1
 
 
 def test_failed_task_retry_dispatch_failure_is_compensated_and_can_retry(
@@ -1132,6 +1223,7 @@ def test_admin_task_retry_reuses_reverse_video_and_replicate_output_paths(
     assert reverse_response.json()["data"]["task_family"] == "reverse_prompt"
     assert reverse_response.json()["data"]["charged"] is True
     assert reverse_response.json()["data"]["credits"] == 100
+    assert reverse_response.json()["data"]["is_estimate"] is False
     assert reverse_calls == [
         {"args": [jobs["reverse_job_id"]], "task_id": jobs["reverse_job_id"], "queue": "image"}
     ]
@@ -1139,6 +1231,7 @@ def test_admin_task_retry_reuses_reverse_video_and_replicate_output_paths(
     assert replicate_response.json()["data"]["task_family"] == "ecom_replicate"
     assert replicate_response.json()["data"]["charged"] is False
     assert replicate_response.json()["data"]["credits"] == 0
+    assert replicate_response.json()["data"]["is_estimate"] is False
     assert replicate_calls == [
         {
             "args": [jobs["replicate_job_id"]],
@@ -1262,9 +1355,11 @@ def test_reverse_retry_released_charge_settles_once_and_replicate_retry_stays_fr
     assert reverse_response.status_code == 202
     assert reverse_response.json()["data"]["charged"] is True
     assert reverse_response.json()["data"]["credits"] == 100
+    assert reverse_response.json()["data"]["is_estimate"] is False
     assert replicate_response.status_code == 202
     assert replicate_response.json()["data"]["charged"] is False
     assert replicate_response.json()["data"]["credits"] == 0
+    assert replicate_response.json()["data"]["is_estimate"] is False
     with auth_db() as db:
         subscription = db.get(Subscription, fixture["subscription_id"])
         positive_after_retry = db.scalar(
@@ -1309,6 +1404,73 @@ def test_reverse_retry_released_charge_settles_once_and_replicate_retry_stays_fr
         assert subscription.quota_credits_reserved == reserved_before
         assert len(settled_retry_records) == 1
         assert settled_retry_records[0].credits == Decimal("100")
+
+
+def test_settled_reverse_video_retry_is_free_and_adds_no_positive_usage(
+    auth_context,
+    auth_db,
+    platform_acme,
+    monkeypatch,
+) -> None:
+    from app.api.v1.routes import admin_console as route
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    jobs = _seed_non_video_task_families(auth_db, fixture)
+    monkeypatch.setattr(
+        route.generate_reverse_prompt_video_task,
+        "apply_async",
+        lambda **kwargs: None,
+    )
+    with auth_db() as db:
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        db.add(
+            UsageRecord(
+                tenant_id=fixture["tenant_id"],
+                subscription_id=subscription.id,
+                reverse_prompt_job_id=jobs["reverse_job_id"],
+                capability="reverse_prompt_video",
+                provider="apimart",
+                model="gemini-3.1-pro-preview",
+                unit="call",
+                quantity=Decimal("1"),
+                credits=Decimal("100"),
+                cost_cents=7,
+                status="settled",
+                settled_at=datetime.now(UTC),
+            )
+        )
+        db.flush()
+        used_before = subscription.quota_credits_used
+        positive_before = db.scalar(
+            select(func.count(UsageRecord.id)).where(UsageRecord.credits > 0)
+        )
+        db.commit()
+
+    response = TestClient(app).post(
+        f"/api/v1/admin/console/tasks/{jobs['reverse_job_id']}/retry",
+        params={"task_family": "reverse_prompt"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 202
+    assert response.json()["data"]["charged"] is False
+    assert response.json()["data"]["credits"] == 0
+    assert response.json()["data"]["is_estimate"] is False
+    with auth_db() as db:
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        positive_after = db.scalar(
+            select(func.count(UsageRecord.id)).where(UsageRecord.credits > 0)
+        )
+        reservations = db.scalar(
+            select(func.count(UsageRecord.id)).where(
+                UsageRecord.reverse_prompt_job_id == jobs["reverse_job_id"],
+                UsageRecord.status == "reserved",
+                UsageRecord.credits > 0,
+            )
+        )
+        assert subscription.quota_credits_used == used_before
+        assert positive_after == positive_before
+        assert reservations == 0
 
 
 def test_non_video_admin_retry_dispatch_failures_are_compensated(

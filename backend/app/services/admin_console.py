@@ -52,6 +52,7 @@ class TaskRetryPreparation:
     task: VideoTask | ReversePromptJob | EcomReplicateJob
     charged: bool
     credits: int
+    is_estimate: bool = False
     output_indexes: tuple[int, ...] = ()
 
 
@@ -412,6 +413,10 @@ def _reserved_retry_charge(db: Session, *criteria: Any) -> tuple[bool, int]:
     return True, _credit_units(Decimal(reservation.credits))
 
 
+def _video_retry_is_estimate(task: VideoTask, *, charged: bool) -> bool:
+    return charged and (task.video_mode or task.mode) == "avatar_talk"
+
+
 def prepare_task_retry(
     db: Session,
     *,
@@ -434,6 +439,7 @@ def prepare_task_retry(
             task=task,
             charged=charged,
             credits=credits,
+            is_estimate=_video_retry_is_estimate(task, charged=charged),
         )
     if task.status != "failed":
         raise AppError(
@@ -475,7 +481,12 @@ def prepare_task_retry(
         db,
         UsageRecord.video_task_id == task.id,
     )
-    return TaskRetryPreparation(task=task, charged=charged, credits=credits)
+    return TaskRetryPreparation(
+        task=task,
+        charged=charged,
+        credits=credits,
+        is_estimate=_video_retry_is_estimate(task, charged=charged),
+    )
 
 
 def compensate_task_retry_enqueue_failure(

@@ -205,6 +205,7 @@ class AdminTaskRetryResponse(BaseModel):
     progress: int
     charged: bool
     credits: int = Field(ge=0)
+    is_estimate: bool
 
 
 class AdminVoiceSlotAssignResponse(BaseModel):

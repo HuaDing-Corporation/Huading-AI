@@ -432,6 +432,7 @@ def retry_task(
             progress=task.progress if resolved_family == "video" else 0,
             charged=preparation.charged,
             credits=preparation.credits,
+            is_estimate=preparation.is_estimate,
         )
         db.commit()
     except Exception:
