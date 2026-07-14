@@ -804,6 +804,37 @@ class UsageRecord(Base):
     settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
 
+class AdminAuditLog(Base):
+    __tablename__ = "admin_audit_logs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    actor_user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"))
+    actor_tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"))
+    action: Mapped[str] = mapped_column(String(32))
+    target_tenant_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("tenants.id"), nullable=True
+    )
+    target_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    before: Mapped[dict[str, object] | None] = mapped_column(_json_type(), nullable=True)
+    after: Mapped[dict[str, object] | None] = mapped_column(_json_type(), nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('credits_adjust', 'plan_change', 'status_change', "
+            "'voice_slot_assign', 'task_retry')",
+            name="ck_admin_audit_logs_action",
+        ),
+        Index("ix_admin_audit_logs_created_at", created_at.desc()),
+        Index(
+            "ix_admin_audit_logs_target_tenant_created_at",
+            "target_tenant_id",
+            "created_at",
+        ),
+    )
+
+
 class PlatformAccount(Base):
     __tablename__ = "platform_accounts"
     __table_args__ = (

@@ -36,6 +36,7 @@ from app.services.synthetic_label import (
     label_artifact_bytes,
     synthetic_label_context,
 )
+from app.services.task_claims import claim_video_task_for_worker
 from app.workers.celery_app import celery_app
 
 logger = get_logger(__name__)
@@ -533,6 +534,13 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
 def generate_video_gen_task(self, params: dict[str, Any]) -> dict[str, Any]:
     tenant_id = str(params["tenant_id"])
     task_id = str(params["video_task_id"])
+    claim = claim_video_task_for_worker(
+        tenant_id=tenant_id,
+        task_id=task_id,
+        session_factory=SessionLocal,
+    )
+    if not claim.claimed:
+        return {"task_id": task_id, "status": claim.status}
     logger.info(
         "video_gen.queued",
         task_id=task_id,

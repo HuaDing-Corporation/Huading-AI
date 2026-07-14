@@ -112,7 +112,7 @@ def tenant_entitlements(db: Session, *, tenant_id: str) -> set[str]:
     if access.has_huading:
         entitlements.update({"voice_clone_vip", "analytics_view"})
     if access.is_platform:
-        entitlements.add("analytics_platform")
+        entitlements.update({"analytics_platform", "admin_console"})
     return entitlements
 
 

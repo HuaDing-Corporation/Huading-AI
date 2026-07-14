@@ -377,6 +377,27 @@ def confirm_response(job: EcomReplicateJob) -> EcomReplicateConfirmAccepted:
     )
 
 
+def _reset_outputs_for_retry(
+    db: Session,
+    *,
+    job: EcomReplicateJob,
+    outputs: list[EcomReplicateOutput],
+) -> None:
+    now = datetime.now(UTC)
+    for output in outputs:
+        output.status = "planned"
+        output.error_code = None
+        output.error_message = None
+        output.updated_at = now
+    job.status = "generating"
+    job.error_code = None
+    job.error_message = None
+    job.started_at = None
+    job.finished_at = None
+    job.updated_at = now
+    db.flush()
+
+
 def prepare_output_retry(
     db: Session,
     *,
@@ -410,23 +431,59 @@ def prepare_output_retry(
             code="ECOM_REPLICATE_OUTPUT_NOT_FOUND",
             status_code=404,
         )
-    if job.status not in {"partial_failed", "completed"} or output.status != "failed":
+    if job.status not in {"partial_failed", "failed", "completed"} or output.status != "failed":
         raise AppError(
             "Replicate output is not retryable.",
             code="ECOM_REPLICATE_OUTPUT_NOT_RETRYABLE",
             status_code=409,
         )
-    output.status = "planned"
-    output.error_code = None
-    output.error_message = None
-    output.updated_at = datetime.now(UTC)
-    job.status = "generating"
-    job.error_code = None
-    job.error_message = None
-    job.finished_at = None
-    job.updated_at = datetime.now(UTC)
-    db.flush()
+    _reset_outputs_for_retry(db, job=job, outputs=[output])
     return job, output
+
+
+def prepare_failed_outputs_retry(
+    db: Session,
+    *,
+    tenant_id: str,
+    job_id: str,
+) -> tuple[EcomReplicateJob, list[EcomReplicateOutput]]:
+    job = db.scalar(
+        select(EcomReplicateJob)
+        .where(EcomReplicateJob.id == job_id, EcomReplicateJob.tenant_id == tenant_id)
+        .with_for_update()
+    )
+    if job is None:
+        raise AppError(
+            "Replicate job not found.",
+            code="ECOM_REPLICATE_JOB_NOT_FOUND",
+            status_code=404,
+        )
+    if job.status not in {"partial_failed", "failed", "completed"}:
+        raise AppError(
+            "Replicate job is not retryable.",
+            code="TASK_NOT_RETRYABLE",
+            status_code=409,
+        )
+    outputs = list(
+        db.scalars(
+            select(EcomReplicateOutput)
+            .where(
+                EcomReplicateOutput.job_id == job.id,
+                EcomReplicateOutput.tenant_id == tenant_id,
+                EcomReplicateOutput.status == "failed",
+            )
+            .order_by(EcomReplicateOutput.index)
+            .with_for_update()
+        )
+    )
+    if not outputs:
+        raise AppError(
+            "Replicate job has no failed outputs to retry.",
+            code="TASK_NOT_RETRYABLE",
+            status_code=409,
+        )
+    _reset_outputs_for_retry(db, job=job, outputs=outputs)
+    return job, outputs
 
 
 def output_response(

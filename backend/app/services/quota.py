@@ -736,6 +736,67 @@ def reserve_image_generation_quota(
     )
 
 
+def reserve_released_video_task_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    video_task_id: str,
+) -> Reservation | None:
+    settled = db.scalar(
+        select(UsageRecord.id).where(
+            UsageRecord.tenant_id == tenant_id,
+            UsageRecord.video_task_id == video_task_id,
+            UsageRecord.status == "settled",
+            UsageRecord.credits > 0,
+        )
+    )
+    if settled is not None:
+        return None
+    released = db.scalar(
+        select(UsageRecord)
+        .where(
+            UsageRecord.tenant_id == tenant_id,
+            UsageRecord.video_task_id == video_task_id,
+            UsageRecord.status == "released",
+            UsageRecord.credits > 0,
+        )
+        .order_by(UsageRecord.created_at.desc(), UsageRecord.id.desc())
+    )
+    if released is None:
+        return None
+
+    subscription = _active_subscription_for_update(db, tenant_id)
+    credits = Decimal(released.credits)
+    reservation_units = _credit_units(credits)
+    if remaining_credits(subscription) < reservation_units:
+        raise AppError(
+            "Insufficient tenant quota.",
+            code="TENANT_QUOTA_EXCEEDED",
+            status_code=403,
+        )
+    subscription.quota_credits_reserved += reservation_units
+    usage_record = UsageRecord(
+        tenant_id=tenant_id,
+        subscription_id=subscription.id,
+        video_task_id=video_task_id,
+        capability=released.capability,
+        provider=released.provider,
+        model=released.model,
+        unit=released.unit,
+        quantity=Decimal(released.quantity),
+        credits=credits,
+        cost_cents=0,
+        status="reserved",
+    )
+    db.add(usage_record)
+    return Reservation(
+        subscription=subscription,
+        usage_record=usage_record,
+        estimated_seconds=max(1, int(Decimal(released.quantity))),
+        estimated_credits=credits,
+    )
+
+
 def _reserved_record(db: Session, *, tenant_id: str, video_task_id: str) -> UsageRecord | None:
     return db.scalar(
         select(UsageRecord).where(

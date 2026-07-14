@@ -255,6 +255,11 @@ def test_worker_routes_seedance_modes(monkeypatch, tmp_path):
     monkeypatch.setattr(video_tasks, "build_progress_store", lambda url: _Store())
     monkeypatch.setattr(video_tasks, "label_artifact_bytes", lambda content, **_kwargs: content)
     monkeypatch.setattr(
+        video_tasks,
+        "claim_video_task_for_worker",
+        lambda **_kwargs: SimpleNamespace(claimed=True, status="running"),
+    )
+    monkeypatch.setattr(
         video_tasks, "create_object_storage", lambda settings: _FakeStorage()
     )
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -12,14 +11,19 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.db.models import Plan, ProviderConfig, Role, Subscription, Tenant, UsageRecord, User
+from app.db.models import Plan, Role, Subscription, Tenant, UsageRecord, User
 from app.db.session import SessionLocal
+from app.services.voice_slots import (
+    SpeakerSlotAssignmentError,
+    SpeakerSlotAssignmentSummary,
+)
+from app.services.voice_slots import (
+    assign_speaker_slot as assign_speaker_slot_service,
+)
 
 _MIN_BACKUP_BYTES = 1024
 _PLAIN_DUMP_MARKER = b"PostgreSQL database dump"
 _TARGET_TOTAL_CREDITS = 10_000_000
-_DOUBAO_VOICE_CLONE_PROVIDER = "doubao-voice-clone"
-_SPEAKER_ID_PATTERN = re.compile(r"^S_[A-Za-z0-9_-]{1,157}$")
 
 
 class BackupGateError(RuntimeError):
@@ -27,10 +31,6 @@ class BackupGateError(RuntimeError):
 
 
 class BillingResetError(RuntimeError):
-    pass
-
-
-class SpeakerSlotAssignmentError(RuntimeError):
     pass
 
 
@@ -61,17 +61,6 @@ class BillingResetSummary:
     subscriptions_reset: int
     before: BillingSnapshot
     after: BillingSnapshot
-
-
-@dataclass(frozen=True)
-class SpeakerSlotAssignmentSummary:
-    apply: bool
-    tenant_id: str
-    tenant_slug: str
-    speaker_id: str
-    config_created: bool
-    changed: bool
-    speaker_ids: tuple[str, ...]
 
 
 def validate_pg_dump_backup(backup_path: Path) -> Path:
@@ -251,11 +240,6 @@ def reset_billing_and_admin(
     )
 
 
-def _speaker_ids(raw_ids: object) -> list[str]:
-    candidates = raw_ids.split(",") if isinstance(raw_ids, str) else raw_ids or []
-    return list(dict.fromkeys(str(item).strip() for item in candidates if str(item).strip()))
-
-
 def assign_speaker_slot(
     db: Session,
     *,
@@ -263,87 +247,12 @@ def assign_speaker_slot(
     speaker_id: str,
     apply: bool = False,
 ) -> SpeakerSlotAssignmentSummary:
-    slug = tenant_slug.strip()
-    normalized_speaker_id = speaker_id.strip()
-    if not slug:
-        raise SpeakerSlotAssignmentError("Tenant slug must not be empty.")
-    if not _SPEAKER_ID_PATTERN.fullmatch(normalized_speaker_id):
-        raise SpeakerSlotAssignmentError("Speaker ID must match S_[A-Za-z0-9_-]+.")
-
-    tenant = db.scalar(select(Tenant).where(Tenant.slug == slug))
-    if tenant is None:
-        raise SpeakerSlotAssignmentError("Target tenant was not found.")
-
-    configs = list(
-        db.scalars(
-            select(ProviderConfig).where(
-                ProviderConfig.capability == "voice_clone",
-                ProviderConfig.provider == _DOUBAO_VOICE_CLONE_PROVIDER,
-            )
-        )
-    )
-    tenant_config = next((item for item in configs if item.tenant_id == tenant.id), None)
-    for config in configs:
-        if config is tenant_config:
-            continue
-        values = dict(config.config or {})
-        configured = set(_speaker_ids(values.get("speaker_ids")))
-        used = set(_speaker_ids(values.get("used_speaker_ids")))
-        if normalized_speaker_id in configured or normalized_speaker_id in used:
-            raise SpeakerSlotAssignmentError(
-                "Speaker ID is already assigned to another tenant or the platform pool."
-            )
-
-    active_platform_config = next(
-        (item for item in configs if item.tenant_id is None and item.is_active),
-        None,
-    )
-    platform_values = (
-        dict(active_platform_config.config or {})
-        if active_platform_config is not None
-        else {}
-    )
-    if (
-        "speaker_ids" not in platform_values
-        and normalized_speaker_id
-        in _speaker_ids(settings.engine_doubao_voice_clone_speaker_ids)
-    ):
-        raise SpeakerSlotAssignmentError(
-            "Speaker ID is already assigned to another tenant or the platform pool."
-        )
-
-    values = dict(tenant_config.config or {}) if tenant_config is not None else {}
-    speaker_ids = _speaker_ids(values.get("speaker_ids"))
-    slot_added = normalized_speaker_id not in speaker_ids
-    if slot_added:
-        speaker_ids.append(normalized_speaker_id)
-    config_created = tenant_config is None
-    changed = config_created or slot_added or not bool(tenant_config.is_active)
-
-    if apply and changed:
-        values["speaker_ids"] = speaker_ids
-        if tenant_config is None:
-            tenant_config = ProviderConfig(
-                tenant_id=tenant.id,
-                capability="voice_clone",
-                provider=_DOUBAO_VOICE_CLONE_PROVIDER,
-                config=values,
-                is_active=True,
-            )
-            db.add(tenant_config)
-        else:
-            tenant_config.config = values
-            tenant_config.is_active = True
-        db.flush()
-
-    return SpeakerSlotAssignmentSummary(
+    return assign_speaker_slot_service(
+        db,
+        tenant_slug=tenant_slug,
+        speaker_id=speaker_id,
         apply=apply,
-        tenant_id=tenant.id,
-        tenant_slug=tenant.slug,
-        speaker_id=normalized_speaker_id,
-        config_created=config_created,
-        changed=changed,
-        speaker_ids=tuple(speaker_ids),
+        platform_speaker_ids=settings.engine_doubao_voice_clone_speaker_ids,
     )
 
 
