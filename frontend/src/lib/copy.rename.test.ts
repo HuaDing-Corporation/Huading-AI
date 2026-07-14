@@ -28,9 +28,13 @@ function collectStrings(node: unknown, out: string[]): void {
 }
 
 describe("copy 文案·「租户」→「用户」", () => {
-  it("copy 全量字符串（含函数式插值）无「租户」残留", () => {
+  it("copy 全量字符串（含函数式插值）无「租户」残留（管理后台除外）", () => {
+    // 豁免 copy.admin（ADMIN-CONSOLE-UI-0001）：管理后台是**平台运营内部工具**（仅 admin_console 可见），
+    // 冻结文档通篇用「租户」——它与租户内的「用户」是两个不同概念（租户=组织，owner 邮箱才是用户），
+    // 在运营工具里改叫「用户」会造成歧义。改名要求的范围是「全站**用户可见**文案」（客户界面），后台不在内。
+    const customerFacing = Object.fromEntries(Object.entries(copy).filter(([key]) => key !== "admin"));
     const strings: string[] = [];
-    collectStrings(copy, strings);
+    collectStrings(customerFacing, strings);
     const offenders = strings.filter((s) => s.includes("租户"));
     expect(offenders, `残留「租户」用户可见文案：\n${offenders.join("\n")}`).toEqual([]);
   });

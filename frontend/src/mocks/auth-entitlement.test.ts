@@ -17,31 +17,36 @@ function asNonPlatform(plan: "huading" | "free", role: "admin" | "creator") {
 }
 
 describe("mock /auth/me · entitlement 按平台租户/套餐派生（不按 role、不伪造）", () => {
-  it("默认（未设旋钮）= 平台租户「华鼎AI」→ 三 entitlement 齐全 + permissions sorted（零回归）", async () => {
+  it("默认（未设旋钮）= 平台租户「华鼎AI」→ 四 entitlement 齐全（含 admin_console）+ permissions sorted（零回归）", async () => {
     const me = await fetchMe();
-    expect(me.permissions).toEqual(expect.arrayContaining(["voice_clone_vip", "analytics_view", "analytics_platform"]));
+    expect(me.permissions).toEqual(
+      expect.arrayContaining(["voice_clone_vip", "analytics_view", "analytics_platform", "admin_console"])
+    );
     expect(me.permissions).toContain("tenant:admin"); // admin 角色基础权限逐字镜像 BE
     expect(me.permissions).toEqual([...me.permissions].sort()); // 对齐 BE sorted()
   });
 
   // 🔴 线上出事态：普通租户 + free + role=admin（自助注册 owner）→ 三个 entitlement 全无。
-  it("新注册普通用户（普通租户 + free + role admin）→ 无 voice_clone_vip / analytics_view / analytics_platform（正是绕过门禁那态）", async () => {
+  it("新注册普通用户（普通租户 + free + role admin）→ 无 voice_clone_vip / analytics_view / analytics_platform / admin_console（正是绕过门禁那态）", async () => {
     asNonPlatform("free", "admin");
     const me = await fetchMe();
     expect(me.user.role).toBe("admin");
     expect(me.permissions).not.toContain("voice_clone_vip");
     expect(me.permissions).not.toContain("analytics_view");
     expect(me.permissions).not.toContain("analytics_platform");
+    // 管理后台 entitlement 同样与平台租户同源——role=admin 绝不给（ADMIN-CONSOLE-UI-0001 变异哨兵）。
+    expect(me.permissions).not.toContain("admin_console");
     // 角色基础权限仍在（派生只增 entitlement，不动角色权限）。
     expect(me.permissions).toContain("tenant:admin");
   });
 
-  it("VIP 客户（普通租户 + huading）→ 有 voice_clone_vip + analytics_view，但**无** analytics_platform（不得看全站）", async () => {
+  it("VIP 客户（普通租户 + huading）→ 有 voice_clone_vip + analytics_view，但**无** analytics_platform / admin_console（不得看全站/进后台）", async () => {
     asNonPlatform("huading", "admin");
     const me = await fetchMe();
     expect(me.permissions).toContain("voice_clone_vip");
     expect(me.permissions).toContain("analytics_view");
     expect(me.permissions).not.toContain("analytics_platform");
+    expect(me.permissions).not.toContain("admin_console"); // 付费 ≠ 平台方，后台仍不可进
   });
 
   it("VIP 客户可为 creator（付费但角色 creator）→ 同样 voice_clone_vip + analytics_view（不因 role 误伤）", async () => {

@@ -35,3 +35,14 @@ export function canViewAnalytics(session: Session | null): boolean {
 export function canViewPlatformAnalytics(session: Session | null): boolean {
   return hasPermission(session, ANALYTICS_PLATFORM_PERMISSION);
 }
+
+/**
+ * 管理员后台 `/admin` 门禁（ADMIN-CONSOLE-UI-0001）：permissions 含 `admin_console`（BE 与
+ * `analytics_platform` 同源派生 = 仅平台租户）。无 → 友好页「仅平台管理员可访问」，BE 端点也会真 403
+ * PLATFORM_ADMIN_REQUIRED。同样**绝不看 role**（自助注册 owner 全是 role=admin）。
+ */
+export const ADMIN_CONSOLE_PERMISSION = "admin_console";
+
+export function canUseAdminConsole(session: Session | null): boolean {
+  return hasPermission(session, ADMIN_CONSOLE_PERMISSION);
+}

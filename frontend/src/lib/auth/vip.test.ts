@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Session } from "@/lib/auth/store";
 import {
+  canUseAdminConsole,
   canUseVipVoiceClone,
   canViewAnalytics,
   canViewPlatformAnalytics
@@ -40,6 +41,14 @@ describe("canViewAnalytics / canViewPlatformAnalytics（只看对应 permission�
   it("analytics_platform 决定全站视图；VIP 客户（仅 analytics_view）→ false（不得看全站）", () => {
     expect(canViewPlatformAnalytics(session("admin", ["analytics_view"]))).toBe(false);
     expect(canViewPlatformAnalytics(session("admin", ["analytics_platform"]))).toBe(true);
+  });
+
+  // 🔴 变异哨兵（ADMIN-CONSOLE-UI-0001）：给 canUseAdminConsole 加回任何 role 快捷分支，本条立即变红。
+  it("canUseAdminConsole：唯一信号 = permissions 含 admin_console；role=admin 无该权限 → false（后台不给自助注册 owner 开门）", () => {
+    expect(canUseAdminConsole(session("admin", []))).toBe(false);
+    expect(canUseAdminConsole(session("admin", ["tenant:admin", "voice_clone_vip", "analytics_view"]))).toBe(false);
+    expect(canUseAdminConsole(session("creator", ["admin_console"]))).toBe(true);
+    expect(canUseAdminConsole(null)).toBe(false);
   });
 
   it("三态一致性：新注册（无 entitlement）三者皆 false；VIP 有 view 无 platform；平台方三者皆真", () => {
