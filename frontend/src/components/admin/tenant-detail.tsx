@@ -7,11 +7,13 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { StatusBadge } from "@/components/ui/status-badge";
-import type { AdminTenantRow, PlanCode } from "@/lib/api/admin-console";
+import { TASK_BADGE_STATUS, type AdminTenantRow, type PlanCode } from "@/lib/api/admin-console";
 import { useAdjustTenantCredits, useAdminTenantDetail, useChangeTenantPlan, useChangeTenantStatus } from "@/lib/api/hooks";
 import { errorText } from "@/lib/api/error-text";
+import { useAuth } from "@/lib/auth/auth-context";
 import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
+
 
 // 租户详情 + 三个写操作（ADMIN-CONSOLE-UI-0001）。写操作全部：二次确认 + 成功/失败反馈 + 失败展示 BE 中文
 // message（errorText 透传 ApiError.message）。余额调整是资金操作——确认弹窗显示「当前 → 调整后」，且
@@ -19,7 +21,8 @@ import { cn } from "@/lib/utils";
 
 const fmt = (n: number) => n.toLocaleString("zh-CN");
 
-/** 余额调整块：delta（正负）+ 理由必填 → 确认弹窗（当前 → 调整后）→ 恰调一次。 */
+/** 余额调整块：delta（正负）+ 理由必填 → 确认弹窗（当前 → 调整后，按 subscription.total）→ 恰调一次。
+ *  subscription 可空（无生效订阅 → 禁用，BE 也会 404 ACTIVE_SUBSCRIPTION_NOT_FOUND）。 */
 function CreditsAdjust({ tenant }: { tenant: AdminTenantRow }) {
   const adjust = useAdjustTenantCredits();
   const [delta, setDelta] = useState("");
@@ -30,9 +33,10 @@ function CreditsAdjust({ tenant }: { tenant: AdminTenantRow }) {
   // 资金操作恰调一次：ref 闸（同一 tick 连点两次时 isPending 闭包仍是旧值，state 闸挡不住——ref 同步生效）。
   const inFlight = useRef(false);
 
+  const currentTotal = tenant.subscription?.total ?? 0;
   const parsed = Number(delta);
   const valid = Number.isInteger(parsed) && parsed !== 0;
-  const after = tenant.balance.total + (valid ? parsed : 0);
+  const after = currentTotal + (valid ? parsed : 0);
 
   const openConfirm = () => {
     setDone(false);
@@ -96,7 +100,9 @@ function CreditsAdjust({ tenant }: { tenant: AdminTenantRow }) {
       <button
         type="button"
         onClick={openConfirm}
-        className="self-start rounded-field border border-line-gold bg-glass-fill px-3 py-1.5 text-[12.5px] text-gold-deep hover:bg-glass-hover"
+        disabled={!tenant.subscription}
+        title={!tenant.subscription ? "该租户没有生效中的订阅" : undefined}
+        className="self-start rounded-field border border-line-gold bg-glass-fill px-3 py-1.5 text-[12.5px] text-gold-deep hover:bg-glass-hover disabled:opacity-40"
       >
         {copy.admin.creditsAdjust}
       </button>
@@ -109,8 +115,8 @@ function CreditsAdjust({ tenant }: { tenant: AdminTenantRow }) {
             <span className={cn("font-medium", parsed < 0 ? "text-error-fg" : "text-success-fg")}>
               {parsed >= 0 ? copy.admin.creditsConfirmCharge(parsed) : copy.admin.creditsConfirmDeduct(parsed)}
             </span>
-            {/* 资金红线：确认弹窗必须显示 当前余额 → 调整后余额 */}
-            <span className="tabular-nums">{copy.admin.creditsBeforeAfter(tenant.balance.total, after)}</span>
+            {/* 资金红线：确认弹窗必须显示 当前余额 → 调整后余额（口径 = subscription.total） */}
+            <span className="tabular-nums">{copy.admin.creditsBeforeAfter(currentTotal, after)}</span>
             <span className="text-ink-faint">
               {copy.admin.creditsReason}：{reason.trim()}
             </span>
@@ -130,7 +136,7 @@ function CreditsAdjust({ tenant }: { tenant: AdminTenantRow }) {
 /** 改套餐块（free / basic / huading）→ 确认弹窗写明 huading 的能力得失。 */
 function PlanChange({ tenant }: { tenant: AdminTenantRow }) {
   const change = useChangeTenantPlan();
-  const [plan, setPlan] = useState<PlanCode>(tenant.plan_code);
+  const [plan, setPlan] = useState<PlanCode>((tenant.plan_code as PlanCode) ?? "free");
   const [confirming, setConfirming] = useState(false);
   const [done, setDone] = useState(false);
   const inFlight = useRef(false);
@@ -201,20 +207,20 @@ function PlanChange({ tenant }: { tenant: AdminTenantRow }) {
   );
 }
 
-/** 启用/停用块：停用弹窗文字警告（不只靠颜色）；平台租户自己的停用按钮置灰（BE 也 422，双保险）。 */
-function StatusToggle({ tenant }: { tenant: AdminTenantRow }) {
+/** 启用/停用块（PATCH {active:bool} → active/suspended）：停用弹窗文字警告（不只靠颜色）；
+ *  平台租户自己（= 当前登录租户，后台仅平台可进）的停用按钮置灰（BE 也 422 CANNOT_SUSPEND_PLATFORM_TENANT，双保险）。 */
+function StatusToggle({ tenant, isSelf }: { tenant: AdminTenantRow; isSelf: boolean }) {
   const change = useChangeTenantStatus();
   const [confirming, setConfirming] = useState(false);
   const [done, setDone] = useState(false);
   const inFlight = useRef(false);
   const disabling = tenant.status === "active";
-  const next = disabling ? "disabled" : "active";
 
   const onConfirm = () => {
     if (inFlight.current || change.isPending) return;
     inFlight.current = true;
     change.mutate(
-      { tenantId: tenant.tenant_id, status: next },
+      { tenantId: tenant.tenant_id, active: !disabling },
       {
         onSettled: () => {
           inFlight.current = false;
@@ -227,7 +233,7 @@ function StatusToggle({ tenant }: { tenant: AdminTenantRow }) {
     );
   };
 
-  const platformBlocked = tenant.is_platform && disabling;
+  const platformBlocked = isSelf && disabling;
   return (
     <section className="flex flex-col gap-2 rounded-field border border-line-gold bg-glass-soft p-3">
       <h3 className="text-[13px] font-semibold text-ink">
@@ -275,6 +281,7 @@ function StatusToggle({ tenant }: { tenant: AdminTenantRow }) {
 /** 租户详情弹窗：基础信息 + 最近任务 / 最近用量 / 已挂槽位 + 三个写操作。 */
 export function TenantDetailDialog({ tenantId, onClose }: { tenantId: string | null; onClose: () => void }) {
   const detail = useAdminTenantDetail(tenantId);
+  const { session } = useAuth();
   const t = detail.data?.tenant;
   return (
     <Dialog open={!!tenantId} onOpenChange={(next) => !next && onClose()}>
@@ -297,21 +304,33 @@ export function TenantDetailDialog({ tenantId, onClose }: { tenantId: string | n
               </div>
               <div>
                 <dt className="text-ink-faint">{copy.admin.colOwner}</dt>
-                <dd className="text-ink">{t.owner_email}</dd>
+                <dd className="text-ink">{t.owner_email ?? "—"}</dd>
               </div>
               <div>
                 <dt className="text-ink-faint">{copy.admin.colPlan}</dt>
-                <dd className="text-ink">{t.plan_code}</dd>
+                <dd className="text-ink">{t.plan_code ?? "—"}</dd>
               </div>
               <div>
                 <dt className="text-ink-faint">{copy.admin.colStatus}</dt>
-                <dd>{t.status === "active" ? copy.admin.statusActive : copy.admin.statusDisabled}</dd>
+                <dd>
+                  {t.status === "active"
+                    ? copy.admin.statusActive
+                    : t.status === "closed"
+                      ? copy.admin.statusClosed
+                      : copy.admin.statusDisabled}
+                </dd>
               </div>
               <div className="col-span-2">
                 <dt className="text-ink-faint">{copy.admin.colBalance}</dt>
                 <dd className="tabular-nums text-ink">
-                  {fmt(t.balance.total)} / {fmt(t.balance.used)} / {fmt(t.balance.reserved)} /{" "}
-                  <b className="text-success-fg">{fmt(t.balance.remaining)}</b>
+                  {t.subscription ? (
+                    <>
+                      {fmt(t.subscription.total)} / {fmt(t.subscription.used)} / {fmt(t.subscription.reserved)} /{" "}
+                      <b className="text-success-fg">{fmt(t.subscription.remaining)}</b>
+                    </>
+                  ) : (
+                    "—"
+                  )}
                 </dd>
               </div>
             </dl>
@@ -319,7 +338,7 @@ export function TenantDetailDialog({ tenantId, onClose }: { tenantId: string | n
             <div className="grid gap-3 sm:grid-cols-3">
               <CreditsAdjust tenant={t} />
               <PlanChange tenant={t} />
-              <StatusToggle tenant={t} />
+              <StatusToggle tenant={t} isSelf={t.tenant_id === session?.tenantId} />
             </div>
 
             <section>
@@ -330,7 +349,7 @@ export function TenantDetailDialog({ tenantId, onClose }: { tenantId: string | n
                 <ul className="flex flex-col gap-1 text-[12px] text-ink-soft">
                   {detail.data!.recent_tasks.map((task) => (
                     <li key={task.id} className="flex items-center gap-2">
-                      <StatusBadge status={task.status} className="px-2 py-0.5 text-[11px]">
+                      <StatusBadge status={TASK_BADGE_STATUS[task.status]} className="px-2 py-0.5 text-[11px]">
                         {task.status}
                       </StatusBadge>
                       <span className="text-ink">{task.id}</span>
@@ -368,7 +387,7 @@ export function TenantDetailDialog({ tenantId, onClose }: { tenantId: string | n
                   {detail.data!.voice_slots.map((s) => (
                     <li key={s.speaker_id} className="tabular-nums">
                       {s.speaker_id}
-                      {s.voice_name && <span className="text-ink-soft">（{s.voice_name}）</span>}
+                      {s.brand_voice_name && <span className="text-ink-soft">（{s.brand_voice_name}）</span>}
                     </li>
                   ))}
                 </ul>

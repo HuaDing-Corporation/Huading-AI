@@ -987,6 +987,7 @@ export const copy = {
     sortUsedAsc: "已用消耗 低→高",
     statusActive: "启用",
     statusDisabled: "停用",
+    statusClosed: "已关闭",
     colTenant: "租户",
     colOwner: "owner 邮箱",
     colPlan: "套餐",
@@ -1041,7 +1042,8 @@ export const copy = {
     colOccupiedBy: "占用租户",
     colVoiceName: "音色",
     slotFree: "空闲",
-    poolRemaining: (n: number) => `剩余 ${n} 个空闲槽位`,
+    // remaining = 全部槽位中未占用数（BE sum(not occupied)，含租户专属），非「平台池剩余」。
+    poolRemaining: (n: number) => `未占用槽位 ${n} 个`,
     assignTitle: "分配专属槽位",
     assignTenantLabel: "租户",
     assignSpeakerLabel: "speaker_id（S_ 开头）",
@@ -1067,9 +1069,13 @@ export const copy = {
     colTask: "关联任务",
     exportCsv: "导出 CSV",
     exportDone: "已导出",
-    // 任务监控
+    // 任务监控（真契约筛选 = 任务族 + 状态 + 租户 + 时间区间）
     tasksTitle: "任务监控",
     taskStatusAll: "全部状态",
+    taskFamilyAll: "全部任务族",
+    taskFamilyVideo: "视频任务",
+    taskFamilyReverse: "视频反推",
+    taskFamilyEcom: "详情图复刻",
     colTaskId: "任务 id",
     colMode: "模式",
     colProgress: "进度",
@@ -1084,11 +1090,10 @@ export const copy = {
       "任务将回到排队中重新执行。是否重新计费以重试回执为准：失败时已扣费的任务不重复扣费；已释放的重新计费（按量任务按实际成片时长结算），确认后立即在结果中明示。",
     retryBtn: "确认重跑",
     retryDone: "已重新排队",
-    // 结果披露三态（🔴 一律不许静默扣费）：free / 固定价实扣 / 按量预计（estimate_basis 有则用，无则兜底句）。
+    // 结果披露三态（🔴 一律不许静默扣费；BE FIX3 最终契约仅 charged/credits/is_estimate，无 estimate_basis）。
     retryDisclosureFree: "不会重复扣费",
     retryDisclosureFixed: (n: number) => `将扣费 ${n.toLocaleString("zh-CN")} 积分`,
-    retryDisclosureEstimate: (n: number, basis?: string) =>
-      `预计扣费约 ${n.toLocaleString("zh-CN")} 积分，最终${basis ?? "按实际成片时长结算"}`,
+    retryDisclosureEstimate: (n: number) => `预计扣费约 ${n.toLocaleString("zh-CN")} 积分，最终按实际成片时长结算`,
     // 审计日志
     auditTitle: "审计日志",
     auditActionAll: "全部动作",

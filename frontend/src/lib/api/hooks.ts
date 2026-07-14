@@ -13,10 +13,12 @@ import {
   fetchAdminUsage,
   fetchAdminVoiceSlots,
   retryAdminTask,
+  type AdminTaskFamily,
+  type AdminTaskStatus,
   type AdminTenantListQuery,
   type AdminUsageQuery,
-  type PlanCode,
-  type TenantStatus
+  type AuditAction,
+  type PlanCode
 } from "@/lib/api/admin-console";
 import { listAvatarPresets } from "@/lib/api/avatars";
 import { analyticsKeys, avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, historyImageKeys, labelSettingsKey, meKey, publishKeys, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
@@ -483,7 +485,7 @@ export function useChangeTenantPlan() {
 export function useChangeTenantStatus() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { tenantId: string; status: TenantStatus }) => changeTenantStatus(input.tenantId, input.status),
+    mutationFn: (input: { tenantId: string; active: boolean }) => changeTenantStatus(input.tenantId, input.active),
     onSuccess: () => void qc.invalidateQueries({ queryKey: adminKeys.all })
   });
 }
@@ -494,7 +496,7 @@ export function useAdminVoiceSlots() {
 export function useAssignVoiceSlot() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { tenant_id: string; speaker_id: string }) => assignVoiceSlot(input),
+    mutationFn: (input: { tenantId: string; speaker_id: string }) => assignVoiceSlot(input.tenantId, { speaker_id: input.speaker_id }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: adminKeys.all })
   });
 }
@@ -502,18 +504,18 @@ export function useAdminUsage(query: AdminUsageQuery) {
   const { session } = useAuth();
   return useQuery({ queryKey: adminKeys.usage(query), queryFn: () => fetchAdminUsage(query), enabled: !!session });
 }
-export function useAdminTasks(query: { status?: string; tenant_id?: string; from?: string; to?: string; limit: number; offset: number }) {
+export function useAdminTasks(query: { task_family?: AdminTaskFamily | ""; tenant_id?: string; status?: AdminTaskStatus | ""; from?: string; to?: string; page: number; page_size: number }) {
   const { session } = useAuth();
   return useQuery({ queryKey: adminKeys.tasks(query), queryFn: () => fetchAdminTasks(query), enabled: !!session });
 }
 export function useRetryAdminTask() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (taskId: string) => retryAdminTask(taskId),
+    mutationFn: (input: { taskId: string; taskFamily?: AdminTaskFamily }) => retryAdminTask(input.taskId, input.taskFamily),
     onSuccess: () => void qc.invalidateQueries({ queryKey: adminKeys.all })
   });
 }
-export function useAdminAudit(query: { action?: string; tenant_id?: string; from?: string; to?: string; limit: number; offset: number }) {
+export function useAdminAudit(query: { action?: AuditAction | ""; target_tenant_id?: string; page: number; page_size: number }) {
   const { session } = useAuth();
   return useQuery({ queryKey: adminKeys.audit(query), queryFn: () => fetchAdminAudit(query), enabled: !!session });
 }

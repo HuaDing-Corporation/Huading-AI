@@ -12,7 +12,7 @@ import { errorText } from "@/lib/api/error-text";
 import { yuan } from "@/lib/analytics/format";
 import { copy } from "@/lib/copy";
 
-const LIMIT = 20;
+const PAGE_SIZE = 20;
 const fmt = (n: number) => n.toLocaleString("zh-CN");
 
 // 计费/用量明细（ADMIN-CONSOLE-UI-0001 §二.3）：租户/时间/capability/provider/状态筛选 + 分页 + CSV 导出。
@@ -24,12 +24,12 @@ export default function AdminUsagePage() {
   const [status, setStatus] = useState("all");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
-  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState(1);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportDone, setExportDone] = useState(false);
 
-  const tenants = useAdminTenants({ sort: "created_desc", limit: 100, offset: 0 });
+  const tenants = useAdminTenants({ sort: "created_at", order: "desc", page: 1, page_size: 100 });
   const filters = {
     tenant_id: tenantId === "all" ? undefined : tenantId,
     capability: capability === "all" ? undefined : capability,
@@ -38,7 +38,7 @@ export default function AdminUsagePage() {
     from: from || undefined,
     to: to || undefined
   };
-  const query = useAdminUsage({ ...filters, limit: LIMIT, offset });
+  const query = useAdminUsage({ ...filters, page, page_size: PAGE_SIZE });
 
   const onExport = async () => {
     if (exporting) return;
@@ -71,10 +71,10 @@ export default function AdminUsagePage() {
     { key: "credits", label: copy.admin.colCredits, align: "right", render: (r) => <span className="text-gold-deep">{fmt(r.credits)}</span> },
     { key: "cost", label: copy.admin.colCost, align: "right", render: (r) => yuan(r.cost_cents) },
     { key: "status", label: copy.admin.colUsageStatus, render: (r) => <span className="text-ink-soft">{r.status}</span> },
-    { key: "task", label: copy.admin.colTask, render: (r) => <span className="tabular-nums text-ink-faint">{r.task_id ?? "—"}</span> }
+    { key: "task", label: copy.admin.colTask, render: (r) => <span className="tabular-nums text-ink-faint">{r.video_task_id ?? "—"}</span> }
   ];
 
-  const resetPage = () => setOffset(0);
+  const resetPage = () => setPage(1);
 
   return (
     <>
@@ -167,7 +167,7 @@ export default function AdminUsagePage() {
         onRetry={() => void query.refetch()}
         minWidth={980}
       />
-      <AdminPager offset={offset} limit={LIMIT} total={query.data?.total ?? 0} onOffset={setOffset} />
+      <AdminPager page={page} pageSize={PAGE_SIZE} total={query.data?.total ?? 0} onPage={setPage} />
     </>
   );
 }

@@ -69,7 +69,8 @@ test("① 平台账号：入口 → 租户管理 → 余额调整（前→后 + 
   // 审计页：余额调整记录（变更前 → 变更后 + 理由）。
   await page.getByRole("link", { name: "审计日志" }).click();
   await page.waitForURL(/\/admin\/audit$/, { timeout: 15_000 });
-  await expect(page.getByText("quota_credits_total：20000 → 25000")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("total：20000 → 25000")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("remaining：14000 → 19000")).toBeVisible();
   await expect(page.getByText("线下打款充值")).toBeVisible();
 
   // 用量页：无筛选导出 → BE 行数上限 422 中文原样展示。
@@ -77,7 +78,7 @@ test("① 平台账号：入口 → 租户管理 → 余额调整（前→后 + 
   await page.waitForURL(/\/admin\/usage$/, { timeout: 15_000 });
   await expect(page.getByText("导出 CSV")).toBeVisible();
   await page.getByRole("button", { name: "导出 CSV" }).click();
-  await expect(page.getByText("导出行数（6）超出上限（3），请缩小筛选范围")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("导出记录超过 3 条，请缩小时间范围。")).toBeVisible({ timeout: 15_000 });
 
   // 任务监控：默认 failed；重跑 task-f1（FIX1：弹窗=通用口径说明，回执横幅=按量估算精确披露，不许静默扣费）。
   await page.getByRole("link", { name: "任务监控" }).click();

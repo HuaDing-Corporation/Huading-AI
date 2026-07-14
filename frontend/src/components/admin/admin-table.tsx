@@ -91,36 +91,36 @@ export function AdminTable<T>({
   );
 }
 
-/** 分页条（offset/limit → 上一页/下一页 + 「第 x–y / 共 n」）。 */
+/** 分页条（page/page_size —— 对齐 BE 真契约分页语义；「第 x–y / 共 n」）。 */
 export function AdminPager({
-  offset,
-  limit,
+  page,
+  pageSize,
   total,
-  onOffset
+  onPage
 }: {
-  offset: number;
-  limit: number;
+  page: number;
+  pageSize: number;
   total: number;
-  onOffset: (next: number) => void;
+  onPage: (next: number) => void;
 }) {
-  const from = total === 0 ? 0 : offset + 1;
-  const to = Math.min(offset + limit, total);
+  const from = total === 0 ? 0 : (page - 1) * pageSize + 1;
+  const to = Math.min(page * pageSize, total);
   return (
     <div className="flex items-center justify-between text-[12px] text-ink-soft">
       <span className="tabular-nums">{copy.admin.pageRange(from, to, total)}</span>
       <div className="flex gap-2">
         <button
           type="button"
-          onClick={() => onOffset(Math.max(0, offset - limit))}
-          disabled={offset === 0}
+          onClick={() => onPage(Math.max(1, page - 1))}
+          disabled={page <= 1}
           className="rounded-field border border-line-gold bg-glass-fill px-3 py-1 hover:bg-glass-hover disabled:opacity-40"
         >
           {copy.admin.prevPage}
         </button>
         <button
           type="button"
-          onClick={() => onOffset(offset + limit)}
-          disabled={offset + limit >= total}
+          onClick={() => onPage(page + 1)}
+          disabled={page * pageSize >= total}
           className="rounded-field border border-line-gold bg-glass-fill px-3 py-1 hover:bg-glass-hover disabled:opacity-40"
         >
           {copy.admin.nextPage}

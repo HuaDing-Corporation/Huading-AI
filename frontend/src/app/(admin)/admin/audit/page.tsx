@@ -8,7 +8,7 @@ import type { AdminAuditRow, AuditAction } from "@/lib/api/admin-console";
 import { useAdminAudit, useAdminTenants } from "@/lib/api/hooks";
 import { copy } from "@/lib/copy";
 
-const LIMIT = 20;
+const PAGE_SIZE = 20;
 const ACTION_LABEL: Record<AuditAction, string> = {
   credits_adjust: copy.admin.actionCreditsAdjust,
   plan_change: copy.admin.actionPlanChange,
@@ -19,16 +19,18 @@ const ACTION_LABEL: Record<AuditAction, string> = {
 
 /** before/after JSON 快照 → 逐键「前 → 后」行（无 before 键则只显 after，如首次分配槽位）。 */
 function BeforeAfter({ row }: { row: AdminAuditRow }) {
-  const keys = [...new Set([...Object.keys(row.before), ...Object.keys(row.after)])];
+  const before = row.before ?? {};
+  const after = row.after ?? {};
+  const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])];
   if (keys.length === 0) return <span className="text-ink-faint">—</span>;
   return (
     <span className="flex flex-col gap-0.5 tabular-nums">
       {keys.map((k) => (
         <span key={k}>
           <span className="text-ink-faint">{k}：</span>
-          {k in row.before && <span className="text-ink-soft">{String(row.before[k])}</span>}
-          {k in row.before && k in row.after && <span className="text-ink-faint">{copy.admin.beforeAfterArrow}</span>}
-          {k in row.after && <span className="font-medium text-ink">{String(row.after[k])}</span>}
+          {k in before && <span className="text-ink-soft">{String(before[k])}</span>}
+          {k in before && k in after && <span className="text-ink-faint">{copy.admin.beforeAfterArrow}</span>}
+          {k in after && <span className="font-medium text-ink">{String(after[k])}</span>}
         </span>
       ))}
     </span>
@@ -39,21 +41,21 @@ function BeforeAfter({ row }: { row: AdminAuditRow }) {
 export default function AdminAuditPage() {
   const [action, setAction] = useState("all");
   const [tenantId, setTenantId] = useState("all");
-  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState(1);
 
-  const tenants = useAdminTenants({ sort: "created_desc", limit: 100, offset: 0 });
+  const tenants = useAdminTenants({ sort: "created_at", order: "desc", page: 1, page_size: 100 });
   const query = useAdminAudit({
-    action: action === "all" ? undefined : action,
-    tenant_id: tenantId === "all" ? undefined : tenantId,
-    limit: LIMIT,
-    offset
+    action: action === "all" ? "" : (action as AuditAction),
+    target_tenant_id: tenantId === "all" ? undefined : tenantId,
+    page,
+    page_size: PAGE_SIZE
   });
 
   const columns: AdminColumn<AdminAuditRow>[] = [
     { key: "time", label: copy.admin.colTime, render: (r) => <span className="tabular-nums text-ink-faint">{r.created_at.replace("T", " ").slice(0, 16)}</span> },
-    { key: "actor", label: copy.admin.colActor, render: (r) => <span className="text-ink-soft">{r.actor_email}</span> },
-    { key: "action", label: copy.admin.colAction, render: (r) => <span className="text-ink">{ACTION_LABEL[r.action] ?? r.action}</span> },
-    { key: "target", label: copy.admin.colTargetTenant, render: (r) => <span className="text-ink">{r.target_tenant_slug}</span> },
+    { key: "actor", label: copy.admin.colActor, render: (r) => <span className="text-ink-soft">{r.actor_email ?? "—"}</span> },
+    { key: "action", label: copy.admin.colAction, render: (r) => <span className="text-ink">{ACTION_LABEL[r.action as AuditAction] ?? r.action}</span> },
+    { key: "target", label: copy.admin.colTargetTenant, render: (r) => <span className="text-ink">{r.target_tenant_slug ?? "—"}</span> },
     { key: "diff", label: copy.admin.colBeforeAfter, render: (r) => <BeforeAfter row={r} /> },
     { key: "reason", label: copy.admin.colReason, render: (r) => <span className="text-ink-soft">{r.reason ?? "—"}</span> }
   ];
@@ -65,7 +67,7 @@ export default function AdminAuditPage() {
       </header>
 
       <div className="flex flex-wrap items-center gap-2">
-        <Select value={action} onValueChange={(v) => { setAction(v); setOffset(0); }}>
+        <Select value={action} onValueChange={(v) => { setAction(v); setPage(1); }}>
           <SelectTrigger className="w-[170px]" aria-label={copy.admin.colAction}>
             <SelectValue />
           </SelectTrigger>
@@ -78,7 +80,7 @@ export default function AdminAuditPage() {
             <SelectItem value="task_retry">{copy.admin.actionTaskRetry}</SelectItem>
           </SelectContent>
         </Select>
-        <Select value={tenantId} onValueChange={(v) => { setTenantId(v); setOffset(0); }}>
+        <Select value={tenantId} onValueChange={(v) => { setTenantId(v); setPage(1); }}>
           <SelectTrigger className="w-[180px]" aria-label={copy.admin.colTargetTenant}>
             <SelectValue />
           </SelectTrigger>
@@ -100,7 +102,7 @@ export default function AdminAuditPage() {
         onRetry={() => void query.refetch()}
         minWidth={860}
       />
-      <AdminPager offset={offset} limit={LIMIT} total={query.data?.total ?? 0} onOffset={setOffset} />
+      <AdminPager page={page} pageSize={PAGE_SIZE} total={query.data?.total ?? 0} onPage={setPage} />
     </>
   );
 }

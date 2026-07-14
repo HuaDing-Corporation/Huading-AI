@@ -6,29 +6,41 @@ import { AdminPager, AdminTable, type AdminColumn } from "@/components/admin/adm
 import { TenantDetailDialog } from "@/components/admin/tenant-detail";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import type { AdminTenantRow, AdminTenantSort, PlanCode, TenantStatus } from "@/lib/api/admin-console";
+import type { AdminSortOrder, AdminTenantRow, AdminTenantSortField, PlanCode, TenantStatus } from "@/lib/api/admin-console";
 import { useAdminTenants } from "@/lib/api/hooks";
 import { copy } from "@/lib/copy";
 
-const LIMIT = 20;
+const PAGE_SIZE = 20;
 const fmt = (n: number) => n.toLocaleString("zh-CN");
+const STATUS_LABEL: Record<string, string> = {
+  active: copy.admin.statusActive,
+  suspended: copy.admin.statusDisabled,
+  closed: copy.admin.statusClosed
+};
 
-// 租户/用户管理（ADMIN-CONSOLE-UI-0001 §二.1）：搜索 + 套餐/状态筛选 + 分页列表 → 详情弹窗（含三个写操作）。
+// 租户/用户管理（ADMIN-CONSOLE-UI-0001 · FIX1 对齐真契约）：q 搜索 + 套餐/状态筛选 + sort/order + page 分页。
+// subscription 可空（无生效订阅 → 余额显「—」）。
 export default function AdminTenantsPage() {
-  const [search, setSearch] = useState("");
+  const [q, setQ] = useState("");
   const [plan, setPlan] = useState("all");
   const [status, setStatus] = useState("all");
-  const [sort, setSort] = useState<AdminTenantSort>("created_desc");
-  const [offset, setOffset] = useState(0);
+  const [sortKey, setSortKey] = useState("created_at_desc");
+  const [page, setPage] = useState(1);
   const [detailId, setDetailId] = useState<string | null>(null);
 
+  const [sort, order] = ((): [AdminTenantSortField, AdminSortOrder] => {
+    const idx = sortKey.lastIndexOf("_");
+    return [sortKey.slice(0, idx) as AdminTenantSortField, sortKey.slice(idx + 1) as AdminSortOrder];
+  })();
+
   const query = useAdminTenants({
-    search: search || undefined,
+    q: q || undefined,
     plan: plan === "all" ? "" : (plan as PlanCode),
     status: status === "all" ? "" : (status as TenantStatus),
     sort,
-    limit: LIMIT,
-    offset
+    order,
+    page,
+    page_size: PAGE_SIZE
   });
 
   const columns: AdminColumn<AdminTenantRow>[] = [
@@ -42,18 +54,21 @@ export default function AdminTenantsPage() {
         </span>
       )
     },
-    { key: "owner", label: copy.admin.colOwner, render: (t) => <span className="text-ink-soft">{t.owner_email}</span> },
-    { key: "plan", label: copy.admin.colPlan, render: (t) => <span className="text-ink">{t.plan_code}</span> },
+    { key: "owner", label: copy.admin.colOwner, render: (t) => <span className="text-ink-soft">{t.owner_email ?? "—"}</span> },
+    { key: "plan", label: copy.admin.colPlan, render: (t) => <span className="text-ink">{t.plan_code ?? "—"}</span> },
     {
       key: "balance",
       label: copy.admin.colBalance,
       align: "right",
-      render: (t) => (
-        <span className="tabular-nums text-ink-soft">
-          {fmt(t.balance.total)} / {fmt(t.balance.used)} / {fmt(t.balance.reserved)} /{" "}
-          <b className="text-success-fg">{fmt(t.balance.remaining)}</b>
-        </span>
-      )
+      render: (t) =>
+        t.subscription ? (
+          <span className="tabular-nums text-ink-soft">
+            {fmt(t.subscription.total)} / {fmt(t.subscription.used)} / {fmt(t.subscription.reserved)} /{" "}
+            <b className="text-success-fg">{fmt(t.subscription.remaining)}</b>
+          </span>
+        ) : (
+          <span className="text-ink-faint">—</span>
+        )
     },
     {
       key: "status",
@@ -62,8 +77,8 @@ export default function AdminTenantsPage() {
         t.status === "active" ? (
           <span className="text-success-fg">{copy.admin.statusActive}</span>
         ) : (
-          // 危险态不只靠颜色：文字本身即「停用」
-          <span className="font-medium text-error-fg">{copy.admin.statusDisabled}</span>
+          // 危险态不只靠颜色：文字本身即「停用/已关闭」
+          <span className="font-medium text-error-fg">{STATUS_LABEL[t.status] ?? t.status}</span>
         )
     },
     { key: "created", label: copy.admin.colCreated, render: (t) => <span className="text-ink-faint">{t.created_at.slice(0, 10)}</span> },
@@ -93,10 +108,10 @@ export default function AdminTenantsPage() {
         <Input
           aria-label={copy.admin.tenantSearchPlaceholder}
           placeholder={copy.admin.tenantSearchPlaceholder}
-          value={search}
+          value={q}
           onChange={(e) => {
-            setSearch(e.target.value);
-            setOffset(0);
+            setQ(e.target.value);
+            setPage(1);
           }}
           className="w-[280px]"
         />
@@ -104,7 +119,7 @@ export default function AdminTenantsPage() {
           value={plan}
           onValueChange={(v) => {
             setPlan(v);
-            setOffset(0);
+            setPage(1);
           }}
         >
           <SelectTrigger className="w-[140px]" aria-label={copy.admin.colPlan}>
@@ -121,7 +136,7 @@ export default function AdminTenantsPage() {
           value={status}
           onValueChange={(v) => {
             setStatus(v);
-            setOffset(0);
+            setPage(1);
           }}
         >
           <SelectTrigger className="w-[130px]" aria-label={copy.admin.colStatus}>
@@ -130,26 +145,27 @@ export default function AdminTenantsPage() {
           <SelectContent>
             <SelectItem value="all">{copy.admin.statusFilterAll}</SelectItem>
             <SelectItem value="active">{copy.admin.statusActive}</SelectItem>
-            <SelectItem value="disabled">{copy.admin.statusDisabled}</SelectItem>
+            <SelectItem value="suspended">{copy.admin.statusDisabled}</SelectItem>
+            <SelectItem value="closed">{copy.admin.statusClosed}</SelectItem>
           </SelectContent>
         </Select>
         <Select
-          value={sort}
+          value={sortKey}
           onValueChange={(v) => {
-            setSort(v as AdminTenantSort);
-            setOffset(0);
+            setSortKey(v);
+            setPage(1);
           }}
         >
           <SelectTrigger className="w-[170px]" aria-label={copy.admin.sortLabel}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="created_desc">{copy.admin.sortCreatedDesc}</SelectItem>
-            <SelectItem value="created_asc">{copy.admin.sortCreatedAsc}</SelectItem>
-            <SelectItem value="remaining_desc">{copy.admin.sortRemainingDesc}</SelectItem>
-            <SelectItem value="remaining_asc">{copy.admin.sortRemainingAsc}</SelectItem>
-            <SelectItem value="used_desc">{copy.admin.sortUsedDesc}</SelectItem>
-            <SelectItem value="used_asc">{copy.admin.sortUsedAsc}</SelectItem>
+            <SelectItem value="created_at_desc">{copy.admin.sortCreatedDesc}</SelectItem>
+            <SelectItem value="created_at_asc">{copy.admin.sortCreatedAsc}</SelectItem>
+            <SelectItem value="balance_desc">{copy.admin.sortRemainingDesc}</SelectItem>
+            <SelectItem value="balance_asc">{copy.admin.sortRemainingAsc}</SelectItem>
+            <SelectItem value="credits_used_desc">{copy.admin.sortUsedDesc}</SelectItem>
+            <SelectItem value="credits_used_asc">{copy.admin.sortUsedAsc}</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -163,7 +179,7 @@ export default function AdminTenantsPage() {
         onRetry={() => void query.refetch()}
         minWidth={900}
       />
-      <AdminPager offset={offset} limit={LIMIT} total={query.data?.total ?? 0} onOffset={setOffset} />
+      <AdminPager page={page} pageSize={PAGE_SIZE} total={query.data?.total ?? 0} onPage={setPage} />
 
       <TenantDetailDialog tenantId={detailId} onClose={() => setDetailId(null)} />
     </>

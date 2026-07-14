@@ -58,10 +58,10 @@ describe("TenantDetailDialog · 余额调整（资金安全）", () => {
     await waitFor(() => expect(screen.getByText(copy.admin.creditsDone)).toBeInTheDocument());
     // 请求级确证：只调了一次（+5000 恰一次 → 25000；调两次会是 30000）。
     const detail = await fetchAdminTenantDetail("ten-acme");
-    expect(detail.tenant.balance.total).toBe(25000);
-    const audit = await fetchAdminAudit({ action: "credits_adjust", limit: 20, offset: 0 });
+    expect(detail.tenant.subscription?.total).toBe(25000);
+    const audit = await fetchAdminAudit({ action: "credits_adjust", page: 1, page_size: 20 });
     expect(audit.total).toBe(1);
-    expect(audit.items[0]).toMatchObject({ before: { quota_credits_total: 20000 }, after: { quota_credits_total: 25000 } });
+    expect(audit.items[0]).toMatchObject({ before: { id: "sub-acme", total: 20000, remaining: 14000 }, after: { id: "sub-acme", total: 25000, remaining: 19000 } });
   });
 
   it("取消不调：打开确认后点取消 → 余额分文未动、无新审计", async () => {
@@ -70,8 +70,8 @@ describe("TenantDetailDialog · 余额调整（资金安全）", () => {
     fireEvent.click(screen.getByRole("button", { name: copy.common.cancel }));
     await waitFor(() => expect(screen.queryByText(copy.admin.creditsConfirmTitle)).not.toBeInTheDocument());
     const detail = await fetchAdminTenantDetail("ten-acme");
-    expect(detail.tenant.balance.total).toBe(25000); // 上一用例后的值，取消未再动
-    const audit = await fetchAdminAudit({ action: "credits_adjust", limit: 20, offset: 0 });
+    expect(detail.tenant.subscription?.total).toBe(25000); // 上一用例后的值，取消未再动
+    const audit = await fetchAdminAudit({ action: "credits_adjust", page: 1, page_size: 20 });
     expect(audit.total).toBe(1); // 仍是上一用例那一条
   });
 
@@ -79,9 +79,9 @@ describe("TenantDetailDialog · 余额调整（资金安全）", () => {
     renderDetail("ten-gamma");
     await openCreditsConfirm("-300", "回收");
     fireEvent.click(screen.getByRole("button", { name: copy.admin.creditsConfirmBtn }));
-    expect(await screen.findByText("扣减后额度（4700）会低于已用+预留（4800），已拒绝")).toBeInTheDocument();
+    expect(await screen.findByText("扣减后额度会低于已用+预留，无法执行。")).toBeInTheDocument();
     const detail = await fetchAdminTenantDetail("ten-gamma");
-    expect(detail.tenant.balance.total).toBe(5000);
+    expect(detail.tenant.subscription?.total).toBe(5000);
   });
 
   it("平台租户自己（ten-mock）：停用按钮置灰 + 「平台租户不可停用」提示（前端先拦一道）", async () => {
