@@ -4,7 +4,7 @@ import { expect, test, type Page } from "@playwright/test";
  * 管理员后台交互冒烟（ADMIN-CONSOLE-UI-0001，生产构建走 MSW）：
  *  ① 平台账号（默认）：顶栏「管理后台」入口可见 → /admin（落租户管理）→ 列表 → Acme 详情 → 余额调整
  *     （确认弹窗显示「当前 → 调整后」确定值）→ 审计页出现「余额调整 20000 → 25000」→ 用量页导出（无筛选
- *     → 422 中文上限提示原样展示）→ 任务监控（默认 failed）重跑 task-f1（弹窗明示「不会重复扣费」）→ 已重新排队；
+ *     → 422 中文上限提示原样展示）→ 任务监控（默认 failed）重跑 job-f1（弹窗明示「不会重复扣费」）→ 已重新排队；
  *     375 下页面不横滚。
  *  ② 非平台账号（新注册态 platform=0+free）：入口隐藏；直达 /admin → 友好页「仅平台管理员可访问」，
  *     页面不出现任何租户数据；移动端 375 友好页仍在。
@@ -80,16 +80,16 @@ test("① 平台账号：入口 → 租户管理 → 余额调整（前→后 + 
   await page.getByRole("button", { name: "导出 CSV" }).click();
   await expect(page.getByText("导出记录超过 3 条，请缩小时间范围。")).toBeVisible({ timeout: 15_000 });
 
-  // 任务监控：默认 failed；重跑 task-f1（FIX1：弹窗=通用口径说明，回执横幅=按量估算精确披露，不许静默扣费）。
+  // 任务监控：默认 failed；重跑 job-f1（FIX1：弹窗=通用口径说明，回执横幅=按量估算精确披露，不许静默扣费）。
   await page.getByRole("link", { name: "任务监控" }).click();
   await page.waitForURL(/\/admin\/tasks$/, { timeout: 15_000 });
-  const failedRow = page.locator("tr", { hasText: "task-f1" });
+  const failedRow = page.locator("tr", { hasText: "job-f1" });
   await expect(failedRow.getByText("PROVIDER_TIMEOUT")).toBeVisible({ timeout: 15_000 });
   await failedRow.getByRole("button", { name: "重跑" }).click();
   await expect(page.getByText(/是否重新计费以重试回执为准/)).toBeVisible();
   await page.getByRole("button", { name: "确认重跑" }).click();
   await expect(
-    page.getByText("已重新排队（task-f1），预计扣费约 1,501 积分，最终按实际成片时长结算")
+    page.getByText("已重新排队（job-f1），预计扣费约 1,501 积分，最终按实际成片时长结算")
   ).toBeVisible({ timeout: 15_000 });
 
   // 375：页面不横滚（表格在容器内滚动）。

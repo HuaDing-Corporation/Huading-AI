@@ -46,7 +46,7 @@ describe("门禁：非平台（新注册态）→ 全端点 403 PLATFORM_ADMIN_R
     await expect403(fetchAdminTasks({ page: 1, page_size: 20 }));
     await expect403(fetchAdminAudit({ page: 1, page_size: 20 }));
     await expect403(adjustTenantCredits("ten-acme", { delta: 100, reason: "x" }));
-    await expect403(retryAdminTask("task-f1"));
+    await expect403(retryAdminTask("job-f1"));
     await expect403(exportAdminUsageCsv({}));
   });
 });
@@ -78,9 +78,9 @@ describe("平台账号（默认）· 读端点确定值（真契约字段）", (
     const d = await fetchAdminTenantDetail("ten-acme");
     expect(d.tenant.slug).toBe("acme");
     expect(d.tenant.status).toBe("active");
-    expect(d.recent_tasks.map((t) => t.id)).toEqual(["task-q1", "task-r1", "task-f1"]); // created_at desc（镜像 BE）
+    expect(d.recent_tasks.map((t) => t.id)).toEqual(["job-q1", "job-r1", "job-f1"]); // created_at desc（镜像 BE）
     expect(d.recent_tasks[0].task_family).toBe("video");
-    expect(d.recent_tasks[2].retryable).toBe(true); // task-f1
+    expect(d.recent_tasks[2].retryable).toBe(true); // job-f1
     expect(d.recent_usage).toHaveLength(4); // u-1/u-2/u-4/u-6
     // 镜像 BE routes:87：按 tenant_id 过滤——含被该租户占用的平台池槽。
     expect(d.voice_slots.map((v) => v.speaker_id)).toEqual(["S_pool_001", "S_acme_001"]);
@@ -103,7 +103,7 @@ describe("平台账号（默认）· 读端点确定值（真契约字段）", (
     expect(all.total).toBe(6);
     const beta = await fetchAdminUsage({ tenant_id: "ten-beta", page: 1, page_size: 20 });
     expect(beta.total).toBe(1);
-    expect(beta.items[0]).toMatchObject({ id: "u-3", tenant_id: "ten-beta", tenant_slug: "beta", tenant_name: "贝塔传媒", credits: 10, cost_cents: 30, video_task_id: "task-d1" });
+    expect(beta.items[0]).toMatchObject({ id: "u-3", tenant_id: "ten-beta", tenant_slug: "beta", tenant_name: "贝塔传媒", credits: 10, cost_cents: 30, video_task_id: "job-d1" });
     const released = await fetchAdminUsage({ status: "released", page: 1, page_size: 20 });
     expect(released.total).toBe(1);
     expect(released.items[0].id).toBe("u-4");
@@ -114,17 +114,17 @@ describe("平台账号（默认）· 读端点确定值（真契约字段）", (
     expect(all.total).toBe(6);
     const failed = await fetchAdminTasks({ status: "failed", page: 1, page_size: 20 });
     expect(failed.total).toBe(3);
-    // done 是 BE 兼容别名 → 归一 succeeded（task-d1）。
+    // done 是 BE 兼容别名 → 归一 succeeded（job-d1）。
     const done = await fetchAdminTasks({ status: "done" as never, page: 1, page_size: 20 });
     expect(done.total).toBe(1);
-    expect(done.items[0].id).toBe("task-d1");
+    expect(done.items[0].id).toBe("job-d1");
     const reverse = await fetchAdminTasks({ task_family: "reverse_prompt", page: 1, page_size: 20 });
     expect(reverse.total).toBe(1);
-    expect(reverse.items[0]).toMatchObject({ id: "task-f3", task_family: "reverse_prompt", status: "failed", retryable: true, error_code: "PROVIDER_ERROR" });
+    expect(reverse.items[0]).toMatchObject({ id: "job-f3", task_family: "reverse_prompt", status: "failed", retryable: true, error_code: "PROVIDER_ERROR" });
     const video = await fetchAdminTasks({ task_family: "video", page: 1, page_size: 20 });
     expect(video.total).toBe(4);
     // succeeded（真枚举，非 done）
-    const d1 = video.items.find((t) => t.id === "task-d1");
+    const d1 = video.items.find((t) => t.id === "job-d1");
     expect(d1?.status).toBe("succeeded");
     expect(d1?.retryable).toBe(false);
   });
@@ -151,7 +151,7 @@ describe("平台账号（默认）· 读端点确定值（真契约字段）", (
     const lines = text.split("\r\n");
     expect(lines).toHaveLength(2);
     expect(lines[0]).toBe("created_at,tenant_id,tenant_slug,tenant_name,capability,provider,model,quantity,unit,credits,cost_cents,status,video_task_id");
-    expect(lines[1]).toBe("2026-07-11T09:02:00Z,ten-beta,beta,贝塔传媒,copywriting,deepseek,v3,1,篇,10,30,settled,task-d1");
+    expect(lines[1]).toBe("2026-07-11T09:02:00Z,ten-beta,beta,贝塔传媒,copywriting,deepseek,v3,1,篇,10,30,settled,job-d1");
   });
 });
 
@@ -209,6 +209,30 @@ describe("平台账号 · 写操作（顺序即契约：写会改内存态）", 
     expect(audit.items[0]).toMatchObject({ before: { status: "suspended" }, after: { status: "active" } });
   });
 
+  // 🔴 P1-1 全局唯一承重（镜像 BE voice_slots.py 冲突检查）：平台池/其它租户已占用的 ID → 422，绝不 changed。
+  it("槽位全局唯一：beta 分配平台池 S_pool_002 → 422 VOICE_SLOT_ASSIGNMENT_FAILED（message 逐字）；分配他租户 S_acme_001 → 422；槽位表无插入", async () => {
+    const poolErr = await assignVoiceSlot("ten-beta", { speaker_id: "S_pool_002" }).catch((e) => e);
+    expect(poolErr).toBeInstanceOf(ApiError);
+    expect((poolErr as ApiError).status).toBe(422);
+    expect((poolErr as ApiError).code).toBe("VOICE_SLOT_ASSIGNMENT_FAILED");
+    expect((poolErr as ApiError).message).toBe("Speaker ID is already assigned to another tenant or the platform pool.");
+    const otherErr = await assignVoiceSlot("ten-beta", { speaker_id: "S_acme_001" }).catch((e) => e);
+    expect((otherErr as ApiError).status).toBe(422);
+    expect((otherErr as ApiError).code).toBe("VOICE_SLOT_ASSIGNMENT_FAILED");
+    // 冲突被拒 → 槽位表分文未动（beta 名下无任何槽）。
+    const slots = await fetchAdminVoiceSlots();
+    expect(slots.items.filter((s) => s.tenant_id === "ten-beta")).toHaveLength(0);
+  });
+
+  // 🔴 P1-2 契约承重：reason >500 → 422（镜像 BE AdminCreditsAdjustRequest max_length=500），余额分文未动。
+  it("余额调整 reason 501 字 → 422（资金链契约不假绿），余额不变", async () => {
+    const err = await adjustTenantCredits("ten-acme", { delta: 100, reason: "长".repeat(501) }).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(422);
+    const detail = await fetchAdminTenantDetail("ten-acme");
+    expect(detail.tenant.subscription?.total).toBe(25000); // 上一用例 +5000 后的值，本次被拒未动
+  });
+
   it("音色槽位分配幂等（POST /tenants/{id}/voice-slots）：首次 changed:true，重复 changed:false；审计**无条件**各落一条（镜像 BE）", async () => {
     const first = await assignVoiceSlot("ten-beta", { speaker_id: "S_beta_777" });
     expect(first).toEqual({ tenant_id: "ten-beta", speaker_id: "S_beta_777", changed: true, speaker_ids: ["S_beta_777"] });
@@ -228,21 +252,21 @@ describe("平台账号 · 写操作（顺序即契约：写会改内存态）", 
   });
 
   it("重跑回执三态（202，真契约字段 id/task_family/tenant_id，无 estimate_basis）；审计各 1 条；重复重跑 → 409", async () => {
-    // ① task-f1：released avatar_talk → charged + credits=原预留 + is_estimate:true（唯一 estimate）。
-    const est = await retryAdminTask("task-f1", "video");
-    expect(est).toEqual({ id: "task-f1", task_family: "video", tenant_id: "ten-acme", status: "queued", progress: 0, charged: true, credits: 1501, is_estimate: true });
-    // ② task-f3：released 反推固定价 100 → is_estimate:false。
-    const fixed = await retryAdminTask("task-f3", "reverse_prompt");
-    expect(fixed).toEqual({ id: "task-f3", task_family: "reverse_prompt", tenant_id: "ten-beta", status: "queued", progress: 0, charged: true, credits: 100, is_estimate: false });
-    // ③ task-f2：电商复刻（确认时已扣）→ 不重复扣费。
-    const free = await retryAdminTask("task-f2");
-    expect(free).toEqual({ id: "task-f2", task_family: "ecom_replicate", tenant_id: "ten-gamma", status: "queued", progress: 0, charged: false, credits: 0, is_estimate: false });
+    // ① job-f1：released avatar_talk → charged + credits=原预留 + is_estimate:true（唯一 estimate）。
+    const est = await retryAdminTask("job-f1", "video");
+    expect(est).toEqual({ id: "job-f1", task_family: "video", tenant_id: "ten-acme", status: "queued", progress: 0, charged: true, credits: 1501, is_estimate: true });
+    // ② job-f3：released 反推固定价 100 → is_estimate:false。
+    const fixed = await retryAdminTask("job-f3", "reverse_prompt");
+    expect(fixed).toEqual({ id: "job-f3", task_family: "reverse_prompt", tenant_id: "ten-beta", status: "queued", progress: 0, charged: true, credits: 100, is_estimate: false });
+    // ③ job-f2：电商复刻（确认时已扣）→ 不重复扣费。
+    const free = await retryAdminTask("job-f2");
+    expect(free).toEqual({ id: "job-f2", task_family: "ecom_replicate", tenant_id: "ten-gamma", status: "queued", progress: 0, charged: false, credits: 0, is_estimate: false });
     // 审计三条（前→后）。
     const audit = await fetchAdminAudit({ action: "task_retry", page: 1, page_size: 20 });
     expect(audit.total).toBe(3);
     expect(audit.items[0]).toMatchObject({ before: { status: "failed", progress: 0 }, after: { status: "queued", progress: 0 }, target_tenant_slug: "gamma" });
     // 已回 queued（retryable:false）→ 422（恰跑一次的服务端兜底）。
-    const err = await retryAdminTask("task-f1").catch((e) => e);
+    const err = await retryAdminTask("job-f1").catch((e) => e);
     expect((err as ApiError).status).toBe(409); // 镜像 BE（409 非 422）
     expect((err as ApiError).code).toBe("TASK_NOT_RETRYABLE");
   });

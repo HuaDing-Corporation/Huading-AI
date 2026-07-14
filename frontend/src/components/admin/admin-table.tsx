@@ -46,7 +46,7 @@ export function AdminTable<T>({
   }
   if (error) {
     return (
-      <div className="text-[13px] text-error-fg">
+      <div role="alert" className="text-[13px] text-error-fg">
         {copy.admin.error}{" "}
         {onRetry && (
           <button type="button" onClick={onRetry} className="underline">

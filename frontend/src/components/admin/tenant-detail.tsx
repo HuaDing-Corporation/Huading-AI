@@ -42,6 +42,8 @@ function CreditsAdjust({ tenant }: { tenant: AdminTenantRow }) {
     setDone(false);
     if (!valid) return setFormError(copy.admin.creditsDeltaRequired);
     if (!reason.trim()) return setFormError(copy.admin.creditsReasonRequired);
+    // BE AdminCreditsAdjustRequest.reason ≤500（P1-2 契约贯通）：超长拦住提交，不发请求（maxLength 拦输入，此处兜粘贴）。
+    if (reason.trim().length > 500) return setFormError(copy.admin.creditsReasonTooLong);
     setFormError(null);
     adjust.reset();
     setConfirming(true);
@@ -86,6 +88,7 @@ function CreditsAdjust({ tenant }: { tenant: AdminTenantRow }) {
         value={reason}
         onChange={(e) => setReason(e.target.value)}
         placeholder={copy.admin.creditsReasonPlaceholder}
+        maxLength={500}
       />
       {formError && (
         <p role="alert" className="text-[12px] text-error-fg">

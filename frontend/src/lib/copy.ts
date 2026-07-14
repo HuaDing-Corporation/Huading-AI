@@ -1010,6 +1010,7 @@ export const copy = {
     creditsReasonPlaceholder: "如：线下打款充值 / 误操作回收",
     creditsDeltaRequired: "请输入非 0 的整数额度",
     creditsReasonRequired: "请填写调整理由",
+    creditsReasonTooLong: "理由不能超过 500 字",
     creditsConfirmTitle: "确认余额调整",
     creditsConfirmCharge: (delta: number) => `+ 充值 ${delta.toLocaleString("zh-CN")} 积分`,
     creditsConfirmDeduct: (delta: number) => `− 扣减 ${Math.abs(delta).toLocaleString("zh-CN")} 积分`,

@@ -41,9 +41,11 @@ export function TopBar() {
         {showAdmin && (
           <Link
             href="/admin"
+            aria-label={copy.admin.consoleEntry}
             className="inline-flex items-center gap-1.5 rounded-field border border-line-gold bg-glass-fill px-3 py-1.5 text-[12.5px] text-gold-deep transition-colors hover:bg-glass-hover"
           >
             <ShieldCheck size={15} strokeWidth={1.8} aria-hidden />
+            {/* 移动端文字隐藏 + 图标 aria-hidden → 由 aria-label 兜可及名（P2-③） */}
             <span className="hidden sm:inline">{copy.admin.consoleEntry}</span>
           </Link>
         )}

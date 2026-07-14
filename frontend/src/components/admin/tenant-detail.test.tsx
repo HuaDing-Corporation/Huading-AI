@@ -75,6 +75,19 @@ describe("TenantDetailDialog · 余额调整（资金安全）", () => {
     expect(audit.total).toBe(1); // 仍是上一用例那一条
   });
 
+  // 🔴 P1-2 前端承重：理由 501 字 → 提交前拦住（friendly 提示 + 确认弹窗不弹 = 不发请求）。
+  // 注：jsdom 的 fireEvent.change 不受 maxLength 限制 → 正好测「提交前长度校验」这层兜底（粘贴场景）。
+  it("理由 501 字 → 前端拦截：提示「理由不能超过 500 字」、确认弹窗不弹、不调接口", async () => {
+    renderDetail("ten-acme");
+    await screen.findByText(copy.admin.detailRecentTasks); // 详情加载完
+
+    fireEvent.change(screen.getByLabelText(copy.admin.creditsDelta), { target: { value: "100" } });
+    fireEvent.change(screen.getByLabelText(copy.admin.creditsReason), { target: { value: "长".repeat(501) } });
+    fireEvent.click(screen.getByRole("button", { name: copy.admin.creditsAdjust }));
+    expect(await screen.findByText(copy.admin.creditsReasonTooLong)).toBeInTheDocument();
+    expect(screen.queryByText(copy.admin.creditsConfirmTitle)).not.toBeInTheDocument(); // 弹窗未开 = 请求未发
+  });
+
   it("下限保护 422：gamma 扣 -300 → 弹窗内原样展示 BE 中文 message，余额不变", async () => {
     renderDetail("ten-gamma");
     await openCreditsConfirm("-300", "回收");
