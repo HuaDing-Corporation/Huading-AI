@@ -500,6 +500,7 @@ interface MockAdminTask {
 const adminTasks = new Map<string, MockAdminTask>([
   ["task-f1", { id: "task-f1", tenant_slug: "acme", mode: "avatar", status: "failed", progress: 35, error_code: "PROVIDER_TIMEOUT", error_message: "上游生成超时，已释放预留额度", created_at: "2026-07-12T10:00:00Z", started_at: "2026-07-12T10:01:00Z", finished_at: "2026-07-12T10:06:00Z", duration_seconds: 300 }],
   ["task-f2", { id: "task-f2", tenant_slug: "gamma", mode: "ecom", status: "failed", progress: 0, error_code: "tenant_quota_exceeded", error_message: "额度不足，任务未启动", created_at: "2026-07-12T11:00:00Z", started_at: null, finished_at: null, duration_seconds: null }],
+  ["task-f3", { id: "task-f3", tenant_slug: "beta", mode: "reverse_video", status: "failed", progress: 10, error_code: "PROVIDER_ERROR", error_message: "上游分析失败，预留已释放", created_at: "2026-07-12T13:00:00Z", started_at: "2026-07-12T13:01:00Z", finished_at: "2026-07-12T13:02:00Z", duration_seconds: 60 }],
   ["task-r1", { id: "task-r1", tenant_slug: "acme", mode: "avatar", status: "running", progress: 60, error_code: null, error_message: null, created_at: "2026-07-13T08:00:00Z", started_at: "2026-07-13T08:01:00Z", finished_at: null, duration_seconds: null }],
   ["task-d1", { id: "task-d1", tenant_slug: "beta", mode: "copywriting", status: "done", progress: 100, error_code: null, error_message: null, created_at: "2026-07-11T09:00:00Z", started_at: "2026-07-11T09:00:30Z", finished_at: "2026-07-11T09:02:00Z", duration_seconds: 90 }],
   ["task-q1", { id: "task-q1", tenant_slug: "acme", mode: "ecom", status: "queued", progress: 0, error_code: null, error_message: null, created_at: "2026-07-13T09:00:00Z", started_at: null, finished_at: null, duration_seconds: null }]
@@ -689,18 +690,28 @@ function adminConsoleHandlers() {
       rows.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
       return ok(paginate(rows, url));
     }),
-    // 重跑失败任务：状态回 queued；**首版不重复扣费**（charged:false，冻结文档口径；BE 合并后核对）；落审计。
+    // 重跑失败任务：状态回 queued + 回执披露（FIX1 · BE FIX3 冻结语义）。三种组合**都要有**（不许只 mock 一种）：
+    //   task-f1（视频任务，失败已释放、按时长计费）→ charged:true, credits=原预留 1501, is_estimate:true（预计，按实际成片时长结算）
+    //   task-f3（视频反推，失败已释放，固定价）    → charged:true, credits=100, is_estimate:false（实扣）
+    //   task-f2（电商详情图复刻，确认时已扣）      → charged:false, credits=0, is_estimate:false（不重复扣费）
+    // 字段以 BE 回执为准，合并后逐字段核对。
     http.post(`${C}/tasks/:id/retry`, ({ params }) => {
       const g = guard();
       if (g) return g;
       const t = adminTasks.get(params.id as string);
       if (!t) return err(404, "NOT_FOUND", "Task not found.");
       if (t.status !== "failed") return err(422, "TASK_NOT_RETRYABLE", "仅失败任务可重跑");
+      const RETRY_RECEIPT: Record<string, { charged: boolean; credits: number; is_estimate: boolean; estimate_basis?: string }> = {
+        "task-f1": { charged: true, credits: 1501, is_estimate: true, estimate_basis: "按实际成片时长结算" },
+        "task-f3": { charged: true, credits: 100, is_estimate: false },
+        "task-f2": { charged: false, credits: 0, is_estimate: false }
+      };
+      const receipt = RETRY_RECEIPT[t.id] ?? { charged: false, credits: 0, is_estimate: false };
       const before = { status: t.status };
       t.status = "queued";
       t.progress = 0;
       pushAudit("task_retry", t.tenant_slug, before, { status: "queued" }, null);
-      return ok({ task_id: t.id, status: t.status, charged: false });
+      return ok({ task_id: t.id, status: t.status, ...receipt });
     }),
     http.get(`${C}/audit`, ({ request }) => {
       const g = guard();

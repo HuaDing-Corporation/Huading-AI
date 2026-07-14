@@ -7,7 +7,7 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { StatusBadge } from "@/components/ui/status-badge";
-import type { AdminTaskRow } from "@/lib/api/admin-console";
+import type { AdminRetryReceipt, AdminTaskRow } from "@/lib/api/admin-console";
 import { useAdminTasks, useAdminTenants, useRetryAdminTask } from "@/lib/api/hooks";
 import { errorText } from "@/lib/api/error-text";
 import { copy } from "@/lib/copy";
@@ -31,8 +31,8 @@ export default function AdminTasksPage() {
   const [to, setTo] = useState("");
   const [offset, setOffset] = useState(0);
   const [retryTarget, setRetryTarget] = useState<AdminTaskRow | null>(null);
-  // 成功回执（含扣费披露）：以 BE 响应为准——charged:true 时横幅必须明示扣费（不许静默扣费）。
-  const [retried, setRetried] = useState<{ id: string; charged: boolean; credits?: number } | null>(null);
+  // 成功回执（FIX1 三态披露）：以 BE 响应为准——charged/is_estimate 分流，横幅明示（不许静默扣费）。
+  const [retried, setRetried] = useState<AdminRetryReceipt | null>(null);
 
   const tenants = useAdminTenants({ sort: "created_desc", limit: 100, offset: 0 });
   const query = useAdminTasks({
@@ -55,8 +55,8 @@ export default function AdminTasksPage() {
         retryInFlight.current = false;
       },
       onSuccess: (res) => {
-        // 以 BE 回执为准：charged:true（口径变更）→ 横幅披露实际扣费。
-        setRetried({ id: res.task_id, charged: res.charged, credits: res.charge_credits });
+        // 以 BE 回执为准：三态披露（free / 固定价实扣 / 按量预计）在横幅分流。
+        setRetried(res);
         setRetryTarget(null);
       }
     });
@@ -173,7 +173,8 @@ export default function AdminTasksPage() {
         </p>
       )}
       {/* 成功横幅在表格外：重跑后任务回 queued，会从 failed 筛选中消失——行内提示会随行一起没了。
-          扣费披露：charged:true 用 alert 角色 + 醒目色（资金变动不许静默）。 */}
+          FIX1 三态披露（🔴 不许静默扣费）：free「不会重复扣费」/ 固定价「将扣费 N」/ 按量「预计约 N，最终按实际结算」。
+          charged:true 用 alert 角色 + 醒目色（资金变动）。 */}
       {retried && (
         <p
           role={retried.charged ? "alert" : "status"}
@@ -183,8 +184,12 @@ export default function AdminTasksPage() {
               : "rounded-field bg-glass-soft px-3 py-2 text-[12.5px] text-success-fg"
           }
         >
-          {copy.admin.retryDone}（{retried.id}）
-          {retried.charged ? copy.admin.retryChargedSuffix(retried.credits ?? 0) : ""}
+          {copy.admin.retryDone}（{retried.task_id}），
+          {retried.charged
+            ? retried.is_estimate
+              ? copy.admin.retryDisclosureEstimate(retried.credits, retried.estimate_basis)
+              : copy.admin.retryDisclosureFixed(retried.credits)
+            : copy.admin.retryDisclosureFree}
         </p>
       )}
 
@@ -207,8 +212,8 @@ export default function AdminTasksPage() {
             <span className="tabular-nums text-ink">
               {retryTarget?.id}（{retryTarget?.tenant_slug}）
             </span>
-            {/* 冻结文档口径：首版重跑不重复扣费（BE charged:false）。BE 若改口径，此处切 retryChargeNote。 */}
-            <span>{copy.admin.retryFreeNote}</span>
+            {/* FIX1：披露字段只在重试回执里（确认前拿不到组合）→ 弹窗做如实的通用口径说明，精确三态在结果横幅。 */}
+            <span>{copy.admin.retryConfirmNote}</span>
           </span>
         }
         confirmLabel={copy.admin.retryBtn}

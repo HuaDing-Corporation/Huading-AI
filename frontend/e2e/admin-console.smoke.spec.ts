@@ -79,15 +79,17 @@ test("① 平台账号：入口 → 租户管理 → 余额调整（前→后 + 
   await page.getByRole("button", { name: "导出 CSV" }).click();
   await expect(page.getByText("导出行数（6）超出上限（3），请缩小筛选范围")).toBeVisible({ timeout: 15_000 });
 
-  // 任务监控：默认 failed；重跑 task-f1（弹窗明示不重复扣费）→ 已重新排队。
+  // 任务监控：默认 failed；重跑 task-f1（FIX1：弹窗=通用口径说明，回执横幅=按量估算精确披露，不许静默扣费）。
   await page.getByRole("link", { name: "任务监控" }).click();
   await page.waitForURL(/\/admin\/tasks$/, { timeout: 15_000 });
   const failedRow = page.locator("tr", { hasText: "task-f1" });
   await expect(failedRow.getByText("PROVIDER_TIMEOUT")).toBeVisible({ timeout: 15_000 });
   await failedRow.getByRole("button", { name: "重跑" }).click();
-  await expect(page.getByText(/不会重复扣费/)).toBeVisible();
+  await expect(page.getByText(/是否重新计费以重试回执为准/)).toBeVisible();
   await page.getByRole("button", { name: "确认重跑" }).click();
-  await expect(page.getByText("已重新排队")).toBeVisible({ timeout: 15_000 });
+  await expect(
+    page.getByText("已重新排队（task-f1），预计扣费约 1,501 积分，最终按实际成片时长结算")
+  ).toBeVisible({ timeout: 15_000 });
 
   // 375：页面不横滚（表格在容器内滚动）。
   await page.setViewportSize({ width: 375, height: 812 });

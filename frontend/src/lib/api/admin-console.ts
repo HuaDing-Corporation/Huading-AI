@@ -208,14 +208,24 @@ export function fetchAdminTasks(query: { status?: string; tenant_id?: string; fr
 }
 
 /**
- * 重跑失败任务。**扣费口径以 BE 回执为准**：冻结文档定「首版重跑不重复扣费」→ 响应带 charged:false；
- * 若 BE 最终对某类任务收费，会返回 charged:true + charge_credits —— UI 必须在确认弹窗明示，不许静默扣费。
+ * 重跑失败任务的回执披露（FIX1 · BE FIX3 重新冻结的语义）：
+ * - charged=false → 本次重试不重新计费（失败时已扣费 / 确认时已扣）；
+ * - charged=true + is_estimate=false → credits 为**实扣**（固定价，如视频反推 100）；
+ * - charged=true + is_estimate=true → credits 为**预计**（按量任务按实际成片时长结算，最终可能不同），
+ *   estimate_basis 为中文结算口径说明（可选）。
+ * UI 一律不许静默扣费——横幅按三态分流披露。字段名以 BE 回执为准，合并后逐字段核对。
  */
-export function retryAdminTask(taskId: string): Promise<{ task_id: string; status: AdminTaskStatus; charged: boolean; charge_credits?: number }> {
-  return apiFetch<{ task_id: string; status: AdminTaskStatus; charged: boolean; charge_credits?: number }>(
-    `${BASE}/tasks/${encodeURIComponent(taskId)}/retry`,
-    { method: "POST" }
-  );
+export interface AdminRetryReceipt {
+  task_id: string;
+  status: AdminTaskStatus;
+  charged: boolean;
+  credits: number;
+  is_estimate: boolean;
+  estimate_basis?: string;
+}
+
+export function retryAdminTask(taskId: string): Promise<AdminRetryReceipt> {
+  return apiFetch<AdminRetryReceipt>(`${BASE}/tasks/${encodeURIComponent(taskId)}/retry`, { method: "POST" });
 }
 
 export function fetchAdminAudit(query: { action?: string; tenant_id?: string; from?: string; to?: string; limit: number; offset: number }): Promise<AdminAuditList> {

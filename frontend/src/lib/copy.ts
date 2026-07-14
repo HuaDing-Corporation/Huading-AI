@@ -1078,13 +1078,17 @@ export const copy = {
     colDuration: "耗时",
     retryTask: "重跑",
     retryTitle: "确认重跑失败任务",
-    // 🔴 扣费口径以 BE 回执为准：冻结文档定「首版重跑不重复扣费」；若 BE 对某类任务收费(charged:true)，改用 retryChargeNote。
-    retryFreeNote: "重跑不会重复扣费（复用原计费记录）。任务将回到排队中重新执行。",
-    retryChargeNote: (n: number) => `⚠️ 本次重跑将扣除 ${n.toLocaleString("zh-CN")} 积分。任务将回到排队中重新执行。`,
+    // FIX1（BE FIX3 冻结）：披露字段只在**重试回执**里（确认前拿不到每任务组合）→ 弹窗只做如实的通用口径
+    // 说明（不对不可知的事下承诺——上轮静默扣费教训），三态精确披露在结果横幅（retryDisclosure*）。
+    retryConfirmNote:
+      "任务将回到排队中重新执行。是否重新计费以重试回执为准：失败时已扣费的任务不重复扣费；已释放的重新计费（按量任务按实际成片时长结算），确认后立即在结果中明示。",
     retryBtn: "确认重跑",
     retryDone: "已重新排队",
-    // 「以 BE 回执为准」的事后披露：若响应 charged:true（BE 改口径），成功横幅必须明示扣费——不许静默扣费。
-    retryChargedSuffix: (n: number) => `，⚠️ 本次重跑已扣除 ${n.toLocaleString("zh-CN")} 积分`,
+    // 结果披露三态（🔴 一律不许静默扣费）：free / 固定价实扣 / 按量预计（estimate_basis 有则用，无则兜底句）。
+    retryDisclosureFree: "不会重复扣费",
+    retryDisclosureFixed: (n: number) => `将扣费 ${n.toLocaleString("zh-CN")} 积分`,
+    retryDisclosureEstimate: (n: number, basis?: string) =>
+      `预计扣费约 ${n.toLocaleString("zh-CN")} 积分，最终${basis ?? "按实际成片时长结算"}`,
     // 审计日志
     auditTitle: "审计日志",
     auditActionAll: "全部动作",

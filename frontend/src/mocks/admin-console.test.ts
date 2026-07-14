@@ -92,13 +92,14 @@ describe("平台账号（默认）· 读端点确定值", () => {
     expect(released.items[0].id).toBe("u-4");
   });
 
-  it("tasks：全量 5；status=failed → 恰 2 条（task-f2 最新在前）且错误码/信息确定值", async () => {
+  it("tasks：全量 6；status=failed → 恰 3 条（created_at 倒序 f3/f2/f1）且错误码/信息确定值", async () => {
     const all = await fetchAdminTasks({ limit: 20, offset: 0 });
-    expect(all.total).toBe(5);
+    expect(all.total).toBe(6);
     const failed = await fetchAdminTasks({ status: "failed", limit: 20, offset: 0 });
-    expect(failed.total).toBe(2);
-    expect(failed.items[0]).toMatchObject({ id: "task-f2", error_code: "tenant_quota_exceeded", error_message: "额度不足，任务未启动" });
-    expect(failed.items[1]).toMatchObject({ id: "task-f1", error_code: "PROVIDER_TIMEOUT" });
+    expect(failed.total).toBe(3);
+    expect(failed.items[0]).toMatchObject({ id: "task-f3", error_code: "PROVIDER_ERROR" });
+    expect(failed.items[1]).toMatchObject({ id: "task-f2", error_code: "tenant_quota_exceeded", error_message: "额度不足，任务未启动" });
+    expect(failed.items[2]).toMatchObject({ id: "task-f1", error_code: "PROVIDER_TIMEOUT" });
   });
 
   it("CSV 导出：无筛选 6 行 > 上限 3 → 422 中文（原样展示）；按 beta 筛 1 行 → 200 CSV 表头+1 数据行", async () => {
@@ -170,12 +171,27 @@ describe("平台账号 · 写操作（顺序即契约：写会改内存态）", 
     expect((err as ApiError).status).toBe(422);
   });
 
-  it("重跑失败任务 task-f1 → queued + charged:false（首版不重复扣费）；审计 task_retry 前→后；再重跑 → 422 仅失败可重跑", async () => {
-    const res = await retryAdminTask("task-f1");
-    expect(res).toEqual({ task_id: "task-f1", status: "queued", charged: false });
+  it("重跑回执三态（FIX1 冻结契约，确定值）：按量预计 / 固定价实扣 / 不重复扣费；审计各落一条；重复重跑 → 422", async () => {
+    // ① task-f1：视频任务，失败已释放、按时长计费 → charged + credits=原预留 + is_estimate:true + 结算口径。
+    const est = await retryAdminTask("task-f1");
+    expect(est).toEqual({
+      task_id: "task-f1",
+      status: "queued",
+      charged: true,
+      credits: 1501,
+      is_estimate: true,
+      estimate_basis: "按实际成片时长结算"
+    });
+    // ② task-f3：视频反推（失败已释放）→ 固定价 100 实扣（is_estimate:false）。
+    const fixed = await retryAdminTask("task-f3");
+    expect(fixed).toEqual({ task_id: "task-f3", status: "queued", charged: true, credits: 100, is_estimate: false });
+    // ③ task-f2：电商详情图复刻（确认时已扣）→ 不重复扣费。
+    const free = await retryAdminTask("task-f2");
+    expect(free).toEqual({ task_id: "task-f2", status: "queued", charged: false, credits: 0, is_estimate: false });
+    // 审计：三次重跑各落一条（前→后）。
     const audit = await fetchAdminAudit({ action: "task_retry", limit: 20, offset: 0 });
-    expect(audit.total).toBe(1);
-    expect(audit.items[0]).toMatchObject({ before: { status: "failed" }, after: { status: "queued" }, target_tenant_slug: "acme" });
+    expect(audit.total).toBe(3);
+    expect(audit.items[0]).toMatchObject({ before: { status: "failed" }, after: { status: "queued" }, target_tenant_slug: "gamma" });
     // 已回 queued → 非 failed 不可重跑（恰跑一次的服务端兜底）。
     const err = await retryAdminTask("task-f1").catch((e) => e);
     expect((err as ApiError).status).toBe(422);
