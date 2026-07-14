@@ -13,7 +13,7 @@ import {
   fetchAdminVoiceSlots,
   retryAdminTask
 } from "@/lib/api/admin-console";
-import { ApiError } from "@/lib/api/client";
+import { ApiError, apiUrl, authHeaders } from "@/lib/api/client";
 
 // 管理员后台 mock 契约承重（ADMIN-CONSOLE-UI-0001 · FIX1 对齐真实 BE #165）：真打 MSW（不 mock adapter/hooks），
 // 断言全确定值（toBe/toEqual）——禁止量级/范围断言承担安全职责。分页 page/page_size、路径 /audit-logs、
@@ -135,20 +135,19 @@ describe("平台账号（默认）· 读端点确定值（真契约字段）", (
     expect((err as ApiError).status).toBe(422);
     expect((err as ApiError).code).toBe("USAGE_EXPORT_TOO_LARGE");
     expect((err as ApiError).message).toBe("导出记录超过 3 条，请缩小时间范围。");
+    // adapter 200 路径：返回 Blob（浏览器下载用），不抛即通过。
     const blob = await exportAdminUsageCsv({ tenant_id: "ten-beta" });
-    // BOM 在**字节层**断言（readAsText 按标准会剥 UTF-8 BOM，文本层看不到）：前 3 字节 = EF BB BF。
-    const bytes = await new Promise<Uint8Array>((resolve) => {
-      const fr = new FileReader();
-      fr.onload = () => resolve(new Uint8Array(fr.result as ArrayBuffer));
-      fr.readAsArrayBuffer(blob);
+    expect(blob).toBeTruthy();
+    // BOM/内容断言走**环境无关**通道：原始 fetch + Response.arrayBuffer()（Node/undici 原生，
+    // 不经 Blob/FileReader——CI jsdom 25 的 FileReader 不认 fetch 产物 Blob，本地 jsdom Blob 又无 .text()/.arrayBuffer()）。
+    // 注：不能用 res.text() 验 BOM——标准 UTF-8 decode 会剥 BOM，charCodeAt(0) 永远看不到 0xFEFF。
+    const res = await fetch(apiUrl("/api/v1/admin/console/usage/export?tenant_id=ten-beta"), {
+      headers: { Accept: "text/csv", ...authHeaders() }
     });
-    expect([bytes[0], bytes[1], bytes[2]]).toEqual([0xef, 0xbb, 0xbf]); // BOM（镜像 BE ﻿ 前缀）
-    // 文本层（BOM 已被 readAsText 剥掉）：13 列真表头 + 1 数据行。
-    const text = await new Promise<string>((resolve) => {
-      const fr = new FileReader();
-      fr.onload = () => resolve(String(fr.result));
-      fr.readAsText(blob);
-    });
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    expect([bytes[0], bytes[1], bytes[2]]).toEqual([0xef, 0xbb, 0xbf]); // BOM（镜像 BE ﻿ 前缀，字节层）
+    // 文本层（跳过 3 字节 BOM 解码）：13 列真表头 + 1 数据行。
+    const text = new TextDecoder("utf-8").decode(bytes.subarray(3));
     const lines = text.split("\r\n");
     expect(lines).toHaveLength(2);
     expect(lines[0]).toBe("created_at,tenant_id,tenant_slug,tenant_name,capability,provider,model,quantity,unit,credits,cost_cents,status,video_task_id");
