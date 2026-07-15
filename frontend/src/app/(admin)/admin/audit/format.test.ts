@@ -137,6 +137,32 @@ describe("变化分组 changed 标志（§一 真实案例 + 单边键）", () =
   });
 });
 
+// FIX1（PR #172 P1）：changed 判定必须基于**原始叶子值深比较**，不能用格式化后字符串——否则碰撞误判「未变」，
+// 把「发生变更」这一事实抹掉（违反审计铁律）。变异硬门：判定改回格式化字符串 → 下面 1–4 必全红。
+describe("FIX1 · changed 基于原始值深比较（格式化碰撞不再误判「未变」）", () => {
+  it("🔴 四个格式化碰撞反例（Codex B 实跑）→ 全判「变化」，信息不丢", () => {
+    expect(flattenAuditDiff({ v: "" }, { v: null })[0].changed).toBe(true); // "" → null（都格式化成 —）
+    expect(flattenAuditDiff({ v: [] }, { v: null })[0].changed).toBe(true); // [] → null（都 —）
+    expect(flattenAuditDiff({ v: {} }, { v: null })[0].changed).toBe(true); // {} → null（都 —）
+    expect(flattenAuditDiff({ v: 1 }, { v: "1" })[0].changed).toBe(true); // 1 → "1"（类型变更被吞）
+  });
+
+  it("深比较不反向误判：同值数组/标量 → 「未变」；数组内容变 → 「变化」", () => {
+    expect(flattenAuditDiff({ v: [] }, { v: [] })[0].changed).toBe(false);
+    expect(flattenAuditDiff({ v: [1, 2] }, { v: [1, 2] })[0].changed).toBe(false);
+    expect(flattenAuditDiff({ v: [1, 2] }, { v: [1, 3] })[0].changed).toBe(true);
+    expect(flattenAuditDiff({ v: 0 }, { v: 0 })[0].changed).toBe(false);
+    expect(flattenAuditDiff({ v: "x" }, { v: "x" })[0].changed).toBe(false);
+    expect(flattenAuditDiff({ v: false }, { v: false })[0].changed).toBe(false);
+  });
+
+  it("undefined（键不存在）vs null（键存在为空）不混淆：单边键恒变化；null→null 未变", () => {
+    expect(flattenAuditDiff({ v: null }, {})[0].changed).toBe(true); // after 无此键（单边）
+    expect(flattenAuditDiff({}, { v: null })[0].changed).toBe(true); // before 无此键（单边）
+    expect(flattenAuditDiff({ v: null }, { v: null })[0].changed).toBe(false); // 两边都 null → 未变
+  });
+});
+
 describe("truncateAuditValue（长值中截，全值可得由组件层保证）", () => {
   it("36 位 UUID → 前8…后6 中截；错误码/plan_code/中文消息/短值一律不截", () => {
     const uuid = "8a4edef5-4075-4dce-a031-8a6ece6618fc";

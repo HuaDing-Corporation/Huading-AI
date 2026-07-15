@@ -65,6 +65,24 @@ function flattenLeaves(obj: Record<string, unknown>): Map<string, unknown> {
 }
 
 /**
+ * 原始叶子值深比较（FIX1：判定归判定、展示归展示——不能用格式化后字符串判 `changed`，否则 `""/[]/{}→null`
+ * 都成「—」vs「—」、`1→"1"` 都成「1」vs「1」而误判「未变」，把「发生了变更」这一事实抹掉，违反审计铁律）。
+ * 叶子只可能是标量／数组／null／空对象（非空对象在 flatten 阶段已展开）：基本类型走**严格相等**（`1 !== "1"`
+ * 自然算变化）；数组逐元素深比较（`[] === []` 判未变、`[1,2] vs [1,3]` 判变化）。自写实现，不引新依赖。
+ */
+function deepEqualLeaf(a: unknown, b: unknown): boolean {
+  if (a === b) return true; // 标量严格相等 + 同引用（null===null、0===0、false===false）
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((x, i) => deepEqualLeaf(x, b[i]));
+  }
+  const ak = Object.keys(a as Record<string, unknown>);
+  const bk = Object.keys(b as Record<string, unknown>);
+  return ak.length === bk.length && ak.every((k) => deepEqualLeaf((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
+}
+
+/**
  * before/after 快照 → 有序叶子列表。键序 = union(flatten(before) 键序, 再 after 独有的新键)——沿用原
  * 「先 before 键、再 after 独有键」语义。只在一侧出现的键 → 只带那一侧值（组件据此不画箭头）。
  */
@@ -82,14 +100,17 @@ export function flattenAuditDiff(
   }
   for (const k of a.keys()) if (!seen.has(k)) keys.push(k);
   return keys.map((key) => {
-    const before = b.has(key) ? formatAuditValue(b.get(key)) : undefined;
-    const after = a.has(key) ? formatAuditValue(a.get(key)) : undefined;
-    // 单边键（一侧缺席）恒为变化；两边都有则比格式化后字符串。
-    const changed = before === undefined || after === undefined || before !== after;
+    const hasBefore = b.has(key);
+    const hasAfter = a.has(key);
+    const before = hasBefore ? formatAuditValue(b.get(key)) : undefined;
+    const after = hasAfter ? formatAuditValue(a.get(key)) : undefined;
+    // 判定基于**原始叶子值深比较**（非格式化字符串）：单边键（一侧键不存在，undefined≠null）恒变化；
+    // 两边键都在则深比较原始值——`""/[]/{}→null`、`1→"1"` 皆算变化，`[] vs []`、`0 vs 0` 算未变。
+    const changed = !hasBefore || !hasAfter || !deepEqualLeaf(b.get(key), a.get(key));
     return {
       key,
-      ...(before !== undefined ? { before } : {}),
-      ...(after !== undefined ? { after } : {}),
+      ...(hasBefore ? { before } : {}),
+      ...(hasAfter ? { after } : {}),
       changed
     };
   });
