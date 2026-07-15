@@ -8,6 +8,32 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INFRA = REPO_ROOT / "infra"
 
+_OVERALL_WAIT_KEYS_BY_EXAMPLE = {
+    REPO_ROOT / "backend" / ".env.example": {
+        "ENGINE_SEEDANCE_TIMEOUT_SECONDS",
+        "ENGINE_OMNIHUMAN_TIMEOUT_SECONDS",
+        "ENGINE_APIMART_TIMEOUT_SECONDS",
+        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS",
+        "ENGINE_IMAGE_PROVIDER_TIMEOUT_SECONDS",
+        "OPENAI_IMAGE_TIMEOUT",
+    },
+    INFRA / ".env.example": {
+        "ENGINE_SEEDANCE_TIMEOUT_SECONDS",
+        "ENGINE_APIMART_TIMEOUT_SECONDS",
+        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS",
+        "ENGINE_IMAGE_PROVIDER_TIMEOUT_SECONDS",
+        "OPENAI_IMAGE_TIMEOUT",
+    },
+    INFRA / ".env.prod.example": {
+        "ENGINE_SEEDANCE_TIMEOUT_SECONDS",
+        "ENGINE_OMNIHUMAN_TIMEOUT_SECONDS",
+        "ENGINE_APIMART_TIMEOUT_SECONDS",
+        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS",
+        "ENGINE_IMAGE_PROVIDER_TIMEOUT_SECONDS",
+        "OPENAI_IMAGE_TIMEOUT",
+    },
+}
+
 
 def _prod_compose() -> dict:
     return yaml.safe_load((INFRA / "docker-compose.prod.yml").read_text(encoding="utf-8"))
@@ -31,6 +57,24 @@ def _nginx_location_block(conf: str, location: str) -> str:
 def _worker_queue(command: str) -> str:
     args = shlex.split(command)
     return args[args.index("-Q") + 1]
+
+
+def _env_values(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key and not key.startswith("#"):
+            values[key] = value
+    return values
+
+
+def test_generation_overall_waits_are_1500_in_every_env_example() -> None:
+    for path, required_keys in _OVERALL_WAIT_KEYS_BY_EXAMPLE.items():
+        values = _env_values(path)
+        assert required_keys <= values.keys(), path
+        assert {key: values[key] for key in required_keys} == {
+            key: "1500" for key in required_keys
+        }
 
 
 def test_prod_compose_exposes_only_nginx_and_persists_state() -> None:
@@ -204,7 +248,9 @@ def test_prod_env_example_and_runbook_have_placeholders_only() -> None:
         "ENGINE_APIMART_VIDEO_MODEL=doubao-seedance-2.0",
         "ENGINE_APIMART_VIDEO_POLL_INITIAL_DELAY_SECONDS=30",
         "ENGINE_APIMART_VIDEO_POLL_INTERVAL_SECONDS=10",
-        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS=900",
+        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS=1500",
+        "ENGINE_ORPHAN_TASK_STALE_SECONDS=1800",
+        "ENGINE_ORPHAN_RECOVERY_INTERVAL_SECONDS=60",
         "ENGINE_DOUBAO_TTS_APPID=",
         "ENGINE_DOUBAO_VOICE_CLONE_APPID=",
         "OPENAI_API_KEY=",
@@ -219,7 +265,9 @@ def test_prod_env_example_and_runbook_have_placeholders_only() -> None:
         "ENGINE_APIMART_VIDEO_MODEL=doubao-seedance-2.0",
         "ENGINE_APIMART_VIDEO_POLL_INITIAL_DELAY_SECONDS=30",
         "ENGINE_APIMART_VIDEO_POLL_INTERVAL_SECONDS=10",
-        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS=900",
+        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS=1500",
+        "ENGINE_ORPHAN_TASK_STALE_SECONDS=1800",
+        "ENGINE_ORPHAN_RECOVERY_INTERVAL_SECONDS=60",
     ]
     for key in backend_required_keys:
         assert key in backend_env_example
