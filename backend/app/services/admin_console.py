@@ -544,7 +544,14 @@ def resolve_task_family(
     families = (requested_family,) if requested_family else tuple(models)
     for family in families:
         model = models[family]
-        item = db.get(model, task_id)
+        if family == "reverse_prompt":
+            item = db.scalar(
+                reverse_prompt.select_live_reverse_prompt_jobs(
+                    ReversePromptJob.id == task_id
+                )
+            )
+        else:
+            item = db.get(model, task_id)
         if item is not None and not (
             family == "video" and getattr(item, "deleted_at", None) is not None
         ):
@@ -559,9 +566,9 @@ def prepare_reverse_prompt_retry(
     job_id: str,
 ) -> TaskRetryPreparation:
     existing = db.scalar(
-        select(ReversePromptJob)
-        .where(ReversePromptJob.id == job_id)
-        .with_for_update()
+        reverse_prompt.select_live_reverse_prompt_jobs(
+            ReversePromptJob.id == job_id
+        ).with_for_update()
     )
     if existing is None:
         raise AppError("Task not found.", code="TASK_NOT_FOUND", status_code=404)
@@ -1046,7 +1053,9 @@ def _task_union():
             (ReversePromptJob.source_kind == "video")
             & ((ReversePromptJob.status == "failed") | reverse_stale)
         ).label("retryable"),
-    ).join(Tenant, Tenant.id == ReversePromptJob.tenant_id)
+    ).join(Tenant, Tenant.id == ReversePromptJob.tenant_id).where(
+        reverse_prompt.live_reverse_prompt_job_condition()
+    )
     failed_output_exists = (
         select(EcomReplicateOutput.id)
         .where(

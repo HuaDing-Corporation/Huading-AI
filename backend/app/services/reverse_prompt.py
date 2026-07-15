@@ -30,6 +30,17 @@ _SOURCE_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 _EMPTY_TEXT_PLACEHOLDERS = {"none", "n/a", "na", "null", "nil"}
 
 
+def live_reverse_prompt_job_condition():
+    return ReversePromptJob.deleted_at.is_(None)
+
+
+def select_live_reverse_prompt_jobs(*conditions):
+    return select(ReversePromptJob).where(
+        live_reverse_prompt_job_condition(),
+        *conditions,
+    )
+
+
 def create_reverse_prompt_job(
     db: Session,
     *,
@@ -263,7 +274,7 @@ def list_reverse_prompt_jobs(
 ) -> ReversePromptHistoryListResponse:
     filters = [
         ReversePromptJob.tenant_id == tenant_id,
-        ReversePromptJob.deleted_at.is_(None),
+        live_reverse_prompt_job_condition(),
     ]
     if source_kind is not None:
         filters.append(ReversePromptJob.source_kind == source_kind)
@@ -352,8 +363,12 @@ def delete_reverse_prompt_job(
 
 
 def reverse_prompt_job_or_404(db: Session, *, tenant_id: str, job_id: str) -> ReversePromptJob:
-    job = db.get(ReversePromptJob, job_id)
-    if job is None or job.tenant_id != tenant_id or job.deleted_at is not None:
+    job = db.scalar(
+        select_live_reverse_prompt_jobs(
+            ReversePromptJob.id == job_id,
+        )
+    )
+    if job is None or job.tenant_id != tenant_id:
         raise AppError(
             "Reverse prompt job not found.",
             code="REVERSE_PROMPT_JOB_NOT_FOUND",
@@ -369,11 +384,9 @@ def _reverse_prompt_job_for_update_or_404(
     job_id: str,
 ) -> ReversePromptJob:
     job = db.scalar(
-        select(ReversePromptJob)
-        .where(
+        select_live_reverse_prompt_jobs(
             ReversePromptJob.id == job_id,
             ReversePromptJob.tenant_id == tenant_id,
-            ReversePromptJob.deleted_at.is_(None),
         )
         .with_for_update()
         .execution_options(populate_existing=True)
