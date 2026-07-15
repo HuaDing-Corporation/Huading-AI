@@ -46,7 +46,7 @@ test("图片 tab：6 分类 + 查看详情(整套+信息并集) + 大图弹窗�
   // 切「电商·详情图」→ 两套历史项。
   await page.getByRole("button", { name: "电商·详情图" }).click();
   await expect(page.getByText("保温杯 · 主图复刻（5 张）")).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText("保温杯 · 详情页（12 张）")).toBeVisible();
+  await expect(page.getByText("保温杯 · 详情页（11 张成功）")).toBeVisible();
 
   // 「查看详情」→ 重开整套弹窗：5 张 + 下载原图（?dl=1）+ 信息并集（分类/张数）。
   await detailCard(page, /保温杯 · 主图复刻（5 张）/).getByRole("button", { name: "查看详情" }).click();
@@ -73,17 +73,19 @@ test("图片 tab：6 分类 + 查看详情(整套+信息并集) + 大图弹窗�
   expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);
 });
 
-test("详情套（partial_failed，12 张含缺图）→ 缺图张禁用「原图暂不可用」不死链", async ({ page }) => {
+test("详情套（partial_failed）→ 只返 11 张成功、全部可下载(非死链) + 部分失败提示", async ({ page }) => {
   const g = watch(page);
   await login(page);
   await page.getByRole("tab", { name: "图片历史" }).click();
   await page.getByRole("button", { name: "电商·详情图" }).click();
 
-  await detailCard(page, /保温杯 · 详情页（12 张）/).getByRole("button", { name: "查看详情" }).click();
-  // 12 张里 11 张可下载 + 1 张缺图禁用态 + 部分失败提示。
-  await expect(page.getByRole("link", { name: "下载原图" })).toHaveCount(11, { timeout: 15_000 });
-  await expect(page.getByText("原图暂不可用")).toBeVisible();
-  await expect(page.getByText("本套部分图片生成失败（缺失项不可下载）")).toBeVisible();
+  await detailCard(page, /保温杯 · 详情页（11 张成功）/).getByRole("button", { name: "查看详情" }).click();
+  // FIX2 对齐真实 BE：详情只返成功张（失败张已 omit，schema download_url:str 非空）→ 11 张全部可下载、无「缺图」死链；
+  // 套级 status 仍标 partial_failed（从 task 带出）→ 展示「仅展示成功生成的图片」提示。
+  const links = page.getByRole("link", { name: "下载原图" });
+  await expect(links).toHaveCount(11, { timeout: 15_000 });
+  await expect(links.first()).toHaveAttribute("href", /\?dl=1$/);
+  await expect(page.getByText("本套部分图片生成失败，仅展示成功生成的图片")).toBeVisible();
 
   expect(g.errors(), `page errors：\n${g.errors().join("\n")}`).toEqual([]);
   expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);

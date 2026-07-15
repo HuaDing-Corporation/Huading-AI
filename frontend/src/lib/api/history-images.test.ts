@@ -22,11 +22,12 @@ describe("listHistoryImages · GET /history/images（分页 + 分类隔离）", 
     expect(p2.items).toHaveLength(3);
   });
 
-  it("ecom_detail：2 条（主图套 + 详情套），item_count 分别 5 / 12", async () => {
+  it("ecom_detail：2 条（主图套 + 详情套），item_count 分别 5 / 11（partial 的 item_count=成功张数）", async () => {
     const res = await listHistoryImages({ category: "ecom_detail" });
     expect(res.total).toBe(2);
     const counts = res.items.map((i) => i.item_count).sort((a, b) => a - b);
-    expect(counts).toEqual([5, 12]);
+    // FIX2 对齐真实 BE：services/image_history.py:109 `item_count = count(succeeded)` → partial 套=11（非规划 12）。
+    expect(counts).toEqual([5, 11]);
     // partial_failed 记录如实带 status
     expect(res.items.some((i) => i.status === "partial_failed")).toBe(true);
   });
@@ -50,12 +51,12 @@ describe("getHistoryImageSet · GET /history/images/{category}/{id}（重开整�
     expect(historyImageDimensions(o0)).toBe("1254x1254");
   });
 
-  it("详情套 hd-detail-1：12 张，partial_failed，缺图张 download_url 为 null", async () => {
+  it("详情套 hd-detail-1：只返 11 张成功（失败张 BE 已 omit），partial_failed，全部 download_url 非空", async () => {
     const set = await getHistoryImageSet("ecom_detail", "hd-detail-1");
     expect(set.status).toBe("partial_failed");
-    expect(set.items).toHaveLength(12);
-    const missing = set.items.filter((it) => it.download_url == null);
-    expect(missing.length).toBe(1);
+    // FIX2 对齐真实 BE：详情只返成功张（services/image_history.py:106 `if not output.download_url: continue`）→ 11 张、无 null。
+    expect(set.items).toHaveLength(11);
+    expect(set.items.every((it) => typeof it.download_url === "string" && it.download_url.length > 0)).toBe(true);
   });
 
   it("跨租户 / 不存在 → 404", async () => {
@@ -64,11 +65,11 @@ describe("getHistoryImageSet · GET /history/images/{category}/{id}（重开整�
 });
 
 describe("historyImageDimensions", () => {
-  it("width/height 均在才给「WxH」；缺一即 null（不冒充）", () => {
-    const base: HistoryImageSetItem = { index: 0 };
-    expect(historyImageDimensions({ ...base, width: 1086, height: 1448 })).toBe("1086x1448");
-    expect(historyImageDimensions({ ...base, width: null, height: 1448 })).toBeNull();
-    expect(historyImageDimensions({ ...base, width: 1086, height: null })).toBeNull();
-    expect(historyImageDimensions(base)).toBeNull();
+  it("width/height 均为正整数才给「WxH」；任一为 0 兜底 null（不冒充）", () => {
+    // FIX2 对齐真实 BE：width/height 为必填 int（schema ImageHistoryDetailItem），故兜底异常用 0（类型已不允许 null）。
+    const base: HistoryImageSetItem = { index: 0, download_url: "https://mock.local/x.png?dl=1", width: 1086, height: 1448 };
+    expect(historyImageDimensions(base)).toBe("1086x1448");
+    expect(historyImageDimensions({ ...base, width: 0 })).toBeNull();
+    expect(historyImageDimensions({ ...base, height: 0 })).toBeNull();
   });
 });

@@ -29,12 +29,17 @@ export interface HistoryListResponse {
   page_size: number;
 }
 
-/** 整套中的单张：原图可下载 URL + 原始尺寸（缺失即 null，不冒充）。 */
+/**
+ * 整套中的单张（FIX2 对齐真实 BE `ImageHistoryDetailItem`，backend/app/schemas/history.py:32-43）：
+ * download_url/width/height 均**必填**（BE `str`/`int` 非空——失败张 BE 已 omit、详情只返成功张，故无 null）；
+ * theme/label 为 `str | None`。BE 另有 5 个展示元字段（requested/resolved/actual_aspect_ratio、resolved/actual_size，
+ * 均 `str | None`）——本 UI 不消费，故类型/ mock 有意省略（FE 读子集，非红线违规）。
+ */
 export interface HistoryImageSetItem {
   index: number;
-  download_url?: string | null; // 原图 bytes（presigned）；缺失→前端禁用态、不死链
-  width?: number | null;
-  height?: number | null;
+  download_url: string; // 原图 bytes（presigned）——BE 必填非空
+  width: number;
+  height: number;
   theme?: string | null; // 分类特有标注（详情图页面主题机器键）
   label?: string | null; // 通用标签（白底图/模特图等友好名）
 }

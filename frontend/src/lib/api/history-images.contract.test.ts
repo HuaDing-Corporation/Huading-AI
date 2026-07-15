@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { getHistoryImageSet, listHistoryImages } from "@/lib/api/history-images";
+import { getHistoryImageSet, listHistoryImages, type HistoryCategory } from "@/lib/api/history-images";
 
 // HISTORY-IMAGE-TAB-UI-0001 归一契约 mock 承重（真打 MSW /history/images，不 mock adapter）：
 // 6 分类（含新 cover）+ 省略 category=全部图片。全确定值断言。
@@ -32,13 +32,28 @@ describe("图片历史归一契约（6 分类 + 全部）", () => {
     expect((await listHistoryImages({ category: "ecom_white", page_size: 100 })).total).toBe(2);
   });
 
-  it("详情整套：ecom_detail 主图 5 张（completed）；partial 详情 12 张含 1 缺图（download_url=null）", async () => {
+  it("详情整套：ecom_detail 主图 5 张（completed）；partial 详情只返 11 张成功（失败张 BE 已 omit，全可下载）", async () => {
     const main = await getHistoryImageSet("ecom_detail", "hd-main-1");
     expect(main.items).toHaveLength(5);
     expect(main.status).toBe("completed");
+    // FIX2 对齐真实 BE：services/image_history.py:106 `if not output.download_url: continue` —— 详情只返成功张，
+    // 失败张已 omit（schema download_url:str 非空）。套级 status 仍标 partial_failed（从 task 带出），但无「缺图」项。
     const detail = await getHistoryImageSet("ecom_detail", "hd-detail-1");
-    expect(detail.items).toHaveLength(12);
+    expect(detail.items).toHaveLength(11);
     expect(detail.status).toBe("partial_failed");
-    expect(detail.items.filter((it) => it.download_url === null)).toHaveLength(1); // 第 6 张缺图
+    expect(detail.items.every((it) => typeof it.download_url === "string" && it.download_url.length > 0)).toBe(true);
+  });
+
+  it("非法 category → 422（🔴 mock 不比 BE 宽松；BE routes/history.py category:ImageHistoryCategory 非枚举即 422）", async () => {
+    // 列表端点：非枚举分类
+    await expect(listHistoryImages({ category: "bogus" as HistoryCategory, page_size: 100 })).rejects.toMatchObject({
+      status: 422,
+      code: "VALIDATION_ERROR"
+    });
+    // 详情端点：path 段非法 category 同样 422（先于跨租户/不存在 404）
+    await expect(getHistoryImageSet("bogus", "hd-main-1")).rejects.toMatchObject({
+      status: 422,
+      code: "VALIDATION_ERROR"
+    });
   });
 });

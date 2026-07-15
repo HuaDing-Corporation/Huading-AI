@@ -611,14 +611,13 @@ export const copy = {
     setLoading: "加载整套图片中…",
     setError: "整套加载失败，请重试",
     setEmpty: "该记录暂无可展示的图片",
-    setPartialHint: "本套部分图片生成失败（缺失项不可下载）",
+    setPartialHint: "本套部分图片生成失败，仅展示成功生成的图片",
     setPageNo: (n: number) => `第 ${n} 张`,
     previewAlt: (n: number) => `历史图片第 ${n} 张`,
     // 原图红线（下载原始 bytes、显示原始尺寸、缺失禁用）
     sizeLabel: (dims: string) => `原始尺寸：${dims}（下载为原图，未裁剪）`,
     sizeUnknown: "原图尺寸以下载文件为准（未裁剪）",
     download: "下载原图",
-    downloadUnavailable: "原图暂不可用",
     close: "关闭",
     // HISTORY-IMAGE-TAB-UI-0001：并进工作台图片 tab 的 6 分类 chip（顺序：全部图片 / 图片生成·修改 / 白底 / 模特 / 详情 / 封面）
     catAll: "全部图片",
