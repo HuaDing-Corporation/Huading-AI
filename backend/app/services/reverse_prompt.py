@@ -8,14 +8,19 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.db.models import Asset, ReversePromptJob, User
 from app.providers.base import resolve
-from app.schemas.reverse_prompt import ReversePromptResult
+from app.schemas.reverse_prompt import (
+    ReversePromptHistoryItem,
+    ReversePromptHistoryListResponse,
+    ReversePromptResult,
+    ReversePromptSourceKind,
+)
 from app.services import quota
 from app.services.storage.base import ObjectStorage
 
@@ -247,9 +252,108 @@ def save_reverse_prompt_job(
     return job
 
 
+def list_reverse_prompt_jobs(
+    db: Session,
+    *,
+    tenant_id: str,
+    source_kind: ReversePromptSourceKind | None,
+    page: int,
+    page_size: int,
+    storage: ObjectStorage,
+) -> ReversePromptHistoryListResponse:
+    filters = [
+        ReversePromptJob.tenant_id == tenant_id,
+        ReversePromptJob.deleted_at.is_(None),
+    ]
+    if source_kind is not None:
+        filters.append(ReversePromptJob.source_kind == source_kind)
+    total = int(
+        db.scalar(select(func.count()).select_from(ReversePromptJob).where(*filters)) or 0
+    )
+    jobs = list(
+        db.scalars(
+            select(ReversePromptJob)
+            .where(*filters)
+            .order_by(ReversePromptJob.created_at.desc(), ReversePromptJob.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    )
+    return ReversePromptHistoryListResponse(
+        items=[
+            ReversePromptHistoryItem(
+                id=job.id,
+                source_kind=job.source_kind,
+                status=job.status,
+                created_at=job.created_at,
+                source_thumbnail_url=_history_source_thumbnail_url(
+                    job,
+                    tenant_id=tenant_id,
+                    storage=storage,
+                ),
+                summary=_history_summary(job.result_json),
+            )
+            for job in jobs
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+def _history_source_thumbnail_url(
+    job: ReversePromptJob,
+    *,
+    tenant_id: str,
+    storage: ObjectStorage,
+) -> str | None:
+    if job.source_kind != "image":
+        return None
+    storage_key = str(job.source_storage_key or "")
+    if not _is_safe_tenant_storage_key(tenant_id, storage_key):
+        return None
+    return storage.presign_get_url(
+        storage_key,
+        expires_in=settings.engine_s3_presign_ttl,
+    )
+
+
+def _history_summary(result_json: Mapping[str, object] | None) -> str | None:
+    if not isinstance(result_json, Mapping):
+        return None
+    for key in ("prompt_zh", "subject", "prompt_en"):
+        value = str(result_json.get(key) or "").strip()
+        if value:
+            return value[:160]
+    return None
+
+
+def _is_safe_tenant_storage_key(tenant_id: str, storage_key: str) -> bool:
+    return (
+        storage_key.startswith(f"tenants/{tenant_id}/")
+        and ".." not in storage_key
+        and "\\" not in storage_key
+    )
+
+
+def delete_reverse_prompt_job(
+    db: Session,
+    *,
+    tenant_id: str,
+    job_id: str,
+) -> ReversePromptJob:
+    job = reverse_prompt_job_or_404(db, tenant_id=tenant_id, job_id=job_id)
+    deleted_at = datetime.now(UTC)
+    job.deleted_at = deleted_at
+    job.updated_at = deleted_at
+    db.commit()
+    db.refresh(job)
+    return job
+
+
 def reverse_prompt_job_or_404(db: Session, *, tenant_id: str, job_id: str) -> ReversePromptJob:
     job = db.get(ReversePromptJob, job_id)
-    if job is None or job.tenant_id != tenant_id:
+    if job is None or job.tenant_id != tenant_id or job.deleted_at is not None:
         raise AppError(
             "Reverse prompt job not found.",
             code="REVERSE_PROMPT_JOB_NOT_FOUND",
@@ -266,7 +370,11 @@ def _reverse_prompt_job_for_update_or_404(
 ) -> ReversePromptJob:
     job = db.scalar(
         select(ReversePromptJob)
-        .where(ReversePromptJob.id == job_id, ReversePromptJob.tenant_id == tenant_id)
+        .where(
+            ReversePromptJob.id == job_id,
+            ReversePromptJob.tenant_id == tenant_id,
+            ReversePromptJob.deleted_at.is_(None),
+        )
         .with_for_update()
         .execution_options(populate_existing=True)
     )
@@ -315,12 +423,7 @@ def source_asset_or_raise(
             code="REVERSE_PROMPT_SOURCE_INVALID",
             status_code=422,
         )
-    expected_prefix = f"tenants/{tenant_id}/"
-    if (
-        not source.storage_key.startswith(expected_prefix)
-        or ".." in source.storage_key
-        or "\\" in source.storage_key
-    ):
+    if not _is_safe_tenant_storage_key(tenant_id, source.storage_key):
         raise AppError(
             "Reverse prompt source storage key is invalid.",
             code="REVERSE_PROMPT_SOURCE_INVALID",

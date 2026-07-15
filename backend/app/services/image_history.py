@@ -18,12 +18,13 @@ from app.services import ecom_replicate
 from app.services.history import video_mode_filter
 from app.services.storage.base import ObjectStorage
 
-PhotoHistoryCategory = Literal["image_gen", "ecom_white", "ecom_model"]
+PhotoHistoryCategory = Literal["image_gen", "ecom_white", "ecom_model", "cover"]
 
 _PHOTO_KIND_BY_CATEGORY: dict[PhotoHistoryCategory, str | None] = {
     "image_gen": None,
     "ecom_white": "ecom_cutout",
     "ecom_model": "ecom_model",
+    "cover": "cover",
 }
 _REPLICATE_HISTORY_STATUSES = {"completed", "partial_failed", "failed"}
 
@@ -136,6 +137,7 @@ def _source_index(tenant_id: str, category: ImageHistoryCategory | None):
             "image_gen",
             "ecom_white",
             "ecom_model",
+            "cover",
         )
         queries.extend(_photo_source_query(tenant_id, item) for item in categories)
         queries.append(_replicate_source_query(tenant_id))
@@ -184,6 +186,8 @@ def _photo_title(category: PhotoHistoryCategory, task: VideoTask) -> str:
         return (task.topic or "图片生成").strip() or "图片生成"
     if category == "ecom_white":
         return "透明底图" if params.get("background") == "transparent" else "白底图"
+    if category == "cover":
+        return (task.topic or "封面").strip() or "封面"
     extra_prompt = str(params.get("extra_prompt") or "").strip()
     if extra_prompt:
         return extra_prompt
@@ -418,6 +422,15 @@ def _photo_detail_meta(
                 meta[key] = params[key]
     elif category == "ecom_white":
         for key in ("background", "source_asset_id"):
+            if params.get(key) is not None:
+                meta[key] = params[key]
+    elif category == "cover":
+        for key in (
+            "source",
+            "source_video_task_id",
+            "timestamp_sec",
+            "layout_template_id",
+        ):
             if params.get(key) is not None:
                 meta[key] = params[key]
     else:

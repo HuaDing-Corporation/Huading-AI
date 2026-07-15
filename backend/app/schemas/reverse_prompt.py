@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 ReversePromptTargetFormat = Literal["seedance_2_0"]
+ReversePromptSourceKind = Literal["image", "video"]
 
 
 class ReversePromptCreateRequest(BaseModel):
@@ -86,3 +87,24 @@ class ReversePromptSavedResponse(BaseModel):
     id: str
     status: Literal["saved"] = "saved"
     saved_at: datetime
+
+
+class ReversePromptDeletedResponse(BaseModel):
+    id: str
+    deleted_at: datetime
+
+
+class ReversePromptHistoryItem(BaseModel):
+    id: str
+    source_kind: ReversePromptSourceKind
+    status: str
+    created_at: datetime
+    source_thumbnail_url: str | None = None
+    summary: str | None = None
+
+
+class ReversePromptHistoryListResponse(BaseModel):
+    items: list[ReversePromptHistoryItem]
+    total: int
+    page: int
+    page_size: int
