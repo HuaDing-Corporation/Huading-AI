@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Frontend image (Next.js). Build context = repo root (pnpm workspace lives there).
-FROM node:20-slim
+FROM node:20-slim AS builder
 
 RUN corepack enable
 
@@ -22,9 +22,19 @@ ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
 ENV NEXT_PUBLIC_USE_MOCK=$NEXT_PUBLIC_USE_MOCK
 RUN pnpm --filter @huading/frontend build
 
-WORKDIR /repo/frontend
+FROM node:20-slim AS runner
+
+WORKDIR /app
+
 ENV NODE_ENV=production \
     PORT=3000 \
     HOSTNAME=0.0.0.0
+
+COPY --from=builder /repo/frontend/.next/standalone ./
+COPY --from=builder /repo/frontend/.next/static ./frontend/.next/static
+COPY --from=builder /repo/frontend/public ./frontend/public
+
+WORKDIR /app/frontend
+
 EXPOSE 3000
-CMD ["pnpm", "start"]
+CMD ["node", "server.js"]
