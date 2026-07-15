@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { flattenAuditDiff, formatAuditValue } from "./format";
+import { flattenAuditDiff, formatAuditValue, truncateAuditValue } from "./format";
 
 // 审计 diff 格式化承重（ADMIN-AUDIT-DIFF-RENDER-FIX-0001 §四.3）：反假绿最高标准——
 // 期望值**手写常量**（不 import 被测函数来算，否则改一处两边同步变、变异永远不红）；
@@ -49,12 +49,12 @@ describe("flattenAuditDiff · 嵌套展开 + 键序 + 单侧语义", () => {
     const after = { plan_code: "huading", subscription: { id: "sub-acme", total: 10000000, used: 5000, reserved: 1000, remaining: 9994000 } };
     const leaves = flattenAuditDiff(before, after);
     expect(leaves).toEqual([
-      { key: "plan_code", before: "free", after: "huading" },
-      { key: "subscription.id", before: "sub-acme", after: "sub-acme" },
-      { key: "subscription.total", before: "10,000,000", after: "10,000,000" },
-      { key: "subscription.used", before: "5,000", after: "5,000" },
-      { key: "subscription.reserved", before: "1,000", after: "1,000" },
-      { key: "subscription.remaining", before: "9,994,000", after: "9,994,000" }
+      { key: "plan_code", before: "free", after: "huading", changed: true },
+      { key: "subscription.id", before: "sub-acme", after: "sub-acme", changed: false },
+      { key: "subscription.total", before: "10,000,000", after: "10,000,000", changed: false },
+      { key: "subscription.used", before: "5,000", after: "5,000", changed: false },
+      { key: "subscription.reserved", before: "1,000", after: "1,000", changed: false },
+      { key: "subscription.remaining", before: "9,994,000", after: "9,994,000", changed: false }
     ]);
     // 反 [object Object] 附加负断言（主断言已是上面的确定值 toEqual）。
     expect(JSON.stringify(leaves)).not.toContain("[object Object]");
@@ -65,9 +65,9 @@ describe("flattenAuditDiff · 嵌套展开 + 键序 + 单侧语义", () => {
     const before = { speaker_ids: [] as string[] };
     const after = { speaker_ids: ["S_acme_001"], speaker_id: "S_acme_001", changed: true };
     expect(flattenAuditDiff(before, after)).toEqual([
-      { key: "speaker_ids", before: "—", after: "S_acme_001" }, // 空数组 → —
-      { key: "speaker_id", after: "S_acme_001" }, // after 独有 → 无 before 字段
-      { key: "changed", after: "是" } // 布尔雷 → 是
+      { key: "speaker_ids", before: "—", after: "S_acme_001", changed: true }, // 空数组 → —，且变化
+      { key: "speaker_id", after: "S_acme_001", changed: true }, // after 独有（单边键）→ 恒变化、默认可见
+      { key: "changed", after: "是", changed: true } // 布尔雷 → 是；单边键
     ]);
   });
 
@@ -76,10 +76,10 @@ describe("flattenAuditDiff · 嵌套展开 + 键序 + 单侧语义", () => {
     const before = { status: "failed", progress: 40, error_code: null, error_message: null };
     const after = { status: "queued", progress: 0 };
     expect(flattenAuditDiff(before, after)).toEqual([
-      { key: "status", before: "failed", after: "queued" },
-      { key: "progress", before: "40", after: "0" },
-      { key: "error_code", before: "—" }, // before 独有（after 无此键）+ null → —
-      { key: "error_message", before: "—" }
+      { key: "status", before: "failed", after: "queued", changed: true },
+      { key: "progress", before: "40", after: "0", changed: true },
+      { key: "error_code", before: "—", changed: true }, // before 独有（after 无此键）+ null → —；单边键
+      { key: "error_message", before: "—", changed: true }
     ]);
   });
 
@@ -88,11 +88,11 @@ describe("flattenAuditDiff · 嵌套展开 + 键序 + 单侧语义", () => {
     const before = { id: "sub-acme", total: 20000, used: 5000, reserved: 1000, remaining: 14000 };
     const after = { id: "sub-acme", total: 25000, used: 5000, reserved: 1000, remaining: 19000 };
     expect(flattenAuditDiff(before, after)).toEqual([
-      { key: "id", before: "sub-acme", after: "sub-acme" },
-      { key: "total", before: "20,000", after: "25,000" },
-      { key: "used", before: "5,000", after: "5,000" },
-      { key: "reserved", before: "1,000", after: "1,000" },
-      { key: "remaining", before: "14,000", after: "19,000" }
+      { key: "id", before: "sub-acme", after: "sub-acme", changed: false },
+      { key: "total", before: "20,000", after: "25,000", changed: true },
+      { key: "used", before: "5,000", after: "5,000", changed: false },
+      { key: "reserved", before: "1,000", after: "1,000", changed: false },
+      { key: "remaining", before: "14,000", after: "19,000", changed: true }
     ]);
   });
 
@@ -100,5 +100,52 @@ describe("flattenAuditDiff · 嵌套展开 + 键序 + 单侧语义", () => {
     const leaves = flattenAuditDiff({ b1: "x", shared: "1" }, { shared: "2", a1: "y" });
     expect(leaves.map((l) => l.key)).toEqual(["b1", "shared", "a1"]);
     expect(flattenAuditDiff(null, null)).toEqual([]);
+  });
+});
+
+// ADMIN-AUDIT-DIFF-NOISE-0001 §四：变化分组（未变键折叠、信息只折叠不删）+ 长值中截。期望值手写常量。
+describe("变化分组 changed 标志（§一 真实案例 + 单边键）", () => {
+  it("§一 生产实拍套餐变更：只有 plan_code 变、subscription.* 5 项全未变 → 分组精确", () => {
+    // 形状/值照抄 §一（admin_console.py:289-296）：plan free→huading，余额分文未动。
+    const before = { plan_code: "free", subscription: { id: "8a4edef5-4075-4dce-a031-8a6ece6618fc", used: 110, total: 10000000, reserved: 0, remaining: 9999890 } };
+    const after = { plan_code: "huading", subscription: { id: "8a4edef5-4075-4dce-a031-8a6ece6618fc", used: 110, total: 10000000, reserved: 0, remaining: 9999890 } };
+    const leaves = flattenAuditDiff(before, after);
+    // 默认展示（变化）恰 plan_code 一项；折叠（未变）恰 subscription.* 五项——保持键序。
+    expect(leaves.filter((l) => l.changed).map((l) => l.key)).toEqual(["plan_code"]);
+    expect(leaves.filter((l) => !l.changed).map((l) => l.key)).toEqual([
+      "subscription.id",
+      "subscription.used",
+      "subscription.total",
+      "subscription.reserved",
+      "subscription.remaining"
+    ]);
+  });
+
+  it("🔴 单边键（voice_slot 首次分配：只有 after）必判「变化」、默认可见——最易写错的一条", () => {
+    const leaves = flattenAuditDiff({ speaker_ids: [] }, { speaker_ids: ["S_x"], speaker_id: "S_x", changed: true });
+    expect(leaves.every((l) => l.changed)).toBe(true); // 三键全变化（无未变键）
+    expect(leaves.filter((l) => !l.changed)).toEqual([]);
+  });
+
+  it("全部键都变（credits_adjust total/remaining 变）→ 有未变键（id/used/reserved）仍在，分组各就位", () => {
+    const leaves = flattenAuditDiff(
+      { id: "sub-acme", total: 20000, used: 5000, reserved: 1000, remaining: 14000 },
+      { id: "sub-acme", total: 25000, used: 5000, reserved: 1000, remaining: 19000 }
+    );
+    expect(leaves.filter((l) => l.changed).map((l) => l.key)).toEqual(["total", "remaining"]);
+    expect(leaves.filter((l) => !l.changed).map((l) => l.key)).toEqual(["id", "used", "reserved"]);
+  });
+});
+
+describe("truncateAuditValue（长值中截，全值可得由组件层保证）", () => {
+  it("36 位 UUID → 前8…后6 中截；错误码/plan_code/中文消息/短值一律不截", () => {
+    const uuid = "8a4edef5-4075-4dce-a031-8a6ece6618fc";
+    expect(uuid.length).toBe(36);
+    expect(truncateAuditValue(uuid)).toBe("8a4edef5…6618fc");
+    // 不截：错误码（非 hex 字母 + 下划线）、plan_code（短）、中文消息（含 CJK）、槽位 id（非 hex 字母）
+    expect(truncateAuditValue("TASK_RETRY_ENQUEUE_FAILED")).toBe("TASK_RETRY_ENQUEUE_FAILED");
+    expect(truncateAuditValue("huading")).toBe("huading");
+    expect(truncateAuditValue("扣减后额度会低于已用与预留，本次操作无法执行，请重新核对。")).toBe("扣减后额度会低于已用与预留，本次操作无法执行，请重新核对。");
+    expect(truncateAuditValue("S_acme_001")).toBe("S_acme_001");
   });
 });

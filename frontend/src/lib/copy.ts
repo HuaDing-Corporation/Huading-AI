@@ -1116,6 +1116,9 @@ export const copy = {
     auditBoolFalse: "否",
     auditSrBefore: "变更前",
     auditSrAfter: "变更后",
-    auditSrNone: "无"
+    auditSrNone: "无",
+    // 信噪比（ADMIN-AUDIT-DIFF-NOISE-0001）：未变键折叠标题。信息只折叠不删——点开可逐键复核未变字段。
+    auditUnchangedFold: (n: number) => `另有 ${n} 项未变化`,
+    auditAllUnchanged: "本次无字段变化"
   }
 } as const;

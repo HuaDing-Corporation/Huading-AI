@@ -1,12 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
 /**
- * 审计「变更前 → 变更后」渲染修复交互冒烟（ADMIN-AUDIT-DIFF-RENDER-FIX-0001，生产构建走 MSW）。
- * 现场血案：/admin/audit 套餐变更行嵌套对象吐 `[object Object]`。这里驱动一次真实套餐变更（Acme
- * huading→basic，产出嵌套 subscription 审计），断言：
- *  ① 嵌套对象被逐键展开成点号路径 `subscription.total` 且数字走千分位（确定值，主断言）；
- *  ② `plan_code` 前→后确定值；③ 种子槽位分配行数组被 join、不再 [object Object]；
- *  ④ 附加负断言：整个审计表内绝不出现 `[object Object]`（附加，不作主断言——避免组件没渲染时空过）。
+ * 审计「变更前 → 变更后」信噪比 + 渲染冒烟（ADMIN-AUDIT-DIFF-NOISE-0001，叠 #169，生产构建走 MSW）。
+ * 驱动一次真实套餐变更（Acme huading→basic：只有 plan_code 变、subscription.* 全不变），断言：
+ *  ① plan_code 变化 → 默认展示（前→后确定值）；② 未变的 subscription.* 默认**收进折叠区**（不可见）、
+ *  折叠标题「另有 5 项未变化」可见；③ 点开折叠 → 未变 5 项**确实还在**（信息只折叠不删，资金追溯依据）；
+ *  ④ 种子槽位分配行（全变化，无折叠）数组 join；⑤ 负断言：整表无 `[object Object]`（附加，非主断言）。
  * 全程 Console 0 error（Chrome DevTools 口径）。
  */
 function watch(page: Page): { errors: () => string[] } {
@@ -57,15 +56,19 @@ test("套餐变更（嵌套 subscription）审计行不再 [object Object]：逐
   await page.getByRole("link", { name: "审计日志" }).click();
   await page.waitForURL(/\/admin\/audit$/, { timeout: 15_000 });
 
-  // ① 主断言（确定值）：嵌套 subscription 被展平成点号路径叶子行 + 数字千分位（20000→20,000），不再 [object Object]。
-  await expect(page.getByText(/^subscription\.total：.*20,000.*20,000$/)).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText(/^subscription\.remaining：.*14,000.*14,000$/)).toBeVisible();
-  // ② plan_code 前→后确定值。
-  await expect(page.getByText(/^plan_code：.*huading.*basic$/)).toBeVisible();
-  // ③ 种子槽位分配行：数组 join 成可读串（after speaker_ids=["S_acme_001"]），不再 [object Object]/空白。
+  // ① plan_code 变化 → 默认展示（前→后确定值）。
+  await expect(page.getByText(/^plan_code：.*huading.*basic$/)).toBeVisible({ timeout: 15_000 });
+  // ② 未变的 subscription.* 默认**收进折叠区**（不可见）；折叠标题「另有 5 项未变化」可见。
+  await expect(page.getByText("另有 5 项未变化")).toBeVisible();
+  await expect(page.getByText(/subscription\.total/)).not.toBeVisible();
+  // ③ 点开折叠 → 未变 5 项**确实还在**（信息只折叠不删）：subscription.total 单值 20,000 可见。
+  await page.getByText("另有 5 项未变化").click();
+  await expect(page.getByText(/subscription\.total：.*20,000/)).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByText(/subscription\.remaining：.*14,000/)).toBeVisible();
+  // ④ 种子槽位分配行（全变化，无折叠）：数组 join 成可读串（after speaker_ids=["S_acme_001"]）。
   await expect(page.getByText(/^speaker_ids：.*S_acme_001$/)).toBeVisible();
 
-  // ④ 附加负断言（非主断言）：整表内绝无 [object Object]。
+  // ⑤ 附加负断言（非主断言）：整表内绝无 [object Object]。
   const tableText = (await page.locator("table").innerText()) ?? "";
   expect(tableText, "审计表内不得出现 [object Object]").not.toContain("[object Object]");
 
