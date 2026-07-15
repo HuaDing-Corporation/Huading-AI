@@ -1,4 +1,3 @@
-import posixpath
 from collections.abc import Mapping
 from typing import Any, Literal, cast
 
@@ -7,7 +6,6 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.exceptions import AppError
-from app.core.logging import get_logger
 from app.db.models import Asset, EcomReplicateJob, EcomReplicateOutput, TaskAsset, VideoTask
 from app.schemas.history import (
     ImageHistoryCategory,
@@ -17,16 +15,8 @@ from app.schemas.history import (
     ImageHistoryListResponse,
 )
 from app.services import ecom_replicate
-from app.services.history import (
-    _delete_media_best_effort,
-    referenced_asset_ids,
-    referenced_storage_keys,
-    stage_video_task_deletions,
-    video_mode_filter,
-)
+from app.services.history import video_mode_filter
 from app.services.storage.base import ObjectStorage
-
-logger = get_logger(__name__)
 
 PhotoHistoryCategory = Literal["image_gen", "ecom_white", "ecom_model", "cover"]
 
@@ -37,56 +27,19 @@ _PHOTO_KIND_BY_CATEGORY: dict[PhotoHistoryCategory, str | None] = {
     "cover": "cover",
 }
 _REPLICATE_HISTORY_STATUSES = {"completed", "partial_failed", "failed"}
-_PHOTO_OUTPUT_ASSET_ROLES = {
-    "output_audio",
-    "output_subtitle",
-    "output_video",
-    "output_image",
-}
-
-
-class _ValidatedDeleteStorage:
-    def __init__(self, storage: ObjectStorage, *, tenant_id: str) -> None:
-        self.bucket = storage.bucket
-        self._storage = storage
-        self._tenant_id = tenant_id
-
-    def delete_object(self, key: str) -> None:
-        self._storage.delete_object(
-            _validated_tenant_storage_key(self._tenant_id, key)
-        )
 
 
 def _tenant_storage_pattern(tenant_id: str) -> str:
     return f"tenants/{tenant_id}/%"
 
 
-def _normalized_tenant_storage_key(tenant_id: str, storage_key: str | None) -> str | None:
-    value = str(storage_key or "")
-    if not value or "\\" in value or "%" in value or "\x00" in value:
-        return None
-    parts = value.split("/")
-    if (
-        len(parts) < 3
-        or parts[0] != "tenants"
-        or parts[1] != tenant_id
-        or any(part in {"", ".", ".."} for part in parts)
-    ):
-        return None
-    normalized = posixpath.normpath(value)
-    expected_prefix = f"tenants/{tenant_id}/"
-    if normalized != value or not normalized.startswith(expected_prefix):
-        return None
-    return normalized
-
-
 def _is_tenant_storage_key(tenant_id: str, storage_key: str) -> bool:
-    return _normalized_tenant_storage_key(tenant_id, storage_key) is not None
+    return storage_key.startswith(f"tenants/{tenant_id}/")
 
 
 def _validated_tenant_storage_key(tenant_id: str, storage_key: str | None) -> str:
-    value = _normalized_tenant_storage_key(tenant_id, storage_key)
-    if value is None:
+    value = str(storage_key or "")
+    if not _is_tenant_storage_key(tenant_id, value):
         raise AppError(
             "Image history item not found.",
             code="IMAGE_HISTORY_NOT_FOUND",
@@ -225,249 +178,6 @@ def _photo_tasks_for_history(
             .order_by(VideoTask.created_at.asc(), VideoTask.id.asc())
         )
     )
-
-
-def _photo_tasks_for_delete(
-    db: Session,
-    *,
-    tenant_id: str,
-    category: PhotoHistoryCategory,
-    history_id: str,
-) -> list[VideoTask]:
-    batch_id = VideoTask.params["batch_id"].as_string()
-    record_id = VideoTask.id if category == "image_gen" else func.coalesce(
-        batch_id,
-        VideoTask.id,
-    )
-    return list(
-        db.scalars(
-            select(VideoTask)
-            .where(
-                *_successful_photo_filters(tenant_id),
-                *_photo_category_filters(category),
-                record_id == history_id,
-            )
-            .order_by(VideoTask.created_at.asc(), VideoTask.id.asc())
-        )
-    )
-
-
-def _validate_photo_delete_storage_keys(
-    db: Session,
-    *,
-    tenant_id: str,
-    tasks: list[VideoTask],
-) -> None:
-    task_ids = [task.id for task in tasks]
-    storage_keys = [
-        key
-        for task in tasks
-        for key in (task.storage_key, task.thumbnail_key)
-        if key
-    ]
-    output_assets = list(
-        db.scalars(
-            select(Asset)
-            .join(TaskAsset, TaskAsset.asset_id == Asset.id)
-            .where(
-                TaskAsset.video_task_id.in_(task_ids),
-                TaskAsset.role.in_(_PHOTO_OUTPUT_ASSET_ROLES),
-                Asset.source == "generated",
-                Asset.storage_key.is_not(None),
-            )
-        )
-    )
-    if any(asset.tenant_id != tenant_id for asset in output_assets):
-        raise AppError(
-            "Image history item not found.",
-            code="IMAGE_HISTORY_NOT_FOUND",
-            status_code=404,
-        )
-    storage_keys.extend(asset.storage_key for asset in output_assets)
-    for storage_key in storage_keys:
-        _validated_tenant_storage_key(tenant_id, storage_key)
-
-
-def _delete_photo_history(
-    db: Session,
-    *,
-    tenant_id: str,
-    storage: ObjectStorage,
-    category: PhotoHistoryCategory,
-    history_id: str,
-) -> str:
-    tasks = _photo_tasks_for_delete(
-        db,
-        tenant_id=tenant_id,
-        category=category,
-        history_id=history_id,
-    )
-    if not tasks:
-        raise AppError(
-            "Image history item not found.",
-            code="IMAGE_HISTORY_NOT_FOUND",
-            status_code=404,
-        )
-    _validate_photo_delete_storage_keys(db, tenant_id=tenant_id, tasks=tasks)
-    try:
-        deleted, storage_keys = stage_video_task_deletions(db, tasks=tasks)
-        if deleted != len(tasks):  # pragma: no cover - rows were resolved immediately above
-            raise RuntimeError("Image history task disappeared during deletion.")
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    validated_storage = _ValidatedDeleteStorage(storage, tenant_id=tenant_id)
-    _delete_media_best_effort(validated_storage, storage_keys)
-    return history_id
-
-
-def _delete_storage_keys_best_effort(
-    storage: ObjectStorage,
-    storage_keys: list[str],
-) -> None:
-    for storage_key in dict.fromkeys(storage_keys):
-        try:
-            storage.delete_object(storage_key)
-        except Exception as exc:  # pragma: no cover - log-only best effort
-            logger.warning(
-                "image_history.storage_delete_failed",
-                storage_key=storage_key,
-                error=str(exc),
-            )
-
-
-def _replicate_output_asset_for_delete(
-    db: Session,
-    *,
-    tenant_id: str,
-    job_id: str,
-    output: EcomReplicateOutput,
-) -> Asset | None:
-    if not output.storage_key:
-        return None
-    _validated_tenant_storage_key(tenant_id, output.storage_key)
-
-    if output.asset_id:
-        candidates = [db.get(Asset, output.asset_id)]
-    else:
-        candidates = list(
-            db.scalars(
-                select(Asset).where(
-                    Asset.tenant_id == tenant_id,
-                    Asset.source == "generated",
-                    Asset.storage_key == output.storage_key,
-                )
-            )
-        )
-
-    owned_assets: list[Asset] = []
-    for asset in candidates:
-        metadata = asset.metadata_ if asset is not None else {}
-        if (
-            asset is not None
-            and asset.tenant_id == tenant_id
-            and asset.source == "generated"
-            and asset.storage_key == output.storage_key
-            and metadata.get("kind") == "ecom_replicate"
-            and metadata.get("job_id") == job_id
-            and metadata.get("output_id") == output.id
-            and metadata.get("output_index") == output.index
-        ):
-            owned_assets.append(asset)
-
-    if len(owned_assets) == 1:
-        return owned_assets[0]
-    if output.asset_id:
-        raise AppError(
-            "Image history item not found.",
-            code="IMAGE_HISTORY_NOT_FOUND",
-            status_code=404,
-        )
-    return None
-
-
-def _delete_replicate_history(
-    db: Session,
-    *,
-    tenant_id: str,
-    storage: ObjectStorage,
-    history_id: str,
-) -> str:
-    job = db.scalar(
-        select(EcomReplicateJob).where(
-            EcomReplicateJob.id == history_id,
-            EcomReplicateJob.tenant_id == tenant_id,
-            EcomReplicateJob.status.in_(_REPLICATE_HISTORY_STATUSES),
-        )
-    )
-    if job is None:
-        raise AppError(
-            "Image history item not found.",
-            code="IMAGE_HISTORY_NOT_FOUND",
-            status_code=404,
-        )
-
-    outputs = list(
-        db.scalars(
-            select(EcomReplicateOutput)
-            .where(EcomReplicateOutput.job_id == job.id)
-            .order_by(EcomReplicateOutput.index.asc(), EcomReplicateOutput.id.asc())
-        )
-    )
-    if any(output.tenant_id != tenant_id for output in outputs):
-        raise AppError(
-            "Image history item not found.",
-            code="IMAGE_HISTORY_NOT_FOUND",
-            status_code=404,
-        )
-
-    candidate_assets: dict[str, Asset] = {}
-    for output in outputs:
-        asset = _replicate_output_asset_for_delete(
-            db,
-            tenant_id=tenant_id,
-            job_id=job.id,
-            output=output,
-        )
-        if asset is None:
-            continue
-        candidate_assets[asset.id] = asset
-
-    output_ids = {output.id for output in outputs}
-    referenced_assets = referenced_asset_ids(
-        db,
-        asset_ids=candidate_assets,
-        deleting_replicate_job_ids={job.id},
-        deleting_replicate_output_ids=output_ids,
-    )
-    generated_assets = {
-        asset_id: asset
-        for asset_id, asset in candidate_assets.items()
-        if asset_id not in referenced_assets
-    }
-    candidate_storage_keys = [asset.storage_key for asset in generated_assets.values()]
-    referenced_keys = referenced_storage_keys(
-        db,
-        storage_keys=candidate_storage_keys,
-        deleting_replicate_job_ids={job.id},
-        deleting_replicate_output_ids=output_ids,
-        deleting_asset_ids=generated_assets,
-    )
-    storage_keys = [key for key in candidate_storage_keys if key not in referenced_keys]
-    for storage_key in storage_keys:
-        _validated_tenant_storage_key(tenant_id, storage_key)
-
-    for output in outputs:
-        db.delete(output)
-    db.flush()
-    for asset in generated_assets.values():
-        db.delete(asset)
-    db.delete(job)
-    db.commit()
-
-    _delete_storage_keys_best_effort(storage, storage_keys)
-    return history_id
 
 
 def _photo_title(category: PhotoHistoryCategory, task: VideoTask) -> str:
@@ -860,30 +570,6 @@ def get_image_history(
             history_id=history_id,
         )
     return _photo_history_detail(
-        db,
-        tenant_id=tenant_id,
-        storage=storage,
-        category=cast(PhotoHistoryCategory, category),
-        history_id=history_id,
-    )
-
-
-def delete_image_history(
-    db: Session,
-    *,
-    tenant_id: str,
-    storage: ObjectStorage,
-    category: ImageHistoryCategory,
-    history_id: str,
-) -> str:
-    if category == "ecom_detail":
-        return _delete_replicate_history(
-            db,
-            tenant_id=tenant_id,
-            storage=storage,
-            history_id=history_id,
-        )
-    return _delete_photo_history(
         db,
         tenant_id=tenant_id,
         storage=storage,

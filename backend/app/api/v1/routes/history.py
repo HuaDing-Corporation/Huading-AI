@@ -11,11 +11,7 @@ from app.schemas.history import (
     ImageHistoryListResponse,
 )
 from app.schemas.response import ApiResponse, ok
-from app.services.image_history import (
-    delete_image_history,
-    get_image_history,
-    list_image_history,
-)
+from app.services.image_history import get_image_history, list_image_history
 from app.services.storage.base import ObjectStorage
 
 router = APIRouter()
@@ -68,25 +64,3 @@ def get_image(
             history_id=history_id,
         ),
     )
-
-
-@router.delete(
-    "/images/{category}/{history_id}",
-    response_model=ApiResponse[dict[str, object]],
-)
-def delete_image(
-    request: Request,
-    category: ImageHistoryCategory,
-    history_id: str,
-    user: User = CurrentUserDependency,
-    db: Session = DbSessionDependency,
-    storage: ObjectStorage = ObjectStorageDependency,
-) -> ApiResponse[dict[str, object]]:
-    deleted_id = delete_image_history(
-        db,
-        tenant_id=user.tenant_id,
-        storage=storage,
-        category=category,
-        history_id=history_id,
-    )
-    return ok(request, {"id": deleted_id, "deleted": True})
