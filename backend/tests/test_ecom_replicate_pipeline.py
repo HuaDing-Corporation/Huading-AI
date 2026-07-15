@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from io import BytesIO
+from time import perf_counter
 from types import SimpleNamespace
 
 import pytest
@@ -141,6 +143,51 @@ class _FakeReverseProvider:
             "provider": "apimart",
             "model": "gemini-3.1-pro-preview",
         }
+
+
+class _ConcurrencyTrackingReverseProvider(_FakeReverseProvider):
+    def __init__(self, *, delay_seconds: float = 0.02) -> None:
+        super().__init__()
+        self.delay_seconds = delay_seconds
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self.reference_in_flight = 0
+        self.max_reference_in_flight = 0
+
+    async def reverse_image(self, payload: dict) -> dict:
+        self.reference_in_flight += 1
+        self.max_reference_in_flight = max(
+            self.max_reference_in_flight,
+            self.reference_in_flight,
+        )
+        try:
+            return await self._track(super().reverse_image(payload))
+        finally:
+            self.reference_in_flight -= 1
+
+    async def analyze_product_identity(self, payload: dict) -> dict:
+        return await self._track(super().analyze_product_identity(payload))
+
+    async def _track(self, operation) -> dict:
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            await asyncio.sleep(self.delay_seconds)
+            return await operation
+        finally:
+            self.in_flight -= 1
+
+
+class _FailingReferenceAnalysisProvider(_FakeReverseProvider):
+    def __init__(self, *, failing_asset_id: str) -> None:
+        super().__init__()
+        self.failing_asset_id = failing_asset_id
+
+    async def reverse_image(self, payload: dict) -> dict:
+        result = await super().reverse_image(payload)
+        if payload.get("source_reference_image_id") == self.failing_asset_id:
+            raise RuntimeError("reference analysis failed")
+        return result
 
 
 class _MismatchThenPassReverseProvider(_FakeReverseProvider):
@@ -289,6 +336,63 @@ def _stub_replicate_task(monkeypatch):
     return enqueued
 
 
+def _run_tracked_detail_plan(
+    *,
+    monkeypatch,
+    auth_context,
+    auth_db,
+    prefix: str,
+    concurrency: int,
+    delay_seconds: float,
+) -> tuple[object, float, _ConcurrencyTrackingReverseProvider]:
+    reverse = _ConcurrencyTrackingReverseProvider(delay_seconds=delay_seconds)
+    _patch_replicate_providers(monkeypatch, reverse=reverse)
+    monkeypatch.setattr(
+        ecom_replicate.settings,
+        "engine_ecom_replicate_analysis_concurrency",
+        concurrency,
+    )
+    storage = _FakeStorage()
+    with auth_db() as db:
+        references = [
+            _seed_image_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                asset_id=f"{prefix}-ref-{index}",
+                purpose="ecom_ref",
+            )
+            for index in range(12)
+        ]
+        product = _seed_image_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id=f"{prefix}-product",
+            purpose="ecom_product",
+        )
+        reference_ids = [asset.id for asset in references]
+        product_id = product.id
+        db.commit()
+
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    started_at = perf_counter()
+    try:
+        response = TestClient(app).post(
+            "/api/v1/ecom-images/replicate",
+            json={
+                "reference_image_asset_ids": reference_ids,
+                "product_image_asset_ids": [product_id],
+                "product_info": {"name": "concurrency test product"},
+                "selling_points": ["bounded parallel analysis"],
+                "output_mode": "detail",
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        elapsed_seconds = perf_counter() - started_at
+        app.dependency_overrides.pop(get_object_storage, None)
+    return response, elapsed_seconds, reverse
+
+
 def _create_main_replicate_plan(
     *,
     auth_context,
@@ -412,6 +516,110 @@ def test_ecom_replicate_preserves_product_limit_and_nonempty_references() -> Non
             }
         )
     assert reference_error.value.errors()[0]["loc"] == ("reference_image_asset_ids",)
+
+
+def test_ecom_replicate_plan_bounds_and_overlaps_full_detail_analysis(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    response, _elapsed_seconds, reverse = _run_tracked_detail_plan(
+        monkeypatch=monkeypatch,
+        auth_context=auth_context,
+        auth_db=auth_db,
+        prefix="bounded-concurrency",
+        concurrency=3,
+        delay_seconds=0.02,
+    )
+
+    assert response.status_code == 201
+    assert len(reverse.calls) == 12
+    assert len(reverse.product_identity_calls) == 1
+    assert reverse.max_reference_in_flight > 1
+    assert reverse.max_in_flight == 3
+
+
+def test_ecom_replicate_parallel_analysis_is_faster_than_serial_mock_timing(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    serial_response, serial_seconds, serial = _run_tracked_detail_plan(
+        monkeypatch=monkeypatch,
+        auth_context=auth_context,
+        auth_db=auth_db,
+        prefix="serial-timing",
+        concurrency=1,
+        delay_seconds=0.05,
+    )
+    parallel_response, parallel_seconds, parallel = _run_tracked_detail_plan(
+        monkeypatch=monkeypatch,
+        auth_context=auth_context,
+        auth_db=auth_db,
+        prefix="parallel-timing",
+        concurrency=4,
+        delay_seconds=0.05,
+    )
+
+    print(
+        "mock replicate timing: "
+        f"serial={serial_seconds:.3f}s parallel={parallel_seconds:.3f}s"
+    )
+    assert serial_response.status_code == 201
+    assert parallel_response.status_code == 201
+    assert serial.max_in_flight == 1
+    assert parallel.max_in_flight == 4
+    assert parallel_seconds < serial_seconds * 0.7
+
+
+def test_ecom_replicate_plan_fails_when_one_reference_analysis_fails(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    failing_asset_id = "failing-analysis-ref"
+    reverse = _FailingReferenceAnalysisProvider(failing_asset_id=failing_asset_id)
+    _patch_replicate_providers(monkeypatch, reverse=reverse)
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        with auth_db() as db:
+            references = [
+                _seed_image_asset(
+                    db,
+                    tenant_id=auth_context["tenant_id"],
+                    asset_id=asset_id,
+                    purpose="ecom_ref",
+                )
+                for asset_id in ("successful-analysis-ref", failing_asset_id)
+            ]
+            product = _seed_image_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                asset_id="failed-plan-product",
+                purpose="ecom_product",
+            )
+            reference_ids = [asset.id for asset in references]
+            product_id = product.id
+            db.commit()
+
+        response = TestClient(app, raise_server_exceptions=False).post(
+            "/api/v1/ecom-images/replicate",
+            json={
+                "reference_image_asset_ids": reference_ids,
+                "product_image_asset_ids": [product_id],
+                "product_info": {"name": "failure propagation product"},
+                "selling_points": ["no partial plans"],
+                "output_mode": "main",
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 500
+    with auth_db() as db:
+        assert db.query(EcomReplicateJob).count() == 0
 
 
 def test_ecom_replicate_plan_creates_plan_ready_job_with_total_price(
