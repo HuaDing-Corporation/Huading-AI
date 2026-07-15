@@ -2,18 +2,22 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app.api.deps import get_object_storage
+from app.core.exceptions import AppError
 from app.db.models import (
     Asset,
     EcomReplicateJob,
     EcomReplicateOutput,
+    ReversePromptJob,
     TaskAsset,
     Tenant,
     VideoTask,
 )
 from app.main import app
+from app.services.image_history import _validated_tenant_storage_key
+from app.services.storage.local import LocalObjectStorage
 
 
 class _FakeStorage:
@@ -219,6 +223,242 @@ def test_image_history_hard_deletes_image_generation_record(
     assert storage.deleted_keys == [storage_key]
 
 
+def test_image_history_preserves_photo_asset_referenced_by_reverse_prompt(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    task_id = "delete-photo-reverse-source"
+    asset_id = f"{task_id}-asset"
+    reverse_job_id = f"{task_id}-reverse"
+    task = _photo_task(
+        task_id=task_id,
+        tenant_id=tenant_id,
+        created_at=datetime.now(UTC),
+        topic="shared reverse prompt source",
+    )
+    storage_key = str(task.storage_key)
+    with auth_db() as db:
+        db.add(task)
+        db.flush()
+        _link_photo_output(
+            db,
+            task=task,
+            asset_id=asset_id,
+            width=1024,
+            height=1024,
+        )
+        db.add(
+            ReversePromptJob(
+                id=reverse_job_id,
+                tenant_id=tenant_id,
+                source_kind="image",
+                source_asset_id=asset_id,
+                source_storage_key=storage_key,
+                target_format="seedance_2_0",
+                status="succeeded",
+            )
+        )
+        db.commit()
+
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app).delete(
+            f"/api/v1/history/images/image_gen/{task_id}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 200
+    with auth_db() as db:
+        assert db.get(VideoTask, task_id) is None
+        assert db.get(Asset, asset_id) is not None
+        reverse_job = db.get(ReversePromptJob, reverse_job_id)
+        assert reverse_job.source_asset_id == asset_id
+        assert reverse_job.source_storage_key == storage_key
+    assert storage.deleted_keys == []
+
+
+def test_image_history_preserves_photo_asset_used_by_replicate_output(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    task_id = "delete-photo-replicate-product"
+    asset_id = f"{task_id}-asset"
+    job_id = f"{task_id}-job"
+    output_id = f"{task_id}-output"
+    task = _photo_task(
+        task_id=task_id,
+        tenant_id=tenant_id,
+        created_at=datetime.now(UTC),
+        topic="shared replicate product",
+    )
+    with auth_db() as db:
+        db.add(task)
+        db.flush()
+        _link_photo_output(
+            db,
+            task=task,
+            asset_id=asset_id,
+            width=1024,
+            height=1024,
+        )
+        db.add(
+            _replicate_job(
+                job_id=job_id,
+                tenant_id=tenant_id,
+                status="completed",
+                created_at=datetime.now(UTC),
+                name="shared replicate product",
+                product_asset_id="unrelated-json-product",
+                output_count=1,
+            )
+        )
+        db.flush()
+        output = _replicate_output(
+            output_id=output_id,
+            job_id=job_id,
+            tenant_id=tenant_id,
+            index=0,
+            status="planned",
+            storage_key=None,
+        )
+        output.product_asset_id = asset_id
+        db.add(output)
+        db.commit()
+
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app).delete(
+            f"/api/v1/history/images/image_gen/{task_id}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 200
+    with auth_db() as db:
+        assert db.get(VideoTask, task_id) is None
+        assert db.get(Asset, asset_id) is not None
+        assert db.get(EcomReplicateOutput, output_id).product_asset_id == asset_id
+    assert storage.deleted_keys == []
+
+
+def test_image_history_preserves_photo_media_referenced_only_by_storage_key(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    task_id = "delete-photo-reverse-key-only"
+    asset_id = f"{task_id}-asset"
+    reverse_job_id = f"{task_id}-reverse"
+    task = _photo_task(
+        task_id=task_id,
+        tenant_id=tenant_id,
+        created_at=datetime.now(UTC),
+        topic="shared reverse prompt key",
+    )
+    storage_key = str(task.storage_key)
+    with auth_db() as db:
+        db.add(task)
+        db.flush()
+        _link_photo_output(
+            db,
+            task=task,
+            asset_id=asset_id,
+            width=1024,
+            height=1024,
+        )
+        db.add(
+            ReversePromptJob(
+                id=reverse_job_id,
+                tenant_id=tenant_id,
+                source_kind="image",
+                source_storage_key=storage_key,
+                target_format="seedance_2_0",
+                status="succeeded",
+            )
+        )
+        db.commit()
+
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app).delete(
+            f"/api/v1/history/images/image_gen/{task_id}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 200
+    with auth_db() as db:
+        assert db.get(VideoTask, task_id) is None
+        assert db.get(Asset, asset_id) is None
+        assert db.get(ReversePromptJob, reverse_job_id).source_storage_key == storage_key
+    assert storage.deleted_keys == []
+
+
+def test_image_history_preserves_photo_media_used_as_another_task_thumbnail(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    task_id = "delete-photo-shared-thumbnail"
+    asset_id = f"{task_id}-asset"
+    task = _photo_task(
+        task_id=task_id,
+        tenant_id=tenant_id,
+        created_at=datetime.now(UTC),
+        topic="shared thumbnail source",
+    )
+    storage_key = str(task.storage_key)
+    consumer = VideoTask(
+        id=f"{task_id}-consumer",
+        tenant_id=tenant_id,
+        status="done",
+        topic="thumbnail consumer",
+        mode="avatar_talk",
+        video_mode="avatar_talk",
+        params={},
+        thumbnail_key=storage_key,
+        created_at=datetime.now(UTC),
+    )
+    consumer_id = consumer.id
+    with auth_db() as db:
+        db.add_all([task, consumer])
+        db.flush()
+        _link_photo_output(
+            db,
+            task=task,
+            asset_id=asset_id,
+            width=1024,
+            height=1024,
+        )
+        db.commit()
+
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app).delete(
+            f"/api/v1/history/images/image_gen/{task_id}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 200
+    with auth_db() as db:
+        assert db.get(VideoTask, task_id) is None
+        assert db.get(Asset, asset_id) is None
+        assert db.get(VideoTask, consumer_id).thumbnail_key == storage_key
+    assert storage.deleted_keys == []
+
+
 @pytest.mark.parametrize(
     ("category", "category_params"),
     [
@@ -315,6 +555,67 @@ def test_image_history_hard_deletes_complete_photo_batch(
             )
         ) == []
     assert storage.deleted_keys == storage_keys
+
+
+def test_image_history_photo_batch_delete_rolls_back_every_member_on_failure(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    batch_id = "delete-photo-atomic-batch"
+    task_ids = ["delete-photo-atomic-first", "delete-photo-atomic-second"]
+    asset_ids = [f"{task_id}-asset" for task_id in task_ids]
+    tasks = [
+        _photo_task(
+            task_id=task_id,
+            tenant_id=tenant_id,
+            created_at=datetime.now(UTC) + timedelta(seconds=index),
+            topic="atomic photo batch",
+            params={"kind": "ecom_model", "batch_id": batch_id},
+        )
+        for index, task_id in enumerate(task_ids)
+    ]
+    with auth_db() as db:
+        db.add_all(tasks)
+        db.flush()
+        for task, asset_id in zip(tasks, asset_ids, strict=True):
+            _link_photo_output(
+                db,
+                task=task,
+                asset_id=asset_id,
+                width=1024,
+                height=1024,
+            )
+        db.commit()
+
+    def fail_when_second_member_is_deleted(session, _flush_context, _instances) -> None:
+        deleted_task_ids = {
+            item.id for item in session.deleted if isinstance(item, VideoTask)
+        }
+        if task_ids[1] in deleted_task_ids:
+            raise RuntimeError("injected second-member delete failure")
+
+    storage = _FakeStorage()
+    event.listen(auth_db.class_, "before_flush", fail_when_second_member_is_deleted)
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app, raise_server_exceptions=False).delete(
+            f"/api/v1/history/images/ecom_model/{batch_id}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+        event.remove(auth_db.class_, "before_flush", fail_when_second_member_is_deleted)
+
+    assert response.status_code == 500
+    with auth_db() as db:
+        assert all(db.get(VideoTask, task_id) is not None for task_id in task_ids)
+        assert all(db.get(Asset, asset_id) is not None for asset_id in asset_ids)
+        links = list(
+            db.scalars(select(TaskAsset).where(TaskAsset.video_task_id.in_(task_ids)))
+        )
+        assert {link.video_task_id for link in links} == set(task_ids)
+    assert storage.deleted_keys == []
 
 
 def test_image_history_detail_exposes_each_output_size_evidence(
@@ -901,12 +1202,20 @@ def test_image_history_hard_deletes_replicate_job_and_preserves_source_assets(
                     storage_key=storage_key,
                     mime_type="image/png",
                     status="ready",
-                    metadata_={"kind": "ecom_replicate", "job_id": job_id},
+                    metadata_={
+                        "kind": "ecom_replicate",
+                        "job_id": job_id,
+                        "output_id": output_id,
+                        "output_index": index,
+                    },
                 )
-                for asset_id, storage_key in zip(
-                    generated_asset_ids,
-                    storage_keys,
-                    strict=True,
+                for index, (asset_id, storage_key, output_id) in enumerate(
+                    zip(
+                        generated_asset_ids,
+                        storage_keys,
+                        output_ids,
+                        strict=True,
+                    )
                 )
             ]
         )
@@ -955,6 +1264,69 @@ def test_image_history_hard_deletes_replicate_job_and_preserves_source_assets(
         assert all(db.get(Asset, asset_id) is None for asset_id in generated_asset_ids)
         assert all(db.get(Asset, asset_id) is not None for asset_id in source_asset_ids)
     assert storage.deleted_keys == storage_keys
+
+
+def test_image_history_preserves_upload_key_when_replicate_output_has_no_asset_id(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    job_id = "delete-detail-unlinked-upload"
+    output_id = f"{job_id}-output"
+    upload_asset_id = f"{job_id}-upload"
+    upload_key = f"tenants/{tenant_id}/uploads/product.png"
+    with auth_db() as db:
+        db.add(
+            Asset(
+                id=upload_asset_id,
+                tenant_id=tenant_id,
+                type="product_image",
+                source="upload",
+                storage_key=upload_key,
+                mime_type="image/png",
+                status="ready",
+            )
+        )
+        db.add(
+            _replicate_job(
+                job_id=job_id,
+                tenant_id=tenant_id,
+                status="completed",
+                created_at=datetime.now(UTC),
+                name="unlinked upload output",
+                product_asset_id=upload_asset_id,
+                output_count=1,
+            )
+        )
+        db.flush()
+        db.add(
+            _replicate_output(
+                output_id=output_id,
+                job_id=job_id,
+                tenant_id=tenant_id,
+                index=0,
+                status="succeeded",
+                storage_key=upload_key,
+            )
+        )
+        db.commit()
+
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app).delete(
+            f"/api/v1/history/images/ecom_detail/{job_id}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 200
+    with auth_db() as db:
+        assert db.get(EcomReplicateJob, job_id) is None
+        assert db.get(EcomReplicateOutput, output_id) is None
+        assert db.get(Asset, upload_asset_id) is not None
+    assert storage.deleted_keys == []
 
 
 def test_image_history_delete_hides_cross_tenant_records(
@@ -1028,7 +1400,16 @@ def test_image_history_replicate_storage_delete_is_best_effort(
     tenant_id = auth_context["tenant_id"]
     job_id = "delete-detail-storage-failure"
     output_id = f"{job_id}-output"
+    asset_id = f"{job_id}-asset"
     storage_key = f"tenants/{tenant_id}/ecom-replicate/{job_id}/00.png"
+    output = _replicate_output(
+        output_id=output_id,
+        job_id=job_id,
+        tenant_id=tenant_id,
+        index=0,
+        status="succeeded",
+        storage_key=storage_key,
+    )
     with auth_db() as db:
         db.add(
             _replicate_job(
@@ -1042,16 +1423,26 @@ def test_image_history_replicate_storage_delete_is_best_effort(
             )
         )
         db.flush()
+        db.add(output)
         db.add(
-            _replicate_output(
-                output_id=output_id,
-                job_id=job_id,
+            Asset(
+                id=asset_id,
                 tenant_id=tenant_id,
-                index=0,
-                status="succeeded",
+                type="generated_image",
+                source="generated",
                 storage_key=storage_key,
+                mime_type="image/png",
+                status="ready",
+                metadata_={
+                    "kind": "ecom_replicate",
+                    "job_id": job_id,
+                    "output_id": output_id,
+                    "output_index": 0,
+                },
             )
         )
+        db.flush()
+        output.asset_id = asset_id
         db.commit()
 
     storage = _FakeStorage()
@@ -1070,6 +1461,7 @@ def test_image_history_replicate_storage_delete_is_best_effort(
     with auth_db() as db:
         assert db.get(EcomReplicateJob, job_id) is None
         assert db.get(EcomReplicateOutput, output_id) is None
+        assert db.get(Asset, asset_id) is None
     assert storage.deleted_keys == [storage_key]
 
 
@@ -1206,6 +1598,119 @@ def test_image_history_delete_preflights_every_photo_storage_key(
             select(TaskAsset).where(TaskAsset.video_task_id == task_id)
         ) is not None
     assert storage.deleted_keys == []
+
+
+def test_image_history_delete_rejects_tenant_key_path_traversal(
+    auth_context,
+    auth_db,
+    tmp_path,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    victim_tenant_id = "history-traversal-victim"
+    task_id = "delete-photo-path-traversal"
+    victim_key = f"tenants/{victim_tenant_id}/victim.png"
+    traversal_key = f"tenants/{tenant_id}/../{victim_tenant_id}/victim.png"
+    task = _photo_task(
+        task_id=task_id,
+        tenant_id=tenant_id,
+        created_at=datetime.now(UTC),
+        topic="path traversal delete",
+    )
+    task.storage_key = traversal_key
+    task.thumbnail_key = traversal_key
+    with auth_db() as db:
+        db.add(
+            Tenant(
+                id=victim_tenant_id,
+                slug="history-traversal-victim",
+                name="History Traversal Victim",
+            )
+        )
+        db.add(task)
+        db.commit()
+
+    storage = LocalObjectStorage(str(tmp_path))
+    storage.put_bytes(victim_key, b"victim", content_type="image/png")
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app).delete(
+            f"/api/v1/history/images/image_gen/{task_id}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "IMAGE_HISTORY_NOT_FOUND"
+    with auth_db() as db:
+        assert db.get(VideoTask, task_id) is not None
+    assert storage.get_bytes(victim_key) == b"victim"
+
+
+def test_image_history_detail_rejects_tenant_key_path_traversal(
+    auth_context,
+    auth_db,
+    tmp_path,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    victim_tenant_id = "history-presign-victim"
+    task_id = "read-photo-path-traversal"
+    victim_key = f"tenants/{victim_tenant_id}/victim.png"
+    traversal_key = f"tenants/{tenant_id}/../{victim_tenant_id}/victim.png"
+    task = _photo_task(
+        task_id=task_id,
+        tenant_id=tenant_id,
+        created_at=datetime.now(UTC),
+        topic="path traversal read",
+    )
+    task.storage_key = traversal_key
+    task.thumbnail_key = traversal_key
+    with auth_db() as db:
+        db.add(
+            Tenant(
+                id=victim_tenant_id,
+                slug="history-presign-victim",
+                name="History Presign Victim",
+            )
+        )
+        db.add(task)
+        db.commit()
+
+    storage = LocalObjectStorage(str(tmp_path))
+    storage.put_bytes(victim_key, b"victim", content_type="image/png")
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app).get(
+            f"/api/v1/history/images/image_gen/{task_id}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "IMAGE_HISTORY_NOT_FOUND"
+    assert storage.get_bytes(victim_key) == b"victim"
+
+
+def test_image_history_tenant_key_validator_rejects_encoded_and_noncanonical_paths() -> None:
+    tenant_id = "tenant-key-validation"
+    safe_key = f"tenants/{tenant_id}/images/output.png"
+    assert _validated_tenant_storage_key(tenant_id, safe_key) == safe_key
+
+    unsafe_keys = (
+        f"tenants/{tenant_id}/../victim/output.png",
+        f"tenants/{tenant_id}/%2e%2e/victim/output.png",
+        f"tenants/{tenant_id}/%252e%252e%252fvictim/output.png",
+        f"tenants/{tenant_id}/images\\..\\victim.png",
+        f"/tenants/{tenant_id}/images/output.png",
+        f"tenants/{tenant_id}//images/output.png",
+        f"tenants/{tenant_id}/./images/output.png",
+    )
+    for storage_key in unsafe_keys:
+        with pytest.raises(AppError) as exc_info:
+            _validated_tenant_storage_key(tenant_id, storage_key)
+        assert exc_info.value.code == "IMAGE_HISTORY_NOT_FOUND"
+        assert exc_info.value.status_code == 404
 
 
 @pytest.mark.parametrize("foreign_target", ["output", "asset"])

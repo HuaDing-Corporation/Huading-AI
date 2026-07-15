@@ -1,3 +1,4 @@
+import posixpath
 from collections.abc import Mapping
 from typing import Any, Literal, cast
 
@@ -16,7 +17,13 @@ from app.schemas.history import (
     ImageHistoryListResponse,
 )
 from app.services import ecom_replicate
-from app.services.history import delete_video_task, video_mode_filter
+from app.services.history import (
+    _delete_media_best_effort,
+    referenced_asset_ids,
+    referenced_storage_keys,
+    stage_video_task_deletions,
+    video_mode_filter,
+)
 from app.services.storage.base import ObjectStorage
 
 logger = get_logger(__name__)
@@ -54,13 +61,32 @@ def _tenant_storage_pattern(tenant_id: str) -> str:
     return f"tenants/{tenant_id}/%"
 
 
+def _normalized_tenant_storage_key(tenant_id: str, storage_key: str | None) -> str | None:
+    value = str(storage_key or "")
+    if not value or "\\" in value or "%" in value or "\x00" in value:
+        return None
+    parts = value.split("/")
+    if (
+        len(parts) < 3
+        or parts[0] != "tenants"
+        or parts[1] != tenant_id
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        return None
+    normalized = posixpath.normpath(value)
+    expected_prefix = f"tenants/{tenant_id}/"
+    if normalized != value or not normalized.startswith(expected_prefix):
+        return None
+    return normalized
+
+
 def _is_tenant_storage_key(tenant_id: str, storage_key: str) -> bool:
-    return storage_key.startswith(f"tenants/{tenant_id}/")
+    return _normalized_tenant_storage_key(tenant_id, storage_key) is not None
 
 
 def _validated_tenant_storage_key(tenant_id: str, storage_key: str | None) -> str:
-    value = str(storage_key or "")
-    if not _is_tenant_storage_key(tenant_id, value):
+    value = _normalized_tenant_storage_key(tenant_id, storage_key)
+    if value is None:
         raise AppError(
             "Image history item not found.",
             code="IMAGE_HISTORY_NOT_FOUND",
@@ -283,16 +309,16 @@ def _delete_photo_history(
             status_code=404,
         )
     _validate_photo_delete_storage_keys(db, tenant_id=tenant_id, tasks=tasks)
-    validated_storage = _ValidatedDeleteStorage(storage, tenant_id=tenant_id)
-    for task in tasks:
-        result = delete_video_task(
-            db,
-            tenant_id=tenant_id,
-            task_id=task.id,
-            storage=validated_storage,
-        )
-        if result != "deleted":  # pragma: no cover - rows were resolved immediately above
+    try:
+        deleted, storage_keys = stage_video_task_deletions(db, tasks=tasks)
+        if deleted != len(tasks):  # pragma: no cover - rows were resolved immediately above
             raise RuntimeError("Image history task disappeared during deletion.")
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    validated_storage = _ValidatedDeleteStorage(storage, tenant_id=tenant_id)
+    _delete_media_best_effort(validated_storage, storage_keys)
     return history_id
 
 
@@ -309,6 +335,56 @@ def _delete_storage_keys_best_effort(
                 storage_key=storage_key,
                 error=str(exc),
             )
+
+
+def _replicate_output_asset_for_delete(
+    db: Session,
+    *,
+    tenant_id: str,
+    job_id: str,
+    output: EcomReplicateOutput,
+) -> Asset | None:
+    if not output.storage_key:
+        return None
+    _validated_tenant_storage_key(tenant_id, output.storage_key)
+
+    if output.asset_id:
+        candidates = [db.get(Asset, output.asset_id)]
+    else:
+        candidates = list(
+            db.scalars(
+                select(Asset).where(
+                    Asset.tenant_id == tenant_id,
+                    Asset.source == "generated",
+                    Asset.storage_key == output.storage_key,
+                )
+            )
+        )
+
+    owned_assets: list[Asset] = []
+    for asset in candidates:
+        metadata = asset.metadata_ if asset is not None else {}
+        if (
+            asset is not None
+            and asset.tenant_id == tenant_id
+            and asset.source == "generated"
+            and asset.storage_key == output.storage_key
+            and metadata.get("kind") == "ecom_replicate"
+            and metadata.get("job_id") == job_id
+            and metadata.get("output_id") == output.id
+            and metadata.get("output_index") == output.index
+        ):
+            owned_assets.append(asset)
+
+    if len(owned_assets) == 1:
+        return owned_assets[0]
+    if output.asset_id:
+        raise AppError(
+            "Image history item not found.",
+            code="IMAGE_HISTORY_NOT_FOUND",
+            status_code=404,
+        )
+    return None
 
 
 def _delete_replicate_history(
@@ -346,25 +422,39 @@ def _delete_replicate_history(
             status_code=404,
         )
 
-    storage_keys = [output.storage_key for output in outputs if output.storage_key]
-    generated_assets: dict[str, Asset] = {}
+    candidate_assets: dict[str, Asset] = {}
     for output in outputs:
-        if not output.asset_id:
+        asset = _replicate_output_asset_for_delete(
+            db,
+            tenant_id=tenant_id,
+            job_id=job.id,
+            output=output,
+        )
+        if asset is None:
             continue
-        asset = db.get(Asset, output.asset_id)
-        if (
-            asset is None
-            or asset.source != "generated"
-            or asset.tenant_id != tenant_id
-        ):
-            raise AppError(
-                "Image history item not found.",
-                code="IMAGE_HISTORY_NOT_FOUND",
-                status_code=404,
-            )
-        generated_assets[asset.id] = asset
-        storage_keys.append(asset.storage_key)
+        candidate_assets[asset.id] = asset
 
+    output_ids = {output.id for output in outputs}
+    referenced_assets = referenced_asset_ids(
+        db,
+        asset_ids=candidate_assets,
+        deleting_replicate_job_ids={job.id},
+        deleting_replicate_output_ids=output_ids,
+    )
+    generated_assets = {
+        asset_id: asset
+        for asset_id, asset in candidate_assets.items()
+        if asset_id not in referenced_assets
+    }
+    candidate_storage_keys = [asset.storage_key for asset in generated_assets.values()]
+    referenced_keys = referenced_storage_keys(
+        db,
+        storage_keys=candidate_storage_keys,
+        deleting_replicate_job_ids={job.id},
+        deleting_replicate_output_ids=output_ids,
+        deleting_asset_ids=generated_assets,
+    )
+    storage_keys = [key for key in candidate_storage_keys if key not in referenced_keys]
     for storage_key in storage_keys:
         _validated_tenant_storage_key(tenant_id, storage_key)
 

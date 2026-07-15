@@ -1,11 +1,13 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Literal
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import JSON, String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
 from app.db.models import Asset, TaskAsset, UsageRecord, VideoTask
+from app.db.session import Base
 from app.services.storage.base import ObjectStorage
 
 logger = get_logger(__name__)
@@ -71,50 +73,192 @@ def _delete_media_best_effort(storage: ObjectStorage, storage_keys: Iterable[str
             )
 
 
-def _asset_has_other_task_links(db: Session, *, asset_id: str, task_ids: set[str]) -> bool:
-    other_links = (
-        db.scalar(
-            select(func.count())
-            .select_from(TaskAsset)
-            .where(
-                TaskAsset.asset_id == asset_id,
-                ~TaskAsset.video_task_id.in_(task_ids),
-            )
+@dataclass(frozen=True)
+class _ReferenceScope:
+    task_ids: frozenset[str] = frozenset()
+    replicate_job_ids: frozenset[str] = frozenset()
+    replicate_output_ids: frozenset[str] = frozenset()
+    asset_ids: frozenset[str] = frozenset()
+
+    def outside(self, statement, table):
+        if table.name == "task_assets" and self.task_ids:
+            return statement.where(~table.c.video_task_id.in_(self.task_ids))
+        excluded_ids = {
+            "assets": self.asset_ids,
+            "ecom_replicate_jobs": self.replicate_job_ids,
+            "ecom_replicate_outputs": self.replicate_output_ids,
+            "video_tasks": self.task_ids,
+        }.get(table.name)
+        if excluded_ids:
+            return statement.where(~table.c.id.in_(excluded_ids))
+        return statement
+
+
+def _references_in_json(value: object, candidates: set[str]) -> set[str]:
+    if isinstance(value, str):
+        return {value} & candidates
+    if isinstance(value, Mapping):
+        references: set[str] = set()
+        for key, item in value.items():
+            references.update(_references_in_json(key, candidates))
+            references.update(_references_in_json(item, candidates))
+        return references
+    if isinstance(value, (list, tuple, set)):
+        references: set[str] = set()
+        for item in value:
+            references.update(_references_in_json(item, candidates))
+        return references
+    return set()
+
+
+def _column_references(db: Session, *, candidates: set[str], scope: _ReferenceScope, match):
+    references: set[str] = set()
+    for table in Base.metadata.sorted_tables:
+        columns = [column for column in table.columns if match(table, column)]
+        if not columns:
+            continue
+        statement = select(*columns).where(
+            or_(*(column.in_(candidates) for column in columns))
         )
-        or 0
+        for row in db.execute(scope.outside(statement, table)):
+            references.update(str(value) for value in row if value in candidates)
+    return references
+
+
+def _json_references(
+    db: Session,
+    *,
+    candidates: set[str],
+    scope: _ReferenceScope,
+) -> set[str]:
+    references: set[str] = set()
+    for table in Base.metadata.sorted_tables:
+        columns = [column for column in table.columns if isinstance(column.type, JSON)]
+        if not columns:
+            continue
+        possible_matches = [
+            cast(column, String).contains(candidate, autoescape=True)
+            for column in columns
+            for candidate in candidates
+        ]
+        statement = select(*columns).where(or_(*possible_matches))
+        for row in db.execute(scope.outside(statement, table)):
+            for value in row:
+                references.update(_references_in_json(value, candidates))
+    return references
+
+
+def referenced_asset_ids(
+    db: Session,
+    *,
+    asset_ids: Iterable[str],
+    deleting_task_ids: Iterable[str] = (),
+    deleting_replicate_job_ids: Iterable[str] = (),
+    deleting_replicate_output_ids: Iterable[str] = (),
+) -> set[str]:
+    candidates = set(asset_ids)
+    if not candidates:
+        return set()
+    scope = _ReferenceScope(
+        task_ids=frozenset(deleting_task_ids),
+        replicate_job_ids=frozenset(deleting_replicate_job_ids),
+        replicate_output_ids=frozenset(deleting_replicate_output_ids),
+        asset_ids=frozenset(candidates),
     )
-    return int(other_links) > 0
+    references = _column_references(
+        db,
+        candidates=candidates,
+        scope=scope,
+        match=lambda _table, column: any(
+            fk.target_fullname == "assets.id" for fk in column.foreign_keys
+        ),
+    )
+    references.update(_json_references(db, candidates=candidates, scope=scope))
+    return references
 
 
-def _hard_delete_tasks(
+def referenced_storage_keys(
+    db: Session,
+    *,
+    storage_keys: Iterable[str],
+    deleting_task_ids: Iterable[str] = (),
+    deleting_replicate_job_ids: Iterable[str] = (),
+    deleting_replicate_output_ids: Iterable[str] = (),
+    deleting_asset_ids: Iterable[str] = (),
+) -> set[str]:
+    candidates = set(storage_keys)
+    if not candidates:
+        return set()
+    scope = _ReferenceScope(
+        task_ids=frozenset(deleting_task_ids),
+        replicate_job_ids=frozenset(deleting_replicate_job_ids),
+        replicate_output_ids=frozenset(deleting_replicate_output_ids),
+        asset_ids=frozenset(deleting_asset_ids),
+    )
+    additional_key_columns = {
+        ("templates", "path"),
+        ("video_tasks", "thumbnail_key"),
+        ("voices", "sample_url"),
+    }
+    references = _column_references(
+        db,
+        candidates=candidates,
+        scope=scope,
+        match=lambda table, column: column.name.endswith("storage_key")
+        or (table.name, column.name) in additional_key_columns,
+    )
+    references.update(_json_references(db, candidates=candidates, scope=scope))
+    return references
+
+
+def stage_video_task_deletions(
     db: Session,
     *,
     tasks: list[VideoTask],
-    storage: ObjectStorage,
-) -> int:
+) -> tuple[int, list[str]]:
     tasks = [task for task in tasks if is_terminal_history_task(task)]
     if not tasks:
-        return 0
+        return 0, []
 
     task_ids = {task.id for task in tasks}
-    storage_keys: list[str | None] = []
+    candidate_storage_keys: list[str | None] = []
     for task in tasks:
-        storage_keys.extend([task.storage_key, task.thumbnail_key])
+        candidate_storage_keys.extend([task.storage_key, task.thumbnail_key])
 
     links = list(
         db.scalars(select(TaskAsset).where(TaskAsset.video_task_id.in_(task_ids)))
     )
-    assets_to_delete: dict[str, Asset] = {}
+    candidate_assets: dict[str, Asset] = {}
     for link in links:
         asset = db.get(Asset, link.asset_id)
         if asset is None:
             continue
         if link.role not in _OUTPUT_ASSET_ROLES or asset.source != "generated":
             continue
-        if _asset_has_other_task_links(db, asset_id=asset.id, task_ids=task_ids):
-            continue
-        assets_to_delete[asset.id] = asset
-        storage_keys.append(asset.storage_key)
+        candidate_assets[asset.id] = asset
+
+    referenced_assets = referenced_asset_ids(
+        db,
+        asset_ids=candidate_assets,
+        deleting_task_ids=task_ids,
+    )
+    assets_to_delete = {
+        asset_id: asset
+        for asset_id, asset in candidate_assets.items()
+        if asset_id not in referenced_assets
+    }
+    candidate_storage_keys.extend(asset.storage_key for asset in assets_to_delete.values())
+    referenced_keys = referenced_storage_keys(
+        db,
+        storage_keys=_unique(candidate_storage_keys),
+        deleting_task_ids=task_ids,
+        deleting_asset_ids=assets_to_delete,
+    )
+    storage_keys = [
+        storage_key
+        for storage_key in _unique(candidate_storage_keys)
+        if storage_key not in referenced_keys
+    ]
 
     for usage in db.scalars(
         select(UsageRecord).where(UsageRecord.video_task_id.in_(task_ids))
@@ -127,10 +271,25 @@ def _hard_delete_tasks(
         db.delete(asset)
     for task in tasks:
         db.delete(task)
-    db.commit()
+    return len(tasks), storage_keys
 
+
+def _hard_delete_tasks(
+    db: Session,
+    *,
+    tasks: list[VideoTask],
+    storage: ObjectStorage,
+) -> int:
+    try:
+        deleted, storage_keys = stage_video_task_deletions(db, tasks=tasks)
+        if not deleted:
+            return 0
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     _delete_media_best_effort(storage, storage_keys)
-    return len(tasks)
+    return deleted
 
 
 def delete_video_task(
