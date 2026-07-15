@@ -22,7 +22,7 @@ import {
 } from "@/lib/api/admin-console";
 import { listAvatarPresets } from "@/lib/api/avatars";
 import { analyticsKeys, avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, historyImageKeys, labelSettingsKey, meKey, publishKeys, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
-import { getHistoryImageSet, listHistoryImages, type HistoryCategory } from "@/lib/api/history-images";
+import { deleteHistoryImage, getHistoryImageSet, listHistoryImages, type HistoryCategory } from "@/lib/api/history-images";
 import { fetchAnalyticsByProvider, fetchAnalyticsByTenant, fetchAnalyticsOverview, fetchAnalyticsTimeseries, type AnalyticsRange } from "@/lib/api/analytics";
 import { cancelBatch, createBatch, estimateBatch, getBatch, listBatches } from "@/lib/api/batches";
 import { getQuota } from "@/lib/api/quota";
@@ -85,8 +85,9 @@ export function useVideo(id: string | undefined) {
   const { session } = useAuth();
   return useQuery({ queryKey: videoKeys.detail(id ?? ""), queryFn: () => getVideo(id as string), enabled: !!session && !!id });
 }
-// 图片历史·统一模块 (HISTORY-UI-0001)：按 category 分页拉列表（page 从 1 起，累计已加载数 < total 才有下一页）。
-export function useHistoryImages(category: HistoryCategory) {
+// 图片历史·统一模块：按 category 分页拉列表（page 从 1 起，累计已加载数 < total 才有下一页）。
+// category 省略（HISTORY-IMAGE-TAB-UI-0001）= 全部图片（不传 category → BE 返回全部分类混合，按时间倒序）。
+export function useHistoryImages(category?: HistoryCategory) {
   const { session } = useAuth();
   return useInfiniteQuery({
     queryKey: historyImageKeys.list(category),
@@ -106,6 +107,14 @@ export function useHistoryImageSet(category: HistoryCategory | string, id: strin
     queryKey: historyImageKeys.detail(category, id ?? ""),
     queryFn: () => getHistoryImageSet(category, id as string),
     enabled: !!session && !!id
+  });
+}
+// 删除一条图片历史（硬删）；成功后失效整个 history-images 列表缓存（"all" 与各分类一并刷新）。
+export function useDeleteHistoryImage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ category, id }: { category: HistoryCategory | string; id: string }) => deleteHistoryImage(category, id),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: historyImageKeys.all })
   });
 }
 export function useCreateVideo() {

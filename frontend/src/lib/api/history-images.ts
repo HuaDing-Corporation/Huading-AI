@@ -7,9 +7,9 @@ import { apiFetch } from "@/lib/api/client";
 //   列表 GET /api/v1/history/images?category=&page=&page_size=  → { items:[HistoryItem], total, page, page_size }
 //   详情 GET /api/v1/history/images/{category}/{id}             → HistoryImageSet（整套，每张原图 download_url + 原始尺寸）
 
-/** 分类键：图片生成/修改 · 电商白底图 · 电商模特图 · 电商详情图。 */
-export type HistoryCategory = "image_gen" | "ecom_white" | "ecom_model" | "ecom_detail";
-export const HISTORY_CATEGORIES: HistoryCategory[] = ["image_gen", "ecom_white", "ecom_model", "ecom_detail"];
+/** 分类键：图片生成/修改 · 电商白底图 · 电商模特图 · 电商详情图 · 封面（HISTORY-IMAGE-TAB-UI-0001 加 cover）。 */
+export type HistoryCategory = "image_gen" | "ecom_white" | "ecom_model" | "ecom_detail" | "cover";
+export const HISTORY_CATEGORIES: HistoryCategory[] = ["image_gen", "ecom_white", "ecom_model", "ecom_detail", "cover"];
 
 /** 列表卡片（各类取合适字段归一到这套）。 */
 export interface HistoryItem {
@@ -58,20 +58,31 @@ function qs(params: Record<string, string | number>): string {
   return sp.toString();
 }
 
-/** 列表（租户作用域，按 created_at 倒序，分页）。 */
+/** 列表（租户作用域，按 created_at 倒序，分页）。category 省略 = 全部图片（BE 归一 API 的 category 为 Optional）。 */
 export function listHistoryImages(input: {
-  category: HistoryCategory;
+  category?: HistoryCategory;
   page?: number;
   page_size?: number;
 }): Promise<HistoryListResponse> {
   const page = input.page ?? 1;
   const page_size = input.page_size ?? HISTORY_PAGE_SIZE;
-  return apiFetch<HistoryListResponse>(`${BASE}?${qs({ category: input.category, page, page_size })}`, { method: "GET" });
+  const params: Record<string, string | number> = { page, page_size };
+  if (input.category) params.category = input.category; // 省略 → 全部图片
+  return apiFetch<HistoryListResponse>(`${BASE}?${qs(params)}`, { method: "GET" });
 }
 
 /** 详情：重开整套（跨租户 404）。 */
 export function getHistoryImageSet(category: HistoryCategory | string, id: string): Promise<HistoryImageSet> {
   return apiFetch<HistoryImageSet>(`${BASE}/${encodeURIComponent(category)}/${encodeURIComponent(id)}`, { method: "GET" });
+}
+
+/**
+ * 删除一条图片历史（硬删，DELETE /history/images/{category}/{history_id}）。
+ * ⚠️ mock 先行：BE 端点由 HISTORY-REFACTOR-BE-0001（Codex A）补，硬删语义、文案 deleteConfirmHard；
+ * 契约（尤其 path 段名 history_id、返回体）以 BE 回执定稿，本文件届时仅对齐、组件不动。跨租户 404。
+ */
+export function deleteHistoryImage(category: HistoryCategory | string, id: string): Promise<void> {
+  return apiFetch<void>(`${BASE}/${encodeURIComponent(category)}/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 /** 单张原始尺寸「宽x高」（width/height 均在才给；缺一即 null，UI 不得冒充）。 */

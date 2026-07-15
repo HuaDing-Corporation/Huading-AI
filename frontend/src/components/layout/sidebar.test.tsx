@@ -55,15 +55,20 @@ describe("Sidebar · 板块「即将上线」占位 gate", () => {
     expect(screen.getByRole("link", { name: "团队（即将上线）" })).toHaveAttribute("href", "/team");
   });
 
-  it("零回归：工作台/批量生产/图片历史/数据看板 无「（即将上线）」后缀，照常可点", () => {
+  it("零回归：工作台/批量生产/数据看板 无「（即将上线）」后缀，照常可点", () => {
     auth.role = "admin";
     render(<Sidebar />);
     expect(screen.getByRole("link", { name: "工作台" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "批量生产" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "图片历史" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "数据看板" })).toBeInTheDocument();
     // 真板块不带后缀
     expect(screen.queryByText("工作台（即将上线）")).not.toBeInTheDocument();
-    expect(screen.queryByText("图片历史（即将上线）")).not.toBeInTheDocument();
+  });
+
+  // HISTORY-IMAGE-TAB-UI-0001：左侧「图片历史」下线（并进工作台图片 tab）——导航里不再有该入口。
+  it("承重：图片历史入口已下线，左导航不再出现", () => {
+    auth.role = "admin";
+    render(<Sidebar />);
+    expect(screen.queryByRole("link", { name: "图片历史" })).not.toBeInTheDocument();
   });
 });

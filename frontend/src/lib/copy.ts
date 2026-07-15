@@ -619,7 +619,21 @@ export const copy = {
     sizeUnknown: "原图尺寸以下载文件为准（未裁剪）",
     download: "下载原图",
     downloadUnavailable: "原图暂不可用",
-    close: "关闭"
+    close: "关闭",
+    // HISTORY-IMAGE-TAB-UI-0001：并进工作台图片 tab 的 6 分类 chip（顺序：全部图片 / 图片生成·修改 / 白底 / 模特 / 详情 / 封面）
+    catAll: "全部图片",
+    catCover: "封面",
+    // 交互：点图 → 大图弹窗（纯图片）；点「查看详情」→ 详情弹窗（整套 + 信息并集）；删除（硬删）
+    viewDetail: "查看详情",
+    openLarge: "查看大图",
+    deleteItem: "删除",
+    lightboxTitle: "查看大图",
+    lightboxAlt: (title: string) => `${title}（大图预览）`,
+    // 详情弹窗信息并集（HISTORY-UI 原弹窗没显；归一 API 列表项带进来）
+    detailCreatedLabel: "生成时间",
+    detailStatusLabel: "状态",
+    detailCategoryLabel: "分类",
+    detailCountLabel: (n: number) => `共 ${n} 张`
   },
   detail: { notFound: "视频不存在或无权访问", back: "返回", download: "下载 MP4", downloadImage: "下载图片" },
   status: { queued: "排队中", failed: "失败", done: "已完成", cancelled: "已取消" },

@@ -900,6 +900,9 @@ const historyImageRecords: MockHistRecord[] = [
   // 电商白底图（ecom_white）：单图恒 ready
   histRecord({ id: "hw-1", category: "ecom_white", title: "陶瓷水杯 · 白底图", created_at: histTs(3), status: "ready", items: [histItem(0, { dims: [1024, 1024], label: "白底图" })] }),
   histRecord({ id: "hw-2", category: "ecom_white", title: "蓝牙耳机 · 白底图", created_at: histTs(4), status: "ready", items: [histItem(0, { dims: [1024, 1024], label: "白底图" })] }),
+  // 封面（cover）：HISTORY-IMAGE-TAB-UI-0001 新增第 6 分类（BE 归一 API 加 cover）；单图恒 ready。
+  histRecord({ id: "hc-1", category: "cover", title: "咖啡科普 · 封面", created_at: histTs(5), status: "ready", items: [histItem(0, { dims: [1280, 720], label: "封面" })] }),
+  histRecord({ id: "hc-2", category: "cover", title: "带货短片 · 封面", created_at: histTs(6), status: "ready", items: [histItem(0, { dims: [1280, 720], label: "封面" })] }),
   // 图片生成/修改（image_gen）：生成 23 条单图 → 触发分页「加载更多」（page_size 20）
   ...Array.from({ length: 23 }, (_, i) =>
     histRecord({ id: `hg-${i + 1}`, category: "image_gen", title: `创意图 #${i + 1}`, created_at: histTs(10 + i), status: "ready", items: [histItem(0, { dims: [1024, 1024], label: "图片生成" })] })
@@ -913,12 +916,12 @@ export const handlers = [
   // ── 图片历史·统一模块 (HISTORY-UI-0001)：list 分页 + detail 整套（list 先注册，避免被 /:category/:id 影子覆盖）──
   http.get(`${BASE}/api/v1/history/images`, ({ request }) => {
     const sp = new URL(request.url).searchParams;
-    const category = sp.get("category") ?? "";
+    const category = sp.get("category"); // 省略（HISTORY-IMAGE-TAB-UI-0001）= 全部图片
     const page = Math.max(1, Number(sp.get("page") ?? 1));
     const pageSize = Math.max(1, Math.min(100, Number(sp.get("page_size") ?? 20)));
-    // 租户作用域 + 按 created_at 倒序（seed 已按倒序时间戳）。
+    // 租户作用域 + 按 created_at 倒序（seed 已按倒序时间戳）。无 category → 全部分类混合。
     const all = historyImageRecords
-      .filter((r) => r.category === category)
+      .filter((r) => !category || r.category === category)
       .slice()
       .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
     const start = (page - 1) * pageSize;
@@ -928,6 +931,13 @@ export const handlers = [
     const rec = historyImageRecords.find((r) => r.category === String(params.category) && r.id === String(params.id));
     if (!rec) return err(404, "HISTORY_NOT_FOUND", "记录不存在或无权访问");
     return ok({ id: rec.id, category: rec.category, created_at: rec.created_at, status: rec.status, items: rec.items, meta: rec.meta ?? {} });
+  }),
+  // 删除一条图片历史（硬删；HISTORY-IMAGE-TAB-UI-0001；mock 先行，待 Codex A 契约核对）。跨租户/不存在 → 404。
+  http.delete(`${BASE}/api/v1/history/images/:category/:id`, ({ params }) => {
+    const idx = historyImageRecords.findIndex((r) => r.category === String(params.category) && r.id === String(params.id));
+    if (idx === -1) return err(404, "HISTORY_NOT_FOUND", "记录不存在或无权访问");
+    historyImageRecords.splice(idx, 1);
+    return ok({ deleted: true });
   }),
   // Auth = M2 shapes (unchanged). Mocked so the (app) client auth-gate can be
   // passed during the MSW parallel period without a real backend.

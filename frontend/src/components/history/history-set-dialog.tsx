@@ -5,18 +5,32 @@ import { Loader2, X } from "lucide-react";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { HistoryImageTile } from "@/components/history/history-image-tile";
+import { HistoryStatusBadge } from "@/components/history/history-status-badge";
 import { useHistoryImageSet } from "@/lib/api/hooks";
 import { copy } from "@/lib/copy";
-import type { HistoryItem } from "@/lib/api/history-images";
+import type { HistoryCategory, HistoryItem } from "@/lib/api/history-images";
+
+/** 分类机器键 → 中文标签（详情弹窗信息并集用；6 分类）。 */
+const CATEGORY_LABEL: Record<HistoryCategory, string> = {
+  image_gen: copy.historyImages.tabImageGen,
+  ecom_white: copy.historyImages.tabEcomWhite,
+  ecom_model: copy.historyImages.tabEcomModel,
+  ecom_detail: copy.historyImages.tabEcomDetail,
+  cover: copy.historyImages.catCover
+};
+const formatCreatedAt = (iso: string) => (iso.includes("T") ? iso.replace("T", " ").slice(0, 16) : iso);
 
 /**
- * 重开整套弹窗（HISTORY-UI-0001 核心）——点历史卡片 → 拉 GET /history/images/{category}/{id} → 完整展示该次整套
- * （详情图 5/12 张、模特套图等；单图类单张）。每张走 HistoryImageTile（原图红线：下载原图、原始尺寸、缺失禁用）。
+ * 详情弹窗（HISTORY-IMAGE-TAB-UI-0001，两边信息取并集）——点「查看详情」→ 拉 GET /history/images/{category}/{id}
+ * → 完整展示该次整套（每张原图 download_url + 原始尺寸 + 缺失禁用，原图红线不变）。**并入**「历史生成」卡片
+ * 现有信息：生成时间 / 状态徽标 / 分类 / 张数（这些原 HISTORY-UI 弹窗没显）。标题/created_at/status/category 从
+ * **列表项 `item` 带入**（BE 详情响应 `ImageHistoryDetailResponse` 无 title，同反推 source_thumbnail_url 模式）。
  * item=null 即关闭（enabled 门控 → 不打开不发请求）。
  */
 export function HistorySetDialog({ item, onClose }: { item: HistoryItem | null; onClose: () => void }) {
   const query = useHistoryImageSet(item?.category ?? "", item?.id);
   const set = query.data;
+  const categoryLabel = item ? (CATEGORY_LABEL[item.category as HistoryCategory] ?? item.category) : "";
   return (
     <Dialog
       open={item !== null}
@@ -27,8 +41,28 @@ export function HistorySetDialog({ item, onClose }: { item: HistoryItem | null; 
       <DialogContent className="w-[min(94vw,880px)] max-h-[85vh] overflow-y-auto">
         <div className="mb-1 flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <DialogTitle className="text-base font-semibold text-ink">{item?.title ?? copy.historyImages.setTitle}</DialogTitle>
-            <DialogDescription className="mt-1 text-[12.5px] text-ink-soft">{copy.historyImages.setTitle}</DialogDescription>
+            <DialogTitle className="truncate text-base font-semibold text-ink" title={item?.title}>
+              {item?.title ?? copy.historyImages.setTitle}
+            </DialogTitle>
+            {/* 信息并集：生成时间 · 状态 · 分类 · 张数（卡片有、原弹窗没显）。 */}
+            <DialogDescription className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-ink-soft">
+              {item ? (
+                <>
+                  <span>
+                    {copy.historyImages.detailCreatedLabel}：<span className="tabular-nums">{formatCreatedAt(item.created_at)}</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    {copy.historyImages.detailStatusLabel}：<HistoryStatusBadge status={item.status} />
+                  </span>
+                  <span>
+                    {copy.historyImages.detailCategoryLabel}：{categoryLabel}
+                  </span>
+                  <span>{copy.historyImages.detailCountLabel(item.item_count)}</span>
+                </>
+              ) : (
+                copy.historyImages.setTitle
+              )}
+            </DialogDescription>
           </div>
           <DialogClose
             aria-label={copy.historyImages.close}

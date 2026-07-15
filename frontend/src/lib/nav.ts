@@ -1,6 +1,5 @@
 import {
   Image as ImageIcon,
-  Images,
   Layers,
   LayoutDashboard,
   LayoutTemplate,
@@ -24,7 +23,7 @@ import type { NavItem } from "@/components/ui/sidebar-nav";
 export const navItems: NavItem[] = [
   { key: "workbench", label: "工作台", icon: LayoutDashboard, href: "/" },
   { key: "batch", label: "批量生产", icon: Layers, href: "/batch" },
-  { key: "history", label: "图片历史", icon: Images, href: "/history" },
+  // HISTORY-IMAGE-TAB-UI-0001：左侧「图片历史」下线——已并进工作台「历史生成」的图片 tab（6 分类 + 大图 + 详情合并）。
   { key: "templates", label: "模板中心", icon: LayoutTemplate, href: "/templates" },
   { key: "brand", label: "品牌库", icon: Palette, href: "/brand-library" },
   { key: "covers", label: "封面工坊", icon: ImageIcon, href: "/covers" },
