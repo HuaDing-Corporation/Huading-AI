@@ -995,6 +995,7 @@ export const copy = {
     colStatus: "状态",
     colCreated: "注册时间",
     colTasks: "任务数",
+    colTaskFamily: "任务类型", // 任务监控「任务类型」筛选器的字段名标签（ADMIN-TASK-FAMILY-COPY-0001）——用户拍板「任务类型」
     colActions: "操作",
     viewDetail: "详情",
     detailTitle: "租户详情",
@@ -1070,10 +1071,10 @@ export const copy = {
     colTask: "关联任务",
     exportCsv: "导出 CSV",
     exportDone: "已导出",
-    // 任务监控（真契约筛选 = 任务族 + 状态 + 租户 + 时间区间）
+    // 任务监控（真契约筛选 = 任务类型 + 状态 + 租户 + 时间区间；字段名 task_family 不变，仅显示串改「任务类型」）
     tasksTitle: "任务监控",
     taskStatusAll: "全部状态",
-    taskFamilyAll: "全部任务族",
+    taskFamilyAll: "全部任务类型",
     taskFamilyVideo: "视频任务",
     taskFamilyReverse: "视频反推",
     taskFamilyEcom: "详情图复刻",
