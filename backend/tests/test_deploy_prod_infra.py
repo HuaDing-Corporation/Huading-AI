@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 import yaml
@@ -27,6 +28,11 @@ def _nginx_location_block(conf: str, location: str) -> str:
     raise AssertionError(f"location block not closed: {location}")
 
 
+def _worker_queue(command: str) -> str:
+    args = shlex.split(command)
+    return args[args.index("-Q") + 1]
+
+
 def test_prod_compose_exposes_only_nginx_and_persists_state() -> None:
     compose = _prod_compose()
     services = compose["services"]
@@ -35,6 +41,7 @@ def test_prod_compose_exposes_only_nginx_and_persists_state() -> None:
         "frontend",
         "backend",
         "worker",
+        "worker-image",
         "postgres",
         "redis",
         "minio",
@@ -106,8 +113,30 @@ def test_prod_compose_wires_public_frontend_and_backend_env() -> None:
     assert frontend_args["NEXT_PUBLIC_API_BASE_URL"] == "https://huadingai.cn/api"
     assert frontend_args["NEXT_PUBLIC_USE_MOCK"] == "0"
     assert compose["services"]["worker"]["command"].endswith(
-        "-Q default,avatar,image --loglevel=info"
+        "-Q default,avatar --loglevel=info"
     )
+
+
+def test_prod_workers_isolate_image_concurrency_from_avatar() -> None:
+    services = _prod_compose()["services"]
+    worker = services["worker"]
+    image_worker = services["worker-image"]
+    video_worker = services["worker-video"]
+
+    worker_args = shlex.split(worker["command"])
+    assert "--pool=solo" in worker_args
+    assert "--concurrency=1" in worker_args
+    assert _worker_queue(worker["command"]) == "default,avatar"
+
+    image_args = shlex.split(image_worker["command"])
+    assert "--pool=prefork" in image_args
+    assert "--concurrency=3" in image_args
+    assert _worker_queue(image_worker["command"]) == "image"
+
+    assert _worker_queue(video_worker["command"]) == "video"
+    assert worker["environment"] == image_worker["environment"]
+    assert worker["depends_on"] == image_worker["depends_on"]
+    assert worker["volumes"] == image_worker["volumes"]
 
 
 def test_prod_nginx_enforces_https_and_supports_api_sse_and_minio() -> None:
