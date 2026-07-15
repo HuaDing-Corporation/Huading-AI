@@ -124,10 +124,14 @@ def test_prod_nginx_enforces_https_and_supports_api_sse_and_minio() -> None:
     assert "proxy_pass $upstream_backend;" in nginx_conf
     assert "proxy_pass $upstream_frontend;" in nginx_conf
     assert "location ~ ^/api/.*/events$" in nginx_conf
-    assert "proxy_buffering off;" in nginx_conf
-    assert "proxy_read_timeout 600s;" in nginx_conf
+    events_block = _nginx_location_block(nginx_conf, "~ ^/api/.*/events$")
+    assert "proxy_buffering off;" in events_block
+    assert "proxy_read_timeout 1800s;" in events_block
+    assert "proxy_send_timeout 1800s;" in events_block
     api_block = _nginx_location_block(nginx_conf, "/api/")
     assert "proxy_set_header Host $host;" in api_block
+    assert "proxy_read_timeout 120s;" in api_block
+    assert "proxy_send_timeout 120s;" in api_block
     assert "location /minio/" not in nginx_conf
     minio_block = _nginx_location_block(nginx_conf, "/huading-videos/")
     assert "proxy_set_header Host $host;" in minio_block
