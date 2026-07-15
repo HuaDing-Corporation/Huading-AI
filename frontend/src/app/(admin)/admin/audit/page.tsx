@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import type { AdminAuditRow, AuditAction } from "@/lib/api/admin-console";
 import { useAdminAudit, useAdminTenants } from "@/lib/api/hooks";
 import { copy } from "@/lib/copy";
+import { flattenAuditDiff } from "./format";
 
 const PAGE_SIZE = 20;
 const ACTION_LABEL: Record<AuditAction, string> = {
@@ -17,20 +18,49 @@ const ACTION_LABEL: Record<AuditAction, string> = {
   task_retry: copy.admin.actionTaskRetry
 };
 
-/** before/after JSON 快照 → 逐键「前 → 后」行（无 before 键则只显 after，如首次分配槽位）。 */
+/** 破折号（—）读屏时读「无」而非 em-dash 噪音；其它值 sr-only 前缀「变更前/后」读通语义（不只靠颜色/箭头）。 */
+function DiffValue({ label, text, className }: { label: string; text: string; className: string }) {
+  return (
+    <span className={className}>
+      <span className="sr-only">{label} </span>
+      {text === copy.admin.auditEmpty ? (
+        <>
+          <span aria-hidden="true">{copy.admin.auditEmpty}</span>
+          <span className="sr-only">{copy.admin.auditSrNone}</span>
+        </>
+      ) : (
+        text
+      )}
+    </span>
+  );
+}
+
+/**
+ * before/after JSON 快照 → 逐键「前 → 后」行。嵌套对象经 flattenAuditDiff 展平为点号路径叶子
+ * （`subscription.total`）、标量经 formatAuditValue 中文化——不再吐 [object Object]/空白/字面 null/裸布尔。
+ * 单侧键只显那一侧、不画箭头（如首次分配槽位的 after 独有键）。
+ */
 function BeforeAfter({ row }: { row: AdminAuditRow }) {
-  const before = row.before ?? {};
-  const after = row.after ?? {};
-  const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])];
-  if (keys.length === 0) return <span className="text-ink-faint">—</span>;
+  const leaves = flattenAuditDiff(row.before, row.after);
+  if (leaves.length === 0)
+    return (
+      <span className="text-ink-faint">
+        <span aria-hidden="true">{copy.admin.auditEmpty}</span>
+        <span className="sr-only">{copy.admin.auditSrNone}</span>
+      </span>
+    );
   return (
     <span className="flex flex-col gap-0.5 tabular-nums">
-      {keys.map((k) => (
-        <span key={k}>
-          <span className="text-ink-faint">{k}：</span>
-          {k in before && <span className="text-ink-soft">{String(before[k])}</span>}
-          {k in before && k in after && <span className="text-ink-faint">{copy.admin.beforeAfterArrow}</span>}
-          {k in after && <span className="font-medium text-ink">{String(after[k])}</span>}
+      {leaves.map(({ key, before, after }) => (
+        <span key={key}>
+          <span className="text-ink-faint">{key}：</span>
+          {before !== undefined && <DiffValue label={copy.admin.auditSrBefore} text={before} className="text-ink-soft" />}
+          {before !== undefined && after !== undefined && (
+            <span aria-hidden="true" className="text-ink-faint">
+              {copy.admin.beforeAfterArrow}
+            </span>
+          )}
+          {after !== undefined && <DiffValue label={copy.admin.auditSrAfter} text={after} className="font-medium text-ink" />}
         </span>
       ))}
     </span>
