@@ -85,9 +85,11 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
     [patch, stopWatchdog]
   );
 
-  // Start a per-task watchdog the moment a task goes in-flight. It forces a
-  // `failed` when no progress arrives within STALL_MS or the task outlives
-  // HARD_CAP_MS from when it was queued — independent of any backend `failed`.
+  // Start a per-task watchdog the moment a task goes in-flight. GEN-TIMEOUT-1500-UI-0001：
+  // 看门狗是**后端失联的最后一道兜底**（worker 崩 / SSE 断 / 任务卡死），**不是生成超时的判定者**——
+  // STALL_MS/HARD_CAP_MS 都晚于后端权威超时（BE 1500s / nginx SSE 1800s），故正常生成期间它永不抢跑。
+  // 只有当既收不到 SSE 进度、也拉不到 poll 更新、且超出这些兜底窗口时才强制本地 `failed`。
+  // 旧值（120s/900s）会在图片生成（无逐轮进度回调）时于 120s 误杀后端还在跑的任务——本包根因修复。
   const startWatchdog = useCallback(
     (taskId: string) => {
       if (timers.current.has(taskId)) return;
