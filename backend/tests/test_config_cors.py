@@ -196,6 +196,17 @@ def test_apimart_video_settings_are_env_driven(monkeypatch) -> None:
     assert s.engine_apimart_video_timeout_seconds == 901
 
 
+def test_ecom_replicate_analysis_concurrency_defaults_and_reads_env(monkeypatch) -> None:
+    monkeypatch.delenv("ENGINE_ECOM_REPLICATE_ANALYSIS_CONCURRENCY", raising=False)
+    default_settings = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    monkeypatch.setenv("ENGINE_ECOM_REPLICATE_ANALYSIS_CONCURRENCY", "3")
+    configured_settings = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    assert default_settings.engine_ecom_replicate_analysis_concurrency == 4
+    assert configured_settings.engine_ecom_replicate_analysis_concurrency == 3
+
+
 def test_apimart_cost_settings_are_env_driven(monkeypatch) -> None:
     monkeypatch.setenv("ENGINE_APIMART_CREDIT_USD", "0.20")
     monkeypatch.setenv("ENGINE_USD_CNY_RATE", "7.5")

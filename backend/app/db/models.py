@@ -500,6 +500,7 @@ class ReversePromptJob(TenantScopedMixin, Base):
     credits: Mapped[Decimal] = mapped_column(Numeric(12, 3), default=Decimal("0"))
     cost_cents: Mapped[int] = mapped_column(Integer, default=0)
     saved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 

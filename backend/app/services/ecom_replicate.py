@@ -130,22 +130,18 @@ def create_replicate_plan(
     requested_aspect = _aspect_from_size(requested_size)
     themes = _themes(payload.output_mode)
 
-    analyses = [
-        _analyze_reference(db, tenant_id=user.tenant_id, reference=reference, storage=storage)
-        for reference in references
-    ]
+    analyses, product_identity_results = asyncio.run(
+        _analyze_plan_inputs(
+            db,
+            tenant_id=user.tenant_id,
+            references=references,
+            products=products,
+            storage=storage,
+        )
+    )
     analysis_json = [
         _analysis_payload(result, fallback_id=reference.id)
         for result, reference in zip(analyses, references, strict=True)
-    ]
-    product_identity_results = [
-        _analyze_product_identity(
-            db,
-            tenant_id=user.tenant_id,
-            product=product,
-            storage=storage,
-        )
-        for product in products
     ]
     product_identities = {
         product.id: _product_identity_payload(result)
@@ -607,21 +603,57 @@ def _tenant_charge_credits(count: int) -> Decimal:
     return (Decimal(count) * _credit_rate()).quantize(Decimal("0.01"))
 
 
-def _analyze_reference(
+async def _analyze_plan_inputs(
+    db: Session,
+    *,
+    tenant_id: str,
+    references: list[Asset],
+    products: list[Asset],
+    storage: ObjectStorage,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    semaphore = asyncio.Semaphore(settings.engine_ecom_replicate_analysis_concurrency)
+    results = await asyncio.gather(
+        *(
+            _analyze_reference(
+                db,
+                tenant_id=tenant_id,
+                reference=reference,
+                storage=storage,
+                semaphore=semaphore,
+            )
+            for reference in references
+        ),
+        *(
+            _analyze_product_identity(
+                db,
+                tenant_id=tenant_id,
+                product=product,
+                storage=storage,
+                semaphore=semaphore,
+            )
+            for product in products
+        ),
+    )
+    reference_count = len(references)
+    return results[:reference_count], results[reference_count:]
+
+
+async def _analyze_reference(
     db: Session,
     *,
     tenant_id: str,
     reference: Asset,
     storage: ObjectStorage,
+    semaphore: asyncio.Semaphore,
 ) -> dict[str, Any]:
-    provider = resolve_named_provider(
-        db,
-        tenant_id=tenant_id,
-        capability="reverse_prompt",
-        provider="apimart-gemini",
-    )
-    result = asyncio.run(
-        provider.reverse_image(
+    async with semaphore:
+        provider = resolve_named_provider(
+            db,
+            tenant_id=tenant_id,
+            capability="reverse_prompt",
+            provider="apimart-gemini",
+        )
+        result = await provider.reverse_image(
             {
                 "image_url": storage.presign_get_url(
                     reference.storage_key,
@@ -631,27 +663,27 @@ def _analyze_reference(
                 "source_reference_image_id": reference.id,
             }
         )
-    )
     result_dict = dict(result)
     record_analysis_cost(db, tenant_id=tenant_id, result=result_dict)
     return result_dict
 
 
-def _analyze_product_identity(
+async def _analyze_product_identity(
     db: Session,
     *,
     tenant_id: str,
     product: Asset,
     storage: ObjectStorage,
+    semaphore: asyncio.Semaphore,
 ) -> dict[str, Any]:
-    provider = resolve_named_provider(
-        db,
-        tenant_id=tenant_id,
-        capability="reverse_prompt",
-        provider="apimart-gemini",
-    )
-    result = asyncio.run(
-        provider.analyze_product_identity(
+    async with semaphore:
+        provider = resolve_named_provider(
+            db,
+            tenant_id=tenant_id,
+            capability="reverse_prompt",
+            provider="apimart-gemini",
+        )
+        result = await provider.analyze_product_identity(
             {
                 "image_url": storage.presign_get_url(
                     product.storage_key,
@@ -660,7 +692,6 @@ def _analyze_product_identity(
                 "source_product_image_id": product.id,
             }
         )
-    )
     result_dict = dict(result)
     record_analysis_cost(db, tenant_id=tenant_id, result=result_dict)
     return result_dict

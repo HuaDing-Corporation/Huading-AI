@@ -371,6 +371,32 @@ def _seed_non_video_task_families(auth_db, fixture: dict[str, str]) -> dict[str,
         }
 
 
+def _seed_deleted_reverse_prompt_job(
+    auth_db,
+    fixture: dict[str, str],
+    *,
+    job_id: str = "deleted-rp",
+    status: str = "queued",
+) -> str:
+    now = datetime.now(UTC)
+    with auth_db() as db:
+        db.add(
+            ReversePromptJob(
+                id=job_id,
+                tenant_id=fixture["tenant_id"],
+                created_by_user_id=fixture["owner_id"],
+                source_kind="video",
+                target_format="seedance_2_0",
+                status=status,
+                deleted_at=now,
+                created_at=now - timedelta(minutes=5),
+                updated_at=now - timedelta(minutes=5),
+            )
+        )
+        db.commit()
+    return job_id
+
+
 def test_admin_console_read_endpoints_return_cross_tenant_operational_data(
     auth_context,
     auth_db,
@@ -551,6 +577,90 @@ def test_admin_task_monitor_normalizes_all_task_families_and_filters_them(
     assert [
         item["id"] for item in legacy_done_filter.json()["data"]["items"]
     ] == [completed_video_id]
+
+
+def test_admin_task_monitor_excludes_soft_deleted_reverse_prompt_jobs(
+    auth_context,
+    auth_db,
+    platform_acme,
+) -> None:
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    deleted_job_id = _seed_deleted_reverse_prompt_job(auth_db, fixture)
+
+    response = TestClient(app).get(
+        "/api/v1/admin/console/tasks",
+        params={
+            "tenant_id": fixture["tenant_id"],
+            "task_family": "reverse_prompt",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["total"] == 0
+    assert [item["id"] for item in response.json()["data"]["items"]] == []
+    assert deleted_job_id not in response.text
+
+
+def test_admin_task_family_does_not_resolve_soft_deleted_reverse_prompt_job(
+    auth_context,
+    auth_db,
+    platform_acme,
+) -> None:
+    from app.core.exceptions import AppError
+    from app.services import admin_console as admin_console_service
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    deleted_job_id = _seed_deleted_reverse_prompt_job(auth_db, fixture)
+
+    with auth_db() as db, pytest.raises(AppError) as exc_info:
+        admin_console_service.resolve_task_family(
+            db,
+            task_id=deleted_job_id,
+            requested_family="reverse_prompt",
+        )
+
+    assert exc_info.value.code == "TASK_NOT_FOUND"
+    assert exc_info.value.status_code == 404
+
+
+def test_admin_retry_rejects_soft_deleted_stale_reverse_prompt_job(
+    auth_context,
+    auth_db,
+    platform_acme,
+    monkeypatch,
+) -> None:
+    from app.api.v1.routes import admin_console as route
+    from app.services import admin_console as admin_console_service
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    deleted_job_id = _seed_deleted_reverse_prompt_job(auth_db, fixture)
+    dispatched: list[str] = []
+    monkeypatch.setattr(
+        admin_console_service,
+        "resolve_task_family",
+        lambda *args, **kwargs: "reverse_prompt",
+    )
+    monkeypatch.setattr(
+        route.generate_reverse_prompt_video_task,
+        "apply_async",
+        lambda *args, **kwargs: dispatched.append(deleted_job_id),
+    )
+
+    response = TestClient(app).post(
+        f"/api/v1/admin/console/tasks/{deleted_job_id}/retry",
+        params={"task_family": "reverse_prompt"},
+        headers=auth_context["headers"],
+    )
+
+    assert dispatched == []
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "TASK_NOT_FOUND"
+    with auth_db() as db:
+        job = db.get(ReversePromptJob, deleted_job_id)
+        assert job is not None
+        assert job.status == "queued"
+        assert job.deleted_at is not None
 
 
 def test_admin_console_tenant_mutations_are_transactional_and_audited(
@@ -1742,6 +1852,70 @@ def test_non_video_retry_enqueue_compensations_are_idempotent(
         assert reverse_job.status == "failed"
         assert replicate_job.status == "failed"
         assert len(audits) == 4
+
+
+def test_reverse_retry_enqueue_compensation_releases_reservation_after_soft_delete(
+    auth_context,
+    auth_db,
+    platform_acme,
+) -> None:
+    from app.services import admin_console as admin_console_service
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    jobs = _seed_non_video_task_families(auth_db, fixture)
+    job_id = jobs["reverse_job_id"]
+    with auth_db() as db:
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        subscription.quota_credits_reserved = 0
+        db.commit()
+
+    with auth_db() as db:
+        actor = db.get(User, auth_context["user_id"])
+        preparation = admin_console_service.prepare_reverse_prompt_retry(
+            db,
+            actor=actor,
+            job_id=job_id,
+        )
+        assert preparation.charged is True
+        db.commit()
+
+    with auth_db() as db:
+        usage = db.scalar(
+            select(UsageRecord).where(
+                UsageRecord.reverse_prompt_job_id == job_id,
+                UsageRecord.status == "reserved",
+            )
+        )
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        assert usage is not None
+        assert subscription.quota_credits_reserved > 0
+        job = db.get(ReversePromptJob, job_id)
+        job.deleted_at = datetime.now(UTC)
+        db.commit()
+
+    with auth_db() as db:
+        actor = db.get(User, auth_context["user_id"])
+        compensated = (
+            admin_console_service.compensate_reverse_prompt_retry_enqueue_failure(
+                db,
+                actor=actor,
+                job_id=job_id,
+            )
+        )
+        assert compensated is not None
+        assert compensated.deleted_at is not None
+        db.commit()
+
+    with auth_db() as db:
+        usage = db.scalar(
+            select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id)
+        )
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        job = db.get(ReversePromptJob, job_id)
+        assert usage.status == "released"
+        assert subscription.quota_credits_reserved == 0
+        assert job.status == "failed"
+        assert job.deleted_at is not None
 
 
 def test_admin_retry_runs_legacy_worker_without_charging_tenant_credits_again(

@@ -3,7 +3,13 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-ImageHistoryCategory = Literal["image_gen", "ecom_white", "ecom_model", "ecom_detail"]
+ImageHistoryCategory = Literal[
+    "image_gen",
+    "ecom_white",
+    "ecom_model",
+    "ecom_detail",
+    "cover",
+]
 
 
 class ImageHistoryItem(BaseModel):
