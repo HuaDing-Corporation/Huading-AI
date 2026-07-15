@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import type { ComponentProps } from "react";
 import { describe, expect, it } from "vitest";
 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./select";
@@ -48,5 +49,32 @@ describe("SelectTrigger · aria-label 透传（确定值可及名）", () => {
       </>
     );
     expect(screen.getByRole("combobox", { name: "画面比例" })).toBeInTheDocument();
+  });
+});
+
+// FIX1（PR #171）：rest 透传把 asChild 变成合法 API，但本组件固定追加箭头（第二个子节点）→ asChild 必崩。
+// 类型 + 运行时双双排除。asChild 不含连字符、是合法标识符 → TS 这次抓得到，类型层可当护栏。
+describe("SelectTrigger · 排除 asChild（固定两个子节点，不支持）", () => {
+  it("🔴 类型层护栏：传 asChild 是类型错误（去掉 select.tsx 的 Omit → 此处 @ts-expect-error 未触发 → tsc 变红）", () => {
+    // @ts-expect-error asChild 不受支持：本组件固定渲染 trigger + 箭头两个子节点
+    const el = <SelectTrigger asChild>{<button />}</SelectTrigger>;
+    expect(el).toBeTruthy(); // 仅使变量被用；真正的护栏是 tsc 对上面 @ts-expect-error 的校验
+  });
+
+  it("运行时护栏：as-cast 绕过类型塞 asChild → 不崩、不透传给 Radix（渲染正常、可及名在、rest 仍透传）", () => {
+    // 模拟调用方用 as-any/spread 绕过类型层塞入 asChild（双 cast，不引入 no-explicit-any）。
+    const sneaky = { "aria-label": "动作", asChild: true };
+    render(
+      <Select defaultValue="a">
+        <SelectTrigger {...(sneaky as unknown as ComponentProps<typeof SelectTrigger>)}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="a">选项 A</SelectItem>
+        </SelectContent>
+      </Select>
+    );
+    // 未崩（能渲染到此——asChild 被丢弃，没到 Radix 触发 failed-to-slot）；rest 仍透传 → 可及名在。
+    expect(screen.getByRole("combobox", { name: "动作" })).toBeInTheDocument();
   });
 });
