@@ -1108,6 +1108,14 @@ export const copy = {
     colTargetTenant: "被操作租户",
     colBeforeAfter: "变更前 → 变更后",
     colReason: "理由",
-    beforeAfterArrow: " → "
+    beforeAfterArrow: " → ",
+    // 审计 diff 值格式化（ADMIN-AUDIT-DIFF-RENDER-FIX-0001）：null/空 → 破折号；布尔中文化；
+    // 以下三个 sr-only 串给屏幕阅读器读通「变更前/后」语义（不只靠颜色/箭头），破折号读「无」而非噪音。
+    auditEmpty: "—",
+    auditBoolTrue: "是",
+    auditBoolFalse: "否",
+    auditSrBefore: "变更前",
+    auditSrAfter: "变更后",
+    auditSrNone: "无"
   }
 } as const;

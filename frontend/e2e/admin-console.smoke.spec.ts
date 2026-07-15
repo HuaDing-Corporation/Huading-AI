@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 /**
  * 管理员后台交互冒烟（ADMIN-CONSOLE-UI-0001，生产构建走 MSW）：
  *  ① 平台账号（默认）：顶栏「管理后台」入口可见 → /admin（落租户管理）→ 列表 → Acme 详情 → 余额调整
- *     （确认弹窗显示「当前 → 调整后」确定值）→ 审计页出现「余额调整 20000 → 25000」→ 用量页导出（无筛选
+ *     （确认弹窗显示「当前 → 调整后」确定值）→ 审计页出现「余额调整 20,000 → 25,000」（zh-CN 千分位）→ 用量页导出（无筛选
  *     → 422 中文上限提示原样展示）→ 任务监控（默认 failed）重跑 job-f1（弹窗明示「不会重复扣费」）→ 已重新排队；
  *     375 下页面不横滚。
  *  ② 非平台账号（新注册态 platform=0+free）：入口隐藏；直达 /admin → 友好页「仅平台管理员可访问」，
@@ -69,8 +69,9 @@ test("① 平台账号：入口 → 租户管理 → 余额调整（前→后 + 
   // 审计页：余额调整记录（变更前 → 变更后 + 理由）。
   await page.getByRole("link", { name: "审计日志" }).click();
   await page.waitForURL(/\/admin\/audit$/, { timeout: 15_000 });
-  await expect(page.getByText("total：20000 → 25000")).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText("remaining：14000 → 19000")).toBeVisible();
+  // ADMIN-AUDIT-DIFF-RENDER-FIX-0001：数字走 zh-CN 千分位（20000→20,000）；sr-only「变更前/后」进 textContent，用锚定正则抗耦合。
+  await expect(page.getByText(/^total：.*20,000.*25,000$/)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText(/^remaining：.*14,000.*19,000$/)).toBeVisible();
   await expect(page.getByText("线下打款充值")).toBeVisible();
 
   // 用量页：无筛选导出 → BE 行数上限 422 中文原样展示。
