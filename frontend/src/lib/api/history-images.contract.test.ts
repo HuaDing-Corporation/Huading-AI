@@ -1,15 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { deleteHistoryImage, getHistoryImageSet, listHistoryImages } from "@/lib/api/history-images";
+import { getHistoryImageSet, listHistoryImages } from "@/lib/api/history-images";
 
 // HISTORY-IMAGE-TAB-UI-0001 归一契约 mock 承重（真打 MSW /history/images，不 mock adapter）：
-// 6 分类（含新 cover）+ 省略 category=全部图片 + 硬删。全确定值断言。
-// ⚠️ mock 先行：cover 分类 / DELETE 端点由 HISTORY-REFACTOR-BE-0001（Codex A）补，BE 合后按真契约逐字段核对。
-// ⚠️ 用例顺序即契约：删除会改模块级 mock 内存态，故「删除」放最后（前面读全量计数不受影响）。
+// 6 分类（含新 cover）+ 省略 category=全部图片。全确定值断言。
+// ⚠️ mock 先行：cover 分类由 HISTORY-REFACTOR-BE-0001（Codex A）补，BE 合后按真契约逐字段核对。
+// FIX1：图片删除端点被摘（用户「三拆」改 GC 方案）→ 本文件不再测硬删（不留打 DELETE 的用例/mock）。
 beforeEach(() => localStorage.clear());
 afterEach(() => localStorage.clear());
 
-describe("图片历史归一契约（6 分类 + 全部 + 硬删）", () => {
+describe("图片历史归一契约（6 分类 + 全部）", () => {
   it("cover 分类：恰 2 条（hc-1/hc-2），item_count=1", async () => {
     const r = await listHistoryImages({ category: "cover", page_size: 100 });
     expect(r.total).toBe(2);
@@ -40,12 +40,5 @@ describe("图片历史归一契约（6 分类 + 全部 + 硬删）", () => {
     expect(detail.items).toHaveLength(12);
     expect(detail.status).toBe("partial_failed");
     expect(detail.items.filter((it) => it.download_url === null)).toHaveLength(1); // 第 6 张缺图
-  });
-
-  it("🔴 硬删：DELETE cover/hc-1 后该条从列表消失（cover 2 → 1，剩 hc-2）", async () => {
-    await deleteHistoryImage("cover", "hc-1");
-    const r = await listHistoryImages({ category: "cover", page_size: 100 });
-    expect(r.total).toBe(1);
-    expect(r.items[0].id).toBe("hc-2");
   });
 });

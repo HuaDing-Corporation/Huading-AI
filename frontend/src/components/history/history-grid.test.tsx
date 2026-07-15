@@ -3,14 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { copy } from "@/lib/copy";
 
-const hooks = vi.hoisted(() => ({ useHistoryImages: vi.fn(), useHistoryImageSet: vi.fn(), useDeleteHistoryImage: vi.fn() }));
+const hooks = vi.hoisted(() => ({ useHistoryImages: vi.fn(), useHistoryImageSet: vi.fn() }));
 vi.mock("@/lib/api/hooks", () => hooks);
 
 import { HistoryGrid } from "./history-grid";
 
 beforeEach(() => {
   hooks.useHistoryImageSet.mockReturnValue({ data: undefined, isLoading: false, isError: false, refetch: vi.fn() });
-  hooks.useDeleteHistoryImage.mockReturnValue({ mutateAsync: vi.fn(), isPending: false, variables: undefined });
 });
 afterEach(() => vi.clearAllMocks());
 

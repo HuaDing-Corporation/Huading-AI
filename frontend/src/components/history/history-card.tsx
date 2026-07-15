@@ -1,7 +1,5 @@
 "use client";
 
-import { Trash2 } from "lucide-react";
-
 import { Button } from "@/components/ui/button";
 import { HistoryStatusBadge } from "@/components/history/history-status-badge";
 import { copy } from "@/lib/copy";
@@ -14,21 +12,18 @@ function formatCreatedAt(iso: string): string {
 
 /**
  * 历史网格卡片（HISTORY-IMAGE-TAB-UI-0001）——封面缩略 + 张数角标 + 标题 + 时间 + 状态徽标；
- * 交互三分（统一交互语言，供包 2 视频 tab 复用同款）：点**图片** → 大图弹窗（onOpenImage）；
- * 点「查看详情」→ 详情弹窗（onDetail）；点删除 → 硬删确认（onDelete）。整卡不再是单一按钮。
+ * 交互（统一交互语言，供包 2 视频 tab 复用同款）：点**图片** → 大图弹窗（onOpenImage）；「查看详情」→ 详情弹窗（onDetail）。
+ * FIX1：归一 API 的图片删除端点被摘掉（用户「三拆」，改 GC 方案将来补）→ 本卡**不渲染删除入口**（点了没反应的按钮
+ * 比没有更糟）。视频/文案 tab 的删除各走自己旧路径、不受影响；反推删除在包 2。
  */
 export function HistoryCard({
   item,
   onOpenImage,
-  onDetail,
-  onDelete,
-  deleting
+  onDetail
 }: {
   item: HistoryItem;
   onOpenImage: () => void;
   onDetail: () => void;
-  onDelete: () => void;
-  deleting?: boolean;
 }) {
   return (
     <div data-testid="history-card" className="group flex flex-col gap-2 rounded-card border border-line-gold bg-glass-fill p-2.5">
@@ -53,20 +48,9 @@ export function HistoryCard({
         </div>
         <HistoryStatusBadge status={item.status} />
       </div>
-      <div className="flex items-center gap-1.5">
-        <Button variant="soft" size="sm" className="flex-1" onClick={onDetail}>
-          {copy.historyImages.viewDetail}
-        </Button>
-        <button
-          type="button"
-          onClick={onDelete}
-          disabled={deleting}
-          aria-label={copy.history.deleteItem}
-          className="flex h-8 w-8 flex-none items-center justify-center rounded-field text-ink-faint outline-none transition-colors hover:bg-error-bg hover:text-error-fg focus-visible:shadow-focus-gold disabled:opacity-50"
-        >
-          <Trash2 size={14} strokeWidth={1.8} />
-        </button>
-      </div>
+      <Button variant="soft" size="sm" className="w-full" onClick={onDetail}>
+        {copy.historyImages.viewDetail}
+      </Button>
     </div>
   );
 }

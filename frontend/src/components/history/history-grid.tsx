@@ -4,38 +4,24 @@ import { useState } from "react";
 import { ImageOff, Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { HistoryCard } from "@/components/history/history-card";
 import { HistorySetDialog } from "@/components/history/history-set-dialog";
 import { ImageLightbox } from "@/components/history/image-lightbox";
-import { useDeleteHistoryImage, useHistoryImages } from "@/lib/api/hooks";
+import { useHistoryImages } from "@/lib/api/hooks";
 import { copy } from "@/lib/copy";
 import type { HistoryCategory, HistoryItem } from "@/lib/api/history-images";
 
 /**
  * 单分类历史网格（HISTORY-IMAGE-TAB-UI-0001）——按 category 分页拉列表（category 省略 = 全部图片），
- * 卡片网格 + 加载/错误/空态 + 「加载更多」。交互三分：点图 → 大图弹窗；「查看详情」→ 详情弹窗（整套 + 信息并集）；
- * 删除 → 硬删确认（deleteConfirmHard，防连点）。每个分类各自 useHistoryImages(category)（按 key 缓存）→ 切分类不串数据。
+ * 卡片网格 + 加载/错误/空态 + 「加载更多」。交互：点图 → 大图弹窗；「查看详情」→ 详情弹窗（整套 + 信息并集）。
+ * FIX1：归一 API 的图片删除端点被摘掉（用户「三拆」，改 GC 方案将来补）→ 本网格不再有删除入口/确认（GC 包上线时原样复活）。
+ * 每个分类各自 useHistoryImages(category)（按 key 缓存）→ 切分类不串数据。
  */
 export function HistoryGrid({ category }: { category?: HistoryCategory }) {
   const query = useHistoryImages(category);
-  const del = useDeleteHistoryImage();
   const [lightbox, setLightbox] = useState<HistoryItem | null>(null);
   const [detail, setDetail] = useState<HistoryItem | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<HistoryItem | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
   const items = query.data?.pages.flatMap((p) => p.items) ?? [];
-
-  const onConfirmDelete = async () => {
-    if (!confirmDelete) return;
-    setActionError(null);
-    try {
-      await del.mutateAsync({ category: confirmDelete.category, id: confirmDelete.id });
-      setConfirmDelete(null);
-    } catch {
-      setActionError(copy.history.deleteFailed);
-    }
-  };
 
   if (query.isLoading) {
     return (
@@ -70,21 +56,9 @@ export function HistoryGrid({ category }: { category?: HistoryCategory }) {
 
   return (
     <>
-      {actionError && (
-        <p role="alert" className="mb-2 rounded-field bg-error-bg px-3 py-2 text-[12.5px] text-error-fg">
-          {actionError}
-        </p>
-      )}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
         {items.map((item) => (
-          <HistoryCard
-            key={item.id}
-            item={item}
-            onOpenImage={() => setLightbox(item)}
-            onDetail={() => setDetail(item)}
-            onDelete={() => setConfirmDelete(item)}
-            deleting={del.isPending && del.variables?.id === item.id}
-          />
+          <HistoryCard key={item.id} item={item} onOpenImage={() => setLightbox(item)} onDetail={() => setDetail(item)} />
         ))}
       </div>
       {query.hasNextPage ? (
@@ -102,20 +76,6 @@ export function HistoryGrid({ category }: { category?: HistoryCategory }) {
         onClose={() => setLightbox(null)}
       />
       <HistorySetDialog item={detail} onClose={() => setDetail(null)} />
-      <ConfirmDialog
-        open={confirmDelete !== null}
-        title={copy.history.deleteConfirmTitle}
-        message={copy.history.deleteConfirmHard}
-        confirmLabel={copy.history.deleteConfirmBtn}
-        danger
-        submitting={del.isPending}
-        error={actionError}
-        onConfirm={() => void onConfirmDelete()}
-        onCancel={() => {
-          setConfirmDelete(null);
-          setActionError(null);
-        }}
-      />
     </>
   );
 }

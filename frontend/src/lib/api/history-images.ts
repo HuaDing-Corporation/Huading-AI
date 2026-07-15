@@ -76,14 +76,9 @@ export function getHistoryImageSet(category: HistoryCategory | string, id: strin
   return apiFetch<HistoryImageSet>(`${BASE}/${encodeURIComponent(category)}/${encodeURIComponent(id)}`, { method: "GET" });
 }
 
-/**
- * 删除一条图片历史（硬删，DELETE /history/images/{category}/{history_id}）。
- * ⚠️ mock 先行：BE 端点由 HISTORY-REFACTOR-BE-0001（Codex A）补，硬删语义、文案 deleteConfirmHard；
- * 契约（尤其 path 段名 history_id、返回体）以 BE 回执定稿，本文件届时仅对齐、组件不动。跨租户 404。
- */
-export function deleteHistoryImage(category: HistoryCategory | string, id: string): Promise<void> {
-  return apiFetch<void>(`${BASE}/${encodeURIComponent(category)}/${encodeURIComponent(id)}`, { method: "DELETE" });
-}
+// FIX1（HISTORY-IMAGE-TAB-UI-0001）：归一 API 的图片删除端点被摘掉——#175 的同步删除媒体经 Codex B 三轮审查
+// 出七八条 P1（共享 Asset 误删 / 批次半删 / 跨租户路径穿越 / TOCTOU），用户「三拆」改 GC 方案将来补。
+// 故此处不再导出图片删除 adapter（不留死代码）；GC 包上线时原样复活。
 
 /** 单张原始尺寸「宽x高」（width/height 均在才给；缺一即 null，UI 不得冒充）。 */
 export function historyImageDimensions(item: HistoryImageSetItem): string | null {

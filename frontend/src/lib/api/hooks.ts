@@ -22,7 +22,7 @@ import {
 } from "@/lib/api/admin-console";
 import { listAvatarPresets } from "@/lib/api/avatars";
 import { analyticsKeys, avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, historyImageKeys, labelSettingsKey, meKey, publishKeys, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
-import { deleteHistoryImage, getHistoryImageSet, listHistoryImages, type HistoryCategory } from "@/lib/api/history-images";
+import { getHistoryImageSet, listHistoryImages, type HistoryCategory } from "@/lib/api/history-images";
 import { fetchAnalyticsByProvider, fetchAnalyticsByTenant, fetchAnalyticsOverview, fetchAnalyticsTimeseries, type AnalyticsRange } from "@/lib/api/analytics";
 import { cancelBatch, createBatch, estimateBatch, getBatch, listBatches } from "@/lib/api/batches";
 import { getQuota } from "@/lib/api/quota";
@@ -109,14 +109,7 @@ export function useHistoryImageSet(category: HistoryCategory | string, id: strin
     enabled: !!session && !!id
   });
 }
-// 删除一条图片历史（硬删）；成功后失效整个 history-images 列表缓存（"all" 与各分类一并刷新）。
-export function useDeleteHistoryImage() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ category, id }: { category: HistoryCategory | string; id: string }) => deleteHistoryImage(category, id),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: historyImageKeys.all })
-  });
-}
+// FIX1：图片删除端点被摘（用户「三拆」，改 GC 方案）→ 图片删除钩子一并摘除，不留孤儿。
 export function useCreateVideo() {
   const qc = useQueryClient();
   return useMutation({

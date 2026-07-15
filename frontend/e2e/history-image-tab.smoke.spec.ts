@@ -1,10 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
 /**
- * HISTORY-IMAGE-TAB-UI-0001 交互冒烟（生产构建 next start，真走 MSW /history/images list/detail/DELETE + 6 category）：
+ * HISTORY-IMAGE-TAB-UI-0001 交互冒烟（生产构建 next start，真走 MSW /history/images list/detail + 6 category）：
  * 图片历史已并进工作台「历史生成」的图片 tab（/history 独立页下线）。验证：6 分类 chip → 切「电商·详情图」→
- * 「查看详情」重开整套(5 张 + 下载原图 + 信息并集：状态/分类/张数) → 点图开大图弹窗 → 删除(硬删确认→列表消失) →
- * partial 缺图不死链。全程无 #130 白屏 / 无 /api/api 双前缀。需 NEXT_PUBLIC_USE_MOCK=1 构建后 next start。
+ * 「查看详情」重开整套(5 张 + 下载原图 + 信息并集：状态/分类/张数) → 点图开大图弹窗 → partial 缺图不死链。
+ * FIX1：归一 API 的图片删除端点被摘（用户「三拆」改 GC 方案）→ 图片 tab 暂无删除入口，本冒烟不再测删除。
+ * 全程无 #130 白屏 / 无 /api/api 双前缀。需 NEXT_PUBLIC_USE_MOCK=1 构建后 next start。
  */
 function watch(page: Page): { errors: () => string[]; doublePrefix: () => string[] } {
   const errors: string[] = [];
@@ -31,7 +32,7 @@ async function login(page: Page) {
 }
 const detailCard = (page: Page, title: RegExp) => page.getByTestId("history-card").filter({ hasText: title });
 
-test("图片 tab：6 分类 + 查看详情(整套+信息并集) + 大图弹窗 + 删除；375 可见", async ({ page }) => {
+test("图片 tab：6 分类 + 查看详情(整套+信息并集) + 大图弹窗；375 可见", async ({ page }) => {
   const g = watch(page);
   await login(page);
 
@@ -63,14 +64,7 @@ test("图片 tab：6 分类 + 查看详情(整套+信息并集) + 大图弹窗 +
   await expect(page.getByRole("img", { name: /保温杯 · 主图复刻（5 张）（大图预览）/ })).toBeVisible({ timeout: 15_000 });
   await page.keyboard.press("Escape");
 
-  // 删除：切「电商·白底图」→ 删「陶瓷水杯 · 白底图」→ 硬删确认 → 列表消失。
-  await page.getByRole("button", { name: "电商·白底图" }).click();
-  await expect(page.getByText("陶瓷水杯 · 白底图")).toBeVisible({ timeout: 15_000 });
-  await detailCard(page, /陶瓷水杯 · 白底图/).getByRole("button", { name: "删除" }).click();
-  await expect(page.getByText("将永久删除，不可恢复")).toBeVisible();
-  await page.getByRole("button", { name: "确认删除" }).click();
-  await expect(page.getByText("陶瓷水杯 · 白底图")).toHaveCount(0, { timeout: 15_000 });
-
+  // FIX1：图片删除端点被摘（用户「三拆」改 GC 方案）→ 图片卡片不再有删除入口，故本冒烟不测删除。
   // 移动端 375：分类 chip 仍可见（flex-wrap 不溢出）。
   await page.setViewportSize({ width: 375, height: 812 });
   await expect(page.getByRole("button", { name: "全部图片" })).toBeVisible();

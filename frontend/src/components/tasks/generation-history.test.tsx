@@ -58,13 +58,12 @@ vi.mock("@/lib/api/hooks", () => ({
   },
   useDeleteCopyDraft: () => deleteDraftMock,
   useClearCopyDrafts: () => clearDraftsMock,
-  // HISTORY-IMAGE-TAB-UI-0001：图片 tab 换归一 API → PhotoHistory 挂 HistoryGrid，需这三个 hook。
+  // HISTORY-IMAGE-TAB-UI-0001：图片 tab 换归一 API → PhotoHistory 挂 HistoryGrid，需这两个 hook（FIX1 摘删除后不再需要图片删除钩子）。
   useHistoryImages: (category?: string) => {
     histImgMock.fn(category);
     return { data: { pages: [{ items: [], total: 0 }] }, isLoading: false, isError: false, hasNextPage: false, isFetchingNextPage: false, fetchNextPage: vi.fn(), refetch: vi.fn() };
   },
-  useHistoryImageSet: () => ({ data: undefined, isLoading: false, isError: false, refetch: vi.fn() }),
-  useDeleteHistoryImage: () => ({ mutateAsync: vi.fn(), isPending: false, variables: undefined })
+  useHistoryImageSet: () => ({ data: undefined, isLoading: false, isError: false, refetch: vi.fn() })
 }));
 
 import { CopyDraftList } from "./copy-draft-list";

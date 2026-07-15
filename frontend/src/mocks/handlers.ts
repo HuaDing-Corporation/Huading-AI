@@ -932,13 +932,7 @@ export const handlers = [
     if (!rec) return err(404, "HISTORY_NOT_FOUND", "记录不存在或无权访问");
     return ok({ id: rec.id, category: rec.category, created_at: rec.created_at, status: rec.status, items: rec.items, meta: rec.meta ?? {} });
   }),
-  // 删除一条图片历史（硬删；HISTORY-IMAGE-TAB-UI-0001；mock 先行，待 Codex A 契约核对）。跨租户/不存在 → 404。
-  http.delete(`${BASE}/api/v1/history/images/:category/:id`, ({ params }) => {
-    const idx = historyImageRecords.findIndex((r) => r.category === String(params.category) && r.id === String(params.id));
-    if (idx === -1) return err(404, "HISTORY_NOT_FOUND", "记录不存在或无权访问");
-    historyImageRecords.splice(idx, 1);
-    return ok({ deleted: true });
-  }),
+  // FIX1（HISTORY-IMAGE-TAB-UI-0001）：图片删除端点被摘（用户「三拆」改 GC 方案）→ 此处不再 mock 图片删除端点（不留死代码）。
   // Auth = M2 shapes (unchanged). Mocked so the (app) client auth-gate can be
   // passed during the MSW parallel period without a real backend.
   http.post(`${BASE}/api/v1/auth/login`, () =>

@@ -626,7 +626,6 @@ export const copy = {
     // 交互：点图 → 大图弹窗（纯图片）；点「查看详情」→ 详情弹窗（整套 + 信息并集）；删除（硬删）
     viewDetail: "查看详情",
     openLarge: "查看大图",
-    deleteItem: "删除",
     lightboxTitle: "查看大图",
     lightboxAlt: (title: string) => `${title}（大图预览）`,
     // 详情弹窗信息并集（HISTORY-UI 原弹窗没显；归一 API 列表项带进来）
