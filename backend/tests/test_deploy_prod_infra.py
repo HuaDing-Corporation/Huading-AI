@@ -54,6 +54,21 @@ def test_prod_compose_exposes_only_nginx_and_persists_state() -> None:
     assert services["minio"]["restart"] == "always"
 
 
+def test_prod_minio_init_uses_single_argv_command_and_no_dead_cors() -> None:
+    minio_init = _prod_compose()["services"]["minio-init"]
+
+    assert minio_init["entrypoint"] == ["/bin/sh", "-c"]
+    command = minio_init["command"]
+    # A scalar is word-split by Compose, so sh -c runs only `set` and creates no bucket.
+    assert isinstance(command, list)
+    assert len(command) == 1
+    script = command[0]
+    assert "mc mb --ignore-existing" in script
+    assert "mc anonymous set none" in script
+    assert "cors" not in script.lower()
+    assert "ENGINE_CORS_ORIGINS" not in minio_init["environment"]
+
+
 def test_prod_compose_wires_public_frontend_and_backend_env() -> None:
     compose = _prod_compose()
     backend_env = compose["services"]["backend"]["environment"]
@@ -91,6 +106,11 @@ def test_prod_nginx_enforces_https_and_supports_api_sse_and_minio() -> None:
     assert "location /minio/" not in nginx_conf
     minio_block = _nginx_location_block(nginx_conf, "/huading-videos/")
     assert "proxy_set_header Host $host;" in minio_block
+    assert "proxy_hide_header Access-Control-Allow-Origin;" in minio_block
+    assert (
+        'add_header Access-Control-Expose-Headers "ETag, Content-Length, Content-Type" always;'
+        in minio_block
+    )
     assert "proxy_pass $upstream_minio;" in minio_block
     assert "proxy_pass $upstream_minio/;" not in minio_block
 
