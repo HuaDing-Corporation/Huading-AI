@@ -145,6 +145,13 @@
     background-attachment: fixed;
     -webkit-font-smoothing: antialiased;
     @apply font-sans;
+    /* HISTORY-IMAGE-TAB-UI-0001「切 tab 跳底部」根因修复（Chrome DevTools 实测坐实）：切到内容更高的历史
+       tab 时，新面板图片逐张加载使页面增高，浏览器的**滚动锚定（scroll anchoring）**在近页底位置随之把
+       scrollY 一路推到新页底（实测 scrollY 1522→2094→2544 随图片加载递增；focusin 只落触发器、面板从不
+       获焦——故非面板焦点）。历史模块在工作台页尾，于是「跳到模块底部」。文档级关掉锚定从根因消除跳变
+       （实测 jumped 972→0），而非 scrollTo 硬盖。本应用列表均向下追加（load-more），不依赖向上锚定，故
+       全局关闭安全；面板级 overflow-anchor 在真实构建里不足（锚定是文档级行为，需在滚动容器上关）。 */
+    overflow-anchor: none;
   }
 }
 
