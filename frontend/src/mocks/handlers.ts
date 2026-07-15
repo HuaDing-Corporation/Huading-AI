@@ -753,7 +753,7 @@ function adminConsoleHandlers() {
       rows.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
       return ok(paginate(rows.map((r) => ({ ...r })), url));
     }),
-    // 重跑（202）：回执三态（FIX1 冻结，**无 estimate_basis**）。按任务族（镜像 BE）：
+    // 重跑（202）：回执三态（FIX1 冻结，**无 estimate_basis**）。按任务类型（镜像 BE，字段名 task_family 不变）：
     //   job-f1 released avatar_talk → charged:true, credits=原预留 1501, is_estimate:true（唯一 estimate）
     //   job-f3 released 反推固定价  → charged:true, credits=100, is_estimate:false
     //   job-f2 电商复刻（确认已扣） → charged:false, credits=0, is_estimate:false

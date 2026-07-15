@@ -26,7 +26,7 @@ const FAMILY_LABEL: Record<AdminTaskFamily, string> = {
   ecom_replicate: copy.admin.taskFamilyEcom
 };
 
-// 任务监控（ADMIN-CONSOLE-UI-0001 · FIX1 对齐真契约）：筛选 = 状态/任务族/租户/时间区间（BE routes:315 有
+// 任务监控（ADMIN-CONSOLE-UI-0001 · FIX1 对齐真契约）：筛选 = 状态/任务类型/租户/时间区间（BE routes:315 有
 // status 参数，服务端把 done 归一为 succeeded）。默认聚焦 failed（排障主场景）。重跑按钮以 BE 的 retryable
 // 为准（前端不自判 status）。回执披露三态（charged/is_estimate，无 estimate_basis）。
 export default function AdminTasksPage() {
@@ -165,7 +165,7 @@ export default function AdminTasksPage() {
           </SelectContent>
         </Select>
         <Select value={family} onValueChange={(v) => { setFamily(v); setPage(1); }}>
-          <SelectTrigger className="w-[150px]" aria-label={copy.admin.taskFamilyAll}>
+          <SelectTrigger className="w-[150px]" aria-label={copy.admin.colTaskFamily}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
