@@ -69,6 +69,31 @@ def test_prod_minio_init_uses_single_argv_command_and_no_dead_cors() -> None:
     assert "ENGINE_CORS_ORIGINS" not in minio_init["environment"]
 
 
+def test_frontend_runtime_image_uses_standalone_multistage_build() -> None:
+    dockerfile = (REPO_ROOT / "frontend" / "Dockerfile").read_text(encoding="utf-8")
+    from_lines = [
+        line.strip() for line in dockerfile.splitlines() if line.startswith("FROM ")
+    ]
+
+    assert from_lines == [
+        "FROM node:20-slim AS builder",
+        "FROM node:20-slim AS runner",
+    ]
+    assert "ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:8000" in dockerfile
+    assert "ARG NEXT_PUBLIC_USE_MOCK=0" in dockerfile
+    runner = dockerfile.split("FROM node:20-slim AS runner", maxsplit=1)[1]
+    assert "pnpm install" not in runner
+    assert "corepack enable" not in runner
+    assert "COPY --from=builder /repo/frontend/.next/standalone ./" in runner
+    assert "COPY --from=builder /repo/frontend/.next/static ./frontend/.next/static" in runner
+    assert 'CMD ["node", "server.js"]' in runner
+
+    next_config = (REPO_ROOT / "frontend" / "next.config.ts").read_text(
+        encoding="utf-8"
+    )
+    assert 'output: "standalone"' in next_config
+
+
 def test_prod_compose_wires_public_frontend_and_backend_env() -> None:
     compose = _prod_compose()
     backend_env = compose["services"]["backend"]["environment"]
