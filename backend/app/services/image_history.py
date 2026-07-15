@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.exceptions import AppError
+from app.core.logging import get_logger
 from app.db.models import Asset, EcomReplicateJob, EcomReplicateOutput, TaskAsset, VideoTask
 from app.schemas.history import (
     ImageHistoryCategory,
@@ -15,8 +16,10 @@ from app.schemas.history import (
     ImageHistoryListResponse,
 )
 from app.services import ecom_replicate
-from app.services.history import video_mode_filter
+from app.services.history import delete_video_task, video_mode_filter
 from app.services.storage.base import ObjectStorage
+
+logger = get_logger(__name__)
 
 PhotoHistoryCategory = Literal["image_gen", "ecom_white", "ecom_model", "cover"]
 
@@ -27,6 +30,24 @@ _PHOTO_KIND_BY_CATEGORY: dict[PhotoHistoryCategory, str | None] = {
     "cover": "cover",
 }
 _REPLICATE_HISTORY_STATUSES = {"completed", "partial_failed", "failed"}
+_PHOTO_OUTPUT_ASSET_ROLES = {
+    "output_audio",
+    "output_subtitle",
+    "output_video",
+    "output_image",
+}
+
+
+class _ValidatedDeleteStorage:
+    def __init__(self, storage: ObjectStorage, *, tenant_id: str) -> None:
+        self.bucket = storage.bucket
+        self._storage = storage
+        self._tenant_id = tenant_id
+
+    def delete_object(self, key: str) -> None:
+        self._storage.delete_object(
+            _validated_tenant_storage_key(self._tenant_id, key)
+        )
 
 
 def _tenant_storage_pattern(tenant_id: str) -> str:
@@ -178,6 +199,185 @@ def _photo_tasks_for_history(
             .order_by(VideoTask.created_at.asc(), VideoTask.id.asc())
         )
     )
+
+
+def _photo_tasks_for_delete(
+    db: Session,
+    *,
+    tenant_id: str,
+    category: PhotoHistoryCategory,
+    history_id: str,
+) -> list[VideoTask]:
+    batch_id = VideoTask.params["batch_id"].as_string()
+    record_id = VideoTask.id if category == "image_gen" else func.coalesce(
+        batch_id,
+        VideoTask.id,
+    )
+    return list(
+        db.scalars(
+            select(VideoTask)
+            .where(
+                *_successful_photo_filters(tenant_id),
+                *_photo_category_filters(category),
+                record_id == history_id,
+            )
+            .order_by(VideoTask.created_at.asc(), VideoTask.id.asc())
+        )
+    )
+
+
+def _validate_photo_delete_storage_keys(
+    db: Session,
+    *,
+    tenant_id: str,
+    tasks: list[VideoTask],
+) -> None:
+    task_ids = [task.id for task in tasks]
+    storage_keys = [
+        key
+        for task in tasks
+        for key in (task.storage_key, task.thumbnail_key)
+        if key
+    ]
+    output_assets = list(
+        db.scalars(
+            select(Asset)
+            .join(TaskAsset, TaskAsset.asset_id == Asset.id)
+            .where(
+                TaskAsset.video_task_id.in_(task_ids),
+                TaskAsset.role.in_(_PHOTO_OUTPUT_ASSET_ROLES),
+                Asset.source == "generated",
+                Asset.storage_key.is_not(None),
+            )
+        )
+    )
+    if any(asset.tenant_id != tenant_id for asset in output_assets):
+        raise AppError(
+            "Image history item not found.",
+            code="IMAGE_HISTORY_NOT_FOUND",
+            status_code=404,
+        )
+    storage_keys.extend(asset.storage_key for asset in output_assets)
+    for storage_key in storage_keys:
+        _validated_tenant_storage_key(tenant_id, storage_key)
+
+
+def _delete_photo_history(
+    db: Session,
+    *,
+    tenant_id: str,
+    storage: ObjectStorage,
+    category: PhotoHistoryCategory,
+    history_id: str,
+) -> str:
+    tasks = _photo_tasks_for_delete(
+        db,
+        tenant_id=tenant_id,
+        category=category,
+        history_id=history_id,
+    )
+    if not tasks:
+        raise AppError(
+            "Image history item not found.",
+            code="IMAGE_HISTORY_NOT_FOUND",
+            status_code=404,
+        )
+    _validate_photo_delete_storage_keys(db, tenant_id=tenant_id, tasks=tasks)
+    validated_storage = _ValidatedDeleteStorage(storage, tenant_id=tenant_id)
+    for task in tasks:
+        result = delete_video_task(
+            db,
+            tenant_id=tenant_id,
+            task_id=task.id,
+            storage=validated_storage,
+        )
+        if result != "deleted":  # pragma: no cover - rows were resolved immediately above
+            raise RuntimeError("Image history task disappeared during deletion.")
+    return history_id
+
+
+def _delete_storage_keys_best_effort(
+    storage: ObjectStorage,
+    storage_keys: list[str],
+) -> None:
+    for storage_key in dict.fromkeys(storage_keys):
+        try:
+            storage.delete_object(storage_key)
+        except Exception as exc:  # pragma: no cover - log-only best effort
+            logger.warning(
+                "image_history.storage_delete_failed",
+                storage_key=storage_key,
+                error=str(exc),
+            )
+
+
+def _delete_replicate_history(
+    db: Session,
+    *,
+    tenant_id: str,
+    storage: ObjectStorage,
+    history_id: str,
+) -> str:
+    job = db.scalar(
+        select(EcomReplicateJob).where(
+            EcomReplicateJob.id == history_id,
+            EcomReplicateJob.tenant_id == tenant_id,
+            EcomReplicateJob.status.in_(_REPLICATE_HISTORY_STATUSES),
+        )
+    )
+    if job is None:
+        raise AppError(
+            "Image history item not found.",
+            code="IMAGE_HISTORY_NOT_FOUND",
+            status_code=404,
+        )
+
+    outputs = list(
+        db.scalars(
+            select(EcomReplicateOutput)
+            .where(EcomReplicateOutput.job_id == job.id)
+            .order_by(EcomReplicateOutput.index.asc(), EcomReplicateOutput.id.asc())
+        )
+    )
+    if any(output.tenant_id != tenant_id for output in outputs):
+        raise AppError(
+            "Image history item not found.",
+            code="IMAGE_HISTORY_NOT_FOUND",
+            status_code=404,
+        )
+
+    storage_keys = [output.storage_key for output in outputs if output.storage_key]
+    generated_assets: dict[str, Asset] = {}
+    for output in outputs:
+        if not output.asset_id:
+            continue
+        asset = db.get(Asset, output.asset_id)
+        if (
+            asset is None
+            or asset.source != "generated"
+            or asset.tenant_id != tenant_id
+        ):
+            raise AppError(
+                "Image history item not found.",
+                code="IMAGE_HISTORY_NOT_FOUND",
+                status_code=404,
+            )
+        generated_assets[asset.id] = asset
+        storage_keys.append(asset.storage_key)
+
+    for storage_key in storage_keys:
+        _validated_tenant_storage_key(tenant_id, storage_key)
+
+    for output in outputs:
+        db.delete(output)
+    db.flush()
+    for asset in generated_assets.values():
+        db.delete(asset)
+    db.delete(job)
+    db.commit()
+
+    _delete_storage_keys_best_effort(storage, storage_keys)
+    return history_id
 
 
 def _photo_title(category: PhotoHistoryCategory, task: VideoTask) -> str:
@@ -570,6 +770,30 @@ def get_image_history(
             history_id=history_id,
         )
     return _photo_history_detail(
+        db,
+        tenant_id=tenant_id,
+        storage=storage,
+        category=cast(PhotoHistoryCategory, category),
+        history_id=history_id,
+    )
+
+
+def delete_image_history(
+    db: Session,
+    *,
+    tenant_id: str,
+    storage: ObjectStorage,
+    category: ImageHistoryCategory,
+    history_id: str,
+) -> str:
+    if category == "ecom_detail":
+        return _delete_replicate_history(
+            db,
+            tenant_id=tenant_id,
+            storage=storage,
+            history_id=history_id,
+        )
+    return _delete_photo_history(
         db,
         tenant_id=tenant_id,
         storage=storage,
