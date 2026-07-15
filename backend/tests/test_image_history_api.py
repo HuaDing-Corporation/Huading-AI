@@ -405,14 +405,124 @@ def test_image_history_unifies_photo_categories_and_excludes_non_history_rows(
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["total"] == 3
+    assert data["total"] == 4
     assert [(item["id"], item["category"]) for item in data["items"]] == [
+        ("cover-hidden", "cover"),
         ("model-history", "ecom_model"),
         ("white-history", "ecom_white"),
         ("plain-history", "image_gen"),
     ]
-    assert data["items"][0]["title"] == "夏日通勤"
+    assert data["items"][0]["title"] == "封面"
+    assert data["items"][1]["title"] == "夏日通勤"
     assert all(item["status"] == "ready" for item in data["items"])
+
+
+def test_image_history_lists_and_opens_cover_without_mixing_image_generation(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    cover = _photo_task(
+        task_id="cover-history-item",
+        tenant_id=tenant_id,
+        created_at=datetime.now(UTC),
+        topic="商品主封面",
+        params={
+            "kind": "cover",
+            "purpose": "cover",
+            "source": "frame",
+            "source_video_task_id": "source-video-task",
+            "timestamp_sec": 2.5,
+            "layout_template_id": "title-bottom",
+        },
+    )
+    safe_key = str(cover.storage_key)
+    foreign_thumbnail = "tenants/another-tenant/thumbnails/foreign.png"
+    cover.thumbnail_key = foreign_thumbnail
+    poster = _photo_task(
+        task_id="poster-still-hidden",
+        tenant_id=tenant_id,
+        created_at=datetime.now(UTC) - timedelta(seconds=1),
+        topic="旧营销海报",
+        params={"kind": "ecom_poster"},
+    )
+    with auth_db() as db:
+        db.add_all([cover, poster])
+        db.flush()
+        _link_photo_output(
+            db,
+            task=cover,
+            asset_id="cover-history-asset",
+            width=1280,
+            height=720,
+        )
+        db.commit()
+
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    client = TestClient(app)
+    try:
+        cover_list = client.get(
+            "/api/v1/history/images",
+            params={"category": "cover"},
+            headers=auth_context["headers"],
+        )
+        cover_detail = client.get(
+            "/api/v1/history/images/cover/cover-history-item",
+            headers=auth_context["headers"],
+        )
+        image_gen_list = client.get(
+            "/api/v1/history/images",
+            params={"category": "image_gen"},
+            headers=auth_context["headers"],
+        )
+        all_images = client.get(
+            "/api/v1/history/images",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert cover_list.status_code == 200
+    assert cover_list.json()["data"] == {
+        "items": [
+            {
+                "id": "cover-history-item",
+                "category": "cover",
+                "title": "商品主封面",
+                "cover_url": f"https://storage.test/{safe_key}?ttl=3600",
+                "created_at": cover_list.json()["data"]["items"][0]["created_at"],
+                "status": "ready",
+                "item_count": 1,
+            }
+        ],
+        "total": 1,
+        "page": 1,
+        "page_size": 20,
+    }
+    assert cover_detail.status_code == 200
+    detail = cover_detail.json()["data"]
+    assert detail["category"] == "cover"
+    assert detail["items"][0]["width"] == 1280
+    assert detail["items"][0]["height"] == 720
+    assert detail["items"][0]["download_url"].startswith(
+        f"https://storage.test/{safe_key}?ttl=3600"
+    )
+    assert detail["meta"] == {
+        "task_ids": ["cover-history-item"],
+        "source": "frame",
+        "source_video_task_id": "source-video-task",
+        "timestamp_sec": 2.5,
+        "layout_template_id": "title-bottom",
+    }
+    assert image_gen_list.status_code == 200
+    assert image_gen_list.json()["data"]["items"] == []
+    assert [item["id"] for item in all_images.json()["data"]["items"]] == [
+        "cover-history-item"
+    ]
+    assert foreign_thumbnail not in cover_list.text
+    assert foreign_thumbnail not in storage.presigned_keys
+    assert safe_key in storage.presigned_keys
 
 
 def test_image_history_lists_only_terminal_replicate_jobs(auth_context, auth_db) -> None:

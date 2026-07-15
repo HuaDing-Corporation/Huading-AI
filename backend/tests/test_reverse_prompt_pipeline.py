@@ -1261,6 +1261,128 @@ def test_reverse_prompt_video_worker_succeeds_settles_once_and_is_pollable(
     db.close()
 
 
+def test_soft_deleted_queued_reverse_prompt_video_worker_settles_without_resurrection(
+    auth_db,
+    auth_context,
+    monkeypatch,
+):
+    session = auth_db()
+    _seed_reverse_prompt_provider(session)
+    asset = _seed_video_asset(session, auth_context["tenant_id"])
+    asset_id = asset.id
+    storage_key = asset.storage_key
+    session.commit()
+    session.close()
+
+    class _FakeTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            return SimpleNamespace(status="PENDING")
+
+    from app.api.v1.routes import reverse_prompt as reverse_prompt_route
+
+    monkeypatch.setattr(
+        reverse_prompt_route,
+        "generate_reverse_prompt_video_task",
+        _FakeTask(),
+    )
+    client = TestClient(app)
+    created = client.post(
+        "/api/v1/reverse-prompt/jobs",
+        json={"source_asset_id": asset_id, "target_format": "seedance_2_0"},
+        headers=auth_context["headers"],
+    )
+    assert created.status_code == 202
+    job_id = created.json()["data"]["id"]
+
+    deleted = client.delete(
+        f"/api/v1/reverse-prompt/jobs/{job_id}",
+        headers=auth_context["headers"],
+    )
+    assert deleted.status_code == 200
+    assert client.get(
+        f"/api/v1/reverse-prompt/jobs/{job_id}",
+        headers=auth_context["headers"],
+    ).status_code == 404
+
+    from app.services import reverse_prompt_video
+
+    class _Storage:
+        def get_bytes(self, key: str) -> bytes:
+            assert key == storage_key
+            return b"fake-video-content"
+
+    provider_result = {
+        **jsonlib.loads(VIDEO_JSON_CONTENT),
+        "provider": "apimart",
+        "model": "gemini-3.1-pro-preview",
+        "prompt_tokens": 2000,
+        "completion_tokens": 800,
+        "total_tokens": 2800,
+        "credits": Decimal("0.1088"),
+        "cost_cents": 8,
+        "raw_model_json": jsonlib.loads(VIDEO_JSON_CONTENT),
+    }
+    provider_result["video_analysis"] = {
+        **provider_result["video_analysis"],
+        "duration_sec": 24.0,
+        "audio_transcript": None,
+        "bgm_style": None,
+    }
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "create_object_storage",
+        lambda _settings: _Storage(),
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "extract_uniform_video_frames",
+        lambda *args, **kwargs: [f"jpeg-{index}".encode() for index in range(8)],
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "resolve",
+        lambda *args, **kwargs: SimpleNamespace(
+            reverse_video_frames=lambda payload: provider_result
+        ),
+    )
+
+    result = reverse_prompt_video.run_reverse_prompt_video_job(
+        job_id,
+        session_factory=auth_db,
+    )
+
+    assert result == {"job_id": job_id, "status": "succeeded"}
+    history = client.get(
+        "/api/v1/reverse-prompt/jobs",
+        headers=auth_context["headers"],
+    )
+    detail = client.get(
+        f"/api/v1/reverse-prompt/jobs/{job_id}",
+        headers=auth_context["headers"],
+    )
+    assert history.status_code == 200
+    assert history.json()["data"]["items"] == []
+    assert detail.status_code == 404
+
+    with auth_db() as db:
+        job = db.get(ReversePromptJob, job_id)
+        usage = db.scalar(
+            select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id)
+        )
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        assert job is not None
+        assert job.status == "succeeded"
+        assert job.deleted_at is not None
+        assert usage is not None
+        assert usage.status == "settled"
+        assert subscription is not None
+        assert subscription.quota_credits_reserved == 0
+
+
 def test_reverse_prompt_video_job_can_be_claimed_only_once(
     auth_db,
     auth_context,
