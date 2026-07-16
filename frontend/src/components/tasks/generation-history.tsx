@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Clapperboard, FileText, Images, Store, Trash2, UserRound } from "lucide-react";
+import { Clapperboard, FileText, Images, ScanSearch, Store, Trash2, UserRound } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
@@ -10,12 +10,14 @@ import { Chip } from "@/components/ui/chip";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger, tabTriggerClass } from "@/components/ui/tabs";
 import { CopyDraftList } from "@/components/tasks/copy-draft-list";
+import { ReverseHistoryList } from "@/components/tasks/reverse-history-list";
 import { TaskCard } from "@/components/tasks/task-card";
 import { HistoryGrid } from "@/components/history/history-grid";
 import { useClearVideos, useDeleteVideo, useVideoHistory } from "@/lib/api/hooks";
 import { fromVideoRead } from "@/lib/sse/progress-mapping";
 import { copy } from "@/lib/copy";
 import type { HistoryCategory } from "@/lib/api/history-images";
+import type { WorkbenchPrefill } from "@/lib/api/reverse-prompt";
 
 /** One mode's history: paginated GET /videos?mode=(&kind=) via useVideoHistory; reuses
  *  TaskCard. 每条带删除(trash→确认→DELETE /videos/{id})、tab 顶「清空」(确认→DELETE
@@ -180,8 +182,13 @@ export function PhotoHistory() {
   );
 }
 
-/** 历史生成 — 5 tabs: 数字人 / 电商 / 视频生成 / 照片(+仅封面筛) + 文案. */
-export function GenerationHistory() {
+/**
+ * 历史生成 — 6 tabs：数字人 / 电商 / 视频生成 / 图片(6 分类) / 文案 / 提示词反推(图片·视频二级分类)。
+ * onApplyPrefill：反推历史「带入生成」把载荷冒泡给 page（page.tsx 的 injectPrefill → setPendingPrefill + activate
+ * → 目标表单 useEffect 同步消费 → clearPrefill）。签名与 ReversePromptForm 的同名 prop 一致，保持全库「冒泡
+ * prefill」惯例；可选性使既有 page.test.tsx 的 stub 不破。
+ */
+export function GenerationHistory({ onApplyPrefill }: { onApplyPrefill?: (prefill: WorkbenchPrefill) => void } = {}) {
   return (
     <Card animateIn>
       {/* LABEL-TOGGLE-UI-0001：移除面板级全局「已含 AI 标识」恒显；改为每卡片按任务 apply_visible_label 显示。 */}
@@ -206,6 +213,11 @@ export function GenerationHistory() {
           <TabsTrigger value="copywriting" className={tabTriggerClass}>
             <FileText size={14} strokeWidth={1.8} /> {copy.history.tabCopy}
           </TabsTrigger>
+          {/* 第 6 tab（HISTORY-VIDEO-REVERSE-UI-0001）：图片/视频反推的二级分类在**该 tab 内部**（chip），
+              不在此处加两个顶层 tab —— 用户明确强调过这点。 */}
+          <TabsTrigger value="reverse_prompt" className={tabTriggerClass}>
+            <ScanSearch size={14} strokeWidth={1.8} /> {copy.history.tabReverse}
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="avatar_talk" className="outline-none">
@@ -222,6 +234,9 @@ export function GenerationHistory() {
         </TabsContent>
         <TabsContent value="copywriting" className="outline-none">
           <CopyDraftList />
+        </TabsContent>
+        <TabsContent value="reverse_prompt" className="outline-none">
+          <ReverseHistoryList onApplyPrefill={onApplyPrefill} />
         </TabsContent>
       </Tabs>
     </Card>

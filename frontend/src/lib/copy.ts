@@ -583,7 +583,27 @@ export const copy = {
     clearConfirmSoft: "将清空此模块全部草稿（可恢复）。",
     clearConfirmBtn: "确认清空",
     deleteFailed: "删除失败，请重试",
-    clearFailed: "清空失败，请重试"
+    clearFailed: "清空失败，请重试",
+    // ── 提示词反推历史（HISTORY-VIDEO-REVERSE-UI-0001）──
+    // 用户拍板：**在该 tab 内部**再分「图片反推 / 视频反推」，不是在顶层加两个 tab。
+    // 二级分类沿用图片历史 tab 的 chip 交互语言（同为「同一端点换 source_kind 筛选」的 filter 语义）。
+    tabReverse: "提示词反推历史",
+    reverseKindLabel: "反推来源",
+    reverseKindAll: "全部",
+    reverseKindImage: "图片反推",
+    reverseKindVideo: "视频反推",
+    reverseEmpty: "暂无反推记录",
+    reverseDetailTitle: "反推详情",
+    reverseSourceAlt: "反推源图",
+    // BE 事实（services/reverse_prompt.py:320-322）：缩略图只对图片源生成，视频源恒 null → 显式占位，不留空洞。
+    reverseNoThumb: "视频源无缩略图",
+    reverseNoSummary: "暂无摘要",
+    reversePendingHint: "反推尚未完成，暂无结果可看",
+    reverseDeleteConfirmTitle: "删除这条反推记录？",
+    reverseKindTag: (kind: string) => (kind === "video" ? "视频反推" : "图片反推"),
+    /** 反推任务状态（BE DB CheckConstraint 5 值：queued/running/succeeded/failed/saved）。未知值原样透出，不吞。 */
+    reverseStatus: (status: string) =>
+      ({ queued: "排队中", running: "反推中", succeeded: "已完成", failed: "失败", saved: "已保存" })[status] ?? status
   },
   // 图片历史·统一模块 (HISTORY-UI-0001) — 独立页 /history，4 tab（归一 category）。
   historyImages: {
