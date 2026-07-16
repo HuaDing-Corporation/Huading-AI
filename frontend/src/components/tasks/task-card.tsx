@@ -8,6 +8,7 @@ import {
   Clapperboard,
   Clock,
   Download,
+  Play,
   Trash2,
   type LucideIcon
 } from "lucide-react";
@@ -43,8 +44,17 @@ const thumbStyle: Record<UiStatus, string> = {
 
 export interface TaskCardProps {
   task: TrackedTask;
-  /** Navigate to the video detail page. */
+  /**
+   * 「查看详情」的落点。HISTORY-VIDEO-DIALOG-UI-0001：本 prop 的**契约未变**（点「查看详情」→ 以 taskId 调用），
+   * 变的是各调用方怎么接它 —— 历史列表现在接到视频详情弹窗（弹窗内再提供「打开详情页」），工作台 TaskList
+   * 仍接 router.push。故 TaskCard 的既有测试（含补网那批）原样成立。
+   */
   onOpen: (id: string) => void;
+  /**
+   * 「播放视频」→ 大屏 overlay（HISTORY-VIDEO-DIALOG-UI-0001）。**可选**：只有历史列表传，工作台 TaskList
+   * 不传 → 不渲染该入口，零回归。仅视频（非 photo）且已有播放地址时才显示。
+   */
+  onOpenMedia?: () => void;
   /** Re-submit the task (stored request keyed by taskId). */
   onRetry: (id: string) => void;
   /** Presigned URL has expired — refresh from the server. */
@@ -66,7 +76,7 @@ export interface TaskCardProps {
  *  - failed   → error message + retry button
  *  - done     → thumbnail + "open detail" button + inline video player
  */
-export function TaskCard({ task, onOpen, onRetry, onUrlError, onDelete, deleting }: TaskCardProps) {
+export function TaskCard({ task, onOpen, onOpenMedia, onRetry, onUrlError, onDelete, deleting }: TaskCardProps) {
   // 兜底 ?? Clock：即便后端未来再冒未知状态（前端类型未及时补），也走「排队」图标而非 undefined → 不 #130 白屏。
   const Icon = thumbIcon[task.status] ?? Clock;
   const showPlayer = task.status === "done" && !!task.playbackUrl;
@@ -185,6 +195,17 @@ export function TaskCard({ task, onOpen, onRetry, onUrlError, onDelete, deleting
             >
               {copy.tasks.open}
             </button>
+            {/* 「播放视频」→ 大屏 overlay（点内容 → 大图/播放，与图片 tab 同款交互语言）。仅历史列表传
+                onOpenMedia；图片结果不给（TaskCard 的 photo 分支只在工作台 TaskList 用，图片历史走 HistoryGrid）。 */}
+            {onOpenMedia && !isImage && (
+              <button
+                type="button"
+                onClick={onOpenMedia}
+                className="inline-flex items-center gap-1.5 rounded-field border border-line-gold bg-glass-fill px-3 py-1.5 text-[12.5px] text-gold-deep transition-colors hover:bg-glass-hover"
+              >
+                <Play size={14} strokeWidth={2} /> {copy.history.videoPlay}
+              </button>
+            )}
             {task.downloadUrl && (
               <a
                 href={task.downloadUrl}

@@ -13,8 +13,10 @@ import { CopyDraftList } from "@/components/tasks/copy-draft-list";
 import { ReverseHistoryList } from "@/components/tasks/reverse-history-list";
 import { TaskCard } from "@/components/tasks/task-card";
 import { HistoryGrid } from "@/components/history/history-grid";
+import { VideoDetailDialog, type VideoDetailPayload } from "@/components/history/video-detail-dialog";
+import { VideoLightbox } from "@/components/history/video-lightbox";
 import { useClearVideos, useDeleteVideo, useVideoHistory } from "@/lib/api/hooks";
-import { fromVideoRead } from "@/lib/sse/progress-mapping";
+import { fromVideoRead, type TrackedTask } from "@/lib/sse/progress-mapping";
 import { copy } from "@/lib/copy";
 import type { HistoryCategory } from "@/lib/api/history-images";
 import type { WorkbenchPrefill } from "@/lib/api/reverse-prompt";
@@ -23,6 +25,13 @@ import type { WorkbenchPrefill } from "@/lib/api/reverse-prompt";
  *  TaskCard. 每条带删除(trash→确认→DELETE /videos/{id})、tab 顶「清空」(确认→DELETE
  *  /videos?mode=)。视频/图片=硬删不可恢复(danger 确认)。防连点(pending 禁用)。
  *  Exported for direct unit testing per mode (Radix tab activation unreliable in jsdom). */
+/** 三视频 tab 的 mode → 中文（视频详情弹窗的「分类」项；对齐图片详情弹窗的信息并集）。 */
+const MODE_LABEL: Record<string, string> = {
+  avatar_talk: copy.history.tabAvatar,
+  seedance_i2v: copy.history.tabEcom,
+  video_gen: copy.history.tabVideoGen
+};
+
 export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
   const router = useRouter();
   const query = useVideoHistory(mode, kind);
@@ -31,6 +40,9 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // HISTORY-VIDEO-DIALOG-UI-0001：点内容 → 大屏播放；「查看详情」→ 详情弹窗（与图片 tab 同款交互语言）。
+  const [detail, setDetail] = useState<VideoDetailPayload | null>(null);
+  const [lightbox, setLightbox] = useState<TrackedTask | null>(null);
 
   const items = query.data?.pages.flatMap((page) => page.items) ?? [];
 
@@ -91,18 +103,25 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
               <Trash2 size={13} strokeWidth={1.8} /> {copy.history.clearAll}
             </button>
           </div>
-          {items.map((item) => (
-            <TaskCard
-              key={item.id}
-              // The tab's mode is authoritative for this list → photo items render <img>.
-              task={{ ...fromVideoRead(item), mode }}
-              onOpen={(id) => router.push(`/videos/${id}`)}
-              onRetry={() => undefined}
-              onUrlError={() => void query.refetch()}
-              onDelete={(id) => setConfirmDelete(id)}
-              deleting={deleteVideo.isPending && deleteVideo.variables === item.id}
-            />
-          ))}
+          {items.map((item) => {
+            // The tab's mode is authoritative for this list → photo items render <img>.
+            const task = { ...fromVideoRead(item), mode };
+            return (
+              <TaskCard
+                key={item.id}
+                task={task}
+                // 「查看详情」→ 详情弹窗（升级前是直接 router.push）。TaskCard 的 onOpen 契约未变，只是这里改了
+                // 接法；跳详情页的能力**没丢** —— 移到弹窗内的「打开详情页」（见 VideoDetailDialog）。
+                // created_at 从**列表项**带入：TrackedTask 无此字段，而 progress-mapping 是 SSE 与列表共用的映射。
+                onOpen={() => setDetail({ task, createdAt: item.created_at, modeLabel: MODE_LABEL[mode] ?? mode })}
+                onOpenMedia={() => setLightbox(task)}
+                onRetry={() => undefined}
+                onUrlError={() => void query.refetch()}
+                onDelete={(id) => setConfirmDelete(id)}
+                deleting={deleteVideo.isPending && deleteVideo.variables === item.id}
+              />
+            );
+          })}
           {query.hasNextPage ? (
             <div className="mt-3 flex justify-center">
               <Button
@@ -117,6 +136,21 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
           ) : null}
         </>
       )}
+
+      {/* 大屏播放：点「播放视频」→ overlay 内联播放；关闭即卸载 <video>（Radix Portal 在 open=false 时不渲染）。 */}
+      <VideoLightbox
+        src={lightbox?.playbackUrl ?? null}
+        poster={lightbox?.thumbnailUrl}
+        title={lightbox?.topic ?? ""}
+        open={lightbox !== null}
+        onClose={() => setLightbox(null)}
+      />
+      {/* 详情弹窗：信息并集（生成时间/状态/模式/时长/AI 标识 + 播放 + 下载）+ 「打开详情页」（跳转能力零回归）。 */}
+      <VideoDetailDialog
+        detail={detail}
+        onClose={() => setDetail(null)}
+        onOpenPage={(id) => router.push(`/videos/${id}`)}
+      />
 
       {/* 删除单条确认(视频/图片=硬删不可恢复) */}
       <ConfirmDialog
