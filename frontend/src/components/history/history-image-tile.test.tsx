@@ -5,7 +5,8 @@ import { copy } from "@/lib/copy";
 import type { HistoryImageSetItem } from "@/lib/api/history-images";
 import { HistoryImageTile } from "./history-image-tile";
 
-// HISTORY-UI-0001 · 整套单张·原图红线：下载给原图 bytes（<a download>）+ 显示原始尺寸 + 零 canvas；缺失禁用不死链。
+// HISTORY-UI-0001 · 整套单张·原图红线：下载给原图 bytes（<a download>）+ 显示原始尺寸 + 零 canvas。
+// FIX2 对齐真实 BE：详情只返成功张、失败张已 omit（schema download_url:str 非空）→ 无「缺图」形态，删掉缺图禁用用例。
 
 describe("HistoryImageTile (原图红线)", () => {
   const base: HistoryImageSetItem = {
@@ -28,15 +29,6 @@ describe("HistoryImageTile (原图红线)", () => {
     expect(screen.getByText(copy.historyImages.sizeLabel("1254x1254"))).toBeInTheDocument();
     // 红线：零前端后处理
     expect(document.querySelector("canvas")).toBeNull();
-  });
-
-  it("download_url 缺失：禁用态「原图暂不可用」，不渲染死链/空图", () => {
-    render(<HistoryImageTile item={{ index: 2, download_url: null, width: null, height: null }} />);
-    expect(screen.queryByRole("link")).not.toBeInTheDocument();
-    expect(document.querySelector("img")).toBeNull();
-    expect(screen.getByText(copy.historyImages.downloadUnavailable)).toBeInTheDocument();
-    // 尺寸缺失 → 不冒充，走「以下载文件为准」
-    expect(screen.getByText(copy.historyImages.sizeUnknown)).toBeInTheDocument();
   });
 
   it("详情图 theme 机器键本地化展示（复用既有映射）", () => {

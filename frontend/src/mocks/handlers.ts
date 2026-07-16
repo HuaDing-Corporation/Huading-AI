@@ -863,17 +863,16 @@ function refs_analysis(j: MockEcomJob): Record<string, unknown>[] {
 
 // ── 图片历史·统一模块 (HISTORY-UI-0001) mock ── 镜像归一契约（需求冻结）：list 分页 + detail 整套，4 category。
 // 归一：各类存储 → HistoryItem（卡片）/ HistoryImageSet（整套，每张原图 download_url + 原始尺寸）。海报历史隐藏（不入任何 tab）。
-interface MockHistItem { index: number; download_url: string | null; width: number | null; height: number | null; theme?: string; label?: string }
+// FIX2 对齐真实 BE：详情单张 download_url/width/height 必填非空（BE 详情只返成功张、失败张已 omit，故无 null）。
+interface MockHistItem { index: number; download_url: string; width: number; height: number; theme?: string; label?: string }
 interface MockHistRecord {
   id: string; category: string; title: string; cover_url: string; created_at: string; status: string;
   items: MockHistItem[]; meta?: Record<string, unknown>;
 }
-function histItem(index: number, opts: { dims?: [number, number]; missing?: boolean; theme?: string; label?: string }): MockHistItem {
+function histItem(index: number, opts: { dims?: [number, number]; theme?: string; label?: string }): MockHistItem {
   const dims = opts.dims ?? [1254, 1254];
   const url = `https://mock.local/hist/${opts.theme ?? opts.label ?? "img"}-${index}.png`;
-  return opts.missing
-    ? { index, download_url: null, width: null, height: null, theme: opts.theme, label: opts.label }
-    : { index, download_url: `${url}?dl=1`, width: dims[0], height: dims[1], theme: opts.theme, label: opts.label };
+  return { index, download_url: `${url}?dl=1`, width: dims[0], height: dims[1], theme: opts.theme, label: opts.label };
 }
 function histRecord(r: Omit<MockHistRecord, "cover_url"> & { cover_url?: string }): MockHistRecord {
   const cover = r.cover_url ?? r.items.find((it) => it.download_url)?.download_url ?? "https://mock.local/hist/cover.png";
@@ -883,14 +882,16 @@ const MAIN_THEMES = ["layout_match", "color_match", "campaign_match", "social_ma
 const DETAIL_THEMES = ["hero", "material", "function", "size", "scenario", "detail", "comparison", "packing", "care", "selling_point", "white_background", "closing"];
 const histTs = (i: number) => new Date(Date.UTC(2026, 6, 10, 12, 0, 0) - i * 60_000).toISOString(); // 递减 → 倒序稳定
 const historyImageRecords: MockHistRecord[] = [
-  // 电商详情图（ecom_detail）：主图 5 张(completed) + 详情页 12 张(partial_failed，含 1 张缺图)
+  // 电商详情图（ecom_detail）：主图 5 张(completed) + 详情页 partial_failed（规划 12、成功 11，失败张 BE 已 omit）
   histRecord({
     id: "hd-main-1", category: "ecom_detail", title: "保温杯 · 主图复刻（5 张）", created_at: histTs(0), status: "completed",
     items: MAIN_THEMES.map((t, i) => histItem(i, { dims: [1254, 1254], theme: t })), meta: { output_mode: "main" }
   }),
   histRecord({
-    id: "hd-detail-1", category: "ecom_detail", title: "保温杯 · 详情页（12 张）", created_at: histTs(1), status: "partial_failed",
-    items: DETAIL_THEMES.map((t, i) => histItem(i, { dims: [1086, 1448], theme: t, missing: i === 5 })), meta: { output_mode: "detail" }
+    // FIX2 对齐真实 BE：job=partial_failed，但详情**只返成功张**（1 张失败被 BE omit）→ 12 规划、11 成功。
+    // 列表 item_count = 成功张数（services/image_history.py:109 `item_count = count(succeeded)`）= 11，非规划 12。
+    id: "hd-detail-1", category: "ecom_detail", title: "保温杯 · 详情页（11 张成功）", created_at: histTs(1), status: "partial_failed",
+    items: DETAIL_THEMES.slice(0, 11).map((t, i) => histItem(i, { dims: [1086, 1448], theme: t })), meta: { output_mode: "detail" }
   }),
   // 电商模特图（ecom_model）：套图 4 张
   histRecord({
@@ -900,6 +901,9 @@ const historyImageRecords: MockHistRecord[] = [
   // 电商白底图（ecom_white）：单图恒 ready
   histRecord({ id: "hw-1", category: "ecom_white", title: "陶瓷水杯 · 白底图", created_at: histTs(3), status: "ready", items: [histItem(0, { dims: [1024, 1024], label: "白底图" })] }),
   histRecord({ id: "hw-2", category: "ecom_white", title: "蓝牙耳机 · 白底图", created_at: histTs(4), status: "ready", items: [histItem(0, { dims: [1024, 1024], label: "白底图" })] }),
+  // 封面（cover）：HISTORY-IMAGE-TAB-UI-0001 新增第 6 分类（BE 归一 API 加 cover）；单图恒 ready。
+  histRecord({ id: "hc-1", category: "cover", title: "咖啡科普 · 封面", created_at: histTs(5), status: "ready", items: [histItem(0, { dims: [1280, 720], label: "封面" })] }),
+  histRecord({ id: "hc-2", category: "cover", title: "带货短片 · 封面", created_at: histTs(6), status: "ready", items: [histItem(0, { dims: [1280, 720], label: "封面" })] }),
   // 图片生成/修改（image_gen）：生成 23 条单图 → 触发分页「加载更多」（page_size 20）
   ...Array.from({ length: 23 }, (_, i) =>
     histRecord({ id: `hg-${i + 1}`, category: "image_gen", title: `创意图 #${i + 1}`, created_at: histTs(10 + i), status: "ready", items: [histItem(0, { dims: [1024, 1024], label: "图片生成" })] })
@@ -908,27 +912,34 @@ const historyImageRecords: MockHistRecord[] = [
 const historyToItem = (r: MockHistRecord) => ({
   id: r.id, category: r.category, title: r.title, cover_url: r.cover_url, created_at: r.created_at, status: r.status, item_count: r.items.length
 });
+// FIX2 对齐真实 BE：ImageHistoryCategory 5 枚举（schemas/history.py:6-12）。非法 category → 422（BE FastAPI 校验 Literal）。
+const VALID_HISTORY_CATEGORIES = new Set(["image_gen", "ecom_white", "ecom_model", "ecom_detail", "cover"]);
 
 export const handlers = [
   // ── 图片历史·统一模块 (HISTORY-UI-0001)：list 分页 + detail 整套（list 先注册，避免被 /:category/:id 影子覆盖）──
   http.get(`${BASE}/api/v1/history/images`, ({ request }) => {
     const sp = new URL(request.url).searchParams;
-    const category = sp.get("category") ?? "";
+    const category = sp.get("category"); // 省略（HISTORY-IMAGE-TAB-UI-0001）= 全部图片
+    // FIX2：非法 category → 422（红线：mock 不能比 BE 宽松；BE FastAPI 对 Literal query 参数返 422，不是 200 空列表）。
+    if (category !== null && !VALID_HISTORY_CATEGORIES.has(category)) return err(422, "VALIDATION_ERROR", "无效的图片分类");
     const page = Math.max(1, Number(sp.get("page") ?? 1));
     const pageSize = Math.max(1, Math.min(100, Number(sp.get("page_size") ?? 20)));
-    // 租户作用域 + 按 created_at 倒序（seed 已按倒序时间戳）。
+    // 租户作用域 + 按 created_at 倒序（seed 已按倒序时间戳）。无 category → 全部分类混合。
     const all = historyImageRecords
-      .filter((r) => r.category === category)
+      .filter((r) => !category || r.category === category)
       .slice()
       .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
     const start = (page - 1) * pageSize;
     return ok({ items: all.slice(start, start + pageSize).map(historyToItem), total: all.length, page, page_size: pageSize });
   }),
   http.get(`${BASE}/api/v1/history/images/:category/:id`, ({ params }) => {
+    // FIX2：非法 category → 422（BE 对 Literal path 参数先校验，先于 404）。
+    if (!VALID_HISTORY_CATEGORIES.has(String(params.category))) return err(422, "VALIDATION_ERROR", "无效的图片分类");
     const rec = historyImageRecords.find((r) => r.category === String(params.category) && r.id === String(params.id));
     if (!rec) return err(404, "HISTORY_NOT_FOUND", "记录不存在或无权访问");
     return ok({ id: rec.id, category: rec.category, created_at: rec.created_at, status: rec.status, items: rec.items, meta: rec.meta ?? {} });
   }),
+  // FIX1（HISTORY-IMAGE-TAB-UI-0001）：图片删除端点被摘（用户「三拆」改 GC 方案）→ 此处不再 mock 图片删除端点（不留死代码）。
   // Auth = M2 shapes (unchanged). Mocked so the (app) client auth-gate can be
   // passed during the MSW parallel period without a real backend.
   http.post(`${BASE}/api/v1/auth/login`, () =>

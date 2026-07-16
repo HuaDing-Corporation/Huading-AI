@@ -7,9 +7,9 @@ import { apiFetch } from "@/lib/api/client";
 //   列表 GET /api/v1/history/images?category=&page=&page_size=  → { items:[HistoryItem], total, page, page_size }
 //   详情 GET /api/v1/history/images/{category}/{id}             → HistoryImageSet（整套，每张原图 download_url + 原始尺寸）
 
-/** 分类键：图片生成/修改 · 电商白底图 · 电商模特图 · 电商详情图。 */
-export type HistoryCategory = "image_gen" | "ecom_white" | "ecom_model" | "ecom_detail";
-export const HISTORY_CATEGORIES: HistoryCategory[] = ["image_gen", "ecom_white", "ecom_model", "ecom_detail"];
+/** 分类键：图片生成/修改 · 电商白底图 · 电商模特图 · 电商详情图 · 封面（HISTORY-IMAGE-TAB-UI-0001 加 cover）。 */
+export type HistoryCategory = "image_gen" | "ecom_white" | "ecom_model" | "ecom_detail" | "cover";
+export const HISTORY_CATEGORIES: HistoryCategory[] = ["image_gen", "ecom_white", "ecom_model", "ecom_detail", "cover"];
 
 /** 列表卡片（各类取合适字段归一到这套）。 */
 export interface HistoryItem {
@@ -29,12 +29,17 @@ export interface HistoryListResponse {
   page_size: number;
 }
 
-/** 整套中的单张：原图可下载 URL + 原始尺寸（缺失即 null，不冒充）。 */
+/**
+ * 整套中的单张（FIX2 对齐真实 BE `ImageHistoryDetailItem`，backend/app/schemas/history.py:32-43）：
+ * download_url/width/height 均**必填**（BE `str`/`int` 非空——失败张 BE 已 omit、详情只返成功张，故无 null）；
+ * theme/label 为 `str | None`。BE 另有 5 个展示元字段（requested/resolved/actual_aspect_ratio、resolved/actual_size，
+ * 均 `str | None`）——本 UI 不消费，故类型/ mock 有意省略（FE 读子集，非红线违规）。
+ */
 export interface HistoryImageSetItem {
   index: number;
-  download_url?: string | null; // 原图 bytes（presigned）；缺失→前端禁用态、不死链
-  width?: number | null;
-  height?: number | null;
+  download_url: string; // 原图 bytes（presigned）——BE 必填非空
+  width: number;
+  height: number;
   theme?: string | null; // 分类特有标注（详情图页面主题机器键）
   label?: string | null; // 通用标签（白底图/模特图等友好名）
 }
@@ -58,21 +63,27 @@ function qs(params: Record<string, string | number>): string {
   return sp.toString();
 }
 
-/** 列表（租户作用域，按 created_at 倒序，分页）。 */
+/** 列表（租户作用域，按 created_at 倒序，分页）。category 省略 = 全部图片（BE 归一 API 的 category 为 Optional）。 */
 export function listHistoryImages(input: {
-  category: HistoryCategory;
+  category?: HistoryCategory;
   page?: number;
   page_size?: number;
 }): Promise<HistoryListResponse> {
   const page = input.page ?? 1;
   const page_size = input.page_size ?? HISTORY_PAGE_SIZE;
-  return apiFetch<HistoryListResponse>(`${BASE}?${qs({ category: input.category, page, page_size })}`, { method: "GET" });
+  const params: Record<string, string | number> = { page, page_size };
+  if (input.category) params.category = input.category; // 省略 → 全部图片
+  return apiFetch<HistoryListResponse>(`${BASE}?${qs(params)}`, { method: "GET" });
 }
 
 /** 详情：重开整套（跨租户 404）。 */
 export function getHistoryImageSet(category: HistoryCategory | string, id: string): Promise<HistoryImageSet> {
   return apiFetch<HistoryImageSet>(`${BASE}/${encodeURIComponent(category)}/${encodeURIComponent(id)}`, { method: "GET" });
 }
+
+// FIX1（HISTORY-IMAGE-TAB-UI-0001）：归一 API 的图片删除端点被摘掉——#175 的同步删除媒体经 Codex B 三轮审查
+// 出七八条 P1（共享 Asset 误删 / 批次半删 / 跨租户路径穿越 / TOCTOU），用户「三拆」改 GC 方案将来补。
+// 故此处不再导出图片删除 adapter（不留死代码）；GC 包上线时原样复活。
 
 /** 单张原始尺寸「宽x高」（width/height 均在才给；缺一即 null，UI 不得冒充）。 */
 export function historyImageDimensions(item: HistoryImageSetItem): string | null {

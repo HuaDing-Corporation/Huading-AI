@@ -85,8 +85,9 @@ export function useVideo(id: string | undefined) {
   const { session } = useAuth();
   return useQuery({ queryKey: videoKeys.detail(id ?? ""), queryFn: () => getVideo(id as string), enabled: !!session && !!id });
 }
-// 图片历史·统一模块 (HISTORY-UI-0001)：按 category 分页拉列表（page 从 1 起，累计已加载数 < total 才有下一页）。
-export function useHistoryImages(category: HistoryCategory) {
+// 图片历史·统一模块：按 category 分页拉列表（page 从 1 起，累计已加载数 < total 才有下一页）。
+// category 省略（HISTORY-IMAGE-TAB-UI-0001）= 全部图片（不传 category → BE 返回全部分类混合，按时间倒序）。
+export function useHistoryImages(category?: HistoryCategory) {
   const { session } = useAuth();
   return useInfiniteQuery({
     queryKey: historyImageKeys.list(category),
@@ -108,6 +109,7 @@ export function useHistoryImageSet(category: HistoryCategory | string, id: strin
     enabled: !!session && !!id
   });
 }
+// FIX1：图片删除端点被摘（用户「三拆」，改 GC 方案）→ 图片删除钩子一并摘除，不留孤儿。
 export function useCreateVideo() {
   const qc = useQueryClient();
   return useMutation({

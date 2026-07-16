@@ -11,9 +11,11 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger, tabTriggerClass } from "@/components/ui/tabs";
 import { CopyDraftList } from "@/components/tasks/copy-draft-list";
 import { TaskCard } from "@/components/tasks/task-card";
+import { HistoryGrid } from "@/components/history/history-grid";
 import { useClearVideos, useDeleteVideo, useVideoHistory } from "@/lib/api/hooks";
 import { fromVideoRead } from "@/lib/sse/progress-mapping";
 import { copy } from "@/lib/copy";
+import type { HistoryCategory } from "@/lib/api/history-images";
 
 /** One mode's history: paginated GET /videos?mode=(&kind=) via useVideoHistory; reuses
  *  TaskCard. 每条带删除(trash→确认→DELETE /videos/{id})、tab 顶「清空」(确认→DELETE
@@ -148,30 +150,32 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
   );
 }
 
-/** 图片历史 + 「全部图片 / 仅封面」toggle → GET /videos?mode=photo(&kind=cover)。
- *  仅封面接真后端(封面建成 photo VideoTask kind=cover)。Exported 供单测。 */
+/**
+ * 图片历史（HISTORY-IMAGE-TAB-UI-0001）——并进左侧「图片历史」的归一 API（GET /history/images?category=）+ 6 分类：
+ * 全部图片 / 图片生成·修改 / 电商·白底图 / 电商·模特图 / 电商·详情图 / 封面（顺序照冻结文档）。「全部图片」= 不传
+ * category。旧「全部/仅封面」两 Chip 被这 6 个分类取代（封面成第 6 分类，不再是叠加筛选）。点图→大图、查看详情→
+ * 详情弹窗、删除→硬删，均由 HistoryGrid 承载。key 随分类变更 → 切分类时 HistoryGrid 全新实例。Exported 供单测。
+ */
+const IMAGE_CATEGORY_CHIPS: { key: HistoryCategory | "all"; label: string }[] = [
+  { key: "all", label: copy.historyImages.catAll },
+  { key: "image_gen", label: copy.historyImages.tabImageGen },
+  { key: "ecom_white", label: copy.historyImages.tabEcomWhite },
+  { key: "ecom_model", label: copy.historyImages.tabEcomModel },
+  { key: "ecom_detail", label: copy.historyImages.tabEcomDetail },
+  { key: "cover", label: copy.historyImages.catCover }
+];
 export function PhotoHistory() {
-  const [coverOnly, setCoverOnly] = useState(false);
+  const [cat, setCat] = useState<HistoryCategory | "all">("all");
   return (
     <div>
-      <div className="mb-3 flex gap-1.5">
-        <Chip
-          selected={!coverOnly}
-          onClick={() => setCoverOnly(false)}
-          className="px-3 py-1.5 text-[12.5px]"
-        >
-          {copy.history.filterAllImages}
-        </Chip>
-        <Chip
-          selected={coverOnly}
-          onClick={() => setCoverOnly(true)}
-          className="px-3 py-1.5 text-[12.5px]"
-        >
-          {copy.history.filterCovers}
-        </Chip>
+      <div className="mb-3 flex flex-wrap gap-1.5">
+        {IMAGE_CATEGORY_CHIPS.map((c) => (
+          <Chip key={c.key} selected={cat === c.key} onClick={() => setCat(c.key)} className="px-3 py-1.5 text-[12.5px]">
+            {c.label}
+          </Chip>
+        ))}
       </div>
-      {/* key 随筛选变更 → 切「全部/仅封面」时 HistoryList 全新实例，重置陈旧 actionError(RV #5) */}
-      <HistoryList key={coverOnly ? "cover" : "all"} mode="photo" kind={coverOnly ? "cover" : undefined} />
+      <HistoryGrid key={cat} category={cat === "all" ? undefined : cat} />
     </div>
   );
 }

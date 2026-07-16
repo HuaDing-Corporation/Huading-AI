@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const historyMock = vi.hoisted(() => ({ fn: vi.fn() }));
 const kindMock = vi.hoisted(() => ({ fn: vi.fn() }));
+const histImgMock = vi.hoisted(() => ({ fn: vi.fn() })); // HISTORY-IMAGE-TAB-UI-0001：捕获 useHistoryImages(category)
 const draftsMock = vi.hoisted(() => ({ fn: vi.fn() }));
 const deleteVideoMock = vi.hoisted(() => ({ mutateAsync: vi.fn(), isPending: false, variables: undefined as string | undefined }));
 const clearVideosMock = vi.hoisted(() => ({ mutateAsync: vi.fn(), isPending: false }));
@@ -56,7 +57,13 @@ vi.mock("@/lib/api/hooks", () => ({
     };
   },
   useDeleteCopyDraft: () => deleteDraftMock,
-  useClearCopyDrafts: () => clearDraftsMock
+  useClearCopyDrafts: () => clearDraftsMock,
+  // HISTORY-IMAGE-TAB-UI-0001：图片 tab 换归一 API → PhotoHistory 挂 HistoryGrid，需这两个 hook（FIX1 摘删除后不再需要图片删除钩子）。
+  useHistoryImages: (category?: string) => {
+    histImgMock.fn(category);
+    return { data: { pages: [{ items: [], total: 0 }] }, isLoading: false, isError: false, hasNextPage: false, isFetchingNextPage: false, fetchNextPage: vi.fn(), refetch: vi.fn() };
+  },
+  useHistoryImageSet: () => ({ data: undefined, isLoading: false, isError: false, refetch: vi.fn() })
 }));
 
 import { CopyDraftList } from "./copy-draft-list";
@@ -129,14 +136,16 @@ describe("GenerationHistory (历史 tabs + 删除/清空/仅封面)", () => {
     expect(screen.getByLabelText("删除")).toBeDisabled();
   });
 
-  it("仅封面：PhotoHistory 默认全部(kind undefined)，点「仅封面」→ kind=cover", () => {
+  // HISTORY-IMAGE-TAB-UI-0001：图片 tab 换归一 API + 6 分类（全部图片=不传 category）。
+  it("图片 tab：默认「全部图片」(category undefined)，点分类 chip → 传对应 category（6 分类含封面）", () => {
     render(<PhotoHistory />);
-    expect(historyMock.fn).toHaveBeenCalledWith("photo");
-    expect(kindMock.fn).toHaveBeenLastCalledWith(undefined);
-    fireEvent.click(screen.getByRole("button", { name: "仅封面" }));
-    expect(kindMock.fn).toHaveBeenLastCalledWith("cover");
+    expect(histImgMock.fn).toHaveBeenLastCalledWith(undefined); // 默认全部图片 = 不传 category
+    fireEvent.click(screen.getByRole("button", { name: "封面" }));
+    expect(histImgMock.fn).toHaveBeenLastCalledWith("cover");
+    fireEvent.click(screen.getByRole("button", { name: "电商·白底图" }));
+    expect(histImgMock.fn).toHaveBeenLastCalledWith("ecom_white");
     fireEvent.click(screen.getByRole("button", { name: "全部图片" }));
-    expect(kindMock.fn).toHaveBeenLastCalledWith(undefined);
+    expect(histImgMock.fn).toHaveBeenLastCalledWith(undefined);
   });
 
   it("文案 history：删除单条软删确认(可恢复文案) → 调 DELETE /copy/drafts/{id}", async () => {

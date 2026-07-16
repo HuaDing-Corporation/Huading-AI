@@ -62,7 +62,8 @@ export const analyticsKeys = {
 // 图片历史·统一模块 (HISTORY-UI-0001) — 按 category 分 key，切 tab 各自缓存不串数据。
 export const historyImageKeys = {
   all: ["history-images"] as const,
-  list: (category: string) => [...historyImageKeys.all, "list", category] as const,
+  // category 省略（全部图片）→ 归一到 "all" 键，与各具体分类互不串缓存。
+  list: (category?: string) => [...historyImageKeys.all, "list", category ?? "all"] as const,
   detail: (category: string, id: string) => [...historyImageKeys.all, "detail", category, id] as const
 };
 
