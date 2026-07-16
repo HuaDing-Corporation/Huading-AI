@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Sparkles } from "lucide-react";
 
 import { useModelBatch, useModelImage, useModelStyles } from "@/lib/api/hooks";
@@ -26,7 +26,10 @@ const GENDER_OPTIONS: { id: ModelGender; label: string }[] = [
  * 单张 POST /ecom-images/model、批量 /model/batch 返回已创建 photo task(kind=ecom_model)，
  * 由外壳 trackExisting 轮询（产物进 TaskList + 图片历史）。
  */
-export function EcomImageModelForm({ initialCustom }: { initialCustom?: string } = {}) {
+export function EcomImageModelForm({
+  initialCustom,
+  onPrefillConsumed
+}: { initialCustom?: string; onPrefillConsumed?: () => void } = {}) {
   const model = useModelImage();
   const modelBatch = useModelBatch();
   const styles = useModelStyles();
@@ -34,8 +37,17 @@ export function EcomImageModelForm({ initialCustom }: { initialCustom?: string }
   const [gender, setGender] = useState<ModelGender>("female");
   const [styleId, setStyleId] = useState<string | null>(null);
   const [aspectRatio, setAspectRatio] = useState<ImageAspectRatio>(DEFAULT_IMAGE_ASPECT_RATIO); // 画面比例，默认 1:1
-  // 提示词反推「带入 · 电商图(AI 模特)」惰性注入自定义补充(= extra_prompt)。
+  // 提示词反推「带入 · 电商图(AI 模特)」注入自定义补充(= extra_prompt)。
   const [custom, setCustom] = useState(() => (initialCustom ?? "").slice(0, MAX_CUSTOM));
+  // WORKBENCH-KEEPALIVE-UI-0001：电商图面板常驻 → 本组件可能早已挂载，上面的初值承接不了后到的 prefill；
+  // 改为同步 props。消费后由**本组件**上报（父容器 EcomImageWorkbench 故意不抢报，否则 effect「子先父后」会让
+  // initialCustom 在本组件挂载前回落 undefined → 值丢失）→ 父级 clearPrefill → props 回落 undefined → early-return，
+  // 不重复注入。截断口径与初值一致（MAX_CUSTOM）。
+  useEffect(() => {
+    if (initialCustom === undefined) return;
+    setCustom(initialCustom.slice(0, MAX_CUSTOM));
+    onPrefillConsumed?.();
+  }, [initialCustom, onPrefillConsumed]);
 
   const styleList = styles.data ?? [];
   const extraPrompt = custom.trim() || undefined;

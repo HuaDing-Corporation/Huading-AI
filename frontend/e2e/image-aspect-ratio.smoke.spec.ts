@@ -69,12 +69,14 @@ test("图片生成：去质量 + 画面比例(选 16:9 提交) + 自适应提示
   await expect(page.getByText(/自适应：有输入图/)).toBeVisible();
 
   // 电商图 · 白底图：亦有画面比例。
+  // WORKBENCH-KEEPALIVE-UI-0001：面板常驻后「图片生成」面板仍挂载（隐藏）且同样有「画面比例」→ 限定面板 scope。
   await page.getByRole("button", { name: "电商图", exact: true }).click();
-  await expect(page.getByText("画面比例")).toBeVisible();
+  const ecomImage = page.getByTestId("panel-ecom_image");
+  await expect(ecomImage.getByText("画面比例")).toBeVisible();
 
   // 移动端（375）：画面比例选择器仍可见。
   await page.setViewportSize({ width: 375, height: 812 });
-  await expect(page.getByText("画面比例")).toBeVisible();
+  await expect(ecomImage.getByText("画面比例")).toBeVisible();
 
   expect(g.errors(), `page errors：\n${g.errors().join("\n")}`).toEqual([]);
   expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);

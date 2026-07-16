@@ -34,7 +34,9 @@ async function gotoReverseResult(page: Page): Promise<{ errors: () => string[]; 
   }
 
   await page.getByRole("button", { name: "提示词反推" }).click();
-  await page.locator('input[type="file"]').setInputFiles({
+  // WORKBENCH-KEEPALIVE-UI-0001：面板改为常驻后，来过的其它表单（如口播的 #avatar-image）仍留在 DOM，
+  // 全局 input[type=file] 会命中多个 → 选择器必须限定到当前面板。
+  await page.getByTestId("panel-reverse_prompt").locator('input[type="file"]').setInputFiles({
     name: "product.png",
     mimeType: "image/png",
     buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])

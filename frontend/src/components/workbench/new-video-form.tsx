@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Sparkles } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
@@ -78,12 +78,17 @@ export function NewVideoForm({
   const [subtitleStyle, setSubtitleStyle] = useState<SubtitleStyle | undefined>(undefined);
   const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）
   const [error, setError] = useState<string | null>(null);
-  const prefillConsumed = useRef(false);
+  // WORKBENCH-KEEPALIVE-UI-0001 · prefill 消费时机重设计：工作台面板改为「挂载后常驻」，本表单不再随切 mode 重挂
+  // → 上面的 mount-时惰性初始化承接不了**后到**的 prefill（值注不进来，而 effect 照样回调 clearPrefill → 载荷被
+  // 当「已消费」丢弃，用户看不到值也无从重试）。故改为同步 props：只写 prefill 真正带来的字段 → 用户已填的其它
+  // 输入（音色 / 语速 / 已传形象图…）原样保留。
+  // 不重复注入：消费后回调 clearPrefill → 父级清空缓冲 → 下次渲染 props 回落 undefined → 这里 early-return。
+  // （原 prefillConsumed ref 闩锁已删：它与组件实例同寿，常驻后永不复位 → 会让父级缓冲再也清不掉。）
   useEffect(() => {
-    if (!prefillConsumed.current && (initialTopic !== undefined || initialScript !== undefined)) {
-      prefillConsumed.current = true;
-      onPrefillConsumed?.();
-    }
+    if (initialTopic === undefined && initialScript === undefined) return;
+    if (initialTopic !== undefined) setTopic(initialTopic);
+    if (initialScript !== undefined) setScript(initialScript);
+    onPrefillConsumed?.();
   }, [initialTopic, initialScript, onPrefillConsumed]);
 
   // Actual submit — runs only after the 确定生成 confirmation; owns its own errors.
@@ -171,6 +176,9 @@ export function NewVideoForm({
         onRegenerate={onGenerateScript}
         loading={scriptGen.isPending}
         speed={speed}
+        // FIX1：ScriptReview 不传 id 即走 useId（每实例唯一）。口播这份显式传旧 id —— e2e 的 #video-script
+        // 落点断言依赖它（反推「带入 · 数字人口播」）。
+        id="video-script"
       />
 
       {/* 形象来源二选一（AVATAR-VIDEO-SOURCE-UI-0001）：照片=默认(承重零回归) / 本人出镜视频 */}

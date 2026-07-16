@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { EcomImageCutoutForm } from "@/components/workbench/ecom-image-cutout-form";
 import { EcomImageModelForm } from "@/components/workbench/ecom-image-model-form";
@@ -32,12 +32,15 @@ export function EcomImageWorkbench({
   onPrefillConsumed?: () => void;
 } = {}) {
   const [tool, setTool] = useState<SubTool>(() => initialTool ?? "cutout");
-  const prefillConsumed = useRef(false);
+  // WORKBENCH-KEEPALIVE-UI-0001 · prefill 消费时机重设计：工作台面板改为「挂载后常驻」→ 本容器不再随切 mode 重挂，
+  // mount-时惰性初始化承接不了后到的 prefill。改为同步 props：initialTool 切到对应子工具。
+  // ⚠️ 时序：custom 由子组件 EcomImageModelForm 消费并上报 —— React effect 是「子先父后」，若这里抢先回调
+  // clearPrefill，initialCustom 会在子组件挂载前就回落 undefined → 值丢失。故只有本次 prefill **不带 custom** 时，
+  // 才由这里直接结清缓冲。（原 prefillConsumed ref 闩锁已删：与实例同寿，常驻后永不复位。）
   useEffect(() => {
-    if (!prefillConsumed.current && (initialTool !== undefined || initialCustom !== undefined)) {
-      prefillConsumed.current = true;
-      onPrefillConsumed?.();
-    }
+    if (initialTool === undefined) return;
+    setTool(initialTool);
+    if (initialCustom === undefined) onPrefillConsumed?.();
   }, [initialTool, initialCustom, onPrefillConsumed]);
 
   return (
@@ -52,7 +55,7 @@ export function EcomImageWorkbench({
       {tool === "cutout" ? (
         <EcomImageCutoutForm />
       ) : tool === "model" ? (
-        <EcomImageModelForm initialCustom={initialCustom} />
+        <EcomImageModelForm initialCustom={initialCustom} onPrefillConsumed={onPrefillConsumed} />
       ) : (
         <EcomDetailWizard />
       )}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Sparkles } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
@@ -67,15 +67,15 @@ export function EcomVideoForm({
   const [speed, setSpeed] = useState(1);
   const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）
   const [error, setError] = useState<string | null>(null);
-  const prefillConsumed = useRef(false);
+  // WORKBENCH-KEEPALIVE-UI-0001 · prefill 消费时机重设计（详见 new-video-form.tsx 同处注释）：面板常驻后本表单
+  // 不再重挂 → 改为同步 props；只写 prefill 带来的字段，用户已填的其它输入原样保留；消费后回调 clearPrefill →
+  // props 回落 undefined → 下次 early-return，不重复注入（原 prefillConsumed ref 闩锁已删，它永不复位）。
   useEffect(() => {
-    if (
-      !prefillConsumed.current &&
-      (initialTopic !== undefined || initialScenePrompt !== undefined || initialScript !== undefined)
-    ) {
-      prefillConsumed.current = true;
-      onPrefillConsumed?.();
-    }
+    if (initialTopic === undefined && initialScenePrompt === undefined && initialScript === undefined) return;
+    if (initialTopic !== undefined) setTopic(initialTopic);
+    if (initialScenePrompt !== undefined) setScenePrompt(initialScenePrompt);
+    if (initialScript !== undefined) setScript(initialScript);
+    onPrefillConsumed?.();
   }, [initialTopic, initialScenePrompt, initialScript, onPrefillConsumed]);
 
   // Actual submit — runs only after the 确定生成 confirmation; owns its own errors.
@@ -192,6 +192,8 @@ export function EcomVideoForm({
         loading={scriptGen.isPending}
         speed={speed}
         label={copy.workbench.ecomScriptLabel}
+        // KEEPALIVE：面板常驻后与口播的 ScriptReview 同存于 DOM → id 必须区分（否则 label[for] 错指隐藏面板）。
+        id="ecom-script"
       />
 
       <AiTextField
@@ -230,6 +232,7 @@ export function EcomVideoForm({
         canUseVip={!authReady || canUseVipVoiceClone(session)}
       />
 
+      {/* FIX1：MoreSettings 不传 id → 内部 useId 生成实例唯一 id，与口播那份天然不撞（无 e2e selector 依赖）。 */}
       <MoreSettings speed={speed} onSpeedChange={setSpeed} />
 
       <AiLabelToggle checked={applyLabel} onChange={setApplyLabel} />

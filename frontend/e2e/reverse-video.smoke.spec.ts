@@ -44,7 +44,8 @@ test("提示词反推·视频：切视频→上传→计费门→轮询→视频
   await expect(page.getByText("提示词反推 · 视频")).toBeVisible();
 
   // 上传 MP4（过预检 1–60s）→ 已上传，可反推。
-  await page.locator('input[type="file"]').setInputFiles(VIDEO_FIXTURE);
+  // WORKBENCH-KEEPALIVE-UI-0001：面板常驻后其它（隐藏）表单的 file input 仍在 DOM → 选择器限定到当前面板。
+  await page.getByTestId("panel-reverse_prompt").locator('input[type="file"]').setInputFiles(VIDEO_FIXTURE);
   await expect(page.getByText("已上传，可反推")).toBeVisible({ timeout: 20_000 });
 
   // 计费门：反推 → 确认弹窗(100 积分) → 确认扣费反推。
@@ -63,8 +64,12 @@ test("提示词反推·视频：切视频→上传→计费门→轮询→视频
   await page.getByRole("button", { name: "带入 · 数字人口播" }).click();
   await expect(page.locator("#video-topic")).toHaveValue("便携保温杯种草", { timeout: 15_000 });
 
-  // 图片模式零回归：切回提示词反推 → 图片来源仍在。
+  // WORKBENCH-KEEPALIVE-UI-0001：切回提示词反推 → 面板常驻，**来源选择（视频）被保留**
+  // （改造前 remount 会把来源重置回图片；保留才是「切 tab 不丢」想要的）。
   await page.getByRole("button", { name: "提示词反推" }).click();
+  await expect(page.getByText("提示词反推 · 视频")).toBeVisible();
+  // 图片模式零回归：手动切回图片来源仍正常。
+  await page.getByRole("group", { name: "反推来源" }).getByRole("button", { name: /图片/ }).first().click();
   await expect(page.getByText("提示词反推 · 图片")).toBeVisible();
   // 移动端（375）：来源二选一仍可见。
   await page.setViewportSize({ width: 375, height: 812 });
