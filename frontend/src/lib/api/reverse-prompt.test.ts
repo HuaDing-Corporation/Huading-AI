@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { copy } from "@/lib/copy";
+import { resetReverseJobs } from "@/mocks/handlers";
 import { apiUrl } from "./client";
 import {
   fillTargetToPrefill,
@@ -12,6 +13,11 @@ import {
   saveReversePrompt,
   type ReversePromptFillTargets
 } from "./reverse-prompt";
+
+// 🔴 FIX4：与 reverse-prompt.history.test.ts 同口径 —— mock job store 每条测试前重置，顺序无关。
+// （本文件里那两条 regenerate/save 原本硬编码 "rp-1"，赌的正是「reverseSeq 从 0 起 + 前面有条 POST」。
+//  FIX3 已改为先建再用返回 id；重置让这个前提变成**确定**的，而不是碰巧成立。）
+beforeEach(() => resetReverseJobs());
 
 // REVERSE-PROMPT-UI · FIX1：对齐 BE 真契约。核心是「带入 6 键」的落点映射——BE 已给预填载荷，FE 直接
 // apply、不猜字段。此处逐一锁死 6 个 BE fill_target 键 → WorkbenchPrefill 的落点，缺键 → null（置灰）。
@@ -131,16 +137,22 @@ describe("reverse-prompt API ↔ MSW（mock 镜像 BE 真形状：ReversePromptJ
     expect(r.fill_targets.ecom_poster).toBeTruthy();
   });
 
+  // 🔴 FIX3：这两条原本硬编码 `rp-1`。它们能绿是**碰巧的** —— 同文件前面有个 POST 图片反推，
+  // reverseSeq 从 0 起、第一个 POST 正好造出 "rp-1"。也就是说它们赌的是**测试执行顺序 + 计数器**，
+  // 而当时的 mock 对任意 id 恒成功，所以就算赌错也照样绿 —— 「job 不存在」这个问题被完全掩盖。
+  // 改为先创建、再用**返回的 id**：既去掉隐藏依赖，也让「必须存在才成功」这件事真的被这两条测到。
   it("regenerate：/jobs/{id}/regenerate 重新反推，仍返回 succeeded result", async () => {
-    const job = await regenerateReversePrompt("rp-1");
-    expect(job.status).toBe("succeeded");
+    const created = await reverseFromAsset({ source_asset_id: "upload-1" });
+    const job = await regenerateReversePrompt(created.id);
+    expect(job.status).toBe("succeeded"); // 图片反推 BE 是同步的（services:148 → mark_..._succeeded）
     expect(job.result?.prompt_zh).toBeTruthy();
   });
 
   it("save：/jobs/{id}/save → { id, status:'saved', saved_at }", async () => {
-    const res = await saveReversePrompt("rp-1");
-    expect(res.id).toBe("rp-1");
-    expect(res.status).toBe("saved");
+    const created = await reverseFromAsset({ source_asset_id: "upload-1" });
+    const res = await saveReversePrompt(created.id);
+    expect(res.id).toBe(created.id);
+    expect(res.status).toBe("saved"); // BE ReversePromptSavedResponse 有 status（默认值也进响应，schemas:86-89）
     expect(res.saved_at).toBeTruthy();
   });
 });

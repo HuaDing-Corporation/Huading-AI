@@ -85,25 +85,8 @@ const REVERSE_RESULT = {
   }
 };
 // ReversePromptJobRead 全字段（前端只读 id/status/result/error_*，其余照给真形状）。
-const reverseJobRead = (id: string, status = "succeeded") => ({
-  id,
-  status,
-  source_kind: "image",
-  source_asset_id: "upload-1",
-  target_format: "seedance_2_0",
-  result: REVERSE_RESULT,
-  error_code: null,
-  error_message: null,
-  provider: "apimart",
-  model: "gemini-2.5-flash",
-  prompt_tokens: 1200,
-  completion_tokens: 480,
-  credits: 0,
-  cost_cents: 3,
-  created_at: new Date(0).toISOString(),
-  updated_at: new Date(0).toISOString(),
-  saved_at: null
-});
+// （反推 job 的读模型见下方「单一权威 job 存储」——原先这里有个 reverseJobRead(id) **合成器**：它不查任何存储、
+//  凭一个 id 就现编一份 succeeded job。那正是 FIX3 要拆掉的东西，见 reverseJobs 的注释。）
 
 // ── 视频反推异步 (VIDEO-REVERSE-PROMPT-UI-0001 · FIX2 逐字段对齐已合入真 BE schema) mock ──
 // POST /reverse-prompt 检测视频源(source_asset_id 以 "video-" 起)→ 202 status="queued"(无 result)；GET /jobs/{id}
@@ -123,27 +106,203 @@ const REVERSE_VIDEO_ANALYSIS = {
   audio_transcript: null, // 一期未启用
   bgm_style: null // 一期未启用
 };
-interface MockReverseVideoJob { id: string; status: string; _polls: number; }
-const reverseVideoJobs = new Map<string, MockReverseVideoJob>();
-const reverseVideoJobRead = (j: MockReverseVideoJob) => ({
-  id: j.id,
-  status: j.status,
-  source_kind: "video",
-  source_asset_id: "video-asset-1",
-  target_format: "seedance_2_0",
-  // FIX1①：video_analysis 内嵌于 result（succeeded 才有）。
-  result: j.status === "succeeded" ? { ...REVERSE_RESULT, video_analysis: REVERSE_VIDEO_ANALYSIS } : null,
+// （视频 job 不再有独立 Map —— 见下方「单一权威 job 存储」。）
+
+// ── 反推历史 (HISTORY-VIDEO-REVERSE-UI-0001) mock ──
+// **镜像已合入 develop 的真 BE**（逐字段核对 backend/app/schemas/reverse_prompt.py:92-110 与
+// routes/reverse_prompt.py:64-87 / :152-166、services/reverse_prompt.py），关键事实（与摘要不同，以源码为准）：
+//   ① 列表项**只有 6 个字段、无 result** → 「带入」拿不到 fill_targets，必须先取详情；
+//   ② source_thumbnail_url **仅 image 源有值，video 源恒 null**（services:320-322）；
+//   ③ summary = prompt_zh → subject → prompt_en 首个非空、截断 160（services:332-339）；
+//   ④ status 取值 = DB CheckConstraint 5 值 queued/running/succeeded/failed/saved（models.py:471）；
+//   ⑤ DELETE 是**纯软删**（只置 deleted_at、不碰媒体）；🔴 FIX3 修正：列表过滤已删，**详情同样 404**
+//      —— 详情/regenerate/save/重复删除全走 reverse_prompt_job_or_404，它用的是 select_live_reverse_prompt_jobs
+//      （services:365-368）= `deleted_at IS NULL`。（此处原注释写「详情仍可取（services:276）」是**错的**：
+//      :276 是**列表**的过滤条件，拿它去断言详情的行为是张假路标，FIX2 已修代码、FIX3 补修这句注释。）
+//
+// ══ 🔴 FIX3 · 单一权威 job 存储 ══════════════════════════════════════════════════════════════
+// 上一版这里有**三个状态源**：`reverseHistory[]`（历史 seed）、`reverseVideoJobs` Map（POST 视频 job）、
+// 以及 `reverseJobRead(id)` —— 一个**连存储都没有的合成器**：POST 图片反推产生的 `rp-*` job 从来没被存下来过，
+// 所以 GET/regenerate/save 拿到 `rp-*` 时**只能猜**。「rp-* 一律放行」不是疏忽，是**没得选**。
+//
+// 于是每个 handler 都在自己编「什么该成功」，编出来的还互相矛盾 —— 实例：DELETE 返 `REVERSE_JOB_NOT_FOUND`、
+// GET 返 `REVERSE_PROMPT_JOB_NOT_FOUND`，同一个 BE 错误两个码（BE 真值是后者）。**补断言补不完，因为下一个
+// handler 还会再猜一次。**
+//
+// 与 #164 同构（CLAUDE.md 第三十四轮：mock 收敛为单一状态源 `resolveMockState()`，注册只写一处、
+// `/me` + analytics + doubao 全走它）—— 那次 Codex B 连打四轮才收敛，结论是：
+// **mock 有多个状态源 → 各自宽松 → 假绿。唯一的解是单一权威存储。**
+//
+// 本 store 的权威性体现在三点：
+//   ① **唯一写入口**：历史 seed、POST 图片 job、POST 视频 job 全部 `reverseJobs.set(...)`，没有第二个地方造 job；
+//   ② **唯一读守卫**：`liveJob(id)` 是 GET/regenerate/save/delete 取 job 的**唯一**途径，存在性与软删只在这一处判；
+//   ③ **唯一序列化**：`reverseJobRead(job)` 一个函数吃所有 job（图片/视频、五种状态），没有第二份读模型。
+// 任一 handler 想「特殊照顾」某个 id，都得先绕过这三点 —— 而绕过是显眼的。
+//
+// ⚠️ 关于「同租户」：mock 只服务一个租户，租户来自 auth token、前端无法表达跨租户请求 →
+// **跨租户在 mock 里不可表达**。加个 tenant_id 字段再自己跟自己比对是装饰，不是防线。故本 store 只守
+// 「存在 + 未删除」，并在此写明这个边界 —— 而不是假装守住了 BE 的 `job.tenant_id != tenant_id → 404`。
+interface MockReverseJob {
+  id: string;
+  source_kind: "image" | "video";
+  /** DB CheckConstraint 五值（models.py:471）。 */
+  status: "queued" | "running" | "succeeded" | "failed" | "saved";
+  created_at: string;
+  saved_at: string | null;
+  /** 镜像 BE deleted_at（软删只置这个、不碰媒体）。null = live。 */
+  deleted_at: string | null;
+  source_thumbnail_url: string | null;
+  summary: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  /** 视频异步轮询模拟：详情第 2 次读起 queued → succeeded。 */
+  polls: number;
+}
+const revTs = (i: number) => new Date(Date.UTC(2026, 6, 16, 12, 0, 0) - i * 60_000).toISOString(); // 递减 → 倒序稳定
+
+/** 唯一权威存储 —— 所有反推 job 都住这里，没有第二个地方。 */
+const reverseJobs = new Map<string, MockReverseJob>();
+
+const mkReverseJob = (
+  seed: Pick<MockReverseJob, "id" | "source_kind"> & Partial<MockReverseJob>
+): MockReverseJob => ({
+  status: "succeeded",
+  created_at: new Date(0).toISOString(),
+  saved_at: null,
+  deleted_at: null,
+  source_thumbnail_url: null,
+  summary: null,
   error_code: null,
   error_message: null,
+  polls: 0,
+  ...seed
+});
+
+/**
+ * 🔴 **唯一的存在性/软删守卫** —— GET/regenerate/save/delete 取 job 必须且只能走这里。
+ * 镜像 BE `reverse_prompt_job_or_404` + `select_live_reverse_prompt_jobs`（`deleted_at IS NULL`）。
+ * 摘掉它 = 回到「每个 handler 各自猜」→ 对应确定值测试必红。
+ */
+const liveJob = (id: string): MockReverseJob | null => {
+  const job = reverseJobs.get(id);
+  return job && job.deleted_at === null ? job : null;
+};
+const jobNotFound = () => err(404, "REVERSE_PROMPT_JOB_NOT_FOUND", "记录不存在或无权访问");
+
+const REVERSE_SEEDS: (Pick<MockReverseJob, "id" | "source_kind"> & Partial<MockReverseJob>)[] = [
+  {
+    id: "rh-img-1",
+    source_kind: "image",
+    status: "succeeded",
+    created_at: revTs(0),
+    source_thumbnail_url: "https://mock.local/reverse/src-1.png",
+    summary: "白色大理石台面上的便携保温杯，暖色晨光，浅景深特写，产品广告风格，缓慢环绕运镜，蒸汽轻升。",
+  },
+  {
+    id: "rh-img-2",
+    source_kind: "image",
+    status: "saved",
+    created_at: revTs(1),
+    saved_at: revTs(1), // BE 状态机 succeeded→saved 时置；原先由读模型按 status 派生，现在是 store 的真字段
+    source_thumbnail_url: "https://mock.local/reverse/src-2.png",
+    summary: "陶瓷马克杯静物，柔和侧光，木质桌面，极简构图。",
+  },
+  {
+    id: "rh-img-3",
+    source_kind: "image",
+    status: "failed",
+    created_at: revTs(2),
+    source_thumbnail_url: "https://mock.local/reverse/src-3.png",
+    summary: null, // 失败无结果 → 无 summary
+    error_code: "REVERSE_FAILED",
+    error_message: "图片解析失败，请换一张更清晰的图片重试"
+  },
+  {
+    id: "rh-vid-1",
+    source_kind: "video",
+    status: "succeeded",
+    created_at: revTs(3),
+    source_thumbnail_url: null, // 🔴 BE 事实：video 源恒 null（不是忘了填）
+    summary: "保温杯带货短片：产品特写 → 使用场景 → 卖点字幕 → 收尾定格。",
+  },
+  {
+    id: "rh-vid-2",
+    source_kind: "video",
+    status: "running",
+    created_at: revTs(4),
+    source_thumbnail_url: null,
+    summary: null, // 进行中无结果
+  },
+  {
+    id: "rh-vid-3",
+    source_kind: "video",
+    status: "queued",
+    created_at: revTs(5),
+    source_thumbnail_url: null,
+    summary: null,
+  }
+];
+REVERSE_SEEDS.forEach((seed) => reverseJobs.set(seed.id, mkReverseJob(seed)));
+
+/**
+ * 🔴 FIX4 · **把「测试之间互不干扰」从排座位变成机制**。
+ *
+ * `reverseJobs` 是模块级、**可变、跨测试累积**的：软删标记、saved 状态、regenerate 打回的 queued 全都留着。
+ * 上一版对此的处理是在测试文件里写一句「⚠️ 本 describe 会改 mock state → **必须放最后**」——
+ * 那不是解法，那是**把顺序依赖写进注释、制度化了**。靠人记住座位表，下一条就会漏（FIX3 我刚认过这个病，
+ * 紧挨着的下一条测试里就又犯了一次，还在注释里写明了「上一条刚把 rh-vid-1 打回 queued」）。
+ *
+ * ⚠️ 注意 vitest.setup.ts 的 `afterEach(() => server.resetHandlers())` **不管这个** ——
+ * 它只重置 handler 覆盖，不碰模块级数据。名字听着像全清，实际不是（又一张假路标）。
+ *
+ * 调用方：反推相关测试文件的 `beforeEach`。**没有全局挂**，理由见回执：全局重置 = 变相给全仓开
+ * shuffle，会掀出一堆既有的跨测试依赖，那是另一个包的活。
+ */
+export const resetReverseJobs = () => {
+  reverseJobs.clear();
+  reverseSeq = 0; // → 每条测试里 POST 出的 id 从 rp-1 / rpv-1 起，确定可预期
+  REVERSE_SEEDS.forEach((seed) => reverseJobs.set(seed.id, mkReverseJob(seed)));
+};
+
+/**
+ * 🔴 **唯一的读模型** —— 图片/视频、五种状态全走这一个函数（原先有三份：reverseJobRead 合成器 /
+ * reverseVideoJobRead / reverseHistJobRead，三份各自决定「什么时候有 result」）。
+ * 契约：queued/running 无 result；failed 无 result 但有 error_*；succeeded/saved 有 result；
+ * video 的 result **内嵌** video_analysis。
+ */
+const reverseJobRead = (j: MockReverseJob) => ({
+  id: j.id,
+  status: j.status,
+  source_kind: j.source_kind,
+  source_asset_id: j.source_kind === "video" ? "video-asset-1" : "upload-1",
+  target_format: "seedance_2_0",
+  result:
+    j.status === "succeeded" || j.status === "saved"
+      ? j.source_kind === "video"
+        ? { ...REVERSE_RESULT, video_analysis: REVERSE_VIDEO_ANALYSIS }
+        : REVERSE_RESULT
+      : null,
+  error_code: j.error_code,
+  error_message: j.error_message,
   provider: "apimart",
   model: "gemini-2.5-flash",
-  prompt_tokens: 0,
-  completion_tokens: 0,
-  credits: 6, // FIX1④：provider 引擎成本；租户固定 100 积分走 BE UsageRecord，不等于此字段。
-  cost_cents: 0,
-  created_at: new Date(0).toISOString(),
-  updated_at: new Date(0).toISOString(),
-  saved_at: null
+  prompt_tokens: j.source_kind === "video" ? 0 : 1200,
+  completion_tokens: j.source_kind === "video" ? 0 : 480,
+  credits: j.source_kind === "video" ? 6 : 0, // provider 引擎成本；租户固定 100 走 UsageRecord
+  cost_cents: j.source_kind === "video" ? 0 : 3,
+  created_at: j.created_at,
+  updated_at: j.created_at,
+  saved_at: j.saved_at
+});
+
+/** 列表项 = BE ReversePromptHistoryItem 的 6 字段（schemas:97-103，**无 result**）。 */
+const reverseHistItem = (j: MockReverseJob) => ({
+  id: j.id,
+  source_kind: j.source_kind,
+  status: j.status,
+  created_at: j.created_at,
+  source_thumbnail_url: j.source_thumbnail_url,
+  summary: j.summary
 });
 
 // ── 深度合成标识设置 (LABEL-UI-0001) mock store ──
@@ -1062,30 +1221,130 @@ export const handlers = [
     const extra = Object.keys(body).filter((k) => k !== "source_asset_id" && k !== "target_format");
     if (extra.length) return err(422, "VALIDATION_ERROR", `Extra inputs are not permitted: ${extra.join(",")}`);
     // 后端据资产推 source_kind：视频源（video-asset-*）→ 异步 202 queued（无 result），前端轮询 GET 到终态。
+    // 🔴 FIX3：两个分支都**写进同一个 store** —— 原先图片分支只是现编一份 read 就返回、job 根本没落地，
+    // 这才是「rp-* 只能放行」的根因。
     if (typeof sourceAssetId === "string" && sourceAssetId.startsWith("video-")) {
       const id = `rpv-${++reverseSeq}`;
-      const job: MockReverseVideoJob = { id, status: "queued", _polls: 0 }; // FIX1③：BE 202 queued（非 running）
-      reverseVideoJobs.set(id, job);
-      return HttpResponse.json({ data: reverseVideoJobRead(job), error: null, request_id: "mock-req" }, { status: 202 });
+      const job = mkReverseJob({ id, source_kind: "video", status: "queued" }); // BE 202 queued（非 running）
+      reverseJobs.set(id, job);
+      return HttpResponse.json({ data: reverseJobRead(job), error: null, request_id: "mock-req" }, { status: 202 });
     }
-    // 图片源：同步 succeeded + result（零回归）。
-    return ok(reverseJobRead(`rp-${++reverseSeq}`));
+    // 图片源：BE 是**同步**的（services:148 置 running → 立刻调 provider → mark_..._succeeded）→ succeeded/200。
+    const id = `rp-${++reverseSeq}`;
+    const job = mkReverseJob({
+      id,
+      source_kind: "image",
+      status: "succeeded",
+      source_thumbnail_url: `https://mock.local/reverse/${id}.png`,
+      summary: REVERSE_RESULT.prompt_zh.slice(0, 160) // BE summary = prompt_zh 优先、截断 160（services:332-339）
+    });
+    reverseJobs.set(id, job);
+    return ok(reverseJobRead(job));
   }),
+  // 反推历史列表（HISTORY-VIDEO-REVERSE-UI-0001）—— **先于 /jobs/:id 注册**，避免被影子路由覆盖。
+  // 🔴 校验镜像 BE、不得更宽松：source_kind 非枚举 → 422（BE 是 Literal 校验，不是 200 空列表）；
+  //    page ge=1 / page_size ge=1 le=100（routes:74-75）；省略 source_kind = 全部。
+  http.get(`${BASE}/api/v1/reverse-prompt/jobs`, ({ request }) => {
+    const sp = new URL(request.url).searchParams;
+    const kind = sp.get("source_kind");
+    if (kind !== null && kind !== "image" && kind !== "video") return err(422, "VALIDATION_ERROR", "无效的反推来源");
+    // 🔴 FIX2 · P1-2：BE 是 `page: Query(ge=1)` / `page_size: Query(ge=1, le=100)`（routes:74-75）→ 越界即 **422**。
+    // 旧 mock 把越界值 clamp 成合法值并返 200 = **比 BE 宽松**（本项目第三次犯：#159 / #166 都栽过）——
+    // 生产必失败的请求在本地全绿。
+    const rawPage = sp.get("page");
+    const rawPageSize = sp.get("page_size");
+    const page = rawPage === null ? 1 : Number(rawPage);
+    const pageSize = rawPageSize === null ? 20 : Number(rawPageSize);
+    if (!Number.isInteger(page) || page < 1) return err(422, "VALIDATION_ERROR", "page 必须 ≥ 1");
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100)
+      return err(422, "VALIDATION_ERROR", "page_size 必须在 1–100 之间");
+    // 🔴 FIX3：从**唯一 store** 取；软删过滤只认 deleted_at（BE live_reverse_prompt_job_condition，services:276）。
+    const all = [...reverseJobs.values()]
+      .filter((j) => j.deleted_at === null)
+      .filter((j) => !kind || j.source_kind === kind)
+      .sort((a, b) => (a.created_at < b.created_at ? 1 : -1)); // created_at 倒序
+    const start = (page - 1) * pageSize;
+    return ok({
+      items: all.slice(start, start + pageSize).map(reverseHistItem), // 6 字段、无 result
+      total: all.length,
+      page,
+      page_size: pageSize
+    });
+  }),
+  // 软删一条（BE 只置 deleted_at、不碰媒体/Asset）。不存在 / 已删 → 404。
+  // 🔴 FIX3：走统一守卫 liveJob；错误码统一为 REVERSE_PROMPT_JOB_NOT_FOUND —— 此处原先自己编了个
+  // `REVERSE_JOB_NOT_FOUND`，与 GET 详情的码不一致（同一个 BE 错误、两个 handler 两个码）。
+  http.delete(`${BASE}/api/v1/reverse-prompt/jobs/:id`, ({ params }) => {
+    const job = liveJob(String(params.id));
+    if (!job) return jobNotFound();
+    job.deleted_at = new Date(0).toISOString();
+    return ok({ id: job.id, deleted_at: job.deleted_at });
+  }),
+  // 详情：走统一守卫 → 不存在 / 已删一律 404（BE reverse_prompt_job_or_404 + live selector，services:365-368）。
+  // 🔴 FIX3：原先这里有个 `if (id.startsWith("rp-")) return ok(reverseJobRead(id))` 放行分支 ——
+  // 它不是疏忽，是**没得选**：POST 图片反推产生的 rp-* job 当时根本没落地，除了现编无路可走。
+  // job 落进 store 之后，这个分支自然消失。
   http.get(`${BASE}/api/v1/reverse-prompt/jobs/:id`, ({ params }) => {
-    const vj = reverseVideoJobs.get(String(params.id));
-    if (vj) {
-      if (vj.status !== "succeeded" && vj.status !== "failed") {
-        vj._polls += 1;
-        if (vj._polls >= 2) vj.status = "succeeded"; // queued → 第 2 次轮询起完成（含 result.video_analysis）
-      }
-      return ok(reverseVideoJobRead(vj));
+    const job = liveJob(String(params.id));
+    if (!job) return jobNotFound();
+    // 视频异步：queued/running 每被轮询一次 +1，第 2 次起转 succeeded（含 result.video_analysis）。
+    if (job.source_kind === "video" && (job.status === "queued" || job.status === "running")) {
+      job.polls += 1;
+      if (job.polls >= 2) job.status = "succeeded";
     }
-    return ok(reverseJobRead(String(params.id)));
+    return ok(reverseJobRead(job));
   }),
-  http.post(`${BASE}/api/v1/reverse-prompt/jobs/:id/regenerate`, ({ params }) => ok(reverseJobRead(String(params.id)))),
-  http.post(`${BASE}/api/v1/reverse-prompt/jobs/:id/save`, ({ params }) =>
-    ok({ id: String(params.id), status: "saved", saved_at: new Date(0).toISOString() })
-  ),
+  /**
+   * regenerate —— 🔴 FIX3 逐条对齐 BE（读的是源码，不是转述）：
+   *  · 不存在 / 已删 → 404（reverse_prompt_job_or_404）
+   *  · **video**：`prepare_reverse_prompt_video_retry`（services:178-230）
+   *      - status ∈ {queued, running} → **409 REVERSE_PROMPT_ALREADY_RUNNING**
+   *        ← 这条**任务包的表里没有**，是我读 BE 时发现的第 5 处宽松
+   *      - 否则重置为 **queued**、清空 result → 路由置 **202**（routes:183-185）
+   *  · **image**：BE 是同步的（services:148 置 running → 立刻调 provider → mark_..._succeeded）→ succeeded/200
+   * 上一版对**任意** id 恒返一份「image succeeded」——视频 job 被伪造成图片、异步被伪造成同步。
+   */
+  http.post(`${BASE}/api/v1/reverse-prompt/jobs/:id/regenerate`, ({ params }) => {
+    const job = liveJob(String(params.id));
+    if (!job) return jobNotFound();
+    if (job.source_kind === "video") {
+      if (job.status === "queued" || job.status === "running")
+        return err(409, "REVERSE_PROMPT_ALREADY_RUNNING", "该反推任务正在进行中");
+      job.status = "queued";
+      job.polls = 0;
+      job.saved_at = null;
+      job.error_code = null;
+      job.error_message = null;
+      job.summary = null; // BE 清 result_json → summary 随之为空
+      return HttpResponse.json({ data: reverseJobRead(job), error: null, request_id: "mock-req" }, { status: 202 });
+    }
+    job.status = "succeeded";
+    job.saved_at = null;
+    job.error_code = null;
+    job.error_message = null;
+    job.summary = REVERSE_RESULT.prompt_zh.slice(0, 160);
+    return ok(reverseJobRead(job));
+  }),
+  /**
+   * save —— 🔴 FIX3 逐条对齐 BE（services:245-263）：
+   *  · 不存在 / 已删 → 404
+   *  · `status not in {succeeded, saved}` → **409 REVERSE_PROMPT_NOT_READY**
+   *    注意是**两个**终态放行：`saved` 也放行 → **重复保存幂等**，不是只有 succeeded（任务包只提了 succeeded）
+   *  · 否则 status="saved" + saved_at=now
+   * 上一版对**任意** id、**任意**状态恒成功 —— queued/running/failed 全放行，与 BE 正相反。
+   */
+  http.post(`${BASE}/api/v1/reverse-prompt/jobs/:id/save`, ({ params }) => {
+    const job = liveJob(String(params.id));
+    if (!job) return jobNotFound();
+    if (job.status !== "succeeded" && job.status !== "saved")
+      return err(409, "REVERSE_PROMPT_NOT_READY", "只有已完成的反推结果才能保存");
+    job.status = "saved";
+    job.saved_at = new Date(0).toISOString();
+    // BE ReversePromptSavedResponse = { id, status: Literal["saved"]="saved", saved_at }（schemas:86-89）——
+    // status 有默认值但**照样进响应**，不是可省字段。（我重构时漏了它，是既有 adapter 测试把我抓回来的：
+    // 那条测试是对的，「让既有测试跟着收敛」在这一项上会是**改测试来掩盖 mock 变得更不忠实**。）
+    return ok({ id: job.id, status: "saved", saved_at: job.saved_at });
+  }),
   http.post(`${BASE}/api/v1/videos`, async ({ request }) => {
     const body = (await request.json()) as {
       topic?: string;

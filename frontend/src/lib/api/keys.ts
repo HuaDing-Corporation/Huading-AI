@@ -67,6 +67,13 @@ export const historyImageKeys = {
   detail: (category: string, id: string) => [...historyImageKeys.all, "detail", category, id] as const
 };
 
+// 反推历史（HISTORY-VIDEO-REVERSE-UI-0001）：source_kind 省略（全部）→ 归一到 "all" 键，与 image/video 互不串缓存。
+export const reversePromptKeys = {
+  all: ["reverse-prompt"] as const,
+  list: (sourceKind?: string) => [...reversePromptKeys.all, "list", sourceKind ?? "all"] as const,
+  detail: (id: string) => [...reversePromptKeys.all, "detail", id] as const
+};
+
 export const meKey = ["me"] as const;
 export const quotaKey = ["quota"] as const;
 export const voicesKey = ["voices"] as const;

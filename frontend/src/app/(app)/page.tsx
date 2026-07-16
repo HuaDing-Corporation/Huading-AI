@@ -225,7 +225,10 @@ export default function Home() {
             <TaskList />
           </div>
 
-          <GenerationHistory />
+          {/* 反推历史「带入生成」（HISTORY-VIDEO-REVERSE-UI-0001）复用同一条 prefill 闭环：
+              传**稳定引用** injectPrefill（useCallback），不传每次渲染换引用的 applyPrefill —— 后者一旦进了
+              下游的 effect 依赖数组，就会重蹈 #181 注释里「effect 每渲染重跑」的覆辙。 */}
+          <GenerationHistory onApplyPrefill={injectPrefill} />
         </section>
       </div>
     </main>

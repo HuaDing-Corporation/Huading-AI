@@ -21,14 +21,23 @@ import {
   type PlanCode
 } from "@/lib/api/admin-console";
 import { listAvatarPresets } from "@/lib/api/avatars";
-import { analyticsKeys, avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, historyImageKeys, labelSettingsKey, meKey, publishKeys, quotaKey, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
+import { analyticsKeys, avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, historyImageKeys, labelSettingsKey, meKey, publishKeys, quotaKey, reversePromptKeys, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
 import { getHistoryImageSet, listHistoryImages, type HistoryCategory } from "@/lib/api/history-images";
 import { fetchAnalyticsByProvider, fetchAnalyticsByTenant, fetchAnalyticsOverview, fetchAnalyticsTimeseries, type AnalyticsRange } from "@/lib/api/analytics";
 import { cancelBatch, createBatch, estimateBatch, getBatch, listBatches } from "@/lib/api/batches";
 import { getQuota } from "@/lib/api/quota";
 import { clearCopyDrafts, deleteCopyDraft, generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
 import { generateScript } from "@/lib/api/scripts";
-import { regenerateReversePrompt, reverseFromAsset, saveReversePrompt, type ReverseFromAssetInput } from "@/lib/api/reverse-prompt";
+import {
+  deleteReversePromptJob,
+  getReversePromptJob,
+  listReversePromptJobs,
+  regenerateReversePrompt,
+  reverseFromAsset,
+  saveReversePrompt,
+  type ReverseFromAssetInput,
+  type ReverseSourceKind
+} from "@/lib/api/reverse-prompt";
 import { uploadAvatarVideo, uploadImage, uploadProductImage, uploadReverseVideo } from "@/lib/api/uploads";
 import { listBgmLibrary } from "@/lib/api/bgm";
 import { uploadAudio } from "@/lib/api/brand-voices";
@@ -168,6 +177,42 @@ export function useRegenerateReversePrompt() {
 }
 export function useSaveReversePrompt() {
   return useMutation({ mutationFn: (jobId: string) => saveReversePrompt(jobId) });
+}
+// ── 反推历史 (HISTORY-VIDEO-REVERSE-UI-0001) — 列表(分页) / 详情(惰性) / 软删 ──
+// ⚠️ BE 是 **page/page_size 制**（routes/reverse_prompt.py:74-75），与 useHistoryImages 同构；
+//    不是 useVideoHistory 那套 limit/offset —— 别抄错。source_kind 省略 = 全部。
+export function useReversePromptJobs(sourceKind?: ReverseSourceKind) {
+  const { session } = useAuth();
+  return useInfiniteQuery({
+    queryKey: reversePromptKeys.list(sourceKind),
+    queryFn: ({ pageParam }) => listReversePromptJobs({ source_kind: sourceKind, page: pageParam }),
+    initialPageParam: 1,
+    getNextPageParam: (lastPage, allPages) => {
+      const loaded = allPages.reduce((sum, page) => sum + page.items.length, 0);
+      return loaded < lastPage.total ? allPages.length + 1 : undefined;
+    },
+    enabled: !!session
+  });
+}
+// 详情：列表项不含 result（BE schemas:97-103 只有 6 字段）→ 「看详情 / 带入生成」都必须先取详情拿 fill_targets。
+// 仅在弹窗打开（id 存在）时才拉，与 useHistoryImageSet 同惯例（关闭态不发请求）。
+export function useReversePromptJob(id: string | undefined) {
+  const { session } = useAuth();
+  return useQuery({
+    queryKey: reversePromptKeys.detail(id ?? ""),
+    queryFn: () => getReversePromptJob(id as string),
+    enabled: !!session && !!id
+  });
+}
+// 软删：BE 只置 deleted_at、不碰媒体 → 成功后失效列表缓存（详情键不动：BE 软删后详情仍可取）。
+export function useDeleteReversePromptJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (jobId: string) => deleteReversePromptJob(jobId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: reversePromptKeys.all });
+    }
+  });
 }
 // ── 口播生产力增强 (ORAL-PROD-UI-0001) — 字幕模板 / 封面截帧 ──
 export function useSubtitleTemplates() {
