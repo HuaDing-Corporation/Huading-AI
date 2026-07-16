@@ -142,6 +142,69 @@ export function saveReversePrompt(id: string): Promise<ReversePromptSavedRespons
   });
 }
 
+// ── 反推历史（HISTORY-VIDEO-REVERSE-UI-0001）─────────────────────────────────
+// 逐字段对齐**已合入 develop 的真 BE**（非冻结文档摘要）：
+//   backend/app/schemas/reverse_prompt.py:92-110、routes/reverse_prompt.py:64-87 与 :152-166
+//   GET    /api/v1/reverse-prompt/jobs?source_kind=&page=&page_size=  → ReversePromptHistoryListResponse
+//   DELETE /api/v1/reverse-prompt/jobs/{id}                           → ReversePromptDeletedResponse（**纯软删**）
+// 🔴 列表项**不含 result**（BE schemas:97-103 只有 6 字段）→ 拿不到 fill_targets，「带入生成」必须先取详情。
+// 🔴 source_thumbnail_url **仅 image 源有值，video 源恒 null**（services/reverse_prompt.py:320-322）。
+// 🔴 DELETE 是软删（只置 deleted_at、不碰媒体/Asset），故不踩 #175 图片删除端点被 revert 的那些雷。
+
+/** 反推来源（镜像 BE ReversePromptSourceKind = Literal["image","video"]，schemas:9）。 */
+export type ReverseSourceKind = "image" | "video";
+
+/** 反推任务状态取值集合（BE schema 未用 Literal 锁，权威是 DB CheckConstraint models.py:471）。 */
+export type ReverseJobStatus = "queued" | "running" | "succeeded" | "failed" | "saved";
+
+/** 列表项（镜像 BE ReversePromptHistoryItem，schemas:97-103）—— **只有这 6 个字段**。 */
+export interface ReversePromptHistoryItem {
+  id: string;
+  source_kind: ReverseSourceKind;
+  status: string; // BE 为裸 str；取值见 ReverseJobStatus（DB 约束），故此处不写死以忠实 BE
+  created_at: string; // ISO（BE datetime）
+  source_thumbnail_url?: string | null; // 仅 image 有值；video 恒 null
+  summary?: string | null; // BE _history_summary：prompt_zh → subject → prompt_en 首个非空，截断 160 字符
+}
+
+/** 列表响应（镜像 BE ReversePromptHistoryListResponse，schemas:106-110）。 */
+export interface ReversePromptHistoryListResponse {
+  items: ReversePromptHistoryItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+/** 软删响应（镜像 BE ReversePromptDeletedResponse，schemas:92-94）。 */
+export interface ReversePromptDeletedResponse {
+  id: string;
+  deleted_at: string;
+}
+
+/** BE 列表分页默认 20、上界 100（routes:74-75 ge=1 / ge=1,le=100）。 */
+export const REVERSE_PAGE_SIZE = 20;
+
+/**
+ * 反推历史列表。source_kind 省略 = 全部（BE routes:70 Optional）；page 从 1 起、page_size ≤100。
+ * ⚠️ BE 是 **page/page_size 制**（不是 /videos 历史那套 limit/offset），分页 hook 别抄错。
+ */
+export function listReversePromptJobs(
+  input: { source_kind?: ReverseSourceKind; page?: number; page_size?: number } = {}
+): Promise<ReversePromptHistoryListResponse> {
+  const sp = new URLSearchParams();
+  if (input.source_kind) sp.set("source_kind", input.source_kind); // 省略 → 全部
+  sp.set("page", String(input.page ?? 1));
+  sp.set("page_size", String(input.page_size ?? REVERSE_PAGE_SIZE));
+  return apiFetch<ReversePromptHistoryListResponse>(`/api/v1/reverse-prompt/jobs?${sp.toString()}`, { method: "GET" });
+}
+
+/** 软删一条反推历史（BE 只置 deleted_at；列表据此过滤，详情仍可取）。 */
+export function deleteReversePromptJob(id: string): Promise<ReversePromptDeletedResponse> {
+  return apiFetch<ReversePromptDeletedResponse>(`/api/v1/reverse-prompt/jobs/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+}
+
 // ── 「带入生成」落点 ──────────────────────────────────────────────────────────
 // 工作台一次性 prefill 的富载荷（口播/电商带货 也复用于文案仿写「用此文案」的 script-only 变体）。
 // target 与 WorkbenchMode 同名（page.tsx 直接 setMode(target)）：avatar_talk/seedance_i2v/video_gen/photo/ecom_image。

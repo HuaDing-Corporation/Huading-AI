@@ -146,6 +146,110 @@ const reverseVideoJobRead = (j: MockReverseVideoJob) => ({
   saved_at: null
 });
 
+// ── 反推历史 (HISTORY-VIDEO-REVERSE-UI-0001) mock ──
+// **镜像已合入 develop 的真 BE**（逐字段核对 backend/app/schemas/reverse_prompt.py:92-110 与
+// routes/reverse_prompt.py:64-87 / :152-166、services/reverse_prompt.py），关键事实（与摘要不同，以源码为准）：
+//   ① 列表项**只有 6 个字段、无 result** → 「带入」拿不到 fill_targets，必须先取详情；
+//   ② source_thumbnail_url **仅 image 源有值，video 源恒 null**（services:320-322）；
+//   ③ summary = prompt_zh → subject → prompt_en 首个非空、截断 160（services:332-339）；
+//   ④ status 取值 = DB CheckConstraint 5 值 queued/running/succeeded/failed/saved（models.py:471）；
+//   ⑤ DELETE 是**纯软删**（只置 deleted_at、不碰媒体）；列表过滤已删，**详情仍可取**（services:276）。
+interface MockReverseHistItem {
+  id: string;
+  source_kind: "image" | "video";
+  status: string;
+  created_at: string;
+  source_thumbnail_url: string | null;
+  summary: string | null;
+  deleted: boolean; // 镜像 BE deleted_at 的存在性（列表过滤、详情不过滤）
+  error_code?: string | null;
+  error_message?: string | null;
+}
+const revTs = (i: number) => new Date(Date.UTC(2026, 6, 16, 12, 0, 0) - i * 60_000).toISOString(); // 递减 → 倒序稳定
+const reverseHistory: MockReverseHistItem[] = [
+  {
+    id: "rh-img-1",
+    source_kind: "image",
+    status: "succeeded",
+    created_at: revTs(0),
+    source_thumbnail_url: "https://mock.local/reverse/src-1.png",
+    summary: "白色大理石台面上的便携保温杯，暖色晨光，浅景深特写，产品广告风格，缓慢环绕运镜，蒸汽轻升。",
+    deleted: false
+  },
+  {
+    id: "rh-img-2",
+    source_kind: "image",
+    status: "saved",
+    created_at: revTs(1),
+    source_thumbnail_url: "https://mock.local/reverse/src-2.png",
+    summary: "陶瓷马克杯静物，柔和侧光，木质桌面，极简构图。",
+    deleted: false
+  },
+  {
+    id: "rh-img-3",
+    source_kind: "image",
+    status: "failed",
+    created_at: revTs(2),
+    source_thumbnail_url: "https://mock.local/reverse/src-3.png",
+    summary: null, // 失败无结果 → 无 summary
+    deleted: false,
+    error_code: "REVERSE_FAILED",
+    error_message: "图片解析失败，请换一张更清晰的图片重试"
+  },
+  {
+    id: "rh-vid-1",
+    source_kind: "video",
+    status: "succeeded",
+    created_at: revTs(3),
+    source_thumbnail_url: null, // 🔴 BE 事实：video 源恒 null（不是忘了填）
+    summary: "保温杯带货短片：产品特写 → 使用场景 → 卖点字幕 → 收尾定格。",
+    deleted: false
+  },
+  {
+    id: "rh-vid-2",
+    source_kind: "video",
+    status: "running",
+    created_at: revTs(4),
+    source_thumbnail_url: null,
+    summary: null, // 进行中无结果
+    deleted: false
+  },
+  {
+    id: "rh-vid-3",
+    source_kind: "video",
+    status: "queued",
+    created_at: revTs(5),
+    source_thumbnail_url: null,
+    summary: null,
+    deleted: false
+  }
+];
+/** 详情响应（ReversePromptJobRead）：queued/running 无 result；failed 无 result 但有 error_*；video 的 result 内嵌 video_analysis。 */
+const reverseHistJobRead = (r: MockReverseHistItem) => ({
+  id: r.id,
+  status: r.status,
+  source_kind: r.source_kind,
+  source_asset_id: r.source_kind === "video" ? "video-asset-1" : "upload-1",
+  target_format: "seedance_2_0",
+  result:
+    r.status === "succeeded" || r.status === "saved"
+      ? r.source_kind === "video"
+        ? { ...REVERSE_RESULT, video_analysis: REVERSE_VIDEO_ANALYSIS }
+        : REVERSE_RESULT
+      : null,
+  error_code: r.error_code ?? null,
+  error_message: r.error_message ?? null,
+  provider: "apimart",
+  model: "gemini-2.5-flash",
+  prompt_tokens: 1200,
+  completion_tokens: 480,
+  credits: r.source_kind === "video" ? 6 : 0, // provider 引擎成本；租户固定 100 走 UsageRecord
+  cost_cents: 3,
+  created_at: r.created_at,
+  updated_at: r.created_at,
+  saved_at: r.status === "saved" ? r.created_at : null
+});
+
 // ── 深度合成标识设置 (LABEL-UI-0001) mock store ──
 // 忠实契约：enabled 只读恒真(合规不可关)；PUT 校验 text 非空 ≤20(否则 422)；非伪造。
 const labelSettings = { position: "br", text: "AI 生成", enabled: true };
@@ -1071,8 +1175,49 @@ export const handlers = [
     // 图片源：同步 succeeded + result（零回归）。
     return ok(reverseJobRead(`rp-${++reverseSeq}`));
   }),
+  // 反推历史列表（HISTORY-VIDEO-REVERSE-UI-0001）—— **先于 /jobs/:id 注册**，避免被影子路由覆盖。
+  // 🔴 校验镜像 BE、不得更宽松：source_kind 非枚举 → 422（BE 是 Literal 校验，不是 200 空列表）；
+  //    page ge=1 / page_size ge=1 le=100（routes:74-75）；省略 source_kind = 全部。
+  http.get(`${BASE}/api/v1/reverse-prompt/jobs`, ({ request }) => {
+    const sp = new URL(request.url).searchParams;
+    const kind = sp.get("source_kind");
+    if (kind !== null && kind !== "image" && kind !== "video") return err(422, "VALIDATION_ERROR", "无效的反推来源");
+    const page = Math.max(1, Number(sp.get("page") ?? 1));
+    const pageSize = Math.max(1, Math.min(100, Number(sp.get("page_size") ?? 20)));
+    const all = reverseHistory
+      .filter((r) => !r.deleted) // BE live_reverse_prompt_job_condition（services:276）：软删不进列表
+      .filter((r) => !kind || r.source_kind === kind)
+      .slice()
+      .sort((a, b) => (a.created_at < b.created_at ? 1 : -1)); // created_at 倒序
+    const start = (page - 1) * pageSize;
+    return ok({
+      // ← 只这 6 个字段：BE ReversePromptHistoryItem 无 result（故「带入」必须先取详情）
+      items: all.slice(start, start + pageSize).map((r) => ({
+        id: r.id,
+        source_kind: r.source_kind,
+        status: r.status,
+        created_at: r.created_at,
+        source_thumbnail_url: r.source_thumbnail_url,
+        summary: r.summary
+      })),
+      total: all.length,
+      page,
+      page_size: pageSize
+    });
+  }),
+  // 软删一条（BE 只置 deleted_at、不碰媒体/Asset）。不存在 / 已删 / 跨租户 → 404。
+  http.delete(`${BASE}/api/v1/reverse-prompt/jobs/:id`, ({ params }) => {
+    const rec = reverseHistory.find((r) => r.id === String(params.id));
+    if (!rec || rec.deleted) return err(404, "REVERSE_JOB_NOT_FOUND", "记录不存在或无权访问");
+    rec.deleted = true;
+    return ok({ id: rec.id, deleted_at: new Date(0).toISOString() });
+  }),
   http.get(`${BASE}/api/v1/reverse-prompt/jobs/:id`, ({ params }) => {
-    const vj = reverseVideoJobs.get(String(params.id));
+    const id = String(params.id);
+    // 反推历史 seed：软删后详情**仍可取**（BE 语义 —— 列表过滤 deleted_at，详情不过滤）。
+    const hist = reverseHistory.find((r) => r.id === id);
+    if (hist) return ok(reverseHistJobRead(hist));
+    const vj = reverseVideoJobs.get(id);
     if (vj) {
       if (vj.status !== "succeeded" && vj.status !== "failed") {
         vj._polls += 1;
@@ -1080,7 +1225,7 @@ export const handlers = [
       }
       return ok(reverseVideoJobRead(vj));
     }
-    return ok(reverseJobRead(String(params.id)));
+    return ok(reverseJobRead(id));
   }),
   http.post(`${BASE}/api/v1/reverse-prompt/jobs/:id/regenerate`, ({ params }) => ok(reverseJobRead(String(params.id)))),
   http.post(`${BASE}/api/v1/reverse-prompt/jobs/:id/save`, ({ params }) =>
