@@ -13,11 +13,13 @@ from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import sessionmaker
 
+from app.core.exceptions import AppError
 from app.db.models import (
     Base,
     Plan,
     ReversePromptJob,
     Subscription,
+    Tenant,
     UsageRecord,
     VideoTask,
 )
@@ -28,9 +30,26 @@ _RUNTIME_QUOTA_FIELDS = {
     "quota_credits_used",
     "quota_credits_reserved",
 }
-_ALLOWED_RUNTIME_WRITES = {
-    "app/services/quota.py": _RUNTIME_QUOTA_FIELDS,
-    "app/services/admin_console.py": {"quota_credits_total"},
+_ALLOWED_RUNTIME_WRITES_BY_FUNCTION = {
+    "app/services/quota.py": {
+        "_apply_active_quota_delta": {
+            "quota_credits_used",
+            "quota_credits_reserved",
+        },
+        "release_reverse_prompt_video_quota": {"quota_credits_reserved"},
+        "settle_reverse_prompt_video_quota": {
+            "quota_credits_used",
+            "quota_credits_reserved",
+        },
+        "release_reserved_quota": {"quota_credits_reserved"},
+        "settle_reserved_quota": {
+            "quota_credits_used",
+            "quota_credits_reserved",
+        },
+    },
+    "app/services/admin_console.py": {
+        "adjust_credits": {"quota_credits_total"},
+    },
 }
 
 
@@ -43,25 +62,54 @@ def _assignment_attributes(node: ast.AST) -> list[ast.Attribute]:
     return [target for target in targets if isinstance(target, ast.Attribute)]
 
 
-def test_runtime_quota_writes_are_centralized_in_locked_services() -> None:
+def _enclosing_function_name(
+    functions: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    node: ast.AST,
+) -> str:
+    if not hasattr(node, "lineno"):
+        return "<module>"
+    enclosing = [
+        function
+        for function in functions
+        if function.lineno <= node.lineno <= function.end_lineno
+    ]
+    return max(enclosing, key=lambda function: function.lineno).name if enclosing else "<module>"
+
+
+def test_runtime_quota_writes_only_occur_in_locked_helpers() -> None:
     app_root = Path(__file__).resolve().parents[1] / "app"
     violations: list[str] = []
     for path in app_root.rglob("*.py"):
         relative = path.relative_to(app_root.parent).as_posix()
-        allowed = _ALLOWED_RUNTIME_WRITES.get(relative, set())
+        allowed_by_function = _ALLOWED_RUNTIME_WRITES_BY_FUNCTION.get(relative, {})
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        functions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        ]
         for node in ast.walk(tree):
-            for target in _assignment_attributes(node):
+            assignment_attributes = _assignment_attributes(node)
+            if assignment_attributes:
+                function_name = _enclosing_function_name(functions, node)
+                allowed = allowed_by_function.get(function_name, set())
+            for target in assignment_attributes:
                 if target.attr in _RUNTIME_QUOTA_FIELDS and target.attr not in allowed:
-                    violations.append(f"{relative}:{node.lineno}:{target.attr}")
+                    violations.append(
+                        f"{relative}:{function_name}:{node.lineno}:{target.attr}"
+                    )
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "values"
             ):
+                function_name = _enclosing_function_name(functions, node)
+                allowed = allowed_by_function.get(function_name, set())
                 for keyword in node.keywords:
                     if keyword.arg in _RUNTIME_QUOTA_FIELDS and keyword.arg not in allowed:
-                        violations.append(f"{relative}:{node.lineno}:{keyword.arg}")
+                        violations.append(
+                            f"{relative}:{function_name}:{node.lineno}:{keyword.arg}"
+                        )
 
     assert violations == []
 
@@ -203,53 +251,24 @@ def _seed_postgres_reservations(
     count: int,
     stale: bool = False,
 ) -> tuple[str, list[str]]:
-    suffix = uuid4().hex[:8]
-    tenant_id = str(uuid4())
-    now = datetime.now(UTC)
+    subscription_id, tenant_id = _seed_postgres_subscription(
+        factory,
+        total=10_000,
+        reserved=100 * count,
+    )
+    task_ids = _seed_postgres_video_tasks(
+        factory,
+        tenant_id=tenant_id,
+        count=count,
+        stale=stale,
+    )
     with factory() as db:
-        from app.db.models import Tenant
-
-        tenant = Tenant(id=tenant_id, slug=f"quota-{suffix}", name="Quota Concurrency")
-        plan = Plan(
-            code=f"quota-{suffix}",
-            name="Quota Concurrency",
-            price_cents=0,
-            period="monthly",
-            quota_credits=10_000,
-        )
-        db.add_all([tenant, plan])
-        db.flush()
-        subscription = Subscription(
-            tenant_id=tenant.id,
-            plan_id=plan.id,
-            status="active",
-            period_start=now - timedelta(days=1),
-            period_end=now + timedelta(days=30),
-            quota_credits_total=10_000,
-            quota_credits_used=0,
-            quota_credits_reserved=100 * count,
-        )
-        db.add(subscription)
-        db.flush()
-        task_ids: list[str] = []
-        for _ in range(count):
-            task = VideoTask(
-                id=str(uuid4()),
-                tenant_id=tenant.id,
-                status="running",
-                mode="photo",
-                video_mode="photo",
-                progress=30,
-                started_at=now - timedelta(seconds=1901) if stale else now,
-                updated_at=now - timedelta(seconds=1901) if stale else now,
-            )
-            db.add(task)
-            db.flush()
+        for task_id in task_ids:
             db.add(
                 UsageRecord(
-                    tenant_id=tenant.id,
-                    subscription_id=subscription.id,
-                    video_task_id=task.id,
+                    tenant_id=tenant_id,
+                    subscription_id=subscription_id,
+                    video_task_id=task_id,
                     capability="image",
                     provider="apimart",
                     model="gpt-image-2",
@@ -260,9 +279,71 @@ def _seed_postgres_reservations(
                     status="reserved",
                 )
             )
+        db.commit()
+    return subscription_id, task_ids
+
+
+def _seed_postgres_subscription(
+    factory,
+    *,
+    total: int,
+    used: int = 0,
+    reserved: int = 0,
+) -> tuple[str, str]:
+    suffix = uuid4().hex[:8]
+    tenant_id = str(uuid4())
+    now = datetime.now(UTC)
+    with factory() as db:
+        tenant = Tenant(id=tenant_id, slug=f"quota-{suffix}", name="Quota Concurrency")
+        plan = Plan(
+            code=f"quota-{suffix}",
+            name="Quota Concurrency",
+            price_cents=0,
+            period="monthly",
+            quota_credits=total,
+        )
+        db.add_all([tenant, plan])
+        db.flush()
+        subscription = Subscription(
+            tenant_id=tenant.id,
+            plan_id=plan.id,
+            status="active",
+            period_start=now - timedelta(days=1),
+            period_end=now + timedelta(days=30),
+            quota_credits_total=total,
+            quota_credits_used=used,
+            quota_credits_reserved=reserved,
+        )
+        db.add(subscription)
+        db.commit()
+        return subscription.id, tenant.id
+
+
+def _seed_postgres_video_tasks(
+    factory,
+    *,
+    tenant_id: str,
+    count: int,
+    stale: bool = False,
+) -> list[str]:
+    now = datetime.now(UTC)
+    with factory() as db:
+        task_ids: list[str] = []
+        for _ in range(count):
+            task = VideoTask(
+                id=str(uuid4()),
+                tenant_id=tenant_id,
+                status="running",
+                mode="photo",
+                video_mode="photo",
+                progress=30,
+                started_at=now - timedelta(seconds=1901) if stale else now,
+                updated_at=now - timedelta(seconds=1901) if stale else now,
+            )
+            db.add(task)
             task_ids.append(task.id)
         db.commit()
-        return subscription.id, task_ids
+        return task_ids
 
 
 def _start_transition(factory, transition):
@@ -282,6 +363,101 @@ def _start_transition(factory, transition):
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
     return thread, done, errors
+
+
+def test_postgres_concurrent_copy_charges_preserve_both_increments(
+    postgres_session_factory,
+) -> None:
+    factory = postgres_session_factory
+    subscription_id, tenant_id = _seed_postgres_subscription(factory, total=10_000)
+    first = factory()
+    thread = None
+    try:
+        quota.charge_copy_quota(first, tenant_id=tenant_id, provider="deepseek")
+        thread, done, errors = _start_transition(
+            factory,
+            lambda db: quota.charge_copy_quota(
+                db,
+                tenant_id=tenant_id,
+                provider="deepseek",
+            ),
+        )
+        second_was_blocked = not done.wait(timeout=0.4)
+        first.commit()
+        thread.join(timeout=5)
+    finally:
+        first.rollback()
+        first.close()
+        if thread is not None:
+            thread.join(timeout=5)
+
+    assert second_was_blocked
+    assert not thread.is_alive()
+    assert errors == []
+    with factory() as db:
+        subscription = db.get(Subscription, subscription_id)
+        records = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.tenant_id == tenant_id,
+                    UsageRecord.capability == "llm",
+                    UsageRecord.status == "settled",
+                )
+            )
+        )
+        assert subscription.quota_credits_used == 2
+        assert len(records) == 2
+        assert sum(record.credits for record in records) == Decimal("2")
+
+
+def test_postgres_concurrent_image_reservations_allow_exactly_one_order(
+    postgres_session_factory,
+) -> None:
+    factory = postgres_session_factory
+    subscription_id, tenant_id = _seed_postgres_subscription(factory, total=10)
+    task_ids = _seed_postgres_video_tasks(factory, tenant_id=tenant_id, count=2)
+    first = factory()
+    thread = None
+    try:
+        quota.reserve_image_generation_quota(
+            first,
+            tenant_id=tenant_id,
+            video_task_id=task_ids[0],
+        )
+        thread, done, errors = _start_transition(
+            factory,
+            lambda db: quota.reserve_image_generation_quota(
+                db,
+                tenant_id=tenant_id,
+                video_task_id=task_ids[1],
+            ),
+        )
+        second_was_blocked = not done.wait(timeout=0.4)
+        first.commit()
+        thread.join(timeout=5)
+    finally:
+        first.rollback()
+        first.close()
+        if thread is not None:
+            thread.join(timeout=5)
+
+    assert second_was_blocked
+    assert not thread.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], AppError)
+    assert errors[0].code == "TENANT_QUOTA_EXCEEDED"
+    with factory() as db:
+        subscription = db.get(Subscription, subscription_id)
+        records = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.video_task_id.in_(task_ids),
+                    UsageRecord.status == "reserved",
+                )
+            )
+        )
+        assert subscription.quota_credits_reserved == 10
+        assert len(records) == 1
 
 
 def test_postgres_concurrent_release_preserves_both_decrements(
