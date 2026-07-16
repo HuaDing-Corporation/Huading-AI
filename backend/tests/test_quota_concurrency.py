@@ -21,9 +21,10 @@ from app.db.models import (
     Subscription,
     Tenant,
     UsageRecord,
+    User,
     VideoTask,
 )
-from app.services import quota
+from app.services import admin_console, quota
 
 _RUNTIME_QUOTA_FIELDS = {
     "quota_credits_total",
@@ -346,6 +347,64 @@ def _seed_postgres_video_tasks(
         return task_ids
 
 
+def _seed_postgres_reverse_prompt_reservations(
+    factory,
+    *,
+    count: int,
+) -> tuple[str, str, list[str]]:
+    subscription_id, tenant_id = _seed_postgres_subscription(
+        factory,
+        total=10_000,
+        reserved=100 * count,
+    )
+    with factory() as db:
+        jobs = [
+            ReversePromptJob(
+                id=str(uuid4()),
+                tenant_id=tenant_id,
+                source_kind="video",
+                target_format="seedance_2_0",
+                status="running",
+            )
+            for _ in range(count)
+        ]
+        db.add_all(jobs)
+        db.flush()
+        db.add_all(
+            [
+                UsageRecord(
+                    tenant_id=tenant_id,
+                    subscription_id=subscription_id,
+                    reverse_prompt_job_id=job.id,
+                    capability="reverse_prompt_video",
+                    provider="apimart",
+                    model="gemini-3.1-pro-preview",
+                    unit="call",
+                    quantity=Decimal("1"),
+                    credits=Decimal("100"),
+                    cost_cents=0,
+                    status="reserved",
+                )
+                for job in jobs
+            ]
+        )
+        db.commit()
+        return subscription_id, tenant_id, [job.id for job in jobs]
+
+
+def _seed_postgres_admin_actor(factory, *, tenant_id: str) -> str:
+    with factory() as db:
+        actor = User(
+            tenant_id=tenant_id,
+            email=f"quota-admin-{uuid4().hex[:8]}@example.com",
+            password_hash="not-used-by-concurrency-test",
+            role="admin",
+        )
+        db.add(actor)
+        db.commit()
+        return actor.id
+
+
 def _start_transition(factory, transition):
     done = threading.Event()
     errors: list[BaseException] = []
@@ -553,6 +612,148 @@ def test_postgres_concurrent_settlement_preserves_both_transitions(
         assert subscription.quota_credits_reserved == 0
         assert subscription.quota_credits_used == 200
         assert {record.status for record in records} == {"settled"}
+
+
+def test_postgres_concurrent_reverse_prompt_releases_preserve_both_decrements(
+    postgres_session_factory,
+) -> None:
+    factory = postgres_session_factory
+    subscription_id, tenant_id, job_ids = _seed_postgres_reverse_prompt_reservations(
+        factory,
+        count=2,
+    )
+    first = factory()
+    thread = None
+    try:
+        quota.release_reverse_prompt_video_quota(
+            first,
+            tenant_id=tenant_id,
+            reverse_prompt_job_id=job_ids[0],
+        )
+        thread, done, errors = _start_transition(
+            factory,
+            lambda db: quota.release_reverse_prompt_video_quota(
+                db,
+                tenant_id=tenant_id,
+                reverse_prompt_job_id=job_ids[1],
+            ),
+        )
+        second_was_blocked = not done.wait(timeout=0.4)
+        first.commit()
+        thread.join(timeout=5)
+    finally:
+        first.rollback()
+        first.close()
+        if thread is not None:
+            thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert errors == []
+    with factory() as db:
+        subscription = db.get(Subscription, subscription_id)
+        records = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.reverse_prompt_job_id.in_(job_ids)
+                )
+            )
+        )
+        assert subscription.quota_credits_reserved == 0
+        assert {record.status for record in records} == {"released"}
+    assert second_was_blocked
+
+
+def test_postgres_concurrent_reverse_prompt_settlement_is_idempotent(
+    postgres_session_factory,
+) -> None:
+    factory = postgres_session_factory
+    subscription_id, tenant_id, job_ids = _seed_postgres_reverse_prompt_reservations(
+        factory,
+        count=1,
+    )
+    job_id = job_ids[0]
+
+    def settle(db) -> None:
+        quota.settle_reverse_prompt_video_quota(
+            db,
+            tenant_id=tenant_id,
+            reverse_prompt_job_id=job_id,
+            provider="apimart",
+            model="gemini-3.1-pro-preview",
+            total_tokens=321,
+            cost_cents=7,
+        )
+
+    first = factory()
+    thread = None
+    try:
+        settle(first)
+        thread, done, errors = _start_transition(factory, settle)
+        second_was_blocked = not done.wait(timeout=0.4)
+        first.commit()
+        thread.join(timeout=5)
+    finally:
+        first.rollback()
+        first.close()
+        if thread is not None:
+            thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert errors == []
+    with factory() as db:
+        subscription = db.get(Subscription, subscription_id)
+        record = db.scalar(
+            select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id)
+        )
+        assert subscription.quota_credits_reserved == 0
+        assert subscription.quota_credits_used == 100
+        assert record.status == "settled"
+    assert second_was_blocked
+
+
+def test_postgres_concurrent_admin_credit_adjustments_preserve_both_increments(
+    postgres_session_factory,
+) -> None:
+    factory = postgres_session_factory
+    initial_total = 10_000
+    increment = 25
+    subscription_id, tenant_id = _seed_postgres_subscription(
+        factory,
+        total=initial_total,
+    )
+    actor_id = _seed_postgres_admin_actor(factory, tenant_id=tenant_id)
+
+    def adjust(db) -> None:
+        actor = db.get(User, actor_id)
+        assert actor is not None
+        admin_console.adjust_credits(
+            db,
+            actor=actor,
+            tenant_id=tenant_id,
+            delta=increment,
+            reason="concurrent quota mutation test",
+        )
+
+    first = factory()
+    thread = None
+    try:
+        adjust(first)
+        thread, done, errors = _start_transition(factory, adjust)
+        second_was_blocked = not done.wait(timeout=0.4)
+        first.commit()
+        thread.join(timeout=5)
+    finally:
+        first.rollback()
+        first.close()
+        if thread is not None:
+            thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert errors == []
+    with factory() as db:
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_total == initial_total + (2 * increment)
+    assert second_was_blocked
 
 
 def test_postgres_recovery_release_wins_against_worker_settlement(

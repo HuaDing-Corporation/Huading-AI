@@ -67,6 +67,9 @@ def active_subscription(db: Session, tenant_id: str) -> Subscription:
     return subscription
 
 
+# Lock-order audit: a transaction may continue from Subscription to BatchJob
+# (settlement followed by refresh_batch_job). No BatchJob -> Subscription edge is
+# currently known, so acyclicity is an audit conclusion, not a structural guarantee.
 def _active_subscription_for_update(db: Session, tenant_id: str) -> Subscription:
     now = datetime.now(UTC)
     subscription = db.scalar(
