@@ -176,6 +176,9 @@ export function NewVideoForm({
         onRegenerate={onGenerateScript}
         loading={scriptGen.isPending}
         speed={speed}
+        // FIX1：ScriptReview 不传 id 即走 useId（每实例唯一）。口播这份显式传旧 id —— e2e 的 #video-script
+        // 落点断言依赖它（反推「带入 · 数字人口播」）。
+        id="video-script"
       />
 
       {/* 形象来源二选一（AVATAR-VIDEO-SOURCE-UI-0001）：照片=默认(承重零回归) / 本人出镜视频 */}

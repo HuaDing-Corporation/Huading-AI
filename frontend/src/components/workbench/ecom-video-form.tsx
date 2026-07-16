@@ -232,8 +232,8 @@ export function EcomVideoForm({
         canUseVip={!authReady || canUseVipVoiceClone(session)}
       />
 
-      {/* KEEPALIVE：与口播的 MoreSettings 常驻同存 → 语速滑杆 id 必须区分。 */}
-      <MoreSettings speed={speed} onSpeedChange={setSpeed} id="ecom-speed" />
+      {/* FIX1：MoreSettings 不传 id → 内部 useId 生成实例唯一 id，与口播那份天然不撞（无 e2e selector 依赖）。 */}
+      <MoreSettings speed={speed} onSpeedChange={setSpeed} />
 
       <AiLabelToggle checked={applyLabel} onChange={setApplyLabel} />
 

@@ -1,5 +1,6 @@
 "use client";
 
+import { useId } from "react";
 import { ChevronDown, Lock } from "lucide-react";
 
 import { copy } from "@/lib/copy";
@@ -9,7 +10,9 @@ export interface MoreSettingsProps {
   onSpeedChange: (n: number) => void;
   /**
    * 语速滑杆的 DOM id。WORKBENCH-KEEPALIVE-UI-0001：面板常驻后口播与电商带货两份 MoreSettings 同存于 DOM，
-   * id 必须各自唯一，否则 `<label for>` 会关联到文档中第一个（隐藏面板那份）滑杆。默认沿用口播的 video-speed。
+   * id 必须各自唯一，否则 `<label for>` 会关联到文档中第一个（隐藏面板那份）滑杆。
+   * FIX1：**不传时走 useId 生成实例唯一 id**（此前默认固定 "video-speed" → 第三个无参调用照样撞）。
+   * 现两个调用方都不传（无 e2e selector 依赖）；仅当需要稳定 selector 时才显式传。
    */
   id?: string;
 }
@@ -27,7 +30,8 @@ function LockedRow({ text }: { text: string }) {
 
 /** Collapsible advanced settings — speed slider + read-only locked aspect/subtitle rows. */
 export function MoreSettings({ speed, onSpeedChange, id }: MoreSettingsProps) {
-  const speedId = id ?? "video-speed";
+  const uid = useId();
+  const speedId = id ?? uid; // 不传 → 每实例唯一，撞车不再是默认行为
   return (
     <details className="mb-[15px] rounded-field border border-line-gold bg-glass-fill">
       <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3.5 py-3 text-[13px] text-ink-soft outline-none transition-colors hover:bg-glass-hover focus-visible:shadow-focus-gold [&::-webkit-details-marker]:hidden">
