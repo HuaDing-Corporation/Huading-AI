@@ -138,8 +138,10 @@ export function EcomImageTool({
   const downloadingAllRef = useRef(false);
   const downloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // 卸载时释放残留批量预览的 object URL(切走工具/模式即卸载),对齐 ImagePicker 防泄漏；
-  // 并清掉批量下载复位定时器，避免卸载后 setState。
+  // 卸载时释放残留批量预览的 object URL，对齐 ImagePicker 防泄漏；并清掉批量下载复位定时器，避免卸载后 setState。
+  // ECOM-SUBTOOL-KEEPALIVE-UI-0001：原注释写的「切走工具/模式即卸载」前提**已不成立** —— 子工具与顶层 mode
+  // 都改为「挂载后常驻」，本 cleanup 只在离开工作台（整页卸载）时才跑。这正是本包想要的：切走子工具再回来，
+  // 批量预览必须还在。代价是 object URL 活到离开页面为止；用户主动移除/换图时仍会照常 revoke，无泄漏放大。
   const batchItemsRef = useRef(batchItems);
   useEffect(() => {
     batchItemsRef.current = batchItems;
