@@ -36,8 +36,10 @@ describe("VoicePicker (口播音色 · 选我的音色)", () => {
       />
     );
     expect(screen.getByText(copy.brandVoice.pickerBrandGroup)).toBeInTheDocument();
-    const brandGroup = document.querySelector('[role="group"][aria-labelledby="voice-group-brand"]');
-    expect(brandGroup?.textContent).toContain("我的主播音");
+    // WORKBENCH-KEEPALIVE-UI-0001：分组 id 已改为 useId 生成（面板常驻后字面量 id 会重复，令第二份的
+    // aria-labelledby 错指隐藏面板）→ 按无障碍名取组，不依赖具体 id；顺带验证 aria-labelledby 关联正确。
+    const brandGroup = screen.getByRole("group", { name: copy.brandVoice.pickerBrandGroup });
+    expect(brandGroup.textContent).toContain("我的主播音");
     fireEvent.click(screen.getByText("我的主播音"));
     expect(onChange).toHaveBeenCalledWith("c1");
   });
@@ -54,9 +56,9 @@ describe("VoicePicker (口播音色 · 选我的音色)", () => {
     );
     expect(screen.getByText(copy.brandVoice.pickerBrandGroup)).toBeInTheDocument();
     expect(screen.getByText(copy.brandVoice.pickerStandardGroup)).toBeInTheDocument();
-    const brandGroup = document.querySelector('[role="group"][aria-labelledby="voice-group-brand"]');
-    expect(brandGroup?.textContent).toContain("我的主播音");
-    expect(brandGroup?.textContent).not.toContain("知性女声");
+    const brandGroup = screen.getByRole("group", { name: copy.brandVoice.pickerBrandGroup });
+    expect(brandGroup.textContent).toContain("我的主播音");
+    expect(brandGroup.textContent).not.toContain("知性女声");
     fireEvent.click(screen.getByText("我的主播音"));
     expect(onChange).toHaveBeenCalledWith("c1");
   });
@@ -70,8 +72,8 @@ describe("VoicePicker (口播音色 · 选我的音色)", () => {
         onChange={() => {}}
       />
     );
-    const standardGroup = document.querySelector('[role="group"][aria-labelledby="voice-group-standard"]');
-    expect(standardGroup?.textContent).not.toContain("我的主播音");
+    const standardGroup = screen.getByRole("group", { name: copy.brandVoice.pickerStandardGroup });
+    expect(standardGroup.textContent).not.toContain("我的主播音");
     // 品牌组仅出现一次「我的主播音」
     expect(screen.getAllByText("我的主播音")).toHaveLength(1);
   });

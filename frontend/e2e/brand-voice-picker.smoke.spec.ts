@@ -30,9 +30,14 @@ async function login(page: Page): Promise<string[]> {
 
 test("口播「选我的音色」：品牌组+徽标；选中后 POST /videos 携带品牌音色 id；默认预设不回归", async ({ page }) => {
   const errors = await login(page);
-  // 默认落在数字人口播；音色区出现「我的品牌音色」组 + 系统组（用 group 标题 id，避开面包屑同名入口）。
-  await expect(page.locator("#voice-group-brand")).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator("#voice-group-standard")).toBeVisible();
+  // 默认落在数字人口播；音色区出现「我的品牌音色」组 + 系统组。
+  // WORKBENCH-KEEPALIVE-UI-0001：面板常驻后口播/电商两份 VoicePicker 同存于 DOM，分组标题 id 已改为 useId 生成
+  // （字面量 id 会重复，令第二份的 aria-labelledby 错指隐藏面板那份）→ 改用「面板 scope + role=group 的无障碍名」
+  // 定位：既避开面包屑同名入口（brandVoice.entry 与 pickerBrandGroup 都叫「我的品牌音色」），又顺带验证
+  // aria-labelledby 关联仍正确。
+  const avatar = page.getByTestId("panel-avatar_talk");
+  await expect(avatar.getByRole("group", { name: "我的品牌音色" })).toBeVisible({ timeout: 15_000 });
+  await expect(avatar.getByRole("group", { name: "系统音色" })).toBeVisible();
   // ready 品牌音色 + provider 徽标（豆包 / CosyVoice）。
   await expect(page.getByText("我的主播音")).toBeVisible();
   await expect(page.getByText("豆包")).toBeVisible();
@@ -80,15 +85,16 @@ test("口播「选我的音色」：品牌组+徽标；选中后 POST /videos �
 
 test("电商带货「选我的音色」+ 移动端显示：品牌组与 ready 音色可见，无 #130", async ({ page }) => {
   const errors = await login(page);
-  // 切到电商带货。
+  // 切到电商带货。KEEPALIVE：口播面板此时仍挂载（隐藏），故一律限定到电商面板 scope。
   await page.getByRole("button", { name: "电商带货" }).click();
-  await expect(page.locator("#voice-group-brand")).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText("我的主播音")).toBeVisible();
+  const ecom = page.getByTestId("panel-seedance_i2v");
+  await expect(ecom.getByRole("group", { name: "我的品牌音色" })).toBeVisible({ timeout: 15_000 });
+  await expect(ecom.getByText("我的主播音")).toBeVisible();
 
   // 移动端（375）：品牌组与 ready 音色仍可见，不溢出/白屏。
   await page.setViewportSize({ width: 375, height: 812 });
-  await expect(page.locator("#voice-group-brand")).toBeVisible();
-  await expect(page.getByText("我的主播音")).toBeVisible();
+  await expect(ecom.getByRole("group", { name: "我的品牌音色" })).toBeVisible();
+  await expect(ecom.getByText("我的主播音")).toBeVisible();
 
   expect(errors, `page errors：\n${errors.join("\n")}`).toEqual([]);
 });

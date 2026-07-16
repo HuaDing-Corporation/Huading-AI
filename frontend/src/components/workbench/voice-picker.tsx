@@ -1,5 +1,6 @@
 "use client";
 
+import { useId } from "react";
 import Link from "next/link";
 import { Loader2, Play } from "lucide-react";
 
@@ -130,6 +131,12 @@ function BrandVoiceOption({
  * 不传 brandVoices → 完全退化为历史行为（按 voices.source 分组），保护未接入消费者（批量电商）零回归。
  */
 export function VoicePicker({ voices, value, onChange, brandVoices, brandVoicesLoading, canUseVip }: VoicePickerProps) {
+  // WORKBENCH-KEEPALIVE-UI-0001：工作台面板改为常驻后，口播与电商带货两份 VoicePicker 会同时留在 DOM ——
+  // 原先的字面量 id（voice-group-brand/standard）就成了重复 id，第二份的 aria-labelledby 会解析到**第一份
+  // （隐藏面板）**的 span，而隐藏子树不在可及性树里 → 该分组失去无障碍名称。改用 useId 生成实例唯一 id。
+  const uid = useId();
+  const brandGroupId = `${uid}-voice-group-brand`;
+  const standardGroupId = `${uid}-voice-group-standard`;
   const standard = voices.filter((v) => v.source !== "brand_voice");
   const vipAllowed = canUseVip ?? true; // 缺省不门禁（零回归）
   const brandVipLocked = (v: BrandVoice) => !vipAllowed && isDoubaoProvider(v.provider);
@@ -143,20 +150,20 @@ export function VoicePicker({ voices, value, onChange, brandVoices, brandVoicesL
         <legend className={labelClass}>{copy.workbench.voiceLabel}</legend>
         {grouped && (
           <>
-            <span id="voice-group-brand" className={groupClass}>
+            <span id={brandGroupId} className={groupClass}>
               {copy.brandVoice.pickerBrandGroup}
             </span>
-            <div className={gridClass} role="group" aria-labelledby="voice-group-brand">
+            <div className={gridClass} role="group" aria-labelledby={brandGroupId}>
               {legacyBrand.map((voice) => (
                 <VoiceOption key={voice.id} voice={voice} selected={value === voice.id} onSelect={() => onChange(voice.id)} />
               ))}
             </div>
-            <span id="voice-group-standard" className={groupClass}>
+            <span id={standardGroupId} className={groupClass}>
               {copy.brandVoice.pickerStandardGroup}
             </span>
           </>
         )}
-        <div className={gridClass} role={grouped ? "group" : undefined} aria-labelledby={grouped ? "voice-group-standard" : undefined}>
+        <div className={gridClass} role={grouped ? "group" : undefined} aria-labelledby={grouped ? standardGroupId : undefined}>
           {standard.map((voice) => (
             <VoiceOption key={voice.id} voice={voice} selected={value === voice.id} onSelect={() => onChange(voice.id)} />
           ))}
@@ -174,11 +181,11 @@ export function VoicePicker({ voices, value, onChange, brandVoices, brandVoicesL
     <fieldset className="mb-[15px] m-0 min-w-0 border-0 p-0">
       <legend className={labelClass}>{copy.workbench.voiceLabel}</legend>
 
-      <span id="voice-group-brand" className={groupClass}>
+      <span id={brandGroupId} className={groupClass}>
         {copy.brandVoice.pickerBrandGroup}
       </span>
       {/* 三态同包一个持久 group+live 容器：分组语义在 loading/空态/选项态一致，加载→结果切换对读屏可播报。 */}
-      <div role="group" aria-labelledby="voice-group-brand" aria-live="polite">
+      <div role="group" aria-labelledby={brandGroupId} aria-live="polite">
         {brandVoicesLoading ? (
           <p className="text-[12.5px] text-ink-soft">{copy.brandVoice.pickerBrandLoading}</p>
         ) : !hasBrandOptions ? (
@@ -207,10 +214,10 @@ export function VoicePicker({ voices, value, onChange, brandVoices, brandVoicesL
         )}
       </div>
 
-      <span id="voice-group-standard" className={groupClass}>
+      <span id={standardGroupId} className={groupClass}>
         {copy.brandVoice.pickerStandardGroup}
       </span>
-      <div className={gridClass} role="group" aria-labelledby="voice-group-standard">
+      <div className={gridClass} role="group" aria-labelledby={standardGroupId}>
         {standard.map((voice) => (
           <VoiceOption key={voice.id} voice={voice} selected={value === voice.id} onSelect={() => onChange(voice.id)} />
         ))}

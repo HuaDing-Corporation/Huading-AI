@@ -192,6 +192,8 @@ export function EcomVideoForm({
         loading={scriptGen.isPending}
         speed={speed}
         label={copy.workbench.ecomScriptLabel}
+        // KEEPALIVE：面板常驻后与口播的 ScriptReview 同存于 DOM → id 必须区分（否则 label[for] 错指隐藏面板）。
+        id="ecom-script"
       />
 
       <AiTextField
@@ -230,7 +232,8 @@ export function EcomVideoForm({
         canUseVip={!authReady || canUseVipVoiceClone(session)}
       />
 
-      <MoreSettings speed={speed} onSpeedChange={setSpeed} />
+      {/* KEEPALIVE：与口播的 MoreSettings 常驻同存 → 语速滑杆 id 必须区分。 */}
+      <MoreSettings speed={speed} onSpeedChange={setSpeed} id="ecom-speed" />
 
       <AiLabelToggle checked={applyLabel} onChange={setApplyLabel} />
 
