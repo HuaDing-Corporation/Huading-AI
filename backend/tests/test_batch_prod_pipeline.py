@@ -1193,4 +1193,6 @@ def test_video_queue_routes_and_compose_worker_are_isolated() -> None:
     assert "-Q video" in full_compose
     assert "-Q video" in prod_compose
     assert "-Q default,avatar,image" in full_compose
-    assert "-Q default,avatar,image" in prod_compose
+    assert "-Q default,avatar --loglevel=info" in prod_compose
+    assert "worker-image:" in prod_compose
+    assert "--pool=prefork --concurrency=3 -Q image" in prod_compose

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.exceptions import AppError
-from app.db.models import CreditRate, Subscription, UsageRecord, VideoTask
+from app.db.models import CreditRate, ReversePromptJob, Subscription, UsageRecord, VideoTask
 from app.services import provider_costs
 
 _SCRIPT_CPS = Decimal("5")
@@ -67,6 +67,9 @@ def active_subscription(db: Session, tenant_id: str) -> Subscription:
     return subscription
 
 
+# Lock-order audit: a transaction may continue from Subscription to BatchJob
+# (settlement followed by refresh_batch_job). No BatchJob -> Subscription edge is
+# currently known, so acyclicity is an audit conclusion, not a structural guarantee.
 def _active_subscription_for_update(db: Session, tenant_id: str) -> Subscription:
     now = datetime.now(UTC)
     subscription = db.scalar(
@@ -90,11 +93,103 @@ def _active_subscription_for_update(db: Session, tenant_id: str) -> Subscription
     return subscription
 
 
+def _subscription_for_update(
+    db: Session,
+    subscription_id: str,
+) -> Subscription | None:
+    return db.scalar(
+        select(Subscription)
+        .where(Subscription.id == subscription_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
+def _lock_video_task_for_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    video_task_id: str,
+) -> None:
+    db.scalar(
+        select(VideoTask.id)
+        .where(
+            VideoTask.id == video_task_id,
+            VideoTask.tenant_id == tenant_id,
+        )
+        .with_for_update()
+    )
+
+
+def _lock_reverse_prompt_job_for_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    reverse_prompt_job_id: str,
+) -> None:
+    db.scalar(
+        select(ReversePromptJob.id)
+        .where(
+            ReversePromptJob.id == reverse_prompt_job_id,
+            ReversePromptJob.tenant_id == tenant_id,
+        )
+        .with_for_update()
+    )
+
+
 def remaining_credits(subscription: Subscription) -> int:
     return (
         subscription.quota_credits_total
         - subscription.quota_credits_used
         - subscription.quota_credits_reserved
+    )
+
+
+def _apply_active_quota_delta(
+    db: Session,
+    *,
+    tenant_id: str,
+    used_credits: int = 0,
+    reserved_credits: int = 0,
+) -> Subscription:
+    subscription = _active_subscription_for_update(db, tenant_id)
+    required_credits = used_credits + reserved_credits
+    if remaining_credits(subscription) < required_credits:
+        raise AppError(
+            "Insufficient tenant quota.",
+            code="TENANT_QUOTA_EXCEEDED",
+            status_code=403,
+        )
+    subscription.quota_credits_used += used_credits
+    subscription.quota_credits_reserved += reserved_credits
+    # A later quota call in this transaction refreshes the locked row from SQL.
+    db.flush([subscription])
+    return subscription
+
+
+def consume_active_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    credits: int,
+) -> Subscription:
+    return _apply_active_quota_delta(
+        db,
+        tenant_id=tenant_id,
+        used_credits=credits,
+    )
+
+
+def _reserve_active_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    credits: int,
+) -> Subscription:
+    return _apply_active_quota_delta(
+        db,
+        tenant_id=tenant_id,
+        reserved_credits=credits,
     )
 
 
@@ -415,15 +510,12 @@ def charge_copy_quota(
     model: str | None = None,
     llm_usage: provider_costs.DeepSeekUsageCost | None = None,
 ) -> UsageRecord:
-    subscription = active_subscription(db, tenant_id)
     estimate = estimate_copy_quota(db, tenant_id=tenant_id)
-    if remaining_credits(subscription) < estimate.reservation_units:
-        raise AppError(
-            "Insufficient tenant quota.",
-            code="TENANT_QUOTA_EXCEEDED",
-            status_code=403,
-        )
-    subscription.quota_credits_used += estimate.reservation_units
+    subscription = consume_active_quota(
+        db,
+        tenant_id=tenant_id,
+        credits=estimate.reservation_units,
+    )
     unit = "call"
     quantity = Decimal("1.000")
     cost_cents = 0
@@ -460,15 +552,12 @@ def charge_reverse_prompt_quota(
     total_tokens: int,
     cost_cents: int,
 ) -> UsageRecord:
-    subscription = active_subscription(db, tenant_id)
     estimate = estimate_reverse_prompt_quota(db, tenant_id=tenant_id)
-    if remaining_credits(subscription) < estimate.reservation_units:
-        raise AppError(
-            "Insufficient tenant quota.",
-            code="TENANT_QUOTA_EXCEEDED",
-            status_code=403,
-        )
-    subscription.quota_credits_used += estimate.reservation_units
+    subscription = consume_active_quota(
+        db,
+        tenant_id=tenant_id,
+        credits=estimate.reservation_units,
+    )
     usage_record = UsageRecord(
         tenant_id=tenant_id,
         subscription_id=subscription.id,
@@ -494,15 +583,12 @@ def charge_voice_clone_quota(
     provider: str,
     model: str | None = None,
 ) -> UsageRecord:
-    subscription = active_subscription(db, tenant_id)
     estimate = estimate_voice_clone_quota(db, tenant_id=tenant_id, provider=provider)
-    if remaining_credits(subscription) < estimate.reservation_units:
-        raise AppError(
-            "Insufficient tenant quota.",
-            code="TENANT_QUOTA_EXCEEDED",
-            status_code=403,
-        )
-    subscription.quota_credits_used += estimate.reservation_units
+    subscription = consume_active_quota(
+        db,
+        tenant_id=tenant_id,
+        credits=estimate.reservation_units,
+    )
     usage_record = UsageRecord(
         tenant_id=tenant_id,
         subscription_id=subscription.id,
@@ -529,20 +615,22 @@ def reserve_avatar_talk_quota(
     script: str,
     speed: Decimal | float | int,
 ) -> Reservation:
-    subscription = active_subscription(db, tenant_id)
     estimate = estimate_avatar_talk_quota(
         db,
         tenant_id=tenant_id,
         script=script,
         speed=speed,
     )
-    if remaining_credits(subscription) < estimate.reservation_units:
-        raise AppError(
-            "Insufficient tenant quota.",
-            code="TENANT_QUOTA_EXCEEDED",
-            status_code=403,
-        )
-    subscription.quota_credits_reserved += estimate.reservation_units
+    _lock_video_task_for_quota(
+        db,
+        tenant_id=tenant_id,
+        video_task_id=video_task_id,
+    )
+    subscription = _reserve_active_quota(
+        db,
+        tenant_id=tenant_id,
+        credits=estimate.reservation_units,
+    )
     usage_record = UsageRecord(
         tenant_id=tenant_id,
         subscription_id=subscription.id,
@@ -571,15 +659,17 @@ def reserve_reverse_prompt_video_quota(
     tenant_id: str,
     reverse_prompt_job_id: str,
 ) -> Reservation:
-    subscription = _active_subscription_for_update(db, tenant_id)
     estimate = estimate_reverse_prompt_video_quota(db, tenant_id=tenant_id)
-    if remaining_credits(subscription) < estimate.reservation_units:
-        raise AppError(
-            "Insufficient tenant quota.",
-            code="TENANT_QUOTA_EXCEEDED",
-            status_code=403,
-        )
-    subscription.quota_credits_reserved += estimate.reservation_units
+    _lock_reverse_prompt_job_for_quota(
+        db,
+        tenant_id=tenant_id,
+        reverse_prompt_job_id=reverse_prompt_job_id,
+    )
+    subscription = _reserve_active_quota(
+        db,
+        tenant_id=tenant_id,
+        credits=estimate.reservation_units,
+    )
     usage_record = UsageRecord(
         tenant_id=tenant_id,
         subscription_id=subscription.id,
@@ -612,7 +702,6 @@ def reserve_seedance_i2v_quota(
     estimated_seconds: int | None = None,
     resolution: str = "720p",
 ) -> Reservation:
-    subscription = active_subscription(db, tenant_id)
     estimate = estimate_seedance_i2v_quota(
         db,
         tenant_id=tenant_id,
@@ -621,13 +710,16 @@ def reserve_seedance_i2v_quota(
         estimated_seconds=estimated_seconds,
         resolution=resolution,
     )
-    if remaining_credits(subscription) < estimate.reservation_units:
-        raise AppError(
-            "Insufficient tenant quota.",
-            code="TENANT_QUOTA_EXCEEDED",
-            status_code=403,
-        )
-    subscription.quota_credits_reserved += estimate.reservation_units
+    _lock_video_task_for_quota(
+        db,
+        tenant_id=tenant_id,
+        video_task_id=video_task_id,
+    )
+    subscription = _reserve_active_quota(
+        db,
+        tenant_id=tenant_id,
+        credits=estimate.reservation_units,
+    )
     usage_record = UsageRecord(
         tenant_id=tenant_id,
         subscription_id=subscription.id,
@@ -658,20 +750,22 @@ def reserve_video_gen_quota(
     duration_sec: int,
     resolution: str,
 ) -> Reservation:
-    subscription = active_subscription(db, tenant_id)
     estimate = estimate_video_gen_quota(
         db,
         tenant_id=tenant_id,
         duration_sec=duration_sec,
         resolution=resolution,
     )
-    if remaining_credits(subscription) < estimate.reservation_units:
-        raise AppError(
-            "Insufficient tenant quota.",
-            code="TENANT_QUOTA_EXCEEDED",
-            status_code=403,
-        )
-    subscription.quota_credits_reserved += estimate.reservation_units
+    _lock_video_task_for_quota(
+        db,
+        tenant_id=tenant_id,
+        video_task_id=video_task_id,
+    )
+    subscription = _reserve_active_quota(
+        db,
+        tenant_id=tenant_id,
+        credits=estimate.reservation_units,
+    )
     usage_record = UsageRecord(
         tenant_id=tenant_id,
         subscription_id=subscription.id,
@@ -701,19 +795,21 @@ def reserve_image_generation_quota(
     video_task_id: str,
     n: int = 1,
 ) -> Reservation:
-    subscription = active_subscription(db, tenant_id)
     estimate = estimate_image_generation_quota(
         db,
         tenant_id=tenant_id,
         n=n,
     )
-    if remaining_credits(subscription) < estimate.reservation_units:
-        raise AppError(
-            "Insufficient tenant quota.",
-            code="TENANT_QUOTA_EXCEEDED",
-            status_code=403,
-        )
-    subscription.quota_credits_reserved += estimate.reservation_units
+    _lock_video_task_for_quota(
+        db,
+        tenant_id=tenant_id,
+        video_task_id=video_task_id,
+    )
+    subscription = _reserve_active_quota(
+        db,
+        tenant_id=tenant_id,
+        credits=estimate.reservation_units,
+    )
     usage_record = UsageRecord(
         tenant_id=tenant_id,
         subscription_id=subscription.id,
@@ -742,6 +838,11 @@ def reserve_released_video_task_quota(
     tenant_id: str,
     video_task_id: str,
 ) -> Reservation | None:
+    _lock_video_task_for_quota(
+        db,
+        tenant_id=tenant_id,
+        video_task_id=video_task_id,
+    )
     settled = db.scalar(
         select(UsageRecord.id).where(
             UsageRecord.tenant_id == tenant_id,
@@ -761,20 +862,19 @@ def reserve_released_video_task_quota(
             UsageRecord.credits > 0,
         )
         .order_by(UsageRecord.created_at.desc(), UsageRecord.id.desc())
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if released is None:
         return None
 
-    subscription = _active_subscription_for_update(db, tenant_id)
     credits = Decimal(released.credits)
     reservation_units = _credit_units(credits)
-    if remaining_credits(subscription) < reservation_units:
-        raise AppError(
-            "Insufficient tenant quota.",
-            code="TENANT_QUOTA_EXCEEDED",
-            status_code=403,
-        )
-    subscription.quota_credits_reserved += reservation_units
+    subscription = _reserve_active_quota(
+        db,
+        tenant_id=tenant_id,
+        credits=reservation_units,
+    )
     usage_record = UsageRecord(
         tenant_id=tenant_id,
         subscription_id=subscription.id,
@@ -798,12 +898,21 @@ def reserve_released_video_task_quota(
 
 
 def _reserved_record(db: Session, *, tenant_id: str, video_task_id: str) -> UsageRecord | None:
+    _lock_video_task_for_quota(
+        db,
+        tenant_id=tenant_id,
+        video_task_id=video_task_id,
+    )
     return db.scalar(
-        select(UsageRecord).where(
+        select(UsageRecord)
+        .where(
             UsageRecord.tenant_id == tenant_id,
             UsageRecord.video_task_id == video_task_id,
             UsageRecord.status == "reserved",
         )
+        .order_by(UsageRecord.created_at.desc(), UsageRecord.id.desc())
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
 
 
@@ -813,6 +922,11 @@ def _reserved_reverse_prompt_record(
     tenant_id: str,
     reverse_prompt_job_id: str,
 ) -> UsageRecord | None:
+    _lock_reverse_prompt_job_for_quota(
+        db,
+        tenant_id=tenant_id,
+        reverse_prompt_job_id=reverse_prompt_job_id,
+    )
     return db.scalar(
         select(UsageRecord)
         .where(
@@ -821,7 +935,9 @@ def _reserved_reverse_prompt_record(
             UsageRecord.capability == "reverse_prompt_video",
             UsageRecord.status == "reserved",
         )
-        .order_by(UsageRecord.created_at.desc())
+        .order_by(UsageRecord.created_at.desc(), UsageRecord.id.desc())
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
 
 
@@ -836,9 +952,9 @@ def release_reverse_prompt_video_quota(
         tenant_id=tenant_id,
         reverse_prompt_job_id=reverse_prompt_job_id,
     )
-    if record is None or record.subscription_id is None:
+    if record is None or record.status != "reserved" or record.subscription_id is None:
         return
-    subscription = db.get(Subscription, record.subscription_id)
+    subscription = _subscription_for_update(db, record.subscription_id)
     if subscription is None:
         return
     subscription.quota_credits_reserved = max(
@@ -864,9 +980,9 @@ def settle_reverse_prompt_video_quota(
         tenant_id=tenant_id,
         reverse_prompt_job_id=reverse_prompt_job_id,
     )
-    if record is None or record.subscription_id is None:
+    if record is None or record.status != "reserved" or record.subscription_id is None:
         return
-    subscription = db.get(Subscription, record.subscription_id)
+    subscription = _subscription_for_update(db, record.subscription_id)
     if subscription is None:
         return
     reserved_units = _credit_units(Decimal(record.credits))
@@ -886,9 +1002,9 @@ def settle_reverse_prompt_video_quota(
 
 def release_reserved_quota(db: Session, *, tenant_id: str, video_task_id: str) -> None:
     record = _reserved_record(db, tenant_id=tenant_id, video_task_id=video_task_id)
-    if record is None or record.subscription_id is None:
+    if record is None or record.status != "reserved" or record.subscription_id is None:
         return
-    subscription = db.get(Subscription, record.subscription_id)
+    subscription = _subscription_for_update(db, record.subscription_id)
     if subscription is None:
         return
     subscription.quota_credits_reserved = max(
@@ -969,9 +1085,9 @@ def settle_reserved_quota(
     model: str | None = None,
 ) -> None:
     record = _reserved_record(db, tenant_id=tenant_id, video_task_id=video_task_id)
-    if record is None or record.subscription_id is None:
+    if record is None or record.status != "reserved" or record.subscription_id is None:
         return
-    subscription = db.get(Subscription, record.subscription_id)
+    subscription = _subscription_for_update(db, record.subscription_id)
     if subscription is None:
         return
 

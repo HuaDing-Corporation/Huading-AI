@@ -1,5 +1,6 @@
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,7 +19,9 @@ from app.services.plan_access import (
     configured_platform_tenant_slugs,
     platform_tenant_configuration_issues,
 )
+from app.services.progress import build_progress_store
 from app.services.storage.factory import create_object_storage
+from app.services.task_recovery import recover_orphaned_image_queue_tasks
 
 logger = get_logger(__name__)
 
@@ -43,6 +46,45 @@ def _warn_platform_tenant_configuration() -> None:
         )
 
 
+async def _run_orphan_recovery_loop() -> None:
+    try:
+        progress_store = build_progress_store(settings.redis_url)
+    except Exception as exc:  # pragma: no cover - invalid Redis config is uncommon
+        progress_store = None
+        logger.warning(
+            "orphan_task.progress_store_unavailable",
+            error_type=type(exc).__name__,
+        )
+    while True:
+        await asyncio.sleep(settings.engine_orphan_recovery_interval_seconds)
+        try:
+            result = await asyncio.to_thread(
+                recover_orphaned_image_queue_tasks,
+                session_factory=SessionLocal,
+                progress_store=progress_store,
+            )
+            if result is not None and any(
+                (
+                    result.photo_tasks,
+                    result.reverse_prompt_jobs,
+                    result.ecom_replicate_jobs,
+                )
+            ):
+                logger.warning(
+                    "orphan_task.recovered",
+                    photo_tasks=result.photo_tasks,
+                    reverse_prompt_jobs=result.reverse_prompt_jobs,
+                    ecom_replicate_jobs=result.ecom_replicate_jobs,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - scheduler must survive DB outages
+            logger.warning(
+                "orphan_task.recovery_failed",
+                error_type=type(exc).__name__,
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging(settings.log_level)
@@ -54,8 +96,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             storage=create_object_storage(settings),
         )
         logger.info("bgm.seeded")
-    yield
-    logger.info("app.stopping")
+    recovery_task = None
+    if settings.engine_orphan_recovery_interval_seconds > 0:
+        recovery_task = asyncio.create_task(_run_orphan_recovery_loop())
+    try:
+        yield
+    finally:
+        if recovery_task is not None:
+            recovery_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await recovery_task
+        logger.info("app.stopping")
 
 
 def create_app() -> FastAPI:

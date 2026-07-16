@@ -1187,9 +1187,12 @@ def run_ecom_replicate_generation(job_id: str, output_index: int | None = None) 
             last_error: Exception | None = None
             max_attempts = _max_ecom_replicate_attempts()
             for attempt in range(max_attempts):
+                attempt_started_at = datetime.now(UTC)
                 output.status = "generating"
-                output.updated_at = datetime.now(UTC)
-                db.flush()
+                output.updated_at = attempt_started_at
+                job.updated_at = attempt_started_at
+                # Publish a durable lease before a provider call that can run for 1500s.
+                db.commit()
                 try:
                     _render_ecom_replicate_output_once(
                         db,

@@ -212,6 +212,7 @@ def _active_subscription_for_update(db: Session, *, tenant_id: str) -> Subscript
         .order_by(Subscription.period_end.desc(), Subscription.created_at.desc())
         .limit(1)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if subscription is None:
         raise AppError(

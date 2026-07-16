@@ -24,7 +24,7 @@ from app.db.models import (
 )
 from app.main import app
 from app.schemas.ecom_images import EcomReplicateRequest
-from app.services import ecom_replicate
+from app.services import ecom_replicate, quota
 from app.workers import image_gen
 
 
@@ -874,8 +874,13 @@ def test_ecom_replicate_confirm_charges_once_and_enqueues_generation(
 
 
 def test_ecom_replicate_confirm_uses_row_locks_for_concurrent_safety() -> None:
-    source = inspect.getsource(ecom_replicate.confirm_replicate_job) + inspect.getsource(
-        ecom_replicate._active_subscription_for_update
+    source = "".join(
+        inspect.getsource(function)
+        for function in (
+            ecom_replicate.confirm_replicate_job,
+            quota.consume_active_quota,
+            quota._active_subscription_for_update,
+        )
     )
 
     assert source.count(".with_for_update()") >= 2

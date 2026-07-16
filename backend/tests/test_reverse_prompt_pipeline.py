@@ -909,6 +909,7 @@ def test_reverse_prompt_video_regenerate_job_query_uses_for_update(
             for sql in statements
             if "FROM reverse_prompt_jobs" in sql
             and "AND reverse_prompt_jobs.tenant_id =" in sql
+            and "reverse_prompt_jobs.created_by_user_id" in sql
         ]
         assert len(decision_queries) == 1
         assert "FOR UPDATE" in decision_queries[0]

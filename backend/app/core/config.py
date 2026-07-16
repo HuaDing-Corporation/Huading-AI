@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://localhost:6379/2"
     celery_task_always_eager: bool = False
     engine_admin_retry_stale_seconds: int = Field(default=60, ge=0)
+    engine_orphan_task_stale_seconds: float = Field(default=1800.0, gt=0)
+    engine_orphan_recovery_interval_seconds: float = Field(default=60.0, ge=0)
 
     jwt_secret_key: str = Field(min_length=32)
     jwt_algorithm: str = "HS256"
@@ -59,7 +61,7 @@ class Settings(BaseSettings):
     redis_socket_timeout: float = 2.0  # seconds
 
     # SSE progress stream cap (seconds) before emitting an sse_timeout event.
-    sse_timeout_seconds: int = 600
+    sse_timeout_seconds: int = 1500
     upload_max_bytes: int = 10 * 1024 * 1024
     upload_video_max_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
 
@@ -102,7 +104,7 @@ class Settings(BaseSettings):
     engine_seedance_mini_model: str = "doubao-seedance-2-0-mini-pending"
     engine_seedance_request_timeout_seconds: float = 120.0
     engine_seedance_poll_interval_seconds: float = 5.0
-    engine_seedance_timeout_seconds: float = 600.0
+    engine_seedance_timeout_seconds: float = 1500.0
     # Volcengine Jimeng OmniHuman (CV API). Secrets are env-only and never
     # hardcoded; req_key is a public model identifier in the provider adapter.
     engine_omnihuman_access_key: str = ""
@@ -110,7 +112,7 @@ class Settings(BaseSettings):
     engine_omnihuman_region: str = "cn-north-1"
     engine_omnihuman_request_timeout_seconds: float = 120.0
     engine_omnihuman_poll_interval_seconds: float = 5.0
-    engine_omnihuman_timeout_seconds: float = 600.0
+    engine_omnihuman_timeout_seconds: float = 1500.0
     engine_omnihuman_result_host_suffixes: str = "aigc-cloud.com"
     engine_omnihuman_cny_per_sec: float = 1.0
     engine_omnihuman_change_lips_lite_req_key: str = "realman_change_lips"
@@ -162,7 +164,7 @@ class Settings(BaseSettings):
     openai_base_url: str = ""
     openai_image_model: str = "gpt-image-2"
     openai_local_proxy: str = ""
-    openai_image_timeout: float = 120.0
+    openai_image_timeout: float = 1500.0
     # APIMart Images. APIMart exposes GPT image generation as async tasks and
     # requires public image URLs for edit-style requests.
     engine_apimart_api_key: str = ""
@@ -172,10 +174,10 @@ class Settings(BaseSettings):
     engine_apimart_request_timeout_seconds: float = 60.0
     engine_apimart_poll_initial_delay_seconds: float = 10.0
     engine_apimart_poll_interval_seconds: float = 4.0
-    engine_apimart_timeout_seconds: float = 180.0
+    engine_apimart_timeout_seconds: float = 1500.0
     engine_apimart_video_poll_initial_delay_seconds: float = 30.0
     engine_apimart_video_poll_interval_seconds: float = 10.0
-    engine_apimart_video_timeout_seconds: float = 900.0
+    engine_apimart_video_timeout_seconds: float = 1500.0
     engine_apimart_credit_usd: float = 0.10
     engine_apimart_reverse_prompt_model: str = "gemini-3.1-pro-preview"
     engine_apimart_reverse_prompt_input_credits_per_m: float = 16.0
@@ -194,7 +196,7 @@ class Settings(BaseSettings):
     engine_usd_cny_rate: float = 7.2
     engine_deepseek_cny_per_1k_input: float = 0.001008
     engine_deepseek_cny_per_1k_output: float = 0.002016
-    engine_image_provider_timeout_seconds: float = 240.0
+    engine_image_provider_timeout_seconds: float = 1500.0
     engine_subtitle_font_path: str = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
     engine_default_template: str = "1080x1920/static_default.html"
     # Playwright browser channel for frame rendering: "chrome"/"msedge" to use a

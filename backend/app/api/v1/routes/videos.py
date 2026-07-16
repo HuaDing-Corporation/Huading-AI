@@ -1174,17 +1174,19 @@ async def stream_video_events(
     store: ProgressStore = ProgressStoreDependency,
 ) -> StreamingResponse:
     """Server-Sent Events stream of progress snapshots until the task is terminal."""
+    tenant_id = user.tenant_id
     owner_tenant_id = _video_task_tenants.get(task_id)
     task = db.get(VideoTask, task_id)
     if task is not None:
         owner_tenant_id = task.tenant_id
-    if owner_tenant_id is not None and owner_tenant_id != user.tenant_id:
+    if owner_tenant_id is not None and owner_tenant_id != tenant_id:
         raise AppError("Video task not found.", code="VIDEO_TASK_NOT_FOUND", status_code=404)
     if owner_tenant_id is None and task is None:
         raise AppError("Video task not found.", code="VIDEO_TASK_NOT_FOUND", status_code=404)
+    db.close()
 
     async def event_generator():
-        scoped_id = scoped_task_id(user.tenant_id, task_id)
+        scoped_id = scoped_task_id(tenant_id, task_id)
         last: str | None = None
         max_ticks = max(1, int(settings.sse_timeout_seconds / _SSE_INTERVAL_S))
         for _ in range(max_ticks):

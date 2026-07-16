@@ -11,6 +11,16 @@ from app.core.config import Settings
 
 _JWT = "x" * 32
 
+_GENERATION_WAIT_ENV = {
+    "SSE_TIMEOUT_SECONDS": "sse_timeout_seconds",
+    "ENGINE_SEEDANCE_TIMEOUT_SECONDS": "engine_seedance_timeout_seconds",
+    "ENGINE_OMNIHUMAN_TIMEOUT_SECONDS": "engine_omnihuman_timeout_seconds",
+    "OPENAI_IMAGE_TIMEOUT": "openai_image_timeout",
+    "ENGINE_APIMART_TIMEOUT_SECONDS": "engine_apimart_timeout_seconds",
+    "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS": "engine_apimart_video_timeout_seconds",
+    "ENGINE_IMAGE_PROVIDER_TIMEOUT_SECONDS": "engine_image_provider_timeout_seconds",
+}
+
 
 def _settings_with_cors(monkeypatch, raw: str) -> Settings:
     monkeypatch.setenv("CORS_ORIGINS", raw)
@@ -38,6 +48,31 @@ def test_default_when_unset(monkeypatch) -> None:
     monkeypatch.delenv("ENGINE_CORS_ORIGINS", raising=False)
     s = Settings(_env_file=None, jwt_secret_key=_JWT)
     assert "http://localhost:3000" in s.cors_origins
+
+
+def test_generation_wait_defaults_allow_1500_seconds(monkeypatch) -> None:
+    for env_name in _GENERATION_WAIT_ENV:
+        monkeypatch.delenv(env_name, raising=False)
+
+    s = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    for field_name in _GENERATION_WAIT_ENV.values():
+        assert getattr(s, field_name) == 1500
+
+    # Polling endpoints should fail fast per request while the overall task waits.
+    assert s.engine_seedance_request_timeout_seconds == 120
+    assert s.engine_omnihuman_request_timeout_seconds == 120
+    assert s.engine_apimart_request_timeout_seconds == 60
+
+
+def test_generation_wait_settings_remain_env_overridable(monkeypatch) -> None:
+    for index, env_name in enumerate(_GENERATION_WAIT_ENV, start=1):
+        monkeypatch.setenv(env_name, str(1500 + index))
+
+    s = Settings(_env_file=None, jwt_secret_key=_JWT)
+
+    for index, field_name in enumerate(_GENERATION_WAIT_ENV.values(), start=1):
+        assert getattr(s, field_name) == 1500 + index
 
 
 def test_engine_cors_origins_override_legacy_cors_env(monkeypatch) -> None:

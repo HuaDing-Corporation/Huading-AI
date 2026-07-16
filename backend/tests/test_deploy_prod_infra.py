@@ -1,11 +1,39 @@
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INFRA = REPO_ROOT / "infra"
+
+_OVERALL_WAIT_KEYS_BY_EXAMPLE = {
+    REPO_ROOT / "backend" / ".env.example": {
+        "ENGINE_SEEDANCE_TIMEOUT_SECONDS",
+        "ENGINE_OMNIHUMAN_TIMEOUT_SECONDS",
+        "ENGINE_APIMART_TIMEOUT_SECONDS",
+        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS",
+        "ENGINE_IMAGE_PROVIDER_TIMEOUT_SECONDS",
+        "OPENAI_IMAGE_TIMEOUT",
+    },
+    INFRA / ".env.example": {
+        "ENGINE_SEEDANCE_TIMEOUT_SECONDS",
+        "ENGINE_OMNIHUMAN_TIMEOUT_SECONDS",
+        "ENGINE_APIMART_TIMEOUT_SECONDS",
+        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS",
+        "ENGINE_IMAGE_PROVIDER_TIMEOUT_SECONDS",
+        "OPENAI_IMAGE_TIMEOUT",
+    },
+    INFRA / ".env.prod.example": {
+        "ENGINE_SEEDANCE_TIMEOUT_SECONDS",
+        "ENGINE_OMNIHUMAN_TIMEOUT_SECONDS",
+        "ENGINE_APIMART_TIMEOUT_SECONDS",
+        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS",
+        "ENGINE_IMAGE_PROVIDER_TIMEOUT_SECONDS",
+        "OPENAI_IMAGE_TIMEOUT",
+    },
+}
 
 
 def _prod_compose() -> dict:
@@ -27,6 +55,29 @@ def _nginx_location_block(conf: str, location: str) -> str:
     raise AssertionError(f"location block not closed: {location}")
 
 
+def _worker_queue(command: str) -> str:
+    args = shlex.split(command)
+    return args[args.index("-Q") + 1]
+
+
+def _env_values(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key and not key.startswith("#"):
+            values[key] = value
+    return values
+
+
+def test_generation_overall_waits_are_1500_in_every_env_example() -> None:
+    for path, required_keys in _OVERALL_WAIT_KEYS_BY_EXAMPLE.items():
+        values = _env_values(path)
+        assert required_keys <= values.keys(), path
+        assert {key: values[key] for key in required_keys} == {
+            key: "1500" for key in required_keys
+        }
+
+
 def test_prod_compose_exposes_only_nginx_and_persists_state() -> None:
     compose = _prod_compose()
     services = compose["services"]
@@ -35,6 +86,7 @@ def test_prod_compose_exposes_only_nginx_and_persists_state() -> None:
         "frontend",
         "backend",
         "worker",
+        "worker-image",
         "postgres",
         "redis",
         "minio",
@@ -106,8 +158,30 @@ def test_prod_compose_wires_public_frontend_and_backend_env() -> None:
     assert frontend_args["NEXT_PUBLIC_API_BASE_URL"] == "https://huadingai.cn/api"
     assert frontend_args["NEXT_PUBLIC_USE_MOCK"] == "0"
     assert compose["services"]["worker"]["command"].endswith(
-        "-Q default,avatar,image --loglevel=info"
+        "-Q default,avatar --loglevel=info"
     )
+
+
+def test_prod_workers_isolate_image_concurrency_from_avatar() -> None:
+    services = _prod_compose()["services"]
+    worker = services["worker"]
+    image_worker = services["worker-image"]
+    video_worker = services["worker-video"]
+
+    worker_args = shlex.split(worker["command"])
+    assert "--pool=solo" in worker_args
+    assert "--concurrency=1" in worker_args
+    assert _worker_queue(worker["command"]) == "default,avatar"
+
+    image_args = shlex.split(image_worker["command"])
+    assert "--pool=prefork" in image_args
+    assert "--concurrency=3" in image_args
+    assert _worker_queue(image_worker["command"]) == "image"
+
+    assert _worker_queue(video_worker["command"]) == "video"
+    assert worker["environment"] == image_worker["environment"]
+    assert worker["depends_on"] == image_worker["depends_on"]
+    assert worker["volumes"] == image_worker["volumes"]
 
 
 def test_prod_nginx_enforces_https_and_supports_api_sse_and_minio() -> None:
@@ -124,10 +198,14 @@ def test_prod_nginx_enforces_https_and_supports_api_sse_and_minio() -> None:
     assert "proxy_pass $upstream_backend;" in nginx_conf
     assert "proxy_pass $upstream_frontend;" in nginx_conf
     assert "location ~ ^/api/.*/events$" in nginx_conf
-    assert "proxy_buffering off;" in nginx_conf
-    assert "proxy_read_timeout 600s;" in nginx_conf
+    events_block = _nginx_location_block(nginx_conf, "~ ^/api/.*/events$")
+    assert "proxy_buffering off;" in events_block
+    assert "proxy_read_timeout 1800s;" in events_block
+    assert "proxy_send_timeout 1800s;" in events_block
     api_block = _nginx_location_block(nginx_conf, "/api/")
     assert "proxy_set_header Host $host;" in api_block
+    assert "proxy_read_timeout 120s;" in api_block
+    assert "proxy_send_timeout 120s;" in api_block
     assert "location /minio/" not in nginx_conf
     minio_block = _nginx_location_block(nginx_conf, "/huading-videos/")
     assert "proxy_set_header Host $host;" in minio_block
@@ -171,7 +249,9 @@ def test_prod_env_example_and_runbook_have_placeholders_only() -> None:
         "ENGINE_APIMART_VIDEO_MODEL=doubao-seedance-2.0",
         "ENGINE_APIMART_VIDEO_POLL_INITIAL_DELAY_SECONDS=30",
         "ENGINE_APIMART_VIDEO_POLL_INTERVAL_SECONDS=10",
-        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS=900",
+        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS=1500",
+        "ENGINE_ORPHAN_TASK_STALE_SECONDS=1800",
+        "ENGINE_ORPHAN_RECOVERY_INTERVAL_SECONDS=60",
         "ENGINE_DOUBAO_TTS_APPID=",
         "ENGINE_DOUBAO_VOICE_CLONE_APPID=",
         "OPENAI_API_KEY=",
@@ -186,7 +266,9 @@ def test_prod_env_example_and_runbook_have_placeholders_only() -> None:
         "ENGINE_APIMART_VIDEO_MODEL=doubao-seedance-2.0",
         "ENGINE_APIMART_VIDEO_POLL_INITIAL_DELAY_SECONDS=30",
         "ENGINE_APIMART_VIDEO_POLL_INTERVAL_SECONDS=10",
-        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS=900",
+        "ENGINE_APIMART_VIDEO_TIMEOUT_SECONDS=1500",
+        "ENGINE_ORPHAN_TASK_STALE_SECONDS=1800",
+        "ENGINE_ORPHAN_RECOVERY_INTERVAL_SECONDS=60",
     ]
     for key in backend_required_keys:
         assert key in backend_env_example

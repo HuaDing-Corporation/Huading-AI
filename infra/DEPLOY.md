@@ -38,6 +38,16 @@ path when forwarding to MinIO. Configure object storage CORS for public
 Video generation defaults to APIMart `doubao-seedance-2.0`; `seedance-mini`
 remains registered only as a database rollback option.
 
+Overall generation waits in `infra/.env` must be `1500` seconds for Seedance,
+OmniHuman, APIMart image/video, the image-provider wrapper, and OpenAI image.
+Keep per-request HTTP timeouts and polling intervals at their shorter template
+values. Existing deployments must update their real `infra/.env` manually;
+copying a newer example does not overwrite that runtime file. The API checks
+image-queue work every 60 seconds and marks tasks failed after 1800 seconds
+without durable progress, releasing photo and video reverse-prompt
+reservations. Keep `ENGINE_ORPHAN_TASK_STALE_SECONDS` above the 1500-second
+provider wait ceiling.
+
 Do not commit `infra/.env`.
 
 ## First Start
