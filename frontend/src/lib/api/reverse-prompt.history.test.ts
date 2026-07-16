@@ -5,6 +5,7 @@ import {
   getReversePromptJob,
   listReversePromptJobs,
   regenerateReversePrompt,
+  reverseFromAsset,
   saveReversePrompt,
   type ReverseSourceKind
 } from "@/lib/api/reverse-prompt";
@@ -190,5 +191,87 @@ describe("反推软删 DELETE /reverse-prompt/jobs/{id}", () => {
   it("重复删除 / 不存在 → 404", async () => {
     await expect(deleteReversePromptJob("rh-vid-3")).rejects.toMatchObject({ status: 404 }); // 上条已删
     await expect(deleteReversePromptJob("nope")).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+// ── 🔴 FIX3：单一权威 job store 的承重 ────────────────────────────────────────────────
+// Codex B 的结论：剩下的不是「第五处遗漏」，是**没有权威存储 → 每个 handler 各自猜「什么该成功」**。
+// 下面每条都钉「必须先存在于 store」这件事本身 —— 摘掉 liveJob 守卫 → 对应条必红。
+describe("反推 job store（单一权威存储）", () => {
+  it("🔴 不存在的 rp-*（旧 mock 的放行分支）→ 404，不再凭 id 前缀现编一份 job", async () => {
+    // 旧 mock：`if (id.startsWith("rp-")) return ok(reverseJobRead(id))` —— 任何 rp-* 都返 200 假 job。
+    // 那不是疏忽：POST 图片反推产生的 job 当时根本没落地，除了现编无路可走。
+    await expect(getReversePromptJob("rp-99999")).rejects.toMatchObject({
+      status: 404,
+      code: "REVERSE_PROMPT_JOB_NOT_FOUND"
+    });
+    await expect(regenerateReversePrompt("rp-99999")).rejects.toMatchObject({ status: 404 });
+    await expect(saveReversePrompt("rp-99999")).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("🔴 不存在的任意 ID（含 rpv-* / 裸串）→ 404（四个动作口径一致，不是各 handler 各判）", async () => {
+    for (const id of ["rpv-99999", "bogus", "rh-nope"]) {
+      await expect(getReversePromptJob(id)).rejects.toMatchObject({ status: 404 });
+      await expect(regenerateReversePrompt(id)).rejects.toMatchObject({ status: 404 });
+      await expect(saveReversePrompt(id)).rejects.toMatchObject({ status: 404 });
+      await expect(deleteReversePromptJob(id)).rejects.toMatchObject({ status: 404 });
+    }
+  });
+
+  // 🔴 BE services/reverse_prompt.py:252-257 —— `if job.status not in {"succeeded", "saved"}` → 409。
+  // 旧 mock 对 queued/running/failed 一律成功 = 与 BE **正相反**（线上必 409、本地全绿）。
+  it("🔴 save 非终态 → 409 REVERSE_PROMPT_NOT_READY（queued / running / failed 都不行）", async () => {
+    // queued：现造一个视频 job（BE POST 视频源 → 202 queued）。**不用 rh-vid-3 那个 queued seed** ——
+    // 它被上面的软删 describe 删了，拿它测会得到 404 而不是 409，等于又赌一次执行顺序（刚在 rp-1 修掉的病）。
+    const queued = await reverseFromAsset({ source_asset_id: "video-asset-1" });
+    expect(queued.status).toBe("queued");
+    await expect(saveReversePrompt(queued.id)).rejects.toMatchObject({
+      status: 409,
+      code: "REVERSE_PROMPT_NOT_READY"
+    });
+    await expect(saveReversePrompt("rh-vid-2")).rejects.toMatchObject({ status: 409 }); // running
+    await expect(saveReversePrompt("rh-img-3")).rejects.toMatchObject({ status: 409 }); // failed
+  });
+
+  // BE 放行的是**两个**终态：`not in {"succeeded","saved"}` → saved 也放行 → 重复保存幂等。
+  // （任务包只提了 succeeded；以源码为准。）
+  it("save 终态放行：succeeded → saved；已 saved 再保存**仍成功**（BE 放行 {succeeded, saved} 两态，幂等）", async () => {
+    const first = await saveReversePrompt("rh-img-1"); // succeeded
+    expect(first.status).toBe("saved");
+    const again = await saveReversePrompt("rh-img-1"); // 已 saved → BE 仍放行
+    expect(again.status).toBe("saved");
+    const seeded = await saveReversePrompt("rh-img-2"); // seed 本就是 saved
+    expect(seeded.status).toBe("saved");
+  });
+
+  // 🔴 BE routes:183-185 —— source_kind=="video" → `_enqueue_reverse_prompt_video` + **202**；
+  // services:220 → status 重置为 **queued**、result_json=None。
+  // 旧 mock 把视频 job 的 regenerate 伪造成 **image succeeded / 200** —— 源类型和同步性一起造假。
+  it("🔴 视频 job regenerate → 202 + 重新 queued（不是 image succeeded / 200）", async () => {
+    const before = await getReversePromptJob("rh-vid-1");
+    expect(before.status).toBe("succeeded");
+    expect(before.source_kind).toBe("video");
+
+    const job = await regenerateReversePrompt("rh-vid-1");
+    expect(job.status).toBe("queued"); // 不是 succeeded
+    expect(job.source_kind).toBe("video"); // 不是 image
+    expect(job.result ?? null).toBeNull(); // BE 清 result_json
+  });
+
+  // 🔴 这条**任务包的表里没有** —— 我读 BE 时发现的：prepare_reverse_prompt_video_retry:197-202
+  // 对 queued/running 的视频 job 直接 409 ALREADY_RUNNING（旧 mock 对它照样返成功）。
+  it("🔴 视频 job 正在跑（queued/running）时 regenerate → 409 REVERSE_PROMPT_ALREADY_RUNNING", async () => {
+    await expect(regenerateReversePrompt("rh-vid-2")).rejects.toMatchObject({
+      status: 409,
+      code: "REVERSE_PROMPT_ALREADY_RUNNING"
+    }); // running
+    // 上一条刚把 rh-vid-1 打回 queued → 它现在也不可再 regenerate
+    await expect(regenerateReversePrompt("rh-vid-1")).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("POST 创建的 job 真的落进 store：新 job 的 id 可取详情、可 save（不再靠 id 前缀猜）", async () => {
+    const created = await reverseFromAsset({ source_asset_id: "upload-1" });
+    expect((await getReversePromptJob(created.id)).id).toBe(created.id); // 存在 → 可取
+    expect((await saveReversePrompt(created.id)).status).toBe("saved"); // succeeded → 可存
   });
 });

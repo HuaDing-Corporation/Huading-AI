@@ -260,7 +260,11 @@ describe("ReverseHistoryList (提示词反推历史)", () => {
   });
 
   // 🔴 变异门③：去掉 ConfirmDialog 确认门（点删除直接 mutateAsync）→ 本条必红。
-  it("删除确认门：点删除只弹确认不删 → 取消不删 → 确认恰删一次；文案是软删「可恢复」口径", async () => {
+  // 🔴 FIX3 · P2 假路标：这条测试名原本写的是「文案是软删『可恢复』口径」—— 而它的断言从 FIX2 起就
+  // **明确禁止**「可恢复」那句文案（下面 queryByText(deleteConfirmSoft) 反断言）。**名字和断言说的是相反的话。**
+  // 名字说谎比没有守卫更危险：读的人信名字、不读断言，就以为「可恢复」是被守着的口径。
+  // （本项目在 quota 那边刚栽过同款：`centralized_in_locked_services` 只证明「集中」、没证明「加锁」。）
+  it("删除确认门：点删除只弹确认不删 → 取消不删 → 确认恰删一次；文案只讲用户可见后果", async () => {
     mocks.jobs.mockReturnValue(listOf(IMG_ITEM));
     mocks.job.mockReturnValue(noJob);
     mocks.del.mutateAsync.mockResolvedValue({ id: "rh-img-1", deleted_at: "2026-07-16T12:30:00.000Z" });
