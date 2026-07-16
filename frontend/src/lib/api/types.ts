@@ -47,15 +47,34 @@ export interface TenantRegisterResponse {
 // 前端此前只列 4 档，致 fromVideoRead 裸透传的 cancelled 在 thumbIcon 查不到 → #130（ECOM-HISTORY-CANCELLED-FIX-0001）。
 export type VideoStatus = "queued" | "running" | "done" | "failed" | "cancelled";
 
+/**
+ * 列表项 —— 🔴 **BE 列表返回的是完整 `VideoRead`**，不是精简版：
+ * `VideoListResponse.items: list[VideoRead]`（backend/app/schemas/videos.py:345-346），且列表路由用的是
+ * **与详情同一个 builder**（`items = [_video_read(task, ...)]`，routes/videos.py:606-609）。
+ *
+ * 本接口按「FE 实际消费的字段」声明其子集 —— 子集本身没问题，**少声明了在读的字段才是问题**：
+ * `fromVideoRead` 曾经要 `read as Partial<VideoDetail>` 才能读 playback_url / download_url /
+ * duration_ms / error_message，等于**用强转绕开类型检查**。强转一旦存在，fixture 写错字段名
+ * （如 `duration_sec` ← BE 其实给 `duration_ms`）类型层一声不吭，只能等确定值断言在运行时抓 ——
+ * 那次就是这么抓到的。故这四个字段补齐、强转删除（HISTORY-VIDEO-DIALOG-UI-0001 · FIX1）。
+ */
 export interface VideoListItem {
   id: string;
   status: VideoStatus;
   progress: number; // 0..100
-  topic: string;
+  // BE `VideoRead.topic: str | None`（schemas/videos.py:321）→ 可为 null；VideoDetail 那边一直诚实声明着
+  // `string | null`，同一个字段两个类型两种说法。消费方 fromVideoRead 本就 `read.topic || "未命名视频"` 兜着。
+  topic: string | null;
   mode?: string | null; // avatar_talk | seedance_i2v | photo —结果渲染：视频 vs 图
   kind?: string | null; // 图片细分：如 "cover"（封面 photo task；HIST kind 筛真后端支持）
   error_code?: string | null; // 图片失败时映射友好文案（friendlyImageError）
+  error_message?: string | null;
   thumbnail_url?: string | null;
+  playback_url?: string | null;
+  download_url?: string | null;
+  // ⚠️ BE 同时有 duration_sec 和 duration_ms 两个字段（schemas/videos.py:335-336）；FE 消费的是 **ms**
+  // （fromVideoRead 除以 1000）。写成 duration_sec 会静默映射不到 —— 这正是补齐类型要拦的那类错。
+  duration_ms?: number | null;
   apply_visible_label?: boolean; // 该任务是否带 AI 显式标识（LABEL-TOGGLE-UI-0001，徽标数据源）
   created_at: string;
 }

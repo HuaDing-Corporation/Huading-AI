@@ -41,10 +41,24 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
   const [confirmClear, setConfirmClear] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   // HISTORY-VIDEO-DIALOG-UI-0001：点内容 → 大屏播放；「查看详情」→ 详情弹窗（与图片 tab 同款交互语言）。
-  const [detail, setDetail] = useState<VideoDetailPayload | null>(null);
-  const [lightbox, setLightbox] = useState<TrackedTask | null>(null);
+  // 🔴 FIX1：**只存 id，不存任务快照**。存快照 = 弹窗里的 playbackUrl 冻结在点击那一刻 →
+  // presign 过期后即使 refetch 拿回了新 URL，弹窗还在用旧的 → 播放器永远救不回来（这正是 P1-1）。
+  // 存 id 从**最新** items 派生，refetch 一到，弹窗里的 <video src> 自然跟着换。
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [lightboxId, setLightboxId] = useState<string | null>(null);
 
   const items = query.data?.pages.flatMap((page) => page.items) ?? [];
+
+  // The tab's mode is authoritative for this list → photo items render <img>.
+  const taskOf = (item: (typeof items)[number]): TrackedTask => ({ ...fromVideoRead(item), mode });
+  // 派生不到（该条已被删除/清空）→ null → 弹窗自动关闭，不会挂着一个指向已消失记录的界面。
+  // refetch 进行中不会走到这里的空态：react-query 保留上一份 data，items 不会瞬间清空。
+  const lightboxItem = lightboxId === null ? undefined : items.find((i) => i.id === lightboxId);
+  const lightboxTask = lightboxItem ? taskOf(lightboxItem) : null;
+  const detailItem = detailId === null ? undefined : items.find((i) => i.id === detailId);
+  const detailPayload: VideoDetailPayload | null = detailItem
+    ? { task: taskOf(detailItem), createdAt: detailItem.created_at, modeLabel: MODE_LABEL[mode] ?? mode }
+    : null;
 
   const onConfirmDelete = async () => {
     if (!confirmDelete) return;
@@ -103,25 +117,21 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
               <Trash2 size={13} strokeWidth={1.8} /> {copy.history.clearAll}
             </button>
           </div>
-          {items.map((item) => {
-            // The tab's mode is authoritative for this list → photo items render <img>.
-            const task = { ...fromVideoRead(item), mode };
-            return (
-              <TaskCard
-                key={item.id}
-                task={task}
-                // 「查看详情」→ 详情弹窗（升级前是直接 router.push）。TaskCard 的 onOpen 契约未变，只是这里改了
-                // 接法；跳详情页的能力**没丢** —— 移到弹窗内的「打开详情页」（见 VideoDetailDialog）。
-                // created_at 从**列表项**带入：TrackedTask 无此字段，而 progress-mapping 是 SSE 与列表共用的映射。
-                onOpen={() => setDetail({ task, createdAt: item.created_at, modeLabel: MODE_LABEL[mode] ?? mode })}
-                onOpenMedia={() => setLightbox(task)}
-                onRetry={() => undefined}
-                onUrlError={() => void query.refetch()}
-                onDelete={(id) => setConfirmDelete(id)}
-                deleting={deleteVideo.isPending && deleteVideo.variables === item.id}
-              />
-            );
-          })}
+          {items.map((item) => (
+            <TaskCard
+              key={item.id}
+              task={taskOf(item)}
+              // 「查看详情」→ 详情弹窗（升级前是直接 router.push）。TaskCard 的 onOpen 契约未变，只是这里改了
+              // 接法；跳详情页的能力**没丢** —— 移到弹窗内的「打开详情页」（见 VideoDetailDialog）。
+              // created_at 从**列表项**带入：TrackedTask 无此字段，而 progress-mapping 是 SSE 与列表共用的映射。
+              onOpen={() => setDetailId(item.id)}
+              onOpenMedia={() => setLightboxId(item.id)}
+              onRetry={() => undefined}
+              onUrlError={() => void query.refetch()}
+              onDelete={(id) => setConfirmDelete(id)}
+              deleting={deleteVideo.isPending && deleteVideo.variables === item.id}
+            />
+          ))}
           {query.hasNextPage ? (
             <div className="mt-3 flex justify-center">
               <Button
@@ -137,19 +147,24 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
         </>
       )}
 
-      {/* 大屏播放：点「播放视频」→ overlay 内联播放；关闭即卸载 <video>（Radix Portal 在 open=false 时不渲染）。 */}
+      {/* 大屏播放：点「播放视频」→ overlay 内联播放；关闭即卸载 <video>（Radix Portal 在 open=false 时不渲染）。
+          onUrlError → refetch：与卡片内联播放器同一个动作，弹窗里的 src 由上面的派生自动跟进。 */}
       <VideoLightbox
-        src={lightbox?.playbackUrl ?? null}
-        poster={lightbox?.thumbnailUrl}
-        title={lightbox?.topic ?? ""}
-        open={lightbox !== null}
-        onClose={() => setLightbox(null)}
+        src={lightboxTask?.playbackUrl ?? null}
+        poster={lightboxTask?.thumbnailUrl}
+        title={lightboxTask?.topic ?? ""}
+        // 按**派生结果**开合、而非 id 是否存在：那条记录若被「清空」冲掉，id 还在但派生为 null，
+        // 按 id 开就会留下一个空白 overlay。与 VideoDetailDialog（open={detail !== null}）同口径。
+        open={lightboxTask !== null}
+        onClose={() => setLightboxId(null)}
+        onUrlError={() => void query.refetch()}
       />
       {/* 详情弹窗：信息并集（生成时间/状态/模式/时长/AI 标识 + 播放 + 下载）+ 「打开详情页」（跳转能力零回归）。 */}
       <VideoDetailDialog
-        detail={detail}
-        onClose={() => setDetail(null)}
+        detail={detailPayload}
+        onClose={() => setDetailId(null)}
         onOpenPage={(id) => router.push(`/videos/${id}`)}
+        onUrlError={() => void query.refetch()}
       />
 
       {/* 删除单条确认(视频/图片=硬删不可恢复) */}

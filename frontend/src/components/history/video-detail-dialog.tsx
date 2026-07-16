@@ -6,6 +6,7 @@ import { HistoryDetailDialog } from "@/components/history/history-detail-dialog"
 import { AiLabelNotice } from "@/components/label/ai-label-notice";
 import { Button } from "@/components/ui/button";
 import { copy } from "@/lib/copy";
+import { useMediaUrlRefresh } from "@/lib/media/use-media-url-refresh";
 import type { TrackedTask } from "@/lib/sse/progress-mapping";
 
 const formatCreatedAt = (iso: string) => (iso.includes("T") ? iso.replace("T", " ").slice(0, 16) : iso);
@@ -35,14 +36,19 @@ export interface VideoDetailPayload {
 export function VideoDetailDialog({
   detail,
   onClose,
-  onOpenPage
+  onOpenPage,
+  onUrlError
 }: {
   detail: VideoDetailPayload | null;
   onClose: () => void;
   onOpenPage: (taskId: string) => void;
+  /** presign 失效 → 请调用方重取（通常是 `query.refetch()`）。哨兵与封顶在 useMediaUrlRefresh 里。 */
+  onUrlError?: () => void;
 }) {
   const task = detail?.task;
   const isImage = task?.mode === "photo";
+  // 🔴 FIX1：图片/视频共用同一条防线 —— 本弹窗两种媒体都可能是 presign（isImage 时渲染 <img>）。
+  const media = useMediaUrlRefresh(task?.playbackUrl, () => onUrlError?.());
   return (
     <HistoryDetailDialog
       open={detail !== null}
@@ -77,16 +83,23 @@ export function VideoDetailDialog({
               <img
                 src={task.playbackUrl}
                 alt={task.topic}
+                onError={media.onError}
+                onLoad={media.onLoad}
                 className="max-h-[52vh] w-full rounded-field border border-line-gold object-contain"
               />
             ) : (
               // 详情弹窗内的播放器同样不 autoplay（与 VideoLightbox 同口径：有声内容由用户发起）。
+              // 🔴 playsInline（FIX1）：否则 iPhone Safari 点播放即切系统全屏，用户被踢出这个弹窗 ——
+              // 详情弹窗的信息并集（时长/分类/AI 标识/下载/打开详情页）全被系统播放器盖住，等于没做。
               <video
                 controls
+                playsInline
                 preload="metadata"
                 poster={task.thumbnailUrl ?? undefined}
                 src={task.playbackUrl}
                 aria-label={task.topic}
+                onError={media.onError}
+                onLoadedMetadata={media.onLoad}
                 className="max-h-[52vh] w-full rounded-field border border-line-gold bg-black"
               />
             )

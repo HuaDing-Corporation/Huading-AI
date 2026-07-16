@@ -2,12 +2,15 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { copy } from "@/lib/copy";
+import type { VideoListItem } from "@/lib/api/types";
 
 // HISTORY-VIDEO-DIALOG-UI-0001 · 三视频 tab 升级承重（点内容 → 大屏播放；「查看详情」→ 详情弹窗）。
 // 每条钉「这次改动」本身：大屏 overlay 存在/不 autoplay/**关闭即卸载**、详情弹窗信息并集、
 // 「打开详情页」把跳转能力接回来（升级前是卡片直接跳）。期望值手写，不 import 被测代码。
 const pushMock = vi.hoisted(() => ({ fn: vi.fn() }));
 const historyMock = vi.hoisted(() => ({ fn: vi.fn() }));
+/** 共享 refetch —— presign 失效重取的落点；FIX1 的承重要数它被调了几次。 */
+const refetchMock = vi.hoisted(() => ({ fn: vi.fn() }));
 const deleteMock = vi.hoisted(() => ({ mutateAsync: vi.fn(), isPending: false, variables: undefined as string | undefined }));
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: pushMock.fn }) }));
@@ -19,7 +22,15 @@ vi.mock("@/lib/api/hooks", () => ({
 
 import { HistoryList } from "./generation-history";
 
-/** 镜像 BE VideoListItem 的相关字段（手写）。 */
+/**
+ * 镜像 BE 列表项（BE 列表返回的是完整 VideoRead —— 见 VideoListItem 注释）。
+ *
+ * 🔴 FIX1：`satisfies VideoListItem` 不是装饰，它开启**多余属性检查** —— 字段名写错当场编译红。
+ * 上一版这里是裸对象字面量 + `listOf(...items: Record<string, unknown>[])`，两层一叠让类型检查形同虚设：
+ * 任何形状都进得来。那个 duration_sec 的坑（BE 其实给 duration_ms）就是这么漏到运行时、只能靠确定值断言
+ * 抓的 —— **类型层本该先抓到它**。实测：把下面的 duration_ms 改成 duration_sec →
+ * `error TS2561: 'duration_sec' does not exist in type 'VideoListItem'. Did you mean to write 'duration_ms'?`
+ */
 const ITEM = {
   id: "v-1",
   status: "done",
@@ -29,19 +40,17 @@ const ITEM = {
   playback_url: "https://cdn/v-1.mp4",
   download_url: "https://cdn/v-1.mp4?dl=1",
   thumbnail_url: "https://cdn/v-1.jpg",
-  // ⚠️ BE 给的是 duration_ms，fromVideoRead 除以 1000 得 durationSec（progress-mapping.ts:120）——
-  // 写成 duration_sec 会静默映射不到（时长项消失），这条是被本测试抓出来的。
   duration_ms: 18000,
   apply_visible_label: true
-};
-const listOf = (...items: Record<string, unknown>[]) => ({
+} satisfies VideoListItem;
+const listOf = (...items: VideoListItem[]) => ({
   data: { pages: [{ items }] },
   isLoading: false,
   isError: false,
   hasNextPage: false,
   fetchNextPage: vi.fn(),
   isFetchingNextPage: false,
-  refetch: vi.fn()
+  refetch: refetchMock.fn
 });
 
 afterEach(() => vi.clearAllMocks());
@@ -88,6 +97,94 @@ describe("三视频 tab · 大屏播放 overlay", () => {
     historyMock.fn.mockReturnValue(listOf(ITEM));
     render(<HistoryList mode="avatar_talk" />);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+});
+
+// ── FIX1 · P1-1 / P1-2：新入口没继承既有防线 ───────────────────────────────────
+describe("三视频 tab · 新播放器继承既有防线（FIX1）", () => {
+  // 🔴 P1-2：缺 playsInline → iPhone Safari 点播放即把视频接管进**系统全屏播放器**。
+  // 而「overlay 内内联播放」正是本组件存在的**全部理由**（放大静止封面零信息增量）——
+  // 在移动 Safari 上没有 playsInline，这个组件等于白写。它不是锦上添花，是成立条件。
+  // 注：React 把 playsInline 渲染成 DOM 属性 playsinline（全小写）。
+  it("大屏 overlay 的 <video> 带 playsInline（移动 Safari 上「内联播放」的成立条件）", () => {
+    historyMock.fn.mockReturnValue(listOf(ITEM));
+    render(<HistoryList mode="avatar_talk" />);
+    fireEvent.click(screen.getByRole("button", { name: copy.history.videoPlay }));
+    expect(within(screen.getByRole("dialog")).getByLabelText("保温杯带货")).toHaveAttribute("playsinline");
+  });
+
+  it("详情弹窗的 <video> 带 playsInline（否则系统播放器盖住整个信息并集）", () => {
+    historyMock.fn.mockReturnValue(listOf(ITEM));
+    render(<HistoryList mode="avatar_talk" />);
+    fireEvent.click(screen.getByRole("button", { name: copy.tasks.open }));
+    expect(within(screen.getByRole("dialog")).getByLabelText("保温杯带货")).toHaveAttribute("playsinline");
+  });
+
+  // 🔴 P1-1：页面开着超过 presign TTL 再打开大屏 → 旧 URL 播不了。既有卡片播放器有这条防线
+  // （onUrlError → refetch），两个新播放器没继承 → 黑屏且无任何反馈，用户不知道为什么。
+  it("overlay 里 presign 失效 → 重取一次；同一 URL 连报多次也只重取一次（不打爆后端）", () => {
+    historyMock.fn.mockReturnValue(listOf(ITEM));
+    render(<HistoryList mode="avatar_talk" />);
+    fireEvent.click(screen.getByRole("button", { name: copy.history.videoPlay }));
+
+    const video = within(screen.getByRole("dialog")).getByLabelText("保温杯带货");
+    fireEvent.error(video);
+    expect(refetchMock.fn).toHaveBeenCalledTimes(1);
+
+    // 浏览器对同一 src 可能连发多个 error → 哨兵必须挡住
+    fireEvent.error(video);
+    fireEvent.error(video);
+    expect(refetchMock.fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("详情弹窗里 presign 失效 → 同样重取一次（两个新入口都要有网，不是只补一个）", () => {
+    historyMock.fn.mockReturnValue(listOf(ITEM));
+    render(<HistoryList mode="avatar_talk" />);
+    fireEvent.click(screen.getByRole("button", { name: copy.tasks.open }));
+
+    fireEvent.error(within(screen.getByRole("dialog")).getByLabelText("保温杯带货"));
+    expect(refetchMock.fn).toHaveBeenCalledTimes(1);
+  });
+
+  // 🔴 硬门核心：**旧 URL 失败 → 换成新 URL**。
+  // 这条钉的是「只存 id、从最新 query 派生」这个改动本身 —— 改回存任务快照 → 必红：
+  // 快照冻结在点击那一刻，refetch 拿回的新 URL 永远进不到弹窗里，重取做了也白做。
+  it("重取拿回新 URL → overlay 里的 <video src> 真的跟着换（存 id 派生，不是存快照）", () => {
+    historyMock.fn.mockReturnValue(listOf(ITEM));
+    const { rerender } = render(<HistoryList mode="avatar_talk" />);
+    fireEvent.click(screen.getByRole("button", { name: copy.history.videoPlay }));
+
+    const before = within(screen.getByRole("dialog")).getByLabelText("保温杯带货");
+    expect(before).toHaveAttribute("src", "https://cdn/v-1.mp4");
+    fireEvent.error(before);
+    expect(refetchMock.fn).toHaveBeenCalledTimes(1);
+
+    // 重取回来一个新签名的 URL（弹窗仍开着）
+    historyMock.fn.mockReturnValue(listOf({ ...ITEM, playback_url: "https://cdn/v-1.mp4?sig=fresh" }));
+    rerender(<HistoryList mode="avatar_talk" />);
+
+    expect(within(screen.getByRole("dialog")).getByLabelText("保温杯带货")).toHaveAttribute(
+      "src",
+      "https://cdn/v-1.mp4?sig=fresh"
+    );
+  });
+
+  // 🔴 硬门核心：**无死循环**。
+  // 「对象已被删除」时 BE 每次都签得出新 URL、但个个 404 →「URL 变了就再报一次」会变成
+  // error → 重取 → 新 URL → error → …… 每轮真打一次后端。故连续失败必须封顶。
+  it("新 URL 仍失效 → 连续重取封顶，不无限循环（对象已删时 BE 能一直签出新 URL）", () => {
+    historyMock.fn.mockReturnValue(listOf(ITEM));
+    const { rerender } = render(<HistoryList mode="avatar_talk" />);
+    fireEvent.click(screen.getByRole("button", { name: copy.history.videoPlay }));
+
+    for (let i = 1; i <= 8; i++) {
+      historyMock.fn.mockReturnValue(listOf({ ...ITEM, playback_url: `https://cdn/gone.mp4?sig=${i}` }));
+      rerender(<HistoryList mode="avatar_talk" />);
+      fireEvent.error(within(screen.getByRole("dialog")).getByLabelText("保温杯带货"));
+    }
+
+    // 救得回来的一次就够；救不回来的最多浪费 2 次 —— 而不是 8 次、80 次。
+    expect(refetchMock.fn).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -106,7 +106,10 @@ export function eventToProgress(event: VideoEvent): ProgressSnapshot | null {
 
 export function fromVideoRead(read: VideoDetail | VideoListItem): TrackedTask {
   const pct = read.progress ?? 0;
-  const detail = read as Partial<VideoDetail>;
+  // 🔴 FIX1：原本这里有一行 `const detail = read as Partial<VideoDetail>`，用来读 VideoListItem 上
+  // **没声明但实际存在**的 playback_url / download_url / duration_ms / error_message。那行强转把类型检查
+  // 变成了摆设：fixture 把 duration_ms 写成 duration_sec 也照样编译过。四个字段已在 VideoListItem 补齐
+  // （BE 列表返回完整 VideoRead，见该接口注释）→ 强转整行删除，两个分支都走真类型。
   return {
     taskId: read.id,
     topic: read.topic || "未命名视频",
@@ -114,11 +117,11 @@ export function fromVideoRead(read: VideoDetail | VideoListItem): TrackedTask {
     progress: pct,
     statusLabel: labelFor(read.status, pct),
     mode: read.mode ?? null,
-    playbackUrl: detail.playback_url ?? null,
-    downloadUrl: detail.download_url ?? null,
+    playbackUrl: read.playback_url ?? null,
+    downloadUrl: read.download_url ?? null,
     thumbnailUrl: read.thumbnail_url ?? null,
-    durationSec: detail.duration_ms != null ? detail.duration_ms / 1000 : null,
-    error: detail.error_message ?? null,
+    durationSec: read.duration_ms != null ? read.duration_ms / 1000 : null,
+    error: read.error_message ?? null,
     errorCode: read.error_code ?? null,
     applyVisibleLabel: read.apply_visible_label ?? false
   };

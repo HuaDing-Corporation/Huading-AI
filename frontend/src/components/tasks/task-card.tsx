@@ -1,6 +1,5 @@
 "use client";
 
-import { useEffect, useRef } from "react";
 import {
   AlertTriangle,
   Ban,
@@ -18,6 +17,7 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { AiLabelNotice } from "@/components/label/ai-label-notice";
 import { friendlyImageError } from "@/lib/api/image-error";
 import { friendlyVideoError } from "@/lib/api/video-error";
+import { useMediaUrlRefresh } from "@/lib/media/use-media-url-refresh";
 import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
 import type { TrackedTask, UiStatus } from "@/lib/sse/progress-mapping";
@@ -84,17 +84,15 @@ export function TaskCard({ task, onOpen, onOpenMedia, onRetry, onUrlError, onDel
   // 失败均映射友好中文（不露裸 error_message/技术串）：photo→friendlyImageError，视频→friendlyVideoError（VIDEO-ERR-MAP-UI）。
   const failureText = isImage ? friendlyImageError(task.errorCode) : friendlyVideoError(task.errorCode);
 
-  // Fire onUrlError at most once per playback URL (mirrors VideoPlayer); reset
-  // the guard when the URL changes so a refreshed URL can error once again (P2-2).
-  const urlErrored = useRef(false);
-  useEffect(() => {
-    urlErrored.current = false;
-  }, [task.playbackUrl]);
-  const handleVideoError = () => {
-    if (urlErrored.current) return;
-    urlErrored.current = true;
-    onUrlError(task.taskId);
-  };
+  // presign 失效 → 重取一次。**改用共享哨兵**（HISTORY-VIDEO-DIALOG-UI-0001 · FIX1）。
+  //
+  // 这里原本是本仓第 2 份手抄实现，注释写着 "mirrors VideoPlayer" —— 但实测它并没有 mirror：
+  // 它比 VideoPlayer 多一个「URL 变更重置」，行为其实**不一样**（而且更好）。三处「拷贝」三个行为，
+  // 没有任何测试拦得住这种漂移，因为每处各测各的。收敛成一份的理由不是「少写几行」，是**拷贝会漂移**。
+  //
+  // 迁移后行为变化只有一个：连续失败封顶（本处原先没有 → 对象被删时会 error→refetch→新 URL→error…… 无限打后端）。
+  // 既有承重（task-card.test.tsx:38「fires onUrlError at most once across repeated errors」）原样全绿 = 零回归证据。
+  const media = useMediaUrlRefresh(task.playbackUrl, () => onUrlError(task.taskId));
 
   return (
     <div className="border-b border-track py-3.5 last:border-none">
@@ -174,7 +172,8 @@ export function TaskCard({ task, onOpen, onOpenMedia, onRetry, onUrlError, onDel
               src={task.playbackUrl ?? undefined}
               alt={task.topic}
               loading="lazy"
-              onError={handleVideoError}
+              onError={media.onError}
+              onLoad={media.onLoad}
               className="max-h-[320px] w-full rounded-field border border-line-gold bg-black/5 object-contain"
             />
           ) : (
@@ -183,7 +182,8 @@ export function TaskCard({ task, onOpen, onOpenMedia, onRetry, onUrlError, onDel
               preload="metadata"
               poster={task.thumbnailUrl ?? undefined}
               src={task.playbackUrl ?? undefined}
-              onError={handleVideoError}
+              onError={media.onError}
+              onLoadedMetadata={media.onLoad}
               className="max-h-[320px] w-full rounded-field border border-line-gold bg-black/5"
             />
           )}
