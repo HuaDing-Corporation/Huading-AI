@@ -245,6 +245,26 @@ const REVERSE_SEEDS: (Pick<MockReverseJob, "id" | "source_kind"> & Partial<MockR
 REVERSE_SEEDS.forEach((seed) => reverseJobs.set(seed.id, mkReverseJob(seed)));
 
 /**
+ * 🔴 FIX4 · **把「测试之间互不干扰」从排座位变成机制**。
+ *
+ * `reverseJobs` 是模块级、**可变、跨测试累积**的：软删标记、saved 状态、regenerate 打回的 queued 全都留着。
+ * 上一版对此的处理是在测试文件里写一句「⚠️ 本 describe 会改 mock state → **必须放最后**」——
+ * 那不是解法，那是**把顺序依赖写进注释、制度化了**。靠人记住座位表，下一条就会漏（FIX3 我刚认过这个病，
+ * 紧挨着的下一条测试里就又犯了一次，还在注释里写明了「上一条刚把 rh-vid-1 打回 queued」）。
+ *
+ * ⚠️ 注意 vitest.setup.ts 的 `afterEach(() => server.resetHandlers())` **不管这个** ——
+ * 它只重置 handler 覆盖，不碰模块级数据。名字听着像全清，实际不是（又一张假路标）。
+ *
+ * 调用方：反推相关测试文件的 `beforeEach`。**没有全局挂**，理由见回执：全局重置 = 变相给全仓开
+ * shuffle，会掀出一堆既有的跨测试依赖，那是另一个包的活。
+ */
+export const resetReverseJobs = () => {
+  reverseJobs.clear();
+  reverseSeq = 0; // → 每条测试里 POST 出的 id 从 rp-1 / rpv-1 起，确定可预期
+  REVERSE_SEEDS.forEach((seed) => reverseJobs.set(seed.id, mkReverseJob(seed)));
+};
+
+/**
  * 🔴 **唯一的读模型** —— 图片/视频、五种状态全走这一个函数（原先有三份：reverseJobRead 合成器 /
  * reverseVideoJobRead / reverseHistJobRead，三份各自决定「什么时候有 result」）。
  * 契约：queued/running 无 result；failed 无 result 但有 error_*；succeeded/saved 有 result；

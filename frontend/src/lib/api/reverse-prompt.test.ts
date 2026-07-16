@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { copy } from "@/lib/copy";
+import { resetReverseJobs } from "@/mocks/handlers";
 import { apiUrl } from "./client";
 import {
   fillTargetToPrefill,
@@ -12,6 +13,11 @@ import {
   saveReversePrompt,
   type ReversePromptFillTargets
 } from "./reverse-prompt";
+
+// 🔴 FIX4：与 reverse-prompt.history.test.ts 同口径 —— mock job store 每条测试前重置，顺序无关。
+// （本文件里那两条 regenerate/save 原本硬编码 "rp-1"，赌的正是「reverseSeq 从 0 起 + 前面有条 POST」。
+//  FIX3 已改为先建再用返回 id；重置让这个前提变成**确定**的，而不是碰巧成立。）
+beforeEach(() => resetReverseJobs());
 
 // REVERSE-PROMPT-UI · FIX1：对齐 BE 真契约。核心是「带入 6 键」的落点映射——BE 已给预填载荷，FE 直接
 // apply、不猜字段。此处逐一锁死 6 个 BE fill_target 键 → WorkbenchPrefill 的落点，缺键 → null（置灰）。

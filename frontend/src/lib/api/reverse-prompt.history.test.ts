@@ -9,6 +9,7 @@ import {
   saveReversePrompt,
   type ReverseSourceKind
 } from "@/lib/api/reverse-prompt";
+import { resetReverseJobs } from "@/mocks/handlers";
 
 // HISTORY-VIDEO-REVERSE-UI-0001 · 反推历史契约承重（真打 MSW /reverse-prompt/jobs，不 mock adapter）。
 // 逐字段对齐**已合入 develop 的真 BE**（非冻结文档摘要）：
@@ -16,7 +17,14 @@ import {
 //   backend/app/api/v1/routes/reverse_prompt.py:64-87（source_kind Literal + page/page_size 上下界）、:152-166（软删）
 //   backend/app/services/reverse_prompt.py:276（列表过滤软删）、:320-322（video 无缩略图）、:332-339（summary 截断）
 // 全确定值断言；期望值手写、不 import 被测代码的常量。
-beforeEach(() => localStorage.clear());
+//
+// 🔴 FIX4：每条测试前**重置 mock job store**。上一版靠「把改状态的 describe 放最后」维持互不干扰 ——
+// 那是排座位，不是机制：Codex B 单独跑 ALREADY_RUNNING 那条即 `1 failed / 24 skipped`，而 shuffle
+// 一开更是 10 条红。重置之后每条测试都从同一份 seed 出发，顺序无关。
+beforeEach(() => {
+  localStorage.clear();
+  resetReverseJobs();
+});
 afterEach(() => localStorage.clear());
 
 describe("反推历史列表 GET /reverse-prompt/jobs", () => {
@@ -154,7 +162,9 @@ describe("反推详情 GET /reverse-prompt/jobs/{id}", () => {
   });
 });
 
-// ⚠️ 本 describe 会改 MSW 的 mock state（软删标记）→ 必须放最后；vitest 默认按文件内顺序执行、文件间隔离。
+// 🔴 FIX4：这里原本写着「⚠️ 本 describe 会改 mock state → **必须放最后**」——
+// 那句话是**把顺序依赖制度化**：它承认状态会泄漏，然后要求所有人记住座位表。已改为 beforeEach 重置 store，
+// 本 describe 放哪都行（shuffle 实证）。
 describe("反推软删 DELETE /reverse-prompt/jobs/{id}", () => {
   // 🔴 FIX2：上一版这里钉的是「详情仍可取」——**那是我把源码读反了**。我读了 services:276（**列表**的过滤条件）
   // 就推断「列表过滤、详情不过滤」，却没去读详情的取数函数。真实：详情走 reverse_prompt_job_or_404，它用的是
@@ -183,13 +193,17 @@ describe("反推软删 DELETE /reverse-prompt/jobs/{id}", () => {
   });
 
   // 🔴 FIX2 · 自扫出的第三处宽松：regenerate / save 在 BE 同样经 reverse_prompt_job_or_404 → 已删即 404。
+  // 🔴 FIX4：这两条原本靠**上一条测试**先把 rh-vid-3 删掉 —— 与 Codex B 抓的那条同病，只是没人单独跑过。
+  // store 一重置它俩就红了（顺序执行和 shuffle 下同样红）→ 证明它们从来就没自己建立过前提。现在自己删。
   it("已删记录的 regenerate / save → 404（BE 同走 live selector；旧 mock 恒成功=假绿）", async () => {
+    await deleteReversePromptJob("rh-vid-3"); // 前提由本条自己建立
     await expect(regenerateReversePrompt("rh-vid-3")).rejects.toMatchObject({ status: 404 });
     await expect(saveReversePrompt("rh-vid-3")).rejects.toMatchObject({ status: 404 });
   });
 
   it("重复删除 / 不存在 → 404", async () => {
-    await expect(deleteReversePromptJob("rh-vid-3")).rejects.toMatchObject({ status: 404 }); // 上条已删
+    await deleteReversePromptJob("rh-vid-3"); // 第一次成功
+    await expect(deleteReversePromptJob("rh-vid-3")).rejects.toMatchObject({ status: 404 }); // 第二次 → 404
     await expect(deleteReversePromptJob("nope")).rejects.toMatchObject({ status: 404 });
   });
 });
@@ -260,13 +274,23 @@ describe("反推 job store（单一权威存储）", () => {
 
   // 🔴 这条**任务包的表里没有** —— 我读 BE 时发现的：prepare_reverse_prompt_video_retry:197-202
   // 对 queued/running 的视频 job 直接 409 ALREADY_RUNNING（旧 mock 对它照样返成功）。
+  //
+  // 🔴 FIX4：本条上一版的 queued 样本靠「上一条测试刚把 rh-vid-1 打回 queued」—— 我甚至把这句依赖
+  // **写进了注释**，就在我认「赌执行顺序」这个病的下一条。隔离跑即 1 failed（接口返 queued 成功，不是 409）。
+  // 现在两个样本都在本条内自建：running 用重置后确定为 running 的 seed，queued 由本条自己打回。
   it("🔴 视频 job 正在跑（queued/running）时 regenerate → 409 REVERSE_PROMPT_ALREADY_RUNNING", async () => {
+    // running：store 每条测试前重置 → rh-vid-2 确定是 running，不依赖谁先跑
     await expect(regenerateReversePrompt("rh-vid-2")).rejects.toMatchObject({
       status: 409,
       code: "REVERSE_PROMPT_ALREADY_RUNNING"
-    }); // running
-    // 上一条刚把 rh-vid-1 打回 queued → 它现在也不可再 regenerate
-    await expect(regenerateReversePrompt("rh-vid-1")).rejects.toMatchObject({ status: 409 });
+    });
+
+    // queued：**本条自己**把 rh-vid-1（succeeded）打回 queued —— 前提由自己建立，不借别的测试
+    expect((await regenerateReversePrompt("rh-vid-1")).status).toBe("queued");
+    await expect(regenerateReversePrompt("rh-vid-1")).rejects.toMatchObject({
+      status: 409,
+      code: "REVERSE_PROMPT_ALREADY_RUNNING"
+    });
   });
 
   it("POST 创建的 job 真的落进 store：新 job 的 id 可取详情、可 save（不再靠 id 前缀猜）", async () => {
