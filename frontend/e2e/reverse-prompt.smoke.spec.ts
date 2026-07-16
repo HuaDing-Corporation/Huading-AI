@@ -75,7 +75,11 @@ test("带入·AI 模特 → 切电商图·AI 模特子工具并预填自定义�
 
   // ecom_model 落点：切到电商图 mode + AI 模特子工具，extra_prompt→#ecom-model-custom（mock ecom_model.extra_prompt）。
   await page.getByRole("button", { name: "带入 · AI 模特" }).click();
-  await expect(page.locator("#ecom-model-custom")).toHaveValue("工作室柔光、简洁白底、突出质感", { timeout: 15_000 });
+  // ECOM-SUBTOOL-KEEPALIVE-UI-0001：子工具改为常驻后，#ecom-model-custom 在隐藏态也留在 DOM，而 toHaveValue
+  // **不校验可见性** → 单靠它已不能证明「确实切到了 AI 模特子工具」。补一条可见性断言把落点锁死。
+  const custom = page.getByTestId("panel-ecom_image").locator("#ecom-model-custom");
+  await expect(custom).toBeVisible({ timeout: 15_000 });
+  await expect(custom).toHaveValue("工作室柔光、简洁白底、突出质感");
 
   expect(g.errors(), `page errors：\n${g.errors().join("\n")}`).toEqual([]);
   expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);
