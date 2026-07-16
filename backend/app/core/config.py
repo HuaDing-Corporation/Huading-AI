@@ -50,7 +50,7 @@ class Settings(BaseSettings):
 
     jwt_secret_key: str = Field(min_length=32)
     jwt_algorithm: str = "HS256"
-    access_token_expire_minutes: int = 60
+    access_token_expire_minutes: int = 1440
 
     # Readiness probe timeouts so an unreachable dependency degrades fast
     # instead of hanging the /ready handler (#003-FIX P2).
