@@ -34,7 +34,11 @@ const KIND_CHIPS: { key: ReverseSourceKind | "all"; label: string }[] = [
   { key: "video", label: copy.history.reverseKindVideo }
 ];
 
-/** 状态徽标（BE DB CheckConstraint 5 值）；未知值由 copy.history.reverseStatus 原样透出，不吞。 */
+/**
+ * 状态徽标（BE DB CheckConstraint 5 值）。
+ * 🔴 FIX2 · P2：未知值**不再原样透出** —— 原样透出会把 BE 的裸英文（如 "cancelled"）直接漏到用户脸上；
+ * 界面是中文的，用户读不懂也没法处置。改由 copy.history.reverseStatus 收敛成「未知状态」。
+ */
 function ReverseStatusBadge({ status }: { status: string }) {
   const tone =
     status === "failed"

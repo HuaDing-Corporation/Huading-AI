@@ -305,4 +305,15 @@ describe("ReverseHistoryList (提示词反推历史)", () => {
     render(<ReverseHistoryList />);
     expect(screen.getByText(copy.history.reverseEmpty)).toBeInTheDocument();
   });
+
+  // 🔴 FIX2 · P2 补网：Codex B 指出 copy.ts `?? status` 会把 BE 的裸英文漏给用户。修之前**没有任何测试碰过
+  // 这条兜底** —— 我做变异硬门时把 `?? "未知状态"` 改回 `?? status`，全量测试竟然全绿 = 修了个没网的洞。
+  // 故先补这条：BE 若哪天加了新状态（DB CheckConstraint 之外的值），界面必须收敛成中文，不能露 "cancelled"。
+  it("BE 出现枚举外的新状态 → 徽标显示「未知状态」，不把裸英文漏给用户", () => {
+    mocks.jobs.mockReturnValue(listOf({ ...IMG_ITEM, id: "rh-img-x", status: "cancelled" }));
+    mocks.job.mockReturnValue(noJob);
+    render(<ReverseHistoryList />);
+    expect(screen.getByText("未知状态")).toBeInTheDocument();
+    expect(screen.queryByText("cancelled")).not.toBeInTheDocument();
+  });
 });
