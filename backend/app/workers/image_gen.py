@@ -33,7 +33,11 @@ from app.services.progress import build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
 from app.services.storage.base import ObjectStorage
 from app.services.storage.factory import create_object_storage
-from app.services.storage.keys import presign_tenant_storage_key
+from app.services.storage.keys import (
+    get_tenant_storage_bytes,
+    presign_tenant_storage_key,
+    put_tenant_storage_bytes,
+)
 from app.services.synthetic_label import (
     label_artifact_bytes,
     synthetic_label_context,
@@ -636,7 +640,14 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                 if source_storage_keys:
                     input_storage_key = source_storage_keys[0]
                     input_images = [
-                        (storage_key, storage.get_bytes(storage_key))
+                        (
+                            storage_key,
+                            get_tenant_storage_bytes(
+                                storage,
+                                tenant_id=tenant_id,
+                                storage_key=storage_key,
+                            ),
+                        )
                         for storage_key in source_storage_keys
                     ]
                     primary_input_bytes = input_images[0][1]
@@ -654,7 +665,11 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                         tenant_id,
                         str(params["image_key"]),
                     )
-                    image_bytes = storage.get_bytes(input_storage_key)
+                    image_bytes = get_tenant_storage_bytes(
+                        storage,
+                        tenant_id=tenant_id,
+                        storage_key=input_storage_key,
+                    )
                     primary_input_bytes = image_bytes
                     input_path = _write_temp_image_bytes(
                         image_bytes,
@@ -678,7 +693,11 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                     str(params["source_storage_key"]),
                 )
                 image_bytes = _compose_ecom_poster(
-                    storage.get_bytes(source_storage_key),
+                    get_tenant_storage_bytes(
+                        storage,
+                        tenant_id=tenant_id,
+                        storage_key=source_storage_key,
+                    ),
                     template_id=str(params.get("template_id") or ""),
                     title=str(params.get("title") or ""),
                     subtitle=str(params.get("subtitle") or ""),
@@ -799,7 +818,13 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                 metadata.update(size_evidence)
                 task.params = {**(task.params or {}), **size_evidence}
 
-            storage.put_bytes(output_key, image_bytes, content_type="image/png")
+            put_tenant_storage_bytes(
+                storage,
+                tenant_id=tenant_id,
+                storage_key=output_key,
+                content=image_bytes,
+                content_type="image/png",
+            )
 
             asset = Asset(
                 tenant_id=tenant_id,
@@ -937,8 +962,16 @@ def _ecom_replicate_provider_payload(
     product: Asset,
     storage: ObjectStorage,
 ) -> dict[str, Any]:
-    reference_bytes = storage.get_bytes(reference.storage_key)
-    product_bytes = storage.get_bytes(product.storage_key)
+    reference_bytes = get_tenant_storage_bytes(
+        storage,
+        tenant_id=output.tenant_id,
+        storage_key=reference.storage_key,
+    )
+    product_bytes = get_tenant_storage_bytes(
+        storage,
+        tenant_id=output.tenant_id,
+        storage_key=product.storage_key,
+    )
     return {
         "prompt": output.prompt or "",
         "size": output.requested_size,
@@ -1040,7 +1073,11 @@ def _render_ecom_replicate_output_once(
     )
 
     product_identity = _ecom_replicate_product_identity(output)
-    product_bytes = storage.get_bytes(product.storage_key)
+    product_bytes = get_tenant_storage_bytes(
+        storage,
+        tenant_id=job.tenant_id,
+        storage_key=product.storage_key,
+    )
     validation_result = asyncio.run(
         invoke(
             db,
@@ -1076,7 +1113,13 @@ def _render_ecom_replicate_output_once(
         )
 
     output_key = _ecom_replicate_storage_key(job.tenant_id, job.id, output.index)
-    storage.put_bytes(output_key, image_bytes, content_type="image/png")
+    put_tenant_storage_bytes(
+        storage,
+        tenant_id=job.tenant_id,
+        storage_key=output_key,
+        content=image_bytes,
+        content_type="image/png",
+    )
 
     asset = Asset(
         tenant_id=job.tenant_id,

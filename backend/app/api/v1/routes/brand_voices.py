@@ -33,6 +33,7 @@ from app.services.plan_access import require_doubao_voice_clone_access
 from app.services.quota import charge_voice_clone_quota
 from app.services.storage.base import ObjectStorage
 from app.services.storage.keys import (
+    get_tenant_storage_bytes,
     is_tenant_storage_key,
     presign_tenant_storage_key,
 )
@@ -542,7 +543,11 @@ def _clone_payload(
     }
     if _uses_doubao_clone_slot(provider):
         payload["speaker_id"] = speaker_id
-        payload["source_audio_bytes"] = storage.get_bytes(source_audio.storage_key)
+        payload["source_audio_bytes"] = get_tenant_storage_bytes(
+            storage,
+            tenant_id=tenant_id,
+            storage_key=source_audio.storage_key,
+        )
     else:
         payload["source_audio_url"] = presign_tenant_storage_key(
             storage,

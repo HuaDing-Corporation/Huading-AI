@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from app.services.storage.base import ObjectStorage
+from app.services.storage.keys import get_tenant_storage_bytes
 
 
 class CoverFrameError(Exception):
@@ -48,10 +49,11 @@ def candidate_timestamps(duration_sec: float | int | None, count: int) -> list[f
 def extract_frame_candidates(
     storage: ObjectStorage,
     *,
+    tenant_id: str,
     video_key: str,
     timestamps: list[float],
 ) -> list[ExtractedFrame]:
-    video_path = _video_from_storage(storage, video_key)
+    video_path = _video_from_storage(storage, tenant_id, video_key)
     try:
         return _extract_frame_candidates_from_path(video_path, timestamps=timestamps)
     finally:
@@ -61,20 +63,27 @@ def extract_frame_candidates(
 def extract_frame_cover(
     storage: ObjectStorage,
     *,
+    tenant_id: str,
     video_key: str,
     timestamp_sec: float,
     title: dict[str, Any] | None = None,
 ) -> CoverImage:
-    video_path = _video_from_storage(storage, video_key)
+    video_path = _video_from_storage(storage, tenant_id, video_key)
     try:
         return _extract_frame_cover_from_path(video_path, timestamp_sec=timestamp_sec, title=title)
     finally:
         video_path.unlink(missing_ok=True)
 
 
-def _video_from_storage(storage: ObjectStorage, video_key: str) -> Path:
+def _video_from_storage(storage: ObjectStorage, tenant_id: str, video_key: str) -> Path:
     try:
-        return _write_temp_video(storage.get_bytes(video_key))
+        return _write_temp_video(
+            get_tenant_storage_bytes(
+                storage,
+                tenant_id=tenant_id,
+                storage_key=video_key,
+            )
+        )
     except Exception as exc:
         raise CoverFrameError("Could not read source video.") from exc
 

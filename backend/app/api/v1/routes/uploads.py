@@ -24,6 +24,7 @@ from app.db.models import Asset, User
 from app.schemas.response import ApiResponse, ok
 from app.schemas.uploads import UploadImageResponse, UploadResponse
 from app.services.storage.base import ObjectStorage
+from app.services.storage.keys import put_tenant_storage_bytes
 
 router = APIRouter()
 ObjectStorageDependency = Depends(get_object_storage)
@@ -99,8 +100,12 @@ async def upload_image(
 
     # Server-generated key: no client-controlled path components (#002-RV P2).
     key = f"uploads/{uuid.uuid4().hex}{extension}"
-    uri = storage.put_bytes(
-        tenant_storage_key(user.tenant_id, key), content, content_type=content_type
+    uri = put_tenant_storage_bytes(
+        storage,
+        tenant_id=user.tenant_id,
+        storage_key=tenant_storage_key(user.tenant_id, key),
+        content=content,
+        content_type=content_type,
     )
     return ok(
         request,
@@ -135,7 +140,13 @@ async def upload_audio(
         raise AppError("Uploaded file is empty.", code="EMPTY_UPLOAD", status_code=400)
 
     storage_key = tenant_storage_key(user.tenant_id, f"uploads/{uuid.uuid4().hex}{extension}")
-    storage.put_bytes(storage_key, content, content_type=content_type)
+    put_tenant_storage_bytes(
+        storage,
+        tenant_id=user.tenant_id,
+        storage_key=storage_key,
+        content=content,
+        content_type=content_type,
+    )
     asset = Asset(
         tenant_id=user.tenant_id,
         type="audio",
@@ -179,7 +190,13 @@ async def upload_avatar_image(
         raise AppError("Uploaded file is empty.", code="EMPTY_UPLOAD", status_code=400)
 
     storage_key = tenant_storage_key(user.tenant_id, f"uploads/{uuid.uuid4().hex}{extension}")
-    storage.put_bytes(storage_key, content, content_type=content_type)
+    put_tenant_storage_bytes(
+        storage,
+        tenant_id=user.tenant_id,
+        storage_key=storage_key,
+        content=content,
+        content_type=content_type,
+    )
     asset = Asset(
         tenant_id=user.tenant_id,
         type="avatar_image",
@@ -251,7 +268,13 @@ async def upload_avatar_video(
         _validate_avatar_video_probe(candidate, probe)
 
     storage_key = tenant_storage_key(user.tenant_id, f"uploads/{uuid.uuid4().hex}{extension}")
-    storage.put_bytes(storage_key, content, content_type=content_type)
+    put_tenant_storage_bytes(
+        storage,
+        tenant_id=user.tenant_id,
+        storage_key=storage_key,
+        content=content,
+        content_type=content_type,
+    )
     asset = Asset(
         tenant_id=user.tenant_id,
         type="video",

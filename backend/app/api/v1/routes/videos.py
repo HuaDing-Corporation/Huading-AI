@@ -72,7 +72,10 @@ from app.services.quota import (
     seedance_i2v_target_seconds,
 )
 from app.services.storage.base import ObjectStorage
-from app.services.storage.keys import presign_tenant_storage_key
+from app.services.storage.keys import (
+    get_tenant_storage_bytes,
+    presign_tenant_storage_key,
+)
 from app.services.voices import resolve_narration_voice
 from app.workers.avatar_talk import (
     build_seedance_scene_prompt_payload,
@@ -292,7 +295,11 @@ def _avatar_video_probe(asset: Asset, *, storage: ObjectStorage) -> _AvatarVideo
     if probe is not None:
         return probe
     try:
-        content = storage.get_bytes(asset.storage_key)
+        content = get_tenant_storage_bytes(
+            storage,
+            tenant_id=asset.tenant_id,
+            storage_key=asset.storage_key,
+        )
     except Exception as exc:
         raise AppError(
             "Avatar source video metadata is incomplete and the object could not be read.",
@@ -307,7 +314,13 @@ def _avatar_video_size_bytes(asset: Asset, *, storage: ObjectStorage) -> int | N
     if asset.size_bytes is not None:
         return asset.size_bytes
     try:
-        return len(storage.get_bytes(asset.storage_key))
+        return len(
+            get_tenant_storage_bytes(
+                storage,
+                tenant_id=asset.tenant_id,
+                storage_key=asset.storage_key,
+            )
+        )
     except Exception as exc:
         raise AppError(
             "Avatar source video metadata is incomplete and the object could not be read.",

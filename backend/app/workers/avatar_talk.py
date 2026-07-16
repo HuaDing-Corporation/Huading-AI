@@ -48,7 +48,11 @@ from app.services.progress import ProgressStore, build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
 from app.services.storage.base import ObjectStorage
 from app.services.storage.factory import create_object_storage
-from app.services.storage.keys import presign_tenant_storage_key
+from app.services.storage.keys import (
+    get_tenant_storage_bytes,
+    presign_tenant_storage_key,
+    put_tenant_storage_bytes,
+)
 from app.services.subtitle_styles import resolve_subtitle_style
 from app.services.synthetic_label import (
     label_artifact_bytes,
@@ -824,7 +828,13 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         suffix=".mp3",
     )
     audio_key = f"tenants/{ctx.tenant_id}/videos/{ctx.task_id}/audio.mp3"
-    ctx.storage.put_bytes(audio_key, audio_bytes, content_type="audio/mpeg")
+    put_tenant_storage_bytes(
+        ctx.storage,
+        tenant_id=ctx.tenant_id,
+        storage_key=audio_key,
+        content=audio_bytes,
+        content_type="audio/mpeg",
+    )
     detected_duration_sec = _audio_duration_sec(audio_source_path)
     duration_ms = int(round(detected_duration_sec * 1000))
     if duration_ms <= 0:
@@ -1232,7 +1242,13 @@ def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         )
     content = "\n".join(lines).encode("utf-8")
     subtitle_key = f"tenants/{ctx.tenant_id}/videos/{ctx.task_id}/subtitle.srt"
-    ctx.storage.put_bytes(subtitle_key, content, content_type="application/x-subrip")
+    put_tenant_storage_bytes(
+        ctx.storage,
+        tenant_id=ctx.tenant_id,
+        storage_key=subtitle_key,
+        content=content,
+        content_type="application/x-subrip",
+    )
     _add_asset(
         ctx,
         storage_key=subtitle_key,
@@ -1550,13 +1566,25 @@ def compose_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     audio_path = work_dir / "voiceover.mp3"
     output_path = work_dir / "final.mp4"
     base_path.write_bytes(base_video_bytes)
-    subtitle_path.write_bytes(ctx.storage.get_bytes(subtitle_key))
+    subtitle_path.write_bytes(
+        get_tenant_storage_bytes(
+            ctx.storage,
+            tenant_id=ctx.tenant_id,
+            storage_key=subtitle_key,
+        )
+    )
     external_audio_path = None
     if getattr(ctx, "use_tts_audio", False):
         audio_key = getattr(ctx, "audio_key", None)
         if not audio_key:
             raise RuntimeError("TTS audio is missing for compose.")
-        audio_path.write_bytes(ctx.storage.get_bytes(audio_key))
+        audio_path.write_bytes(
+            get_tenant_storage_bytes(
+                ctx.storage,
+                tenant_id=ctx.tenant_id,
+                storage_key=audio_key,
+            )
+        )
         external_audio_path = audio_path
     burn_kwargs = {
         "task_id": ctx.task_id,
@@ -1997,7 +2025,13 @@ def upload_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         suffix=".mp4",
     )
     final_key = f"tenants/{ctx.tenant_id}/videos/{ctx.task_id}/final.mp4"
-    ctx.storage.put_bytes(final_key, final_bytes, content_type="video/mp4")
+    put_tenant_storage_bytes(
+        ctx.storage,
+        tenant_id=ctx.tenant_id,
+        storage_key=final_key,
+        content=final_bytes,
+        content_type="video/mp4",
+    )
     _add_asset(
         ctx,
         storage_key=final_key,

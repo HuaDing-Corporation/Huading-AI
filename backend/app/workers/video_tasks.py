@@ -23,6 +23,10 @@ from app.db.session import SessionLocal
 from app.services import provider_costs
 from app.services.progress import build_progress_store
 from app.services.storage.factory import create_object_storage
+from app.services.storage.keys import (
+    get_tenant_storage_bytes,
+    put_tenant_storage_bytes,
+)
 from app.services.synthetic_label import (
     LabelSettings,
     build_synthetic_label_meta,
@@ -242,7 +246,11 @@ def _resolve_i2v_image(params: dict[str, Any]) -> str:
     storage_key = _tenant_upload_storage_key(tenant_id, image_key)
 
     storage = create_object_storage(settings)
-    content = storage.get_bytes(storage_key)
+    content = get_tenant_storage_bytes(
+        storage,
+        tenant_id=tenant_id,
+        storage_key=storage_key,
+    )
     suffix = Path(image_key).suffix or ".jpg"
     handle = tempfile.NamedTemporaryFile(prefix="i2v-", suffix=suffix, delete=False)
     with handle as fh:
@@ -328,13 +336,25 @@ def generate_video_task(self, params: dict[str, Any]) -> dict[str, Any]:
         storage = create_object_storage(settings)
         storage_bucket = getattr(storage, "bucket", settings.engine_s3_bucket)
         storage_key = _storage_key(task_id, tenant_id)
-        storage.put_bytes(storage_key, video_bytes, content_type="video/mp4")
+        put_tenant_storage_bytes(
+            storage,
+            tenant_id=tenant_id,
+            storage_key=storage_key,
+            content=video_bytes,
+            content_type="video/mp4",
+        )
         thumbnail_key = None
         thumbnail_path = result.get("thumbnail_path")
         if thumbnail_path:
             thumbnail_bytes = Path(thumbnail_path).read_bytes()
             thumbnail_key = _thumbnail_key(task_id, tenant_id)
-            storage.put_bytes(thumbnail_key, thumbnail_bytes, content_type="image/jpeg")
+            put_tenant_storage_bytes(
+                storage,
+                tenant_id=tenant_id,
+                storage_key=thumbnail_key,
+                content=thumbnail_bytes,
+                content_type="image/jpeg",
+            )
         duration = result.get("duration")
         file_size = len(video_bytes)
         _update_video_task(

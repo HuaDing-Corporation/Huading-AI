@@ -3,19 +3,24 @@ from pathlib import Path
 
 import pytest
 
-from app.db.models import Asset, VideoTask
+import scripts.ops.scan_storage_keys as storage_key_scanner
+from app.db.models import Asset, BgmLibraryTrack, VideoTask
 from app.services.storage.base import StorageKeyError
 from app.services.storage.keys import (
+    get_tenant_storage_bytes,
     is_tenant_storage_key,
     validate_catalog_storage_key,
     validate_tenant_storage_key,
 )
+from app.services.storage.local import LocalObjectStorage
 from scripts.ops.scan_storage_keys import scan_storage_keys
 
 _APP_ROOT = Path(__file__).resolve().parents[1] / "app"
-_FORBIDDEN_STORAGE_METHODS = {"delete_object", "presign_get_url"}
+_STORAGE_BASE_PATH = _APP_ROOT / "services/storage/base.py"
 _RAW_STORAGE_CALL_ALLOWLIST = {
+    Path("services/storage/base.py"),
     Path("services/storage/keys.py"),
+    Path("services/storage/local.py"),
     Path("services/storage/s3.py"),
 }
 
@@ -69,35 +74,81 @@ def test_catalog_storage_key_validator_never_accepts_tenant_keys() -> None:
         validate_catalog_storage_key("tenants/tenant-boundary/images/output.png")
 
 
-def _raw_storage_call_violations(path: Path) -> list[str]:
+def test_tenant_get_bytes_boundary_blocks_real_local_storage_traversal(
+    tmp_path: Path,
+) -> None:
+    storage = LocalObjectStorage(str(tmp_path))
+    tenant_id = "tenant-reader"
+    victim_key = "tenants/tenant-victim/private/victim.png"
+    traversal_key = f"tenants/{tenant_id}/../tenant-victim/private/victim.png"
+    victim_bytes = b"cross-tenant-private-content"
+    storage.put_bytes(victim_key, victim_bytes, content_type="image/png")
+
+    with pytest.raises(StorageKeyError):
+        get_tenant_storage_bytes(
+            storage,
+            tenant_id=tenant_id,
+            storage_key=traversal_key,
+        )
+
+    assert storage.get_bytes(victim_key) == victim_bytes
+
+
+def _object_storage_public_methods() -> set[str]:
+    tree = ast.parse(
+        _STORAGE_BASE_PATH.read_text(encoding="utf-8"),
+        filename=str(_STORAGE_BASE_PATH),
+    )
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "ObjectStorage":
+            methods = {
+                item.name
+                for item in node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and not item.name.startswith("_")
+            }
+            if methods:
+                return methods
+    raise AssertionError("ObjectStorage public methods could not be discovered.")
+
+
+def _raw_storage_call_violations(path: Path, method_names: set[str]) -> list[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     violations: list[str] = []
     for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in method_names:
+            violations.append(f"{path.relative_to(_APP_ROOT)}:{node.lineno}:{node.attr}")
+            continue
         if not isinstance(node, ast.Call):
             continue
-        if (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr in _FORBIDDEN_STORAGE_METHODS
-        ):
-            violations.append(f"{path.relative_to(_APP_ROOT)}:{node.lineno}:{node.func.attr}")
-            continue
         if not (isinstance(node.func, ast.Name) and node.func.id == "getattr"):
+            if not (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "methodcaller"
+            ):
+                continue
+            method_index = 0
+        else:
+            method_index = 1
+        if len(node.args) <= method_index:
             continue
-        if len(node.args) < 2 or not isinstance(node.args[1], ast.Constant):
-            continue
-        method_name = node.args[1].value
-        if method_name in _FORBIDDEN_STORAGE_METHODS:
-            violations.append(f"{path.relative_to(_APP_ROOT)}:{node.lineno}:getattr:{method_name}")
+        method_arg = node.args[method_index]
+        if isinstance(method_arg, ast.Constant) and method_arg.value in method_names:
+            violations.append(
+                f"{path.relative_to(_APP_ROOT)}:{node.lineno}:"
+                f"{node.func.id}:{method_arg.value}"
+            )
     return violations
 
 
-def test_storage_delete_and_presign_only_occur_in_validated_boundary() -> None:
+def test_object_storage_methods_only_occur_in_validated_boundary() -> None:
+    method_names = _object_storage_public_methods()
     violations: list[str] = []
     for path in _APP_ROOT.rglob("*.py"):
         relative = path.relative_to(_APP_ROOT)
         if relative in _RAW_STORAGE_CALL_ALLOWLIST:
             continue
-        violations.extend(_raw_storage_call_violations(path))
+        violations.extend(_raw_storage_call_violations(path, method_names))
     assert violations == []
 
 
@@ -164,3 +215,76 @@ def test_storage_key_scanner_reports_dirty_rows_without_modifying_them(
         assert db.get(Asset, safe_asset_id) is not None
         assert db.get(Asset, dirty_asset_id) is not None
         assert db.get(VideoTask, dirty_task_id) is not None
+
+
+def test_storage_key_scanner_reports_platform_asset_and_bgm_catalog_keys(
+    auth_db,
+) -> None:
+    platform_asset_id = "storage-scan-platform-asset"
+    track_id = "storage-scan-bgm-track"
+    with auth_db() as db:
+        db.add_all(
+            [
+                Asset(
+                    id=platform_asset_id,
+                    tenant_id=None,
+                    type="avatar_image",
+                    source="preset",
+                    storage_key="platform/../tenants/victim/private.png",
+                    status="ready",
+                ),
+                BgmLibraryTrack(
+                    track_id=track_id,
+                    name="Storage scan track",
+                    duration_sec=10,
+                    storage_key="platform/bgm//dirty.mp3",
+                    preview_storage_key="tenants/victim/private/preview.mp3",
+                    license="Test license",
+                ),
+            ]
+        )
+        db.commit()
+
+        findings = scan_storage_keys(db)
+
+        assert {
+            (finding.source, finding.row_id, finding.field, finding.reason)
+            for finding in findings
+        } == {
+            (
+                "assets",
+                platform_asset_id,
+                "storage_key",
+                "noncanonical_path",
+            ),
+            (
+                "bgm_library_tracks",
+                track_id,
+                "storage_key",
+                "noncanonical_path",
+            ),
+            (
+                "bgm_library_tracks",
+                track_id,
+                "preview_storage_key",
+                "catalog_prefix_mismatch",
+            ),
+        }
+        assert db.get(Asset, platform_asset_id) is not None
+        assert db.get(BgmLibraryTrack, track_id) is not None
+
+
+def test_storage_key_scanner_policy_covers_every_persisted_key_column() -> None:
+    persisted_columns = storage_key_scanner.persisted_storage_key_columns()
+
+    assert persisted_columns == {
+        ("assets", "storage_key"),
+        ("bgm_library_tracks", "preview_storage_key"),
+        ("bgm_library_tracks", "storage_key"),
+        ("brand_assets", "storage_key"),
+        ("ecom_replicate_outputs", "storage_key"),
+        ("reverse_prompt_jobs", "source_storage_key"),
+        ("video_tasks", "storage_key"),
+        ("video_tasks", "thumbnail_key"),
+    }
+    assert storage_key_scanner.configured_storage_key_columns() == persisted_columns

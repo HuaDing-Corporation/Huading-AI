@@ -102,3 +102,80 @@ def delete_tenant_storage_key(
     storage_key: str | None,
 ) -> None:
     storage.delete_object(validate_tenant_storage_key(tenant_id, storage_key))
+
+
+def get_tenant_storage_bytes(
+    storage: ObjectStorage,
+    *,
+    tenant_id: str,
+    storage_key: str | None,
+) -> bytes:
+    return storage.get_bytes(validate_tenant_storage_key(tenant_id, storage_key))
+
+
+def get_catalog_storage_bytes(
+    storage: ObjectStorage,
+    *,
+    storage_key: str | None,
+) -> bytes:
+    return storage.get_bytes(validate_catalog_storage_key(storage_key))
+
+
+def put_tenant_storage_bytes(
+    storage: ObjectStorage,
+    *,
+    tenant_id: str,
+    storage_key: str | None,
+    content: bytes,
+    content_type: str,
+) -> str:
+    return storage.put_bytes(
+        validate_tenant_storage_key(tenant_id, storage_key),
+        content,
+        content_type=content_type,
+    )
+
+
+def put_tenant_storage_text(
+    storage: ObjectStorage,
+    *,
+    tenant_id: str,
+    storage_key: str | None,
+    content: str,
+    content_type: str,
+) -> str:
+    return storage.put_text(
+        validate_tenant_storage_key(tenant_id, storage_key),
+        content,
+        content_type=content_type,
+    )
+
+
+def put_catalog_storage_bytes(
+    storage: ObjectStorage,
+    *,
+    storage_key: str | None,
+    content: bytes,
+    content_type: str,
+) -> str:
+    return storage.put_bytes(
+        validate_catalog_storage_key(storage_key),
+        content,
+        content_type=content_type,
+    )
+
+
+def catalog_storage_key_exists(
+    storage: ObjectStorage,
+    *,
+    storage_key: str | None,
+) -> bool:
+    safe_key = validate_catalog_storage_key(storage_key)
+    object_exists = getattr(storage, "object_exists", None)
+    if callable(object_exists):
+        return bool(object_exists(safe_key))
+    try:
+        storage.get_bytes(safe_key)
+    except Exception:
+        return False
+    return True

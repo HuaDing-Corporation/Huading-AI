@@ -6,6 +6,7 @@ from app.db.models import User
 from app.schemas.response import ApiResponse, ok
 from app.schemas.storage import StoragePutRequest, StoragePutResponse
 from app.services.storage.base import ObjectStorage, StorageKeyError
+from app.services.storage.keys import put_tenant_storage_text
 
 router = APIRouter()
 ObjectStorageDependency = Depends(get_object_storage)
@@ -32,9 +33,11 @@ def put_object(
             status_code=400,
         )
     try:
-        uri = storage.put_text(
-            tenant_storage_key(user.tenant_id, payload.key),
-            payload.content,
+        uri = put_tenant_storage_text(
+            storage,
+            tenant_id=user.tenant_id,
+            storage_key=tenant_storage_key(user.tenant_id, payload.key),
+            content=payload.content,
             content_type=payload.content_type,
         )
     except StorageKeyError as exc:

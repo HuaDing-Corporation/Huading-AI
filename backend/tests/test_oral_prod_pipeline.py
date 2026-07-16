@@ -527,7 +527,13 @@ def test_frame_candidates_clamp_count_and_store_previews(
     storage = _FakeStorage()
     calls: dict[str, object] = {}
 
-    def fake_extract_frame_candidates(storage_arg, *, video_key, timestamps):
+    def fake_extract_frame_candidates(
+        storage_arg,
+        *,
+        tenant_id,
+        video_key,
+        timestamps,
+    ):
         calls.update(
             {
                 "storage": storage_arg,
@@ -614,7 +620,14 @@ def test_cover_from_frame_stores_cover_photo_history_item(
     storage = _FakeStorage()
     calls: dict[str, object] = {}
 
-    def fake_extract_frame_cover(storage_arg, *, video_key, timestamp_sec, title):
+    def fake_extract_frame_cover(
+        storage_arg,
+        *,
+        tenant_id,
+        video_key,
+        timestamp_sec,
+        title,
+    ):
         calls.update(
             {
                 "storage": storage_arg,
