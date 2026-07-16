@@ -600,10 +600,24 @@ export const copy = {
     reverseNoSummary: "暂无摘要",
     reversePendingHint: "反推尚未完成，暂无结果可看",
     reverseDeleteConfirmTitle: "删除这条反推记录？",
+    /**
+     * 🔴 FIX2：删除文案**只描述用户能观察到的后果**，不描述 BE 实现。
+     * - 不用 deleteConfirmSoft「可恢复」：BE 的软删是**运维保险**（出事能救、不碰媒体），**不是给用户的功能** ——
+     *   用户侧列表过滤已删、详情 404、且**没有任何恢复入口**（无回收站 / 无「已删除」筛选）→ 说「可恢复」是骗人。
+     * - 也不用 deleteConfirmHard「将永久删除，不可恢复」：反推软删**只置 deleted_at、不碰媒体**，数据其实都在 ——
+     *   那是**反方向的谎**（用户以为删干净了，实际没有），将来做回收站时还得推翻文案。
+     * → 两句都只讲用户可观察的事实：「从历史移除」= 列表消失 + 详情打不开；「无法撤销」= 界面上没有回头路。
+     */
+    reverseDeleteConfirmMsg: "将从历史移除，无法撤销。",
     reverseKindTag: (kind: string) => (kind === "video" ? "视频反推" : "图片反推"),
-    /** 反推任务状态（BE DB CheckConstraint 5 值：queued/running/succeeded/failed/saved）。未知值原样透出，不吞。 */
+    /**
+     * 反推任务状态（BE DB CheckConstraint 5 值：queued/running/succeeded/failed/saved）。
+     * FIX2 · P2：未知值回退「未知状态」而**不是原样透出** —— 当前 5 值约束下暂不触发，但 BE 将来加状态就会
+     * 在 UI 上露出裸英文。与「类型层用裸 `str` 忠实透出、不吞未知值」不冲突：**类型层忠实、展示层兜底**，两件事。
+     */
     reverseStatus: (status: string) =>
-      ({ queued: "排队中", running: "反推中", succeeded: "已完成", failed: "失败", saved: "已保存" })[status] ?? status
+      ({ queued: "排队中", running: "反推中", succeeded: "已完成", failed: "失败", saved: "已保存" })[status] ??
+      "未知状态"
   },
   // 图片历史·统一模块 (HISTORY-UI-0001) — 独立页 /history，4 tab（归一 category）。
   historyImages: {

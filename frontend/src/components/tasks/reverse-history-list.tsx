@@ -264,11 +264,13 @@ export function ReverseHistoryList({ onApplyPrefill }: { onApplyPrefill?: (prefi
 
       <ReverseDetailDialog item={detail} onClose={() => setDetail(null)} onApplyPrefill={onApplyPrefill} />
 
-      {/* 删除确认 —— 反推是**软删**（BE 只置 deleted_at、不碰媒体）→ 用「可恢复」文案，非视频/图片的硬删口径。 */}
+      {/* 删除确认。FIX2：文案讲**用户可观察的后果**，不讲 BE 实现 —— BE 的软删是运维保险（不碰媒体、出事能救），
+          但用户侧列表过滤已删 + 详情 404 + **没有恢复入口** → 「可恢复」是骗人；而「永久删除」又谎报了实现
+          （数据其实都在）。故用 reverseDeleteConfirmMsg「将从历史移除，无法撤销。」 */}
       <ConfirmDialog
         open={!!confirmDelete}
         title={copy.history.reverseDeleteConfirmTitle}
-        message={copy.history.deleteConfirmSoft}
+        message={copy.history.reverseDeleteConfirmMsg}
         confirmLabel={copy.history.deleteConfirmBtn}
         submitting={del.isPending}
         error={actionError}

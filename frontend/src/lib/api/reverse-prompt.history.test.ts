@@ -4,6 +4,8 @@ import {
   deleteReversePromptJob,
   getReversePromptJob,
   listReversePromptJobs,
+  regenerateReversePrompt,
+  saveReversePrompt,
   type ReverseSourceKind
 } from "@/lib/api/reverse-prompt";
 
@@ -76,6 +78,21 @@ describe("反推历史列表 GET /reverse-prompt/jobs", () => {
       code: "VALIDATION_ERROR"
     });
   });
+
+  // 🔴 FIX2 · P1-2：BE 是 `page: Query(ge=1)` / `page_size: Query(ge=1, le=100)`（routes:74-75）→ 越界即 422。
+  // 上一版 mock 把越界值 clamp 成合法值返 200 = 比 BE 宽松（本项目第三次犯：#159 / #166 都栽过）。
+  it("🔴 分页越界 → 422（page=0 / page_size=0 / page_size=101；mock 不比 BE 宽松）", async () => {
+    await expect(listReversePromptJobs({ page: 0 })).rejects.toMatchObject({ status: 422, code: "VALIDATION_ERROR" });
+    await expect(listReversePromptJobs({ page: -1 })).rejects.toMatchObject({ status: 422 });
+    await expect(listReversePromptJobs({ page_size: 0 })).rejects.toMatchObject({ status: 422 });
+    await expect(listReversePromptJobs({ page_size: 101 })).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("分页边界内合法：page_size=100（BE le=100 的上界，属合法）", async () => {
+    const r = await listReversePromptJobs({ page_size: 100 });
+    expect(r.page_size).toBe(100);
+    expect(r.total).toBe(6);
+  });
 });
 
 describe("反推详情 GET /reverse-prompt/jobs/{id}", () => {
@@ -124,13 +141,30 @@ describe("反推详情 GET /reverse-prompt/jobs/{id}", () => {
     expect(job.saved_at).toBeTruthy();
     expect(job.result).toBeTruthy(); // saved 仍带 result
   });
+
+  // 🔴 FIX2 · §六.5 自扫出的**第四处宽松**（Codex B 没提，我自己扫的）：旧 mock 详情有个兜底
+  // `return ok(reverseJobRead(id))` —— **任何不存在的 id 都返 200 + 一份假 job**；BE 对不存在/跨租户一律
+  // 经 reverse_prompt_job_or_404 → 404。这是「mock 比 BE 宽松」的同一种病，只是没人写测试碰过它。
+  it("不存在的 id → 404（旧 mock 兜底恒返假 job = 第四处宽松）", async () => {
+    await expect(getReversePromptJob("rh-not-exist")).rejects.toMatchObject({
+      status: 404,
+      code: "REVERSE_PROMPT_JOB_NOT_FOUND"
+    });
+  });
 });
 
 // ⚠️ 本 describe 会改 MSW 的 mock state（软删标记）→ 必须放最后；vitest 默认按文件内顺序执行、文件间隔离。
 describe("反推软删 DELETE /reverse-prompt/jobs/{id}", () => {
-  it("软删 → 返 {id, deleted_at}；列表少一条；详情仍可取（BE 只置 deleted_at、不碰媒体）", async () => {
+  // 🔴 FIX2：上一版这里钉的是「详情仍可取」——**那是我把源码读反了**。我读了 services:276（**列表**的过滤条件）
+  // 就推断「列表过滤、详情不过滤」，却没去读详情的取数函数。真实：详情走 reverse_prompt_job_or_404，它用的是
+  // **select_live_reverse_prompt_jobs**（services/reverse_prompt.py:365-368）= `deleted_at IS NULL` → **删除后 404**。
+  // 后端承重测试逐条钉死（test_reverse_prompt_history.py:262-285：detail / regenerate / save / re-delete 全 404）。
+  // 教训：契约测试本该是发现「读错」的地方，但它跟着错的理解一起写，就成了**假绿的放大器**。
+  it("软删 → 返 {id, deleted_at}；列表少一条；**详情随即 404**（BE 详情复用 live selector）", async () => {
     const before = await listReversePromptJobs({ source_kind: "video" });
     expect(before.total).toBe(3);
+    // 删之前详情可取（对照组，确保下面的 404 是「因为删了」而不是「这条本来就取不到」）
+    expect((await getReversePromptJob("rh-vid-3")).id).toBe("rh-vid-3");
 
     const res = await deleteReversePromptJob("rh-vid-3");
     expect(res.id).toBe("rh-vid-3");
@@ -140,8 +174,17 @@ describe("反推软删 DELETE /reverse-prompt/jobs/{id}", () => {
     expect(after.total).toBe(2);
     expect(after.items.map((i) => i.id)).toEqual(["rh-vid-1", "rh-vid-2"]);
 
-    // 软删 ≠ 硬删：BE 列表过滤 deleted_at，**详情不过滤** → 仍可取（这正是「可恢复」的底气）。
-    expect((await getReversePromptJob("rh-vid-3")).id).toBe("rh-vid-3");
+    // 用户侧的真实后果：列表看不到 **且** 详情打不开 → 界面上没有回头路（故删除文案讲「无法撤销」）。
+    await expect(getReversePromptJob("rh-vid-3")).rejects.toMatchObject({
+      status: 404,
+      code: "REVERSE_PROMPT_JOB_NOT_FOUND"
+    });
+  });
+
+  // 🔴 FIX2 · 自扫出的第三处宽松：regenerate / save 在 BE 同样经 reverse_prompt_job_or_404 → 已删即 404。
+  it("已删记录的 regenerate / save → 404（BE 同走 live selector；旧 mock 恒成功=假绿）", async () => {
+    await expect(regenerateReversePrompt("rh-vid-3")).rejects.toMatchObject({ status: 404 });
+    await expect(saveReversePrompt("rh-vid-3")).rejects.toMatchObject({ status: 404 });
   });
 
   it("重复删除 / 不存在 → 404", async () => {

@@ -1182,8 +1182,16 @@ export const handlers = [
     const sp = new URL(request.url).searchParams;
     const kind = sp.get("source_kind");
     if (kind !== null && kind !== "image" && kind !== "video") return err(422, "VALIDATION_ERROR", "无效的反推来源");
-    const page = Math.max(1, Number(sp.get("page") ?? 1));
-    const pageSize = Math.max(1, Math.min(100, Number(sp.get("page_size") ?? 20)));
+    // 🔴 FIX2 · P1-2：BE 是 `page: Query(ge=1)` / `page_size: Query(ge=1, le=100)`（routes:74-75）→ 越界即 **422**。
+    // 旧 mock 把越界值 clamp 成合法值并返 200 = **比 BE 宽松**（本项目第三次犯：#159 / #166 都栽过）——
+    // 生产必失败的请求在本地全绿。
+    const rawPage = sp.get("page");
+    const rawPageSize = sp.get("page_size");
+    const page = rawPage === null ? 1 : Number(rawPage);
+    const pageSize = rawPageSize === null ? 20 : Number(rawPageSize);
+    if (!Number.isInteger(page) || page < 1) return err(422, "VALIDATION_ERROR", "page 必须 ≥ 1");
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100)
+      return err(422, "VALIDATION_ERROR", "page_size 必须在 1–100 之间");
     const all = reverseHistory
       .filter((r) => !r.deleted) // BE live_reverse_prompt_job_condition（services:276）：软删不进列表
       .filter((r) => !kind || r.source_kind === kind)
@@ -1214,9 +1222,12 @@ export const handlers = [
   }),
   http.get(`${BASE}/api/v1/reverse-prompt/jobs/:id`, ({ params }) => {
     const id = String(params.id);
-    // 反推历史 seed：软删后详情**仍可取**（BE 语义 —— 列表过滤 deleted_at，详情不过滤）。
+    // 🔴 FIX2 · P1-1（我上一版读反了源码）：详情走 `reverse_prompt_job_or_404` → 它用的是
+    // **select_live_reverse_prompt_jobs**（services/reverse_prompt.py:365-368）= `deleted_at IS NULL`
+    // → **软删后详情 404**，不是「仍可取」。后端承重测试逐条钉死（test_reverse_prompt_history.py:262-285：
+    // 删除后 detail / regenerate / save / re-delete 全 404）。
     const hist = reverseHistory.find((r) => r.id === id);
-    if (hist) return ok(reverseHistJobRead(hist));
+    if (hist) return hist.deleted ? err(404, "REVERSE_PROMPT_JOB_NOT_FOUND", "记录不存在或无权访问") : ok(reverseHistJobRead(hist));
     const vj = reverseVideoJobs.get(id);
     if (vj) {
       if (vj.status !== "succeeded" && vj.status !== "failed") {
@@ -1225,12 +1236,28 @@ export const handlers = [
       }
       return ok(reverseVideoJobRead(vj));
     }
+    // 🔴 FIX2 · §六.5 自扫出的**第四处宽松**：旧兜底 `ok(reverseJobRead(id))` 让**任何不存在的 id 都返 200 +
+    // 一份假 job**；BE 对不存在/跨租户一律 404（reverse_prompt_job_or_404）。图片反推是同步的（POST 直接返
+    // succeeded+result，不走轮询），视频反推的 job 都在 reverseVideoJobs 里 → 该兜底没有真实消费者，纯宽松。
+    // 保留 rp-* 前缀（POST 图片反推产生的 id）可取，其余一律 404 —— 与 BE 一致。
+    if (id.startsWith("rp-")) return ok(reverseJobRead(id));
+    return err(404, "REVERSE_PROMPT_JOB_NOT_FOUND", "记录不存在或无权访问");
+  }),
+  // 🔴 FIX2 · §六.5 自扫出的**第三处宽松**：regenerate / save 在 BE 同样经 reverse_prompt_job_or_404（live
+  // selector）取 job → **已删即 404**（后端承重测试 test_reverse_prompt_history.py:274-281 逐条钉）。
+  // 旧 mock 对已删 job 恒成功 —— 又一处「生产必失败、本地全绿」。
+  http.post(`${BASE}/api/v1/reverse-prompt/jobs/:id/regenerate`, ({ params }) => {
+    const id = String(params.id);
+    if (reverseHistory.find((r) => r.id === id)?.deleted)
+      return err(404, "REVERSE_PROMPT_JOB_NOT_FOUND", "记录不存在或无权访问");
     return ok(reverseJobRead(id));
   }),
-  http.post(`${BASE}/api/v1/reverse-prompt/jobs/:id/regenerate`, ({ params }) => ok(reverseJobRead(String(params.id)))),
-  http.post(`${BASE}/api/v1/reverse-prompt/jobs/:id/save`, ({ params }) =>
-    ok({ id: String(params.id), status: "saved", saved_at: new Date(0).toISOString() })
-  ),
+  http.post(`${BASE}/api/v1/reverse-prompt/jobs/:id/save`, ({ params }) => {
+    const id = String(params.id);
+    if (reverseHistory.find((r) => r.id === id)?.deleted)
+      return err(404, "REVERSE_PROMPT_JOB_NOT_FOUND", "记录不存在或无权访问");
+    return ok({ id, status: "saved", saved_at: new Date(0).toISOString() });
+  }),
   http.post(`${BASE}/api/v1/videos`, async ({ request }) => {
     const body = (await request.json()) as {
       topic?: string;

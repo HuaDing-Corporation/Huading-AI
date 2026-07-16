@@ -269,8 +269,11 @@ describe("ReverseHistoryList (提示词反推历史)", () => {
     fireEvent.click(screen.getByLabelText(copy.history.deleteItem));
     expect(mocks.del.mutateAsync).not.toHaveBeenCalled(); // 确认门：不直接删
     expect(screen.getByText(copy.history.reverseDeleteConfirmTitle)).toBeInTheDocument();
-    // 反推是软删（BE 只置 deleted_at）→ 必须是「可恢复」文案，不能用视频/图片的硬删口径
-    expect(screen.getByText(copy.history.deleteConfirmSoft)).toBeInTheDocument();
+    // 🔴 FIX2：文案只讲用户可观察的后果 —— 列表消失 + 详情 404 + 无恢复入口 → 「将从历史移除，无法撤销。」
+    // 不用「可恢复」（软删是 BE 的运维保险、不是用户功能，用户没有回收站），也不用「永久删除」（谎报实现：
+    // 数据其实都在、媒体没碰）。
+    expect(screen.getByText(copy.history.reverseDeleteConfirmMsg)).toBeInTheDocument();
+    expect(screen.queryByText(copy.history.deleteConfirmSoft)).not.toBeInTheDocument();
     expect(screen.queryByText(copy.history.deleteConfirmHard)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: copy.common.cancel }));
