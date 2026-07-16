@@ -48,6 +48,7 @@ from app.services.progress import ProgressStore, build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
 from app.services.storage.base import ObjectStorage
 from app.services.storage.factory import create_object_storage
+from app.services.storage.keys import presign_tenant_storage_key
 from app.services.subtitle_styles import resolve_subtitle_style
 from app.services.synthetic_label import (
     label_artifact_bytes,
@@ -185,7 +186,12 @@ def _seedance_i2v_image_url(ctx: AvatarTalkContext, params: Mapping[str, Any]) -
         math.ceil(float(settings.engine_apimart_video_timeout_seconds)),
         _APIMART_VIDEO_MIN_PRESIGN_TTL_SECONDS,
     )
-    return ctx.storage.presign_get_url(storage_key, expires_in=presign_ttl)
+    return presign_tenant_storage_key(
+        ctx.storage,
+        tenant_id=ctx.tenant_id,
+        storage_key=storage_key,
+        expires_in=presign_ttl,
+    )
 
 
 def _seedance_i2v_provider_payload(
@@ -908,12 +914,16 @@ def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         tier = _change_lips_tier()
         _validate_change_lips_tts_duration(float(ctx.duration_sec or 0), tier=tier)
         payload = {
-            "video_url": ctx.storage.presign_get_url(
-                avatar.storage_key,
+            "video_url": presign_tenant_storage_key(
+                ctx.storage,
+                tenant_id=ctx.tenant_id,
+                storage_key=avatar.storage_key,
                 expires_in=settings.engine_s3_presign_ttl,
             ),
-            "audio_url": ctx.storage.presign_get_url(
-                audio_key,
+            "audio_url": presign_tenant_storage_key(
+                ctx.storage,
+                tenant_id=ctx.tenant_id,
+                storage_key=audio_key,
                 expires_in=settings.engine_s3_presign_ttl,
             ),
             "tier": tier,
@@ -977,12 +987,16 @@ def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         return ctx
 
     payload = {
-        "image_url": ctx.storage.presign_get_url(
-            avatar.storage_key,
+        "image_url": presign_tenant_storage_key(
+            ctx.storage,
+            tenant_id=ctx.tenant_id,
+            storage_key=avatar.storage_key,
             expires_in=settings.engine_s3_presign_ttl,
         ),
-        "audio_url": ctx.storage.presign_get_url(
-            audio_key,
+        "audio_url": presign_tenant_storage_key(
+            ctx.storage,
+            tenant_id=ctx.tenant_id,
+            storage_key=audio_key,
             expires_in=settings.engine_s3_presign_ttl,
         ),
         "prompt": task.topic,
@@ -2104,16 +2118,20 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 progress=100,
                 step="done",
                 playback_url=(
-                    storage.presign_get_url(
-                        output_storage_key,
+                    presign_tenant_storage_key(
+                        storage,
+                        tenant_id=tenant_id,
+                        storage_key=output_storage_key,
                         expires_in=settings.engine_s3_presign_ttl,
                     )
                     if output_storage_key
                     else None
                 ),
                 download_url=(
-                    storage.presign_get_url(
-                        output_storage_key,
+                    presign_tenant_storage_key(
+                        storage,
+                        tenant_id=tenant_id,
+                        storage_key=output_storage_key,
                         expires_in=settings.engine_s3_presign_ttl,
                         download_filename=f"{task.id}.mp4",
                     )
@@ -2232,16 +2250,20 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
                 progress=100,
                 step="done",
                 playback_url=(
-                    storage.presign_get_url(
-                        output_storage_key,
+                    presign_tenant_storage_key(
+                        storage,
+                        tenant_id=tenant_id,
+                        storage_key=output_storage_key,
                         expires_in=settings.engine_s3_presign_ttl,
                     )
                     if output_storage_key
                     else None
                 ),
                 download_url=(
-                    storage.presign_get_url(
-                        output_storage_key,
+                    presign_tenant_storage_key(
+                        storage,
+                        tenant_id=tenant_id,
+                        storage_key=output_storage_key,
                         expires_in=settings.engine_s3_presign_ttl,
                         download_filename=f"{task.id}.mp4",
                     )

@@ -27,6 +27,7 @@ from app.services.covers import (
 )
 from app.services.history import prune_video_history
 from app.services.storage.base import ObjectStorage
+from app.services.storage.keys import presign_tenant_storage_key
 from app.services.synthetic_label import (
     label_artifact_bytes,
     synthetic_label_context,
@@ -115,8 +116,10 @@ def frame_candidates(
         response_frames.append(
             FrameCandidate(
                 timestamp_sec=frame.timestamp_sec,
-                preview_url=storage.presign_get_url(
-                    key,
+                preview_url=presign_tenant_storage_key(
+                    storage,
+                    tenant_id=user.tenant_id,
+                    storage_key=key,
                     expires_in=settings.engine_s3_presign_ttl,
                 ),
             )
@@ -232,8 +235,10 @@ def cover_from_frame(
         CoverFromFrameResponse(
             cover=CoverRead(
                 id=asset.id,
-                image_url=storage.presign_get_url(
-                    storage_key,
+                image_url=presign_tenant_storage_key(
+                    storage,
+                    tenant_id=user.tenant_id,
+                    storage_key=storage_key,
                     expires_in=settings.engine_s3_presign_ttl,
                 ),
                 width=cover.width,

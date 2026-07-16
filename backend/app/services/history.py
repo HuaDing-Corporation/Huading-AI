@@ -4,9 +4,14 @@ from typing import Literal
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.core.exceptions import AppError
 from app.core.logging import get_logger
 from app.db.models import Asset, TaskAsset, UsageRecord, VideoTask
-from app.services.storage.base import ObjectStorage
+from app.services.storage.base import ObjectStorage, StorageKeyError
+from app.services.storage.keys import (
+    delete_tenant_storage_key,
+    validate_tenant_storage_keys,
+)
 
 logger = get_logger(__name__)
 
@@ -54,15 +59,19 @@ def _unique(items: Iterable[str | None]) -> list[str]:
     return unique_items
 
 
-def _delete_media_best_effort(storage: ObjectStorage, storage_keys: Iterable[str]) -> None:
-    delete_object = getattr(storage, "delete_object", None)
-    if delete_object is None:
-        logger.warning("history.storage_delete_unavailable")
-        return
-
+def _delete_media_best_effort(
+    storage: ObjectStorage,
+    *,
+    tenant_id: str,
+    storage_keys: Iterable[str],
+) -> None:
     for storage_key in _unique(storage_keys):
         try:
-            delete_object(storage_key)
+            delete_tenant_storage_key(
+                storage,
+                tenant_id=tenant_id,
+                storage_key=storage_key,
+            )
         except Exception as exc:  # pragma: no cover - log-only best effort
             logger.warning(
                 "history.storage_delete_failed",
@@ -89,6 +98,7 @@ def _asset_has_other_task_links(db: Session, *, asset_id: str, task_ids: set[str
 def _hard_delete_tasks(
     db: Session,
     *,
+    tenant_id: str,
     tasks: list[VideoTask],
     storage: ObjectStorage,
 ) -> int:
@@ -116,6 +126,18 @@ def _hard_delete_tasks(
         assets_to_delete[asset.id] = asset
         storage_keys.append(asset.storage_key)
 
+    try:
+        safe_storage_keys = validate_tenant_storage_keys(
+            tenant_id,
+            _unique(storage_keys),
+        )
+    except StorageKeyError as exc:
+        raise AppError(
+            "Video task not found.",
+            code="VIDEO_TASK_NOT_FOUND",
+            status_code=404,
+        ) from exc
+
     for usage in db.scalars(
         select(UsageRecord).where(UsageRecord.video_task_id.in_(task_ids))
     ):
@@ -129,7 +151,11 @@ def _hard_delete_tasks(
         db.delete(task)
     db.commit()
 
-    _delete_media_best_effort(storage, storage_keys)
+    _delete_media_best_effort(
+        storage,
+        tenant_id=tenant_id,
+        storage_keys=safe_storage_keys,
+    )
     return len(tasks)
 
 
@@ -150,7 +176,7 @@ def delete_video_task(
         return "missing"
     if not is_terminal_history_task(task):
         return "skipped"
-    _hard_delete_tasks(db, tasks=[task], storage=storage)
+    _hard_delete_tasks(db, tenant_id=tenant_id, tasks=[task], storage=storage)
     return "deleted"
 
 
@@ -170,7 +196,7 @@ def clear_video_history(
             )
         )
     )
-    return _hard_delete_tasks(db, tasks=tasks, storage=storage)
+    return _hard_delete_tasks(db, tenant_id=tenant_id, tasks=tasks, storage=storage)
 
 
 def prune_video_history(
@@ -192,7 +218,12 @@ def prune_video_history(
             .order_by(VideoTask.created_at.desc(), VideoTask.id.desc())
         )
     )
-    return _hard_delete_tasks(db, tasks=tasks[keep:], storage=storage)
+    return _hard_delete_tasks(
+        db,
+        tenant_id=tenant_id,
+        tasks=tasks[keep:],
+        storage=storage,
+    )
 
 
 def prune_video_history_best_effort(

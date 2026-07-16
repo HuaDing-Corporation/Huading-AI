@@ -32,6 +32,7 @@ from app.services.progress import ProgressStore, build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
 from app.services.storage.base import ObjectStorage
 from app.services.storage.factory import create_object_storage
+from app.services.storage.keys import presign_tenant_storage_key
 from app.services.synthetic_label import (
     label_artifact_bytes,
     synthetic_label_context,
@@ -224,7 +225,12 @@ def _provider_payload(ctx: VideoGenContext) -> dict[str, Any]:
     )
     for asset in ctx.reference_assets:
         image_urls.append(
-            ctx.storage.presign_get_url(asset.storage_key, expires_in=presign_ttl)
+            presign_tenant_storage_key(
+                ctx.storage,
+                tenant_id=ctx.tenant_id,
+                storage_key=asset.storage_key,
+                expires_in=presign_ttl,
+            )
         )
     payload: dict[str, Any] = {
         "model": settings.engine_apimart_video_model,
@@ -467,12 +473,16 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 status="done",
                 progress=100,
                 step="upload",
-                playback_url=storage.presign_get_url(
-                    storage_key,
+                playback_url=presign_tenant_storage_key(
+                    storage,
+                    tenant_id=tenant_id,
+                    storage_key=storage_key,
                     expires_in=settings.engine_s3_presign_ttl,
                 ),
-                download_url=storage.presign_get_url(
-                    storage_key,
+                download_url=presign_tenant_storage_key(
+                    storage,
+                    tenant_id=tenant_id,
+                    storage_key=storage_key,
                     expires_in=settings.engine_s3_presign_ttl,
                     download_filename=f"{task_id}.mp4",
                 ),

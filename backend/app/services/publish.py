@@ -13,6 +13,7 @@ from app.db.models import PublishRecord, VideoTask
 from app.services.copy import generate_publish_copy
 from app.services.quota import charge_copy_quota
 from app.services.storage.base import ObjectStorage
+from app.services.storage.keys import presign_tenant_storage_key
 
 _DEFAULT_PLATFORMS: list[dict[str, object]] = [
     {
@@ -156,13 +157,20 @@ def _source_urls(
     *,
     source_kind: str,
 ) -> tuple[str, str]:
-    media_url = storage.presign_get_url(
-        task.storage_key,
+    media_url = presign_tenant_storage_key(
+        storage,
+        tenant_id=task.tenant_id,
+        storage_key=task.storage_key,
         expires_in=settings.engine_s3_presign_ttl,
     )
     cover_key = task.thumbnail_key or (task.storage_key if source_kind == "image" else None)
     cover_url = (
-        storage.presign_get_url(cover_key, expires_in=settings.engine_s3_presign_ttl)
+        presign_tenant_storage_key(
+            storage,
+            tenant_id=task.tenant_id,
+            storage_key=cover_key,
+            expires_in=settings.engine_s3_presign_ttl,
+        )
         if cover_key
         else media_url
     )

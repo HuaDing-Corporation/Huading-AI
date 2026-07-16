@@ -23,6 +23,10 @@ from app.schemas.reverse_prompt import (
 )
 from app.services import quota
 from app.services.storage.base import ObjectStorage
+from app.services.storage.keys import (
+    is_tenant_storage_key,
+    presign_tenant_storage_key,
+)
 
 _TARGET_FORMAT = "seedance_2_0"
 _SOURCE_IMAGE_TYPES = {"avatar_image", "product_image", "generated_image", "cover"}
@@ -98,8 +102,10 @@ def create_reverse_prompt_job(
         result = _invoke_reverse_provider(
             db,
             tenant_id=user.tenant_id,
-            image_url=storage.presign_get_url(
-                source.storage_key,
+            image_url=presign_tenant_storage_key(
+                storage,
+                tenant_id=user.tenant_id,
+                storage_key=source.storage_key,
                 expires_in=settings.engine_s3_presign_ttl,
             ),
         )
@@ -153,8 +159,10 @@ def regenerate_reverse_prompt_job(
         result = _invoke_reverse_provider(
             db,
             tenant_id=user.tenant_id,
-            image_url=storage.presign_get_url(
-                str(job.source_storage_key),
+            image_url=presign_tenant_storage_key(
+                storage,
+                tenant_id=user.tenant_id,
+                storage_key=job.source_storage_key,
                 expires_in=settings.engine_s3_presign_ttl,
             ),
         )
@@ -323,8 +331,10 @@ def _history_source_thumbnail_url(
     storage_key = str(job.source_storage_key or "")
     if not _is_safe_tenant_storage_key(tenant_id, storage_key):
         return None
-    return storage.presign_get_url(
-        storage_key,
+    return presign_tenant_storage_key(
+        storage,
+        tenant_id=tenant_id,
+        storage_key=storage_key,
         expires_in=settings.engine_s3_presign_ttl,
     )
 
@@ -340,11 +350,7 @@ def _history_summary(result_json: Mapping[str, object] | None) -> str | None:
 
 
 def _is_safe_tenant_storage_key(tenant_id: str, storage_key: str) -> bool:
-    return (
-        storage_key.startswith(f"tenants/{tenant_id}/")
-        and ".." not in storage_key
-        and "\\" not in storage_key
-    )
+    return is_tenant_storage_key(tenant_id, storage_key)
 
 
 def delete_reverse_prompt_job(

@@ -33,6 +33,7 @@ from app.services.progress import build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
 from app.services.storage.base import ObjectStorage
 from app.services.storage.factory import create_object_storage
+from app.services.storage.keys import presign_tenant_storage_key
 from app.services.synthetic_label import (
     label_artifact_bytes,
     synthetic_label_context,
@@ -847,12 +848,16 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                 keep=20,
             )
 
-            playback_url = storage.presign_get_url(
-                output_key,
+            playback_url = presign_tenant_storage_key(
+                storage,
+                tenant_id=tenant_id,
+                storage_key=output_key,
                 expires_in=settings.engine_s3_presign_ttl,
             )
-            download_url = storage.presign_get_url(
-                output_key,
+            download_url = presign_tenant_storage_key(
+                storage,
+                tenant_id=tenant_id,
+                storage_key=output_key,
                 expires_in=settings.engine_s3_presign_ttl,
                 download_filename=f"{task_id}.png",
             )

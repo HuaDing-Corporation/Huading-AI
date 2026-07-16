@@ -32,6 +32,10 @@ from app.schemas.response import ApiResponse, ok
 from app.services.plan_access import require_doubao_voice_clone_access
 from app.services.quota import charge_voice_clone_quota
 from app.services.storage.base import ObjectStorage
+from app.services.storage.keys import (
+    is_tenant_storage_key,
+    presign_tenant_storage_key,
+)
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -452,12 +456,7 @@ def _validate_audio_asset(asset: Asset, *, tenant_id: str) -> None:
             code="UNSUPPORTED_SOURCE_AUDIO_TYPE",
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
         )
-    expected_prefix = f"tenants/{tenant_id}/"
-    if (
-        not asset.storage_key.startswith(expected_prefix)
-        or ".." in asset.storage_key
-        or "\\" in asset.storage_key
-    ):
+    if not is_tenant_storage_key(tenant_id, asset.storage_key):
         raise AppError(
             "Invalid source audio storage key.",
             code="INVALID_SOURCE_AUDIO_KEY",
@@ -545,8 +544,10 @@ def _clone_payload(
         payload["speaker_id"] = speaker_id
         payload["source_audio_bytes"] = storage.get_bytes(source_audio.storage_key)
     else:
-        payload["source_audio_url"] = storage.presign_get_url(
-            source_audio.storage_key,
+        payload["source_audio_url"] = presign_tenant_storage_key(
+            storage,
+            tenant_id=tenant_id,
+            storage_key=source_audio.storage_key,
             expires_in=settings.engine_s3_presign_ttl,
         )
     return payload
