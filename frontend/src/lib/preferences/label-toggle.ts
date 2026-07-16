@@ -4,24 +4,33 @@ import { useCallback, useSyncExternalStore } from "react";
 
 const STORAGE_KEY = "huading.label_toggle_enabled";
 
-// 存储不可用（隐私模式 / 禁用存储）时的内存态承载；localStorage 正常时不参与。
+// 存储**写不进**时的内存态承载（隐私模式 / quota 满 / 只读模式）；localStorage 可写时恒为 null、不参与。
+// 🔴 FIX1：它必须是**权威覆盖层**而非 catch 兜底。旧写法把它只放在 readStored 的 catch 里，而 setItem 抛、
+// getItem 正常是最典型的形态（隐私模式/quota 满）—— 那样「写进内存、读却走 localStorage 拿旧值」，两个分支
+// 永不相交 → 开关点了不动、还提交错值。根因是本次改造把权威从 React state 迁到了 readStored()：迁移前写失败
+// 只丢持久化（state 兜着 UI 照常翻转），迁移后写失败直接升级成功能失效。故内存态必须先于 localStorage 被读到。
 let memoryFallback: boolean | null = null;
 
-/** 读取记忆值；SSR / 无存储 / 异常 → 内存态或默认关(false)。 */
+/** 读取记忆值；SSR → false。内存态存在（= 上次写没写进去）时它是权威；否则读 localStorage，读失败 → 默认关。 */
 function readStored(): boolean {
   if (typeof window === "undefined") return false;
+  if (memoryFallback !== null) return memoryFallback;
   try {
     return window.localStorage.getItem(STORAGE_KEY) === "1";
   } catch {
-    return memoryFallback ?? false;
+    return false;
   }
 }
 
 function writeStored(value: boolean): void {
   try {
     window.localStorage.setItem(STORAGE_KEY, value ? "1" : "0");
+    // 写成功 → 存储可用，localStorage 重新是权威，内存兜底立即退位。
+    // 不清会让一次偶发失败（如 quota 满）后的陈旧内存态**永久压过** localStorage，连另一标签页的 storage
+    // 事件也被吃掉 → 跨标签页同步坏死。清除是安全的：写成功即证明存储可用，无需再兜底。
+    memoryFallback = null;
   } catch {
-    memoryFallback = value; // 隐私模式/存储禁用：仅内存态，忽略持久化失败
+    memoryFallback = value; // 隐私模式/存储禁用/quota 满：仅内存态，忽略持久化失败，但 UI 必须照常翻转
   }
 }
 
