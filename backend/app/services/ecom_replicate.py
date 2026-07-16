@@ -15,7 +15,6 @@ from app.db.models import (
     Asset,
     EcomReplicateJob,
     EcomReplicateOutput,
-    Subscription,
     UsageRecord,
     User,
 )
@@ -27,7 +26,7 @@ from app.schemas.ecom_images import (
     EcomReplicatePlanPayload,
     EcomReplicateRequest,
 )
-from app.services.quota import remaining_credits
+from app.services.quota import consume_active_quota
 from app.services.storage.base import ObjectStorage
 
 _SOURCE_IMAGE_TYPES = {"avatar_image", "product_image", "generated_image"}
@@ -269,15 +268,12 @@ def confirm_replicate_job(
             status_code=409,
         )
 
-    subscription = _active_subscription_for_update(db, tenant_id)
     charge_units = int(Decimal(job.total_credits).to_integral_value(rounding=ROUND_HALF_UP))
-    if remaining_credits(subscription) < charge_units:
-        raise AppError(
-            "Insufficient tenant quota.",
-            code="TENANT_QUOTA_EXCEEDED",
-            status_code=403,
-        )
-    subscription.quota_credits_used += charge_units
+    subscription = consume_active_quota(
+        db,
+        tenant_id=tenant_id,
+        credits=charge_units,
+    )
     job.status = "generating"
     job.confirmed_at = datetime.now(UTC)
     job.updated_at = datetime.now(UTC)
@@ -298,28 +294,6 @@ def confirm_replicate_job(
     )
     db.flush()
     return job, True
-
-
-def _active_subscription_for_update(db: Session, tenant_id: str) -> Subscription:
-    now = datetime.now(UTC)
-    subscription = db.scalar(
-        select(Subscription)
-        .where(
-            Subscription.tenant_id == tenant_id,
-            Subscription.status == "active",
-            Subscription.period_start <= now,
-            Subscription.period_end >= now,
-        )
-        .order_by(Subscription.period_end.desc())
-        .with_for_update()
-    )
-    if subscription is None:
-        raise AppError(
-            "Active subscription not found.",
-            code="SUBSCRIPTION_NOT_FOUND",
-            status_code=404,
-        )
-    return subscription
 
 
 def job_or_404(db: Session, *, tenant_id: str, job_id: str) -> EcomReplicateJob:

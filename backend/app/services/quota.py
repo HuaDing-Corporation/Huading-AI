@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.exceptions import AppError
-from app.db.models import CreditRate, Subscription, UsageRecord, VideoTask
+from app.db.models import CreditRate, ReversePromptJob, Subscription, UsageRecord, VideoTask
 from app.services import provider_costs
 
 _SCRIPT_CPS = Decimal("5")
@@ -90,12 +90,41 @@ def _active_subscription_for_update(db: Session, tenant_id: str) -> Subscription
     return subscription
 
 
+def _subscription_for_update(
+    db: Session,
+    subscription_id: str,
+) -> Subscription | None:
+    return db.scalar(
+        select(Subscription)
+        .where(Subscription.id == subscription_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
 def remaining_credits(subscription: Subscription) -> int:
     return (
         subscription.quota_credits_total
         - subscription.quota_credits_used
         - subscription.quota_credits_reserved
     )
+
+
+def consume_active_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    credits: int,
+) -> Subscription:
+    subscription = _active_subscription_for_update(db, tenant_id)
+    if remaining_credits(subscription) < credits:
+        raise AppError(
+            "Insufficient tenant quota.",
+            code="TENANT_QUOTA_EXCEEDED",
+            status_code=403,
+        )
+    subscription.quota_credits_used += credits
+    return subscription
 
 
 def quota_payload(subscription: Subscription) -> dict[str, int]:
@@ -798,12 +827,24 @@ def reserve_released_video_task_quota(
 
 
 def _reserved_record(db: Session, *, tenant_id: str, video_task_id: str) -> UsageRecord | None:
+    db.scalar(
+        select(VideoTask.id)
+        .where(
+            VideoTask.id == video_task_id,
+            VideoTask.tenant_id == tenant_id,
+        )
+        .with_for_update()
+    )
     return db.scalar(
-        select(UsageRecord).where(
+        select(UsageRecord)
+        .where(
             UsageRecord.tenant_id == tenant_id,
             UsageRecord.video_task_id == video_task_id,
             UsageRecord.status == "reserved",
         )
+        .order_by(UsageRecord.created_at.desc(), UsageRecord.id.desc())
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
 
 
@@ -813,6 +854,14 @@ def _reserved_reverse_prompt_record(
     tenant_id: str,
     reverse_prompt_job_id: str,
 ) -> UsageRecord | None:
+    db.scalar(
+        select(ReversePromptJob.id)
+        .where(
+            ReversePromptJob.id == reverse_prompt_job_id,
+            ReversePromptJob.tenant_id == tenant_id,
+        )
+        .with_for_update()
+    )
     return db.scalar(
         select(UsageRecord)
         .where(
@@ -821,7 +870,9 @@ def _reserved_reverse_prompt_record(
             UsageRecord.capability == "reverse_prompt_video",
             UsageRecord.status == "reserved",
         )
-        .order_by(UsageRecord.created_at.desc())
+        .order_by(UsageRecord.created_at.desc(), UsageRecord.id.desc())
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
 
 
@@ -836,9 +887,9 @@ def release_reverse_prompt_video_quota(
         tenant_id=tenant_id,
         reverse_prompt_job_id=reverse_prompt_job_id,
     )
-    if record is None or record.subscription_id is None:
+    if record is None or record.status != "reserved" or record.subscription_id is None:
         return
-    subscription = db.get(Subscription, record.subscription_id)
+    subscription = _subscription_for_update(db, record.subscription_id)
     if subscription is None:
         return
     subscription.quota_credits_reserved = max(
@@ -864,9 +915,9 @@ def settle_reverse_prompt_video_quota(
         tenant_id=tenant_id,
         reverse_prompt_job_id=reverse_prompt_job_id,
     )
-    if record is None or record.subscription_id is None:
+    if record is None or record.status != "reserved" or record.subscription_id is None:
         return
-    subscription = db.get(Subscription, record.subscription_id)
+    subscription = _subscription_for_update(db, record.subscription_id)
     if subscription is None:
         return
     reserved_units = _credit_units(Decimal(record.credits))
@@ -886,9 +937,9 @@ def settle_reverse_prompt_video_quota(
 
 def release_reserved_quota(db: Session, *, tenant_id: str, video_task_id: str) -> None:
     record = _reserved_record(db, tenant_id=tenant_id, video_task_id=video_task_id)
-    if record is None or record.subscription_id is None:
+    if record is None or record.status != "reserved" or record.subscription_id is None:
         return
-    subscription = db.get(Subscription, record.subscription_id)
+    subscription = _subscription_for_update(db, record.subscription_id)
     if subscription is None:
         return
     subscription.quota_credits_reserved = max(
@@ -969,9 +1020,9 @@ def settle_reserved_quota(
     model: str | None = None,
 ) -> None:
     record = _reserved_record(db, tenant_id=tenant_id, video_task_id=video_task_id)
-    if record is None or record.subscription_id is None:
+    if record is None or record.status != "reserved" or record.subscription_id is None:
         return
-    subscription = db.get(Subscription, record.subscription_id)
+    subscription = _subscription_for_update(db, record.subscription_id)
     if subscription is None:
         return
 
