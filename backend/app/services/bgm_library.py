@@ -10,6 +10,10 @@ from sqlalchemy.orm import Session
 
 from app.db.models import BgmLibraryTrack
 from app.services.storage.base import ObjectStorage
+from app.services.storage.keys import (
+    catalog_storage_key_exists,
+    put_catalog_storage_bytes,
+)
 
 
 @dataclass(frozen=True)
@@ -52,23 +56,13 @@ def _seed_asset_bytes(track: BgmSeedTrack) -> bytes:
     return (BGM_SEED_ASSET_DIR / track.filename).read_bytes()
 
 
-def _storage_object_exists(storage: ObjectStorage, key: str) -> bool:
-    object_exists = getattr(storage, "object_exists", None)
-    if callable(object_exists):
-        return bool(object_exists(key))
-    try:
-        storage.get_bytes(key)
-    except Exception:
-        return False
-    return True
-
-
 def _upload_seed_track(storage: ObjectStorage, track: BgmSeedTrack) -> None:
-    if _storage_object_exists(storage, track.storage_key):
+    if catalog_storage_key_exists(storage, storage_key=track.storage_key):
         return
-    storage.put_bytes(
-        track.storage_key,
-        _seed_asset_bytes(track),
+    put_catalog_storage_bytes(
+        storage,
+        storage_key=track.storage_key,
+        content=_seed_asset_bytes(track),
         content_type="audio/mpeg",
     )
 

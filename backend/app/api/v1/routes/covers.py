@@ -27,6 +27,10 @@ from app.services.covers import (
 )
 from app.services.history import prune_video_history
 from app.services.storage.base import ObjectStorage
+from app.services.storage.keys import (
+    presign_tenant_storage_key,
+    put_tenant_storage_bytes,
+)
 from app.services.synthetic_label import (
     label_artifact_bytes,
     synthetic_label_context,
@@ -94,6 +98,7 @@ def frame_candidates(
     try:
         frames = extract_frame_candidates(
             storage,
+            tenant_id=user.tenant_id,
             video_key=task.storage_key,
             timestamps=timestamps,
         )
@@ -111,12 +116,20 @@ def frame_candidates(
             f"tenants/{user.tenant_id}/covers/{task.id}/candidates/"
             f"{index:02d}-{millis}.jpg"
         )
-        storage.put_bytes(key, frame.image_bytes, content_type="image/jpeg")
+        put_tenant_storage_bytes(
+            storage,
+            tenant_id=user.tenant_id,
+            storage_key=key,
+            content=frame.image_bytes,
+            content_type="image/jpeg",
+        )
         response_frames.append(
             FrameCandidate(
                 timestamp_sec=frame.timestamp_sec,
-                preview_url=storage.presign_get_url(
-                    key,
+                preview_url=presign_tenant_storage_key(
+                    storage,
+                    tenant_id=user.tenant_id,
+                    storage_key=key,
                     expires_in=settings.engine_s3_presign_ttl,
                 ),
             )
@@ -137,6 +150,7 @@ def cover_from_frame(
     try:
         cover = extract_frame_cover(
             storage,
+            tenant_id=user.tenant_id,
             video_key=task.storage_key,
             timestamp_sec=payload.timestamp_sec,
             title=title,
@@ -163,7 +177,13 @@ def cover_from_frame(
         content_id=cover_task_id,
         image_bytes=cover.image_bytes,
     )
-    storage.put_bytes(storage_key, cover_bytes, content_type="image/png")
+    put_tenant_storage_bytes(
+        storage,
+        tenant_id=user.tenant_id,
+        storage_key=storage_key,
+        content=cover_bytes,
+        content_type="image/png",
+    )
     cover_task = VideoTask(
         id=cover_task_id,
         tenant_id=user.tenant_id,
@@ -232,8 +252,10 @@ def cover_from_frame(
         CoverFromFrameResponse(
             cover=CoverRead(
                 id=asset.id,
-                image_url=storage.presign_get_url(
-                    storage_key,
+                image_url=presign_tenant_storage_key(
+                    storage,
+                    tenant_id=user.tenant_id,
+                    storage_key=storage_key,
                     expires_in=settings.engine_s3_presign_ttl,
                 ),
                 width=cover.width,

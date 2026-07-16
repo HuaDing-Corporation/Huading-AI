@@ -26,6 +26,7 @@ from app.services.reverse_prompt import (
     source_asset_or_raise,
 )
 from app.services.storage.factory import create_object_storage
+from app.services.storage.keys import get_tenant_storage_bytes
 
 _MAX_VIDEO_DURATION_SEC = 60.0
 _FRAME_MAX_EDGE = 768
@@ -139,7 +140,11 @@ def run_reverse_prompt_video_job(
             if source_kind != "video":
                 raise ReversePromptVideoProcessingError("Reverse prompt source is not a video.")
             storage = create_object_storage(settings)
-            video_bytes = storage.get_bytes(source.storage_key)
+            video_bytes = get_tenant_storage_bytes(
+                storage,
+                tenant_id=job.tenant_id,
+                storage_key=source.storage_key,
+            )
             if not video_bytes:
                 raise ReversePromptVideoProcessingError("Reverse prompt video is empty.")
             with NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:

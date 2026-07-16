@@ -72,6 +72,10 @@ from app.services.quota import (
     seedance_i2v_target_seconds,
 )
 from app.services.storage.base import ObjectStorage
+from app.services.storage.keys import (
+    get_tenant_storage_bytes,
+    presign_tenant_storage_key,
+)
 from app.services.voices import resolve_narration_voice
 from app.workers.avatar_talk import (
     build_seedance_scene_prompt_payload,
@@ -291,7 +295,11 @@ def _avatar_video_probe(asset: Asset, *, storage: ObjectStorage) -> _AvatarVideo
     if probe is not None:
         return probe
     try:
-        content = storage.get_bytes(asset.storage_key)
+        content = get_tenant_storage_bytes(
+            storage,
+            tenant_id=asset.tenant_id,
+            storage_key=asset.storage_key,
+        )
     except Exception as exc:
         raise AppError(
             "Avatar source video metadata is incomplete and the object could not be read.",
@@ -306,7 +314,13 @@ def _avatar_video_size_bytes(asset: Asset, *, storage: ObjectStorage) -> int | N
     if asset.size_bytes is not None:
         return asset.size_bytes
     try:
-        return len(storage.get_bytes(asset.storage_key))
+        return len(
+            get_tenant_storage_bytes(
+                storage,
+                tenant_id=asset.tenant_id,
+                storage_key=asset.storage_key,
+            )
+        )
     except Exception as exc:
         raise AppError(
             "Avatar source video metadata is incomplete and the object could not be read.",
@@ -517,19 +531,27 @@ def _video_read(
     mode = task.mode or task.video_mode
     params = task.params or {}
     if status_value == "done" and task.storage_key:
-        playback_url = storage.presign_get_url(
-            task.storage_key, expires_in=settings.engine_s3_presign_ttl
+        playback_url = presign_tenant_storage_key(
+            storage,
+            tenant_id=task.tenant_id,
+            storage_key=task.storage_key,
+            expires_in=settings.engine_s3_presign_ttl,
         )
-        download_url = storage.presign_get_url(
-            task.storage_key,
+        download_url = presign_tenant_storage_key(
+            storage,
+            tenant_id=task.tenant_id,
+            storage_key=task.storage_key,
             expires_in=settings.engine_s3_presign_ttl,
             download_filename=f"{task.id}.png" if mode == "photo" else f"{task.id}.mp4",
         )
         if mode == "photo":
             thumbnail_url = playback_url
     if task.thumbnail_key:
-        thumbnail_url = storage.presign_get_url(
-            task.thumbnail_key, expires_in=settings.engine_s3_presign_ttl
+        thumbnail_url = presign_tenant_storage_key(
+            storage,
+            tenant_id=task.tenant_id,
+            storage_key=task.thumbnail_key,
+            expires_in=settings.engine_s3_presign_ttl,
         )
     return VideoRead(
         id=task.id,

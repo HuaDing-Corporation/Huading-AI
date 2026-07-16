@@ -16,7 +16,12 @@ from app.schemas.history import (
 )
 from app.services import ecom_replicate
 from app.services.history import video_mode_filter
-from app.services.storage.base import ObjectStorage
+from app.services.storage.base import ObjectStorage, StorageKeyError
+from app.services.storage.keys import (
+    is_tenant_storage_key,
+    presign_tenant_storage_key,
+    validate_tenant_storage_key,
+)
 
 PhotoHistoryCategory = Literal["image_gen", "ecom_white", "ecom_model", "cover"]
 
@@ -34,18 +39,18 @@ def _tenant_storage_pattern(tenant_id: str) -> str:
 
 
 def _is_tenant_storage_key(tenant_id: str, storage_key: str) -> bool:
-    return storage_key.startswith(f"tenants/{tenant_id}/")
+    return is_tenant_storage_key(tenant_id, storage_key)
 
 
 def _validated_tenant_storage_key(tenant_id: str, storage_key: str | None) -> str:
-    value = str(storage_key or "")
-    if not _is_tenant_storage_key(tenant_id, value):
+    try:
+        return validate_tenant_storage_key(tenant_id, storage_key)
+    except StorageKeyError as exc:
         raise AppError(
             "Image history item not found.",
             code="IMAGE_HISTORY_NOT_FOUND",
             status_code=404,
-        )
-    return value
+        ) from exc
 
 
 def _photo_cover_storage_key(tenant_id: str, task: VideoTask) -> str:
@@ -63,8 +68,10 @@ def _presign_tenant_storage_key(
     download_filename: str | None = None,
 ) -> str:
     safe_key = _validated_tenant_storage_key(tenant_id, storage_key)
-    return storage.presign_get_url(
-        safe_key,
+    return presign_tenant_storage_key(
+        storage,
+        tenant_id=tenant_id,
+        storage_key=safe_key,
         expires_in=settings.engine_s3_presign_ttl,
         download_filename=download_filename,
     )

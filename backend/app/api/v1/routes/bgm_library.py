@@ -8,6 +8,7 @@ from app.schemas.bgm import BgmLibraryResponse, BgmTrackRead
 from app.schemas.response import ApiResponse, ok
 from app.services.bgm_library import list_bgm_tracks
 from app.services.storage.base import ObjectStorage
+from app.services.storage.keys import presign_catalog_storage_key
 
 router = APIRouter()
 ObjectStorageDependency = Depends(get_object_storage)
@@ -28,8 +29,9 @@ def bgm_library(
                 track_id=track.track_id,
                 name=track.name,
                 duration_sec=track.duration_sec,
-                preview_url=storage.presign_get_url(
-                    preview_key,
+                preview_url=presign_catalog_storage_key(
+                    storage,
+                    storage_key=preview_key,
                     expires_in=settings.engine_s3_presign_ttl,
                 ),
                 license=track.license,

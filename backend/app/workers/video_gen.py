@@ -32,6 +32,12 @@ from app.services.progress import ProgressStore, build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
 from app.services.storage.base import ObjectStorage
 from app.services.storage.factory import create_object_storage
+from app.services.storage.keys import (
+    get_catalog_storage_bytes,
+    get_tenant_storage_bytes,
+    presign_tenant_storage_key,
+    put_tenant_storage_bytes,
+)
 from app.services.synthetic_label import (
     label_artifact_bytes,
     synthetic_label_context,
@@ -224,7 +230,12 @@ def _provider_payload(ctx: VideoGenContext) -> dict[str, Any]:
     )
     for asset in ctx.reference_assets:
         image_urls.append(
-            ctx.storage.presign_get_url(asset.storage_key, expires_in=presign_ttl)
+            presign_tenant_storage_key(
+                ctx.storage,
+                tenant_id=ctx.tenant_id,
+                storage_key=asset.storage_key,
+                expires_in=presign_ttl,
+            )
         )
     payload: dict[str, Any] = {
         "model": settings.engine_apimart_video_model,
@@ -261,12 +272,19 @@ def _bgm_bytes(ctx: VideoGenContext) -> tuple[bytes, str] | None:
         asset = ctx.db.get(Asset, str(ctx.bgm.get("asset_id") or ""))
         if asset is None or asset.tenant_id != ctx.tenant_id:
             raise RuntimeError("BGM upload asset not found.")
-        return ctx.storage.get_bytes(asset.storage_key), _suffix_for_key(asset.storage_key, ".mp3")
+        return get_tenant_storage_bytes(
+            ctx.storage,
+            tenant_id=ctx.tenant_id,
+            storage_key=asset.storage_key,
+        ), _suffix_for_key(asset.storage_key, ".mp3")
     if ctx.bgm.get("source") == "library":
         track = ctx.db.get(BgmLibraryTrack, str(ctx.bgm.get("track_id") or ""))
         if track is None or not track.is_active:
             raise RuntimeError("BGM library track not found.")
-        return ctx.storage.get_bytes(track.storage_key), _suffix_for_key(track.storage_key, ".mp3")
+        return get_catalog_storage_bytes(
+            ctx.storage,
+            storage_key=track.storage_key,
+        ), _suffix_for_key(track.storage_key, ".mp3")
     return None
 
 
@@ -358,7 +376,13 @@ def _apply_synthetic_video_label(ctx: VideoGenContext, video_bytes: bytes) -> by
 
 def _store_output(ctx: VideoGenContext, video_bytes: bytes) -> str:
     key = f"tenants/{ctx.tenant_id}/videos/{ctx.task_id}/final.mp4"
-    ctx.storage.put_bytes(key, video_bytes, content_type="video/mp4")
+    put_tenant_storage_bytes(
+        ctx.storage,
+        tenant_id=ctx.tenant_id,
+        storage_key=key,
+        content=video_bytes,
+        content_type="video/mp4",
+    )
     output_asset = Asset(
         tenant_id=ctx.tenant_id,
         type="video",
@@ -467,12 +491,16 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 status="done",
                 progress=100,
                 step="upload",
-                playback_url=storage.presign_get_url(
-                    storage_key,
+                playback_url=presign_tenant_storage_key(
+                    storage,
+                    tenant_id=tenant_id,
+                    storage_key=storage_key,
                     expires_in=settings.engine_s3_presign_ttl,
                 ),
-                download_url=storage.presign_get_url(
-                    storage_key,
+                download_url=presign_tenant_storage_key(
+                    storage,
+                    tenant_id=tenant_id,
+                    storage_key=storage_key,
                     expires_in=settings.engine_s3_presign_ttl,
                     download_filename=f"{task_id}.mp4",
                 ),

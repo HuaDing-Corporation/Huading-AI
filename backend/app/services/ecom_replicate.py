@@ -28,6 +28,7 @@ from app.schemas.ecom_images import (
 )
 from app.services.quota import consume_active_quota
 from app.services.storage.base import ObjectStorage
+from app.services.storage.keys import presign_tenant_storage_key
 
 _SOURCE_IMAGE_TYPES = {"avatar_image", "product_image", "generated_image"}
 _SOURCE_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
@@ -629,8 +630,10 @@ async def _analyze_reference(
         )
         result = await provider.reverse_image(
             {
-                "image_url": storage.presign_get_url(
-                    reference.storage_key,
+                "image_url": presign_tenant_storage_key(
+                    storage,
+                    tenant_id=tenant_id,
+                    storage_key=reference.storage_key,
                     expires_in=settings.engine_s3_presign_ttl,
                 ),
                 "target_format": "seedance_2_0",
@@ -659,8 +662,10 @@ async def _analyze_product_identity(
         )
         result = await provider.analyze_product_identity(
             {
-                "image_url": storage.presign_get_url(
-                    product.storage_key,
+                "image_url": presign_tenant_storage_key(
+                    storage,
+                    tenant_id=tenant_id,
+                    storage_key=product.storage_key,
                     expires_in=settings.engine_s3_presign_ttl,
                 ),
                 "source_product_image_id": product.id,
@@ -744,8 +749,10 @@ def _output_download_url(
 ) -> str | None:
     if storage is None or output.status != "succeeded" or not output.storage_key:
         return None
-    return storage.presign_get_url(
-        output.storage_key,
+    return presign_tenant_storage_key(
+        storage,
+        tenant_id=output.tenant_id,
+        storage_key=output.storage_key,
         expires_in=settings.engine_s3_presign_ttl,
         download_filename=f"ecom-replicate-{output.job_id}-{output.index:02d}.png",
     )

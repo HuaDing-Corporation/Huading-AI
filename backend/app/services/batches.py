@@ -26,6 +26,10 @@ from app.services.quota import (
     seedance_i2v_target_seconds,
 )
 from app.services.storage.base import ObjectStorage
+from app.services.storage.keys import (
+    presign_tenant_storage_key,
+    put_tenant_storage_bytes,
+)
 from app.services.voices import resolve_narration_voice
 
 _IMAGE_MIME_EXTENSIONS = {
@@ -272,7 +276,13 @@ def download_image_url_to_asset(
     finally:
         _close_response(response)
     storage_key = tenant_storage_key(tenant_id, f"uploads/{uuid4().hex}{extension}")
-    storage.put_bytes(storage_key, content, content_type=content_type)
+    put_tenant_storage_bytes(
+        storage,
+        tenant_id=tenant_id,
+        storage_key=storage_key,
+        content=content,
+        content_type=content_type,
+    )
     asset = Asset(
         tenant_id=tenant_id,
         type="product_image",
@@ -417,8 +427,10 @@ def batch_row_index(task: VideoTask) -> int:
 def output_video_url(task: VideoTask, *, storage: ObjectStorage) -> str | None:
     if task.status != "done" or not task.storage_key:
         return None
-    return storage.presign_get_url(
-        task.storage_key,
+    return presign_tenant_storage_key(
+        storage,
+        tenant_id=task.tenant_id,
+        storage_key=task.storage_key,
         expires_in=settings.engine_s3_presign_ttl,
         download_filename=None,
     )

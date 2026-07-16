@@ -13,6 +13,7 @@ from app.db.models import (
     VideoTask,
 )
 from app.main import app
+from app.services.storage.local import LocalObjectStorage
 
 
 class _FakeStorage:
@@ -88,6 +89,44 @@ def _replicate_job(
         created_at=created_at,
         updated_at=created_at,
     )
+
+
+def test_image_history_presign_rejects_tenant_key_path_traversal(
+    auth_context,
+    auth_db,
+    tmp_path,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    victim_tenant_id = "history-presign-victim"
+    victim_key = f"tenants/{victim_tenant_id}/victim.png"
+    traversal_key = f"tenants/{tenant_id}/../{victim_tenant_id}/victim.png"
+    task = _photo_task(
+        task_id="history-presign-traversal",
+        tenant_id=tenant_id,
+        created_at=datetime.now(UTC),
+        topic="Traversal read",
+    )
+    task.storage_key = traversal_key
+    task.thumbnail_key = traversal_key
+    with auth_db() as db:
+        db.add(Tenant(id=victim_tenant_id, slug=victim_tenant_id, name="Victim"))
+        db.add(task)
+        db.commit()
+
+    storage = LocalObjectStorage(str(tmp_path))
+    storage.put_bytes(victim_key, b"victim", content_type="image/png")
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app).get(
+            "/api/v1/history/images/image_gen/history-presign-traversal",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "IMAGE_HISTORY_NOT_FOUND"
+    assert storage.object_exists(victim_key) is True
 
 
 def _replicate_output(

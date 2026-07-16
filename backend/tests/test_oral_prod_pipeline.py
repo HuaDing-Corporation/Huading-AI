@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.api.deps import get_object_storage, get_progress_store
+from app.core.exceptions import AppError
 from app.db.models import (
     Asset,
     CreditRate,
@@ -20,6 +21,8 @@ from app.db.models import (
 )
 from app.main import app
 from app.schemas.videos import VideoGenerateRequest
+from app.services.history import prune_video_history
+from app.services.storage.local import LocalObjectStorage
 from app.workers import avatar_talk
 
 
@@ -524,7 +527,13 @@ def test_frame_candidates_clamp_count_and_store_previews(
     storage = _FakeStorage()
     calls: dict[str, object] = {}
 
-    def fake_extract_frame_candidates(storage_arg, *, video_key, timestamps):
+    def fake_extract_frame_candidates(
+        storage_arg,
+        *,
+        tenant_id,
+        video_key,
+        timestamps,
+    ):
         calls.update(
             {
                 "storage": storage_arg,
@@ -611,7 +620,14 @@ def test_cover_from_frame_stores_cover_photo_history_item(
     storage = _FakeStorage()
     calls: dict[str, object] = {}
 
-    def fake_extract_frame_cover(storage_arg, *, video_key, timestamp_sec, title):
+    def fake_extract_frame_cover(
+        storage_arg,
+        *,
+        tenant_id,
+        video_key,
+        timestamp_sec,
+        title,
+    ):
         calls.update(
             {
                 "storage": storage_arg,
@@ -782,6 +798,157 @@ def test_delete_video_hard_deletes_task_assets_and_media(auth_context, auth_db) 
             select(TaskAsset).where(TaskAsset.video_task_id == "delete-photo")
         ).all()
         assert deleted_links == []
+
+
+def test_delete_video_rejects_tenant_key_path_traversal_before_commit(
+    auth_context,
+    auth_db,
+    tmp_path,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    victim_tenant_id = "legacy-delete-victim"
+    victim_key = f"tenants/{victim_tenant_id}/victim.png"
+    traversal_key = f"tenants/{tenant_id}/../{victim_tenant_id}/victim.png"
+    task_id = "legacy-delete-traversal"
+    with auth_db() as db:
+        db.add(Tenant(id=victim_tenant_id, slug=victim_tenant_id, name="Victim"))
+        db.add(
+            VideoTask(
+                id=task_id,
+                tenant_id=tenant_id,
+                created_by_user_id=auth_context["user_id"],
+                mode="photo",
+                video_mode="photo",
+                status="done",
+                progress=100,
+                storage_key=traversal_key,
+            )
+        )
+        db.commit()
+
+    storage = LocalObjectStorage(str(tmp_path))
+    storage.put_bytes(victim_key, b"victim", content_type="image/png")
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app).delete(
+            f"/api/v1/videos/{task_id}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    victim_exists = storage.object_exists(victim_key)
+    assert response.status_code == 404, (
+        f"legacy_delete_result={response.json().get('data')!r}; "
+        f"cross_tenant_victim_exists={victim_exists}"
+    )
+    assert response.json()["error"]["code"] == "VIDEO_TASK_NOT_FOUND"
+    assert victim_exists is True
+    with auth_db() as db:
+        assert db.get(VideoTask, task_id) is not None
+
+
+def test_clear_videos_rejects_tenant_key_path_traversal_before_commit(
+    auth_context,
+    auth_db,
+    tmp_path,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    victim_tenant_id = "legacy-clear-victim"
+    victim_key = f"tenants/{victim_tenant_id}/victim.png"
+    traversal_key = f"tenants/{tenant_id}/../{victim_tenant_id}/victim.png"
+    task_id = "legacy-clear-traversal"
+    with auth_db() as db:
+        db.add(Tenant(id=victim_tenant_id, slug=victim_tenant_id, name="Victim"))
+        db.add(
+            VideoTask(
+                id=task_id,
+                tenant_id=tenant_id,
+                created_by_user_id=auth_context["user_id"],
+                mode="photo",
+                video_mode="photo",
+                status="done",
+                progress=100,
+                storage_key=traversal_key,
+            )
+        )
+        db.commit()
+
+    storage = LocalObjectStorage(str(tmp_path))
+    storage.put_bytes(victim_key, b"victim", content_type="image/png")
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app).delete(
+            "/api/v1/videos",
+            params={"mode": "photo"},
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "VIDEO_TASK_NOT_FOUND"
+    assert storage.object_exists(victim_key) is True
+    with auth_db() as db:
+        assert db.get(VideoTask, task_id) is not None
+
+
+def test_prune_video_history_rejects_tenant_key_path_traversal_before_commit(
+    auth_context,
+    auth_db,
+    tmp_path,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    victim_tenant_id = "legacy-prune-victim"
+    victim_key = f"tenants/{victim_tenant_id}/victim.png"
+    traversal_key = f"tenants/{tenant_id}/../{victim_tenant_id}/victim.png"
+    old_task_id = "legacy-prune-traversal"
+    keep_task_id = "legacy-prune-keep"
+    now = datetime.now(UTC)
+    with auth_db() as db:
+        db.add(Tenant(id=victim_tenant_id, slug=victim_tenant_id, name="Victim"))
+        db.add_all(
+            [
+                VideoTask(
+                    id=old_task_id,
+                    tenant_id=tenant_id,
+                    mode="photo",
+                    video_mode="photo",
+                    status="done",
+                    progress=100,
+                    storage_key=traversal_key,
+                    created_at=now - timedelta(days=1),
+                ),
+                VideoTask(
+                    id=keep_task_id,
+                    tenant_id=tenant_id,
+                    mode="photo",
+                    video_mode="photo",
+                    status="done",
+                    progress=100,
+                    storage_key=f"tenants/{tenant_id}/photos/keep/output.png",
+                    created_at=now,
+                ),
+            ]
+        )
+        db.commit()
+
+    storage = LocalObjectStorage(str(tmp_path))
+    storage.put_bytes(victim_key, b"victim", content_type="image/png")
+    with auth_db() as db:
+        with pytest.raises(AppError) as exc_info:
+            prune_video_history(
+                db,
+                tenant_id=tenant_id,
+                mode="photo",
+                storage=storage,
+                keep=1,
+            )
+    assert exc_info.value.code == "VIDEO_TASK_NOT_FOUND"
+    assert storage.object_exists(victim_key) is True
+    with auth_db() as db:
+        assert db.get(VideoTask, old_task_id) is not None
+        assert db.get(VideoTask, keep_task_id) is not None
 
 
 def test_delete_video_skips_reserved_inflight_task_without_leaking_quota(
