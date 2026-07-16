@@ -33,43 +33,71 @@ vi.mock("@/components/tasks/generation-history", () => ({
 import Home from "./page";
 
 describe("Workbench mode switch (数字人口播 / 电商带货)", () => {
-  it("defaults to the avatar form and toggles to the i2v form and back", () => {
+  // WORKBENCH-KEEPALIVE-UI-0001：切 mode 不再卸载表单（旧行为 = React state 全销毁 = 用户输入全丢）。
+  // 故这里的不变量由「互斥**挂载**」改为「互斥**可见** + 惰性挂载」：没访问过的不在 DOM；访问过的留在 DOM 但 hidden。
+  it("默认口播；切 mode → 目标可见、来过的表单仍挂载但不可见（惰性挂载 + 常驻保活）", () => {
     render(<Home />);
 
     // Default = 数字人口播 → avatar form; task list shared/always present.
-    expect(screen.getByTestId("avatar-form")).toBeInTheDocument();
+    expect(screen.getByTestId("avatar-form")).toBeVisible();
+    // 惰性挂载：没访问过的表单根本不在 DOM（不把它们 mount 时的 GET 打到首屏）。
     expect(screen.queryByTestId("ecom-form")).not.toBeInTheDocument();
     expect(screen.getByTestId("tasklist")).toBeInTheDocument();
 
-    // Switch to 电商带货 → i2v form replaces the avatar form.
+    // 切到电商带货 → 目标可见；口播表单仍在 DOM（输入保活），但 hidden → 不可见、读屏/Tab 不可达。
     fireEvent.click(screen.getByRole("button", { name: /电商带货/ }));
-    expect(screen.getByTestId("ecom-form")).toBeInTheDocument();
-    expect(screen.queryByTestId("avatar-form")).not.toBeInTheDocument();
-
-    // Switch back → original 口播 form intact (不破现有数字人口播表单).
-    fireEvent.click(screen.getByRole("button", { name: /数字人口播/ }));
+    expect(screen.getByTestId("ecom-form")).toBeVisible();
     expect(screen.getByTestId("avatar-form")).toBeInTheDocument();
-    expect(screen.queryByTestId("ecom-form")).not.toBeInTheDocument();
+    expect(screen.getByTestId("avatar-form")).not.toBeVisible();
 
-    // Switch to 图片生成 / 修改 → photo form (WORKBENCH-TAB-ORDER-0001: 3rd tab). 名称匹配，与顺序无关。
+    // 切回 → 口播可见、电商转隐藏；两者都还挂着（不破现有数字人口播表单）。
+    fireEvent.click(screen.getByRole("button", { name: /数字人口播/ }));
+    expect(screen.getByTestId("avatar-form")).toBeVisible();
+    expect(screen.getByTestId("ecom-form")).not.toBeVisible();
+
+    // 图片生成 / 修改（WORKBENCH-TAB-ORDER-0001: 3rd tab）。名称匹配，与顺序无关。
     fireEvent.click(screen.getByRole("button", { name: /图片生成/ }));
-    expect(screen.getByTestId("photo-form")).toBeInTheDocument();
-    expect(screen.queryByTestId("avatar-form")).not.toBeInTheDocument();
+    expect(screen.getByTestId("photo-form")).toBeVisible();
+    expect(screen.getByTestId("avatar-form")).not.toBeVisible();
 
-    // Switch to 文案仿写 → copywriting form (5th tab).
+    // 文案仿写（5th tab）。
     fireEvent.click(screen.getByRole("button", { name: /文案仿写/ }));
-    expect(screen.getByTestId("copywriting-form")).toBeInTheDocument();
-    expect(screen.queryByTestId("photo-form")).not.toBeInTheDocument();
+    expect(screen.getByTestId("copywriting-form")).toBeVisible();
+    expect(screen.getByTestId("photo-form")).not.toBeVisible();
 
-    // Switch to 电商图 → cutout form (4th tab).
+    // 电商图（4th tab）。
     fireEvent.click(screen.getByRole("button", { name: /电商图/ }));
-    expect(screen.getByTestId("ecom-image-form")).toBeInTheDocument();
-    expect(screen.queryByTestId("copywriting-form")).not.toBeInTheDocument();
+    expect(screen.getByTestId("ecom-image-form")).toBeVisible();
+    expect(screen.getByTestId("copywriting-form")).not.toBeVisible();
 
-    // Switch to 视频生成 → video-gen form (7th tab, VIDEOGEN-UI-0001).
+    // 视频生成（7th tab, VIDEOGEN-UI-0001）。
     fireEvent.click(screen.getByRole("button", { name: /视频生成/ }));
-    expect(screen.getByTestId("video-gen-form")).toBeInTheDocument();
-    expect(screen.queryByTestId("ecom-image-form")).not.toBeInTheDocument();
+    expect(screen.getByTestId("video-gen-form")).toBeVisible();
+    expect(screen.getByTestId("ecom-image-form")).not.toBeVisible();
+
+    // 六个来过的面板全在 DOM，但只有一个可见。
+    for (const id of ["avatar-form", "ecom-form", "photo-form", "copywriting-form", "ecom-image-form"]) {
+      expect(screen.getByTestId(id)).not.toBeVisible();
+    }
+  });
+
+  // WORKBENCH-KEEPALIVE-UI-0001 · a11y 硬门：隐藏面板必须真从可及性树消失。用 HTML `hidden` 属性
+  // （UA 样式 [hidden]{display:none}）—— 只加 Tailwind class 会被 CSS 覆盖且 jsdom 测不出；只用 aria-hidden
+  // 更糟（元素仍可被 Tab 聚焦 → 看不见的焦点黑洞）。隐藏态不得挂任何设 display 的 class。
+  it("a11y：隐藏面板带 hidden 属性且无 display class 覆盖；激活面板 display:contents（布局不变）", () => {
+    render(<Home />);
+    fireEvent.click(screen.getByRole("button", { name: /电商带货/ }));
+
+    const hiddenPanel = screen.getByTestId("panel-avatar_talk");
+    const activePanel = screen.getByTestId("panel-seedance_i2v");
+
+    expect(hiddenPanel).toHaveAttribute("hidden");
+    expect(hiddenPanel).not.toBeVisible();
+    // 关键：隐藏态 className 为空——任何 display 类（flex/grid/contents/block）都会盖掉 [hidden] 的 UA 样式。
+    expect(hiddenPanel.className).toBe("");
+    // 激活态：display:contents → wrapper 透明，表单本体仍是 grid 直接子项 → 布局与改造前逐像素一致。
+    expect(activePanel).not.toHaveAttribute("hidden");
+    expect(activePanel).toHaveClass("contents");
   });
 
   // WORKBENCH-TAB-ORDER-0001：锁死 7 tab 顺序（用户 2026-07-10 指定），防未来误重排。

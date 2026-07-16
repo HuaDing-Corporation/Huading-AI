@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Clapperboard } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
@@ -36,12 +36,13 @@ export function VideoGenForm({
   const [refAssetIds, setRefAssetIds] = useState<string[]>([]);
   // 提示词反推「带入」注入 prompt（同时作 topic）；惰性消费，mount 后回调 page 清空。参考图仍需用户自行上传。
   const [prompt, setPrompt] = useState(() => initialPrompt ?? "");
-  const prefillConsumed = useRef(false);
+  // WORKBENCH-KEEPALIVE-UI-0001 · prefill 消费时机重设计（详见 new-video-form.tsx 同处注释）：面板常驻后本表单
+  // 不再重挂 → 改为同步 props；消费后回调 clearPrefill → props 回落 undefined → early-return，不重复注入
+  // （原 prefillConsumed ref 闩锁已删，它永不复位）。参考图仍需用户自行上传，且切 tab 后保留。
   useEffect(() => {
-    if (!prefillConsumed.current && initialPrompt !== undefined) {
-      prefillConsumed.current = true;
-      onPrefillConsumed?.();
-    }
+    if (initialPrompt === undefined) return;
+    setPrompt(initialPrompt);
+    onPrefillConsumed?.();
   }, [initialPrompt, onPrefillConsumed]);
   const [durationSec, setDurationSec] = useState<VideoGenDuration>(5);
   const [resolution, setResolution] = useState<VideoGenResolution>("720p");

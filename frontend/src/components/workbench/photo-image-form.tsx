@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Sparkles } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
@@ -36,12 +36,13 @@ export function PhotoImageForm({
 
   // 提示词反推「带入 · 图片生成」注入 prompt(=fill_targets.photo.topic)；惰性消费，mount 后回调 page 清空。
   const [prompt, setPrompt] = useState(() => initialPrompt ?? "");
-  const prefillConsumed = useRef(false);
+  // WORKBENCH-KEEPALIVE-UI-0001 · prefill 消费时机重设计（详见 new-video-form.tsx 同处注释）：面板常驻后本表单
+  // 不再重挂 → 改为同步 props；消费后回调 clearPrefill → props 回落 undefined → early-return，不重复注入
+  // （原 prefillConsumed ref 闩锁已删，它永不复位）。参考图 / 画面比例等其它输入切 tab 后保留。
   useEffect(() => {
-    if (!prefillConsumed.current && initialPrompt !== undefined) {
-      prefillConsumed.current = true;
-      onPrefillConsumed?.();
-    }
+    if (initialPrompt === undefined) return;
+    setPrompt(initialPrompt);
+    onPrefillConsumed?.();
   }, [initialPrompt, onPrefillConsumed]);
   const [aspectRatio, setAspectRatio] = useState<ImageAspectRatio>(DEFAULT_IMAGE_ASPECT_RATIO); // 默认 1:1
   const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）
