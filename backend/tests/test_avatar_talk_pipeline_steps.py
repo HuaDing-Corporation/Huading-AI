@@ -2537,6 +2537,69 @@ def test_avatar_step_publishes_progress_heartbeat_during_provider_polling():
     Base.metadata.drop_all(engine)
 
 
+def test_avatar_step_reads_platform_preset_through_catalog_boundary(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-platform-avatar"
+    unit_id = "platform-avatar-job"
+    storage = _Storage()
+    payloads: list[dict[str, object]] = []
+
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="platform-avatar", name="Platform Avatar"))
+        avatar = Asset(
+            id="platform-avatar-asset",
+            tenant_id=None,
+            type="avatar_image",
+            source="preset",
+            storage_key="platform/avatars/default.png",
+            status="ready",
+        )
+        db.add(avatar)
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="avatar_talk",
+                video_mode="avatar_talk",
+                status="running",
+                topic="platform avatar",
+                script="platform avatar script",
+            )
+        )
+        db.add(TaskAsset(video_task_id=unit_id, asset_id=avatar.id, role="input_avatar"))
+        db.commit()
+
+        class _AvatarProvider:
+            async def generate_avatar(self, payload: dict[str, object]):
+                payloads.append(payload)
+                return {"video_url": "https://visual.example/result.mp4"}
+
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _AvatarProvider(),
+        )
+        monkeypatch.setattr(avatar_talk, "_download_bytes", lambda _url: b"MP4")
+
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=storage,
+        )
+        ctx.audio_key = f"tenants/{tenant_id}/videos/{unit_id}/audio.mp3"
+
+        result = avatar_talk.avatar_step(ctx)
+
+        assert result.base_video_bytes == b"MP4"
+        assert payloads[0]["image_url"] == (
+            "https://storage.test/platform/avatars/default.png"
+        )
+
+    Base.metadata.drop_all(engine)
+
+
 def test_change_lips_config_defaults_to_basic_with_super_resolution(monkeypatch) -> None:
     for key in (
         "ENGINE_OMNIHUMAN_CHANGE_LIPS_DEFAULT_TIER",

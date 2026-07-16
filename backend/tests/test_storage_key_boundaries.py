@@ -4,24 +4,29 @@ from pathlib import Path
 import pytest
 
 import scripts.ops.scan_storage_keys as storage_key_scanner
+from app.core.exceptions import AppError
 from app.db.models import Asset, BgmLibraryTrack, VideoTask
 from app.services.storage.base import StorageKeyError
 from app.services.storage.keys import (
     get_tenant_storage_bytes,
     is_tenant_storage_key,
+    presign_owned_storage_key,
     validate_catalog_storage_key,
     validate_tenant_storage_key,
 )
 from app.services.storage.local import LocalObjectStorage
 from scripts.ops.scan_storage_keys import scan_storage_keys
 
-_APP_ROOT = Path(__file__).resolve().parents[1] / "app"
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+_APP_ROOT = _BACKEND_ROOT / "app"
+_SCRIPTS_ROOT = _BACKEND_ROOT / "scripts"
+_STORAGE_SCAN_ROOTS = (_APP_ROOT, _SCRIPTS_ROOT)
 _STORAGE_BASE_PATH = _APP_ROOT / "services/storage/base.py"
 _RAW_STORAGE_CALL_ALLOWLIST = {
-    Path("services/storage/base.py"),
-    Path("services/storage/keys.py"),
-    Path("services/storage/local.py"),
-    Path("services/storage/s3.py"),
+    Path("app/services/storage/base.py"),
+    Path("app/services/storage/keys.py"),
+    Path("app/services/storage/local.py"),
+    Path("app/services/storage/s3.py"),
 }
 
 
@@ -74,6 +79,22 @@ def test_catalog_storage_key_validator_never_accepts_tenant_keys() -> None:
         validate_catalog_storage_key("tenants/tenant-boundary/images/output.png")
 
 
+def test_owned_presign_rejects_asset_owned_by_another_tenant(tmp_path: Path) -> None:
+    storage = LocalObjectStorage(str(tmp_path))
+
+    with pytest.raises(AppError) as exc_info:
+        presign_owned_storage_key(
+            storage,
+            tenant_id="tenant-requester",
+            owner_tenant_id="tenant-owner",
+            storage_key="tenants/tenant-owner/images/private.png",
+            expires_in=60,
+        )
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.code == "STORAGE_OBJECT_NOT_FOUND"
+
+
 def test_tenant_get_bytes_boundary_blocks_real_local_storage_traversal(
     tmp_path: Path,
 ) -> None:
@@ -112,43 +133,128 @@ def _object_storage_public_methods() -> set[str]:
     raise AssertionError("ObjectStorage public methods could not be discovered.")
 
 
-def _raw_storage_call_violations(path: Path, method_names: set[str]) -> list[str]:
+def _import_aliases(tree: ast.AST) -> dict[str, str]:
+    aliases = {
+        "getattr": "builtins.getattr",
+        "methodcaller": "operator.methodcaller",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for imported in node.names:
+                local_name = imported.asname or imported.name.split(".", 1)[0]
+                aliases[local_name] = imported.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for imported in node.names:
+                local_name = imported.asname or imported.name
+                aliases[local_name] = f"{node.module}.{imported.name}"
+    return aliases
+
+
+def _dotted_name(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _dotted_name(node.value)
+        if parent:
+            return f"{parent}.{node.attr}"
+    return None
+
+
+def _resolved_call_name(node: ast.expr, aliases: dict[str, str]) -> str | None:
+    dotted_name = _dotted_name(node)
+    if not dotted_name:
+        return None
+    head, separator, tail = dotted_name.partition(".")
+    resolved_head = aliases.get(head, head)
+    return f"{resolved_head}.{tail}" if separator else resolved_head
+
+
+def _raw_storage_call_violations(
+    path: Path,
+    method_names: set[str],
+    *,
+    relative_to: Path = _APP_ROOT,
+) -> list[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    aliases = _import_aliases(tree)
     violations: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr in method_names:
-            violations.append(f"{path.relative_to(_APP_ROOT)}:{node.lineno}:{node.attr}")
+            violations.append(f"{path.relative_to(relative_to)}:{node.lineno}:{node.attr}")
             continue
         if not isinstance(node, ast.Call):
             continue
-        if not (isinstance(node.func, ast.Name) and node.func.id == "getattr"):
-            if not (
-                isinstance(node.func, ast.Name)
-                and node.func.id == "methodcaller"
-            ):
-                continue
-            method_index = 0
-        else:
-            method_index = 1
+        resolved_name = _resolved_call_name(node.func, aliases)
+        method_index = {
+            "builtins.getattr": 1,
+            "operator.methodcaller": 0,
+        }.get(resolved_name or "")
+        if method_index is None:
+            continue
         if len(node.args) <= method_index:
             continue
         method_arg = node.args[method_index]
         if isinstance(method_arg, ast.Constant) and method_arg.value in method_names:
             violations.append(
-                f"{path.relative_to(_APP_ROOT)}:{node.lineno}:"
-                f"{node.func.id}:{method_arg.value}"
+                f"{path.relative_to(relative_to)}:{node.lineno}:"
+                f"{resolved_name}:{method_arg.value}"
             )
     return violations
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'import operator\noperator.methodcaller("get_bytes")\n',
+        'from operator import methodcaller as mc\nmc("get_bytes")\n',
+        'import builtins\nbuiltins.getattr(storage, "get_bytes")\n',
+        'from builtins import getattr as lookup\nlookup(storage, "get_bytes")\n',
+    ],
+    ids=[
+        "operator-attribute",
+        "methodcaller-import-alias",
+        "builtins-attribute",
+        "getattr-import-alias",
+    ],
+)
+def test_raw_storage_guard_resolves_common_indirect_calls(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    fixture = tmp_path / "indirect_storage_call.py"
+    fixture.write_text(source, encoding="utf-8")
+
+    violations = _raw_storage_call_violations(
+        fixture,
+        {"get_bytes"},
+        relative_to=tmp_path,
+    )
+
+    assert len(violations) == 1
+    assert violations[0].endswith(":get_bytes")
+
+
+def test_raw_storage_guard_scans_application_and_operational_scripts() -> None:
+    assert _STORAGE_SCAN_ROOTS == (_APP_ROOT, _SCRIPTS_ROOT)
 
 
 def test_object_storage_methods_only_occur_in_validated_boundary() -> None:
     method_names = _object_storage_public_methods()
     violations: list[str] = []
-    for path in _APP_ROOT.rglob("*.py"):
-        relative = path.relative_to(_APP_ROOT)
-        if relative in _RAW_STORAGE_CALL_ALLOWLIST:
-            continue
-        violations.extend(_raw_storage_call_violations(path, method_names))
+    missing_roots = [root for root in _STORAGE_SCAN_ROOTS if not root.is_dir()]
+    assert missing_roots == []
+    for root in _STORAGE_SCAN_ROOTS:
+        for path in root.rglob("*.py"):
+            relative = path.relative_to(_BACKEND_ROOT)
+            if relative in _RAW_STORAGE_CALL_ALLOWLIST:
+                continue
+            violations.extend(
+                _raw_storage_call_violations(
+                    path,
+                    method_names,
+                    relative_to=_BACKEND_ROOT,
+                )
+            )
     assert violations == []
 
 

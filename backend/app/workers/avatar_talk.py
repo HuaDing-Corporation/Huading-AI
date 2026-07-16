@@ -50,6 +50,7 @@ from app.services.storage.base import ObjectStorage
 from app.services.storage.factory import create_object_storage
 from app.services.storage.keys import (
     get_tenant_storage_bytes,
+    presign_owned_storage_key,
     presign_tenant_storage_key,
     put_tenant_storage_bytes,
 )
@@ -924,9 +925,10 @@ def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         tier = _change_lips_tier()
         _validate_change_lips_tts_duration(float(ctx.duration_sec or 0), tier=tier)
         payload = {
-            "video_url": presign_tenant_storage_key(
+            "video_url": presign_owned_storage_key(
                 ctx.storage,
                 tenant_id=ctx.tenant_id,
+                owner_tenant_id=avatar.tenant_id,
                 storage_key=avatar.storage_key,
                 expires_in=settings.engine_s3_presign_ttl,
             ),
@@ -997,9 +999,10 @@ def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         return ctx
 
     payload = {
-        "image_url": presign_tenant_storage_key(
+        "image_url": presign_owned_storage_key(
             ctx.storage,
             tenant_id=ctx.tenant_id,
+            owner_tenant_id=avatar.tenant_id,
             storage_key=avatar.storage_key,
             expires_in=settings.engine_s3_presign_ttl,
         ),

@@ -95,6 +95,33 @@ def presign_catalog_storage_key(
     )
 
 
+def presign_owned_storage_key(
+    storage: ObjectStorage,
+    *,
+    tenant_id: str,
+    owner_tenant_id: str | None,
+    storage_key: str | None,
+    expires_in: int,
+    download_filename: str | None = None,
+) -> str:
+    if owner_tenant_id is None:
+        return presign_catalog_storage_key(
+            storage,
+            storage_key=storage_key,
+            expires_in=expires_in,
+            download_filename=download_filename,
+        )
+    if owner_tenant_id != tenant_id:
+        raise _storage_object_not_found()
+    return presign_tenant_storage_key(
+        storage,
+        tenant_id=owner_tenant_id,
+        storage_key=storage_key,
+        expires_in=expires_in,
+        download_filename=download_filename,
+    )
+
+
 def delete_tenant_storage_key(
     storage: ObjectStorage,
     *,
