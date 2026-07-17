@@ -66,7 +66,7 @@ export function TopBar() {
           <MessageCircle size={15} strokeWidth={1.8} aria-hidden />
           <span className="hidden sm:inline">{copy.contact.consoleEntry}</span>
         </button>
-        <ContactDialog open={contactOpen} onClose={() => setContactOpen(false)} />
+        <ContactDialog open={contactOpen} onOpenChange={setContactOpen} />
         <Button variant="icon" size="icon" aria-label="通知" className="hidden sm:flex">
           <Bell size={18} strokeWidth={1.8} />
         </Button>

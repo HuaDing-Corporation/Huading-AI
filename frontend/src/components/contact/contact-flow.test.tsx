@@ -4,12 +4,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { copy } from "@/lib/copy";
 import { markJustRegistered } from "@/lib/contact/welcome-flag";
 
+// 横幅要比对「标记里的注册者」与「当前 session」（串号防护）→ mock useAuth 供身份。
+const auth = vi.hoisted(() => ({ useAuth: vi.fn() }));
+vi.mock("@/lib/auth/auth-context", () => auth);
+
 import { ContactQr } from "./contact-qr";
 import { WelcomeContactBanner } from "./welcome-contact-banner";
+import type { Mock } from "vitest";
 
 // LANDING-CONTACT-UI-0001 · 联系链路承重。
 // 转化链路的断点是「落地页说联系我们，却没给联系方式」；这里钉的是接上之后**每一环都真的通**：
 // 二维码可见且 alt 有意义 → 注册标记 → 横幅出现 → 弹窗有码 → 关闭可再找到（顶栏常驻入口另测）。
+
+const REGISTRANT = "a@b.com";
+const sessionOf = (email: string) => ({ token: "t", user: { user: { email, full_name: null } } });
 
 afterEach(() => {
   localStorage.clear();
@@ -48,7 +56,10 @@ describe("ContactQr（二维码 + 双端引导）", () => {
 });
 
 describe("注册成功 → 工作台欢迎横幅（三条约束的承重）", () => {
-  beforeEach(() => markJustRegistered()); // = register/page.tsx 成功分支落的标记
+  beforeEach(() => {
+    markJustRegistered(REGISTRANT); // = register/page.tsx 成功分支落的标记（绑注册者 email）
+    (auth.useAuth as Mock).mockReturnValue({ session: sessionOf(REGISTRANT), ready: true });
+  });
 
   it("标记在 → 横幅出现：标题 + 「查看微信二维码」动作 + 「我知道了」关闭；无标记 → 不渲染", () => {
     const { unmount } = render(<WelcomeContactBanner />);
@@ -86,7 +97,7 @@ describe("注册成功 → 工作台欢迎横幅（三条约束的承重）", ()
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: copy.contact.welcomeAction }));
-    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: copy.historyImages.close }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: copy.common.close }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
@@ -98,6 +109,27 @@ describe("注册成功 → 工作台欢迎横幅（三条约束的承重）", ()
     expect(screen.queryByText(copy.contact.welcomeTitle)).not.toBeInTheDocument();
     first.unmount();
 
+    render(<WelcomeContactBanner />);
+    expect(screen.queryByText(copy.contact.welcomeTitle)).not.toBeInTheDocument();
+  });
+
+  // 🔴 review 抓的串号 bug 的承重：localStorage 是**设备级**的 —— A 注册后没关横幅就退出，
+  // 同一浏览器上 B 登录，不能把「注册成功，欢迎加入华鼎！」发给 B（错误的欢迎给错误的人）。
+  it("🔴 换账号不串号：A 的注册标记在，B 登录 → 不显示横幅；A 自己回来 → 仍显示", () => {
+    // B 登录（标记里存的是 A 的 email）
+    (auth.useAuth as Mock).mockReturnValue({ session: sessionOf("b@other.com"), ready: true });
+    const asB = render(<WelcomeContactBanner />);
+    expect(screen.queryByText(copy.contact.welcomeTitle)).not.toBeInTheDocument();
+    asB.unmount();
+
+    // A 自己重新登录 → 横幅还在（这正是不用「logout 清标记」的理由：那会把 A 该看的也误清）
+    (auth.useAuth as Mock).mockReturnValue({ session: sessionOf(REGISTRANT), ready: true });
+    render(<WelcomeContactBanner />);
+    expect(screen.getByText(copy.contact.welcomeTitle)).toBeInTheDocument();
+  });
+
+  it("未登录（session 空）→ 不显示（没有身份可比对就不显示，不猜）", () => {
+    (auth.useAuth as Mock).mockReturnValue({ session: null, ready: true });
     render(<WelcomeContactBanner />);
     expect(screen.queryByText(copy.contact.welcomeTitle)).not.toBeInTheDocument();
   });

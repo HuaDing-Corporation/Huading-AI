@@ -5,6 +5,7 @@ import { Sparkles, X } from "lucide-react";
 
 import { ContactDialog } from "@/components/contact/contact-dialog";
 import { Button } from "@/components/ui/button";
+import { useAuth } from "@/lib/auth/auth-context";
 import { clearWelcomePending, hasWelcomePending } from "@/lib/contact/welcome-flag";
 import { copy } from "@/lib/copy";
 
@@ -20,14 +21,18 @@ import { copy } from "@/lib/copy";
  *     常驻入口不依赖注册标记，对所有 0 余额账号（不只新注册）都在。
  *
  * 挂载时读一次 localStorage（避免 SSR/hydration 不一致：初始 false，effect 后显示）。
+ * 🔴 标记绑注册者 email、读时比对**当前 session**（review 抓的串号 bug）：同一浏览器上
+ * A 注册没关横幅就退出、B 登录 —— B 不该看到「注册成功，欢迎加入华鼎！」。
  */
 export function WelcomeContactBanner() {
+  const { session } = useAuth();
+  const email = session?.user?.user.email;
   const [visible, setVisible] = useState(false);
   const [qrOpen, setQrOpen] = useState(false);
 
   useEffect(() => {
-    if (hasWelcomePending()) setVisible(true);
-  }, []);
+    if (hasWelcomePending(email)) setVisible(true);
+  }, [email]);
 
   if (!visible) return null;
 
@@ -64,7 +69,7 @@ export function WelcomeContactBanner() {
           <X size={16} strokeWidth={2} />
         </button>
       </div>
-      <ContactDialog open={qrOpen} onClose={() => setQrOpen(false)} />
+      <ContactDialog open={qrOpen} onOpenChange={setQrOpen} />
     </div>
   );
 }

@@ -26,18 +26,14 @@ import { cn } from "@/lib/utils";
  */
 export function ContactQr({ compact }: { compact?: boolean }) {
   const C = copy.contact;
+  // 尺寸只声明一处（width/height 属性即定尺寸；再写尺寸 class 就是四处重复，改一漏三时 class 会静默压过属性）
+  const size = compact ? 148 : 176;
   return (
     <div className={cn("flex flex-col items-center gap-5 sm:flex-row sm:justify-center", compact && "gap-4")}>
       {/* 白底衬卡：扫码对比度（功能），非装饰 */}
       <div className="rounded-card border border-line-gold bg-white p-3 shadow-glass">
         {/* eslint-disable-next-line @next/next/no-img-element -- 6KB 本地静态图，无需 next/image 优化管线 */}
-        <img
-          src="/wechat-qr.png"
-          alt={C.qrAlt}
-          width={compact ? 148 : 176}
-          height={compact ? 148 : 176}
-          className={cn("block", compact ? "h-[148px] w-[148px]" : "h-[176px] w-[176px]")}
-        />
+        <img src="/wechat-qr.png" alt={C.qrAlt} width={size} height={size} className="block" />
       </div>
       <div className="flex max-w-[280px] flex-col items-center gap-3 text-center sm:items-start sm:text-left">
         {/* PC 引导：手机扫屏幕上的码（sm 及以上显示） */}

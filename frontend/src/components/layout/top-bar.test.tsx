@@ -46,7 +46,7 @@ describe("TopBar · 常驻「开通额度」入口（能再次找到）", () => 
     renderBar();
 
     fireEvent.click(screen.getByRole("button", { name: copy.contact.consoleEntry }));
-    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: copy.historyImages.close }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: copy.common.close }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: copy.contact.consoleEntry }));

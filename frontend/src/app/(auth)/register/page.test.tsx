@@ -94,7 +94,7 @@ describe("RegisterPage (注册)", () => {
     fill({ slug: "huading", team: "华鼎", email: "a@b.com", password: "pw123456" });
     fireEvent.click(screen.getByRole("button", { name: copy.auth.registerSubmit }));
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/"));
-    expect(localStorage.getItem("hd:welcome-contact")).toBe("1");
+    expect(localStorage.getItem("hd:welcome-contact")).toBe("a@b.com"); // 绑注册者 email（串号防护）
     ok.unmount();
 
     // 失败分支：register 抛错 → 不落标记（没注册成功就别欢迎人家）

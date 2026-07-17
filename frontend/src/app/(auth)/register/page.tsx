@@ -74,9 +74,9 @@ export default function RegisterPage() {
         password,
         fullName: fullName.trim() || undefined
       });
-      // LANDING-CONTACT-UI-0001：落标记 → 工作台首屏显示「联系开通额度」欢迎横幅。
-      // 跳转行为不动（#155：landToken → 直接进控制台）—— 提示由控制台侧读标记显示，不在这里拦。
-      markJustRegistered();
+      // LANDING-CONTACT-UI-0001：落标记（绑注册者 email，防同一浏览器换账号串号）→
+      // 工作台首屏显示「联系开通额度」欢迎横幅。跳转行为不动（#155：landToken → 直接进控制台）。
+      markJustRegistered(email.trim());
       router.replace("/"); // 后端随注册发 token → 直接进控制台
     } catch (err) {
       setError(friendlyRegisterError(err));

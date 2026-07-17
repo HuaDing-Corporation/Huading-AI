@@ -2,7 +2,9 @@ export const copy = {
   // copy/copied 由共享的 CopyableBlock 消费（HISTORY-FULL-PROMPT-UI-0001）。原先它们是 copy.reverse.copy/copied ——
   // 组件提升到 components/ui 后，一个 ui 基元依赖 copy.reverse.* 是命名说谎（它跟反推没关系）→ 归入 common。
   // 原 reverse.copy/copied 搬走后**零消费者**，已删：值相同的重复 key 就是陷阱（COPY-DRAFT 那条教训）。
-  common: { cancel: "取消", processing: "处理中…", copy: "复制", copied: "已复制" },
+  // close：LANDING-CONTACT-UI-0001 加入 —— 联系弹窗的关闭钮曾借用 copy.historyImages.close，
+  // 一个与图片历史无关的域消费别人域的文案 = 跨域隐性耦合（改历史域文案会静默改联系弹窗的可及名），归入 common。
+  common: { cancel: "取消", close: "关闭", processing: "处理中…", copy: "复制", copied: "已复制" },
   // 侧边栏导航（BATCH-PROD-UI-0001-FIX3）
   nav: { comingSoon: "即将上线" },
   // 板块「即将上线」占位（UI-COMINGSOON-TENANT-RENAME-0001）—— 导航后缀 + 统一友好占位页
