@@ -103,7 +103,9 @@ export function HistorySetDialog({ item, onClose }: { item: HistoryItem | null; 
           ) : null}
           <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {set.items.map((it) => (
-              <HistoryImageTile key={it.index} item={it} />
+              // presign 失效 → 重取本整套（MEDIA-URL-REFRESH-CONVERGE-0001 · 第 5 片）。
+              // 数据源就是本组件的 useHistoryImageSet query → 重取拿回的新 download_url 直接喂回 tile，导电。
+              <HistoryImageTile key={it.index} item={it} onUrlError={() => void query.refetch()} />
             ))}
           </div>
         </>

@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { copy } from "@/lib/copy";
 import type { HistoryImageSetItem } from "@/lib/api/history-images";
@@ -18,7 +18,7 @@ describe("HistoryImageTile (原图红线)", () => {
   };
 
   it("有 download_url：预览 <img src=download_url object-contain> + 下载 <a href download> + 原始尺寸 + 零 canvas", () => {
-    render(<HistoryImageTile item={base} />);
+    render(<HistoryImageTile item={base} onUrlError={vi.fn()} />);
     const img = document.querySelector("img");
     expect(img).toHaveAttribute("src", "https://cdn/hist-0.png?dl=1");
     expect(img?.className).toContain("object-contain");
@@ -32,7 +32,7 @@ describe("HistoryImageTile (原图红线)", () => {
   });
 
   it("详情图 theme 机器键本地化展示（复用既有映射）", () => {
-    render(<HistoryImageTile item={base} />);
+    render(<HistoryImageTile item={base} onUrlError={vi.fn()} />);
     expect(screen.getByText(copy.workbench.ecomReplicateTheme("layout_match"))).toBeInTheDocument();
   });
 });

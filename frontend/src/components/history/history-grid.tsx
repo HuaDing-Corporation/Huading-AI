@@ -73,6 +73,7 @@ export function HistoryGrid({ category }: { category?: HistoryCategory }) {
             item={item}
             onOpenImage={() => setLightboxId(item.id)}
             onDetail={() => setDetailId(item.id)}
+            onUrlError={() => void query.refetch()}
           />
         ))}
       </div>
@@ -91,6 +92,7 @@ export function HistoryGrid({ category }: { category?: HistoryCategory }) {
         src={lightbox?.cover_url ?? null}
         alt={lightbox ? copy.historyImages.lightboxAlt(lightbox.title) : ""}
         onClose={() => setLightboxId(null)}
+        onUrlError={() => void query.refetch()}
       />
       <HistorySetDialog item={detail} onClose={() => setDetailId(null)} />
     </>

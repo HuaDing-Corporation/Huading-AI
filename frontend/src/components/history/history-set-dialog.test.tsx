@@ -1,3 +1,4 @@
+// rebase(#187)：两边的并集 —— #187 要 waitFor（提示词复制的异步断言），本 PR 要 fireEvent（error/load 事件）。
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -142,5 +143,94 @@ describe("HistorySetDialog · 信息并集（一项都不能少）", () => {
   it("item=null → 不发详情请求、不渲染标题（弹窗关闭态）", () => {
     render(<HistorySetDialog item={null} onClose={() => {}} />);
     expect(screen.queryByText("保温杯 · 主图复刻（5 张）")).not.toBeInTheDocument();
+  });
+});
+
+// ── MEDIA-URL-REFRESH-CONVERGE-0001 · **第 5 片：接防线** ──────────────────────────────────
+//
+// ⚠️ **证伪任务包一处**：任务包 §二.3 点名「history-card / image-lightbox / **history-detail-dialog**
+// 全链路零 onError」。但 `history-detail-dialog.tsx` 是**纯外壳**（Dialog/标题/meta/关闭），**没有 img** ——
+// 详情弹窗里真正裸着的 `<img>` 在 `history-image-tile.tsx:27`，消费的是 `download_url`
+// （history-images.ts:41 明确标注 presigned）。以源码为准 → 本片接的是 tile。
+//
+// tile 的数据源是 HistorySetDialog 自己的 `useHistoryImageSet` query（不是 history-grid 那个冻结快照），
+// 故它**本来就导电**：重取 → set.items 换新 download_url → tile 的 src 跟着换。承重见下面第 3 条。
+describe("HistorySetDialog · 整套图 presign 失效 → 重取（接入共享哨兵）", () => {
+  it("整套单张失效 → 重取一次；同一 URL 连报多次也只一次", () => {
+    const refetch = vi.fn();
+    hooks.useHistoryImageSet.mockReturnValue({
+      data: {
+        id: "hd-main-1",
+        category: "ecom_detail",
+        created_at: "2026-07-10T12:00:00Z",
+        status: "completed",
+        items: [{ index: 0, download_url: "https://mock.local/hist/hero-0.png?dl=1", width: 1254, height: 1254 }],
+        meta: {}
+      },
+      isLoading: false,
+      isError: false,
+      refetch
+    });
+    render(<HistorySetDialog item={ITEM} onClose={() => {}} />);
+
+    const img = screen.getByRole("img");
+    fireEvent.error(img);
+    expect(refetch).toHaveBeenCalledTimes(1);
+
+    fireEvent.error(img);
+    fireEvent.error(img);
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("🔴 每张各自独立计数 —— 一张失效不该吃掉另一张的重取机会", () => {
+    const refetch = vi.fn();
+    hooks.useHistoryImageSet.mockReturnValue({
+      data: {
+        id: "hd-main-1",
+        category: "ecom_detail",
+        created_at: "2026-07-10T12:00:00Z",
+        status: "completed",
+        items: [
+          { index: 0, download_url: "https://mock.local/a.png?dl=1", width: 1254, height: 1254 },
+          { index: 1, download_url: "https://mock.local/b.png?dl=1", width: 1254, height: 1254 }
+        ],
+        meta: {}
+      },
+      isLoading: false,
+      isError: false,
+      refetch
+    });
+    render(<HistorySetDialog item={ITEM} onClose={() => {}} />);
+
+    // 整套 N 张各是一个 HistoryImageTile 实例 → 各自一个哨兵。两张都失效 → 各报一次。
+    const imgs = screen.getAllByRole("img");
+    fireEvent.error(imgs[0]);
+    fireEvent.error(imgs[1]);
+    expect(refetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("重取拿回新 URL → tile 的 <img src> 真的跟着换（数据源是 query 派生，重取才有意义）", () => {
+    const refetch = vi.fn();
+    const setWith = (url: string) => ({
+      data: {
+        id: "hd-main-1",
+        category: "ecom_detail",
+        created_at: "2026-07-10T12:00:00Z",
+        status: "completed",
+        items: [{ index: 0, download_url: url, width: 1254, height: 1254 }],
+        meta: {}
+      },
+      isLoading: false,
+      isError: false,
+      refetch
+    });
+    hooks.useHistoryImageSet.mockReturnValue(setWith("https://mock.local/hero-0.png?dl=1"));
+    const { rerender } = render(<HistorySetDialog item={ITEM} onClose={() => {}} />);
+
+    fireEvent.error(screen.getByRole("img"));
+    hooks.useHistoryImageSet.mockReturnValue(setWith("https://mock.local/hero-0.png?dl=1&sig=fresh"));
+    rerender(<HistorySetDialog item={ITEM} onClose={() => {}} />);
+
+    expect(screen.getByRole("img")).toHaveAttribute("src", "https://mock.local/hero-0.png?dl=1&sig=fresh");
   });
 });

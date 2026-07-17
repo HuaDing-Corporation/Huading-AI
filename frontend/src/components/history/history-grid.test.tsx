@@ -57,6 +57,9 @@ const ITEM: HistoryItem = {
 /** 另一条：用于「删掉打开的那条、但列表非空」——不这样列表就走空态早返回，测不到派生（见下面注释）。 */
 const ITEM_B: HistoryItem = { ...ITEM, id: "h2", title: "另一条", cover_url: "https://cdn/cover-2.png" };
 
+/** 跨 rerender 稳定的 refetch spy（listOf 每次调用都会重建对象，spy 不能建在里面）。 */
+const refetchSpy = vi.fn();
+
 /** infinite-query 形状（useHistoryImages 是 useInfiniteQuery，组件读 data.pages.flatMap）。 */
 const listOf = (...items: HistoryItem[]) => ({
   isLoading: false,
@@ -64,7 +67,7 @@ const listOf = (...items: HistoryItem[]) => ({
   data: { pages: [{ items, total: items.length, page: 1, page_size: 20 }] },
   hasNextPage: false,
   isFetchingNextPage: false,
-  refetch: vi.fn(),
+  refetch: refetchSpy,
   fetchNextPage: vi.fn()
 });
 
@@ -127,5 +130,69 @@ describe("HistoryGrid · 防线导不导电（先导电，再挂 onError）", ()
     rerender(<HistoryGrid category="image_gen" />);
 
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+});
+
+// ── MEDIA-URL-REFRESH-CONVERGE-0001 · **第 5 片：接防线**（导电已在第 4 片证明）────────────────
+//
+// 图片 tab 此前对 presign 过期**零防护** —— 不是防护弱，是连 onError 都没接：页面开久了图片历史
+// 全挂成碎图，且**没有恢复路径**（用户只能刷新整页）。症状比视频轻（碎图 vs 黑屏），性质一样。
+// 现在接共享哨兵：同一 URL 只报一次 / URL 变了再给一次机会 / 连续失败封顶 / 成功即清零。
+describe("HistoryGrid · presign 失效 → 重取（接入共享哨兵）", () => {
+  it("卡片封面失效 → 重取一次；同一 URL 连报多次也只一次（不打爆后端）", () => {
+    hooks.useHistoryImages.mockReturnValue(listOf(ITEM));
+    render(<HistoryGrid category="image_gen" />);
+
+    const img = screen.getByAltText(ITEM.title);
+    fireEvent.error(img);
+    expect(refetchSpy).toHaveBeenCalledTimes(1);
+
+    // 浏览器对同一 src 可能连发多个 error → 哨兵必须挡住
+    fireEvent.error(img);
+    fireEvent.error(img);
+    expect(refetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("大图弹窗里失效 → 同样重取一次（两个入口都要有网，不是只补一个）", () => {
+    hooks.useHistoryImages.mockReturnValue(listOf(ITEM));
+    render(<HistoryGrid category="image_gen" />);
+    fireEvent.click(screen.getByRole("button", { name: copy.historyImages.openLarge }));
+
+    fireEvent.error(within(screen.getByRole("dialog")).getByRole("img"));
+    expect(refetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // 🔴 死循环刹车：图片链路原先**完全没有**这道闸 —— 裸挂 onError 就会 error→refetch→新 URL→error→……
+  it("🔴 对象已删、BE 每次签出新 URL 但个个失效 → 连续重取封顶，不无限打后端", () => {
+    hooks.useHistoryImages.mockReturnValue(listOf({ ...ITEM, cover_url: "https://cdn/gone.png?sig=0" }));
+    const { rerender } = render(<HistoryGrid category="image_gen" />);
+
+    for (let i = 1; i <= 8; i++) {
+      hooks.useHistoryImages.mockReturnValue(listOf({ ...ITEM, cover_url: `https://cdn/gone.png?sig=${i}` }));
+      rerender(<HistoryGrid category="image_gen" />);
+      fireEvent.error(screen.getByAltText(ITEM.title));
+    }
+
+    expect(refetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("加载成功即清零 → 长会话里「显示过、之后再过期」仍能再救", () => {
+    hooks.useHistoryImages.mockReturnValue(listOf({ ...ITEM, cover_url: "https://cdn/c.png?sig=1" }));
+    const { rerender } = render(<HistoryGrid category="image_gen" />);
+
+    fireEvent.error(screen.getByAltText(ITEM.title));
+    hooks.useHistoryImages.mockReturnValue(listOf({ ...ITEM, cover_url: "https://cdn/c.png?sig=2" }));
+    rerender(<HistoryGrid category="image_gen" />);
+    fireEvent.error(screen.getByAltText(ITEM.title));
+    expect(refetchSpy).toHaveBeenCalledTimes(2); // 已到封顶
+
+    // 第 3 个 URL 真的加载出来了 → 预算清零
+    hooks.useHistoryImages.mockReturnValue(listOf({ ...ITEM, cover_url: "https://cdn/c.png?sig=3" }));
+    rerender(<HistoryGrid category="image_gen" />);
+    fireEvent.load(screen.getByAltText(ITEM.title));
+
+    // 很久以后它自己过期了 → 还能再救（若不清零，这里会哑 → 用户对着碎图干瞪眼）
+    fireEvent.error(screen.getByAltText(ITEM.title));
+    expect(refetchSpy).toHaveBeenCalledTimes(3);
   });
 });
