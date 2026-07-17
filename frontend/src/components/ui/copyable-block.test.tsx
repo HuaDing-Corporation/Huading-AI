@@ -40,11 +40,18 @@ describe("CopyableBlock", () => {
   });
 
   // 🔴 这条就是那两份坏实现会红的地方（它们的 `?.` 短路后 await 不抛 → 照样置「已复制」）。
-  it("🔴 非安全上下文（navigator.clipboard 缺失）→ **不谎报**「已复制」", () => {
+  //
+  // ⚠️ **必须 await 一次微任务再断言，否则这条测试是假的** —— 我第一版就写错了，是变异门抓出来的：
+  // doCopy 是 async，坏实现的 `await navigator.clipboard?.writeText(x)` → `await undefined` →
+  // `setCopied(true)` 落在**微任务**里。同步断言先跑完 → 看不到「已复制」→ **好版本坏版本都绿**。
+  // 既有的 reverse-prompt-result-view.test.tsx:132（名字叫「承重·非安全上下文…（Review P3 修正）」）
+  // 是同一个形状 → **它也抓不住**：那个守卫从写下那天起就没被真正测过。已报 backlog。
+  it("🔴 非安全上下文（navigator.clipboard 缺失）→ **不谎报**「已复制」", async () => {
     setClipboard(undefined);
     render(<CopyableBlock label="提示词" text="abc" />);
 
     fireEvent.click(screen.getByRole("button", { name: "复制" }));
+    await new Promise((r) => setTimeout(r, 0)); // 放行微任务：坏实现正是在这里置「已复制」的
     expect(screen.queryByText("已复制")).not.toBeInTheDocument();
   });
 
