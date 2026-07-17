@@ -274,7 +274,7 @@ export function ReverseHistoryList({ onApplyPrefill }: { onApplyPrefill?: (prefi
       <ConfirmDialog
         open={!!confirmDelete}
         title={copy.history.reverseDeleteConfirmTitle}
-        message={copy.history.reverseDeleteConfirmMsg}
+        message={copy.history.deleteConfirmNoUndo}
         confirmLabel={copy.history.deleteConfirmBtn}
         submitting={del.isPending}
         error={actionError}

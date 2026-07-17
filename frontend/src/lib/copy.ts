@@ -574,13 +574,35 @@ export const copy = {
     deleteItem: "删除",
     clearAll: "清空",
     deleteConfirmTitle: "删除这条记录？",
-    deleteConfirmHard: "将永久删除，不可恢复。",
-    deleteConfirmSoft: "将从历史移除（可恢复）。",
+    deleteConfirmHard: "将永久删除，不可恢复。", // 视频/图片：BE 真硬删（_hard_delete_tasks）→ 诚实
+    /**
+     * 🔴 COPY-DRAFT-DELETE-COPY-FIX-0001：软删域（反推历史 / 文案草稿）的删除确认。
+     *
+     * 这里原本是 `deleteConfirmSoft:「将从历史移除（可恢复）。」`，**已删除**。它是个陷阱：
+     * **名字编码的是 BE 实现**（Soft = 软删）→ 谁看到「BE 是软删」就选它 → 再骗一次用户。
+     * 而软删是**运维保险**（出事能救、不碰媒体），**不是给用户的功能**：用户侧列表过滤已删、详情 404、
+     * 且**全仓零恢复入口**（`restore`/`undelete`/`deleted_at = None` 一处都搜不到）→ 说「可恢复」是骗人。
+     *
+     * 本 key 的名字说的是**用户能观察到的后果**（NoUndo = 界面上没有回头路），不是 BE 怎么存的。
+     * 谁选它，是在断言一件**可核查的、用户可见的事**；选错会被用户当场发现，而不是像 Soft 那样永远没人知道。
+     * 将来某个域真做了回收站 → 这个名字对它立刻变假，那正是我们要的信号。
+     *
+     * 消费者：反推历史（reverse-history-list）、文案草稿（copy-draft-list）—— 两域的这句话**逐字相同**
+     * （都在「历史生成」模块内、都是软删+无恢复入口），故共用一个 key 而非造两个值相同的 key：
+     * 值相同的两个 key 迟早会各改各的。
+     */
+    deleteConfirmNoUndo: "将从历史移除，无法撤销。",
     deleteConfirmBtn: "确认删除",
     clearConfirmTitle: "清空该历史？",
     clearConfirmHard: "将永久删除此模块全部记录，不可恢复。",
     clearConfirmPhotoHard: "将清空全部图片（含封面），硬删不可恢复；不受当前「仅封面」筛选影响（始终删除全部图片）。",
-    clearConfirmSoft: "将清空此模块全部草稿（可恢复）。",
+    /**
+     * 🔴 同上：原 `clearConfirmSoft:「将清空此模块全部草稿（可恢复）。」` **已删除** —— 与 deleteConfirmSoft
+     * 是同一个谎的孪生（BE `clear_drafts`（services/copy.py:384-394）同样只置 deleted_at、同样没有恢复入口）。
+     * 任务包只点了 deleteConfirmSoft；只删那一个 = 把陷阱留了一半，下一个人照样能摸到 clearConfirmSoft。
+     * 名字带 Drafts 是因为**内容就是草稿专属**（「全部草稿」）—— 不装成通用的。
+     */
+    clearDraftsConfirmNoUndo: "将清空此模块全部草稿，无法撤销。",
     clearConfirmBtn: "确认清空",
     deleteFailed: "删除失败，请重试",
     clearFailed: "清空失败，请重试",
@@ -600,15 +622,9 @@ export const copy = {
     reverseNoSummary: "暂无摘要",
     reversePendingHint: "反推尚未完成，暂无结果可看",
     reverseDeleteConfirmTitle: "删除这条反推记录？",
-    /**
-     * 🔴 FIX2：删除文案**只描述用户能观察到的后果**，不描述 BE 实现。
-     * - 不用 deleteConfirmSoft「可恢复」：BE 的软删是**运维保险**（出事能救、不碰媒体），**不是给用户的功能** ——
-     *   用户侧列表过滤已删、详情 404、且**没有任何恢复入口**（无回收站 / 无「已删除」筛选）→ 说「可恢复」是骗人。
-     * - 也不用 deleteConfirmHard「将永久删除，不可恢复」：反推软删**只置 deleted_at、不碰媒体**，数据其实都在 ——
-     *   那是**反方向的谎**（用户以为删干净了，实际没有），将来做回收站时还得推翻文案。
-     * → 两句都只讲用户可观察的事实：「从历史移除」= 列表消失 + 详情打不开；「无法撤销」= 界面上没有回头路。
-     */
-    reverseDeleteConfirmMsg: "将从历史移除，无法撤销。",
+    // 删除正文见上方 **deleteConfirmNoUndo**（COPY-DRAFT-DELETE-COPY-FIX-0001 起与文案草稿共用）。
+    // 原 `reverseDeleteConfirmMsg` 是 FIX2 为反推单独造的，值与文案草稿那句逐字相同 → 合成一个 key。
+    // 它当初"单独造"是对的（§四 划了线不许动文案 tab），现在两域都归位了，就该合。
     reverseKindTag: (kind: string) => (kind === "video" ? "视频反推" : "图片反推"),
     // ── 三视频 tab 升级（HISTORY-VIDEO-DIALOG-UI-0001）：与图片 tab 同款交互语言 ──
     // 点内容 → 大图/播放；点「查看详情」→ 详情弹窗（弹窗内保留「打开详情页」，跳 /videos/{id} 的能力不丢）。

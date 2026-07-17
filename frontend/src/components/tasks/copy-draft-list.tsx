@@ -22,7 +22,13 @@ function pills(keyPrefix: string, items: string[] | null | undefined) {
 
 /** 历史「文案」tab：分页 GET /copy/drafts via useCopyDrafts。草稿非 video(独立列表)。
  *  每条带删除(trash→确认→DELETE /copy/drafts/{id})、顶「清空」(确认→DELETE /copy/drafts)。
- *  文案=软删可恢复(确认非危险样式)。防连点(pending 禁用)。Exported 供独立单测。 */
+ *  防连点(pending 禁用)。Exported 供独立单测。
+ *
+ *  🔴 COPY-DRAFT-DELETE-COPY-FIX-0001：此处原写「文案=软删**可恢复**(确认非危险样式)」——
+ *  「可恢复」是**把 BE 实现当成对用户的承诺**。BE 确实是软删（services/copy.py:376-381 只置 deleted_at），
+ *  但那是**运维保险**：用户侧 list_drafts/get_draft 都过滤 deleted_at（:352 / :367）→ 列表消失 + 详情 404，
+ *  且**全仓零恢复入口**（restore/undelete/deleted_at=None 一处都搜不到）→ 用户拿不回来。说「可恢复」是骗人。
+ *  确认框保持**非危险样式**仍然对（它不是硬删、媒体没碰），但**文案必须只讲用户能观察到的后果**。 */
 export function CopyDraftList() {
   const query = useCopyDrafts();
   const deleteDraft = useDeleteCopyDraft();
@@ -130,11 +136,11 @@ export function CopyDraftList() {
         </>
       )}
 
-      {/* 删除单条确认(文案=软删可恢复，非危险样式) */}
+      {/* 删除单条确认：非危险样式（非硬删），但文案只讲用户可观察的后果 —— 见 deleteConfirmNoUndo */}
       <ConfirmDialog
         open={!!confirmDelete}
         title={copy.history.deleteConfirmTitle}
-        message={copy.history.deleteConfirmSoft}
+        message={copy.history.deleteConfirmNoUndo}
         confirmLabel={copy.history.deleteConfirmBtn}
         submitting={deleteDraft.isPending}
         error={actionError}
@@ -144,11 +150,11 @@ export function CopyDraftList() {
           setActionError(null);
         }}
       />
-      {/* 清空确认(文案=软删可恢复) */}
+      {/* 清空确认：BE clear_drafts 同样只置 deleted_at、同样无恢复入口 —— 见 clearDraftsConfirmNoUndo */}
       <ConfirmDialog
         open={confirmClear}
         title={copy.history.clearConfirmTitle}
-        message={copy.history.clearConfirmSoft}
+        message={copy.history.clearDraftsConfirmNoUndo}
         confirmLabel={copy.history.clearConfirmBtn}
         submitting={clearDrafts.isPending}
         error={actionError}

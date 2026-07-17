@@ -261,7 +261,7 @@ describe("ReverseHistoryList (提示词反推历史)", () => {
 
   // 🔴 变异门③：去掉 ConfirmDialog 确认门（点删除直接 mutateAsync）→ 本条必红。
   // 🔴 FIX3 · P2 假路标：这条测试名原本写的是「文案是软删『可恢复』口径」—— 而它的断言从 FIX2 起就
-  // **明确禁止**「可恢复」那句文案（下面 queryByText(deleteConfirmSoft) 反断言）。**名字和断言说的是相反的话。**
+  // **明确禁止**「可恢复」那句文案。**名字和断言说的是相反的话。**
   // 名字说谎比没有守卫更危险：读的人信名字、不读断言，就以为「可恢复」是被守着的口径。
   // （本项目在 quota 那边刚栽过同款：`centralized_in_locked_services` 只证明「集中」、没证明「加锁」。）
   it("删除确认门：点删除只弹确认不删 → 取消不删 → 确认恰删一次；文案只讲用户可见后果", async () => {
@@ -276,9 +276,14 @@ describe("ReverseHistoryList (提示词反推历史)", () => {
     // 🔴 FIX2：文案只讲用户可观察的后果 —— 列表消失 + 详情 404 + 无恢复入口 → 「将从历史移除，无法撤销。」
     // 不用「可恢复」（软删是 BE 的运维保险、不是用户功能，用户没有回收站），也不用「永久删除」（谎报实现：
     // 数据其实都在、媒体没碰）。
-    expect(screen.getByText(copy.history.reverseDeleteConfirmMsg)).toBeInTheDocument();
-    expect(screen.queryByText(copy.history.deleteConfirmSoft)).not.toBeInTheDocument();
-    expect(screen.queryByText(copy.history.deleteConfirmHard)).not.toBeInTheDocument();
+    expect(screen.getByText(copy.history.deleteConfirmNoUndo)).toBeInTheDocument();
+    // 🔴 COPY-DRAFT-DELETE-COPY-FIX-0001：这两条反断言**写死字面量**，不再 `copy.history.deleteConfirmSoft`。
+    // 三个理由：① 那个 key 已被删除（它就是那个谎），import 它编译都过不了；
+    // ② 反断言的意图是「**这句话**永远不许出现在用户眼前」—— 钉字面量才拦得住「有人把同样的话换个 key 名加回来」，
+    //    钉 key 只能拦住「有人用那个 key」；③ 本文件开头自己写的规矩就是「期望值手写、不 import 被测代码的常量」——
+    //    原来那行其实一直在违反它。
+    expect(screen.queryByText("将从历史移除（可恢复）。")).not.toBeInTheDocument();
+    expect(screen.queryByText("将永久删除，不可恢复。")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: copy.common.cancel }));
     expect(mocks.del.mutateAsync).not.toHaveBeenCalled(); // 取消不删
