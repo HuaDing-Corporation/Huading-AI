@@ -10,7 +10,7 @@ import { HistoryStatusBadge } from "@/components/history/history-status-badge";
 import { useHistoryImageSet } from "@/lib/api/hooks";
 import { copy } from "@/lib/copy";
 import { useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
-import type { HistoryCategory, HistoryItem } from "@/lib/api/history-images";
+import { historyImageSetMediaKey, type HistoryCategory, type HistoryItem } from "@/lib/api/history-images";
 
 /** 分类机器键 → 中文标签（详情弹窗信息并集用；6 分类）。 */
 const CATEGORY_LABEL: Record<HistoryCategory, string> = {
@@ -108,13 +108,19 @@ export function HistorySetDialog({ item, onClose }: { item: HistoryItem | null; 
             <p className="mb-1 mt-2 text-[12.5px] text-error-fg">{copy.historyImages.setPartialHint}</p>
           ) : null}
           <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {set.items.map((it) => (
-              // presign 失效 → 重取本整套（MEDIA-URL-REFRESH-CONVERGE-0001 · 第 5 片 / FIX2）。
+            {set.items.map((it) => {
+              // presign 失效 → 重取本整套（MEDIA-URL-REFRESH-CONVERGE-0001 · 第 5 片 / FIX2 / FIX3）。
               // 数据源就是本组件的 useHistoryImageSet query → 重取拿回的新 download_url 直接喂回 tile，导电。
-              // 每张 tile 是独立媒体位置（it.index 跨 refetch 稳定）：整套里一张删了、其余在，
-              // 那一张的无限重试不该被健康张的 onLoad 清账（FIX2 的 P1-2）。
-              <HistoryImageTile key={it.index} item={it} refresh={refresh.forMedia(String(it.index))} />
-            ))}
+              // 每张 tile 是独立媒体位置：整套里一张删了、其余在，那一张的无限重试不该被健康张的
+              // onLoad 清账（FIX2 的 P1-2）。
+              //
+              // 🔴 FIX3：上一版这里用 `it.index` 当 mediaKey，注释还写着「it.index 跨 refetch 稳定」——
+              // **那句是假的**：白底图/模特图/封面的整套是按 batch_id 聚合多个任务的，BE 只查 `done`
+              // 任务再重新 enumerate（image_history.py:84/:472）→ **批量陆续完成时同一张图 index 必然
+              // 从 0 漂到 1、2** → 失败预算换到新 key、绕过封顶。身份判据见 historyImageSetMediaKey。
+              const mediaKey = historyImageSetMediaKey(set, it);
+              return <HistoryImageTile key={mediaKey} item={it} refresh={refresh.forMedia(mediaKey)} />;
+            })}
           </div>
         </>
       ) : (
