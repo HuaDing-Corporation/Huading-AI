@@ -51,7 +51,24 @@ export interface HistoryImageSet {
   created_at: string;
   status: string;
   items: HistoryImageSetItem[];
-  meta?: Record<string, unknown>; // 分类特有（如详情图 output_mode / 规划信息，可选）
+  /**
+   * 分类特有的元信息（BE services/image_history.py:418-447 按 category 分支构造）。
+   * 🔴 HISTORY-FULL-PROMPT-UI-0001：**把正在读的两个键声明出来** —— 原先整个是 Record<string, unknown>，
+   * 读 meta.prompt 拿到 unknown、键名拼错类型层一声不吭（#185 栽过同款：Partial<VideoDetail> 强转让
+   * duration_sec / duration_ms 写错也照样编译过）。索引签名保留（其余分类特有键仍开放），但**读的必须声明**。
+   */
+  meta?: {
+    /** image_gen 分类：BE 直接放 meta["prompt"] = tasks[0].topic（image_history.py:426）—— 与标题同源。 */
+    prompt?: string;
+    /**
+     * **仅 ecom_model**：用户填的补充描述（image_history.py:444 的 else 分支 —— PhotoHistoryCategory
+     * 只有四值 ["image_gen","ecom_white","ecom_model","cover"]（:26），故 else 只覆盖 ecom_model）。
+     * ⚠️ 不是「详情 / 海报」：ecom_detail 走另一个 builder（:545-559，meta 无此键）；海报不是历史分类。
+     */
+    extra_prompt?: string;
+    // 其余分类特有键（详情图 output_mode / 白底图 background / 封面 timestamp_sec…）
+    [key: string]: unknown;
+  };
 }
 
 const BASE = "/api/v1/history/images";

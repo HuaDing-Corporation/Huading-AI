@@ -125,15 +125,15 @@ describe("ReversePromptResultView（反推结果 + 带入 4 模块）", () => {
     vi.stubGlobal("navigator", { clipboard: { writeText } });
     render(<ReversePromptResultView result={FULL} onApply={noop} onRegenerate={noop} onSave={noop} />);
     // 中文提示词块的复制按钮（首个 copy 按钮）
-    fireEvent.click(screen.getAllByRole("button", { name: copy.reverse.copy })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: copy.common.copy })[0]);
     expect(writeText).toHaveBeenCalledWith("中文提示词内容ZH");
   });
 
   it("承重·非安全上下文：navigator.clipboard 缺失 → 点复制不谎报「已复制」（Review P3 修正）", () => {
     vi.stubGlobal("navigator", {});
     render(<ReversePromptResultView result={FULL} onApply={noop} onRegenerate={noop} onSave={noop} />);
-    fireEvent.click(screen.getAllByRole("button", { name: copy.reverse.copy })[0]);
-    expect(screen.queryByText(copy.reverse.copied)).not.toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: copy.common.copy })[0]);
+    expect(screen.queryByText(copy.common.copied)).not.toBeInTheDocument();
   });
 
   it("重新反推 / 保存 回调可触发", () => {

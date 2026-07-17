@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { copy } from "@/lib/copy";
@@ -97,6 +97,77 @@ describe("三视频 tab · 大屏播放 overlay", () => {
     historyMock.fn.mockReturnValue(listOf(ITEM));
     render(<HistoryList mode="avatar_talk" />);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+});
+
+// ── HISTORY-FULL-PROMPT-UI-0001：详情弹窗里能看到完整提示词 + 复制 ──────────────
+// 用户实测：「历史生成中要能看到完整提示词，目前只能看到短提示词，提示词长就会被截断」。
+// 🔴 **三个视频 tab 的提示词是三个不同的字段**（逐个读 BE 源码确认，任务包那张表有四行是错的）：
+//   video_gen   → topic（BE 创建时 self.topic = prompt，schemas/videos.py:236）
+//   avatar_talk → script（topic 只是主题；用户要拿回去复用的是要念的文案）
+//   seedance_i2v→ scene_prompt，**BE 未暴露**（只在 task.params）→ 本包不做，已单独报包
+const LONG_PROMPT = "将图片背景换成浅蓝色带有线条波纹浅反光的纯净水，然后再将图片中的字体切换成蓝金风格。".repeat(8);
+
+describe("三视频 tab · 详情弹窗的完整提示词（FULL-PROMPT）", () => {
+  it("🔴 video_gen：提示词 = topic（BE 把 prompt 写回 topic）→ 长提示词**全文可见**，标题仍截断", () => {
+    historyMock.fn.mockReturnValue(listOf({ ...ITEM, topic: LONG_PROMPT }));
+    render(<HistoryList mode="video_gen" />);
+    fireEvent.click(screen.getByRole("button", { name: copy.tasks.open }));
+
+    const dialog = screen.getByRole("dialog");
+
+    // 🔴 **「标题与提示词同源」的处置**（任务包 §三.1 让我定 + 给理由）：
+    // video_gen 的标题和提示词是**同一个字段**（BE 把 prompt 写回 topic）→ 同一句话在弹窗里出现两次。
+    // 决定：**两者都保留**，本条把这个决定钉死（写 2 而不是「至少 1」——若哪天有人偷偷去掉一个，本条会红）。
+    // 理由：① 标题是**索引**（一行、可扫、hover 全文），提示词块是**内容**（全文、可复制）——
+    //         同源时标题就是内容的截断预览，这是「主题行 + 正文」的标准形态，不是重复；
+    //       ② 改标题会破 #185 刚定稿的行为（本文件上面那条就钉着「标题 = topic」）→ §四.4 零回归；
+    //       ③ 真正让它「像 bug」的不是出现两次，是**没有身份** —— 提示词块带标签 + 复制按钮，
+    //         它明确是「可复制的全文」，不是标题的复读。
+    const both = within(dialog).getAllByText(LONG_PROMPT);
+    expect(both).toHaveLength(2); // 标题（截断预览）+ 提示词块（全文）
+
+    // 标题仍一行（用户拍板「标题保持一行」：几百字的提示词不该把头部撑爆、把图片挤下去）
+    expect(within(dialog).getByRole("heading")).toHaveClass("truncate");
+
+    // 提示词块里的那份是**全文、不截断**（用户报的正是「长了就看不全」）
+    const block = both.find((el) => el.tagName === "P");
+    expect(block?.className).toContain("whitespace-pre-wrap");
+    expect(block?.className).not.toContain("truncate");
+  });
+
+  it("🔴 avatar_talk：提示词 = script（不是 topic）→ 显示口播文案，标签是「口播文案」", () => {
+    historyMock.fn.mockReturnValue(listOf({ ...ITEM, topic: "保温杯选题", script: "大家好，今天聊聊保温杯……" }));
+    render(<HistoryList mode="avatar_talk" />);
+    fireEvent.click(screen.getByRole("button", { name: copy.tasks.open }));
+
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("大家好，今天聊聊保温杯……")).toBeInTheDocument();
+    expect(within(dialog).getByText(copy.history.scriptLabel)).toBeInTheDocument();
+    // 🔴 拿 topic 冒充提示词 → 本条必红（topic 是主题，不是用户要复用的文案）
+    expect(within(dialog).queryByText(copy.history.promptLabel)).not.toBeInTheDocument();
+  });
+
+  it("🔴 seedance_i2v：BE 未暴露 scene_prompt → **不显示提示词块**（宁可没有，也不拿 topic 冒充）", () => {
+    historyMock.fn.mockReturnValue(listOf({ ...ITEM, topic: "保温杯卖点" }));
+    render(<HistoryList mode="seedance_i2v" />);
+    fireEvent.click(screen.getByRole("button", { name: copy.tasks.open }));
+
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).queryByText(copy.history.promptLabel)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(copy.history.scriptLabel)).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: copy.common.copy })).not.toBeInTheDocument();
+  });
+
+  it("复制按钮：点击 → 剪贴板收到**完整**提示词（不是标题那个截断版）", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true, writable: true });
+    historyMock.fn.mockReturnValue(listOf({ ...ITEM, topic: LONG_PROMPT }));
+    render(<HistoryList mode="video_gen" />);
+    fireEvent.click(screen.getByRole("button", { name: copy.tasks.open }));
+
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: copy.common.copy }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(LONG_PROMPT));
   });
 });
 

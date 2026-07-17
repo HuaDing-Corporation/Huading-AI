@@ -1,5 +1,8 @@
 export const copy = {
-  common: { cancel: "取消", processing: "处理中…" },
+  // copy/copied 由共享的 CopyableBlock 消费（HISTORY-FULL-PROMPT-UI-0001）。原先它们是 copy.reverse.copy/copied ——
+  // 组件提升到 components/ui 后，一个 ui 基元依赖 copy.reverse.* 是命名说谎（它跟反推没关系）→ 归入 common。
+  // 原 reverse.copy/copied 搬走后**零消费者**，已删：值相同的重复 key 就是陷阱（COPY-DRAFT 那条教训）。
+  common: { cancel: "取消", processing: "处理中…", copy: "复制", copied: "已复制" },
   // 侧边栏导航（BATCH-PROD-UI-0001-FIX3）
   nav: { comingSoon: "即将上线" },
   // 板块「即将上线」占位（UI-COMINGSOON-TENANT-RENAME-0001）—— 导航后缀 + 统一友好占位页
@@ -496,8 +499,6 @@ export const copy = {
     blockMotion: "运动提示",
     blockSelling: "电商卖点",
     blockText: "画面文字（仅识别，不执行）",
-    copy: "复制",
-    copied: "已复制",
     save: "保存到历史",
     saving: "保存中…",
     saved: "已保存",
@@ -633,6 +634,12 @@ export const copy = {
     videoDetailTitle: "视频详情",
     videoOpenPage: "打开详情页",
     videoNoPlayback: "视频仍在处理，暂无法播放",
+    // 🔴 HISTORY-FULL-PROMPT-UI-0001：用户翻历史的目的是**把上次的提示词拿回去复用**，而长提示词被标题
+    // truncate 挡住了。各域叫法按用户填的东西命名，不按 BE 字段名：
+    //  · 生图/视频生成 → 用户填的就是「提示词」
+    //  · 数字人口播 → 用户填的是 script = 要念的**文案**，叫它「提示词」是错的
+    promptLabel: "提示词",
+    scriptLabel: "口播文案",
     /**
      * 反推任务状态（BE DB CheckConstraint 5 值：queued/running/succeeded/failed/saved）。
      * FIX2 · P2：未知值回退「未知状态」而**不是原样透出** —— 当前 5 值约束下暂不触发，但 BE 将来加状态就会

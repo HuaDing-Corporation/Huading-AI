@@ -42,6 +42,22 @@ export function HistorySetDialog({ item, onClose }: { item: HistoryItem | null; 
       title={item?.title ?? copy.historyImages.setTitle}
       titleAttr={item?.title}
       closeLabel={copy.historyImages.close}
+      // 🔴 图片域的「提示词」按分类而异 —— 逐个读 BE 源码（FIX1 收准，上一版这条注释是**我新写的假路标**）：
+      //  · image_gen   → meta.prompt（services/image_history.py:426，= task.topic，**与标题同源**）
+      //  · ecom_model  → meta.extra_prompt（:444 的 else 分支。注意 PhotoHistoryCategory 只有四值
+      //                  ["image_gen","ecom_white","ecom_model","cover"]（:26）→ **else 只覆盖 ecom_model**）
+      //  · ecom_white  → meta 只有 background / source_asset_id（:431）→ 无提示词（用户只传图 + 选背景）
+      //  · cover       → meta 只有 source / timestamp_sec 等（:435）→ 无提示词（只选帧 + 选模板）
+      //  · ecom_detail → **走另一个 builder**（:545-559）：meta 是 output_mode / product_info /
+      //                  selling_points… → **既无 prompt 也无 extra_prompt**
+      //
+      // ⚠️ 上一版这里写的是「电商模特 / **详情** / **海报** → meta.extra_prompt」，两处都错：
+      //    详情图有自己的 builder、meta 里没有 extra_prompt；「海报」**根本不是历史分类**
+      //    （FE HistoryCategory 五值里没有 poster）。实现一直是对的（读两个键、都没有就 null），
+      //    **只有注释在撒谎** —— 而注释留在原地就是误导下一个人。
+      //
+      // 无提示词的三类 → 两个键都取不到 → null → 外壳整块不渲染（不给用户看一个空的「提示词」框）。
+      prompt={set?.meta?.prompt ?? set?.meta?.extra_prompt ?? null}
       // 信息并集：生成时间 · 状态 · 分类 · 张数（卡片有、原弹窗没显）。
       meta={
         item ? (

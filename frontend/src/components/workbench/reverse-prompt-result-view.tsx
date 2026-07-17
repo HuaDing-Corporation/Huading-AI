@@ -1,7 +1,6 @@
 "use client";
 
-import { useState } from "react";
-import { AlertTriangle, Copy, RefreshCw, Save, Sparkles } from "lucide-react";
+import { AlertTriangle, RefreshCw, Save, Sparkles } from "lucide-react";
 
 import {
   fillTargetToPrefill,
@@ -10,39 +9,13 @@ import {
   type WorkbenchPrefill
 } from "@/lib/api/reverse-prompt";
 import { Button } from "@/components/ui/button";
+import { CopyableBlock } from "@/components/ui/copyable-block";
 import { Card, CardTitle } from "@/components/ui/card";
 import { copy } from "@/lib/copy";
 
 const labelClass = "mb-1 block text-[12px] tracking-[.5px] text-ink-soft";
 
 /** 单个可复制文本块（大段提示词）——标签 + 文本 + 复制按钮（各自 copied 态）。 */
-function CopyableBlock({ label, text }: { label: string; text: string }) {
-  const [copied, setCopied] = useState(false);
-  const doCopy = async () => {
-    // 仅在 Clipboard API 存在且写入成功时才置「已复制」——避免非安全上下文(clipboard 缺失)下谎报成功态。
-    if (!text || !navigator.clipboard?.writeText) return;
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // 复制失败静默降级（不显示「已复制」）
-    }
-  };
-  return (
-    <div className="mb-3">
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <span className={`${labelClass} mb-0`}>{label}</span>
-        <Button variant="soft" size="sm" onClick={() => void doCopy()}>
-          <Copy size={13} strokeWidth={2} /> {copied ? copy.reverse.copied : copy.reverse.copy}
-        </Button>
-      </div>
-      <p className="whitespace-pre-wrap rounded-field border border-line-gold bg-glass-soft px-3 py-2 text-[13px] leading-relaxed text-ink">
-        {text}
-      </p>
-    </div>
-  );
-}
 
 /** 小字段（主体/场景/构图…）——标签 + 单行值。 */
 function Field({ label, value }: { label: string; value: string }) {
