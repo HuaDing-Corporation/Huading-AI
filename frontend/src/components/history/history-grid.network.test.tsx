@@ -52,6 +52,17 @@ const page = (n: number, sig: string) => ({
   page_size: 20
 });
 
+/** 一坏（h1 永远 gone）+ N-1 好（h2..hN 每轮换新、能加载）。用于 P1-2 的「部分成功干扰」场景。 */
+const mixedPage = (n: number, sig: string) => ({
+  items: [
+    { ...card(1, sig), cover_url: `https://cdn/gone.png?sig=${sig}` },
+    ...Array.from({ length: n - 1 }, (_, i) => card(i + 2, sig))
+  ],
+  total: n,
+  page: 1,
+  page_size: 20
+});
+
 function wrap(ui: ReactNode) {
   // gcTime:Infinity + staleTime:0 无关紧要 —— 这里数的是 queryFn 实际被调的次数。
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -94,6 +105,29 @@ describe("HistoryGrid · 真实 network 次数（P1-2：预算的作用域 = que
     }
 
     // 初次 1 + 封顶 2 = 3。上一版：每张卡各 2 次 = 16 次重取（并发时 TanStack 还会再放大）。
+    expect(adapter.listHistoryImages).toHaveBeenCalledTimes(3);
+  });
+
+  // 🔴 FIX2 的 P1-2 真实 network 承重：**部分成功干扰**。
+  // 1 张坏（对象删了、每轮签新 URL 仍 404）+ 7 张好（每轮换新、正常加载）。健康兄弟的 load 若清掉
+  // 坏图的失败计数（= 上一版把清零提到 query 级），坏图就**永远打不到封顶** → 每轮都 refetch，无限。
+  // 现有 network 测试只覆盖「全图一起失败」，覆盖不到这个 —— 这条专补它（Codex B 的场景）。
+  it("🔴 1 坏 7 好、健康兄弟每轮 load × 5 → 坏图封顶仍 2（健康兄弟不替坏图清账）", async () => {
+    adapter.listHistoryImages.mockResolvedValue(mixedPage(8, "1"));
+    wrap(<HistoryGrid category="image_gen" />);
+    await waitFor(() => expect(screen.getAllByRole("img")).toHaveLength(8));
+    expect(adapter.listHistoryImages).toHaveBeenCalledTimes(1);
+
+    const goodAlts = ["图 2", "图 3", "图 4", "图 5", "图 6", "图 7", "图 8"];
+    for (let round = 2; round <= 6; round++) {
+      adapter.listHistoryImages.mockResolvedValue(mixedPage(8, String(round)));
+      act(() => fireEvent.error(screen.getByAltText("图 1"))); // 坏图失效
+      await act(async () => {}); // 重取往返：新一批 URL 进来（坏图仍坏，好图换新）
+      act(() => goodAlts.forEach((alt) => fireEvent.load(screen.getByAltText(alt)))); // 健康兄弟全部加载成功
+    }
+
+    // 坏图独立爬到封顶 2 就停：初次 1 + 坏图 2 = 3。
+    // 上一版（清零 query 级）：健康兄弟每轮清掉坏图计数 → 坏图永不封顶 → 1 + 5 = 6。
     expect(adapter.listHistoryImages).toHaveBeenCalledTimes(3);
   });
 

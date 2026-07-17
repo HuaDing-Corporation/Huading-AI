@@ -81,7 +81,9 @@ export function HistoryGrid({ category }: { category?: HistoryCategory }) {
             item={item}
             onOpenImage={() => setLightboxId(item.id)}
             onDetail={() => setDetailId(item.id)}
-            refresh={refresh}
+            // 每张卡是一个独立媒体位置（item.id 跨 refetch 稳定）：合流共享、封顶各自 —— 一张坏图
+            // 无限重试不该被健康兄弟的 onLoad 清账，健康图也不该被坏图拖着一起封顶（FIX2）。
+            refresh={refresh.forMedia(item.id)}
           />
         ))}
       </div>
@@ -100,7 +102,8 @@ export function HistoryGrid({ category }: { category?: HistoryCategory }) {
         src={lightbox?.cover_url ?? null}
         alt={lightbox ? copy.historyImages.lightboxAlt(lightbox.title) : ""}
         onClose={() => setLightboxId(null)}
-        refresh={refresh}
+        // 大图与它背后那张卡是**同一个媒体**（同一 cover_url）→ 同一 mediaKey，共享封顶/去重。
+        refresh={refresh.forMedia(lightbox?.id ?? "")}
       />
       <HistorySetDialog item={detail} onClose={() => setDetailId(null)} />
     </>

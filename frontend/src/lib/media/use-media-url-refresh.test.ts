@@ -71,8 +71,9 @@ describe("useMediaUrlRefreshScope（presign 失效 → 重取的共享哨兵）"
     const { result } = renderHook(() => useMediaUrlRefreshScope(fn));
 
     act(() => {
-      // 8 张卡，8 个**各不相同**的 URL（去重挡不住它们 —— 挡住的是「在飞门控」）
-      for (let i = 1; i <= 8; i++) result.current.onError(`https://cdn/card-${i}.png?sig=1`);
+      // 8 张卡 = 8 个独立媒体位置（forMedia），各自一个**各不相同**的 URL。
+      // 挡住其余 7 次的是**在飞门控**（query 级），不是去重（那是各媒体各自的）。
+      for (let i = 1; i <= 8; i++) result.current.forMedia(`card-${i}`).onError(`https://cdn/card-${i}.png?sig=1`);
     });
 
     expect(fn).toHaveBeenCalledTimes(1);
@@ -82,16 +83,17 @@ describe("useMediaUrlRefreshScope（presign 失效 → 重取的共享哨兵）"
     await act(async () => settleAll());
   });
 
-  // 🔴 P1-2 的正面承重之二：**N 个元素共享一份封顶**。
-  // 上一版每张卡各持一份 → 8 张卡 = 最多 16 次；现在全列表合计最多 2 次。
-  it("🔴 N 个元素共享一份封顶 → 全列表合计最多 2 次（不是 2×N）", async () => {
+  // 🔴 P1-2 的正面承重之二：**N 个媒体全坏 → 全列表合计 2 次**（合流 + 封顶的合成结果）。
+  // 每媒体独立涨 consecutive（哪怕被在飞门控挡下也涨）→ 两轮后 8 个媒体全部到顶 → 第三轮整域封顶；
+  // 而每轮真正的 refetch 由在飞门控合流成 1 次 → 合计 2 次。上一版每实例各持一份 → 8×2 = 16。
+  it("🔴 N 个媒体全坏 → 全列表合计最多 2 次（不是 2×N）", async () => {
     const { fn, settleAll } = deferredExpired();
     const { result } = renderHook(() => useMediaUrlRefreshScope(fn));
 
-    // 三轮「整列表全碎 → 重取 → 新 URL 仍全碎」。上一版这里会是 8 张 × 2 = 16 次。
+    // 三轮「整列表全碎 → 重取 → 新 URL 仍全碎」。8 个独立媒体位置（forMedia）。
     for (let round = 1; round <= 3; round++) {
       act(() => {
-        for (let i = 1; i <= 8; i++) result.current.onError(`https://cdn/card-${i}.png?sig=${round}`);
+        for (let i = 1; i <= 8; i++) result.current.forMedia(`card-${i}`).onError(`https://cdn/card-${i}.png?sig=${round}`);
       });
       await act(async () => settleAll()); // 上一次重取回来了，门控解除（微任务 → 必须 await）
     }
@@ -115,6 +117,24 @@ describe("useMediaUrlRefreshScope（presign 失效 → 重取的共享哨兵）"
     expect(onExpired).toHaveBeenCalledTimes(2);
     expect(onExpired).toHaveBeenCalledWith("task-a");
     expect(onExpired).toHaveBeenCalledWith("task-b");
+  });
+
+  // 🔴 FIX2 的 P1-2：**健康兄弟不替坏图清账**。
+  // FIX1 把封顶提到 query 级修好了 2N，但清零也跟着提上去了 → 列表里每张健康图片的 onLoad 清掉了
+  // 坏图的失败计数 → 永久坏图无限重试（反向的洞）。拆分后：封顶/清零单媒体级，坏图独立爬到封顶就停。
+  it("🔴 坏媒体 error + 健康兄弟 load × N 轮 → 坏媒体封顶仍 2（健康兄弟不替它清账）", async () => {
+    const onExpired = vi.fn().mockResolvedValue(undefined);
+    const { result } = renderHook(() => useMediaUrlRefreshScope(onExpired));
+    const bad = result.current.forMedia("bad");
+    const good = result.current.forMedia("good"); // 同一合流域内的健康兄弟
+
+    for (let i = 1; i <= 5; i++) {
+      await act(async () => bad.onError(`https://cdn/gone.png?sig=${i}`)); // 坏图每轮换新 URL、个个 404
+      act(() => good.onLoad()); // 健康兄弟每轮都加载成功
+    }
+
+    // 坏图救不回来是它自己的事：爬到封顶 2 就停，不被健康兄弟的成功清账（清 query 级会变成无限）。
+    expect(onExpired).toHaveBeenCalledTimes(2);
   });
 
   it("加载成功即清零 → 长会话里「播成功过、之后再过期」仍能再救（封顶不误伤正常的二次过期）", async () => {

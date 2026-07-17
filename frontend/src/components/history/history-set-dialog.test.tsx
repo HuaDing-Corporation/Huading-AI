@@ -33,7 +33,7 @@ beforeEach(() => {
     },
     isLoading: false,
     isError: false,
-    refetch: vi.fn()
+    refetch: vi.fn().mockResolvedValue(undefined)
   });
 });
 afterEach(() => vi.clearAllMocks());
@@ -65,7 +65,7 @@ const setOf = (category: string, meta: Record<string, unknown>) => ({
   },
   isLoading: false,
   isError: false,
-  refetch: vi.fn()
+  refetch: vi.fn().mockResolvedValue(undefined)
 });
 const itemOf = (category: string): HistoryItem => ({ ...ITEM, category: category as HistoryItem["category"] });
 const LONG = "将图片背景换成浅蓝色带有线条波纹浅反光的纯净水，然后再将图片中的字体切换成蓝金风格。".repeat(6);
@@ -157,7 +157,7 @@ describe("HistorySetDialog · 信息并集（一项都不能少）", () => {
 // 故它**本来就导电**：重取 → set.items 换新 download_url → tile 的 src 跟着换。承重见下面第 3 条。
 describe("HistorySetDialog · 整套图 presign 失效 → 重取（接入共享哨兵）", () => {
   it("整套单张失效 → 重取一次；同一 URL 连报多次也只一次", () => {
-    const refetch = vi.fn();
+    const refetch = vi.fn().mockResolvedValue(undefined);
     hooks.useHistoryImageSet.mockReturnValue({
       data: {
         id: "hd-main-1",
@@ -192,7 +192,7 @@ describe("HistorySetDialog · 整套图 presign 失效 → 重取（接入共享
   //
   // 这比"漏测"重一层：不是没看见，是看见了并盖章说对。改的不是数字，是**预算的作用域**。
   it("🔴 整套 N 张同时失效 → 只重取一次（一次 refetch 就把 N 张的 URL 全刷回来）", () => {
-    const refetch = vi.fn();
+    const refetch = vi.fn().mockResolvedValue(undefined);
     hooks.useHistoryImageSet.mockReturnValue({
       data: {
         id: "hd-main-1",
@@ -220,7 +220,7 @@ describe("HistorySetDialog · 整套图 presign 失效 → 重取（接入共享
   });
 
   it("重取拿回新 URL → tile 的 <img src> 真的跟着换（数据源是 query 派生，重取才有意义）", () => {
-    const refetch = vi.fn();
+    const refetch = vi.fn().mockResolvedValue(undefined);
     const setWith = (url: string) => ({
       data: {
         id: "hd-main-1",

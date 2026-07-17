@@ -165,7 +165,8 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
               onOpen={() => setDetailId(item.id)}
               onOpenMedia={() => setLightboxId(item.id)}
               onRetry={() => undefined}
-              refresh={refresh}
+              // 每张卡是一个独立媒体位置（item.id 跨 refetch 稳定）：合流共享、封顶各自（FIX2）。
+              refresh={refresh.forMedia(item.id)}
               onDelete={(id) => setConfirmDelete(id)}
               deleting={deleteVideo.isPending && deleteVideo.variables === item.id}
             />
@@ -195,14 +196,16 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
         // 按 id 开就会留下一个空白 overlay。与 VideoDetailDialog（open={detail !== null}）同口径。
         open={lightboxTask !== null}
         onClose={() => setLightboxId(null)}
-        refresh={refresh}
+        // overlay 与它背后那张卡是**同一个视频**（同一 playbackUrl）→ 同一 mediaKey。
+        refresh={refresh.forMedia(lightboxId ?? "")}
       />
       {/* 详情弹窗：信息并集（生成时间/状态/模式/时长/AI 标识 + 播放 + 下载）+ 「打开详情页」（跳转能力零回归）。 */}
       <VideoDetailDialog
         detail={detailPayload}
         onClose={() => setDetailId(null)}
         onOpenPage={(id) => router.push(`/videos/${id}`)}
-        refresh={refresh}
+        // 详情弹窗与它背后那张卡是**同一个视频** → 同一 mediaKey。
+        refresh={refresh.forMedia(detailId ?? "")}
       />
 
       {/* 删除单条确认(视频/图片=硬删不可恢复) */}

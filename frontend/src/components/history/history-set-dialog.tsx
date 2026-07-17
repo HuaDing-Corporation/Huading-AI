@@ -109,9 +109,11 @@ export function HistorySetDialog({ item, onClose }: { item: HistoryItem | null; 
           ) : null}
           <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {set.items.map((it) => (
-              // presign 失效 → 重取本整套（MEDIA-URL-REFRESH-CONVERGE-0001 · 第 5 片）。
+              // presign 失效 → 重取本整套（MEDIA-URL-REFRESH-CONVERGE-0001 · 第 5 片 / FIX2）。
               // 数据源就是本组件的 useHistoryImageSet query → 重取拿回的新 download_url 直接喂回 tile，导电。
-              <HistoryImageTile key={it.index} item={it} refresh={refresh} />
+              // 每张 tile 是独立媒体位置（it.index 跨 refetch 稳定）：整套里一张删了、其余在，
+              // 那一张的无限重试不该被健康张的 onLoad 清账（FIX2 的 P1-2）。
+              <HistoryImageTile key={it.index} item={it} refresh={refresh.forMedia(String(it.index))} />
             ))}
           </div>
         </>
