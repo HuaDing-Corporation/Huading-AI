@@ -60,7 +60,11 @@ export interface HistoryImageSet {
   meta?: {
     /** image_gen 分类：BE 直接放 meta["prompt"] = tasks[0].topic（image_history.py:426）—— 与标题同源。 */
     prompt?: string;
-    /** 电商模特 / 详情 / 海报：用户填的补充描述（image_history.py:444 的 else 分支）。 */
+    /**
+     * **仅 ecom_model**：用户填的补充描述（image_history.py:444 的 else 分支 —— PhotoHistoryCategory
+     * 只有四值 ["image_gen","ecom_white","ecom_model","cover"]（:26），故 else 只覆盖 ecom_model）。
+     * ⚠️ 不是「详情 / 海报」：ecom_detail 走另一个 builder（:545-559，meta 无此键）；海报不是历史分类。
+     */
     extra_prompt?: string;
     // 其余分类特有键（详情图 output_mode / 白底图 background / 封面 timestamp_sec…）
     [key: string]: unknown;
