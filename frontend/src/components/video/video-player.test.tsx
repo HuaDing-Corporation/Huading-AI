@@ -1,7 +1,22 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { VideoPlayer } from "@/components/video/video-player";
+import { useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
+import { VideoPlayer, type VideoPlayerProps } from "@/components/video/video-player";
+
+// MEDIA-URL-REFRESH-CONVERGE-0001 · FIX1：VideoPlayer 的 `onUrlExpired: () => void` 换成
+// `refresh: MediaUrlRefreshScope`（预算的作用域必须由持有 query 的调用方决定）。
+//
+// 🔴 **只换接线，不动任何期望值**：下面用的是**真实的** useMediaUrlRefreshScope（不是 stub），
+// 故「同一 URL 连报多次 → onUrlExpired 恰调一次」「URL 换了 → 再给一次机会」「封顶 2 次」
+// 这些断言的语义与数字**逐字不变**，仍是端到端穿过 VideoPlayer 的真实行为。
+type PlayerProps = Omit<VideoPlayerProps, "refresh"> & { onUrlExpired: () => void };
+
+/** 把 VideoPlayer 包在真实 scope 里，scope 的 onExpired 即测试传的 onUrlExpired。 */
+function Player({ onUrlExpired, ...props }: PlayerProps) {
+  const refresh = useMediaUrlRefreshScope(async () => onUrlExpired());
+  return <VideoPlayer {...props} refresh={refresh} />;
+}
 
 // MEDIA-URL-REFRESH-CONVERGE-0001 · **第 1 片：先补网**（本 commit 零产品代码改动）。
 //
@@ -23,7 +38,7 @@ afterEach(() => vi.clearAllMocks());
 
 describe("VideoPlayer · 迁移前基线（不变量）", () => {
   it("渲染 <video>：src / poster / controls / preload=metadata", () => {
-    render(<VideoPlayer playbackUrl={URL_A} downloadUrl={null} poster="https://cdn/a.jpg" onUrlExpired={vi.fn()} />);
+    render(<Player playbackUrl={URL_A} downloadUrl={null} poster="https://cdn/a.jpg" onUrlExpired={vi.fn()} />);
 
     const video = document.querySelector("video");
     expect(video).toHaveAttribute("src", URL_A);
@@ -34,14 +49,14 @@ describe("VideoPlayer · 迁移前基线（不变量）", () => {
 
   it("有 downloadUrl → 渲染下载链接（带 download 属性）；无 → 不渲染", () => {
     const { unmount } = render(
-      <VideoPlayer playbackUrl={URL_A} downloadUrl="https://cdn/a.mp4?dl=1" poster={null} onUrlExpired={vi.fn()} />
+      <Player playbackUrl={URL_A} downloadUrl="https://cdn/a.mp4?dl=1" poster={null} onUrlExpired={vi.fn()} />
     );
     const link = screen.getByRole("link");
     expect(link).toHaveAttribute("href", "https://cdn/a.mp4?dl=1");
     expect(link).toHaveAttribute("download");
     unmount();
 
-    render(<VideoPlayer playbackUrl={URL_A} downloadUrl={null} poster={null} onUrlExpired={vi.fn()} />);
+    render(<Player playbackUrl={URL_A} downloadUrl={null} poster={null} onUrlExpired={vi.fn()} />);
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
   });
 
@@ -49,7 +64,7 @@ describe("VideoPlayer · 迁移前基线（不变量）", () => {
   // 浏览器对同一 src 会连发 error；每个都触发重取 = 打爆后端。这条在迁移前后都必须成立。
   it("同一 URL 连报多次 error → onUrlExpired 恰调一次", () => {
     const onUrlExpired = vi.fn();
-    render(<VideoPlayer playbackUrl={URL_A} downloadUrl={null} poster={null} onUrlExpired={onUrlExpired} />);
+    render(<Player playbackUrl={URL_A} downloadUrl={null} poster={null} onUrlExpired={onUrlExpired} />);
 
     const video = document.querySelector("video")!;
     fireEvent.error(video);
@@ -59,7 +74,7 @@ describe("VideoPlayer · 迁移前基线（不变量）", () => {
   });
 
   it("playbackUrl 为空 → 不渲染 src", () => {
-    render(<VideoPlayer playbackUrl={null} downloadUrl={null} poster={null} onUrlExpired={vi.fn()} />);
+    render(<Player playbackUrl={null} downloadUrl={null} poster={null} onUrlExpired={vi.fn()} />);
     expect(document.querySelector("video")).not.toHaveAttribute("src");
   });
 
@@ -88,19 +103,29 @@ describe("VideoPlayer · 迁移前基线（不变量）", () => {
 describe("VideoPlayer · 迁入共享哨兵后（三个 bug 各有承重）", () => {
   const URL_B = "https://cdn/a.mp4?sig=2";
 
+  /**
+   * 等「上一次重取」回来 —— FIX1 的在飞门控（同一资源的并发失效只发一次）靠 onExpired 的 Promise 落定来解除。
+   *
+   * ⚠️ 这不是把测试将就实现：真实链路里「重取 → 新 URL 进来 → 它也失效」之间**必然隔着一次网络往返**，
+   * 没有往返就没有新 URL，也就无所谓「新 URL 又失效」。同步连发三个 error 是**同一次失效的重复上报**，
+   * 那正是门控该挡住的东西（挡不住 = 打三次后端）。下面每条的**期望值一个没改**，改的只是让往返真的发生。
+   */
+  const roundTrip = () => act(async () => {});
+
   // bug ①：详情页刷新后新 URL 再过期 → 旧实现 expired.current 恒 true → 播放器哑死到组件卸载。
-  it("🔴 URL 换了 → 重新给一次机会（旧实现刷新后就永久哑掉）", () => {
+  it("🔴 URL 换了 → 重新给一次机会（旧实现刷新后就永久哑掉）", async () => {
     const onUrlExpired = vi.fn();
     const { rerender } = render(
-      <VideoPlayer playbackUrl={URL_A} downloadUrl={null} poster={null} onUrlExpired={onUrlExpired} />
+      <Player playbackUrl={URL_A} downloadUrl={null} poster={null} onUrlExpired={onUrlExpired} />
     );
     const video = document.querySelector("video")!;
 
     fireEvent.error(video);
     expect(onUrlExpired).toHaveBeenCalledTimes(1);
+    await roundTrip();
 
     // 重取拿回新 URL，但它也过期了 → 必须还能再救（否则用户永远黑屏，且不知为何）
-    rerender(<VideoPlayer playbackUrl={URL_B} downloadUrl={null} poster={null} onUrlExpired={onUrlExpired} />);
+    rerender(<Player playbackUrl={URL_B} downloadUrl={null} poster={null} onUrlExpired={onUrlExpired} />);
     fireEvent.error(video);
     expect(onUrlExpired).toHaveBeenCalledTimes(2);
   });
@@ -108,24 +133,24 @@ describe("VideoPlayer · 迁入共享哨兵后（三个 bug 各有承重）", ()
   // bug ③（原 it.todo 就地实现）：没有 URL 就没有「过期」可言，别空打后端。
   it("playbackUrl 为空 → error 不报过期（旧实现会误报，白打一次后端）", () => {
     const onUrlExpired = vi.fn();
-    render(<VideoPlayer playbackUrl={null} downloadUrl={null} poster={null} onUrlExpired={onUrlExpired} />);
+    render(<Player playbackUrl={null} downloadUrl={null} poster={null} onUrlExpired={onUrlExpired} />);
 
     fireEvent.error(document.querySelector("video")!);
     expect(onUrlExpired).not.toHaveBeenCalled();
   });
 
   // 🔴 死循环刹车 —— 这条是上面 bug ① 的**成立前提**：拆掉 hook 的封顶，这条必红。
-  it("🔴 新 URL 仍失效 → 连续重取封顶，不无限循环（对象已删时 BE 能一直签出新 URL）", () => {
+  it("🔴 新 URL 仍失效 → 连续重取封顶，不无限循环（对象已删时 BE 能一直签出新 URL）", async () => {
     const onUrlExpired = vi.fn();
     const { rerender } = render(
-      <VideoPlayer playbackUrl="https://cdn/gone.mp4?sig=0" downloadUrl={null} poster={null} onUrlExpired={onUrlExpired} />
+      <Player playbackUrl="https://cdn/gone.mp4?sig=0" downloadUrl={null} poster={null} onUrlExpired={onUrlExpired} />
     );
     const video = document.querySelector("video")!;
 
     // 模拟「对象已被删除」：每轮 error → 重取 → BE 签出**新** URL → 仍然 404 → error → ……
     for (let i = 1; i <= 8; i++) {
       rerender(
-        <VideoPlayer
+        <Player
           playbackUrl={`https://cdn/gone.mp4?sig=${i}`}
           downloadUrl={null}
           poster={null}
@@ -133,6 +158,7 @@ describe("VideoPlayer · 迁入共享哨兵后（三个 bug 各有承重）", ()
         />
       );
       fireEvent.error(video);
+      await roundTrip(); // 每轮之间隔着一次真实的重取往返，否则新 URL 根本不会出现
     }
 
     // 救得回来的一次就够；救不回来的最多浪费 2 次 —— 而不是打后端 8 次、80 次。
@@ -142,21 +168,23 @@ describe("VideoPlayer · 迁入共享哨兵后（三个 bug 各有承重）", ()
   // 封顶的另一半：不清零就会误伤长会话里的**正常**二次过期（播成功过 → 很久以后 TTL 到）。
   // ⚠️ 用 loadedMetadata 而非 load：React 的 media 事件表不含 load，<video onLoad> 根本接不上
   //    （实测：fireEvent.load(video) 静默不触发）。这也是 hook 注释里选 onLoadedMetadata 的原因。
-  it("播成功过之后再过期 → 仍能再救（成功即清零，封顶不误伤正常的二次过期）", () => {
+  it("播成功过之后再过期 → 仍能再救（成功即清零，封顶不误伤正常的二次过期）", async () => {
     const onUrlExpired = vi.fn();
     const { rerender } = render(
-      <VideoPlayer playbackUrl={URL_A} downloadUrl={null} poster={null} onUrlExpired={onUrlExpired} />
+      <Player playbackUrl={URL_A} downloadUrl={null} poster={null} onUrlExpired={onUrlExpired} />
     );
     const video = document.querySelector("video")!;
 
     fireEvent.error(video);
-    rerender(<VideoPlayer playbackUrl={URL_B} downloadUrl={null} poster={null} onUrlExpired={onUrlExpired} />);
+    await roundTrip();
+    rerender(<Player playbackUrl={URL_B} downloadUrl={null} poster={null} onUrlExpired={onUrlExpired} />);
     fireEvent.error(video);
+    await roundTrip();
     expect(onUrlExpired).toHaveBeenCalledTimes(2); // 已到封顶
 
     // 第 3 个 URL 真的播起来了（拿到元数据 = 这个 URL 签得开、取得到）→ 预算清零
     rerender(
-      <VideoPlayer playbackUrl="https://cdn/a.mp4?sig=3" downloadUrl={null} poster={null} onUrlExpired={onUrlExpired} />
+      <Player playbackUrl="https://cdn/a.mp4?sig=3" downloadUrl={null} poster={null} onUrlExpired={onUrlExpired} />
     );
     fireEvent.loadedMetadata(video);
 

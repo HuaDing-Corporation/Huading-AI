@@ -2,7 +2,7 @@
 
 import { MediaLightbox } from "@/components/history/media-lightbox";
 import { copy } from "@/lib/copy";
-import { useMediaUrlRefresh } from "@/lib/media/use-media-url-refresh";
+import type { MediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 
 /**
  * 大图弹窗（HISTORY-IMAGE-TAB-UI-0001）：点图片 → 弹**纯图片**大图，不显示任何其它信息（用户原话）。
@@ -23,16 +23,19 @@ export function ImageLightbox({
   alt,
   open,
   onClose,
-  onUrlError
+  refresh
 }: {
   src: string | null;
   alt: string;
   open: boolean;
   onClose: () => void;
-  /** presign 失效 → 请调用方重取。**有意做成必填**：零防护的成因就是没人「记得」接，必填 = 编译器替人记。 */
-  onUrlError: () => void;
+  /**
+   * presign 失效重取的作用域，由持有 query 的 HistoryGrid 创建并下发（FIX1）——
+   * 本弹窗与网格里的卡片消费**同一个** query，共用一份预算：大图碎了就等于那张卡也碎了，
+   * 一次 refetch 两边一起救。收 scope 而非 callback → 结构上不可能各自持一份预算。
+   */
+  refresh: MediaUrlRefreshScope;
 }) {
-  const media = useMediaUrlRefresh(src, onUrlError);
   return (
     <MediaLightbox open={open} onClose={onClose} title={copy.historyImages.lightboxTitle} description={alt}>
       {src ? (
@@ -40,8 +43,8 @@ export function ImageLightbox({
         <img
           src={src}
           alt={alt}
-          onError={media.onError}
-          onLoad={media.onLoad}
+          onError={() => refresh.onError(src)}
+          onLoad={refresh.onLoad}
           className="block max-h-[60vh] max-w-[60vw] rounded-card object-contain shadow-focus-gold"
         />
       ) : null}

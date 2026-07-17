@@ -11,7 +11,7 @@ import { videoKeys } from "@/lib/api/keys";
 import { friendlyImageError } from "@/lib/api/image-error";
 import { friendlyVideoError } from "@/lib/api/video-error";
 import { copy } from "@/lib/copy";
-import { useMediaUrlRefresh } from "@/lib/media/use-media-url-refresh";
+import { useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 import { cn } from "@/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -59,21 +59,17 @@ export function VideoDetail({ id }: VideoDetailProps) {
   const router = useRouter();
   const [coverOpen, setCoverOpen] = useState(false);
 
-  /** presign 失效 → 重取本视频详情。两个分支（photo 的 `<img>` / video 的 VideoPlayer）共用这一条动作。 */
-  const handleUrlExpired = useCallback(() => {
-    void queryClient.invalidateQueries({ queryKey: videoKeys.detail(id) });
-  }, [queryClient, id]);
-
   /**
-   * photo 分支的 `<img>` 迁入**共享哨兵**（MEDIA-URL-REFRESH-CONVERGE-0001）—— 它此前是**裸接**的：
-   * 没有任何哨兵，只要 BE 每次都能签出**新的**失效 URL（对象已删/已迁移即如此），就是
-   * error → invalidate → 新 URL → error → …… **无限重取**，每轮真打一次后端。
+   * presign 失效 → 重取本视频详情。**两个分支共用同一份预算**（FIX1）：photo 的 `<img>` 与 video 的
+   * VideoPlayer 消费的是同一个 `useVideo(id)` query —— 一次 invalidate 把两者的 URL 一起换新，
+   * 故预算属于这个 query，不属于哪个元素。（此处同一时刻只渲染一个分支，但作用域该按资源划、不按现象划。）
    *
-   * hook 必须在早返回（loading / error / !data）**之前**调用 —— rules-of-hooks，且 lint 是 error 级。
-   * 故这里传 `data?.playback_url`：无数据时是 undefined，hook 的 `if (!url) return` 让它自然哑火。
-   * video 分支的哨兵在 VideoPlayer 内部（同一个 hook），两分支同一时刻只渲染一个，互不干扰。
+   * 必须在早返回（loading / error / !data）**之前**调用 —— rules-of-hooks，lint 是 error 级。
+   * `invalidateQueries` 返回 Promise → 在飞门控靠它判断这次重取回来了没有。
    */
-  const media = useMediaUrlRefresh(data?.playback_url, handleUrlExpired);
+  const refresh = useMediaUrlRefreshScope(
+    useCallback(() => queryClient.invalidateQueries({ queryKey: videoKeys.detail(id) }), [queryClient, id])
+  );
 
   // Loading state
   if (isLoading) {
@@ -157,8 +153,8 @@ export function VideoDetail({ id }: VideoDetailProps) {
             <img
               src={data.playback_url}
               alt={data.topic ?? copy.workbench.photoResultAlt}
-              onError={media.onError}
-              onLoad={media.onLoad}
+              onError={() => refresh.onError(data.playback_url)}
+              onLoad={refresh.onLoad}
               className="w-full rounded-field border border-line-gold bg-black/5 object-contain"
             />
             {data.download_url && (
@@ -176,7 +172,7 @@ export function VideoDetail({ id }: VideoDetailProps) {
             playbackUrl={data.playback_url}
             downloadUrl={data.download_url}
             poster={data.thumbnail_url}
-            onUrlExpired={handleUrlExpired}
+            refresh={refresh}
           />
         )
       ) : (

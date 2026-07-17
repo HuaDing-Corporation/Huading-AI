@@ -3,13 +3,18 @@
 import { Download } from "lucide-react";
 
 import { copy } from "@/lib/copy";
-import { useMediaUrlRefresh } from "@/lib/media/use-media-url-refresh";
+import type { MediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 
 export interface VideoPlayerProps {
   playbackUrl?: string | null;
   downloadUrl?: string | null;
   poster?: string | null;
-  onUrlExpired: () => void;
+  /**
+   * presign 失效重取的**作用域**，由持有 query 的调用方创建并下发（FIX1）。
+   * 🔴 收的是 scope、不是 `onUrlExpired: () => void` —— 后者会让本组件各持一份预算，
+   * 而预算必须属于「一次重取能救回哪些 URL」的那个资源。见 use-media-url-refresh.ts 的注释。
+   */
+  refresh: MediaUrlRefreshScope;
 }
 
 /**
@@ -30,12 +35,10 @@ export interface VideoPlayerProps {
  * 🔴 **修 1 的前提是「封顶」已经在**：单独补重置 → 对象已删时（BE 每次都签得出新 URL、个个 404）
  * error → 重取 → 新 URL → error → …… **无限重取**，每轮真打一次后端；原来缺的那半条恰好在充当
  * 粗糙的死循环刹车。这个顺序不靠「记得先做封顶」来保证 —— hook 把「URL 变更重置」与「连续失败封顶
- * + 加载成功即清零」**打包在同一次迁移里**，结构上不存在「重置已开、封顶未到」的中间态。
+ * + 加载成功即清零」**打包在同一个 API 里**，结构上不存在「重置已开、封顶未到」的中间态。
  * 承重见 `video-player.test.tsx`（封顶那条拆掉 hook 的 MAX_CONSECUTIVE_REFRESH 即红）。
  */
-export function VideoPlayer({ playbackUrl, downloadUrl, poster, onUrlExpired }: VideoPlayerProps) {
-  const media = useMediaUrlRefresh(playbackUrl, onUrlExpired);
-
+export function VideoPlayer({ playbackUrl, downloadUrl, poster, refresh }: VideoPlayerProps) {
   return (
     <div className="flex flex-col gap-3">
       <video
@@ -43,8 +46,8 @@ export function VideoPlayer({ playbackUrl, downloadUrl, poster, onUrlExpired }: 
         preload="metadata"
         poster={poster ?? undefined}
         src={playbackUrl ?? undefined}
-        onError={media.onError}
-        onLoadedMetadata={media.onLoad}
+        onError={() => refresh.onError(playbackUrl)}
+        onLoadedMetadata={refresh.onLoad}
         className="max-h-[480px] w-full rounded-field border border-line-gold bg-black/5"
       />
       {downloadUrl && (

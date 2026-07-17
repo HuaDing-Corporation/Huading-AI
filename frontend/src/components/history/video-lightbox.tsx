@@ -2,7 +2,7 @@
 
 import { MediaLightbox } from "@/components/history/media-lightbox";
 import { copy } from "@/lib/copy";
-import { useMediaUrlRefresh } from "@/lib/media/use-media-url-refresh";
+import type { MediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 
 /**
  * 视频大屏弹窗（HISTORY-VIDEO-DIALOG-UI-0001）—— 图片 lightbox 的视频等价物。
@@ -31,7 +31,7 @@ export function VideoLightbox({
   title,
   open,
   onClose,
-  onUrlError
+  refresh
 }: {
   src: string | null;
   poster?: string | null;
@@ -39,10 +39,13 @@ export function VideoLightbox({
   title: string;
   open: boolean;
   onClose: () => void;
-  /** presign 失效 → 请调用方重取（通常是 `query.refetch()`）。哨兵与封顶在 useMediaUrlRefresh 里。 */
-  onUrlError?: () => void;
+  /**
+   * presign 失效重取的作用域，由持有 query 的调用方创建并下发（FIX1）——
+   * 本 overlay 与列表里的卡片消费**同一个** query，共用一份预算：overlay 里的 URL 碎了，
+   * 那张卡的也碎了，一次 refetch 两边一起救。收 scope 而非 callback → 不可能各自持一份预算。
+   */
+  refresh: MediaUrlRefreshScope;
 }) {
-  const media = useMediaUrlRefresh(src, () => onUrlError?.());
   return (
     <MediaLightbox open={open} onClose={onClose} title={copy.history.videoLightboxTitle} description={title}>
       {src ? (
@@ -53,8 +56,8 @@ export function VideoLightbox({
           poster={poster ?? undefined}
           src={src}
           aria-label={title}
-          onError={media.onError}
-          onLoadedMetadata={media.onLoad}
+          onError={() => refresh.onError(src)}
+          onLoadedMetadata={refresh.onLoad}
           className="block max-h-[70vh] max-w-[80vw] rounded-card bg-black shadow-focus-gold"
         />
       ) : null}

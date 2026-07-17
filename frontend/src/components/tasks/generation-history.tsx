@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { Clapperboard, FileText, Images, ScanSearch, Store, Trash2, UserRound } from "lucide-react";
 import { useRouter } from "next/navigation";
 
@@ -16,6 +16,7 @@ import { HistoryGrid } from "@/components/history/history-grid";
 import { VideoDetailDialog, type VideoDetailPayload } from "@/components/history/video-detail-dialog";
 import { VideoLightbox } from "@/components/history/video-lightbox";
 import { useClearVideos, useDeleteVideo, useVideoHistory } from "@/lib/api/hooks";
+import { useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 import { fromVideoRead, type TrackedTask } from "@/lib/sse/progress-mapping";
 import { copy } from "@/lib/copy";
 import type { HistoryCategory } from "@/lib/api/history-images";
@@ -72,6 +73,14 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
   const [lightboxId, setLightboxId] = useState<string | null>(null);
 
   const items = query.data?.pages.flatMap((page) => page.items) ?? [];
+
+  // 🔴 FIX1：**一份预算，整个列表共用** —— N 张卡 + 大屏 overlay + 详情弹窗消费的是同一个
+  // useVideoHistory query，一次 refetch 把所有 playbackUrl 一起刷回来。上一版给每张卡各发一份
+  // `() => query.refetch()` → 「每实例最多 2 次」在 N 张卡上 = **最多 2×N 次真实请求**。
+  //
+  // ⚠️ Codex B 的 P1-2 点的是 history-grid / history-set-dialog，**没点这里** —— 但这里是同一个形态
+  // （#185 引入）。修一半 = 「局部正确、全局错」的重演，故一并收。
+  const refresh = useMediaUrlRefreshScope(useCallback(() => query.refetch(), [query]));
 
   // The tab's mode is authoritative for this list → photo items render <img>.
   const taskOf = (item: (typeof items)[number]): TrackedTask => ({ ...fromVideoRead(item), mode });
@@ -156,7 +165,7 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
               onOpen={() => setDetailId(item.id)}
               onOpenMedia={() => setLightboxId(item.id)}
               onRetry={() => undefined}
-              onUrlError={() => void query.refetch()}
+              refresh={refresh}
               onDelete={(id) => setConfirmDelete(id)}
               deleting={deleteVideo.isPending && deleteVideo.variables === item.id}
             />
@@ -186,14 +195,14 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
         // 按 id 开就会留下一个空白 overlay。与 VideoDetailDialog（open={detail !== null}）同口径。
         open={lightboxTask !== null}
         onClose={() => setLightboxId(null)}
-        onUrlError={() => void query.refetch()}
+        refresh={refresh}
       />
       {/* 详情弹窗：信息并集（生成时间/状态/模式/时长/AI 标识 + 播放 + 下载）+ 「打开详情页」（跳转能力零回归）。 */}
       <VideoDetailDialog
         detail={detailPayload}
         onClose={() => setDetailId(null)}
         onOpenPage={(id) => router.push(`/videos/${id}`)}
-        onUrlError={() => void query.refetch()}
+        refresh={refresh}
       />
 
       {/* 删除单条确认(视频/图片=硬删不可恢复) */}

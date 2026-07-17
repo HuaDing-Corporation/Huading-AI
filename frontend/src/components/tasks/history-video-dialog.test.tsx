@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { copy } from "@/lib/copy";
@@ -10,7 +10,9 @@ import type { VideoListItem } from "@/lib/api/types";
 const pushMock = vi.hoisted(() => ({ fn: vi.fn() }));
 const historyMock = vi.hoisted(() => ({ fn: vi.fn() }));
 /** 共享 refetch —— presign 失效重取的落点；FIX1 的承重要数它被调了几次。 */
-const refetchMock = vi.hoisted(() => ({ fn: vi.fn() }));
+// FIX1：替身必须返回 Promise —— 真实 query.refetch() 返回 Promise，而在飞门控（同一 query 的并发失效
+// 只发一次）靠它落定来解除。替身返回 undefined 就测不到合流 = 假绿。
+const refetchMock = vi.hoisted(() => ({ fn: vi.fn().mockResolvedValue(undefined) }));
 const deleteMock = vi.hoisted(() => ({ mutateAsync: vi.fn(), isPending: false, variables: undefined as string | undefined }));
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: pushMock.fn }) }));
@@ -243,7 +245,7 @@ describe("三视频 tab · 新播放器继承既有防线（FIX1）", () => {
   // 🔴 硬门核心：**无死循环**。
   // 「对象已被删除」时 BE 每次都签得出新 URL、但个个 404 →「URL 变了就再报一次」会变成
   // error → 重取 → 新 URL → error → …… 每轮真打一次后端。故连续失败必须封顶。
-  it("新 URL 仍失效 → 连续重取封顶，不无限循环（对象已删时 BE 能一直签出新 URL）", () => {
+  it("新 URL 仍失效 → 连续重取封顶，不无限循环（对象已删时 BE 能一直签出新 URL）", async () => {
     historyMock.fn.mockReturnValue(listOf(ITEM));
     const { rerender } = render(<HistoryList mode="avatar_talk" />);
     fireEvent.click(screen.getByRole("button", { name: copy.history.videoPlay }));
@@ -252,6 +254,7 @@ describe("三视频 tab · 新播放器继承既有防线（FIX1）", () => {
       historyMock.fn.mockReturnValue(listOf({ ...ITEM, playback_url: `https://cdn/gone.mp4?sig=${i}` }));
       rerender(<HistoryList mode="avatar_talk" />);
       fireEvent.error(within(screen.getByRole("dialog")).getByLabelText("保温杯带货"));
+      await act(async () => {}); // FIX1：每轮之间隔着一次真实的重取往返，否则新 URL 根本不会出现
     }
 
     // 救得回来的一次就够；救不回来的最多浪费 2 次 —— 而不是 8 次、80 次。

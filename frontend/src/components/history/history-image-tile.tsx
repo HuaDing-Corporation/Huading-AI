@@ -4,7 +4,7 @@ import { Download } from "lucide-react";
 
 import { historyImageDimensions, type HistoryImageSetItem } from "@/lib/api/history-images";
 import { copy } from "@/lib/copy";
-import { useMediaUrlRefresh } from "@/lib/media/use-media-url-refresh";
+import type { MediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 
 /**
  * 图片历史·整套单张（HISTORY-UI-0001；FIX2 对齐真实 BE）——复用详情图红线：预览仅 CSS 等比缩放同一原图 URL
@@ -18,13 +18,18 @@ import { useMediaUrlRefresh } from "@/lib/media/use-media-url-refresh";
  */
 export function HistoryImageTile({
   item,
-  onUrlError
+  refresh
 }: {
   item: HistoryImageSetItem;
-  /** presign 失效 → 请调用方重取（HistorySetDialog 的 `query.refetch()`）。整套 N 张各是一个实例 → 各自一个哨兵。 */
-  onUrlError: () => void;
+  /**
+   * presign 失效重取的作用域，由持有 query 的 HistorySetDialog 创建并下发（FIX1）。
+   *
+   * 🔴 整套 N 张消费的是**同一个** useHistoryImageSet query —— 一次 refetch 把 N 张的 download_url
+   * 全刷回来。上一版每张各持一份预算，我还给它写了条测试断言「两张失效 → refetch 两次」并标成 🔴 ——
+   * **那条测试在给错误行为盖章**：第二次 refetch 是纯重复请求，第一次回来时它那张也已经救好了。
+   */
+  refresh: MediaUrlRefreshScope;
 }) {
-  const media = useMediaUrlRefresh(item.download_url, onUrlError);
   const pageNo = item.index + 1;
   const dims = historyImageDimensions(item);
   const sizeHint = dims ? copy.historyImages.sizeLabel(dims) : copy.historyImages.sizeUnknown;
@@ -40,8 +45,8 @@ export function HistoryImageTile({
       <img
         src={item.download_url}
         alt={copy.historyImages.previewAlt(pageNo)}
-        onError={media.onError}
-        onLoad={media.onLoad}
+        onError={() => refresh.onError(item.download_url)}
+        onLoad={refresh.onLoad}
         className="w-full rounded-mark border border-line-gold object-contain"
       />
       <p className="text-[11.5px] leading-relaxed text-ink-faint">{sizeHint}</p>

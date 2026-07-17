@@ -6,7 +6,7 @@ import { HistoryDetailDialog } from "@/components/history/history-detail-dialog"
 import { AiLabelNotice } from "@/components/label/ai-label-notice";
 import { Button } from "@/components/ui/button";
 import { copy } from "@/lib/copy";
-import { useMediaUrlRefresh } from "@/lib/media/use-media-url-refresh";
+import type { MediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 import type { TrackedTask } from "@/lib/sse/progress-mapping";
 
 const formatCreatedAt = (iso: string) => (iso.includes("T") ? iso.replace("T", " ").slice(0, 16) : iso);
@@ -44,18 +44,19 @@ export function VideoDetailDialog({
   detail,
   onClose,
   onOpenPage,
-  onUrlError
+  refresh
 }: {
   detail: VideoDetailPayload | null;
   onClose: () => void;
   onOpenPage: (taskId: string) => void;
-  /** presign 失效 → 请调用方重取（通常是 `query.refetch()`）。哨兵与封顶在 useMediaUrlRefresh 里。 */
-  onUrlError?: () => void;
+  /**
+   * presign 失效重取的作用域，由持有 query 的调用方创建并下发（FIX1）——
+   * 本弹窗与列表里的卡片消费**同一个** query，共用一份预算。收 scope 而非 callback。
+   */
+  refresh: MediaUrlRefreshScope;
 }) {
   const task = detail?.task;
   const isImage = task?.mode === "photo";
-  // 🔴 FIX1：图片/视频共用同一条防线 —— 本弹窗两种媒体都可能是 presign（isImage 时渲染 <img>）。
-  const media = useMediaUrlRefresh(task?.playbackUrl, () => onUrlError?.());
   return (
     <HistoryDetailDialog
       open={detail !== null}
@@ -92,8 +93,8 @@ export function VideoDetailDialog({
               <img
                 src={task.playbackUrl}
                 alt={task.topic}
-                onError={media.onError}
-                onLoad={media.onLoad}
+                onError={() => refresh.onError(task.playbackUrl)}
+                onLoad={refresh.onLoad}
                 className="max-h-[52vh] w-full rounded-field border border-line-gold object-contain"
               />
             ) : (
@@ -107,8 +108,8 @@ export function VideoDetailDialog({
                 poster={task.thumbnailUrl ?? undefined}
                 src={task.playbackUrl}
                 aria-label={task.topic}
-                onError={media.onError}
-                onLoadedMetadata={media.onLoad}
+                onError={() => refresh.onError(task.playbackUrl)}
+                onLoadedMetadata={refresh.onLoad}
                 className="max-h-[52vh] w-full rounded-field border border-line-gold bg-black"
               />
             )

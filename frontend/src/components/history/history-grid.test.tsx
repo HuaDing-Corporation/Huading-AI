@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { copy } from "@/lib/copy";
@@ -57,8 +57,17 @@ const ITEM: HistoryItem = {
 /** 另一条：用于「删掉打开的那条、但列表非空」——不这样列表就走空态早返回，测不到派生（见下面注释）。 */
 const ITEM_B: HistoryItem = { ...ITEM, id: "h2", title: "另一条", cover_url: "https://cdn/cover-2.png" };
 
-/** 跨 rerender 稳定的 refetch spy（listOf 每次调用都会重建对象，spy 不能建在里面）。 */
-const refetchSpy = vi.fn();
+/**
+ * 跨 rerender 稳定的 refetch spy（listOf 每次调用都会重建对象，spy 不能建在里面）。
+ *
+ * ⚠️ **必须 mockResolvedValue**：真实 `query.refetch()` 返回 Promise，而 FIX1 的在飞门控
+ * （同一 query 的并发失效只发一次）靠这个 Promise 的落定来解除。替身若返回 undefined，
+ * 门控就形同虚设 → 测试测不到合流 = 假绿。**替身不真实，测试就测不到真东西。**
+ */
+const refetchSpy = vi.fn().mockResolvedValue(undefined);
+
+/** 等一次重取往返落定 → 门控解除。真实链路里没有这次往返就不会有新 URL。 */
+const roundTrip = () => act(async () => {});
 
 /** infinite-query 形状（useHistoryImages 是 useInfiniteQuery，组件读 data.pages.flatMap）。 */
 const listOf = (...items: HistoryItem[]) => ({
@@ -163,7 +172,7 @@ describe("HistoryGrid · presign 失效 → 重取（接入共享哨兵）", () 
   });
 
   // 🔴 死循环刹车：图片链路原先**完全没有**这道闸 —— 裸挂 onError 就会 error→refetch→新 URL→error→……
-  it("🔴 对象已删、BE 每次签出新 URL 但个个失效 → 连续重取封顶，不无限打后端", () => {
+  it("🔴 对象已删、BE 每次签出新 URL 但个个失效 → 连续重取封顶，不无限打后端", async () => {
     hooks.useHistoryImages.mockReturnValue(listOf({ ...ITEM, cover_url: "https://cdn/gone.png?sig=0" }));
     const { rerender } = render(<HistoryGrid category="image_gen" />);
 
@@ -171,19 +180,22 @@ describe("HistoryGrid · presign 失效 → 重取（接入共享哨兵）", () 
       hooks.useHistoryImages.mockReturnValue(listOf({ ...ITEM, cover_url: `https://cdn/gone.png?sig=${i}` }));
       rerender(<HistoryGrid category="image_gen" />);
       fireEvent.error(screen.getByAltText(ITEM.title));
+      await roundTrip(); // 每轮之间隔着一次真实的重取往返，否则新 URL 根本不会出现
     }
 
     expect(refetchSpy).toHaveBeenCalledTimes(2);
   });
 
-  it("加载成功即清零 → 长会话里「显示过、之后再过期」仍能再救", () => {
+  it("加载成功即清零 → 长会话里「显示过、之后再过期」仍能再救", async () => {
     hooks.useHistoryImages.mockReturnValue(listOf({ ...ITEM, cover_url: "https://cdn/c.png?sig=1" }));
     const { rerender } = render(<HistoryGrid category="image_gen" />);
 
     fireEvent.error(screen.getByAltText(ITEM.title));
+    await roundTrip();
     hooks.useHistoryImages.mockReturnValue(listOf({ ...ITEM, cover_url: "https://cdn/c.png?sig=2" }));
     rerender(<HistoryGrid category="image_gen" />);
     fireEvent.error(screen.getByAltText(ITEM.title));
+    await roundTrip();
     expect(refetchSpy).toHaveBeenCalledTimes(2); // 已到封顶
 
     // 第 3 个 URL 真的加载出来了 → 预算清零

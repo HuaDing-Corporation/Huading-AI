@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { ImageOff, Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import { HistorySetDialog } from "@/components/history/history-set-dialog";
 import { ImageLightbox } from "@/components/history/image-lightbox";
 import { useHistoryImages } from "@/lib/api/hooks";
 import { copy } from "@/lib/copy";
+import { useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 import type { HistoryCategory } from "@/lib/api/history-images";
 
 /**
@@ -27,6 +28,13 @@ export function HistoryGrid({ category }: { category?: HistoryCategory }) {
   const [lightboxId, setLightboxId] = useState<string | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
   const items = query.data?.pages.flatMap((p) => p.items) ?? [];
+
+  // 🔴 FIX1：**一份预算，整个网格共用** —— 全网格的卡片 + 大图弹窗消费的是同一个 useHistoryImages query，
+  // 一次 refetch 把所有 cover_url 一起刷回来。上一版给每张卡各发一份 `() => query.refetch()`，
+  // 于是「每实例最多 2 次」在 N 张卡的网格上 = **最多 2×N 次真实请求**（Codex B 的 P1-2）。
+  // 现在 scope 由这里（持有 query 的人）创建、整份下发 → 元素侧拿不到也建不了自己的预算。
+  // refetch() 返回 Promise → 在飞门控生效：N 张同时碎 → **1 次**请求。
+  const refresh = useMediaUrlRefreshScope(useCallback(() => query.refetch(), [query]));
 
   // 从**最新** items 派生：refetch 一到，弹窗里的 <img src> 自然跟着换。
   // 派生不到（该条已被删）→ null → 弹窗自动关闭，不挂着一个指向已消失记录的界面。
@@ -73,7 +81,7 @@ export function HistoryGrid({ category }: { category?: HistoryCategory }) {
             item={item}
             onOpenImage={() => setLightboxId(item.id)}
             onDetail={() => setDetailId(item.id)}
-            onUrlError={() => void query.refetch()}
+            refresh={refresh}
           />
         ))}
       </div>
@@ -92,7 +100,7 @@ export function HistoryGrid({ category }: { category?: HistoryCategory }) {
         src={lightbox?.cover_url ?? null}
         alt={lightbox ? copy.historyImages.lightboxAlt(lightbox.title) : ""}
         onClose={() => setLightboxId(null)}
-        onUrlError={() => void query.refetch()}
+        refresh={refresh}
       />
       <HistorySetDialog item={detail} onClose={() => setDetailId(null)} />
     </>

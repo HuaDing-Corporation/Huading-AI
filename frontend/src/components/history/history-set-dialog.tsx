@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback } from "react";
 import { Loader2 } from "lucide-react";
 
 import { HistoryDetailDialog } from "@/components/history/history-detail-dialog";
@@ -8,6 +9,7 @@ import { HistoryImageTile } from "@/components/history/history-image-tile";
 import { HistoryStatusBadge } from "@/components/history/history-status-badge";
 import { useHistoryImageSet } from "@/lib/api/hooks";
 import { copy } from "@/lib/copy";
+import { useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 import type { HistoryCategory, HistoryItem } from "@/lib/api/history-images";
 
 /** 分类机器键 → 中文标签（详情弹窗信息并集用；6 分类）。 */
@@ -35,6 +37,10 @@ export function HistorySetDialog({ item, onClose }: { item: HistoryItem | null; 
   const query = useHistoryImageSet(item?.category ?? "", item?.id);
   const set = query.data;
   const categoryLabel = item ? (CATEGORY_LABEL[item.category as HistoryCategory] ?? item.category) : "";
+  // 🔴 FIX1：**一份预算，整套 N 张共用** —— 一次 refetch 把整套的 download_url 全刷回来，
+  // 第 2..N 张各再发一次纯属重复请求。上一版每张 tile 各持一份预算（= 2×N），而且我给它写了条测试
+  // 断言「两张失效 → refetch 两次」并标 🔴 —— **测试在给错误行为盖章**。见 use-media-url-refresh.ts。
+  const refresh = useMediaUrlRefreshScope(useCallback(() => query.refetch(), [query]));
   return (
     <HistoryDetailDialog
       open={item !== null}
@@ -105,7 +111,7 @@ export function HistorySetDialog({ item, onClose }: { item: HistoryItem | null; 
             {set.items.map((it) => (
               // presign 失效 → 重取本整套（MEDIA-URL-REFRESH-CONVERGE-0001 · 第 5 片）。
               // 数据源就是本组件的 useHistoryImageSet query → 重取拿回的新 download_url 直接喂回 tile，导电。
-              <HistoryImageTile key={it.index} item={it} onUrlError={() => void query.refetch()} />
+              <HistoryImageTile key={it.index} item={it} refresh={refresh} />
             ))}
           </div>
         </>

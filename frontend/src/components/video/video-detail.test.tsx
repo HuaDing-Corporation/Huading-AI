@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
@@ -294,7 +294,7 @@ describe("VideoDetail · photo 的 <img> 迁入共享哨兵后", () => {
 
   // 🔴 死循环刹车：这是整条 photo 链路上原先**完全没有**的东西。
   // 裸接实现在这个场景下会打后端 8 次（乃至无限）—— 拆掉 hook 的封顶，这条必红。
-  it("🔴 对象已删、BE 每次签出新 URL 但个个失效 → 连续重取封顶，不无限打后端", () => {
+  it("🔴 对象已删、BE 每次签出新 URL 但个个失效 → 连续重取封顶，不无限打后端", async () => {
     const { spyWrapper, invalidate } = makeSpyWrapper();
     (useVideo as Mock).mockReturnValue({
       data: { ...photoDone, playback_url: "https://mock.local/gone.png?sig=0" },
@@ -311,6 +311,9 @@ describe("VideoDetail · photo 的 <img> 迁入共享哨兵后", () => {
       });
       rerender(<VideoDetail id="p1" />);
       fireEvent.error(screen.getByRole("img"));
+      // FIX1：每轮之间隔着一次真实的重取往返 —— 没有往返就没有新 URL，也就无所谓「新 URL 又失效」。
+      // 同步连发是同一次失效的重复上报，那正是在飞门控该挡住的东西。
+      await act(async () => {});
     }
 
     expect(invalidate).toHaveBeenCalledTimes(2);

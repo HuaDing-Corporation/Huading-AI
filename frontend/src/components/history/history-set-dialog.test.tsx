@@ -182,7 +182,16 @@ describe("HistorySetDialog · 整套图 presign 失效 → 重取（接入共享
     expect(refetch).toHaveBeenCalledTimes(1);
   });
 
-  it("🔴 每张各自独立计数 —— 一张失效不该吃掉另一张的重取机会", () => {
+  // 🔴 **上一版这条测试在给错误行为盖章**（Codex B 的 P1-2）。
+  // 它原本叫「每张各自独立计数 —— 一张失效不该吃掉另一张的重取机会」，断言 `refetch` 被调 **2** 次，
+  // 理由写的是「一张不该吃掉另一张的机会」。**那个框架从根上就错了**：
+  // refetch 刷的是**整个 set query** —— 第一次回来时第二张的 download_url 也已经换新了，
+  // 第二次 refetch 是**纯重复请求**。所谓「另一张的机会」根本不存在，它们本来就是同一次机会。
+  // 于是「每实例最多 2 次」在 N 张的整套上 = 最多 2×N 次真实请求；而 TanStack 默认 cancelRefetch:true
+  // 让两次并发 refetch 的 queryFn 被调 **3** 次（第二次中止并重启第一次 —— 我自己跑探针复现了这个数字）。
+  //
+  // 这比"漏测"重一层：不是没看见，是看见了并盖章说对。改的不是数字，是**预算的作用域**。
+  it("🔴 整套 N 张同时失效 → 只重取一次（一次 refetch 就把 N 张的 URL 全刷回来）", () => {
     const refetch = vi.fn();
     hooks.useHistoryImageSet.mockReturnValue({
       data: {
@@ -202,11 +211,12 @@ describe("HistorySetDialog · 整套图 presign 失效 → 重取（接入共享
     });
     render(<HistorySetDialog item={ITEM} onClose={() => {}} />);
 
-    // 整套 N 张各是一个 HistoryImageTile 实例 → 各自一个哨兵。两张都失效 → 各报一次。
+    // 整套 N 张共用**一份**预算（scope 由持有 query 的 HistorySetDialog 创建并整份下发）。
+    // 两张同时碎 → 第一张触发重取，第二张看到「已有一次在路上」→ 不再发。
     const imgs = screen.getAllByRole("img");
     fireEvent.error(imgs[0]);
     fireEvent.error(imgs[1]);
-    expect(refetch).toHaveBeenCalledTimes(2);
+    expect(refetch).toHaveBeenCalledTimes(1);
   });
 
   it("重取拿回新 URL → tile 的 <img src> 真的跟着换（数据源是 query 派生，重取才有意义）", () => {

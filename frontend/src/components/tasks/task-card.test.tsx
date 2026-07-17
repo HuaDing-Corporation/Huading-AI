@@ -1,10 +1,28 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TrackedTask } from "@/lib/sse/progress-mapping";
 import { copy } from "@/lib/copy";
+import { useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 
-import { TaskCard } from "./task-card";
+import { TaskCard, type TaskCardProps } from "./task-card";
+
+// MEDIA-URL-REFRESH-CONVERGE-0001 · FIX1：TaskCard 的 `onUrlError: (id) => void` 换成
+// `refresh: MediaUrlRefreshScope`（预算的作用域必须由调用方决定，见 use-media-url-refresh.ts）。
+//
+// 🔴 本文件**只换接线，不动任何期望值**：下面那条 P2-2「fires onUrlError at most once across
+// repeated errors」用的是**真实的** useMediaUrlRefreshScope（不是 stub）→ 「同一 URL 连报 3 次 →
+// 只重取 1 次」这个断言**逐字不变、数字不变**，且仍然是端到端穿过 TaskCard 的真实行为。
+// 若改成 stub scope 再断言「转发了 3 次」，那就是把期望值改弱 —— 本项目认过的、最容易掩盖问题的动作。
+const onUrlError = vi.fn().mockResolvedValue(undefined);
+
+/** 把 TaskCard 包在真实 scope 里；scope 的 onExpired 即 `onUrlError`，故既有断言原样成立。 */
+function Card(props: Omit<TaskCardProps, "refresh">) {
+  const refresh = useMediaUrlRefreshScope(onUrlError);
+  return <TaskCard {...props} refresh={refresh} />;
+}
+
+beforeEach(() => onUrlError.mockClear());
 
 const failed: TrackedTask = {
   taskId: "t1",
@@ -18,7 +36,7 @@ const failed: TrackedTask = {
 describe("TaskCard retry visibility (P2-1)", () => {
   it("hides retry and shows a refill hint for a hydrated failed task (not retryable)", () => {
     const onRetry = vi.fn();
-    render(<TaskCard task={failed} onOpen={vi.fn()} onRetry={onRetry} onUrlError={vi.fn()} />);
+    render(<Card task={failed} onOpen={vi.fn()} onRetry={onRetry} />);
     expect(screen.queryByText("重试")).toBeNull();
     expect(screen.getByText("请到工作台重新发起")).toBeTruthy();
     expect(onRetry).not.toHaveBeenCalled();
@@ -27,7 +45,7 @@ describe("TaskCard retry visibility (P2-1)", () => {
   it("shows retry for a retryable failed task and calls onRetry", () => {
     const onRetry = vi.fn();
     render(
-      <TaskCard task={{ ...failed, retryable: true }} onOpen={vi.fn()} onRetry={onRetry} onUrlError={vi.fn()} />
+      <Card task={{ ...failed, retryable: true }} onOpen={vi.fn()} onRetry={onRetry} />
     );
     fireEvent.click(screen.getByText("重试"));
     expect(onRetry).toHaveBeenCalledWith("t1");
@@ -36,7 +54,6 @@ describe("TaskCard retry visibility (P2-1)", () => {
 
 describe("TaskCard inline player onError once (P2-2)", () => {
   it("fires onUrlError at most once across repeated errors", () => {
-    const onUrlError = vi.fn();
     const done: TrackedTask = {
       taskId: "d1",
       topic: "T",
@@ -46,7 +63,7 @@ describe("TaskCard inline player onError once (P2-2)", () => {
       playbackUrl: "https://example.test/v.mp4"
     };
     const { container } = render(
-      <TaskCard task={done} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={onUrlError} />
+      <Card task={done} onOpen={vi.fn()} onRetry={vi.fn()} />
     );
     const video = container.querySelector("video") as HTMLVideoElement;
     fireEvent.error(video);
@@ -68,12 +85,12 @@ describe("TaskCard AI 标识徽标（LABEL-TOGGLE-UI-0001，按任务状态两�
   });
 
   it("带标识(applyVisibleLabel=true) + done → 显示「已含 AI 生成标识」徽标", () => {
-    render(<TaskCard task={doneTask(true)} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />);
+    render(<Card task={doneTask(true)} onOpen={vi.fn()} onRetry={vi.fn()} />);
     expect(screen.getByText(copy.label.productNotice)).toBeInTheDocument();
   });
 
   it("不带标识(applyVisibleLabel=false) + done → 不显示徽标", () => {
-    render(<TaskCard task={doneTask(false)} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />);
+    render(<Card task={doneTask(false)} onOpen={vi.fn()} onRetry={vi.fn()} />);
     expect(screen.queryByText(copy.label.productNotice)).not.toBeInTheDocument();
   });
 });
@@ -89,7 +106,7 @@ describe("TaskCard cancelled 状态（ECOM-HISTORY-CANCELLED-FIX-0001 · 根治�
       progress: 100,
       statusLabel: "已取消"
     };
-    render(<TaskCard task={cancelled} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />);
+    render(<Card task={cancelled} onOpen={vi.fn()} onRetry={vi.fn()} />);
     expect(screen.getByText("退款任务")).toBeInTheDocument();
     expect(screen.getByText("已取消")).toBeInTheDocument(); // StatusBadge 覆盖 cancelled
   });
@@ -103,7 +120,7 @@ describe("TaskCard photo error friendly (IMAGE-ERROR-FRIENDLY)", () => {
       errorCode: "IMAGE_MODERATION_BLOCKED",
       error: 'Error code: 400 - {"error":{"code":"moderation_blocked"}}'
     };
-    render(<TaskCard task={task} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />);
+    render(<Card task={task} onOpen={vi.fn()} onRetry={vi.fn()} />);
     expect(screen.getByText(copy.errors.imageModeration)).toBeInTheDocument();
     expect(screen.queryByText(/Error code: 400/)).toBeNull();
     expect(screen.queryByText(/moderation_blocked/)).toBeNull();
@@ -111,7 +128,7 @@ describe("TaskCard photo error friendly (IMAGE-ERROR-FRIENDLY)", () => {
 
   it("uses a generic friendly line for a failed photo with unknown error_code", () => {
     const task: TrackedTask = { ...failed, mode: "photo", errorCode: null, error: "Error code: 500 raw" };
-    render(<TaskCard task={task} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />);
+    render(<Card task={task} onOpen={vi.fn()} onRetry={vi.fn()} />);
     expect(screen.getByText(copy.errors.imageGeneric)).toBeInTheDocument();
     expect(screen.queryByText(/Error code/)).toBeNull();
   });
@@ -119,14 +136,14 @@ describe("TaskCard photo error friendly (IMAGE-ERROR-FRIENDLY)", () => {
   // VIDEO-ERR-MAP-UI：视频失败也走友好中文映射（照抄图片线），不再露裸 error_message / 技术串。
   it("视频失败·已知码 VIDEO_TIMEOUT → 友好中文，且不露裸 error", () => {
     const task: TrackedTask = { ...failed, errorCode: "VIDEO_TIMEOUT", error: "Error code: 504 - upstream timeout" };
-    render(<TaskCard task={task} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />);
+    render(<Card task={task} onOpen={vi.fn()} onRetry={vi.fn()} />);
     expect(screen.getByText(copy.errors.videoTimeout)).toBeInTheDocument();
     expect(screen.queryByText(/Error code: 504/)).toBeNull();
   });
 
   it("视频失败·未知/缺失码 → 通用视频兜底文案，绝不回落裸 error_message", () => {
     const task: TrackedTask = { ...failed, errorCode: null, error: "RuntimeError: something exploded" };
-    render(<TaskCard task={task} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />);
+    render(<Card task={task} onOpen={vi.fn()} onRetry={vi.fn()} />);
     expect(screen.getByText(copy.errors.videoGeneric)).toBeInTheDocument();
     expect(screen.queryByText(/RuntimeError/)).toBeNull();
   });
@@ -147,20 +164,20 @@ const doneVideo: TrackedTask = {
 
 describe("TaskCard 封面 poster（补网 · 改造前基线）", () => {
   it("有 thumbnailUrl → <video poster> 用它作封面", () => {
-    render(<TaskCard task={doneVideo} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />);
+    render(<Card task={doneVideo} onOpen={vi.fn()} onRetry={vi.fn()} />);
     expect(document.querySelector("video")).toHaveAttribute("poster", "https://cdn/v-1.jpg");
   });
 
   it("无 thumbnailUrl → 不设 poster（不冒充空封面）", () => {
     render(
-      <TaskCard task={{ ...doneVideo, thumbnailUrl: null }} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />
+      <Card task={{ ...doneVideo, thumbnailUrl: null }} onOpen={vi.fn()} onRetry={vi.fn()} />
     );
     expect(document.querySelector("video")).not.toHaveAttribute("poster");
   });
 
   it("photo 模式走 <img>（无 video、无 poster）——封面只属于视频分支", () => {
     render(
-      <TaskCard task={{ ...doneVideo, mode: "photo" }} onOpen={vi.fn()} onRetry={vi.fn()} onUrlError={vi.fn()} />
+      <Card task={{ ...doneVideo, mode: "photo" }} onOpen={vi.fn()} onRetry={vi.fn()} />
     );
     expect(document.querySelector("video")).toBeNull();
     expect(document.querySelector("img")).toHaveAttribute("src", "https://cdn/v-1.mp4");
@@ -170,7 +187,7 @@ describe("TaskCard 封面 poster（补网 · 改造前基线）", () => {
 describe("TaskCard「查看详情」跳转（补网 · 改造前基线）", () => {
   it("done + 有播放地址 → 点「查看详情」以 taskId 恰调一次 onOpen", () => {
     const onOpen = vi.fn();
-    render(<TaskCard task={doneVideo} onOpen={onOpen} onRetry={vi.fn()} onUrlError={vi.fn()} />);
+    render(<Card task={doneVideo} onOpen={onOpen} onRetry={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: copy.tasks.open }));
     expect(onOpen).toHaveBeenCalledTimes(1);
     expect(onOpen).toHaveBeenCalledWith("v-1");
@@ -180,7 +197,7 @@ describe("TaskCard「查看详情」跳转（补网 · 改造前基线）", () =
   it("done + 尚无播放地址（对账中）→ 仍有「查看详情」，且以 taskId 调 onOpen", () => {
     const onOpen = vi.fn();
     render(
-      <TaskCard task={{ ...doneVideo, playbackUrl: null }} onOpen={onOpen} onRetry={vi.fn()} onUrlError={vi.fn()} />
+      <Card task={{ ...doneVideo, playbackUrl: null }} onOpen={onOpen} onRetry={vi.fn()} />
     );
     fireEvent.click(screen.getByRole("button", { name: copy.tasks.open }));
     expect(onOpen).toHaveBeenCalledWith("v-1");
@@ -189,11 +206,10 @@ describe("TaskCard「查看详情」跳转（补网 · 改造前基线）", () =
   it("running → 无「查看详情」（只有进度条）", () => {
     const onOpen = vi.fn();
     render(
-      <TaskCard
+      <Card
         task={{ ...doneVideo, status: "running", playbackUrl: null, progress: 40 }}
         onOpen={onOpen}
         onRetry={vi.fn()}
-        onUrlError={vi.fn()}
       />
     );
     expect(screen.queryByRole("button", { name: copy.tasks.open })).not.toBeInTheDocument();
