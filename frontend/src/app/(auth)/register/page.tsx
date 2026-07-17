@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 
 import { ApiError } from "@/lib/api/client";
 import { useAuth } from "@/lib/auth/auth-context";
+import { markJustRegistered } from "@/lib/contact/welcome-flag";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -73,6 +74,9 @@ export default function RegisterPage() {
         password,
         fullName: fullName.trim() || undefined
       });
+      // LANDING-CONTACT-UI-0001：落标记 → 工作台首屏显示「联系开通额度」欢迎横幅。
+      // 跳转行为不动（#155：landToken → 直接进控制台）—— 提示由控制台侧读标记显示，不在这里拦。
+      markJustRegistered();
       router.replace("/"); // 后端随注册发 token → 直接进控制台
     } catch (err) {
       setError(friendlyRegisterError(err));

@@ -1022,6 +1022,28 @@ export const copy = {
     footerContact: "联系",
     footerTerms: "服务条款"
   },
+  // 联系我们（LANDING-CONTACT-UI-0001）——转化链路的断点：落地页/CTA 一直在说「联系我们开通额度」，
+  // 却没给联系方式。微信二维码 + 双端引导（PC 扫屏上的码；移动端保存图→微信扫一扫选相册——
+  // ⚠️ u.wechat.com 链接实测在微信外**任何**浏览器都 301 到 wechat.com 官网、且无 Universal Links
+  // 配置 → 「点链接唤起微信」不成立，故不放链接，见 contact-qr.tsx 注释）。
+  contact: {
+    title: "联系我们，开通生成额度",
+    sub: "新注册账号需开通额度后才能开始生成。添加客服微信，当天开通。",
+    // 二维码 alt：读屏用户扫不了码 → alt 说清「这是什么 + 用来干什么」，不是一句空的「二维码」。
+    qrAlt: "客服微信二维码：用微信「扫一扫」扫描本图，即可添加客服开通生成额度",
+    hintDesktop: "打开手机微信「扫一扫」，扫描左侧二维码",
+    hintMobile: "保存二维码图片，打开微信「扫一扫」，从相册选取识别",
+    saveQr: "保存二维码",
+    // 注册成功横幅（工作台）：不一闪而过（常显直到关闭）/ 不阻断（横幅非弹窗）/ 能再次找到（顶栏常驻入口）
+    welcomeTitle: "注册成功，欢迎加入华鼎！",
+    welcomeBody: "新账号需要开通生成额度——添加客服微信，当天开通，即可开始生成。",
+    welcomeAction: "查看微信二维码",
+    welcomeDismiss: "我知道了",
+    // 工作台常驻入口（横幅关掉后仍能找到联系方式的地方；对所有 0 余额账号可见，不只新注册）
+    consoleEntry: "开通额度",
+    dialogTitle: "添加客服微信",
+    dialogDesc: "扫码添加客服微信，开通生成额度"
+  },
   // 管理员后台（ADMIN-CONSOLE-UI-0001）——独立 /admin 区域，仅平台租户（admin_console entitlement）。
   admin: {
     consoleTitle: "管理后台",

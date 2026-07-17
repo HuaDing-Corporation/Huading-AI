@@ -84,6 +84,29 @@ describe("RegisterPage (注册)", () => {
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/"));
   });
 
+  // LANDING-CONTACT-UI-0001：注册成功 → 落 localStorage 标记 → 工作台首屏显示「联系开通额度」横幅。
+  // 跳转行为**原样**（上一条钉着 replace("/")）—— 提示由控制台侧读标记显示，注册页不拦。
+  it("🔴 注册成功 → 落欢迎横幅标记（hd:welcome-contact）；注册失败 → 不落", async () => {
+    localStorage.clear();
+    register.mockResolvedValue(undefined);
+    (auth.useAuth as Mock).mockReturnValue({ session: null, ready: true, register });
+    const ok = render(<RegisterPage />);
+    fill({ slug: "huading", team: "华鼎", email: "a@b.com", password: "pw123456" });
+    fireEvent.click(screen.getByRole("button", { name: copy.auth.registerSubmit }));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/"));
+    expect(localStorage.getItem("hd:welcome-contact")).toBe("1");
+    ok.unmount();
+
+    // 失败分支：register 抛错 → 不落标记（没注册成功就别欢迎人家）
+    localStorage.clear();
+    register.mockRejectedValue(new ApiError("boom", "err", 500));
+    render(<RegisterPage />);
+    fill({ slug: "huading2", team: "华鼎", email: "a@b.com", password: "pw123456" });
+    fireEvent.click(screen.getByRole("button", { name: copy.auth.registerSubmit }));
+    expect(await screen.findByText(copy.auth.errRegisterFailed)).toBeInTheDocument();
+    expect(localStorage.getItem("hd:welcome-contact")).toBeNull();
+  });
+
   it("姓名留空 → fullName 传 undefined（选填）", async () => {
     register.mockResolvedValue(undefined);
     (auth.useAuth as Mock).mockReturnValue({ session: null, ready: true, register });

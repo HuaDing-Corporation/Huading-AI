@@ -87,6 +87,26 @@ test("未登录进站=落地页；登录→控制台；已登录访 /landing=头
   await expect(page.locator("header").getByRole("link", { name: "登录", exact: true })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole("heading", { level: 1, name: "企业级 AI 短视频工厂" })).toBeVisible();
 
+  // ⑥ LANDING-CONTACT-UI-0001 · 联系区双端形态（断点显隐 jsdom 钉不了，只有真浏览器能钉）。
+  // 仍在 375 移动端：显示「保存图 → 微信扫一扫从相册选取」+ 保存按钮；PC 扫码引导隐藏。
+  const qrImg = page.getByRole("img", { name: /客服微信二维码/ });
+  await qrImg.scrollIntoViewIfNeeded();
+  await expect(qrImg).toBeVisible();
+  await expect
+    .poll(async () => qrImg.evaluate((el) => (el as HTMLImageElement).naturalWidth), { timeout: 10_000 })
+    .toBeGreaterThan(0); // 图真的部署且可解码（不是 404 裂图）
+  await expect(page.getByText(/保存二维码图片，打开微信/)).toBeVisible();
+  const saveLink = page.getByRole("link", { name: /保存二维码/ });
+  await expect(saveLink).toBeVisible();
+  await expect(saveLink).toHaveAttribute("download", /.+/);
+  await expect(page.getByText(/打开手机微信「扫一扫」/)).toBeHidden();
+
+  // 桌面 1280：PC 扫码引导显示；保存按钮隐藏（PC 主路径是直接扫屏）。页脚「联系」锚到 #contact。
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect(page.getByText(/打开手机微信「扫一扫」/)).toBeVisible();
+  await expect(saveLink).toBeHidden();
+  await expect(page.getByRole("link", { name: "联系", exact: true })).toHaveAttribute("href", "#contact");
+
   expect(g.errors(), `page errors：\n${g.errors().join("\n")}`).toEqual([]);
   expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);
 });

@@ -13,6 +13,7 @@ import {
   type LucideIcon
 } from "lucide-react";
 
+import { ContactQr } from "@/components/contact/contact-qr";
 import { LandingFx } from "@/components/landing/landing-fx";
 import { Button } from "@/components/ui/button";
 import { copy } from "@/lib/copy";
@@ -196,7 +197,27 @@ export function CtaSection() {
   );
 }
 
-/** 页脚：© + 备案占位 + 链接占位（关于/联系/服务条款，AUTH 后续接真实页）。 */
+/**
+ * 联系我们（LANDING-CONTACT-UI-0001）——接上转化链路的断点：CTA 区一直在说「注册后联系我们
+ * 开通额度」（ctaSub 一字未改，承诺没变），这里就是那个「联系我们」本体。紧跟 CTA 区之后 ——
+ * 用户刚被告知要联系，往下一屏就是二维码。页脚的「联系」占位链接锚到本区（#contact）。
+ */
+export function ContactSection() {
+  const C = copy.contact;
+  return (
+    <section id="contact" className="scroll-mt-24 px-5 pb-20 pt-4 sm:pb-24">
+      <div className="glass mx-auto max-w-2xl rounded-card px-6 py-10 sm:px-10">
+        <h2 className={sectionTitleClass}>{C.title}</h2>
+        <p className={sectionSubClass}>{C.sub}</p>
+        <div className="mt-8">
+          <ContactQr />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/** 页脚：© + 备案占位 + 链接（联系 → #contact 锚点；关于/服务条款仍为占位，AUTH 后续接真实页）。 */
 export function LandingFooter() {
   const L = copy.landing;
   return (
@@ -207,7 +228,13 @@ export function LandingFooter() {
         <span className="flex items-center gap-3">
           <span>{L.footerAbout}</span>
           <span aria-hidden>·</span>
-          <span>{L.footerContact}</span>
+          {/* LANDING-CONTACT-UI-0001：占位 span → 真锚点（联系区就在页脚上方一屏） */}
+          <a
+            href="#contact"
+            className="rounded-pill outline-none transition-colors hover:text-gold-deep focus-visible:shadow-focus-gold"
+          >
+            {L.footerContact}
+          </a>
           <span aria-hidden>·</span>
           <span>{L.footerTerms}</span>
         </span>
