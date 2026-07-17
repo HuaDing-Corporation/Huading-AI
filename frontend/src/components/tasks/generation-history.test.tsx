@@ -184,6 +184,26 @@ describe("GenerationHistory (历史 tabs + 删除/清空/仅封面)", () => {
     await waitFor(() => expect(clearDraftsMock.mutateAsync).toHaveBeenCalledTimes(1));
   });
 
+  // 🔴 danger 承重（DANGER-SEMANTICS-SIGNPOSTS-0001）：文案草稿删除/清空是**软删**（BE 只置 deleted_at），
+  // 但用户侧列表消失 + 无恢复入口 = **用户不可撤销** → 确认按钮必须是危险样式。判据 = 用户能否撤销，
+  // 不是 BE 是否硬删（这正是 #186 只改了一半的地方：文案改成用户视角了，样式还留在 BE 视角）。
+  // 变异门：把 copy-draft-list 两处 ConfirmDialog 的 danger 去掉（回到「软删=非 danger」旧判据）→ 这两条必红。
+  // 钉的是**渲染出的样式**（danger 按钮专属 bg-error-bg/text-error-fg），不是"确认框组件存在"。
+  it("danger 承重：文案草稿删除确认渲染危险样式（软删但用户不可撤销）", () => {
+    render(<CopyDraftList />);
+    fireEvent.click(screen.getByLabelText("删除"));
+    const confirmBtn = screen.getByRole("button", { name: "确认删除" });
+    expect(confirmBtn).toHaveClass("bg-error-bg");
+    expect(confirmBtn).toHaveClass("text-error-fg");
+  });
+
+  it("danger 承重：文案草稿清空确认渲染危险样式（软删但用户不可撤销）", () => {
+    render(<CopyDraftList />);
+    fireEvent.click(screen.getByRole("button", { name: /清空/ }));
+    const confirmBtn = screen.getByRole("button", { name: "确认清空" });
+    expect(confirmBtn).toHaveClass("bg-error-bg");
+  });
+
   it("删除失败：弹窗内显示友好错误且弹窗仍开可重试(失败友好态)", async () => {
     deleteVideoMock.mutateAsync.mockRejectedValue(new Error("boom"));
     render(<HistoryList mode="avatar_talk" />);

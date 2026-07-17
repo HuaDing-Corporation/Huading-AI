@@ -11,7 +11,9 @@ export interface ConfirmDialogProps {
   title: string;
   message: ReactNode;
   confirmLabel: string;
-  /** 危险操作(硬删不可恢复)→ 红色确认按钮；否则金色主按钮(如软删可恢复)。 */
+  /** 危险操作(**用户不可撤销**：无论硬删还是软删，只要用户侧没有恢复入口)→ 红色确认按钮；
+   *  用户可撤销/可逆的操作 → 金色主按钮。判据是「用户能否撤销」，不是「BE 是否硬删」
+   *  (DANGER-SEMANTICS-SIGNPOSTS-0001；软删但无恢复入口的删除同样是 danger)。 */
   danger?: boolean;
   /** 防连点：请求中禁用确认+取消。 */
   submitting?: boolean;

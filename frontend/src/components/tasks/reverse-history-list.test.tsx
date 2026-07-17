@@ -294,6 +294,20 @@ describe("ReverseHistoryList (提示词反推历史)", () => {
     expect(mocks.del.mutateAsync).toHaveBeenCalledWith("rh-img-1");
   });
 
+  // 🔴 danger 承重（DANGER-SEMANTICS-SIGNPOSTS-0001）：反推历史删除是**软删**（deleted_at），但列表过滤已删 +
+  // 详情 404 + 无恢复入口 = **用户不可撤销** → 确认按钮必须是危险样式。判据 = 用户能否撤销，不是 BE 是否硬删。
+  // 变异门：去掉 reverse 删除 ConfirmDialog 的 danger（回到「软删=非 danger」旧判据）→ 本条必红。
+  // 钉**渲染出的样式**（danger 按钮专属 bg-error-bg），不是"确认框存在"。
+  it("danger 承重：反推历史删除确认渲染危险样式（软删但用户不可撤销）", () => {
+    mocks.jobs.mockReturnValue(listOf(IMG_ITEM));
+    mocks.job.mockReturnValue(noJob);
+    render(<ReverseHistoryList />);
+    fireEvent.click(screen.getByLabelText(copy.history.deleteItem));
+    const confirmBtn = screen.getByRole("button", { name: copy.history.deleteConfirmBtn });
+    expect(confirmBtn).toHaveClass("bg-error-bg");
+    expect(confirmBtn).toHaveClass("text-error-fg");
+  });
+
   it("删除失败 → 弹窗内提示，且弹窗不关（可重试）", async () => {
     mocks.jobs.mockReturnValue(listOf(IMG_ITEM));
     mocks.job.mockReturnValue(noJob);
