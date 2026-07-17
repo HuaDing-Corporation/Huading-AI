@@ -58,6 +58,14 @@ export function VideoDetail({ id }: VideoDetailProps) {
   const router = useRouter();
   const [coverOpen, setCoverOpen] = useState(false);
 
+  /**
+   * ⚠️ 已知缺陷（HISTORY-VIDEO-DIALOG-UI-0001 · FIX1 实测确认，**本包未修**，已记 backlog）：
+   * 下面 photo 分支的 `<img onError={handleUrlExpired}>` 是**裸接**的 —— 没有任何哨兵。
+   * video 分支还有 VideoPlayer 内部的 ref 兜着，图片分支什么都没有：只要 BE 每次都能签出**新的**
+   * 失效 URL（对象已删/已迁移即如此），就是 error → invalidate → 新 URL → error → …… **无限重取**。
+   * 正解见 `@/lib/media/use-media-url-refresh`（同一 URL 只报一次 + 连续失败封顶 + 成功即清零），
+   * 历史 tab 已全部收敛到它。本文件属 `/videos/{id}` 详情页域、且零 URL 过期测试覆盖 → 单独一片修。
+   */
   function handleUrlExpired() {
     void queryClient.invalidateQueries({ queryKey: videoKeys.detail(id) });
   }

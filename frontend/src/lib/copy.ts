@@ -610,6 +610,13 @@ export const copy = {
      */
     reverseDeleteConfirmMsg: "将从历史移除，无法撤销。",
     reverseKindTag: (kind: string) => (kind === "video" ? "视频反推" : "图片反推"),
+    // ── 三视频 tab 升级（HISTORY-VIDEO-DIALOG-UI-0001）：与图片 tab 同款交互语言 ──
+    // 点内容 → 大图/播放；点「查看详情」→ 详情弹窗（弹窗内保留「打开详情页」，跳 /videos/{id} 的能力不丢）。
+    videoLightboxTitle: "视频预览",
+    videoPlay: "播放视频",
+    videoDetailTitle: "视频详情",
+    videoOpenPage: "打开详情页",
+    videoNoPlayback: "视频仍在处理，暂无法播放",
     /**
      * 反推任务状态（BE DB CheckConstraint 5 值：queued/running/succeeded/failed/saved）。
      * FIX2 · P2：未知值回退「未知状态」而**不是原样透出** —— 当前 5 值约束下暂不触发，但 BE 将来加状态就会

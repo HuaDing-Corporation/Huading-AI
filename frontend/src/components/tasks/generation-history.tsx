@@ -13,8 +13,10 @@ import { CopyDraftList } from "@/components/tasks/copy-draft-list";
 import { ReverseHistoryList } from "@/components/tasks/reverse-history-list";
 import { TaskCard } from "@/components/tasks/task-card";
 import { HistoryGrid } from "@/components/history/history-grid";
+import { VideoDetailDialog, type VideoDetailPayload } from "@/components/history/video-detail-dialog";
+import { VideoLightbox } from "@/components/history/video-lightbox";
 import { useClearVideos, useDeleteVideo, useVideoHistory } from "@/lib/api/hooks";
-import { fromVideoRead } from "@/lib/sse/progress-mapping";
+import { fromVideoRead, type TrackedTask } from "@/lib/sse/progress-mapping";
 import { copy } from "@/lib/copy";
 import type { HistoryCategory } from "@/lib/api/history-images";
 import type { WorkbenchPrefill } from "@/lib/api/reverse-prompt";
@@ -23,6 +25,13 @@ import type { WorkbenchPrefill } from "@/lib/api/reverse-prompt";
  *  TaskCard. 每条带删除(trash→确认→DELETE /videos/{id})、tab 顶「清空」(确认→DELETE
  *  /videos?mode=)。视频/图片=硬删不可恢复(danger 确认)。防连点(pending 禁用)。
  *  Exported for direct unit testing per mode (Radix tab activation unreliable in jsdom). */
+/** 三视频 tab 的 mode → 中文（视频详情弹窗的「分类」项；对齐图片详情弹窗的信息并集）。 */
+const MODE_LABEL: Record<string, string> = {
+  avatar_talk: copy.history.tabAvatar,
+  seedance_i2v: copy.history.tabEcom,
+  video_gen: copy.history.tabVideoGen
+};
+
 export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
   const router = useRouter();
   const query = useVideoHistory(mode, kind);
@@ -31,8 +40,25 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // HISTORY-VIDEO-DIALOG-UI-0001：点内容 → 大屏播放；「查看详情」→ 详情弹窗（与图片 tab 同款交互语言）。
+  // 🔴 FIX1：**只存 id，不存任务快照**。存快照 = 弹窗里的 playbackUrl 冻结在点击那一刻 →
+  // presign 过期后即使 refetch 拿回了新 URL，弹窗还在用旧的 → 播放器永远救不回来（这正是 P1-1）。
+  // 存 id 从**最新** items 派生，refetch 一到，弹窗里的 <video src> 自然跟着换。
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [lightboxId, setLightboxId] = useState<string | null>(null);
 
   const items = query.data?.pages.flatMap((page) => page.items) ?? [];
+
+  // The tab's mode is authoritative for this list → photo items render <img>.
+  const taskOf = (item: (typeof items)[number]): TrackedTask => ({ ...fromVideoRead(item), mode });
+  // 派生不到（该条已被删除/清空）→ null → 弹窗自动关闭，不会挂着一个指向已消失记录的界面。
+  // refetch 进行中不会走到这里的空态：react-query 保留上一份 data，items 不会瞬间清空。
+  const lightboxItem = lightboxId === null ? undefined : items.find((i) => i.id === lightboxId);
+  const lightboxTask = lightboxItem ? taskOf(lightboxItem) : null;
+  const detailItem = detailId === null ? undefined : items.find((i) => i.id === detailId);
+  const detailPayload: VideoDetailPayload | null = detailItem
+    ? { task: taskOf(detailItem), createdAt: detailItem.created_at, modeLabel: MODE_LABEL[mode] ?? mode }
+    : null;
 
   const onConfirmDelete = async () => {
     if (!confirmDelete) return;
@@ -94,9 +120,12 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
           {items.map((item) => (
             <TaskCard
               key={item.id}
-              // The tab's mode is authoritative for this list → photo items render <img>.
-              task={{ ...fromVideoRead(item), mode }}
-              onOpen={(id) => router.push(`/videos/${id}`)}
+              task={taskOf(item)}
+              // 「查看详情」→ 详情弹窗（升级前是直接 router.push）。TaskCard 的 onOpen 契约未变，只是这里改了
+              // 接法；跳详情页的能力**没丢** —— 移到弹窗内的「打开详情页」（见 VideoDetailDialog）。
+              // created_at 从**列表项**带入：TrackedTask 无此字段，而 progress-mapping 是 SSE 与列表共用的映射。
+              onOpen={() => setDetailId(item.id)}
+              onOpenMedia={() => setLightboxId(item.id)}
               onRetry={() => undefined}
               onUrlError={() => void query.refetch()}
               onDelete={(id) => setConfirmDelete(id)}
@@ -117,6 +146,26 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
           ) : null}
         </>
       )}
+
+      {/* 大屏播放：点「播放视频」→ overlay 内联播放；关闭即卸载 <video>（Radix Portal 在 open=false 时不渲染）。
+          onUrlError → refetch：与卡片内联播放器同一个动作，弹窗里的 src 由上面的派生自动跟进。 */}
+      <VideoLightbox
+        src={lightboxTask?.playbackUrl ?? null}
+        poster={lightboxTask?.thumbnailUrl}
+        title={lightboxTask?.topic ?? ""}
+        // 按**派生结果**开合、而非 id 是否存在：那条记录若被「清空」冲掉，id 还在但派生为 null，
+        // 按 id 开就会留下一个空白 overlay。与 VideoDetailDialog（open={detail !== null}）同口径。
+        open={lightboxTask !== null}
+        onClose={() => setLightboxId(null)}
+        onUrlError={() => void query.refetch()}
+      />
+      {/* 详情弹窗：信息并集（生成时间/状态/模式/时长/AI 标识 + 播放 + 下载）+ 「打开详情页」（跳转能力零回归）。 */}
+      <VideoDetailDialog
+        detail={detailPayload}
+        onClose={() => setDetailId(null)}
+        onOpenPage={(id) => router.push(`/videos/${id}`)}
+        onUrlError={() => void query.refetch()}
+      />
 
       {/* 删除单条确认(视频/图片=硬删不可恢复) */}
       <ConfirmDialog
