@@ -32,6 +32,30 @@ const MODE_LABEL: Record<string, string> = {
   video_gen: copy.history.tabVideoGen
 };
 
+/**
+ * 🔴 HISTORY-FULL-PROMPT-UI-0001：**三个视频 tab 的「提示词」是三个不同的字段**，逐个读 BE 源码确认
+ * （任务包 §三.1 那张表是凭记忆写的，四行有错 —— 用户已确认以实测为准）：
+ *
+ *  · **video_gen**：用户填的就是提示词，且 BE 在创建时把它**写回了 topic**
+ *    （schemas/videos.py:231-236 `prompt = (self.prompt or self.topic or "").strip(); self.prompt = prompt; self.topic = prompt`）
+ *    → topic **就是**提示词。标题也是它 —— 所以这个 tab 的「标题 vs 提示词」必然同源，见下方 §同源处置。
+ *  · **avatar_talk**：topic 是**主题**（一句话选题）、script 是**要念的文案**。用户想拿回去复用的是 script。
+ *    BE 一直在发（_video_read:559），本包给 VideoListItem 补上声明即可，**零 BE 改动**。
+ *  · **seedance_i2v**：提示词是 **scene_prompt**，但它只活在 `task.params`（routes/videos.py:761-767），
+ *    **VideoRead 根本不序列化它** → 前端拿不到。本包按边界「不改 BE」→ **不做**，已单独报包。
+ *    ⚠️ 陷阱：VideoRead **有**一个 `prompt` 字段，但 `_video_read:557` 是 `prompt=task.topic or ""` ——
+ *    它只是 topic 的别名，**字段名在撒谎**。对 seedance 拿到的是产品主题，不是场景提示词。别用它冒充。
+ *
+ * 返回 undefined 的字段不进 payload → 外壳整块不渲染（不给用户看一个空的「提示词」框）。
+ */
+function promptOf(mode: string, item: { topic: string | null; script?: string | null }) {
+  if (mode === "avatar_talk") return { prompt: item.script ?? null, promptLabel: copy.history.scriptLabel };
+  if (mode === "video_gen") return { prompt: item.topic ?? null, promptLabel: copy.history.promptLabel };
+  // seedance_i2v：scene_prompt 未被 BE 暴露 → 不显示（宁可没有，也不拿 topic 冒充提示词）。
+  // photo：本组件的 photo 分支只在测试里直接渲染；线上图片 tab 走 PhotoHistory → HistorySetDialog。
+  return {};
+}
+
 export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
   const router = useRouter();
   const query = useVideoHistory(mode, kind);
@@ -57,7 +81,12 @@ export function HistoryList({ mode, kind }: { mode: string; kind?: string }) {
   const lightboxTask = lightboxItem ? taskOf(lightboxItem) : null;
   const detailItem = detailId === null ? undefined : items.find((i) => i.id === detailId);
   const detailPayload: VideoDetailPayload | null = detailItem
-    ? { task: taskOf(detailItem), createdAt: detailItem.created_at, modeLabel: MODE_LABEL[mode] ?? mode }
+    ? {
+        task: taskOf(detailItem),
+        createdAt: detailItem.created_at,
+        modeLabel: MODE_LABEL[mode] ?? mode,
+        ...promptOf(mode, detailItem)
+      }
     : null;
 
   const onConfirmDelete = async () => {

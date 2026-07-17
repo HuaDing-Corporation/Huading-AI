@@ -42,6 +42,11 @@ export function HistorySetDialog({ item, onClose }: { item: HistoryItem | null; 
       title={item?.title ?? copy.historyImages.setTitle}
       titleAttr={item?.title}
       closeLabel={copy.historyImages.close}
+      // 🔴 图片域的「提示词」按分类而异（BE image_history.py:418-447 逐分支构造 meta）：
+      //  · image_gen → meta.prompt（= task.topic，**与标题同源**，见外壳注释里的同源处置）
+      //  · 电商模特 / 详情 / 海报 → meta.extra_prompt（用户填的补充描述）
+      //  · 白底图 / 封面 → **本就没有提示词**（用户只上传图 + 选背景 / 选帧）→ 两者皆无 → 整块不渲染
+      prompt={set?.meta?.prompt ?? set?.meta?.extra_prompt ?? null}
       // 信息并集：生成时间 · 状态 · 分类 · 张数（卡片有、原弹窗没显）。
       meta={
         item ? (

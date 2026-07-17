@@ -21,6 +21,13 @@ export interface VideoDetailPayload {
   createdAt: string;
   /** 模式中文（数字人视频历史 / 电商视频历史 / 视频生成历史）—— 对应图片详情弹窗的「分类」项。 */
   modeLabel: string;
+  /**
+   * 🔴 完整提示词（HISTORY-FULL-PROMPT-UI-0001）—— **由调用方按 mode 决定取哪个字段**（见 generation-history
+   * 的 promptOf）：video_gen=topic、avatar_talk=script、seedance_i2v=BE 未暴露 scene_prompt 故 undefined。
+   * 与 createdAt 同一模式：从**列表项**带入，不动 progress-mapping（那是 SSE 与列表共用的映射）。
+   */
+  prompt?: string | null;
+  promptLabel?: string;
 }
 
 /**
@@ -55,6 +62,8 @@ export function VideoDetailDialog({
       onClose={onClose}
       title={task?.topic ?? copy.history.videoDetailTitle}
       titleAttr={task?.topic}
+      prompt={detail?.prompt}
+      promptLabel={detail?.promptLabel}
       meta={
         detail && task ? (
           <>

@@ -65,6 +65,10 @@ export interface VideoListItem {
   // BE `VideoRead.topic: str | None`（schemas/videos.py:321）→ 可为 null；VideoDetail 那边一直诚实声明着
   // `string | null`，同一个字段两个类型两种说法。消费方 fromVideoRead 本就 `read.topic || "未命名视频"` 兜着。
   topic: string | null;
+  // 🔴 HISTORY-FULL-PROMPT-UI-0001：数字人口播用户填的是 script（要念的文案）—— BE 一直在发
+  // （_video_read:559 `script=task.script`，列表与详情同一个 builder），只是 FE 没声明。同 #185 补齐
+  // playback_url 那批：**少声明了在发也在用的字段**才是问题，子集本身不是。
+  script?: string | null;
   mode?: string | null; // avatar_talk | seedance_i2v | photo —结果渲染：视频 vs 图
   kind?: string | null; // 图片细分：如 "cover"（封面 photo task；HIST kind 筛真后端支持）
   error_code?: string | null; // 图片失败时映射友好文案（friendlyImageError）
