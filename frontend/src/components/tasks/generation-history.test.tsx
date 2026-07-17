@@ -148,23 +148,40 @@ describe("GenerationHistory (历史 tabs + 删除/清空/仅封面)", () => {
     expect(histImgMock.fn).toHaveBeenLastCalledWith(undefined);
   });
 
-  it("文案 history：删除单条软删确认(可恢复文案) → 调 DELETE /copy/drafts/{id}", async () => {
+  // 🔴 COPY-DRAFT-DELETE-COPY-FIX-0001：这两条原本**在给谎言站岗** —— 它们断言用户**必须**看到
+  // 「（可恢复）」，测试名还叫「(可恢复文案)」。而 BE 那边：delete_draft/clear_drafts 只置 deleted_at
+  // （services/copy.py:378 / :393），list_drafts + get_draft 都过滤 deleted_at（:354 / :368）
+  // → 列表消失 + 详情 404，且**全仓零恢复入口**（restore/undelete/deleted_at=None 一处都搜不到）。
+  // 「可恢复」是**把 BE 的运维保险当成对用户的承诺**。
+  //
+  // 注意这两条是**写死字面量**的（不是引用 copy key）→ `grep deleteConfirmSoft` **扫不到它们**。
+  // 谎言不靠 key 名传播，靠句子传播 —— 所以下面的反断言同样钉字面量。
+  it("文案 history：删除确认门 → 恰调一次 DELETE /copy/drafts/{id}；文案只讲用户可观察的后果", async () => {
     render(<CopyDraftList />);
     expect(screen.getByText("草稿文案A")).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("删除"));
-    expect(deleteDraftMock.mutateAsync).not.toHaveBeenCalled();
-    expect(screen.getByText("将从历史移除（可恢复）。")).toBeInTheDocument(); // 文案=软删文案
+    expect(deleteDraftMock.mutateAsync).not.toHaveBeenCalled(); // 确认门：不直接删
+
+    expect(screen.getByText("将从历史移除，无法撤销。")).toBeInTheDocument();
+    expect(screen.queryByText("将从历史移除（可恢复）。")).not.toBeInTheDocument(); // 不许把谎加回来
+    expect(screen.queryByText("将永久删除，不可恢复。")).not.toBeInTheDocument(); // 也不许反方向的谎（数据其实都在）
+
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
     await waitFor(() => expect(deleteDraftMock.mutateAsync).toHaveBeenCalledWith("d-1"));
+    expect(deleteDraftMock.mutateAsync).toHaveBeenCalledTimes(1);
   });
 
-  it("文案清空：点清空 → 软删确认文案(可恢复) → 调 DELETE /copy/drafts", async () => {
+  it("文案清空：确认门 → 恰调一次 DELETE /copy/drafts；文案同样不说「可恢复」", async () => {
     render(<CopyDraftList />);
     fireEvent.click(screen.getByRole("button", { name: /清空/ }));
     expect(clearDraftsMock.mutateAsync).not.toHaveBeenCalled();
-    expect(screen.getByText("将清空此模块全部草稿（可恢复）。")).toBeInTheDocument(); // 文案=软删
+
+    expect(screen.getByText("将清空此模块全部草稿，无法撤销。")).toBeInTheDocument();
+    // clearConfirmSoft 是 deleteConfirmSoft 的孪生 —— 任务包只点了后者，只删一个 = 陷阱留一半。
+    expect(screen.queryByText("将清空此模块全部草稿（可恢复）。")).not.toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: "确认清空" }));
-    await waitFor(() => expect(clearDraftsMock.mutateAsync).toHaveBeenCalled());
+    await waitFor(() => expect(clearDraftsMock.mutateAsync).toHaveBeenCalledTimes(1));
   });
 
   it("删除失败：弹窗内显示友好错误且弹窗仍开可重试(失败友好态)", async () => {
