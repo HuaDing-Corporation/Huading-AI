@@ -58,16 +58,13 @@ export function WelcomeContactBanner() {
         <Button variant="primary" size="sm" onClick={() => setQrOpen(true)}>
           {C.welcomeAction}
         </Button>
-        {/* 「我知道了」= 主动关闭 → 清标记。之后靠顶栏常驻「开通额度」找回。 */}
-        <button
-          type="button"
-          onClick={dismiss}
-          aria-label={C.welcomeDismiss}
-          title={C.welcomeDismiss}
-          className="flex h-9 w-9 items-center justify-center rounded-field text-ink-faint outline-none transition-colors hover:bg-glass-hover hover:text-ink focus-visible:shadow-focus-gold"
-        >
+        {/* 「我知道了」= 主动关闭 → 清标记。之后靠顶栏常驻「开通额度」找回。
+            关闭钮用既有 ui/button 的 ghost/icon —— 上一版这里是手写样式串，且与同一 PR 里
+            contact-dialog 那份**当场就漂了**（h-9/rounded-field/text-ink-faint vs h-8/rounded-mark/
+            text-ink-soft）。拷贝不只是变多，它会悄悄漂移 —— 本包不留手写关闭钮。 */}
+        <Button variant="ghost" size="icon" onClick={dismiss} aria-label={C.welcomeDismiss} title={C.welcomeDismiss}>
           <X size={16} strokeWidth={2} />
-        </button>
+        </Button>
       </div>
       <ContactDialog open={qrOpen} onOpenChange={setQrOpen} />
     </div>
