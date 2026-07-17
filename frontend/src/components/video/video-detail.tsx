@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { ChevronLeft, Download, Image as ImageIcon, Share2 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -11,6 +11,7 @@ import { videoKeys } from "@/lib/api/keys";
 import { friendlyImageError } from "@/lib/api/image-error";
 import { friendlyVideoError } from "@/lib/api/video-error";
 import { copy } from "@/lib/copy";
+import { useMediaUrlRefresh } from "@/lib/media/use-media-url-refresh";
 import { cn } from "@/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -58,17 +59,21 @@ export function VideoDetail({ id }: VideoDetailProps) {
   const router = useRouter();
   const [coverOpen, setCoverOpen] = useState(false);
 
-  /**
-   * ⚠️ 已知缺陷（HISTORY-VIDEO-DIALOG-UI-0001 · FIX1 实测确认，**本包未修**，已记 backlog）：
-   * 下面 photo 分支的 `<img onError={handleUrlExpired}>` 是**裸接**的 —— 没有任何哨兵。
-   * video 分支还有 VideoPlayer 内部的 ref 兜着，图片分支什么都没有：只要 BE 每次都能签出**新的**
-   * 失效 URL（对象已删/已迁移即如此），就是 error → invalidate → 新 URL → error → …… **无限重取**。
-   * 正解见 `@/lib/media/use-media-url-refresh`（同一 URL 只报一次 + 连续失败封顶 + 成功即清零），
-   * 历史 tab 已全部收敛到它。本文件属 `/videos/{id}` 详情页域、且零 URL 过期测试覆盖 → 单独一片修。
-   */
-  function handleUrlExpired() {
+  /** presign 失效 → 重取本视频详情。两个分支（photo 的 `<img>` / video 的 VideoPlayer）共用这一条动作。 */
+  const handleUrlExpired = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: videoKeys.detail(id) });
-  }
+  }, [queryClient, id]);
+
+  /**
+   * photo 分支的 `<img>` 迁入**共享哨兵**（MEDIA-URL-REFRESH-CONVERGE-0001）—— 它此前是**裸接**的：
+   * 没有任何哨兵，只要 BE 每次都能签出**新的**失效 URL（对象已删/已迁移即如此），就是
+   * error → invalidate → 新 URL → error → …… **无限重取**，每轮真打一次后端。
+   *
+   * hook 必须在早返回（loading / error / !data）**之前**调用 —— rules-of-hooks，且 lint 是 error 级。
+   * 故这里传 `data?.playback_url`：无数据时是 undefined，hook 的 `if (!url) return` 让它自然哑火。
+   * video 分支的哨兵在 VideoPlayer 内部（同一个 hook），两分支同一时刻只渲染一个，互不干扰。
+   */
+  const media = useMediaUrlRefresh(data?.playback_url, handleUrlExpired);
 
   // Loading state
   if (isLoading) {
@@ -152,7 +157,8 @@ export function VideoDetail({ id }: VideoDetailProps) {
             <img
               src={data.playback_url}
               alt={data.topic ?? copy.workbench.photoResultAlt}
-              onError={handleUrlExpired}
+              onError={media.onError}
+              onLoad={media.onLoad}
               className="w-full rounded-field border border-line-gold bg-black/5 object-contain"
             />
             {data.download_url && (

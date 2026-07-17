@@ -274,5 +274,63 @@ describe("VideoDetail · presign 失效重取（迁移前基线 · 不变量）"
   // 🔴 photo 分支缺的正是上面 video 分支有的那条：`<img>` 裸接 handleUrlExpired、零哨兵 →
   // 同一 URL 连发 3 个 error 就真打 3 次后端；对象已删（BE 每次都签得出新 URL、个个 404）时更是无限重取。
   // 按「缺陷不进网」→ 此处只记录、不断言；正向断言在迁移片里（迁完才绿）。
-  it.todo("photo 的 <img> 同一 URL 连报多次 → 只该重取一次（当前裸接会每次都打后端），迁移片修");
+  // → **已在下面的第 3 片 describe 里实现**，故 todo 摘除。
+});
+
+// ── MEDIA-URL-REFRESH-CONVERGE-0001 · **第 3 片：迁移**（photo 的 <img> 迁入共享哨兵）───────────
+// 上面「补网」那组的两条不变量迁移后原样全绿 = 零回归证据。本组是上一片 it.todo 的兑现。
+describe("VideoDetail · photo 的 <img> 迁入共享哨兵后", () => {
+  it("同一 URL 连报多次 → 只重取一次（裸接时每个 error 都真打一次后端）", () => {
+    (useVideo as Mock).mockReturnValue({ data: photoDone, error: null, isLoading: false });
+    const { spyWrapper, invalidate } = makeSpyWrapper();
+    render(<VideoDetail id="p1" />, { wrapper: spyWrapper });
+
+    const img = screen.getByRole("img");
+    fireEvent.error(img);
+    fireEvent.error(img);
+    fireEvent.error(img);
+    expect(invalidate).toHaveBeenCalledTimes(1);
+  });
+
+  // 🔴 死循环刹车：这是整条 photo 链路上原先**完全没有**的东西。
+  // 裸接实现在这个场景下会打后端 8 次（乃至无限）—— 拆掉 hook 的封顶，这条必红。
+  it("🔴 对象已删、BE 每次签出新 URL 但个个失效 → 连续重取封顶，不无限打后端", () => {
+    const { spyWrapper, invalidate } = makeSpyWrapper();
+    (useVideo as Mock).mockReturnValue({
+      data: { ...photoDone, playback_url: "https://mock.local/gone.png?sig=0" },
+      error: null,
+      isLoading: false
+    });
+    const { rerender } = render(<VideoDetail id="p1" />, { wrapper: spyWrapper });
+
+    for (let i = 1; i <= 8; i++) {
+      (useVideo as Mock).mockReturnValue({
+        data: { ...photoDone, playback_url: `https://mock.local/gone.png?sig=${i}` },
+        error: null,
+        isLoading: false
+      });
+      rerender(<VideoDetail id="p1" />);
+      fireEvent.error(screen.getByRole("img"));
+    }
+
+    expect(invalidate).toHaveBeenCalledTimes(2);
+  });
+
+  // 重取真的把新 URL 喂进了 UI（详情页数据源是 useVideo query 派生，不是冻结快照）→ 防线导电。
+  it("重取拿回新 URL → <img src> 真的跟着换（数据源是 query 派生，重取才有意义）", () => {
+    (useVideo as Mock).mockReturnValue({ data: photoDone, error: null, isLoading: false });
+    const { spyWrapper } = makeSpyWrapper();
+    const { rerender } = render(<VideoDetail id="p1" />, { wrapper: spyWrapper });
+
+    expect(screen.getByRole("img")).toHaveAttribute("src", "https://mock.local/p.png");
+    fireEvent.error(screen.getByRole("img"));
+
+    (useVideo as Mock).mockReturnValue({
+      data: { ...photoDone, playback_url: "https://mock.local/p.png?sig=fresh" },
+      error: null,
+      isLoading: false
+    });
+    rerender(<VideoDetail id="p1" />);
+    expect(screen.getByRole("img")).toHaveAttribute("src", "https://mock.local/p.png?sig=fresh");
+  });
 });
