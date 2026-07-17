@@ -1537,6 +1537,56 @@ def test_video_list_filters_by_mode_and_keeps_pagination(
     assert all(item["mode"] == "seedance_i2v" for item in data["items"])
 
 
+def test_seedance_video_history_exposes_scene_prompt_from_params_not_topic(
+    auth_context,
+    auth_db,
+) -> None:
+    store = _MemProgressStore()
+    storage = _FakeStorage()
+    with auth_db() as db:
+        db.add(
+            VideoTask(
+                id="history-i2v-scene-prompt",
+                tenant_id=auth_context["tenant_id"],
+                created_by_user_id=auth_context["user_id"],
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="done",
+                progress=100,
+                topic="portable thermos product benefits",
+                params={"scene_prompt": "warm tabletop close-up with drifting steam"},
+            )
+        )
+        db.commit()
+
+    app.dependency_overrides[get_progress_store] = lambda: store
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        resp = TestClient(app).get(
+            "/api/v1/videos?mode=seedance_i2v",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_progress_store, None)
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 200
+    item = resp.json()["data"]["items"][0]
+    assert item["topic"] == "portable thermos product benefits"
+    assert item["prompt"] == "portable thermos product benefits"
+    assert item["scene_prompt"] == "warm tabletop close-up with drifting steam"
+    assert item["scene_prompt"] != item["topic"]
+
+
+def test_video_read_openapi_marks_legacy_prompt_deprecated() -> None:
+    resp = TestClient(app).get("/openapi.json")
+
+    assert resp.status_code == 200
+    schema = resp.json()["components"]["schemas"]["VideoRead"]
+    assert schema["properties"]["prompt"]["deprecated"] is True
+    assert "prompt" in schema["required"]
+
+
 def test_video_list_filters_photo_and_returns_image_urls(
     auth_context,
     auth_db,

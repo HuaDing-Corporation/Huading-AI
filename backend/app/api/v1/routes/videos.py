@@ -557,6 +557,7 @@ def _video_read(
         id=task.id,
         title=(task.topic or ("Untitled image" if mode == "photo" else "Untitled video"))[:80],
         prompt=task.topic or "",
+        scene_prompt=params.get("scene_prompt"),
         mode=mode,
         kind=history_kind(task),
         status=status_value,

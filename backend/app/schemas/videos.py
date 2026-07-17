@@ -313,7 +313,14 @@ class VideoTaskStatus(BaseModel):
 class VideoRead(BaseModel):
     id: str
     title: str
-    prompt: str
+    prompt: str = Field(
+        description=(
+            "Deprecated topic alias retained for compatibility; use topic or the "
+            "mode-specific scene_prompt field."
+        ),
+        deprecated=True,
+    )
+    scene_prompt: str | None = None
     mode: str
     kind: str | None = None
     status: str
