@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { copy } from "@/lib/copy";
@@ -126,13 +126,22 @@ describe("ReversePromptResultView（反推结果 + 带入 4 模块）", () => {
     render(<ReversePromptResultView result={FULL} onApply={noop} onRegenerate={noop} onSave={noop} />);
     // 中文提示词块的复制按钮（首个 copy 按钮）
     fireEvent.click(screen.getAllByRole("button", { name: copy.common.copy })[0]);
-    expect(writeText).toHaveBeenCalledWith("中文提示词内容ZH");
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("中文提示词内容ZH"));
+    // 🔴 await 状态落定（成功后 CopyableBlock setCopied(true) 在微任务里）→ 消 act(...) 警告。
+    // 顺带正向锁死：真写进去了才显示「已复制」。
+    expect(await screen.findByText(copy.common.copied)).toBeInTheDocument();
   });
 
-  it("承重·非安全上下文：navigator.clipboard 缺失 → 点复制不谎报「已复制」（Review P3 修正）", () => {
+  // 🔴 CLIPBOARD-TRUTH-0001：修这条**假守卫**。它叫「承重·非安全上下文（Review P3 修正）」，看起来像被守着，
+  // 但它同步做负断言 —— 而坏实现的 setCopied(true) 落在 await 之后的**微任务**里，同步断言先跑完 →
+  // 好实现坏实现**都绿**，那个守卫从写下那天起就没被真正测过。修法照 copyable-block.test.tsx:54：
+  // **放行一次微任务再断言**（坏实现正是在这里置「已复制」的）。变异门：把 copyToClipboard 退化成
+  // `await navigator.clipboard?.writeText(x); return true` → 本条转红。
+  it("🔴 承重·非安全上下文：navigator.clipboard 缺失 → 点复制不谎报「已复制」（Review P3 修正）", async () => {
     vi.stubGlobal("navigator", {});
     render(<ReversePromptResultView result={FULL} onApply={noop} onRegenerate={noop} onSave={noop} />);
     fireEvent.click(screen.getAllByRole("button", { name: copy.common.copy })[0]);
+    await new Promise((r) => setTimeout(r, 0)); // 放行微任务：坏实现在这里置「已复制」
     expect(screen.queryByText(copy.common.copied)).not.toBeInTheDocument();
   });
 

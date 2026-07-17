@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Copy } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { copyToClipboard } from "@/lib/clipboard";
 import { copy } from "@/lib/copy";
 
 /**
@@ -11,18 +12,11 @@ import { copy } from "@/lib/copy";
  *
  * ## 为什么是提升既有的、而不是新写一份
  *
- * 本仓已有 **3 处独立的 clipboard 实现**，而且**已经分叉、其中两处是坏的**（实测）：
- *  - `workbench/reverse-prompt-result-view.tsx`（本组件的原身）：`if (!text || !navigator.clipboard?.writeText) return;`
- *    —— **正确**：Clipboard API 缺失时直接不动，不置「已复制」。
- *  - `workbench/copywriting-form.tsx:90`：`await navigator.clipboard?.writeText(text)` —— `?.` 在
- *    `navigator.clipboard` 缺失时**短路成 undefined**，`await undefined` **不抛异常** → 紧跟的
- *    `setCopiedFlash(true)` 照样执行 → **界面说「已复制」，剪贴板里什么都没有**。
- *  - `publish/publish-draft-card.tsx:48`：同一个 `?.` 短路，同样谎报成功。
- *
- * 也就是说：有人发现过这个 bug、**只修了一处**（原身的注释与承重测试都写着「Review P3 修正」），
- * 另外两处原样留着。**拷贝不只是变多，它会悄悄漂移** —— 而漂移没有任何测试拦得住，因为每处各测各的。
- * 所以本包**不写第四份**，而是把正确的那份提升出来共用。
- * （另外两处属 workbench / publish 域、不在本包范围 —— 已报 backlog，本包不顺手改。）
+ * 本仓曾有 **3 处独立的 clipboard 实现**，其中两处是坏的（`await navigator.clipboard?.writeText(x)`
+ * 的 `?.` 在 API 缺失时短路成 undefined、await 不抛 → 照样置「已复制」→ 谎报）。
+ * CLIPBOARD-TRUTH-0001 把这段逻辑**收口到 `@/lib/clipboard` 的 `copyToClipboard`**（返回是否真写进去）——
+ * 本组件、copywriting-form、publish-draft-card 三处都调它，成功态一律由返回布尔驱动，全仓再无手写 clipboard。
+ * （本组件原先那份是**对的**，但「对的手写拷贝」仍是可被照抄的模板 → 一并收口，见 clipboard.ts 注释。）
  *
  * ## 与原身的差异（FIX1 收准 —— 别把它当原样搬运）
  * 提升时**不是零差异**：新增了 `break-words`（原身只有 `whitespace-pre-wrap`）。
@@ -40,14 +34,10 @@ import { copy } from "@/lib/copy";
 export function CopyableBlock({ label, text }: { label: string; text: string }) {
   const [copied, setCopied] = useState(false);
   const doCopy = async () => {
-    // 仅在 Clipboard API 存在且写入成功时才置「已复制」——避免非安全上下文(clipboard 缺失)下谎报成功态。
-    if (!text || !navigator.clipboard?.writeText) return;
-    try {
-      await navigator.clipboard.writeText(text);
+    // 仅在**真的写进剪贴板**时才置「已复制」——非安全上下文/抛错一律不谎报（copyToClipboard 返回 false）。
+    if (await copyToClipboard(text)) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // 复制失败静默降级（不显示「已复制」）
     }
   };
   return (
