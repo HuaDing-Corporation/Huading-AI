@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
@@ -20,6 +20,7 @@ vi.mock("@/lib/api/hooks", () => ({
 
 import { ApiError } from "@/lib/api/client";
 import { useVideo } from "@/lib/api/hooks";
+import { videoKeys } from "@/lib/api/keys";
 import { VideoDetail } from "./video-detail";
 import { copy } from "@/lib/copy";
 import type { Mock } from "vitest";
@@ -182,4 +183,96 @@ describe("VideoDetail", () => {
     // LABEL-UI-0001 负向：未完成(running)无产物 → 不显「已含 AI 生成标识」(锁住条件分支)。
     expect(screen.queryByText(copy.label.productNotice)).not.toBeInTheDocument();
   });
+});
+
+// ── MEDIA-URL-REFRESH-CONVERGE-0001 · **第 2 片：补网**（本 commit 零产品代码改动）─────────────
+//
+// 任务包硬门 1「补网在前、迁移在后」要求的是**两处**：VideoPlayer（第 1 片 46f4195d 已补）与
+// 本文件 photo 分支的 `<img onError={handleUrlExpired}>`（video-detail.tsx:152）。后者是**裸接** ——
+// 连哨兵都没有，且**零 URL 过期测试**（上面 9 条一条都没碰 onError）。下一片要把它迁进
+// useMediaUrlRefresh，无网迁移 = 拿用户的详情页赌运气。
+//
+// ⚠️ 照第 1 片立的规矩：**不变量才进网，缺陷不进网**。
+// 这里钉的是「重取动作确实接上了」（迁移前后都必须成立）；**有意不钉**「连报多次 → 打后端多次」——
+// 那是裸接的缺陷，是下一片要修的东西。把缺陷钉进网，下一片就得改测试来修 bug。
+
+/**
+ * 造一个 invalidateQueries 可观测的 client + wrapper。
+ *
+ * 为什么不改上面那个既有 `wrapper`：① 它每次被 React 调用都新建 client（rerender 即换一个），
+ * 而本组的断言要跨 render 累计调用次数；② 更重要的是**零回归最好的证据是「我根本没动它，而它还绿着」** ——
+ * 上面 9 条既有测试原样不动。
+ */
+function makeSpyWrapper() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const invalidate = vi.spyOn(client, "invalidateQueries");
+  function spyWrapper({ children }: { children: ReactNode }) {
+    return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  }
+  return { spyWrapper, invalidate };
+}
+
+const photoDone = {
+  id: "p1",
+  status: "done",
+  progress: 100,
+  mode: "photo",
+  topic: "白色大理石上的香水瓶",
+  script: null,
+  voice_id: null,
+  aspect_ratio: null,
+  subtitle_enabled: null,
+  playback_url: "https://mock.local/p.png",
+  download_url: null,
+  thumbnail_url: null,
+  created_at: "2026-06-23T00:00:00Z"
+};
+
+const videoDone = {
+  id: "v1",
+  status: "done",
+  progress: 100,
+  mode: "avatar_talk",
+  topic: "测试视频",
+  script: null,
+  voice_id: null,
+  aspect_ratio: null,
+  subtitle_enabled: null,
+  playback_url: "https://mock.local/v.mp4",
+  download_url: null,
+  thumbnail_url: null,
+  created_at: "2026-06-18T00:00:00Z"
+};
+
+describe("VideoDetail · presign 失效重取（迁移前基线 · 不变量）", () => {
+  it("photo 的 <img> 报 error → 重取本视频详情（防线接上了，不是摆设）", () => {
+    (useVideo as Mock).mockReturnValue({ data: photoDone, error: null, isLoading: false });
+    const { spyWrapper, invalidate } = makeSpyWrapper();
+    render(<VideoDetail id="p1" />, { wrapper: spyWrapper });
+
+    fireEvent.error(screen.getByRole("img"));
+    // 重取的必须是**这个** id 的详情：错 key = 重取了别的东西，UI 里的旧 URL 一动不动。
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: videoKeys.detail("p1") });
+  });
+
+  it("video 分支：VideoPlayer 的 onUrlExpired 接到同一条重取动作，且同一 URL 连报多次只重取一次", () => {
+    (useVideo as Mock).mockReturnValue({ data: videoDone, error: null, isLoading: false });
+    const { spyWrapper, invalidate } = makeSpyWrapper();
+    render(<VideoDetail id="v1" />, { wrapper: spyWrapper });
+
+    const video = document.querySelector("video")!;
+    fireEvent.error(video);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: videoKeys.detail("v1") });
+
+    // 浏览器对同一 src 会连发 error。这条在迁移前由 VideoPlayer 的手抄哨兵挡住，迁移后由共享 hook 挡住 ——
+    // **换实现不换行为**，故它是不变量，进网。
+    fireEvent.error(video);
+    fireEvent.error(video);
+    expect(invalidate).toHaveBeenCalledTimes(1);
+  });
+
+  // 🔴 photo 分支缺的正是上面 video 分支有的那条：`<img>` 裸接 handleUrlExpired、零哨兵 →
+  // 同一 URL 连发 3 个 error 就真打 3 次后端；对象已删（BE 每次都签得出新 URL、个个 404）时更是无限重取。
+  // 按「缺陷不进网」→ 此处只记录、不断言；正向断言在迁移片里（迁完才绿）。
+  it.todo("photo 的 <img> 同一 URL 连报多次 → 只该重取一次（当前裸接会每次都打后端），迁移片修");
 });
