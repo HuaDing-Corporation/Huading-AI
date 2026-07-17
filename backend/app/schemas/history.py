@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 ImageHistoryCategory = Literal[
     "image_gen",
@@ -32,8 +32,18 @@ class ImageHistoryListResponse(BaseModel):
 class ImageHistoryDetailItem(BaseModel):
     index: int
     download_url: str
-    width: int
-    height: int
+    width: int = Field(
+        deprecated=True,
+        description="Deprecated compatibility value; use actual_width for output pixels.",
+    )
+    height: int = Field(
+        deprecated=True,
+        description="Deprecated compatibility value; use actual_height for output pixels.",
+    )
+    requested_width: int | None
+    requested_height: int | None
+    actual_width: int | None
+    actual_height: int | None
     requested_aspect_ratio: str | None = None
     resolved_aspect_ratio: str | None = None
     resolved_size: str | None = None
