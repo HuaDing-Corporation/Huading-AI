@@ -124,6 +124,64 @@ describe("HistorySetDialog · 真实 network 次数（FIX3：mediaKey 必须跨�
     expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(3);
   });
 
+  // 🔴 方向②（反方向，后果不对称）：**A 继承 B 的毒预算 → 刷不了**。
+  // 方向①（上一条）钉的是「坏图漂到新 index → 拿到新预算 → 多刷」（后果=浪费一次后端）。
+  // 这条钉反向：坏图 B 在某个 index 把预算耗到封顶后**漂走**，一张健康图 A 漂进那个槽 → 若按 index 记账，
+  // A 继承了 B 耗尽的预算 → A 自己失败时**刷不出来**（后果=用户对着碎图，功能失效，比浪费严重）。
+  //
+  // ⚠️ 这条**必须用 error-before-load**（A 首帧就失败、还没 load 过），不能用「load 成功后再过期」。
+  //    实测（受控探针）：后者在 index 变异下**仍绿** —— 因为 A 的 onLoad（FIX2 加的清零）会先把继承来的毒
+  //    清掉，suppression 根本触发不了；而每次 refetch 都重新 presign 整套（image_history.py:480）→ 刚漂进来
+  //    的图 URL 是新鲜的、会 load。所以「过期-after-load」这条路被 FIX2 自己遮住了，抓不到本 bug。
+  //    error-before-load 是真实可达的：对象存储最终一致性 / CDN 边缘未命中 → 刚写完的图**首次访问就 404**，
+  //    retry 才成 —— 那一帧它 error 而从未 load。**别把它"简化"成 load-后-error，那会变假绿。**
+  it("🔴 坏图漂走后、健康图漂进它耗尽的 index 槽、首帧瞬时失败 → 仍能自救重取（不继承毒预算）", async () => {
+    // created 顺序：t-heal 最早、t-bad 后。完成顺序：t-bad 先（1-2 轮只它 done），t-heal 后（第 3 轮才 done）。
+    // → t-bad 先独占 index 0 把预算耗满，t-heal 一完成就按 created_at 插到**前面** → t-bad 漂到 index 1、
+    //   t-heal 占下 index 0（那个被 t-bad 耗尽的槽）。
+    const ORDER2 = ["t-heal", "t-bad"];
+    const url2 = (id: string, sig: string) =>
+      id === "t-bad" ? `https://cdn/gone.png?sig=${sig}` : `https://cdn/heal.png?sig=${sig}`;
+    const resp2 = (done: string[], sig: string) => {
+      const tasks = ORDER2.filter((id) => done.includes(id));
+      return {
+        id: "batch-1",
+        category: "ecom_model",
+        created_at: "2026-07-10T12:00:00Z",
+        status: "ready",
+        items: tasks.map((id, index) => ({ index, download_url: url2(id, sig), width: 1024, height: 1536 })),
+        meta: { task_ids: tasks }
+      };
+    };
+    const badBy = () => screen.getAllByRole("img").find((i) => i.getAttribute("src")?.includes("gone.png"))!;
+    const healBy = () => screen.getAllByRole("img").find((i) => i.getAttribute("src")?.includes("heal.png"))!;
+
+    adapter.getHistoryImageSet.mockResolvedValue(resp2(["t-bad"], "1"));
+    wrap(<HistorySetDialog item={ITEM} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getAllByRole("img")).toHaveLength(1));
+    expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(1);
+
+    // 两轮把 t-bad 在 index 0 上的预算耗到封顶（consecutive → 2）。
+    adapter.getHistoryImageSet.mockResolvedValue(resp2(["t-bad"], "2"));
+    act(() => void fireEvent.error(badBy()));
+    await waitFor(() => expect(badBy().getAttribute("src")).toBe(url2("t-bad", "2")));
+    // 第 2 次失效的重取里 t-heal 也完成了 → 它插到前面，t-bad 漂到 index 1。
+    adapter.getHistoryImageSet.mockResolvedValue(resp2(["t-heal", "t-bad"], "3"));
+    act(() => void fireEvent.error(badBy()));
+    await waitFor(() => expect(screen.getAllByRole("img")).toHaveLength(2));
+    expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(3); // 1 初次 + 2（t-bad 在 index0 耗满）
+    expect(healBy().getAttribute("alt")).toBe("历史图片第 1 张"); // t-heal 真的占下了 index 0 那个槽
+
+    // t-heal 首帧就瞬时失败（最终一致性/CDN 未命中）—— 它**从未 load 过**，毒无从被清。
+    adapter.getHistoryImageSet.mockResolvedValue(resp2(["t-heal", "t-bad"], "4"));
+    act(() => void fireEvent.error(healBy()));
+    await act(async () => {});
+
+    // 🔴 承重点：健康图有自己的身份（task:t-heal）→ 干净预算 → 能自救 → 第 4 次重取。
+    // 按 index 记账时：t-heal 落在 output:0，那格被 t-bad 耗到 2 → suppression → 只有 3（healthy 刷不出来）。
+    expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(4);
+  });
+
   it("整套里两张各自坏 → 各自独立爬到封顶，互不吃对方的机会（单射：不同媒体 ≠ 同一个 key）", async () => {
     // 判据的另一半：稳定之外还要**单射**。两张坏图若共享一个 key，合计只会重取 2 次而不是各自 2 次。
     const twoBad = (sig: string) => ({
