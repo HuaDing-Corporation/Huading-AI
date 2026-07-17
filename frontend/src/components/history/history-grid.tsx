@@ -9,7 +9,7 @@ import { HistorySetDialog } from "@/components/history/history-set-dialog";
 import { ImageLightbox } from "@/components/history/image-lightbox";
 import { useHistoryImages } from "@/lib/api/hooks";
 import { copy } from "@/lib/copy";
-import type { HistoryCategory, HistoryItem } from "@/lib/api/history-images";
+import type { HistoryCategory } from "@/lib/api/history-images";
 
 /**
  * 单分类历史网格（HISTORY-IMAGE-TAB-UI-0001）——按 category 分页拉列表（category 省略 = 全部图片），
@@ -19,9 +19,19 @@ import type { HistoryCategory, HistoryItem } from "@/lib/api/history-images";
  */
 export function HistoryGrid({ category }: { category?: HistoryCategory }) {
   const query = useHistoryImages(category);
-  const [lightbox, setLightbox] = useState<HistoryItem | null>(null);
-  const [detail, setDetail] = useState<HistoryItem | null>(null);
+  // 🔴 **只存 id，不存列表项快照**（MEDIA-URL-REFRESH-CONVERGE-0001 · 第 4 片）。
+  // `cover_url` 是 presign（history-images.ts:19）。存快照 = 弹窗里的 cover_url 冻结在点击那一刻 →
+  // 下一片给弹窗挂上 onError + 重取后，refetch 拿回的新 URL **进不到弹窗里** → 得到一个
+  // 「测试全绿、线上依然碎图」的防线，比没有防线更危险。**先导电，再挂 onError。**
+  // 同 #185 在 generation-history.tsx:44-48 上修过的 P1-1（那次是 playbackUrl，这次是 cover_url）。
+  const [lightboxId, setLightboxId] = useState<string | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(null);
   const items = query.data?.pages.flatMap((p) => p.items) ?? [];
+
+  // 从**最新** items 派生：refetch 一到，弹窗里的 <img src> 自然跟着换。
+  // 派生不到（该条已被删）→ null → 弹窗自动关闭，不挂着一个指向已消失记录的界面。
+  const lightbox = lightboxId === null ? null : (items.find((i) => i.id === lightboxId) ?? null);
+  const detail = detailId === null ? null : (items.find((i) => i.id === detailId) ?? null);
 
   if (query.isLoading) {
     return (
@@ -58,7 +68,12 @@ export function HistoryGrid({ category }: { category?: HistoryCategory }) {
     <>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
         {items.map((item) => (
-          <HistoryCard key={item.id} item={item} onOpenImage={() => setLightbox(item)} onDetail={() => setDetail(item)} />
+          <HistoryCard
+            key={item.id}
+            item={item}
+            onOpenImage={() => setLightboxId(item.id)}
+            onDetail={() => setDetailId(item.id)}
+          />
         ))}
       </div>
       {query.hasNextPage ? (
@@ -69,13 +84,15 @@ export function HistoryGrid({ category }: { category?: HistoryCategory }) {
         </div>
       ) : null}
 
+      {/* 按**派生结果**开合、而非 id 是否存在：该条被删后 id 还在、但派生为 null，
+          按 id 开就会留下一个空白弹窗。与 generation-history.tsx:156-158 同口径。 */}
       <ImageLightbox
         open={lightbox !== null}
         src={lightbox?.cover_url ?? null}
         alt={lightbox ? copy.historyImages.lightboxAlt(lightbox.title) : ""}
-        onClose={() => setLightbox(null)}
+        onClose={() => setLightboxId(null)}
       />
-      <HistorySetDialog item={detail} onClose={() => setDetail(null)} />
+      <HistorySetDialog item={detail} onClose={() => setDetailId(null)} />
     </>
   );
 }
