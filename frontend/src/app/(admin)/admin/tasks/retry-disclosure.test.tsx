@@ -6,10 +6,16 @@ import AdminTasksPage from "./page";
 import { AuthProvider } from "@/lib/auth/auth-context";
 import { authStore } from "@/lib/auth/store";
 import { copy } from "@/lib/copy";
+import { resetAdminConsole } from "@/mocks/handlers";
 
 // FIX1 · 重试披露三态承重（BE FIX3 冻结契约）：真打 MSW（不 mock hooks/adapter），逐组合断言结果横幅
 // **精确文案**（正则 ^…$，不用模糊断言）。变异哨兵：把横幅的 is_estimate 分支删掉（永远走「将扣费 N 积分」）
-// → 按量那条（job-f1）必须变红。⚠️ 模块级 mock 态：每用例重跑**不同**任务（f1/f3/f2 各一次），互不影响。
+// → 按量那条（job-f1）必须变红。
+//
+// 🔴 ADMIN-MOCK-STORE-RESET-0001：这里原本写「⚠️ 模块级 mock 态：每用例重跑**不同**任务（f1/f3/f2 各一次），
+// 互不影响」。「互不影响」当时是真的，但那是**数据凑巧**（三条用例正好各挑了一个任务），不是机制——
+// 重跑会就地改写 status/retryable，谁再加一条碰同一个任务的用例，它就随座位表变。改成 beforeEach 重置：
+// 「互不影响」从「碰巧成立」变成结构上成立。（实测：本文件在 shuffle 下不红，加重置也不改变任何断言。）
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
   usePathname: () => "/admin/tasks"
@@ -40,6 +46,7 @@ async function retryTask(taskId: string) {
 beforeEach(() => {
   localStorage.clear();
   authStore.clear();
+  resetAdminConsole();
 });
 afterEach(() => {
   localStorage.clear();

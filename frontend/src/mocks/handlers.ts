@@ -646,12 +646,17 @@ interface MockAdminTenant {
   created_at: string; owner_email: string | null; plan_code: "free" | "basic" | "huading" | null;
   subscription: MockSubscription | null; task_count: number; is_platform: boolean;
 }
-const adminTenants = new Map<string, MockAdminTenant>([
-  ["ten-mock", { tenant_id: "ten-mock", slug: "huading", name: "华鼎（mock）", status: "active", created_at: "2026-01-01T08:00:00Z", owner_email: "qa@huading.test", plan_code: "huading", subscription: { id: "sub-mock", total: 1000, used: 120, reserved: 36, remaining: 844 }, task_count: 96, is_platform: true }],
-  ["ten-acme", { tenant_id: "ten-acme", slug: "acme", name: "Acme 电商", status: "active", created_at: "2026-06-02T09:30:00Z", owner_email: "owner@acme.test", plan_code: "huading", subscription: { id: "sub-acme", total: 20000, used: 5000, reserved: 1000, remaining: 14000 }, task_count: 42, is_platform: false }],
-  ["ten-beta", { tenant_id: "ten-beta", slug: "beta", name: "贝塔传媒", status: "active", created_at: "2026-07-01T14:00:00Z", owner_email: "ops@beta.test", plan_code: null, subscription: null, task_count: 3, is_platform: false }],
-  ["ten-gamma", { tenant_id: "ten-gamma", slug: "gamma", name: "伽马食品", status: "suspended", created_at: "2026-05-20T11:00:00Z", owner_email: "boss@gamma.test", plan_code: "basic", subscription: { id: "sub-gamma", total: 5000, used: 4200, reserved: 600, remaining: 200 }, task_count: 17, is_platform: false }]
-]);
+// 🔴 种子是**工厂**，不是常量 —— 每次调用现造一份全新嵌套字面量。
+// 理由（这里踩过就回不来）：subscription 是**就地改写**的（credits handler 直接 `sub.total = newTotal`）。
+// 若照「常量种子 + 浅拷贝」写，两次 reset 会共用同一个 subscription 对象 —— 看着重置了，其实没有。
+// 工厂让「重置后 = 首次加载」在结构上成立，不靠拷贝深度是否够这种需要人去核对的前提。
+const adminTenantSeeds = (): MockAdminTenant[] => [
+  { tenant_id: "ten-mock", slug: "huading", name: "华鼎（mock）", status: "active", created_at: "2026-01-01T08:00:00Z", owner_email: "qa@huading.test", plan_code: "huading", subscription: { id: "sub-mock", total: 1000, used: 120, reserved: 36, remaining: 844 }, task_count: 96, is_platform: true },
+  { tenant_id: "ten-acme", slug: "acme", name: "Acme 电商", status: "active", created_at: "2026-06-02T09:30:00Z", owner_email: "owner@acme.test", plan_code: "huading", subscription: { id: "sub-acme", total: 20000, used: 5000, reserved: 1000, remaining: 14000 }, task_count: 42, is_platform: false },
+  { tenant_id: "ten-beta", slug: "beta", name: "贝塔传媒", status: "active", created_at: "2026-07-01T14:00:00Z", owner_email: "ops@beta.test", plan_code: null, subscription: null, task_count: 3, is_platform: false },
+  { tenant_id: "ten-gamma", slug: "gamma", name: "伽马食品", status: "suspended", created_at: "2026-05-20T11:00:00Z", owner_email: "boss@gamma.test", plan_code: "basic", subscription: { id: "sub-gamma", total: 5000, used: 4200, reserved: 600, remaining: 200 }, task_count: 17, is_platform: false }
+];
+const adminTenants = new Map<string, MockAdminTenant>();
 interface MockAdminTask {
   id: string; task_family: "video" | "reverse_prompt" | "ecom_replicate"; tenant_id: string; tenant_slug: string; tenant_name: string;
   mode: string; label: string | null; video_mode: string | null;
@@ -659,14 +664,16 @@ interface MockAdminTask {
   error_code: string | null; error_message: string | null;
   created_at: string; started_at: string | null; finished_at: string | null; duration_seconds: number | null; retryable: boolean;
 }
-const adminTasks = new Map<string, MockAdminTask>([
-  ["job-f1", { id: "job-f1", task_family: "video", tenant_id: "ten-acme", tenant_slug: "acme", tenant_name: "Acme 电商", mode: "avatar", label: "口播视频", video_mode: "avatar_talk", status: "failed", progress: 35, error_code: "PROVIDER_TIMEOUT", error_message: "上游生成超时，已释放预留额度", created_at: "2026-07-12T10:00:00Z", started_at: "2026-07-12T10:01:00Z", finished_at: "2026-07-12T10:06:00Z", duration_seconds: 300, retryable: true }],
-  ["job-f2", { id: "job-f2", task_family: "ecom_replicate", tenant_id: "ten-gamma", tenant_slug: "gamma", tenant_name: "伽马食品", mode: "ecom_replicate", label: "详情图复刻", video_mode: null, status: "failed", progress: 0, error_code: "tenant_quota_exceeded", error_message: "额度不足，任务未启动", created_at: "2026-07-12T11:00:00Z", started_at: null, finished_at: null, duration_seconds: null, retryable: true }],
-  ["job-f3", { id: "job-f3", task_family: "reverse_prompt", tenant_id: "ten-beta", tenant_slug: "beta", tenant_name: "贝塔传媒", mode: "reverse_prompt", label: "视频反推", video_mode: null, status: "failed", progress: 10, error_code: "PROVIDER_ERROR", error_message: "上游分析失败，预留已释放", created_at: "2026-07-12T13:00:00Z", started_at: "2026-07-12T13:01:00Z", finished_at: "2026-07-12T13:02:00Z", duration_seconds: 60, retryable: true }],
-  ["job-r1", { id: "job-r1", task_family: "video", tenant_id: "ten-acme", tenant_slug: "acme", tenant_name: "Acme 电商", mode: "avatar", label: "口播视频", video_mode: "avatar_talk", status: "running", progress: 60, error_code: null, error_message: null, created_at: "2026-07-13T08:00:00Z", started_at: "2026-07-13T08:01:00Z", finished_at: null, duration_seconds: null, retryable: false }],
-  ["job-d1", { id: "job-d1", task_family: "video", tenant_id: "ten-beta", tenant_slug: "beta", tenant_name: "贝塔传媒", mode: "avatar", label: "电商带货", video_mode: "seedance_i2v", status: "succeeded", progress: 100, error_code: null, error_message: null, created_at: "2026-07-11T09:00:00Z", started_at: "2026-07-11T09:00:30Z", finished_at: "2026-07-11T09:02:00Z", duration_seconds: 90, retryable: false }],
-  ["job-q1", { id: "job-q1", task_family: "video", tenant_id: "ten-acme", tenant_slug: "acme", tenant_name: "Acme 电商", mode: "avatar", label: "口播视频", video_mode: "avatar_talk", status: "queued", progress: 0, error_code: null, error_message: null, created_at: "2026-07-13T09:00:00Z", started_at: null, finished_at: null, duration_seconds: null, retryable: false }]
-]);
+// 同上，工厂：retry handler 就地改写 status/progress/retryable。
+const adminTaskSeeds = (): MockAdminTask[] => [
+  { id: "job-f1", task_family: "video", tenant_id: "ten-acme", tenant_slug: "acme", tenant_name: "Acme 电商", mode: "avatar", label: "口播视频", video_mode: "avatar_talk", status: "failed", progress: 35, error_code: "PROVIDER_TIMEOUT", error_message: "上游生成超时，已释放预留额度", created_at: "2026-07-12T10:00:00Z", started_at: "2026-07-12T10:01:00Z", finished_at: "2026-07-12T10:06:00Z", duration_seconds: 300, retryable: true },
+  { id: "job-f2", task_family: "ecom_replicate", tenant_id: "ten-gamma", tenant_slug: "gamma", tenant_name: "伽马食品", mode: "ecom_replicate", label: "详情图复刻", video_mode: null, status: "failed", progress: 0, error_code: "tenant_quota_exceeded", error_message: "额度不足，任务未启动", created_at: "2026-07-12T11:00:00Z", started_at: null, finished_at: null, duration_seconds: null, retryable: true },
+  { id: "job-f3", task_family: "reverse_prompt", tenant_id: "ten-beta", tenant_slug: "beta", tenant_name: "贝塔传媒", mode: "reverse_prompt", label: "视频反推", video_mode: null, status: "failed", progress: 10, error_code: "PROVIDER_ERROR", error_message: "上游分析失败，预留已释放", created_at: "2026-07-12T13:00:00Z", started_at: "2026-07-12T13:01:00Z", finished_at: "2026-07-12T13:02:00Z", duration_seconds: 60, retryable: true },
+  { id: "job-r1", task_family: "video", tenant_id: "ten-acme", tenant_slug: "acme", tenant_name: "Acme 电商", mode: "avatar", label: "口播视频", video_mode: "avatar_talk", status: "running", progress: 60, error_code: null, error_message: null, created_at: "2026-07-13T08:00:00Z", started_at: "2026-07-13T08:01:00Z", finished_at: null, duration_seconds: null, retryable: false },
+  { id: "job-d1", task_family: "video", tenant_id: "ten-beta", tenant_slug: "beta", tenant_name: "贝塔传媒", mode: "avatar", label: "电商带货", video_mode: "seedance_i2v", status: "succeeded", progress: 100, error_code: null, error_message: null, created_at: "2026-07-11T09:00:00Z", started_at: "2026-07-11T09:00:30Z", finished_at: "2026-07-11T09:02:00Z", duration_seconds: 90, retryable: false },
+  { id: "job-q1", task_family: "video", tenant_id: "ten-acme", tenant_slug: "acme", tenant_name: "Acme 电商", mode: "avatar", label: "口播视频", video_mode: "avatar_talk", status: "queued", progress: 0, error_code: null, error_message: null, created_at: "2026-07-13T09:00:00Z", started_at: null, finished_at: null, duration_seconds: null, retryable: false }
+];
+const adminTasks = new Map<string, MockAdminTask>();
 // 用量流水（6 条，> mock 导出上限 3 → 无筛选导出走 422；按租户筛后 ≤3 → 200 CSV。字段逐字 BE AdminUsageItem）。
 const ADMIN_USAGE = [
   { id: "u-1", created_at: "2026-07-10T10:00:00Z", tenant_id: "ten-acme", tenant_slug: "acme", tenant_name: "Acme 电商", capability: "video_generate", provider: "seedance", model: "i2v-v1", quantity: 1, unit: "视频", credits: 300, cost_cents: 4200, status: "settled", video_task_id: "job-f1" },
@@ -683,12 +690,14 @@ interface MockVoiceSlot {
   tenant_id: string | null; tenant_slug: string | null; tenant_name: string | null;
   occupied: boolean; brand_voice_id: string | null; brand_voice_name: string | null; brand_voice_status: string | null;
 }
-const voiceSlots: MockVoiceSlot[] = [
+// 同上，工厂：分配 handler 往这个数组 push 新槽位。
+const voiceSlotSeeds = (): MockVoiceSlot[] => [
   { speaker_id: "S_pool_001", scope: "platform", sources: ["env"], tenant_id: "ten-acme", tenant_slug: "acme", tenant_name: "Acme 电商", occupied: true, brand_voice_id: "bv-ready-1", brand_voice_name: "我的主播音", brand_voice_status: "ready" },
   { speaker_id: "S_pool_002", scope: "platform", sources: ["env"], tenant_id: null, tenant_slug: null, tenant_name: null, occupied: false, brand_voice_id: null, brand_voice_name: null, brand_voice_status: null },
   { speaker_id: "S_pool_003", scope: "platform", sources: ["env"], tenant_id: null, tenant_slug: null, tenant_name: null, occupied: false, brand_voice_id: null, brand_voice_name: null, brand_voice_status: null },
   { speaker_id: "S_acme_001", scope: "tenant", sources: ["tenant_config"], tenant_id: "ten-acme", tenant_slug: "acme", tenant_name: "Acme 电商", occupied: true, brand_voice_id: "bv-ready-1", brand_voice_name: "我的主播音", brand_voice_status: "ready" }
 ];
+const voiceSlots: MockVoiceSlot[] = [];
 // 审计日志（只写不改不删；字段逐字 BE AdminAuditLogItem）。时间戳用序号合成（确定性）。
 let auditSeq = 1;
 interface MockAuditRow {
@@ -696,9 +705,40 @@ interface MockAuditRow {
   target_tenant_id: string | null; target_tenant_slug: string | null; target_id: string | null;
   before: Record<string, unknown> | null; after: Record<string, unknown> | null; reason: string | null; created_at: string;
 }
-const adminAudit: MockAuditRow[] = [
+const adminAuditSeeds = (): MockAuditRow[] => [
   { id: "audit-0", actor_user_id: "u-mock", actor_email: "qa@huading.test", actor_tenant_id: "ten-mock", action: "voice_slot_assign", target_tenant_id: "ten-acme", target_tenant_slug: "acme", target_id: null, before: { speaker_ids: [] }, after: { speaker_ids: ["S_acme_001"] }, reason: "首批客户开通", created_at: "2026-07-13T09:00:00Z" }
 ];
+const adminAudit: MockAuditRow[] = [];
+
+/**
+ * 🔴 **admin 后台 mock store 重置** —— 与反推域的 `resetReverseJobs()` 同构（PR #183 FIX4 的先例）：
+ * 每条测试从**同一份 seed** 出发，顺序依赖在结构上不可能存在。
+ *
+ * 这里原先的处置是在 admin-console.test.ts 顶上写「只读用例在前、写操作在后（顺序即契约）」，并把
+ * 「顺序即契约」写进了 describe 的名字 —— **那不是契约，是把 bug 命名成了 feature**。顺序从来不是契约，
+ * 它只是状态泄漏的补偿动作；`--sequence.shuffle` 一开就散（多 seed 实测：同一份代码，红 1~6 条不等）。
+ *
+ * ⚠️ 同 `resetReverseJobs()` 的告警：vitest.setup.ts 的 `afterEach(() => server.resetHandlers())` **不管这个** ——
+ * 它只重置 handler 覆盖、不碰模块级数据。名字听着像全清，实际不是。
+ *
+ * 覆盖 admin 段全部 5 个可变模块级状态：adminTenants / adminTasks / voiceSlots / adminAudit / auditSeq。
+ * （`ADMIN_USAGE` 是 as const、handler 只 filter/spread 不改 → 不需要重置，也就不在此列。）
+ *
+ * 调用方：碰 admin MSW 态的测试文件的 `beforeEach`。**没有全局挂**（沿用反推域的判断：全局重置 =
+ * 变相给全仓开 shuffle，会掀出别的域的既有依赖，那是另一个包的活）。
+ */
+export const resetAdminConsole = () => {
+  adminTenants.clear();
+  adminTenantSeeds().forEach((t) => adminTenants.set(t.tenant_id, t));
+  adminTasks.clear();
+  adminTaskSeeds().forEach((t) => adminTasks.set(t.id, t));
+  voiceSlots.length = 0;
+  voiceSlots.push(...voiceSlotSeeds());
+  adminAudit.length = 0;
+  adminAudit.push(...adminAuditSeeds());
+  auditSeq = 1; // → 每条测试里写出的审计 id / created_at 从同一起点递增，确定可预期
+};
+resetAdminConsole();
 function pushAudit(action: string, target: MockAdminTenant, targetId: string | null, before: Record<string, unknown> | null, after: Record<string, unknown> | null, reason: string | null) {
   auditSeq += 1;
   adminAudit.unshift({

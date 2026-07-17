@@ -14,11 +14,17 @@ import {
   retryAdminTask
 } from "@/lib/api/admin-console";
 import { ApiError, apiUrl, authHeaders } from "@/lib/api/client";
+import { resetAdminConsole } from "@/mocks/handlers";
 
 // 管理员后台 mock 契约承重（ADMIN-CONSOLE-UI-0001 · FIX1 对齐真实 BE #165）：真打 MSW（不 mock adapter/hooks），
 // 断言全确定值（toBe/toEqual）——禁止量级/范围断言承担安全职责。分页 page/page_size、路径 /audit-logs、
 // PATCH plan/status、subscription 快照、槽位合一列表、重试回执三态（无 estimate_basis）逐字段对齐真契约。
-// ⚠️ 本文件 mock 数据为模块级内存态：只读用例在前、写操作在后（顺序即契约）。
+//
+// 🔴 ADMIN-MOCK-STORE-RESET-0001：每条测试前**重置 admin mock store**（照反推域 resetReverseJobs() 的先例）。
+// 上一版这里写的是「⚠️ 本文件 mock 数据为模块级内存态：只读用例在前、写操作在后（顺序即契约）」——
+// 那不是契约，是把状态泄漏的补偿动作命名成了规矩。`--sequence.shuffle` 一开就散：同一份代码，换 seed
+// 红 1~6 条不等（实测 seed 3 → 5 条、seed 8 → 6 条、seed 1/2 → 0 条）——「红几条」本身就不是个稳定的数。
+// 重置之后每条测试从同一份 seed 出发，顺序无关。
 
 const LIST = { sort: "created_at" as const, order: "desc" as const, page: 1, page_size: 20 };
 
@@ -27,7 +33,10 @@ function asNonPlatform() {
   localStorage.setItem("hd_mock_plan", "free");
 }
 
-beforeEach(() => localStorage.clear());
+beforeEach(() => {
+  localStorage.clear();
+  resetAdminConsole();
+});
 afterEach(() => localStorage.clear());
 
 describe("门禁：非平台（新注册态）→ 全端点 403 PLATFORM_ADMIN_REQUIRED（与 /me admin_console 同源）", () => {
@@ -155,7 +164,7 @@ describe("平台账号（默认）· 读端点确定值（真契约字段）", (
   });
 });
 
-describe("平台账号 · 写操作（顺序即契约：写会改内存态）", () => {
+describe("平台账号 · 写端点确定值（响应 + 审计，真契约字段）", () => {
   it("余额 +5000（acme）：响应 {tenant_id, delta, subscription} 确定值；审计 before/after = 订阅快照全量 dump + 理由", async () => {
     const res = await adjustTenantCredits("ten-acme", { delta: 5000, reason: "线下打款充值" });
     expect(res).toEqual({
@@ -230,7 +239,9 @@ describe("平台账号 · 写操作（顺序即契约：写会改内存态）", 
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).status).toBe(422);
     const detail = await fetchAdminTenantDetail("ten-acme");
-    expect(detail.tenant.subscription?.total).toBe(25000); // 上一用例 +5000 后的值，本次被拒未动
+    // 20000 = acme 的 seed 值（重置前这里写的是 25000「上一用例 +5000 后的值」——它把「上一条测试跑过了」
+    // 当前提，等于赌座位表）。改成 seed 值不是放宽：被拒必须分文未动，真扣了就是 20100，照样红。
+    expect(detail.tenant.subscription?.total).toBe(20000);
   });
 
   it("音色槽位分配幂等（POST /tenants/{id}/voice-slots）：首次 changed:true，重复 changed:false；审计**无条件**各落一条（镜像 BE）", async () => {
