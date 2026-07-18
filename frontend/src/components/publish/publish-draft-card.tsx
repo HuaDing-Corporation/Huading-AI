@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import { Check, Copy, Download, ExternalLink } from "lucide-react";
 
+import { copyToClipboard } from "@/lib/clipboard";
 import { errorText } from "@/lib/api/error-text";
 import { useMarkPublished } from "@/lib/api/hooks";
 import type { PublishDraftItem } from "@/lib/api/types";
@@ -44,14 +45,16 @@ export function PublishDraftCard({
     if (copyingRef.current) return;
     copyingRef.current = true;
     setError(null);
-    try {
-      await navigator.clipboard?.writeText(composed);
+    // 🔴 CLIPBOARD-TRUTH-0001：成功态由 copyToClipboard 的返回布尔驱动。旧写法的 `?.` 在非安全上下文
+    // 短路成 undefined、await 不抛 → 照样 setCopied(true) → 谎报。现在「缺 API」与「writeText 抛错」
+    // 归一成同一条失败路径（本组件本就有 copyFailed 提示手动复制 —— 比静默降级更贴合发布场景）。
+    if (await copyToClipboard(composed)) {
       setCopied(true);
       window.setTimeout(() => {
         copyingRef.current = false;
         setCopied(false);
       }, 1500);
-    } catch {
+    } else {
       copyingRef.current = false;
       setError(copy.publish.copyFailed);
     }

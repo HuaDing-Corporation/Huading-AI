@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Copy, RefreshCw, Sparkles } from "lucide-react";
 
+import { copyToClipboard } from "@/lib/clipboard";
 import { errorText } from "@/lib/api/error-text";
 import { useGenerateTitles, useGenerateTopics, useRewriteCopy, useSaveCopyDraft } from "@/lib/api/hooks";
 import type { CopyMode, CopyPlatform, CopyRewriteRequest, CopyRewriteResult } from "@/lib/api/types";
@@ -85,13 +86,13 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
     !sourceText.trim() || generating || (mode === "custom" && !instruction.trim());
 
   const copyText = async (text: string) => {
-    if (!text) return;
-    try {
-      await navigator.clipboard?.writeText(text);
+    // 🔴 CLIPBOARD-TRUTH-0001：只在**真的写进剪贴板**时才闪「已复制」。
+    // 旧写法 `await navigator.clipboard?.writeText(text)` 的 `?.` 在非安全上下文短路成 undefined、
+    // await 不抛 → 照样 setCopiedFlash(true) → 谎报。现在成功态由 copyToClipboard 的返回布尔驱动。
+    // 本组件无复制失败的 UI（不同于 publish 的 copyFailed），失败即静默降级（用户可手动选中复制）。
+    if (await copyToClipboard(text)) {
       setCopiedFlash(true);
       window.setTimeout(() => setCopiedFlash(false), 1500);
-    } catch {
-      // 复制失败静默降级（用户可手动选择文本）
     }
   };
 

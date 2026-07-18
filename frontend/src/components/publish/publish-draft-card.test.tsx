@@ -78,6 +78,19 @@ describe("PublishDraftCard (发布草稿卡)", () => {
     expect(await screen.findByText(copy.publish.copyFailed)).toBeInTheDocument();
   });
 
+  // 🔴 CLIPBOARD-TRUTH-0001 补网：非安全上下文（navigator.clipboard 缺失）→ **不谎报**「已复制」。
+  // 旧写法的 `?.` 短路使这条路径谎报（界面翻「已复制」而剪贴板空）。本组件有 copyFailed 提示 →
+  // 缺 API 与 writeText 抛错归一到同一失败路径：显示「复制失败，请手动选择文案」，且**不**显示「已复制」。
+  // ⚠️ 放行微任务后再断言（同 copyable-block.test.tsx:54）—— 否则同步负断言好坏版本都绿 = 假测试。
+  it("🔴 非安全上下文（无 clipboard）→ 显示复制失败、不谎报「已复制」", async () => {
+    Object.assign(navigator, { clipboard: undefined });
+    render(<PublishDraftCard recordId={RECORD_ID} item={item} platformName="抖音" />);
+    fireEvent.click(screen.getByRole("button", { name: copy.publish.copyText }));
+    expect(await screen.findByText(copy.publish.copyFailed)).toBeInTheDocument();
+    // 负断言（放行微任务后）：坏实现会在此刻已翻「已复制」。
+    expect(screen.queryByText(copy.publish.copied)).not.toBeInTheDocument();
+  });
+
   it("标记失败：mutateAsync 拒绝 → role=alert，按钮不转已发布", async () => {
     markMock.mutateAsync.mockRejectedValue(new Error("boom"));
     render(<PublishDraftCard recordId={RECORD_ID} item={item} platformName="抖音" />);

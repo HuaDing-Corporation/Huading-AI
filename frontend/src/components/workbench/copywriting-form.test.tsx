@@ -14,6 +14,7 @@ vi.mock("@/lib/api/hooks", () => ({
 }));
 
 import { CopywritingForm } from "./copywriting-form";
+import { copy } from "@/lib/copy";
 
 const SOURCE = /粘贴你有权使用/;
 
@@ -156,6 +157,22 @@ describe("CopywritingForm (文案仿写 + 标题/话题)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /复制/ }));
     await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalledWith("改写后的文案"));
+  });
+
+  // 🔴 CLIPBOARD-TRUTH-0001 补网：非安全上下文（navigator.clipboard 缺失）→ 点复制**不谎报**「已复制」。
+  // ⚠️ 必须放行一次微任务再断言（同 copyable-block.test.tsx:54）：坏实现的 setCopiedFlash(true) 落在
+  // await 之后的微任务里，同步负断言会先跑完 → 好坏版本都绿 = 假测试（这正是本包在修的那种）。
+  // 变异门：把 copyToClipboard 退化成 `await navigator.clipboard?.writeText(x); return true` → 本条转红。
+  it("🔴 非安全上下文（无 clipboard）→ 点复制不谎报「已复制」", async () => {
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true, writable: true });
+    render(<CopywritingForm />);
+    typeSource("原文");
+    fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
+    await screen.findByDisplayValue("改写后的文案");
+
+    fireEvent.click(screen.getByRole("button", { name: /复制/ }));
+    await new Promise((r) => setTimeout(r, 0)); // 放行微任务：坏实现在这里置「已复制」
+    expect(screen.queryByText(copy.workbench.copyCopied)).not.toBeInTheDocument();
   });
 
   it("标题端点失败时降级不渲染标题区，但文案与话题仍出", async () => {
