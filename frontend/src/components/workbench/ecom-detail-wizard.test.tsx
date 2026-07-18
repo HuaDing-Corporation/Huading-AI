@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { copy } from "@/lib/copy";
@@ -163,11 +163,35 @@ async function driveToPlan(mode: "main" | "detail" = "main") {
 
 async function confirmCharge() {
   fireEvent.click(screen.getByRole("button", { name: copy.workbench.ecomPlanConfirm }));
-  fireEvent.click(await screen.findByRole("button", { name: copy.workbench.ecomChargeConfirm }));
+  const chargeBtn = await screen.findByRole("button", { name: copy.workbench.ecomChargeConfirm });
+  // 扣费点击触发 onConfirmCharge：其 confirmEcomReplicate().then 里的 5 个 setState（setJob/setPollError/
+  // setChargeOpen/setStep/setConfirming）在同步 click 返回后、下一个 findBy 之前的**微任务间隙**落地——
+  // 这正是 45 条 act warning 的唯一来源（fake timer 下轮询已由 shim 驱动、不再逃逸，独此一处在 act 外）。
+  // 用 async act 包裹点击，把这波 confirm 后置状态更新收进 act 内。断言仍由各测试随后的 findBy/waitFor 承担。
+  await act(async () => {
+    fireEvent.click(chargeBtn);
+  });
 }
 
-beforeEach(() => vi.clearAllMocks());
-afterEach(() => vi.clearAllMocks());
+// ECOM-WIZARD-TEST-CLEANUP-0001 · fake timer 治 45 条 act warning + 19.5s（6 个真实 1500ms 轮询 timer）。
+// 房规坑（tasks-context.test.tsx:143「waitFor would deadlock under fake timers」）：RTL 的
+// jestFakeTimersAreEnabled() 只在 `typeof jest !== 'undefined'` 时才认得 fake timer——vitest 无全局 jest，
+// 故默认 findBy/waitFor 在 fake timer 下死锁。补一个最小 shim（vitest fake setTimeout 已带 `clock` 特征，
+// 只差 jest 这个门），让 RTL 走「fake timer 分支」：它每轮把 `jest.advanceTimersByTime(50)` 包在
+// @testing-library/react 的 unstable_advanceTimersWrapper=act(...) 里推进——1500ms 轮询 setTimeout 因此在
+// **act 内**触发，setJob 不再逃逸 act（warning 归零），且是 fake 时间（无真实等待，提速）。RTL 只调用
+// advanceTimersByTime 这一个 jest 方法（interval=50 与 0），故 shim 仅需它。被测断言/findBy 全部原样保留。
+const rtlFakeTimerShim = { advanceTimersByTime: (ms: number) => vi.advanceTimersByTime(ms) };
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.useFakeTimers();
+  (globalThis as unknown as { jest?: typeof rtlFakeTimerShim }).jest = rtlFakeTimerShim;
+});
+afterEach(() => {
+  delete (globalThis as unknown as { jest?: typeof rtlFakeTimerShim }).jest;
+  vi.useRealTimers();
+  vi.clearAllMocks();
+});
 
 describe("EcomDetailWizard (电商详情图向导 · FIX1 真契约)", () => {
   it("上传校验：模式必选 → 缺参考图 → 缺商品图 → 缺信息 → 缺卖点，逐级拦截且不发起 plan", () => {
