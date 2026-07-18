@@ -24,8 +24,9 @@ export function formatAuditValue(value: unknown): string {
 /**
  * 一行 diff 叶子：`key` 为点号路径；`before`/`after` 为已格式化串（缺席即该侧无此键——只显另一侧、不画箭头）。
  * `changed`（ADMIN-AUDIT-DIFF-NOISE-0001）：本键是否发生变化——**单边键**（只在 before 或只在 after，如首次分配
- * 槽位）恒为 true；两边都有则比**格式化后字符串**（审计员看到的就是格式化值，「未变」= 显示一致；BE 每键类型稳定
- * 无 raw/format 歧义）。组件据此把变化键默认展示、未变键折叠（信息只折叠不删）。
+ * 槽位）恒为 true；两边都有则**深比较原始叶子值**（#172 FIX1：判定归判定、展示归展示——用格式化后字符串判
+ * `changed` 会把 `1→"1"`、`""/[]/{}→null` 都折成「显示一致」而误判「未变」，抹掉真实变更；实现见 deepEqualLeaf）。
+ * 组件据此把变化键默认展示、未变键折叠（信息只折叠不删）。
  */
 export interface AuditDiffLeaf {
   key: string;

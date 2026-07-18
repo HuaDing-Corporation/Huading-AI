@@ -11,7 +11,12 @@ export interface ConfirmDialogProps {
   title: string;
   message: ReactNode;
   confirmLabel: string;
-  /** 危险操作(硬删不可恢复)→ 红色确认按钮；否则金色主按钮(如软删可恢复)。 */
+  /** 危险操作 → 红色确认按钮；否则金色主按钮。
+   *  判据（DANGER-SEMANTICS-SIGNPOSTS-0001 · FIX1 · 方案 A 收准版）= 满足两支之一即 danger：
+   *  ① 面向用户**不可恢复的删除/破坏性**操作（硬删，或软删但用户侧无恢复入口）；
+   *  ② **高影响的负向/减损**操作（如扣减租户额度、停用租户——即便技术上可逆）。
+   *  ⚠️ 判据**不是「能否撤销」**：扣减/停用可逆却仍 danger（属②负向减损），付费生成不可逆却用金色主按钮
+   *  （正常付费、既非破坏也非减损）——「可否撤销」既非必要也非充分条件。 */
   danger?: boolean;
   /** 防连点：请求中禁用确认+取消。 */
   submitting?: boolean;

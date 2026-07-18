@@ -270,12 +270,14 @@ export function ReverseHistoryList({ onApplyPrefill }: { onApplyPrefill?: (prefi
 
       {/* 删除确认。FIX2：文案讲**用户可观察的后果**，不讲 BE 实现 —— BE 的软删是运维保险（不碰媒体、出事能救），
           但用户侧列表过滤已删 + 详情 404 + **没有恢复入口** → 「可恢复」是骗人；而「永久删除」又谎报了实现
-          （数据其实都在）。故用 reverseDeleteConfirmMsg「将从历史移除，无法撤销。」 */}
+          （数据其实都在）。故用 copy.history.deleteConfirmNoUndo「将从历史移除，无法撤销。」
+          danger（DANGER-SEMANTICS-SIGNPOSTS-0001）：软删但无恢复入口 = **不可恢复的删除**（方案 A ①支）→ 危险样式，与 BE 是否硬删无关。 */}
       <ConfirmDialog
         open={!!confirmDelete}
         title={copy.history.reverseDeleteConfirmTitle}
         message={copy.history.deleteConfirmNoUndo}
         confirmLabel={copy.history.deleteConfirmBtn}
+        danger
         submitting={del.isPending}
         error={actionError}
         onConfirm={() => void onConfirmDelete()}

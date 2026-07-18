@@ -28,7 +28,9 @@ function pills(keyPrefix: string, items: string[] | null | undefined) {
  *  「可恢复」是**把 BE 实现当成对用户的承诺**。BE 确实是软删（services/copy.py:376-381 只置 deleted_at），
  *  但那是**运维保险**：用户侧 list_drafts/get_draft 都过滤 deleted_at（:352 / :367）→ 列表消失 + 详情 404，
  *  且**全仓零恢复入口**（restore/undelete/deleted_at=None 一处都搜不到）→ 用户拿不回来。说「可恢复」是骗人。
- *  确认框保持**非危险样式**仍然对（它不是硬删、媒体没碰），但**文案必须只讲用户能观察到的后果**。 */
+ *  🔴 DANGER-SEMANTICS-SIGNPOSTS-0001：确认框**现在用危险样式**（原写「保持非危险样式仍然对，因为不是硬删」——
+ *  那是旧判据。方案 A 收准版判据①支＝**不可恢复的删除**：软删但零恢复入口、用户拿不回来 → danger；与 BE
+ *  是否硬删无关）。文案仍只讲用户能观察到的后果。 */
 export function CopyDraftList() {
   const query = useCopyDrafts();
   const deleteDraft = useDeleteCopyDraft();
@@ -136,12 +138,15 @@ export function CopyDraftList() {
         </>
       )}
 
-      {/* 删除单条确认：非危险样式（非硬删），但文案只讲用户可观察的后果 —— 见 deleteConfirmNoUndo */}
+      {/* 删除单条确认：软删（BE 只置 deleted_at），但用户侧列表消失 + 无恢复入口 = **不可恢复的删除**
+          → danger（方案 A ①支；与 BE 是否硬删无关。#186 把文案改成用户视角，这里把样式也对齐）。
+          文案见 deleteConfirmNoUndo。 */}
       <ConfirmDialog
         open={!!confirmDelete}
         title={copy.history.deleteConfirmTitle}
         message={copy.history.deleteConfirmNoUndo}
         confirmLabel={copy.history.deleteConfirmBtn}
+        danger
         submitting={deleteDraft.isPending}
         error={actionError}
         onConfirm={() => void onConfirmDelete()}
@@ -150,12 +155,14 @@ export function CopyDraftList() {
           setActionError(null);
         }}
       />
-      {/* 清空确认：BE clear_drafts 同样只置 deleted_at、同样无恢复入口 —— 见 clearDraftsConfirmNoUndo */}
+      {/* 清空确认：BE clear_drafts 同样只置 deleted_at、同样无恢复入口 = **不可恢复的删除** → danger（方案 A ①支）。
+          文案见 clearDraftsConfirmNoUndo。 */}
       <ConfirmDialog
         open={confirmClear}
         title={copy.history.clearConfirmTitle}
         message={copy.history.clearDraftsConfirmNoUndo}
         confirmLabel={copy.history.clearConfirmBtn}
+        danger
         submitting={clearDrafts.isPending}
         error={actionError}
         onConfirm={() => void onConfirmClear()}
