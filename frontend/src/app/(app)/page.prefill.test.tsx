@@ -23,6 +23,8 @@ vi.mock("@/lib/videos/tasks-context", () => ({
 }));
 // 占位与 prefill 链路无关的重组件（避免其 hook 依赖；prefill 编排不经它们）。
 vi.mock("@/components/layout/top-bar", () => ({ TopBar: () => <div data-testid="topbar" /> }));
+// LANDING-CONTACT-UI-0001：横幅有专门测试（contact-flow.test.tsx），page 级与 TopBar 同款 mock 掉。
+vi.mock("@/components/contact/welcome-contact-banner", () => ({ WelcomeContactBanner: () => null }));
 vi.mock("@/components/layout/sidebar", () => ({ Sidebar: () => <div data-testid="sidebar" /> }));
 vi.mock("@/components/tasks/task-list", () => ({ TaskList: () => <div data-testid="tasklist" /> }));
 vi.mock("@/components/tasks/generation-history", () => ({ GenerationHistory: () => <div data-testid="history" /> }));

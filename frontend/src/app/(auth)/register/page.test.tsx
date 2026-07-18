@@ -57,7 +57,7 @@ describe("RegisterPage (注册)", () => {
 
   // 边界：正好 200 字合法（不拦截，正常提交）。
   it("姓名 200 字（=上界）→ 合法，正常调 register", async () => {
-    register.mockResolvedValue(undefined);
+    register.mockResolvedValue({ tenantId: "t1", userId: "u1" });
     (auth.useAuth as Mock).mockReturnValue({ session: null, ready: true, register });
     render(<RegisterPage />);
     fill({ slug: "huading", team: "华鼎", email: "a@b.com", password: "pw123456", full: "名".repeat(200) });
@@ -67,7 +67,7 @@ describe("RegisterPage (注册)", () => {
   });
 
   it("合法提交 → register(五字段，含 fullName) + 进控制台 /", async () => {
-    register.mockResolvedValue(undefined);
+    register.mockResolvedValue({ tenantId: "t1", userId: "u1" });
     (auth.useAuth as Mock).mockReturnValue({ session: null, ready: true, register });
     render(<RegisterPage />);
     fill({ slug: "huading", team: "华鼎科技", email: "a@b.com", password: "pw123456", full: "陈大文" });
@@ -84,8 +84,32 @@ describe("RegisterPage (注册)", () => {
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/"));
   });
 
+  // LANDING-CONTACT-UI-0001 · FIX1：注册成功 → 按**注册者身份**（register 返回的 tenantId+userId）
+  // 落 localStorage 标记。跳转行为**原样**（上一条钉着 replace("/")）—— 提示由控制台侧读标记显示，注册页不拦。
+  it("🔴 注册成功 → 按身份落欢迎横幅标记（hd:welcome-contact:t1:u1）；注册失败 → 不落", async () => {
+    localStorage.clear();
+    register.mockResolvedValue({ tenantId: "t1", userId: "u1" });
+    (auth.useAuth as Mock).mockReturnValue({ session: null, ready: true, register });
+    const ok = render(<RegisterPage />);
+    fill({ slug: "huading", team: "华鼎", email: "a@b.com", password: "pw123456" });
+    fireEvent.click(screen.getByRole("button", { name: copy.auth.registerSubmit }));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/"));
+    // 🔴 按 register 返回的身份落标记，值为 "1"（不再是 email —— email 不是身份，见 FIX1）。
+    expect(localStorage.getItem("hd:welcome-contact:t1:u1")).toBe("1");
+    ok.unmount();
+
+    // 失败分支：register 抛错 → 不落标记（没注册成功就别欢迎人家）
+    localStorage.clear();
+    register.mockRejectedValue(new ApiError("boom", "err", 500));
+    render(<RegisterPage />);
+    fill({ slug: "huading2", team: "华鼎", email: "a@b.com", password: "pw123456" });
+    fireEvent.click(screen.getByRole("button", { name: copy.auth.registerSubmit }));
+    expect(await screen.findByText(copy.auth.errRegisterFailed)).toBeInTheDocument();
+    expect(localStorage.getItem("hd:welcome-contact:t1:u1")).toBeNull();
+  });
+
   it("姓名留空 → fullName 传 undefined（选填）", async () => {
-    register.mockResolvedValue(undefined);
+    register.mockResolvedValue({ tenantId: "t1", userId: "u1" });
     (auth.useAuth as Mock).mockReturnValue({ session: null, ready: true, register });
     render(<RegisterPage />);
     fill({ slug: "huading", team: "华鼎科技", email: "a@b.com", password: "pw123456" });

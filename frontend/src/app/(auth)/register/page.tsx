@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 
 import { ApiError } from "@/lib/api/client";
 import { useAuth } from "@/lib/auth/auth-context";
+import { markJustRegistered } from "@/lib/contact/welcome-flag";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -66,13 +67,16 @@ export default function RegisterPage() {
     setError(null);
     setSubmitting(true);
     try {
-      await register({
+      const { tenantId, userId } = await register({
         tenantSlug: slug.trim(),
         tenantName: teamName.trim(),
         email: email.trim(),
         password,
         fullName: fullName.trim() || undefined
       });
+      // LANDING-CONTACT-UI-0001 · FIX1：按**注册者身份**（tenantId+userId，非 email）落标记 →
+      // 工作台首屏显示「联系开通额度」欢迎横幅。跳转行为不动（#155：landToken → 直接进控制台）。
+      markJustRegistered(tenantId, userId);
       router.replace("/"); // 后端随注册发 token → 直接进控制台
     } catch (err) {
       setError(friendlyRegisterError(err));

@@ -58,6 +58,29 @@ test("登录新文案 + 互链；注册校验 / slug 占用 friendly / 成功进
   await page.waitForURL("http://localhost:3100/", { timeout: 30_000 });
   await expect(page.getByRole("button", { name: "生成视频" })).toBeVisible({ timeout: 20_000 });
 
+  // ④b LANDING-CONTACT-UI-0001 硬门：**走完注册流程后**欢迎横幅真的出现（不是"组件存在"）。
+  // 真实链路：注册页落 localStorage 标记 → replace("/") → 工作台读标记渲染横幅。
+  await expect(page.getByText("注册成功，欢迎加入华鼎！")).toBeVisible();
+  // 点「查看微信二维码」→ 弹窗含真实二维码图（静态资源真的部署在 /wechat-qr.png）
+  await page.getByRole("button", { name: "查看微信二维码" }).click();
+  const qr = page.getByRole("dialog").getByRole("img", { name: /客服微信二维码/ });
+  await expect(qr).toBeVisible();
+  // 图真的加载成功（naturalWidth>0 = 静态资源存在且可解码，不是 404 裂图）
+  await expect
+    .poll(async () => qr.evaluate((el) => (el as HTMLImageElement).naturalWidth), { timeout: 10_000 })
+    .toBeGreaterThan(0);
+  await page.getByRole("dialog").getByRole("button", { name: "关闭" }).click();
+  // 关闭横幅 → 消失；「能再次找到」：顶栏常驻「开通额度」仍能打开二维码弹窗
+  await page.getByRole("button", { name: "我知道了" }).click();
+  await expect(page.getByText("注册成功，欢迎加入华鼎！")).toHaveCount(0);
+  await page.getByRole("button", { name: "开通额度" }).click();
+  await expect(page.getByRole("dialog").getByRole("img", { name: /客服微信二维码/ })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "关闭" }).click();
+  // 刷新 → 横幅不再出现（主动关闭是持久的，不纠缠用户）
+  await page.reload();
+  await expect(page.getByRole("button", { name: "生成视频" })).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText("注册成功，欢迎加入华鼎！")).toHaveCount(0);
+
   // ⑤ 退出后：注册页「去登录」互链回登录页。
   await page.evaluate(() => window.localStorage.removeItem("huading.session"));
   await page.goto("/register");

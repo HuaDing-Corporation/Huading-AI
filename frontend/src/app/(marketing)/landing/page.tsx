@@ -2,6 +2,7 @@
 
 import { LandingTopbar } from "@/components/landing/landing-topbar";
 import {
+  ContactSection,
   CtaSection,
   LandingFooter,
   LandingHero,
@@ -35,6 +36,8 @@ export default function LandingPage() {
         <SampleWall />
         <StepsSection />
         <CtaSection />
+        {/* LANDING-CONTACT-UI-0001：CTA 说「注册后联系我们开通额度」→ 下一屏就是联系方式 */}
+        <ContactSection />
       </main>
       <LandingFooter />
     </div>

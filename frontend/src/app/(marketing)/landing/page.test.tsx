@@ -84,4 +84,23 @@ describe("LandingPage (/landing 落地页)", () => {
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
     expect(screen.getByRole("link", { name: copy.landing.skipToMain })).toHaveAttribute("href", "#landing-main");
   });
+
+  // ── LANDING-CONTACT-UI-0001：联系区（转化链路的断点接上了）─────────────────────
+  it("🔴 联系区：标题 + 二维码（alt 说用途）+ 双端引导；CTA 既有承诺文案一字未改", () => {
+    render(<LandingPage />);
+    // 联系区本体
+    expect(screen.getByRole("heading", { name: copy.contact.title })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: copy.contact.qrAlt })).toHaveAttribute("src", "/wechat-qr.png");
+    expect(screen.getByText(copy.contact.hintDesktop)).toBeInTheDocument();
+    expect(screen.getByText(copy.contact.hintMobile)).toBeInTheDocument();
+    // §三.3 的处置钉死：CTA 区那句用户看得见的承诺**没改**（改的是给它接上落点，不是改承诺）
+    expect(screen.getByText(copy.landing.ctaSub)).toBeInTheDocument();
+  });
+
+  it("页脚「联系」从占位变真锚点 → #contact（联系区就在页脚上方）", () => {
+    render(<LandingPage />);
+    expect(screen.getByRole("link", { name: copy.landing.footerContact })).toHaveAttribute("href", "#contact");
+    // 锚点目标真的存在（不是死链）
+    expect(document.getElementById("contact")).not.toBeNull();
+  });
 });

@@ -13,6 +13,7 @@ import { CopywritingForm } from "@/components/workbench/copywriting-form";
 import { EcomImageWorkbench } from "@/components/workbench/ecom-image-workbench";
 import { ReversePromptForm } from "@/components/workbench/reverse-prompt-form";
 import { GenerationHistory } from "@/components/tasks/generation-history";
+import { WelcomeContactBanner } from "@/components/contact/welcome-contact-banner";
 import { Sidebar } from "@/components/layout/sidebar";
 import { TaskList } from "@/components/tasks/task-list";
 import { TopBar } from "@/components/layout/top-bar";
@@ -132,6 +133,9 @@ export default function Home() {
         <Sidebar />
 
         <section className="flex min-w-0 flex-col gap-5">
+          {/* 注册成功欢迎横幅（LANDING-CONTACT-UI-0001）：只在 localStorage 有注册标记时渲染，
+              放内容区首位 —— 用户马上会撞上 0 余额，这条先把「为什么 + 怎么办」递到眼前。 */}
+          <WelcomeContactBanner />
           {/* B2: breadcrumb / back navigation；flex-wrap 使多入口在窄屏换行不溢出 */}
           <nav className="flex flex-wrap items-center gap-1.5 px-1 text-[12.5px]" aria-label="面包屑">
             <button
