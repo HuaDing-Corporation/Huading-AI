@@ -46,6 +46,7 @@ def generate_script(
                     topic,
                     video_mode=payload.video_mode,
                     duration_sec=payload.duration_sec,
+                    length_tier=payload.length_tier,
                 )
             ),
             timeout_seconds=30.0,

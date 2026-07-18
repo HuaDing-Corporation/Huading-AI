@@ -787,7 +787,13 @@ def test_batch_create_ecom_table_download_failure_marks_one_row_failed_not_whole
         assert "http" not in (failed_task.error_message or "")
         assert failed_task.error_message == "参考图下载失败(第1行): 下载失败"
         assert queued_task.status == "queued"
-        assert queued_task.params["image_key"].startswith("uploads/")
+        assert len(queued_task.params["product_image_keys"]) == 1
+        assert queued_task.params["product_image_keys"][0].startswith("uploads/")
+        assert "image_key" not in queued_task.params
+        assert (
+            seedance_calls[0]["args"][0]["product_image_keys"]
+            == queued_task.params["product_image_keys"]
+        )
         assert queued_task.params["speed"] == 1.25
         assert queued_task.params["resolution"] == "480p"
         assert db.scalar(select(func.count()).select_from(UsageRecord)) == 1

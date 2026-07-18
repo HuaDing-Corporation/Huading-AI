@@ -113,6 +113,7 @@ async def test_apimart_video_provider_submits_polls_downloads_and_maps_i2v_paylo
             "resolution": "4k",
             "fps": 24,
             "image_urls": ["https://storage.test/huading-videos/ref-a.png?sig=ok"],
+            "negative_prompt": "blurry, warped product",
         }
     )
 
@@ -139,6 +140,7 @@ async def test_apimart_video_provider_submits_polls_downloads_and_maps_i2v_paylo
                 "resolution": "720p",
                 "generate_audio": False,
                 "image_urls": ["https://storage.test/huading-videos/ref-a.png?sig=ok"],
+                "negative_prompt": "blurry, warped product",
             },
             "timeout": 12.5,
         }

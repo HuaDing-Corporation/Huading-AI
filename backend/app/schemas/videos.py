@@ -97,7 +97,6 @@ class VideoGenerateRequest(BaseModel):
 
     topic: str | None = Field(
         default=None,
-        min_length=1,
         max_length=2000,
         description="Theme/topic or fixed script",
     )
@@ -131,7 +130,13 @@ class VideoGenerateRequest(BaseModel):
     )
     image_key: str | None = Field(
         default=None,
-        description="Tenant-relative upload key from POST /uploads (seedance_i2v/photo input)",
+        description="Tenant-relative upload key from POST /uploads (photo input)",
+    )
+    product_image_keys: list[str] = Field(
+        default_factory=list,
+        min_length=1,
+        max_length=9,
+        description="Tenant-relative product upload keys for seedance_i2v (1-9 items).",
     )
     image_size: str = Field(
         default="1024x1024",
@@ -151,8 +156,11 @@ class VideoGenerateRequest(BaseModel):
     )
     scene_prompt: str | None = Field(
         default=None,
-        max_length=4000,
         description="Overall visual prompt for seedance_i2v scene planning.",
+    )
+    negative_prompt: str | None = Field(
+        default=None,
+        description="Optional unrestricted negative prompt for seedance_i2v generation.",
     )
     duration_sec: int | None = Field(
         default=None,
@@ -211,6 +219,15 @@ class VideoGenerateRequest(BaseModel):
             raise ValueError("invalid image_key (use the key returned by POST /uploads)")
         return v
 
+    @field_validator("product_image_keys")
+    @classmethod
+    def _check_video_product_image_keys(cls, values: list[str]) -> list[str]:
+        if any(".." in value or not _IMAGE_KEY_RE.match(value) for value in values):
+            raise ValueError(
+                "invalid product_image_keys (use keys returned by POST /uploads)"
+            )
+        return values
+
     @field_validator("frame_template")
     @classmethod
     def _check_template(cls, v: str | None) -> str | None:
@@ -242,7 +259,7 @@ class VideoGenerateRequest(BaseModel):
                 raise ValueError("video_gen duration_sec must be one of 5, 10, 15")
             return self
 
-        if not (self.topic or "").strip():
+        if self.video_mode != "seedance_i2v" and not (self.topic or "").strip():
             raise ValueError("topic must not be blank")
         if (self.purpose == "cover" or self.kind == "cover") and self.video_mode != "photo":
             raise ValueError("cover purpose/kind requires video_mode=photo")
@@ -252,8 +269,10 @@ class VideoGenerateRequest(BaseModel):
                     _MIN_DURATION_SEC,
                     min(_MAX_DURATION_SEC, int(self.duration_sec)),
                 )
-            if not self.image_key:
-                raise ValueError("seedance_i2v requires image_key (upload an image first)")
+            if not self.product_image_keys:
+                raise ValueError(
+                    "seedance_i2v requires product_image_keys (upload an image first)"
+                )
             if not self.voice_id:
                 raise ValueError("seedance_i2v requires voice_id")
         if self.video_mode == "avatar_talk":
@@ -284,8 +303,19 @@ class VideoEstimateResponse(BaseModel):
 class ScenePromptRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    topic: str = Field(min_length=1, max_length=2000)
+    topic: str | None = Field(default=None, max_length=2000)
+    script: str | None = Field(default=None, max_length=5000)
+    product_image_keys: list[str] = Field(min_length=1, max_length=9)
     duration_sec: int | None = Field(default=None)
+
+    @field_validator("product_image_keys")
+    @classmethod
+    def _check_product_image_keys(cls, values: list[str]) -> list[str]:
+        if any(".." in value or not _IMAGE_KEY_RE.match(value) for value in values):
+            raise ValueError(
+                "invalid product_image_keys (use keys returned by POST /uploads)"
+            )
+        return values
 
     @field_validator("duration_sec")
     @classmethod
@@ -297,6 +327,7 @@ class ScenePromptRequest(BaseModel):
 
 class ScenePromptResponse(BaseModel):
     scene_prompt: str
+    negative_prompt: str
 
 
 class VideoTaskStatus(BaseModel):

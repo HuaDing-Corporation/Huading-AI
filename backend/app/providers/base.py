@@ -24,6 +24,7 @@ Capability = Literal[
     "publish",
     "voice_clone",
     "reverse_prompt",
+    "scene_prompt",
 ]
 T = TypeVar("T")
 
@@ -80,6 +81,14 @@ class ReversePromptProvider(Protocol):
     ) -> Mapping[str, Any]: ...
 
 
+@runtime_checkable
+class ScenePromptProvider(Protocol):
+    async def generate_scene_prompt(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]: ...
+
+
 Provider = (
     LLMProvider
     | TTSProvider
@@ -90,6 +99,7 @@ Provider = (
     | PublishProvider
     | VoiceCloneProvider
     | ReversePromptProvider
+    | ScenePromptProvider
 )
 ProviderFactory = Callable[[ProviderConfig], Provider]
 Operation = Callable[[], T | Awaitable[T]]

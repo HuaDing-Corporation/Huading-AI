@@ -1415,7 +1415,7 @@ def test_seedance_i2v_rejects_doubao_brand_voice_without_huading_access(
         json={
             "topic": "premium ecommerce voice gate",
             "video_mode": "seedance_i2v",
-            "image_key": "uploads/product.png",
+            "product_image_keys": ["uploads/product.png"],
             "voice_id": brand_voice_id,
             "duration_sec": 15,
         },
@@ -1478,7 +1478,7 @@ def test_seedance_i2v_allows_cosyvoice_brand_voice_on_free_plan(
         json={
             "topic": "free ecommerce voice",
             "video_mode": "seedance_i2v",
-            "image_key": "uploads/product.png",
+            "product_image_keys": ["uploads/product.png"],
             "voice_id": brand_voice_id,
             "duration_sec": 15,
         },

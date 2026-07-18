@@ -11,9 +11,11 @@ from app.db.models import (
     Asset,
     CreditRate,
     Plan,
+    Role,
     Subscription,
     TaskAsset,
     UsageRecord,
+    User,
     VideoTask,
     Voice,
 )
@@ -22,9 +24,11 @@ from app.schemas.videos import VideoGenerateRequest
 
 
 class _FakeStorage:
-    def __init__(self) -> None:
+    def __init__(self, *, missing_keys: set[str] | None = None) -> None:
         self.bucket = "test-bucket"
         self.saved: dict[str, tuple[bytes, str]] = {}
+        self.missing_keys = missing_keys or set()
+        self.existence_checks: list[str] = []
 
     def put_bytes(self, key: str, content: bytes, *, content_type: str) -> str:
         self.saved[key] = (content, content_type)
@@ -32,6 +36,10 @@ class _FakeStorage:
 
     def get_bytes(self, key: str) -> bytes:
         return self.saved[key][0]
+
+    def object_exists(self, key: str) -> bool:
+        self.existence_checks.append(key)
+        return key not in self.missing_keys
 
     def presign_get_url(
         self,
@@ -917,15 +925,21 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
     monkeypatch.setattr(videos_route, "generate_seedance_i2v_task", _FakeI2VTask())
     monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _UnexpectedAvatarTask())
 
+    scene_prompt = "hero product on a bright kitchen counter" + ("，细节镜头" * 900)
+    negative_prompt = "No warped product, no duplicated parts, no flicker."
     client = TestClient(app)
     resp = client.post(
         "/api/v1/videos",
         json={
             "topic": "premium scarf product benefits",
             "video_mode": "seedance_i2v",
-            "image_key": "uploads/product.png",
+            "product_image_keys": [
+                "uploads/product-front.png",
+                "uploads/product-side.webp",
+            ],
             "voice_id": voice_id,
-            "scene_prompt": "hero product on a bright kitchen counter",
+            "scene_prompt": scene_prompt,
+            "negative_prompt": negative_prompt,
             "duration_sec": 30,
             "resolution": "1080p",
             "speed": 1.0,
@@ -940,8 +954,12 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
     assert enqueued["task_id"] == data["id"]
     assert enqueued["queue"] == "video"
     assert enqueued["args"][0]["video_mode"] == "seedance_i2v"
-    assert enqueued["args"][0]["image_key"] == "uploads/product.png"
-    assert enqueued["args"][0]["scene_prompt"] == "hero product on a bright kitchen counter"
+    assert enqueued["args"][0]["product_image_keys"] == [
+        "uploads/product-front.png",
+        "uploads/product-side.webp",
+    ]
+    assert enqueued["args"][0]["scene_prompt"] == scene_prompt
+    assert enqueued["args"][0]["negative_prompt"] == negative_prompt
     assert enqueued["args"][0]["duration_sec"] == 30
     assert enqueued["args"][0]["resolution"] == "1080p"
     with auth_db() as db:
@@ -950,8 +968,13 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
         assert task.mode == "seedance_i2v"
         assert task.video_mode == "seedance_i2v"
         assert task.voice_id == voice_id
-        assert task.params["image_key"] == "uploads/product.png"
-        assert task.params["scene_prompt"] == "hero product on a bright kitchen counter"
+        assert task.params["product_image_keys"] == [
+            "uploads/product-front.png",
+            "uploads/product-side.webp",
+        ]
+        assert "image_key" not in task.params
+        assert task.params["scene_prompt"] == scene_prompt
+        assert task.params["negative_prompt"] == negative_prompt
         assert task.params["duration_sec"] == 30
         assert task.params["resolution"] == "1080p"
         assert task.duration_sec == 30
@@ -964,6 +987,44 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
         assert reserved.model == "doubao-seedance-2.0"
         assert reserved.quantity == Decimal("30")
         assert reserved.credits == Decimal("8403.00")
+
+
+def test_seedance_i2v_accepts_image_only_submission(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(db, auth_context["tenant_id"])
+        subscription.quota_credits_total = 10000
+        voice, _avatar = _seed_voice_and_avatar(db, auth_context["tenant_id"])
+        voice_id = voice.id
+
+    class _FakeI2VTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            return type("Result", (), {"status": "PENDING"})()
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route, "generate_seedance_i2v_task", _FakeI2VTask())
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/videos",
+        json={
+            "video_mode": "seedance_i2v",
+            "product_image_keys": ["uploads/product.png"],
+            "voice_id": voice_id,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 202
+    with auth_db() as db:
+        task = db.get(VideoTask, resp.json()["data"]["id"])
+        assert task is not None
+        assert task.topic is None
+        assert task.script is None
+        assert task.params["product_image_keys"] == ["uploads/product.png"]
 
 
 def test_photo_order_routes_before_avatar_when_voice_is_present(
@@ -1079,7 +1140,7 @@ def test_video_estimate_seedance_i2v_matches_reserved_quota_with_tenant_rate(
     payload = {
         "topic": "premium scarf product benefits",
         "video_mode": "seedance_i2v",
-        "image_key": "uploads/product.png",
+        "product_image_keys": ["uploads/product.png"],
         "voice_id": voice_id,
         "duration_sec": 30,
     }
@@ -1241,7 +1302,7 @@ def test_video_estimate_is_read_only_no_task_usage_or_reserved_change(
         json={
             "topic": "premium scarf product benefits",
             "video_mode": "seedance_i2v",
-            "image_key": "uploads/product.png",
+            "product_image_keys": ["uploads/product.png"],
             "voice_id": voice_id,
             "duration_sec": 15,
         },
@@ -1263,7 +1324,7 @@ def test_video_estimate_uses_video_generate_validation(auth_context) -> None:
         json={
             "topic": "premium scarf product benefits",
             "video_mode": "seedance_i2v",
-            "image_key": "uploads/product.png",
+            "product_image_keys": ["uploads/product.png"],
         },
         headers=auth_context["headers"],
     )
@@ -1349,6 +1410,38 @@ def test_photo_schema_still_rejects_blank_topic() -> None:
         VideoGenerateRequest.model_validate({"topic": "   ", "video_mode": "photo"})
 
 
+@pytest.mark.parametrize(
+    ("video_mode", "mode_fields"),
+    [
+        ("static_template", {}),
+        ("seedance_t2v", {}),
+        ("photo", {}),
+        ("avatar_talk", {"voice_id": "voice-1", "avatar_asset_id": "avatar-1"}),
+    ],
+)
+def test_non_seedance_video_modes_still_require_nonblank_topic(
+    video_mode: str,
+    mode_fields: dict,
+) -> None:
+    for topic in (None, "   "):
+        with pytest.raises(ValidationError):
+            VideoGenerateRequest.model_validate(
+                {"topic": topic, "video_mode": video_mode, **mode_fields}
+            )
+
+
+def test_video_gen_uses_prompt_when_topic_is_omitted() -> None:
+    payload = VideoGenerateRequest.model_validate(
+        {
+            "video_mode": "video_gen",
+            "prompt": "cinematic product reveal",
+            "duration_sec": 5,
+        }
+    )
+
+    assert payload.topic == "cinematic product reveal"
+
+
 def test_video_estimate_implicit_avatar_requires_avatar_asset_id(auth_context) -> None:
     client = TestClient(app)
     resp = client.post(
@@ -1371,7 +1464,7 @@ def test_seedance_i2v_order_requires_voice(auth_context) -> None:
         json={
             "topic": "premium scarf product benefits",
             "video_mode": "seedance_i2v",
-            "image_key": "uploads/product.png",
+            "product_image_keys": ["uploads/product.png"],
         },
         headers=auth_context["headers"],
     )
@@ -1407,7 +1500,7 @@ def test_seedance_i2v_duration_is_clamped_and_forwarded(
         json={
             "topic": "premium scarf product benefits",
             "video_mode": "seedance_i2v",
-            "image_key": "uploads/product.png",
+            "product_image_keys": ["uploads/product.png"],
             "voice_id": voice_id,
             "duration_sec": 999,
         },
@@ -1428,14 +1521,14 @@ def test_video_generate_request_clamps_seedance_duration() -> None:
     low = VideoGenerateRequest(
         topic="x",
         video_mode="seedance_i2v",
-        image_key="uploads/product.png",
+        product_image_keys=["uploads/product.png"],
         voice_id="voice",
         duration_sec=3,
     )
     high = VideoGenerateRequest(
         topic="x",
         video_mode="seedance_i2v",
-        image_key="uploads/product.png",
+        product_image_keys=["uploads/product.png"],
         voice_id="voice",
         duration_sec=999,
     )
@@ -1627,6 +1720,59 @@ def test_video_read_openapi_marks_legacy_prompt_deprecated() -> None:
     assert "prompt" in schema["required"]
 
 
+def test_video_openapi_documents_optional_one_to_nine_product_images() -> None:
+    resp = TestClient(app).get("/openapi.json")
+
+    assert resp.status_code == 200
+    schema = resp.json()["components"]["schemas"]["VideoGenerateRequest"]
+    product_images = schema["properties"]["product_image_keys"]
+    assert product_images["minItems"] == 1
+    assert product_images["maxItems"] == 9
+    assert "product_image_keys" not in schema.get("required", [])
+
+
+def test_scripts_openapi_documents_seedance_length_tiers() -> None:
+    resp = TestClient(app).get("/openapi.json")
+
+    assert resp.status_code == 200
+    schema = resp.json()["components"]["schemas"]["ScriptGenerateRequest"]
+    length_tier = schema["properties"]["length_tier"]
+    assert length_tier["enum"] == ["short", "medium", "long"]
+    assert length_tier["default"] == "medium"
+    assert "seedance_i2v" in length_tier["description"]
+
+
+def test_scene_prompt_request_openapi_requires_one_to_nine_product_images() -> None:
+    resp = TestClient(app).get("/openapi.json")
+
+    assert resp.status_code == 200
+    schema = resp.json()["components"]["schemas"]["ScenePromptRequest"]
+    product_images = schema["properties"]["product_image_keys"]
+    assert "product_image_keys" in schema["required"]
+    assert product_images["minItems"] == 1
+    assert product_images["maxItems"] == 9
+    assert schema["additionalProperties"] is False
+
+
+def test_scene_prompt_response_openapi_requires_unbounded_prompts() -> None:
+    resp = TestClient(app).get("/openapi.json")
+
+    assert resp.status_code == 200
+    schema = resp.json()["components"]["schemas"]["ScenePromptResponse"]
+    assert set(schema["required"]) == {"scene_prompt", "negative_prompt"}
+    assert "maxLength" not in schema["properties"]["scene_prompt"]
+    assert "maxLength" not in schema["properties"]["negative_prompt"]
+
+
+def test_video_generate_openapi_documents_unbounded_scene_prompts() -> None:
+    resp = TestClient(app).get("/openapi.json")
+
+    assert resp.status_code == 200
+    schema = resp.json()["components"]["schemas"]["VideoGenerateRequest"]
+    assert "maxLength" not in schema["properties"]["scene_prompt"]["anyOf"][0]
+    assert "maxLength" not in schema["properties"]["negative_prompt"]["anyOf"][0]
+
+
 def test_video_list_filters_photo_and_returns_image_urls(
     auth_context,
     auth_db,
@@ -1711,42 +1857,321 @@ def test_scene_prompt_endpoint_generates_visual_prompt_without_creating_video(
 ) -> None:
     payloads: list[dict] = []
 
-    class _FakeDeepSeek:
-        async def generate_text(self, payload: dict):
+    class _FakeLuna:
+        async def generate_scene_prompt(self, payload: dict):
             payloads.append(payload)
-            return {"text": "Bright tabletop product video with slow push-in."}
+            return {
+                "scene_prompt": "Bright tabletop product video with slow push-in.",
+                "negative_prompt": "No warped mug, no extra handles, no text.",
+                "provider": "apimart",
+                "model": "gpt-5.6-luna",
+                "prompt_tokens": 120,
+                "completion_tokens": 80,
+                "total_tokens": 200,
+                "credits": Decimal("1.25"),
+                "cost_cents": 90,
+            }
 
     from app.api.v1.routes import videos as videos_route
 
-    monkeypatch.setattr(videos_route.settings, "engine_llm_api_key", "k")
-    monkeypatch.setattr(videos_route.settings, "engine_llm_base_url", "https://deepseek.test")
-    monkeypatch.setattr(videos_route.settings, "engine_llm_model", "m")
     monkeypatch.setattr(
         videos_route,
         "resolve",
-        lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
+        lambda _db, *, tenant_id, capability: (
+            _FakeLuna()
+            if capability == "scene_prompt"
+            else (_ for _ in ()).throw(AssertionError(f"unexpected capability {capability}"))
+        ),
     )
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
     with auth_db() as db:
         before = db.scalar(select(func.count()).select_from(VideoTask))
+
+    try:
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/videos/scene-prompt",
+            json={
+                "topic": "premium ceramic mug",
+                "script": "Show the glaze, comfortable handle, and gift-ready finish.",
+                "product_image_keys": [
+                    "uploads/product-front.png",
+                    "uploads/product-side.webp",
+                ],
+                "duration_sec": 30,
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 200
+    assert resp.json()["data"] == {
+        "scene_prompt": "Bright tabletop product video with slow push-in.",
+        "negative_prompt": "No warped mug, no extra handles, no text.",
+    }
+    assert payloads[0]["video_mode"] == "seedance_i2v"
+    assert payloads[0]["target_duration_sec"] == 30
+    assert payloads[0]["topic"] == "premium ceramic mug"
+    assert payloads[0]["script"] == (
+        "Show the glaze, comfortable handle, and gift-ready finish."
+    )
+    assert payloads[0]["image_urls"] == [
+        (
+            "https://storage.test/tenants/"
+            f"{auth_context['tenant_id']}/uploads/product-front.png"
+            f"?ttl={videos_route.settings.engine_s3_presign_ttl}"
+        ),
+        (
+            "https://storage.test/tenants/"
+            f"{auth_context['tenant_id']}/uploads/product-side.webp"
+            f"?ttl={videos_route.settings.engine_s3_presign_ttl}"
+        ),
+    ]
+    with auth_db() as db:
+        after = db.scalar(select(func.count()).select_from(VideoTask))
+        usage = db.query(UsageRecord).filter_by(capability="scene_prompt").one()
+    assert after == before
+    assert usage.provider == "apimart"
+    assert usage.model == "gpt-5.6-luna"
+    assert usage.unit == "token"
+    assert usage.quantity == Decimal("200")
+    assert usage.credits == Decimal("0")
+    assert usage.cost_cents == 90
+    assert usage.status == "settled"
+
+
+def test_scene_prompt_endpoint_requires_at_least_one_product_image(
+    monkeypatch,
+    auth_context,
+) -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(
+        videos_route,
+        "resolve",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("provider must not resolve when product images are missing")
+        ),
+    )
 
     client = TestClient(app)
     resp = client.post(
         "/api/v1/videos/scene-prompt",
-        json={"topic": "premium ceramic mug", "duration_sec": 30},
+        json={"topic": "premium ceramic mug"},
         headers=auth_context["headers"],
     )
 
-    assert resp.status_code == 200
-    assert resp.json()["data"] == {
-        "scene_prompt": "Bright tabletop product video with slow push-in."
-    }
-    assert payloads[0]["video_mode"] == "seedance_i2v"
-    assert payloads[0]["target_duration_sec"] == 30
-    assert "script" not in payloads[0]
-    assert "不要写口播台词" in payloads[0]["user_prompt"]
+    assert resp.status_code == 422
+
+
+def test_scene_prompt_endpoint_maps_provider_resolution_failure_to_503(
+    monkeypatch,
+    auth_context,
+) -> None:
+    from app.api.v1.routes import videos as videos_route
+    from app.providers.base import ProviderResolutionError
+
+    def fail_resolve(*_args, **_kwargs):
+        raise ProviderResolutionError("No scene prompt provider configured.")
+
+    monkeypatch.setattr(videos_route, "resolve", fail_resolve)
+    app.dependency_overrides[get_object_storage] = lambda: _FakeStorage()
+    try:
+        resp = TestClient(app).post(
+            "/api/v1/videos/scene-prompt",
+            json={"product_image_keys": ["uploads/product.png"]},
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 503
+    assert resp.json()["error"]["code"] == "SCENE_PROMPT_PROVIDER_NOT_CONFIGURED"
+
+
+def test_scene_prompt_endpoint_rejects_missing_product_image_before_provider_resolution(
+    monkeypatch,
+    auth_context,
+) -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    provider_resolved = False
+
+    class _FakeLuna:
+        async def generate_scene_prompt(self, _payload: dict):
+            return {
+                "scene_prompt": "Image-grounded product showcase.",
+                "negative_prompt": "No product distortion.",
+            }
+
+    def resolve_provider(*_args, **_kwargs):
+        nonlocal provider_resolved
+        provider_resolved = True
+        return _FakeLuna()
+
+    first_key = f"tenants/{auth_context['tenant_id']}/uploads/product-front.png"
+    missing_key = f"tenants/{auth_context['tenant_id']}/uploads/product-missing.png"
+    storage = _FakeStorage(missing_keys={missing_key})
+    monkeypatch.setattr(videos_route, "resolve", resolve_provider)
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        resp = TestClient(app).post(
+            "/api/v1/videos/scene-prompt",
+            json={
+                "product_image_keys": [
+                    "uploads/product-front.png",
+                    "uploads/product-missing.png",
+                ]
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "PRODUCT_IMAGE_NOT_FOUND"
+    assert provider_resolved is False
+    assert storage.existence_checks == [first_key, missing_key]
+
+
+def test_scene_prompt_endpoint_maps_provider_invocation_failure_to_502(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import videos as videos_route
+    from app.providers.base import ProviderInvocationError
+
+    class _FakeScenePromptProvider:
+        async def generate_scene_prompt(self, _payload: dict):
+            raise AssertionError("route-level invoke mock should run first")
+
+    class _BillableScenePromptFailure(RuntimeError):
+        usage_result = {
+            "provider": "apimart",
+            "model": "gpt-5.6-luna",
+            "prompt_tokens": 120,
+            "completion_tokens": 30,
+            "total_tokens": 150,
+            "cost_cents": 45,
+        }
+
+    invoke_timeouts: list[float | None] = []
+
+    async def fail_invoke(*_args, **kwargs):
+        invoke_timeouts.append(kwargs["timeout_seconds"])
+        try:
+            raise _BillableScenePromptFailure("Luna returned invalid JSON twice.")
+        except _BillableScenePromptFailure as exc:
+            raise ProviderInvocationError("Scene prompt invocation failed.") from exc
+
+    monkeypatch.setattr(
+        videos_route,
+        "resolve",
+        lambda *_args, **_kwargs: _FakeScenePromptProvider(),
+    )
+    monkeypatch.setattr(videos_route, "invoke", fail_invoke)
+    app.dependency_overrides[get_object_storage] = lambda: _FakeStorage()
+    try:
+        resp = TestClient(app).post(
+            "/api/v1/videos/scene-prompt",
+            json={"product_image_keys": ["uploads/product.png"]},
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 502
+    assert resp.json()["error"]["code"] == "SCENE_PROMPT_PROVIDER_FAILED"
+    assert invoke_timeouts == [None]
     with auth_db() as db:
-        after = db.scalar(select(func.count()).select_from(VideoTask))
-    assert after == before
+        usage = db.query(UsageRecord).filter_by(capability="scene_prompt").one()
+    assert usage.quantity == Decimal("150")
+    assert usage.credits == Decimal("0")
+    assert usage.cost_cents == 45
+
+
+def test_scene_prompt_endpoint_records_usage_for_incomplete_provider_result(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    class _IncompleteScenePromptProvider:
+        async def generate_scene_prompt(self, _payload: dict):
+            return {
+                "scene_prompt": "",
+                "negative_prompt": "No distortion.",
+                "provider": "apimart",
+                "model": "gpt-5.6-luna",
+                "prompt_tokens": 90,
+                "completion_tokens": 10,
+                "total_tokens": 100,
+                "cost_cents": 30,
+            }
+
+    monkeypatch.setattr(
+        videos_route,
+        "resolve",
+        lambda *_args, **_kwargs: _IncompleteScenePromptProvider(),
+    )
+    app.dependency_overrides[get_object_storage] = lambda: _FakeStorage()
+    try:
+        resp = TestClient(app).post(
+            "/api/v1/videos/scene-prompt",
+            json={"product_image_keys": ["uploads/product.png"]},
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 502
+    assert resp.json()["error"]["code"] == "SCENE_PROMPT_EMPTY_RESULT"
+    with auth_db() as db:
+        usage = db.query(UsageRecord).filter_by(capability="scene_prompt").one()
+    assert usage.quantity == Decimal("100")
+    assert usage.credits == Decimal("0")
+    assert usage.cost_cents == 30
+
+
+def test_scene_prompt_endpoint_allows_images_without_topic_or_script(
+    monkeypatch,
+    auth_context,
+) -> None:
+    payloads: list[dict] = []
+
+    class _FakeLuna:
+        async def generate_scene_prompt(self, payload: dict):
+            payloads.append(payload)
+            return {
+                "scene_prompt": "Image-grounded product showcase.",
+                "negative_prompt": "No product distortion.",
+            }
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(
+        videos_route,
+        "resolve",
+        lambda _db, *, tenant_id, capability: _FakeLuna(),
+    )
+    app.dependency_overrides[get_object_storage] = lambda: _FakeStorage()
+    try:
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/videos/scene-prompt",
+            json={"product_image_keys": ["uploads/product.png"]},
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 200
+    assert payloads[0]["topic"] == ""
+    assert payloads[0]["script"] == ""
 
 
 def test_scene_prompt_endpoint_requires_auth(auth_context) -> None:
@@ -1754,10 +2179,51 @@ def test_scene_prompt_endpoint_requires_auth(auth_context) -> None:
 
     resp = client.post(
         "/api/v1/videos/scene-prompt",
-        json={"topic": "premium ceramic mug"},
+        json={
+            "topic": "premium ceramic mug",
+            "product_image_keys": ["uploads/product.png"],
+        },
     )
 
     assert resp.status_code == 401
+
+
+@pytest.mark.parametrize("role", [Role.REVIEWER, Role.OPS])
+def test_scene_prompt_endpoint_requires_video_create_permission(
+    monkeypatch,
+    auth_context,
+    auth_db,
+    role: Role,
+) -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    provider_resolved = False
+
+    def resolve_provider(*_args, **_kwargs):
+        nonlocal provider_resolved
+        provider_resolved = True
+        raise AssertionError("provider must not resolve without video:create permission")
+
+    with auth_db() as db:
+        user = db.get(User, auth_context["user_id"])
+        assert user is not None
+        user.role = role.value
+        db.commit()
+
+    monkeypatch.setattr(videos_route, "resolve", resolve_provider)
+    app.dependency_overrides[get_object_storage] = lambda: _FakeStorage()
+    try:
+        resp = TestClient(app).post(
+            "/api/v1/videos/scene-prompt",
+            json={"product_image_keys": ["uploads/product.png"]},
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "FORBIDDEN"
+    assert provider_resolved is False
 
 
 def test_video_schema_rejects_invalid_aspect_ratio_before_db_check() -> None:
@@ -1766,6 +2232,98 @@ def test_video_schema_rejects_invalid_aspect_ratio_before_db_check() -> None:
 
     with pytest.raises(ValidationError):
         VideoGenerateRequest.model_validate({"topic": "bad ratio", "aspect_ratio": "4:3"})
+
+
+def test_seedance_schema_allows_image_only_product_keys() -> None:
+    payload = VideoGenerateRequest.model_validate(
+        {
+            "video_mode": "seedance_i2v",
+            "voice_id": "voice-1",
+            "product_image_keys": [
+                "uploads/product-a.png",
+                "uploads/product-b.webp",
+            ],
+        }
+    )
+
+    assert payload.topic is None
+    assert payload.script is None
+    assert payload.scene_prompt is None
+    assert payload.product_image_keys == [
+        "uploads/product-a.png",
+        "uploads/product-b.webp",
+    ]
+
+
+@pytest.mark.parametrize(("topic", "expected"), [(None, None), ("   ", "")])
+def test_seedance_schema_allows_omitted_or_blank_topic(
+    topic: str | None,
+    expected: str | None,
+) -> None:
+    payload = VideoGenerateRequest.model_validate(
+        {
+            "topic": topic,
+            "video_mode": "seedance_i2v",
+            "voice_id": "voice-1",
+            "product_image_keys": ["uploads/product.png"],
+        }
+    )
+
+    assert payload.topic == expected
+
+
+@pytest.mark.parametrize(
+    "image_fields",
+    [
+        {"image_key": "uploads/legacy-product.png"},
+        {"product_image_keys": []},
+        {"product_image_keys": [f"uploads/product-{index}.png" for index in range(10)]},
+        {"product_image_keys": ["../private/product.png"]},
+    ],
+)
+def test_seedance_schema_rejects_legacy_or_invalid_product_images(
+    image_fields: dict,
+) -> None:
+    with pytest.raises(ValidationError):
+        VideoGenerateRequest.model_validate(
+            {
+                "video_mode": "seedance_i2v",
+                "voice_id": "voice-1",
+                **image_fields,
+            }
+        )
+
+
+def test_seedance_schema_accepts_nine_product_images() -> None:
+    product_image_keys = [f"uploads/product-{index}.png" for index in range(9)]
+
+    payload = VideoGenerateRequest.model_validate(
+        {
+            "video_mode": "seedance_i2v",
+            "voice_id": "voice-1",
+            "product_image_keys": product_image_keys,
+        }
+    )
+
+    assert payload.product_image_keys == product_image_keys
+
+
+def test_seedance_schema_allows_unlimited_scene_and_negative_prompts() -> None:
+    scene_prompt = "镜" * 5001
+    negative_prompt = "避免变形、闪烁和重复主体。" * 500
+
+    payload = VideoGenerateRequest.model_validate(
+        {
+            "video_mode": "seedance_i2v",
+            "voice_id": "voice-1",
+            "product_image_keys": ["uploads/product.png"],
+            "scene_prompt": scene_prompt,
+            "negative_prompt": negative_prompt,
+        }
+    )
+
+    assert payload.scene_prompt == scene_prompt
+    assert payload.negative_prompt == negative_prompt
 
 
 def test_video_progress_snapshot_accepts_percent_and_legacy_fraction() -> None:
