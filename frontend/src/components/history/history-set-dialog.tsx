@@ -10,7 +10,12 @@ import { HistoryStatusBadge } from "@/components/history/history-status-badge";
 import { useHistoryImageSet } from "@/lib/api/hooks";
 import { copy } from "@/lib/copy";
 import { NO_MEDIA_URL_REFRESH, useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
-import { historyImageSetMediaKey, type HistoryCategory, type HistoryItem } from "@/lib/api/history-images";
+import {
+  historyImageSetMediaKey,
+  historyImageSetScopeKey,
+  type HistoryCategory,
+  type HistoryItem
+} from "@/lib/api/history-images";
 
 /** 分类机器键 → 中文标签（详情弹窗信息并集用；6 分类）。 */
 const CATEGORY_LABEL: Record<HistoryCategory, string> = {
@@ -115,12 +120,14 @@ export function HistorySetDialog({ item, onClose }: { item: HistoryItem | null; 
               // onLoad 清账（FIX2 的 P1-2）。
               //
               // 🔴 FIX3：`it.index` 跨 refetch 会漂（BE 只查 done + 重 enumerate，image_history.py:84/:472）。
-              // 🔴 FIX4：mediaKey 现在带 `(category, set.id)` 命名空间 —— 本弹窗的预算 Map 跨「打开 A→关→打开 B」
-              //   持续存在（HistoryGrid 不卸载它），不带命名空间时 A/B 的 output:0 会撞进同一预算。
-              //   身份判据（稳定 + 单射 + 命名空间，量程=Map 存活期）见 historyImageSetMediaKey。
-              // mediaKey 为 null = 拿不到可信身份（畸形 task_ids）→ 停用刷新，宁可不救不救错（§三）。
+              // 🔴 FIX5：**整个 RefreshGroup 按本 set 隔离** —— 本弹窗的预算 Map 跨「打开 A→关→打开 B」持续存在
+              //   （HistoryGrid 不卸载它）。FIX4 只给 mediaKey 加了命名空间、隔离了预算，但 group 的 `inFlight`
+              //   仍由根组 "" 共享（A 未落定切 B → B 首帧被吞）。改用 `forKey(scopeKey)`：整个 group 按 (category,
+              //   set.id) 分，inFlight/预算/URL 集合一次性全隔离，不会再漏第 N 个共享状态。见 use-media-url-refresh.ts。
+              // mediaKey 为 null = 拿不到可信身份（畸形/缺失 task_ids）→ 停用刷新，宁可不救不救错（§五）。
+              const setScope = refresh.forKey(historyImageSetScopeKey(set));
               const mediaKey = historyImageSetMediaKey(set, it);
-              const tileRefresh = mediaKey === null ? NO_MEDIA_URL_REFRESH : refresh.forMedia(mediaKey);
+              const tileRefresh = mediaKey === null ? NO_MEDIA_URL_REFRESH : setScope.forMedia(mediaKey);
               return <HistoryImageTile key={mediaKey ?? `unstable:${it.index}`} item={it} refresh={tileRefresh} />;
             })}
           </div>

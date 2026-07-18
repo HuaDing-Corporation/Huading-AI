@@ -80,6 +80,15 @@ export interface MediaUrlRefreshGroup extends MediaUrlRefreshScope {
    *     「实际产生的 key」时才配叫双射。**FIX3 满足了 1、2 在"一次整套"内的版本，漏了 3 与"跨打开"的 2** ——
    *     因为 `(job_id, index)` 唯一被我当成了 `index` 全局唯一：约束是真的，作用域比我以为的窄。
    *
+   * ## 🔴 命名空间要隔离**整个 group**，不是给 mediaKey 加前缀（FIX5 —— 第五次，也是最后一次）
+   *
+   * `RefreshGroup` 里不止一个共享状态：**预算 Map + `inFlight` + URL 集合**。FIX4 给 mediaKey 加了
+   * `(category,set.id)` 前缀，只隔离了**预算**，`inFlight` 仍由根组 `""` 共享 → A 未落定切 B、B 被吞（第 5 次）。
+   * **前四次都是「隔离想到的那个字段」，永远有下一个。** 根治是**按 scope 隔离整个 group**：调用方对每个
+   * 独立资源用 `forKey(scopeKey)`（它 `getGroup(scopeKey)` 返回**不同的 group 实例**）→ 预算/inFlight/URL 集合
+   * **一次性全按 scope 分**，现在和将来的字段都不可能再漏。**机制 > 清单**：不是逐个隔离字段，是整个 group 按 scope 分。
+   * 用法见 `history-set-dialog.tsx`（`refresh.forKey(historyImageSetScopeKey(set)).forMedia(perImageKey)`）。
+   *
    * ## 所以判据是**可执行的**，不是 review 问题
    *
    * 「复查了但判据错」没有任何流程拦得住。唯一拦得住的是让它**自己变红**，且**测试要跨到 Map 存活期的边界**：

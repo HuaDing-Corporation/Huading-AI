@@ -320,4 +320,24 @@ describe("HistorySetDialog · FIX4 §三（畸形 task_ids → 停用刷新）",
     await act(async () => {});
     expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(1); // 都没重取
   });
+
+  it("🔴 §五 运行时防御：task_ids 为 null（键在、非数组）→ 停用刷新，不被误当 ecom_detail（不退回 index）", async () => {
+    adapter.getHistoryImageSet.mockResolvedValue({
+      id: "batch-null",
+      category: "ecom_model", // photo 形态
+      created_at: "2026-07-10T12:00:00Z",
+      status: "completed",
+      items: [{ index: 0, download_url: "https://cdn/x.png?sig=1", width: 1024, height: 1536 }],
+      // 键在、但值是 null（BE 契约漂移）—— 必须走「畸形」停用，而不是 `ids===undefined` 那条 ecom_detail 分支。
+      meta: { task_ids: null as unknown as string[] }
+    });
+    wrap(<HistorySetDialog item={{ ...ITEM, id: "batch-null", category: "ecom_model" }} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getAllByRole("img")).toHaveLength(1));
+    expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(1);
+
+    fireEvent.error(screen.getByRole("img"));
+    await act(async () => {});
+    // null task_ids → NO_MEDIA_URL_REFRESH → 不重取。若误当 ecom_detail 退回 output:index，这里会变 2。
+    expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(1);
+  });
 });

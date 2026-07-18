@@ -99,33 +99,41 @@ export interface HistoryImageSet {
  *    → **index 不是身份**。这四类必须用 `meta.task_ids[index]`（VideoTask.id 是主键，恒定）。
  *    （image_gen 例外：history_id == VideoTask.id（:100）→ 整套恒 1 张，漂不起来；但它同样有 task_ids。）
  *
- * 🔴 **FIX4 · 命名空间**：预算 Map 活在 `HistorySetDialog` **组件实例**里，跨「打开 set A → 关 → 打开
- * set B」**持续存在**（`HistoryGrid` 切换详情集时不卸载它）。而 `(job_id, index)` 唯一**≠ `index` 全局唯一** ——
- * 两个不同 job 的 `output:0` 会撞进**同一份**预算 → B 继承 A 耗尽的封顶（这是 FIX3 我核对 `index` 时
- * 犯的推论错：约束是真的，但作用域比我以为的窄）。故 key 必须带 query 身份 `(category, id)` 命名空间 ——
- * 值域限定到「本 set」，跨 set 结构上就撞不上。
+ * 🔴 **FIX5 · 命名空间下沉到「整个 group」，不再是给 mediaKey 加前缀**：
+ * 预算 Map 活在 `HistorySetDialog` **组件实例**里，跨「打开 set A → 关 → 打开 set B」持续存在
+ * （`HistoryGrid` 切换详情集时不卸载它）。FIX4 给 mediaKey 加了 `(category,set.id)` 前缀，隔离了**预算**，
+ * 但 `RefreshGroup` 里还有 **`inFlight`**（+ URL 集合）**仍由根组 `""` 共享** —— A 的 refetch 未落定时切到 B，
+ * B 首帧报错会被 A 的 `inFlight` 直接吞掉（第五次栽在作用域，每次漏下一个字段）。
+ * **根治**：`HistorySetDialog` 改用 `refresh.forKey(scopeKey)`（见 `historyImageSetScopeKey`）—— 整个 group
+ * 按 scope 分，**预算 / inFlight / URL 集合全部自动按 scope 分**，不可能再漏第 N 个共享状态。
+ * 所以本函数只需给出**本 set 内**的媒体身份（不再带 set 前缀，前缀由 group 提供）。
  *
- * 🔴 **FIX4 · 畸形 `task_ids` 不再静默退回 index**（§三，我 FIX3 那句「对契约漂移安全」被证伪）：
- * 数据存在性分派消掉了显式分类分支，但**没消掉契约假设** —— 仍假定 task_ids 完整、同长、非空、唯一。
- * 判据：
- *  · `task_ids` **整个缺失** → ecom_detail 形态：`index` 是持久化、`(job,index)` 唯一的列
- *    （models.py:585/:570，计划期一次写入、全仓无写回、BE 拿它当主键 `with_for_update()`）→ **本 set 内是身份** →
- *    `output:${index}`（带 ns）。
- *  · `task_ids` **存在** → photo 形态：`index` 会漂、**不是身份**（BE 只查 done + 重 enumerate，:84/:472）。
- *    必须拿到本位置一个**合法且唯一**的 task_id（VideoTask 主键，恒定）→ `task:${id}`（带 ns）。
- *    **畸形/部分/重复** → **没有可信身份 → 返回 `null`，调用方停用刷新**（宁可不救，也不救错）：
- *      - 退回 `index` = 重演 FIX3 的漂移（photo index 不稳）；
- *      - 静默用它 = 把「BE 契约破了」这个**应当可见**的故障，藏成偶发的预算错乱。
- *    这样反而让「对契约漂移安全」这句**真的成立**了：要么正确、要么保守停用，**永不静默出错**。
+ * 🔴 **§五 · 数据形态判别 + 运行时防御**（我 FIX3 那句「对任意契约漂移安全」被证伪，措辞收准）：
+ *  · `task_ids` **键整个缺失**（`undefined`）→ ecom_detail 形态：`index` 是持久化、`(job,index)` 唯一的列
+ *    （models.py:585/:570，计划期一次写入、全仓无写回、BE 拿它当主键 `with_for_update()`）→ 本 set 内是身份 →
+ *    `output:${index}`。
+ *  · `task_ids` **键在、但不是合法数组**（`null` / 非数组）→ **畸形 photo，不是 ecom_detail** → 停用刷新。
+ *  · `task_ids` **是数组** → photo 形态：`index` 会漂、**不是身份**（BE 只查 done + 重 enumerate，:84/:472）。
+ *    本位置须是**合法且唯一**的 task_id（VideoTask 主键，恒定）→ `task:${id}`；**缺失/空/非字符串/重复** →
+ *    没有可信身份 → **返回 `null`，调用方停用刷新**（宁可不救，也不救错：退回 index = 重演 FIX3 漂移；
+ *    静默用它 = 把「BE 契约破了」这个应当可见的故障藏成偶发预算错乱）。
+ *  **两者靠数据形态判别，不是分类字符串。** 唯一残留假设：photo 若**错误省略**整个 `task_ids` 键会被当
+ *  ecom_detail（退回 index），此时最坏是**本 group 内**有界的 2×N 过度重取 —— 有界、且需 BE 违约才触发。
  */
+export function historyImageSetScopeKey(set: HistoryImageSet): string {
+  // 整个 RefreshGroup 的隔离键 = 该整套的 query 身份 (category, id)。set.id 是响应主键、全局唯一；
+  // 带上 category 与 useHistoryImageSet 的 queryKey 对齐（["history-images","detail",category,id]）。
+  return `${set.category}:${set.id}`;
+}
+
 export function historyImageSetMediaKey(set: HistoryImageSet, item: HistoryImageSetItem): string | null {
-  const ns = `${set.category}:${set.id}`; // query 身份 = 命名空间（值域限到本 set）
-  const ids = set.meta?.task_ids;
-  if (ids === undefined) return `${ns}:output:${item.index}`; // ecom_detail：index 是持久化唯一列
-  const id = ids[item.index];
-  if (typeof id !== "string" || !id) return null; // 缺失 / 空 / 非字符串
+  const ids: unknown = set.meta?.task_ids; // 运行时可能是 null / 非数组，故当 unknown 收
+  if (ids === undefined) return `output:${item.index}`; // 键缺失 → ecom_detail：index 是持久化唯一列
+  if (!Array.isArray(ids)) return null; // 键在但 null/非数组 → 畸形 photo，不是 ecom_detail（§五）
+  const id: unknown = ids[item.index];
+  if (typeof id !== "string" || !id) return null; // 缺失 / 空 / 非字符串元素
   if (ids.indexOf(id) !== ids.lastIndexOf(id)) return null; // 重复 → 不唯一 → 不可作身份
-  return `${ns}:task:${id}`;
+  return `task:${id}`;
 }
 
 const BASE = "/api/v1/history/images";

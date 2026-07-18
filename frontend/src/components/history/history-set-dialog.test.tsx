@@ -244,3 +244,49 @@ describe("HistorySetDialog · 整套图 presign 失效 → 重取（接入共享
     expect(screen.getByRole("img")).toHaveAttribute("src", "https://mock.local/hero-0.png?dl=1&sig=fresh");
   });
 });
+
+// ── FIX5：inFlight 也按 set 隔离（整个 RefreshGroup 按 scope 分，不只 mediaKey）─────────────────
+//
+// 🔴 这条钉的是**现有跨 job 测试绕过的那个窗口**：跨 job 测试切 B **前先等 A settle**，只覆盖了「预算」隔离。
+// 本条**故意让 A 的 refetch 保持 pending**（永不落定）就切 B —— 若 group 的 inFlight 仍由根组 "" 共享，
+// B 首帧报错会被 `if (group.inFlight) return`（use-media-url-refresh.ts:187）直接吞掉（CB 探针 3→4 停 3）。
+// 用 hooks-mock：refetch 是可控 spy，能精确让 A 的 refetch **永不落定**（真实 query + adapter 难稳定复现
+// 「跨 queryKey 切换后旧 refetch 仍 pending」）。这里数的是 refetchB 这个**独立** spy 被没被调（0 vs 1，
+// 单次顺序、无并发 → 不受 cancelRefetch 膨胀影响，二元判定本身就防膨胀）。
+describe("HistorySetDialog · FIX5（A pending 切 B，B 的刷新不被 A 的 inFlight 吞）", () => {
+  const setOf = (jobId: string, sig: string, refetch: () => Promise<unknown>) => ({
+    data: {
+      id: jobId,
+      category: "ecom_detail", // 无 task_ids → mediaKey=output:index；group 按 (category,set.id) 分
+      created_at: "2026-07-10T12:00:00Z",
+      status: "completed",
+      items: [{ index: 0, download_url: `https://cdn/gone-${jobId}.png?sig=${sig}`, width: 1254, height: 1254 }],
+      meta: {}
+    },
+    isLoading: false,
+    isError: false,
+    refetch
+  });
+  const itemForJob = (jobId: string): HistoryItem => ({ ...ITEM, id: jobId, category: "ecom_detail" });
+
+  it("🔴 A 的 refetch 未落定时切到 B、B 首帧报错 → B 仍能发请求（inFlight 按 set 隔离）", () => {
+    // A 的 refetch 永不落定 → A 的 group.inFlight 保持 true（模拟 CB 探针「A 保持 pending」）。
+    const refetchA = vi.fn().mockReturnValue(new Promise<never>(() => {}));
+    hooks.useHistoryImageSet.mockReturnValue(setOf("job-a", "1", refetchA));
+    const { rerender } = render(<HistorySetDialog item={itemForJob("job-a")} onClose={() => {}} />);
+
+    fireEvent.error(screen.getByRole("img")); // A 首帧失败 → refetchA 触发并保持 pending
+    expect(refetchA).toHaveBeenCalledTimes(1);
+
+    // 切到 B（同一实例）。B 初次查询正常，refetchB 独立可观测。
+    const refetchB = vi.fn().mockResolvedValue(undefined);
+    hooks.useHistoryImageSet.mockReturnValue(setOf("job-b", "1", refetchB));
+    rerender(<HistorySetDialog item={itemForJob("job-b")} onClose={() => {}} />);
+
+    fireEvent.error(screen.getByRole("img")); // B 首帧失败
+
+    // 🔴 承重点：B 有自己的 group（forKey(scopeKey-B)）→ 自己的 inFlight=false → B 发请求。
+    // 裸根组时：A 的 refetch 还 pending → 根组 inFlight=true → B 被吞（refetchB 0 次）。
+    expect(refetchB).toHaveBeenCalledTimes(1);
+  });
+});
