@@ -47,7 +47,9 @@ export function ProductImageCountPicker({ value, onChange }: ProductImageCountPi
 
   const onCustomInput = (raw: string) => {
     setCustomText(raw);
-    onChange(Number(raw)); // NaN when empty/non-numeric → 父级卡提交 + 错误提示
+    // Number("")===0、Number("abc")===NaN —— 两者都非法(0<MIN、NaN 非整)，均由父级 isValidImageCount 卡提交 +
+    // 本组件 showError 就地提示；父级越限文案已守 isValidImageCount，不会拿 0 报「超过所选 0 张」。
+    onChange(Number(raw));
   };
 
   const showError = custom && !isValidImageCount(Number(customText));

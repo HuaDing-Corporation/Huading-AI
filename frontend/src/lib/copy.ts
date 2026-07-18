@@ -159,11 +159,7 @@ export const copy = {
     ecomSubtitle: "上传产品图、输入卖点，AI 一键生成带货短片",
     ecomTopicLabel: "产品卖点 / 主题",
     ecomTopicPlaceholder: "输入产品卖点，如：316 不锈钢保温杯，24 小时持续锁温",
-    ecomTopicRequired: "请先输入产品卖点",
     ecomImageRequired: "请上传产品图后再生成",
-    productImageLabel: "产品图（必填）",
-    productImageUpload: "上传产品图（JPG / PNG / WebP，≤10MB）",
-    productImagePreviewAlt: "产品图预览",
     // 电商带货：视频时长选择器
     durationLabel: "视频时长",
     durationLabelAligned: "视频时长（与文案、字幕一致）",

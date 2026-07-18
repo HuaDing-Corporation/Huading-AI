@@ -335,4 +335,30 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0].negative_prompt).toBe("禁止文字水印");
   });
+
+  // 评审修复承重（CONFIRMED 死点击）：主题去必填后「AI生成文案」空主题时禁用（文案生成仍需主题；与「AI生成画面」缺图禁用对称，消静默 no-op）。
+  it("空主题 → 「AI生成文案」禁用，填主题后启用（消死点击）", () => {
+    render(<EcomVideoForm />);
+    const genScript = screen.getByRole("button", { name: /AI生成文案/ });
+    expect(genScript).toBeDisabled();
+    fireEvent.change(screen.getByPlaceholderText(/输入产品卖点/), { target: { value: "保温杯" } });
+    expect(genScript).toBeEnabled();
+  });
+
+  // 评审修复承重（CONFIRMED 张数 clear→0）：清空自定义张数 Number("")===0，不得误报「超过所选 0 张」；生成禁用 + picker 就地范围提示。
+  it("清空自定义张数 → 不误报「超过所选 0 张」，生成禁用 + 张数范围提示", async () => {
+    render(<EcomVideoForm />);
+    uploadProductImages(1);
+    const generate = screen.getByRole("button", { name: /生成视频/ });
+    await waitFor(() => expect(generate).toBeEnabled());
+
+    // 张数切自定义并清空 → 0（越限判据已守 isValidImageCount，不拿 0 报越限）。
+    const countFieldset = screen.getByText("产品图张数").closest("fieldset") as HTMLElement;
+    fireEvent.click(within(countFieldset).getByRole("button", { name: "自定义" }));
+    fireEvent.change(screen.getByLabelText("自定义张数"), { target: { value: "" } });
+
+    expect(screen.queryByText(/超过所选 0 张/)).not.toBeInTheDocument();
+    await waitFor(() => expect(generate).toBeDisabled());
+    expect(screen.getByText("请输入 1–9 张")).toBeInTheDocument();
+  });
 });

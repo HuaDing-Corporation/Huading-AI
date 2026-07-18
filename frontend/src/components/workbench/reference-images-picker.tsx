@@ -71,9 +71,12 @@ export function ReferenceImagesPicker({
   useEffect(() => {
     itemsRef.current = items;
   }, [items]);
+  // 上传在途(await 期间)的预览 URL：尚未落入 items，卸载清理不覆盖 → 单独记账，一并在卸载时释放，杜绝在途卸载泄漏。
+  const pendingPreviews = useRef<Set<string>>(new Set());
   useEffect(
     () => () => {
       itemsRef.current.forEach((it) => URL.revokeObjectURL(it.preview));
+      pendingPreviews.current.forEach((url) => URL.revokeObjectURL(url));
     },
     []
   );
@@ -95,6 +98,7 @@ export function ReferenceImagesPicker({
     try {
       for (const file of toUpload) {
         const preview = URL.createObjectURL(file);
+        pendingPreviews.current.add(preview); // 在途记账：落入 items 或被 revoke 前，卸载清理据此释放
         try {
           const key = uploadFile ? await uploadFile(file) : (await uploadImg.mutateAsync(file)).asset_id;
           setItems((prev) => {
@@ -107,6 +111,8 @@ export function ReferenceImagesPicker({
         } catch (err) {
           URL.revokeObjectURL(preview);
           setError(errorText(err));
+        } finally {
+          pendingPreviews.current.delete(preview); // 已落定（入 items 由 itemsRef 接管，或已 revoke）→ 移出在途集
         }
       }
     } finally {

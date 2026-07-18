@@ -17,6 +17,9 @@ export interface ScriptReviewProps {
   /** AI action 按钮文案（默认「重写文案」）。ECOM-VIDEO-OPTIMIZE-UI-0001：电商带货传「AI生成文案」，
    *  口播共享此组件不传 → 保持「重写文案」不变（copy.workbench.regenerate 是共享 key，不可直改）。 */
   actionLabel?: string;
+  /** 禁用 AI action（非 loading）。ECOM-VIDEO-OPTIMIZE-UI-0001：电商带货主题去必填后，主题空时禁「AI生成文案」
+   *  （文案生成仍需主题作输入，避免可点却静默 no-op；与「AI生成画面」缺产品图禁用对称）。口播不传 → 行为不变。 */
+  actionDisabled?: boolean;
   /**
    * textarea 的 DOM id（AiTextField 同时用作 name）。WORKBENCH-KEEPALIVE-UI-0001：工作台面板常驻后，口播与
    * 电商带货两份 ScriptReview 会同存于 DOM —— id 必须各自唯一，否则 `<label for>` 按 HTML 规范关联到文档中
@@ -30,7 +33,7 @@ export interface ScriptReviewProps {
 
 /** AI 口播文案 panel — editable textarea + regenerate, with a char/duration footer.
  *  Thin wrapper over the shared AiTextField. Pure props, no fetch. */
-export function ScriptReview({ script, onChange, onRegenerate, loading, speed, label, actionLabel, id }: ScriptReviewProps) {
+export function ScriptReview({ script, onChange, onRegenerate, loading, speed, label, actionLabel, actionDisabled, id }: ScriptReviewProps) {
   const uid = useId();
   const fieldId = id ?? uid; // 不传 → 每实例唯一，撞车不再是默认行为
   // Soft over-length hint: the raw estimate can exceed the cap (estSeconds clamps
@@ -53,6 +56,7 @@ export function ScriptReview({ script, onChange, onRegenerate, loading, speed, l
       onAction={onRegenerate}
       actionLabel={actionLabel ?? copy.workbench.regenerate}
       actionIcon="regenerate"
+      actionDisabled={actionDisabled}
       loading={loading}
       footer={footer}
     />

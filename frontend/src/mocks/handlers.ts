@@ -1225,7 +1225,12 @@ export const handlers = [
     ok({ items: [{ asset_id: "preset-1", display_name: "默认主播", thumbnail_url: "https://mock.local/p1.jpg" }], total: 1 })
   ),
   http.post(`${BASE}/api/v1/scripts/generate`, async ({ request }) => {
-    const body = (await request.json()) as { topic: string; length_tier?: string };
+    const body = (await request.json()) as { topic?: string; length_tier?: string };
+    // topic 必填（BE ScriptGenerateRequest.topic 非可选）——mock 不比 BE 宽松：缺/空即 422，守住前端两处调用方
+    // （电商 onGenerateScript、口播 onGenerateScript）都在 topic 非空时才发。
+    if (!body.topic || !body.topic.trim()) {
+      return err(422, "VALIDATION_ERROR", "topic is required");
+    }
     // 字数档位（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.5）：可选，present 时须 short/medium/long（镜像 BE Literal，
     // mock 不比 BE 宽松——非法枚举即 422，守住前端只发合法档位）。反映到 mock 文案长度供承重区分档位真接线。
     if (body.length_tier !== undefined && !["short", "medium", "long"].includes(body.length_tier)) {
@@ -1416,6 +1421,7 @@ export const handlers = [
       reference_image_asset_ids?: string[];
       product_image_keys?: string[]; // 电商带货 i2v 产品图（ECOM-VIDEO-OPTIMIZE-UI-0001 §4.3）
       negative_prompt?: string; // 电商带货 i2v 负面提示词（§4.3/req6）
+      voice_id?: string; // 电商带货/数字人口播必填
       duration_sec?: number;
       resolution?: string;
       bgm?: { source?: string; asset_id?: string; track_id?: string };
@@ -1461,6 +1467,10 @@ export const handlers = [
       const keys = body.product_image_keys ?? [];
       if (!Array.isArray(keys) || keys.length < 1 || keys.length > 9) {
         return err(422, "ECOM_I2V_INVALID", "电商带货产品图 1–9 张");
+      }
+      // 电商带货音色必填（BE：数字人口播/电商带货 voice_id 必填）——mock 不比 BE 宽松，守住前端 generateDisabled 的音色门。
+      if (!body.voice_id) {
+        return err(422, "ECOM_I2V_INVALID", "电商带货需选择音色");
       }
     }
     const id = `mock-${++videoSeq}`;
