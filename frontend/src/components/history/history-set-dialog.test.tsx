@@ -1,3 +1,4 @@
+// rebase(#187)：两边的并集 —— #187 要 waitFor（提示词复制的异步断言），本 PR 要 fireEvent（error/load 事件）。
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -32,7 +33,7 @@ beforeEach(() => {
     },
     isLoading: false,
     isError: false,
-    refetch: vi.fn()
+    refetch: vi.fn().mockResolvedValue(undefined)
   });
 });
 afterEach(() => vi.clearAllMocks());
@@ -64,7 +65,7 @@ const setOf = (category: string, meta: Record<string, unknown>) => ({
   },
   isLoading: false,
   isError: false,
-  refetch: vi.fn()
+  refetch: vi.fn().mockResolvedValue(undefined)
 });
 const itemOf = (category: string): HistoryItem => ({ ...ITEM, category: category as HistoryItem["category"] });
 const LONG = "将图片背景换成浅蓝色带有线条波纹浅反光的纯净水，然后再将图片中的字体切换成蓝金风格。".repeat(6);
@@ -142,5 +143,150 @@ describe("HistorySetDialog · 信息并集（一项都不能少）", () => {
   it("item=null → 不发详情请求、不渲染标题（弹窗关闭态）", () => {
     render(<HistorySetDialog item={null} onClose={() => {}} />);
     expect(screen.queryByText("保温杯 · 主图复刻（5 张）")).not.toBeInTheDocument();
+  });
+});
+
+// ── MEDIA-URL-REFRESH-CONVERGE-0001 · **第 5 片：接防线** ──────────────────────────────────
+//
+// ⚠️ **证伪任务包一处**：任务包 §二.3 点名「history-card / image-lightbox / **history-detail-dialog**
+// 全链路零 onError」。但 `history-detail-dialog.tsx` 是**纯外壳**（Dialog/标题/meta/关闭），**没有 img** ——
+// 详情弹窗里真正裸着的 `<img>` 在 `history-image-tile.tsx:27`，消费的是 `download_url`
+// （history-images.ts:41 明确标注 presigned）。以源码为准 → 本片接的是 tile。
+//
+// tile 的数据源是 HistorySetDialog 自己的 `useHistoryImageSet` query（不是 history-grid 那个冻结快照），
+// 故它**本来就导电**：重取 → set.items 换新 download_url → tile 的 src 跟着换。承重见下面第 3 条。
+describe("HistorySetDialog · 整套图 presign 失效 → 重取（接入共享哨兵）", () => {
+  it("整套单张失效 → 重取一次；同一 URL 连报多次也只一次", () => {
+    const refetch = vi.fn().mockResolvedValue(undefined);
+    hooks.useHistoryImageSet.mockReturnValue({
+      data: {
+        id: "hd-main-1",
+        category: "ecom_detail",
+        created_at: "2026-07-10T12:00:00Z",
+        status: "completed",
+        items: [{ index: 0, download_url: "https://mock.local/hist/hero-0.png?dl=1", width: 1254, height: 1254 }],
+        meta: {}
+      },
+      isLoading: false,
+      isError: false,
+      refetch
+    });
+    render(<HistorySetDialog item={ITEM} onClose={() => {}} />);
+
+    const img = screen.getByRole("img");
+    fireEvent.error(img);
+    expect(refetch).toHaveBeenCalledTimes(1);
+
+    fireEvent.error(img);
+    fireEvent.error(img);
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  // 🔴 **上一版这条测试在给错误行为盖章**（Codex B 的 P1-2）。
+  // 它原本叫「每张各自独立计数 —— 一张失效不该吃掉另一张的重取机会」，断言 `refetch` 被调 **2** 次，
+  // 理由写的是「一张不该吃掉另一张的机会」。**那个框架从根上就错了**：
+  // refetch 刷的是**整个 set query** —— 第一次回来时第二张的 download_url 也已经换新了，
+  // 第二次 refetch 是**纯重复请求**。所谓「另一张的机会」根本不存在，它们本来就是同一次机会。
+  // 于是「每实例最多 2 次」在 N 张的整套上 = 最多 2×N 次真实请求；而 TanStack 默认 cancelRefetch:true
+  // 让两次并发 refetch 的 queryFn 被调 **3** 次（第二次中止并重启第一次 —— 我自己跑探针复现了这个数字）。
+  //
+  // 这比"漏测"重一层：不是没看见，是看见了并盖章说对。改的不是数字，是**预算的作用域**。
+  it("🔴 整套 N 张同时失效 → 只重取一次（一次 refetch 就把 N 张的 URL 全刷回来）", () => {
+    const refetch = vi.fn().mockResolvedValue(undefined);
+    hooks.useHistoryImageSet.mockReturnValue({
+      data: {
+        id: "hd-main-1",
+        category: "ecom_detail",
+        created_at: "2026-07-10T12:00:00Z",
+        status: "completed",
+        items: [
+          { index: 0, download_url: "https://mock.local/a.png?dl=1", width: 1254, height: 1254 },
+          { index: 1, download_url: "https://mock.local/b.png?dl=1", width: 1254, height: 1254 }
+        ],
+        meta: {}
+      },
+      isLoading: false,
+      isError: false,
+      refetch
+    });
+    render(<HistorySetDialog item={ITEM} onClose={() => {}} />);
+
+    // 整套 N 张共用**一份**预算（scope 由持有 query 的 HistorySetDialog 创建并整份下发）。
+    // 两张同时碎 → 第一张触发重取，第二张看到「已有一次在路上」→ 不再发。
+    const imgs = screen.getAllByRole("img");
+    fireEvent.error(imgs[0]);
+    fireEvent.error(imgs[1]);
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("重取拿回新 URL → tile 的 <img src> 真的跟着换（数据源是 query 派生，重取才有意义）", () => {
+    const refetch = vi.fn().mockResolvedValue(undefined);
+    const setWith = (url: string) => ({
+      data: {
+        id: "hd-main-1",
+        category: "ecom_detail",
+        created_at: "2026-07-10T12:00:00Z",
+        status: "completed",
+        items: [{ index: 0, download_url: url, width: 1254, height: 1254 }],
+        meta: {}
+      },
+      isLoading: false,
+      isError: false,
+      refetch
+    });
+    hooks.useHistoryImageSet.mockReturnValue(setWith("https://mock.local/hero-0.png?dl=1"));
+    const { rerender } = render(<HistorySetDialog item={ITEM} onClose={() => {}} />);
+
+    fireEvent.error(screen.getByRole("img"));
+    hooks.useHistoryImageSet.mockReturnValue(setWith("https://mock.local/hero-0.png?dl=1&sig=fresh"));
+    rerender(<HistorySetDialog item={ITEM} onClose={() => {}} />);
+
+    expect(screen.getByRole("img")).toHaveAttribute("src", "https://mock.local/hero-0.png?dl=1&sig=fresh");
+  });
+});
+
+// ── FIX5：inFlight 也按 set 隔离（整个 RefreshGroup 按 scope 分，不只 mediaKey）─────────────────
+//
+// 🔴 这条钉的是**现有跨 job 测试绕过的那个窗口**：跨 job 测试切 B **前先等 A settle**，只覆盖了「预算」隔离。
+// 本条**故意让 A 的 refetch 保持 pending**（永不落定）就切 B —— 若 group 的 inFlight 仍由根组 "" 共享，
+// B 首帧报错会被 `if (group.inFlight) return`（use-media-url-refresh.ts:187）直接吞掉（CB 探针 3→4 停 3）。
+// 用 hooks-mock：refetch 是可控 spy，能精确让 A 的 refetch **永不落定**（真实 query + adapter 难稳定复现
+// 「跨 queryKey 切换后旧 refetch 仍 pending」）。这里数的是 refetchB 这个**独立** spy 被没被调（0 vs 1，
+// 单次顺序、无并发 → 不受 cancelRefetch 膨胀影响，二元判定本身就防膨胀）。
+describe("HistorySetDialog · FIX5（A pending 切 B，B 的刷新不被 A 的 inFlight 吞）", () => {
+  const setOf = (jobId: string, sig: string, refetch: () => Promise<unknown>) => ({
+    data: {
+      id: jobId,
+      category: "ecom_detail", // 无 task_ids → mediaKey=output:index；group 按 (category,set.id) 分
+      created_at: "2026-07-10T12:00:00Z",
+      status: "completed",
+      items: [{ index: 0, download_url: `https://cdn/gone-${jobId}.png?sig=${sig}`, width: 1254, height: 1254 }],
+      meta: {}
+    },
+    isLoading: false,
+    isError: false,
+    refetch
+  });
+  const itemForJob = (jobId: string): HistoryItem => ({ ...ITEM, id: jobId, category: "ecom_detail" });
+
+  it("🔴 A 的 refetch 未落定时切到 B、B 首帧报错 → B 仍能发请求（inFlight 按 set 隔离）", () => {
+    // A 的 refetch 永不落定 → A 的 group.inFlight 保持 true（模拟 CB 探针「A 保持 pending」）。
+    const refetchA = vi.fn().mockReturnValue(new Promise<never>(() => {}));
+    hooks.useHistoryImageSet.mockReturnValue(setOf("job-a", "1", refetchA));
+    const { rerender } = render(<HistorySetDialog item={itemForJob("job-a")} onClose={() => {}} />);
+
+    fireEvent.error(screen.getByRole("img")); // A 首帧失败 → refetchA 触发并保持 pending
+    expect(refetchA).toHaveBeenCalledTimes(1);
+
+    // 切到 B（同一实例）。B 初次查询正常，refetchB 独立可观测。
+    const refetchB = vi.fn().mockResolvedValue(undefined);
+    hooks.useHistoryImageSet.mockReturnValue(setOf("job-b", "1", refetchB));
+    rerender(<HistorySetDialog item={itemForJob("job-b")} onClose={() => {}} />);
+
+    fireEvent.error(screen.getByRole("img")); // B 首帧失败
+
+    // 🔴 承重点：B 有自己的 group（forKey(scopeKey-B)）→ 自己的 inFlight=false → B 发请求。
+    // 裸根组时：A 的 refetch 还 pending → 根组 inFlight=true → B 被吞（refetchB 0 次）。
+    expect(refetchB).toHaveBeenCalledTimes(1);
   });
 });

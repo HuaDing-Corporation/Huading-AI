@@ -1,11 +1,13 @@
 "use client";
 
+import { useCallback } from "react";
 import { Clapperboard } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 import { Card, CardTitle } from "@/components/ui/card";
 import { TaskCard } from "@/components/tasks/task-card";
 import { copy } from "@/lib/copy";
+import { useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 import { useVideoTasks } from "@/lib/videos/tasks-context";
 
 /** Live "生成任务" panel — shows only the 2 most recent in-flight/just-finished
@@ -14,6 +16,14 @@ export function TaskList() {
   const { tasks, refreshTask, retryTask } = useVideoTasks();
   const router = useRouter();
   const recent = tasks.slice(0, 2);
+
+  // 🔴 FIX1：这里是那个**反例** —— `refreshTask(taskId)` 只刷**这一个** task（tasks-context:146 走
+  // GET /videos/{id}）。N 张卡 = N 个**不同资源**，N 次请求是**必要的**，不是浪费。故按 taskId
+  // `forKey` 分区，每张卡各持一份预算 —— 若在这里也合流成一次，就只有一张卡被救回来、其余永远黑着。
+  //
+  // 同一个 TaskCard 在 generation-history 里却要全列表共用一份（那边一次 refetch 刷全部）——
+  // **作用域只有调用方知道**，这正是预算不能放在 TaskCard 里的原因。
+  const refresh = useMediaUrlRefreshScope(useCallback((taskId: string) => refreshTask(taskId), [refreshTask]));
 
   return (
     <Card animateIn className="flex flex-col">
@@ -37,7 +47,7 @@ export function TaskList() {
                 // unhandled rejection (P2-1).
                 void retryTask(id).catch(() => undefined);
               }}
-              onUrlError={(id) => void refreshTask(id)}
+              refresh={refresh.forKey(task.taskId)}
             />
           ))}
           {tasks.length > recent.length ? (

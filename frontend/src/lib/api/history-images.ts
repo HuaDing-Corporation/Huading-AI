@@ -66,9 +66,74 @@ export interface HistoryImageSet {
      * ⚠️ 不是「详情 / 海报」：ecom_detail 走另一个 builder（:545-559，meta 无此键）；海报不是历史分类。
      */
     extra_prompt?: string;
+    /**
+     * **仅 photo 四类**（image_gen/ecom_white/ecom_model/cover）：与 `items` **同序**的任务 ID
+     * （image_history.py:421 `{"task_ids": [task.id for task in tasks]}` —— 无条件写入，且与 :471-490 的
+     * `items` 同出一份 `tasks` 列表）。ecom_detail 走另一个 builder（:550-560），**没有这个键**。
+     * 用途见 `historyImageSetMediaKey`。
+     */
+    task_ids?: string[];
     // 其余分类特有键（详情图 output_mode / 白底图 background / 封面 timestamp_sec…）
     [key: string]: unknown;
   };
+}
+
+/**
+ * 整套里单张的**跨重取稳定身份** —— 喂给 `useMediaUrlRefresh` 的 mediaKey（CONVERGE-0001 · FIX3 的 P1）。
+ *
+ * 🔴 `item.index` 在两条 BE 分支下**同名、同类型、意思相反**，这正是这条 P1 的根：
+ *
+ *  · **ecom_detail**（`_replicate_history_detail`）：`index=output.index`（image_history.py:537）读的是
+ *    **持久化列** `ecom_replicate_outputs.index`（models.py:585 `Mapped[int]` NOT NULL），且
+ *    `UniqueConstraint("job_id","index")`（models.py:570）→ **一个 job 内唯一**。计划期 enumerate 一次写入
+ *    （ecom_replicate.py:191/218，status 还是 "planned"），全仓**无任何写回路径**，BE 自己还拿它当主键用
+ *    （ecom_replicate.py:395 `EcomReplicateOutput.index == output_index` + `with_for_update()`）
+ *    → **跨重取恒定，index 本身就是身份**。
+ *    ⚠️ 但**数组位置**会漂：`_safe_replicate_outputs` 按 `status=="succeeded"` 过滤（:257），
+ *    陆续成功时先到的那张位置会被后到、index 更小的挤后 —— 故只能认 `item.index`，不能认下标。
+ *
+ *  · **其余四类**（`_photo_history_detail`）：BE 只查 `status=="done"` 的任务（image_history.py:84）、
+ *    按 `created_at` 排序后**重新 enumerate**（:472 `for index, task in enumerate(tasks)`）。排序键固定
+ *    给的是稳定的**相对顺序**，但 index 是**绝对位置**，而这个列表的**成员资格随完成情况变** ——
+ *    **批量陆续完成时，同一张图会从 index 0 漂到 1、2**（created_at 更早、完成更晚的兄弟插到它前面）
+ *    → **index 不是身份**。这四类必须用 `meta.task_ids[index]`（VideoTask.id 是主键，恒定）。
+ *    （image_gen 例外：history_id == VideoTask.id（:100）→ 整套恒 1 张，漂不起来；但它同样有 task_ids。）
+ *
+ * 🔴 **FIX5 · 命名空间下沉到「整个 group」，不再是给 mediaKey 加前缀**：
+ * 预算 Map 活在 `HistorySetDialog` **组件实例**里，跨「打开 set A → 关 → 打开 set B」持续存在
+ * （`HistoryGrid` 切换详情集时不卸载它）。FIX4 给 mediaKey 加了 `(category,set.id)` 前缀，隔离了**预算**，
+ * 但 `RefreshGroup` 里还有 **`inFlight`**（+ URL 集合）**仍由根组 `""` 共享** —— A 的 refetch 未落定时切到 B，
+ * B 首帧报错会被 A 的 `inFlight` 直接吞掉（第五次栽在作用域，每次漏下一个字段）。
+ * **根治**：`HistorySetDialog` 改用 `refresh.forKey(scopeKey)`（见 `historyImageSetScopeKey`）—— 整个 group
+ * 按 scope 分，**预算 / inFlight / URL 集合全部自动按 scope 分**，不可能再漏第 N 个共享状态。
+ * 所以本函数只需给出**本 set 内**的媒体身份（不再带 set 前缀，前缀由 group 提供）。
+ *
+ * 🔴 **§五 · 数据形态判别 + 运行时防御**（我 FIX3 那句「对任意契约漂移安全」被证伪，措辞收准）：
+ *  · `task_ids` **键整个缺失**（`undefined`）→ ecom_detail 形态：`index` 是持久化、`(job,index)` 唯一的列
+ *    （models.py:585/:570，计划期一次写入、全仓无写回、BE 拿它当主键 `with_for_update()`）→ 本 set 内是身份 →
+ *    `output:${index}`。
+ *  · `task_ids` **键在、但不是合法数组**（`null` / 非数组）→ **畸形 photo，不是 ecom_detail** → 停用刷新。
+ *  · `task_ids` **是数组** → photo 形态：`index` 会漂、**不是身份**（BE 只查 done + 重 enumerate，:84/:472）。
+ *    本位置须是**合法且唯一**的 task_id（VideoTask 主键，恒定）→ `task:${id}`；**缺失/空/非字符串/重复** →
+ *    没有可信身份 → **返回 `null`，调用方停用刷新**（宁可不救，也不救错：退回 index = 重演 FIX3 漂移；
+ *    静默用它 = 把「BE 契约破了」这个应当可见的故障藏成偶发预算错乱）。
+ *  **两者靠数据形态判别，不是分类字符串。** 唯一残留假设：photo 若**错误省略**整个 `task_ids` 键会被当
+ *  ecom_detail（退回 index），此时最坏是**本 group 内**有界的 2×N 过度重取 —— 有界、且需 BE 违约才触发。
+ */
+export function historyImageSetScopeKey(set: HistoryImageSet): string {
+  // 整个 RefreshGroup 的隔离键 = 该整套的 query 身份 (category, id)。set.id 是响应主键、全局唯一；
+  // 带上 category 与 useHistoryImageSet 的 queryKey 对齐（["history-images","detail",category,id]）。
+  return `${set.category}:${set.id}`;
+}
+
+export function historyImageSetMediaKey(set: HistoryImageSet, item: HistoryImageSetItem): string | null {
+  const ids: unknown = set.meta?.task_ids; // 运行时可能是 null / 非数组，故当 unknown 收
+  if (ids === undefined) return `output:${item.index}`; // 键缺失 → ecom_detail：index 是持久化唯一列
+  if (!Array.isArray(ids)) return null; // 键在但 null/非数组 → 畸形 photo，不是 ecom_detail（§五）
+  const id: unknown = ids[item.index];
+  if (typeof id !== "string" || !id) return null; // 缺失 / 空 / 非字符串元素
+  if (ids.indexOf(id) !== ids.lastIndexOf(id)) return null; // 重复 → 不唯一 → 不可作身份
+  return `task:${id}`;
 }
 
 const BASE = "/api/v1/history/images";

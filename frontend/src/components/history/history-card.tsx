@@ -3,6 +3,7 @@
 import { Button } from "@/components/ui/button";
 import { HistoryStatusBadge } from "@/components/history/history-status-badge";
 import { copy } from "@/lib/copy";
+import type { MediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 import type { HistoryItem } from "@/lib/api/history-images";
 
 /** ISO → "YYYY-MM-DD HH:mm"（确定性、无时区漂移；测试不依赖精确时间）。 */
@@ -19,11 +20,22 @@ function formatCreatedAt(iso: string): string {
 export function HistoryCard({
   item,
   onOpenImage,
-  onDetail
+  onDetail,
+  refresh
 }: {
   item: HistoryItem;
   onOpenImage: () => void;
   onDetail: () => void;
+  /**
+   * presign 失效重取的**作用域**，由持有 query 的 HistoryGrid 创建并下发（FIX1）。
+   *
+   * 🔴 收 scope 而非 `onUrlError: () => void`：整个网格的卡片消费的是**同一个** useHistoryImages query，
+   * 一次 refetch 就把所有 cover_url 刷回来了。若每张卡各持一份预算（上一版就是），全碎时 = **2×N 次**
+   * 真实请求 —— 局部正确、全局错。预算属于 query，元素只负责报告自己的 URL。
+   *
+   * 本卡的 item 来自 `items.map(...)` **派生**（非快照）→ 新 cover_url 喂得进来，防线导电（第 4 片实测）。
+   */
+  refresh: MediaUrlRefreshScope;
 }) {
   return (
     <div data-testid="history-card" className="group flex flex-col gap-2 rounded-card border border-line-gold bg-glass-fill p-2.5">
@@ -34,7 +46,13 @@ export function HistoryCard({
         className="relative aspect-square w-full overflow-hidden rounded-mark border border-line-gold bg-glass-soft outline-none focus-visible:shadow-focus-gold"
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={item.cover_url} alt={item.title} className="h-full w-full object-cover transition-transform group-hover:scale-[1.02]" />
+        <img
+          src={item.cover_url}
+          alt={item.title}
+          onError={() => refresh.onError(item.cover_url)}
+          onLoad={refresh.onLoad}
+          className="h-full w-full object-cover transition-transform group-hover:scale-[1.02]"
+        />
         <span className="absolute right-1.5 top-1.5 rounded-pill bg-ink/55 px-2 py-0.5 text-[11px] font-medium text-white">
           {copy.historyImages.itemCount(item.item_count)}
         </span>

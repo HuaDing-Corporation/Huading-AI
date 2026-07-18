@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback } from "react";
 import { Loader2 } from "lucide-react";
 
 import { HistoryDetailDialog } from "@/components/history/history-detail-dialog";
@@ -8,7 +9,13 @@ import { HistoryImageTile } from "@/components/history/history-image-tile";
 import { HistoryStatusBadge } from "@/components/history/history-status-badge";
 import { useHistoryImageSet } from "@/lib/api/hooks";
 import { copy } from "@/lib/copy";
-import type { HistoryCategory, HistoryItem } from "@/lib/api/history-images";
+import { NO_MEDIA_URL_REFRESH, useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
+import {
+  historyImageSetMediaKey,
+  historyImageSetScopeKey,
+  type HistoryCategory,
+  type HistoryItem
+} from "@/lib/api/history-images";
 
 /** 分类机器键 → 中文标签（详情弹窗信息并集用；6 分类）。 */
 const CATEGORY_LABEL: Record<HistoryCategory, string> = {
@@ -35,6 +42,10 @@ export function HistorySetDialog({ item, onClose }: { item: HistoryItem | null; 
   const query = useHistoryImageSet(item?.category ?? "", item?.id);
   const set = query.data;
   const categoryLabel = item ? (CATEGORY_LABEL[item.category as HistoryCategory] ?? item.category) : "";
+  // 🔴 FIX1：**一份预算，整套 N 张共用** —— 一次 refetch 把整套的 download_url 全刷回来，
+  // 第 2..N 张各再发一次纯属重复请求。上一版每张 tile 各持一份预算（= 2×N），而且我给它写了条测试
+  // 断言「两张失效 → refetch 两次」并标 🔴 —— **测试在给错误行为盖章**。见 use-media-url-refresh.ts。
+  const refresh = useMediaUrlRefreshScope(useCallback(() => query.refetch(), [query]));
   return (
     <HistoryDetailDialog
       open={item !== null}
@@ -102,9 +113,23 @@ export function HistorySetDialog({ item, onClose }: { item: HistoryItem | null; 
             <p className="mb-1 mt-2 text-[12.5px] text-error-fg">{copy.historyImages.setPartialHint}</p>
           ) : null}
           <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {set.items.map((it) => (
-              <HistoryImageTile key={it.index} item={it} />
-            ))}
+            {set.items.map((it) => {
+              // presign 失效 → 重取本整套（MEDIA-URL-REFRESH-CONVERGE-0001 · 第 5 片 / FIX2 / FIX3）。
+              // 数据源就是本组件的 useHistoryImageSet query → 重取拿回的新 download_url 直接喂回 tile，导电。
+              // 每张 tile 是独立媒体位置：整套里一张删了、其余在，那一张的无限重试不该被健康张的
+              // onLoad 清账（FIX2 的 P1-2）。
+              //
+              // 🔴 FIX3：`it.index` 跨 refetch 会漂（BE 只查 done + 重 enumerate，image_history.py:84/:472）。
+              // 🔴 FIX5：**整个 RefreshGroup 按本 set 隔离** —— 本弹窗的预算 Map 跨「打开 A→关→打开 B」持续存在
+              //   （HistoryGrid 不卸载它）。FIX4 只给 mediaKey 加了命名空间、隔离了预算，但 group 的 `inFlight`
+              //   仍由根组 "" 共享（A 未落定切 B → B 首帧被吞）。改用 `forKey(scopeKey)`：整个 group 按 (category,
+              //   set.id) 分，inFlight/预算/URL 集合一次性全隔离，不会再漏第 N 个共享状态。见 use-media-url-refresh.ts。
+              // mediaKey 为 null = 拿不到可信身份（畸形/缺失 task_ids）→ 停用刷新，宁可不救不救错（§五）。
+              const setScope = refresh.forKey(historyImageSetScopeKey(set));
+              const mediaKey = historyImageSetMediaKey(set, it);
+              const tileRefresh = mediaKey === null ? NO_MEDIA_URL_REFRESH : setScope.forMedia(mediaKey);
+              return <HistoryImageTile key={mediaKey ?? `unstable:${it.index}`} item={it} refresh={tileRefresh} />;
+            })}
           </div>
         </>
       ) : (

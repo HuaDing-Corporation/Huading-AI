@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { ChevronLeft, Download, Image as ImageIcon, Share2 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -11,6 +11,7 @@ import { videoKeys } from "@/lib/api/keys";
 import { friendlyImageError } from "@/lib/api/image-error";
 import { friendlyVideoError } from "@/lib/api/video-error";
 import { copy } from "@/lib/copy";
+import { useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 import { cn } from "@/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -59,16 +60,26 @@ export function VideoDetail({ id }: VideoDetailProps) {
   const [coverOpen, setCoverOpen] = useState(false);
 
   /**
-   * ⚠️ 已知缺陷（HISTORY-VIDEO-DIALOG-UI-0001 · FIX1 实测确认，**本包未修**，已记 backlog）：
-   * 下面 photo 分支的 `<img onError={handleUrlExpired}>` 是**裸接**的 —— 没有任何哨兵。
-   * video 分支还有 VideoPlayer 内部的 ref 兜着，图片分支什么都没有：只要 BE 每次都能签出**新的**
-   * 失效 URL（对象已删/已迁移即如此），就是 error → invalidate → 新 URL → error → …… **无限重取**。
-   * 正解见 `@/lib/media/use-media-url-refresh`（同一 URL 只报一次 + 连续失败封顶 + 成功即清零），
-   * 历史 tab 已全部收敛到它。本文件属 `/videos/{id}` 详情页域、且零 URL 过期测试覆盖 → 单独一片修。
+   * presign 失效 → 重取本视频详情。**两个分支共用同一份预算**（FIX1）：photo 的 `<img>` 与 video 的
+   * VideoPlayer 消费的是同一个 `useVideo(id)` query —— 一次 invalidate 把两者的 URL 一起换新，
+   * 故预算属于这个 query，不属于哪个元素。（此处同一时刻只渲染一个分支，但作用域该按资源划、不按现象划。）
+   *
+   * 🔴 FIX4（「第 10 处」扫描）：本组件是 `/videos/[id]` 页。按 **video id** 切独立合流域（`forKey(id)`）：
+   *   换视频 = 换 key，结构上撞不上。id 是 VideoTask 主键、全局唯一，就是正确的命名空间。
+   *   ⚠️ FIX5 收准（Codex B RV5 证伪我上一版注释）：我原写「`page.tsx` 无 `key={id}` → Next 换 param **不** remount →
+   *   预算 Map 跨 `/videos/a→b` 存活、裸根 scope 会继承封顶」。**「不 remount」这个前提不可靠** —— App Router
+   *   动态 segment 变化**通常会** remount。但 `forKey(id)` **两种情况都对**：remount 时它是 no-op，不 remount 时它
+   *   正确隔离。**保留它不是因为「一定不 remount」，而是因为它对 remount 与否都成立。**
+   *
+   * 必须在早返回（loading / error / !data）**之前**调用 —— rules-of-hooks，lint 是 error 级。
+   * `invalidateQueries` 返回 Promise → 在飞门控靠它判断这次重取回来了没有。
    */
-  function handleUrlExpired() {
-    void queryClient.invalidateQueries({ queryKey: videoKeys.detail(id) });
-  }
+  const refresh = useMediaUrlRefreshScope(
+    useCallback(
+      (budgetKey: string) => queryClient.invalidateQueries({ queryKey: videoKeys.detail(budgetKey) }),
+      [queryClient]
+    )
+  ).forKey(id);
 
   // Loading state
   if (isLoading) {
@@ -152,7 +163,8 @@ export function VideoDetail({ id }: VideoDetailProps) {
             <img
               src={data.playback_url}
               alt={data.topic ?? copy.workbench.photoResultAlt}
-              onError={handleUrlExpired}
+              onError={() => refresh.onError(data.playback_url)}
+              onLoad={refresh.onLoad}
               className="w-full rounded-field border border-line-gold bg-black/5 object-contain"
             />
             {data.download_url && (
@@ -170,7 +182,7 @@ export function VideoDetail({ id }: VideoDetailProps) {
             playbackUrl={data.playback_url}
             downloadUrl={data.download_url}
             poster={data.thumbnail_url}
-            onUrlExpired={handleUrlExpired}
+            refresh={refresh}
           />
         )
       ) : (
