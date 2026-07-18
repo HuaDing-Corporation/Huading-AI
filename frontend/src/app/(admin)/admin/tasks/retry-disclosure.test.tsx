@@ -53,7 +53,11 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("任务重跑 · 回执披露三态（精确文案，不许静默扣费）", () => {
+// 🔴 FIX1（Codex B #191 P1）：定向 scoped timeout 15s，**不放宽全局**（全局保持默认 5s）。
+// 这三条是 React 渲染测试（render + AdminTasksPage + MSW 往返），在 shuffle 高负载窗口偶发 5s 超时——
+// 那是**负载噪声、非顺序依赖**（单跑无限稳定绿，见 ADMIN-MOCK-STORE-RESET-0001 §二）。全局放宽会掩盖别的
+// 真实慢测；scoped 只兜住这一处。vitest 2.1.9：describe 第二参 options.timeout 合并进本 suite 全部子测试（已实测）。
+describe("任务重跑 · 回执披露三态（精确文案，不许静默扣费）", { timeout: 15000 }, () => {
   it("按量估算（job-f1）→ 横幅精确：「已重新排队（job-f1），预计扣费约 1,501 积分，最终按实际成片时长结算」（alert 角色）", async () => {
     renderTasks();
     await retryTask("job-f1");

@@ -722,7 +722,9 @@ const adminAudit: MockAuditRow[] = [];
  * 它只重置 handler 覆盖、不碰模块级数据。名字听着像全清，实际不是。
  *
  * 覆盖 admin 段全部 5 个可变模块级状态：adminTenants / adminTasks / voiceSlots / adminAudit / auditSeq。
- * （`ADMIN_USAGE` 是 as const、handler 只 filter/spread 不改 → 不需要重置，也就不在此列。）
+ * （`ADMIN_USAGE` 不在此列，真依据是**它没有写路径** —— 全部消费方只 `filter` / `spread`（`{ ...r }`），
+ *  没有一处改它的元素或长度，故跨测试不会泄漏、无需重置。注意 `as const` **只是 TypeScript 编译期只读，
+ *  不是运行时冻结**（`Object.freeze` 才是）；真正兜住的是「无写路径」这个事实，不是 `as const`。FIX1 · Codex B。）
  *
  * 调用方：碰 admin MSW 态的测试文件的 `beforeEach`。**没有全局挂**（沿用反推域的判断：全局重置 =
  * 变相给全仓开 shuffle，会掀出别的域的既有依赖，那是另一个包的活）。
