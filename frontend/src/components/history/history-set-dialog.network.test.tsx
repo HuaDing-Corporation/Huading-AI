@@ -212,3 +212,112 @@ describe("HistorySetDialog · 真实 network 次数（FIX3：mediaKey 必须跨�
     expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(3);
   });
 });
+
+// ── FIX4 · P1：mediaKey 缺 job/set 命名空间（跨 job 碰撞）───────────────────────────────────────
+//
+// 预算 Map 活在 HistorySetDialog **组件实例**里，跨「打开 set A → 关 → 打开 set B」持续存在
+// （HistoryGrid 切换详情集时不卸载它）。ecom_detail 无 task_ids → key 落到 output:index，而
+// **`(job_id, index)` 唯一 ≠ index 全局唯一** → 不带命名空间时，job-a 的 output:0 和 job-b 的 output:0
+// 撞进同一份预算 → B 继承 A 耗尽的封顶。这条钉的正是判据第三条（命名空间）+ 量程（Map 存活期）。
+describe("HistorySetDialog · FIX4 跨 job（同实例、换 set → 预算不继承）", () => {
+  it("🔴 job A 的 output:0 耗尽封顶后切到 job B、相同 output index、B 首帧失败 → B 仍能自救", async () => {
+    // ecom_detail：无 task_ids → key = output:index。每次 adapter 调用给全新 URL（sig 递增）→ 去重挡不住。
+    let sig = 0;
+    const respFor = (id: string) => ({
+      id,
+      category: "ecom_detail",
+      created_at: "2026-07-10T12:00:00Z",
+      status: "completed",
+      items: [{ index: 0, download_url: `https://cdn/gone-${id}.png?sig=${++sig}`, width: 1254, height: 1254 }],
+      meta: {} // ← 无 task_ids：ecom_detail 形态
+    });
+    adapter.getHistoryImageSet.mockImplementation((_cat: string, id: string) => Promise.resolve(respFor(id)));
+
+    // 同一个 client + 同一个 HistorySetDialog 实例，只换 item（= Next 换 param 不 remount 的忠实模型）。
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = (item: HistoryItem) => (
+      <QueryClientProvider client={client}>
+        <HistorySetDialog item={item} onClose={() => {}} />
+      </QueryClientProvider>
+    );
+    const itemA: HistoryItem = { ...ITEM, id: "job-a", category: "ecom_detail" };
+    const itemB: HistoryItem = { ...ITEM, id: "job-b", category: "ecom_detail" };
+
+    const { rerender } = render(view(itemA));
+    await waitFor(() => expect(screen.getByRole("img").getAttribute("src")).toContain("gone-job-a"));
+    expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(1); // job-a 初次加载
+
+    // 两轮把 job-a 的 output:0 耗满（error → 重取 → 新 URL 落地）。
+    for (let round = 0; round < 2; round++) {
+      const prev = screen.getByRole("img").getAttribute("src");
+      fireEvent.error(screen.getByRole("img"));
+      await waitFor(() => expect(screen.getByRole("img").getAttribute("src")).not.toBe(prev)); // 新 URL 进来
+    }
+    await act(async () => {}); // 确保最后一次重取的在飞门控落定
+    expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(3); // 1 初次 + 2 重取（封顶）
+
+    // 切到 job-b（同一实例、换 item）。job-b 相同 output index 0、首帧就失败（error-before-load）。
+    rerender(view(itemB));
+    await waitFor(() => expect(screen.getByRole("img").getAttribute("src")).toContain("gone-job-b"));
+    const before = adapter.getHistoryImageSet.mock.calls.length; // 含 job-b 初次加载
+    fireEvent.error(screen.getByRole("img"));
+    await act(async () => {});
+
+    // 🔴 承重点：job-b 的 output:0 带了 job-b 命名空间 → 干净预算 → B 触发了自己的重取（+1）。
+    // 去命名空间时：B 落在 output:0（被 A 耗到封顶）→ suppression → B 不重取（+0）。
+    expect(adapter.getHistoryImageSet.mock.calls.length).toBe(before + 1);
+  });
+});
+
+// ── FIX4 · §三：畸形 / 部分 / 重复 task_ids → 停用刷新，不静默退回不稳定 index ────────────────────
+//
+// 数据存在性分派消掉了显式分类分支，但没消掉契约假设（仍假定 task_ids 完整/同长/非空/唯一）。
+// photo 分支缺少合法且唯一的 task_id 时，退回 index = 重演 FIX3 的漂移。故：没有可信身份 → NO_REFRESH。
+describe("HistorySetDialog · FIX4 §三（畸形 task_ids → 停用刷新）", () => {
+  it("🔴 部分 task_ids（index 1 拿不到）→ 那张停用刷新；有合法 id 的那张照常刷新", async () => {
+    adapter.getHistoryImageSet.mockResolvedValue({
+      id: "batch-x",
+      category: "ecom_model", // photo 形态：有 task_ids，index 不稳
+      created_at: "2026-07-10T12:00:00Z",
+      status: "completed",
+      items: [
+        { index: 0, download_url: "https://cdn/ok.png?sig=1", width: 1024, height: 1536 },
+        { index: 1, download_url: "https://cdn/bad.png?sig=1", width: 1024, height: 1536 }
+      ],
+      meta: { task_ids: ["t-ok"] } // 只 1 个 → index 1 → undefined → 畸形/部分
+    });
+    wrap(<HistorySetDialog item={{ ...ITEM, id: "batch-x", category: "ecom_model" }} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getAllByRole("img")).toHaveLength(2));
+    expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(1);
+
+    const imgs = screen.getAllByRole("img"); // [index0(ok), index1(bad)]
+    fireEvent.error(imgs[1]); // 畸形那张 → NO_MEDIA_URL_REFRESH → 不重取
+    await act(async () => {});
+    expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(1);
+
+    fireEvent.error(imgs[0]); // 有合法 task_id 那张 → 正常重取（证明不是整体哑了）
+    await act(async () => {});
+    expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(2);
+  });
+
+  it("🔴 task_ids 含重复 id → 那两张都停用刷新（重复 ≠ 唯一，不可作身份）", async () => {
+    adapter.getHistoryImageSet.mockResolvedValue({
+      id: "batch-y",
+      category: "ecom_model",
+      created_at: "2026-07-10T12:00:00Z",
+      status: "completed",
+      items: [
+        { index: 0, download_url: "https://cdn/d0.png?sig=1", width: 1024, height: 1536 },
+        { index: 1, download_url: "https://cdn/d1.png?sig=1", width: 1024, height: 1536 }
+      ],
+      meta: { task_ids: ["dup", "dup"] } // 重复 → 两张都不唯一
+    });
+    wrap(<HistorySetDialog item={{ ...ITEM, id: "batch-y", category: "ecom_model" }} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getAllByRole("img")).toHaveLength(2));
+    expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(1);
+
+    act(() => screen.getAllByRole("img").forEach((img) => fireEvent.error(img)));
+    await act(async () => {});
+    expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(1); // 都没重取
+  });
+});

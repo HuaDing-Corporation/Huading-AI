@@ -9,7 +9,7 @@ import { HistoryImageTile } from "@/components/history/history-image-tile";
 import { HistoryStatusBadge } from "@/components/history/history-status-badge";
 import { useHistoryImageSet } from "@/lib/api/hooks";
 import { copy } from "@/lib/copy";
-import { useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
+import { NO_MEDIA_URL_REFRESH, useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 import { historyImageSetMediaKey, type HistoryCategory, type HistoryItem } from "@/lib/api/history-images";
 
 /** 分类机器键 → 中文标签（详情弹窗信息并集用；6 分类）。 */
@@ -114,12 +114,14 @@ export function HistorySetDialog({ item, onClose }: { item: HistoryItem | null; 
               // 每张 tile 是独立媒体位置：整套里一张删了、其余在，那一张的无限重试不该被健康张的
               // onLoad 清账（FIX2 的 P1-2）。
               //
-              // 🔴 FIX3：上一版这里用 `it.index` 当 mediaKey，注释还写着「it.index 跨 refetch 稳定」——
-              // **那句是假的**：白底图/模特图/封面的整套是按 batch_id 聚合多个任务的，BE 只查 `done`
-              // 任务再重新 enumerate（image_history.py:84/:472）→ **批量陆续完成时同一张图 index 必然
-              // 从 0 漂到 1、2** → 失败预算换到新 key、绕过封顶。身份判据见 historyImageSetMediaKey。
+              // 🔴 FIX3：`it.index` 跨 refetch 会漂（BE 只查 done + 重 enumerate，image_history.py:84/:472）。
+              // 🔴 FIX4：mediaKey 现在带 `(category, set.id)` 命名空间 —— 本弹窗的预算 Map 跨「打开 A→关→打开 B」
+              //   持续存在（HistoryGrid 不卸载它），不带命名空间时 A/B 的 output:0 会撞进同一预算。
+              //   身份判据（稳定 + 单射 + 命名空间，量程=Map 存活期）见 historyImageSetMediaKey。
+              // mediaKey 为 null = 拿不到可信身份（畸形 task_ids）→ 停用刷新，宁可不救不救错（§三）。
               const mediaKey = historyImageSetMediaKey(set, it);
-              return <HistoryImageTile key={mediaKey} item={it} refresh={refresh.forMedia(mediaKey)} />;
+              const tileRefresh = mediaKey === null ? NO_MEDIA_URL_REFRESH : refresh.forMedia(mediaKey);
+              return <HistoryImageTile key={mediaKey ?? `unstable:${it.index}`} item={it} refresh={tileRefresh} />;
             })}
           </div>
         </>

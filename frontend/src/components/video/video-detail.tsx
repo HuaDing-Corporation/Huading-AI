@@ -64,12 +64,20 @@ export function VideoDetail({ id }: VideoDetailProps) {
    * VideoPlayer 消费的是同一个 `useVideo(id)` query —— 一次 invalidate 把两者的 URL 一起换新，
    * 故预算属于这个 query，不属于哪个元素。（此处同一时刻只渲染一个分支，但作用域该按资源划、不按现象划。）
    *
+   * 🔴 FIX4（「第 10 处」扫描）：本组件是 `/videos/[id]` 页，`page.tsx` 渲染 `<VideoDetail id={id}/>` **无 `key={id}`**
+   *   → Next.js 换 param 不 remount → 预算 Map 跨 `/videos/a`→`/videos/b` **持续存在**。若用裸根 scope（mediaKey ""），
+   *   a 耗尽的封顶会被 b 继承（与本包 P1 同型）。故按 **video id** 切独立合流域（`forKey(id)`）：换视频 = 换 key，
+   *   结构上撞不上。id 是 VideoTask 主键、全局唯一，就是正确的命名空间。
+   *
    * 必须在早返回（loading / error / !data）**之前**调用 —— rules-of-hooks，lint 是 error 级。
    * `invalidateQueries` 返回 Promise → 在飞门控靠它判断这次重取回来了没有。
    */
   const refresh = useMediaUrlRefreshScope(
-    useCallback(() => queryClient.invalidateQueries({ queryKey: videoKeys.detail(id) }), [queryClient, id])
-  );
+    useCallback(
+      (budgetKey: string) => queryClient.invalidateQueries({ queryKey: videoKeys.detail(budgetKey) }),
+      [queryClient]
+    )
+  ).forKey(id);
 
   // Loading state
   if (isLoading) {

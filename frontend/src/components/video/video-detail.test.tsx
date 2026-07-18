@@ -337,3 +337,46 @@ describe("VideoDetail · photo 的 <img> 迁入共享哨兵后", () => {
     expect(screen.getByRole("img")).toHaveAttribute("src", "https://mock.local/p.png?sig=fresh");
   });
 });
+
+// ── MEDIA-URL-REFRESH-CONVERGE-0001 · **FIX4：跨视频不继承封顶（「第 10 处」承重）** ──────────────
+//
+// 本组件是 `/videos/[id]` 页，`page.tsx` 渲染 `<VideoDetail id={id}/>` **无 `key={id}`** → Next.js 换 param
+// **不 remount** → 预算 Map 跨 `/videos/a`→`/videos/b` 持续存在。上一版用**裸根 scope**（mediaKey ""），
+// 视频 a 耗尽的封顶会被 b 继承（与本包 P1「output:index 缺命名空间」同型）。FIX4 改按 video id 切独立域
+// （`forKey(id)`）。testing-library 的 rerender 保持**同一组件实例**（换 id prop、不 remount），正是 Next
+// 换 param 的忠实模型 —— Map 会跨 a/b 存活，这条测试就跑在它的存活期边界上。
+describe("VideoDetail · FIX4 跨视频（同实例、换 id → 预算不继承）", () => {
+  const roundTrip = () => act(async () => {});
+  const gone = (id: string, sig: string) => ({
+    ...photoDone,
+    id,
+    playback_url: `https://mock.local/gone-${id}.png?sig=${sig}`
+  });
+
+  it("🔴 视频 a 耗尽封顶后切到 b、b 首帧失败 → b 仍能自救（不继承 a 的毒预算）", async () => {
+    const { spyWrapper, invalidate } = makeSpyWrapper();
+
+    // 视频 a：对象已删，两轮把它的封顶耗满（每轮换新 URL，避免被去重挡下）。
+    (useVideo as Mock).mockReturnValue({ data: gone("a", "0"), error: null, isLoading: false });
+    const { rerender } = render(<VideoDetail id="a" />, { wrapper: spyWrapper });
+    fireEvent.error(screen.getByRole("img")); // invalidate #1
+    await roundTrip();
+    (useVideo as Mock).mockReturnValue({ data: gone("a", "1"), error: null, isLoading: false });
+    rerender(<VideoDetail id="a" />);
+    fireEvent.error(screen.getByRole("img")); // invalidate #2 → a 封顶
+    await roundTrip();
+    expect(invalidate).toHaveBeenCalledTimes(2);
+    expect(invalidate).toHaveBeenLastCalledWith({ queryKey: videoKeys.detail("a") });
+
+    // 用户切到视频 b（同一 VideoDetail 实例、换 id prop）。b 首帧就瞬时失败（error-before-load）。
+    (useVideo as Mock).mockReturnValue({ data: gone("b", "0"), error: null, isLoading: false });
+    rerender(<VideoDetail id="b" />);
+    fireEvent.error(screen.getByRole("img"));
+    await roundTrip();
+
+    // 🔴 承重点：b 有自己的命名空间（forKey("b")）→ 干净预算 → 第 3 次重取，且重取的是 b 的详情。
+    // 裸根 scope 时：b 落在 "" 上，那格被 a 耗到封顶 → suppression → 停在 2（b 刷不出来）。
+    expect(invalidate).toHaveBeenCalledTimes(3);
+    expect(invalidate).toHaveBeenLastCalledWith({ queryKey: videoKeys.detail("b") });
+  });
+});

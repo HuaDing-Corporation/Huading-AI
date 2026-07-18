@@ -41,6 +41,16 @@ export interface MediaUrlRefreshScope {
   onLoad: () => void;
 }
 
+/**
+ * 停用刷新的空 scope —— 调用方**无法为某个媒体求出可信、稳定、命名空间化的身份**时用它
+ * （FIX4 §三：畸形 `task_ids` 等）。onError/onLoad 都是空操作 → 该媒体过期时不自愈，
+ * 但**绝不**用一个不可信的 key 去污染别人的预算或绕过封顶。**宁可不救，也不救错。**
+ */
+export const NO_MEDIA_URL_REFRESH: MediaUrlRefreshScope = {
+  onError: () => {},
+  onLoad: () => {}
+};
+
 /** 持有 query 的组件拿到的东西：可整份下发（单媒体），或按媒体位置 / 按独立资源切分。 */
 export interface MediaUrlRefreshGroup extends MediaUrlRefreshScope {
   /**
@@ -52,24 +62,35 @@ export interface MediaUrlRefreshGroup extends MediaUrlRefreshScope {
    * 上一版这里写的是「mediaKey 用跨刷新稳定的身份（**item.id / index**）」。**那个括号是错的**，而且
    * `history-set-dialog` 就是照着它把 `it.index` 传了进来（FIX3 的 P1）。判据不能是**举例**，得是**性质**：
    *
-   *  | 语义 | 要求 | 违反后果 |
-   *  |---|---|---|
-   *  | **封顶** | **稳定**：跨重取，同一个物理媒体 → **同一个** key | 预算换到新 key → **绕过封顶**（FIX3 的 P1）|
-   *  | **清零** | **单射**：同域内，不同媒体 → **不同** key | 健康兄弟的 onLoad 替坏图清账 → **永不封顶**（FIX2 的 P1-2）|
+   *  | # | 语义 | 要求 | 违反后果 |
+   *  |---|---|---|---|
+   *  | 1 | **封顶** | **稳定**：同一物理媒体 → **同一个** key | 预算换到新 key → **绕过封顶**（FIX3 的 P1）|
+   *  | 2 | **清零** | **单射**：不同物理媒体 → **不同** key | 健康兄弟的 onLoad 替坏图清账 → **永不封顶**（FIX2 的 P1-2）|
+   *  | 3 | **命名空间** | key 含正确的 **query/job/set** 命名空间 | 跨 job 的 `output:0` 撞进同一预算 → 继承封顶（**FIX4 的 P1**）|
    *
-   * 两条缺一不可，且**方向相反** —— 这正是 `index` 骗过复查的原因：它**完美满足单射**（enumerate 出来的
-   * 位置在一次响应内必然两两不同），只违反稳定。而**单射性看一份响应就能看出来，稳定性看一份响应根本
-   * 看不出来** —— 它是两次响应之间的性质。任何「盯着一个响应/一段代码看它像不像 id」的复查都会放行它。
+   * ## 🔴 判据每次都少一个维度 —— 这次把**范围**量化死（FIX4）
+   *
+   * 前两条（稳定+单射）是必要的，但**没说"跨多久"**。这个 hook 的预算 Map 活在**组件实例**里，
+   * 跨「打开 A → 关 → 打开 B」持续存在（弹窗/详情页切资源时**不卸载**）。所以判据的量程是
+   * **整个 Map 存活期**，不只是同一次整套或相邻两次 refetch：
+   *
+   *  1. 同一物理媒体，**跨 Map 存活期内的全部时间**，保持同一个 key；
+   *  2. Map 存活期内，**任何两个不同物理媒体**（哪怕来自不同 job/set/次打开）都**不共用 key**；
+   *  3. key 必含正确的 query/job/set 命名空间 —— 数学上这是**「稳定的单射」**，只有把值域限定到
+   *     「实际产生的 key」时才配叫双射。**FIX3 满足了 1、2 在"一次整套"内的版本，漏了 3 与"跨打开"的 2** ——
+   *     因为 `(job_id, index)` 唯一被我当成了 `index` 全局唯一：约束是真的，作用域比我以为的窄。
    *
    * ## 所以判据是**可执行的**，不是 review 问题
    *
-   * 「复查了但判据错」没有任何流程拦得住（复查已经做了、看起来有据可查）。唯一拦得住的是让它**自己变红**：
+   * 「复查了但判据错」没有任何流程拦得住。唯一拦得住的是让它**自己变红**，且**测试要跨到 Map 存活期的边界**：
    *
-   * > 给持有 query 的组件**两次连续响应**，其中**同一个物理媒体处在不同位置**、URL 已换新；
-   * > 断言**真实的 adapter 调用次数**（不是 refetch 的 spy 次数）仍等于封顶值。
+   * > ① 同组件**两次连续响应**、同一物理媒体处在不同位置、URL 已换新 → 封顶不许被绕过（钉稳定，FIX3）；
+   * > ② 同组件**从 set A 切到 set B**、相同 output index → B 的预算不许继承 A（钉命名空间 + 跨打开的单射，FIX4）；
+   * > 均断言**真实 adapter 调用次数**（不是 refetch 的 spy 次数）。
    *
-   * key 稳不稳定是**产出它的那个端点**的性质，不是本 hook 的性质 → 判据只能**逐调用点**用场景测试兑现。
-   * 现成的两条：`history-set-dialog.network.test.tsx`（index 漂移）/ `history-grid.network.test.tsx`（部分成功）。
+   * key 稳不稳定/够不够命名空间，是**产出它的那个端点 + 调用点作用域**的性质，不是本 hook 的性质
+   * → 判据只能**逐调用点**用场景测试兑现。现成的：`history-set-dialog.network.test.tsx`（index 漂移 + 跨 job）
+   * / `history-grid.network.test.tsx`（部分成功）。
    */
   forMedia: (mediaKey: string) => MediaUrlRefreshScope;
 }
