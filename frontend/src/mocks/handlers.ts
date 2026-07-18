@@ -1225,8 +1225,28 @@ export const handlers = [
     ok({ items: [{ asset_id: "preset-1", display_name: "默认主播", thumbnail_url: "https://mock.local/p1.jpg" }], total: 1 })
   ),
   http.post(`${BASE}/api/v1/scripts/generate`, async ({ request }) => {
-    const body = (await request.json()) as { topic: string };
-    return ok({ script: `【${body.topic}】大家好，今天用一分钟带你了解……（mock 文案，可编辑）` });
+    const body = (await request.json()) as { topic: string; length_tier?: string };
+    // 字数档位（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.5）：可选，present 时须 short/medium/long（镜像 BE Literal，
+    // mock 不比 BE 宽松——非法枚举即 422，守住前端只发合法档位）。反映到 mock 文案长度供承重区分档位真接线。
+    if (body.length_tier !== undefined && !["short", "medium", "long"].includes(body.length_tier)) {
+      return err(422, "VALIDATION_ERROR", "length_tier 非法");
+    }
+    const tierWords: Record<string, string> = { short: "（短）", medium: "（中）", long: "（长，更详尽的卖点展开……）" };
+    const suffix = body.length_tier ? tierWords[body.length_tier] : "";
+    return ok({ script: `【${body.topic}】大家好，今天用一分钟带你了解……（mock 文案，可编辑）${suffix}` });
+  }),
+  // 「AI 生成画面」scene-prompt（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.2）：从只收 topic → 收产品图 keys + 文案 + topic。
+  // 🔴 严格纪律「必须带产品图」——mock 不比 BE 宽松：product_image_keys 缺失/空 → 422（luna 多模态强制读图）。
+  // 返回 {scene_prompt, negative_prompt}（新增 negative_prompt，前端自动填入负面框）。
+  http.post(`${BASE}/api/v1/videos/scene-prompt`, async ({ request }) => {
+    const body = (await request.json()) as { topic?: string; script?: string; product_image_keys?: string[] };
+    if (!Array.isArray(body.product_image_keys) || body.product_image_keys.length < 1) {
+      return err(422, "VALIDATION_ERROR", "product_image_keys 至少 1 张");
+    }
+    return ok({
+      scene_prompt: "白色大理石台面暖光特写，产品缓慢环绕运镜，浅景深突出材质，蒸汽轻升，节奏舒缓（mock 专业画面提示词，可编辑）",
+      negative_prompt: "低分辨率, 变形, 多余文字, 水印, 杂乱背景, 手部畸变"
+    });
   }),
   http.post(`${BASE}/api/v1/uploads/images`, () => {
     const n = ++imageUploadSeq;
@@ -1394,6 +1414,8 @@ export const handlers = [
       purpose?: string;
       prompt?: string;
       reference_image_asset_ids?: string[];
+      product_image_keys?: string[]; // 电商带货 i2v 产品图（ECOM-VIDEO-OPTIMIZE-UI-0001 §4.3）
+      negative_prompt?: string; // 电商带货 i2v 负面提示词（§4.3/req6）
       duration_sec?: number;
       resolution?: string;
       bgm?: { source?: string; asset_id?: string; track_id?: string };
@@ -1431,6 +1453,14 @@ export const handlers = [
         !bgmOk
       ) {
         return err(422, "VIDEO_GEN_INVALID", "视频生成参数非法");
+      }
+    }
+    // 电商带货 i2v 校验（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.3）：产品图下限=至少 1 张（决策2 保底；topic/script/
+    // scene 可全空但产品图必带）。mock 不比 BE 宽松——缺 product_image_keys 即 422，守住前端「产品图 ≥1」门。
+    if (body.video_mode === "seedance_i2v") {
+      const keys = body.product_image_keys ?? [];
+      if (!Array.isArray(keys) || keys.length < 1 || keys.length > 9) {
+        return err(422, "ECOM_I2V_INVALID", "电商带货产品图 1–9 张");
       }
     }
     const id = `mock-${++videoSeq}`;

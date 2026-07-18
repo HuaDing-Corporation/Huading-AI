@@ -14,6 +14,8 @@ export interface AiTextFieldProps {
   onAction?: () => void;
   actionLabel?: string;
   actionIcon?: "regenerate" | "generate";
+  /** 禁用 AI action（非 loading）——如电商「AI 生成画面」缺产品图时前端友好拦（BE 会 422）。 */
+  actionDisabled?: boolean;
   loading?: boolean;
   rows?: number;
   placeholder?: string;
@@ -36,6 +38,7 @@ export function AiTextField({
   onAction,
   actionLabel,
   actionIcon = "regenerate",
+  actionDisabled = false,
   loading = false,
   rows = 5,
   placeholder,
@@ -49,7 +52,7 @@ export function AiTextField({
           {label}
         </label>
         {onAction ? (
-          <Button type="button" variant="soft" size="sm" onClick={onAction} disabled={loading}>
+          <Button type="button" variant="soft" size="sm" onClick={onAction} disabled={loading || actionDisabled}>
             <Icon size={14} strokeWidth={2} className={loading ? "animate-spin" : undefined} />
             {actionLabel}
           </Button>

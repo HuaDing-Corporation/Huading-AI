@@ -179,6 +179,36 @@ export const copy = {
     scenePromptGenerate: "AI 生成画面",
     scenePromptPlaceholder: "描述想要的产品画面 / 场景 / 镜头，可点「AI 生成画面」自动生成，也可手动编辑",
     scenePromptHint: "画面与口播已解耦：此处只描述画面，不影响配音文案",
+    // ── 电商带货视频优化（ECOM-VIDEO-OPTIMIZE-UI-0001）──
+    // 「AI生成文案」：ScriptReview 共享组件的 actionLabel 覆盖（口播不传 → 仍「重写文案」，不改共享 regenerate key）。
+    ecomScriptGenerate: "AI生成文案",
+    // 文案字数档位（短/中/长，默认中）
+    scriptLengthLabel: "文案长度",
+    scriptLengthShort: "短",
+    scriptLengthMedium: "中",
+    scriptLengthLong: "长",
+    scriptLengthHint: "档位决定 AI 生成文案的目标字数（短/中/长），与所选时长共同影响长度",
+    // 负面提示词（可选、无字数限制；「AI生成画面」返回值自动填入）
+    negativePromptLabel: "负面提示词（可选）",
+    negativePromptPlaceholder: "不希望出现的元素，如：水印、多余文字、杂乱背景、变形。留空即可；点「AI 生成画面」会自动填入建议，可再改",
+    negativePromptHint: "描述要避免的画面元素；生成时作为负面约束（BE 转发视频模型）",
+    // 「AI生成画面」需产品图（前端友好拦，BE 会 422）
+    sceneNeedProductImage: "请先上传产品图，再生成画面",
+    // 产品图张数选择器（1–5 档 + 自定义，上限 9）
+    productImageCountLabel: "产品图张数",
+    productImageCount: (n: number) => `${n} 张`,
+    productImageCountCustom: "自定义",
+    productImageCountCustomLabel: "自定义张数",
+    productImageCountPlaceholder: "1–9",
+    productImageCountRange: "请输入 1–9 张",
+    productImageCountHint: "选择要用几张产品图；多图会分配到不同分镜。切换张数不会自动删图",
+    // 产品图多图 picker（复用 ReferenceImagesPicker）
+    productImagesLabel: "产品图（必填，至少 1 张）",
+    productImagesUpload: "上传产品图",
+    productImagesOverLimit: "超过所选张数，多余产品图未添加",
+    // 已上传数 > 所选张数时的表单级拦截（不静默丢图，明确让用户删减）
+    productImagesExceed: (uploaded: number, allowed: number) =>
+      `已上传 ${uploaded} 张，超过所选 ${allowed} 张，请删除多余产品图或调高张数`,
     // 图片生成 / 修改（mode 值仍为 photo，仅显示文案）
     modePhoto: "图片生成 / 修改",
     photoTitle: "图片生成 / 修改",

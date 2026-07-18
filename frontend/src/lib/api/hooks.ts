@@ -67,6 +67,7 @@ import type {
   ModelRequest,
   PosterBatchRequest,
   PosterRequest,
+  ScenePromptRequest,
   ScriptGenerateRequest,
   AnalyticsGranularity,
   AnalyticsTenantSort
@@ -166,7 +167,7 @@ export function useScriptGenerate() {
   return useMutation({ mutationFn: (params: ScriptGenerateRequest) => generateScript(params) });
 }
 export function useScenePromptGenerate() {
-  return useMutation({ mutationFn: (topic: string) => generateScenePrompt(topic) });
+  return useMutation({ mutationFn: (params: ScenePromptRequest) => generateScenePrompt(params) });
 }
 // ── 提示词反推 (REVERSE-PROMPT-UI-0001) — 反推 / 重推 / 保存 ──
 export function useReverseFromAsset() {

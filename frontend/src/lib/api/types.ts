@@ -111,14 +111,17 @@ export interface VideoDetail {
 }
 
 export interface CreateVideoRequest {
-  topic: string; // 必填 ≤500（电商带货=产品卖点/主题）；视频生成 video_gen 传 prompt 文本作标题
+  topic?: string; // 数字人口播/照片/视频生成沿用（≤500）；电商带货 i2v 起可选（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.3/req1：空则不带）
+
   script?: string; // 可选；缺则后端 DeepSeek 生成（前端流程会带）
   voice_id?: string; // 数字人口播 / 电商带货必填；照片 photo 不传（无配音）
   avatar_asset_id?: string; // 数字人口播·照片形象（上传/预设产出的 asset_id）；与 avatar_video_asset_id 互斥
   avatar_video_asset_id?: string; // 数字人口播·本人出镜视频源（AVATAR-VIDEO-SOURCE-UI-0001，与 avatar_asset_id 互斥）；字段形状以 BE 包为准
   video_mode?: string; // 省略=数字人口播 avatar_talk；电商带货传 "seedance_i2v"；视频生成传 "video_gen"
-  image_key?: string; // 电商带货 i2v 必填 / 照片 photo 可选参考图，来自 POST /uploads
-  scene_prompt?: string; // 电商带货 i2v 画面提示词（与口播解耦，可 AI 生成）；空则后端回退 topic
+  image_key?: string; // @deprecated 电商带货 i2v 旧单图字段（ECOM-VIDEO-OPTIMIZE-UI-0001 起改用 product_image_keys）；照片 photo 可选参考图仍用，来自 POST /uploads
+  product_image_keys?: string[]; // 电商带货 i2v 产品图 1–N（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.3；来自 POST /uploads→key）；下限=至少 1 张（决策2 保底）
+  scene_prompt?: string; // 电商带货 i2v 画面提示词（与口播解耦，可 AI 生成）；空则后端回退 topic；已去 max_length（契约 §4.3）
+  negative_prompt?: string; // 电商带货 i2v 负面提示词（可选、无限，ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.3/req6）；转发 APIMart video body（step0 验 Seedance 吃）
   duration_sec?: number; // 电商带货 i2v 目标时长（秒，5–120，默认 30）；视频生成限 5/10/15
   image_size?: string; // @deprecated 照片旧「尺寸」（IMAGE-ASPECT-RATIO-UI-0001 起改用 aspect_ratio；BE 仅在 aspect_ratio 省略时回退翻译）；cover 通路仍可带
   image_quality?: string; // @deprecated 照片旧「质量」（IMAGE-ASPECT-RATIO-UI-0001 起去除；BE 已忽略）；cover 通路仍可带、不影响
@@ -185,19 +188,32 @@ export interface AvatarPreset {
   thumbnail_url: string | null; // backend str|None (P2-3)
 }
 
+// 文案字数档位（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.5）：短/中/长，目标字数区间由 BE prompt 控制。
+export type ScriptLengthTier = "short" | "medium" | "long";
+
 export interface ScriptGenerateRequest {
   topic: string;
   video_mode?: string; // 电商带货传 "seedance_i2v"；让文案口径/长度随模式
   duration_sec?: number; // 目标时长（秒）：文案长度随之，与视频/字幕对齐
+  length_tier?: ScriptLengthTier; // 电商带货文案长度档位（默认 medium，契约 §4.5）；DeepSeek 不变，仅 prompt 控长
 }
 
 export interface ScriptGenerateResponse {
   script: string;
 }
 
+// POST /videos/scene-prompt 请求（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.2）：从只发 topic → 发产品图 keys + 文案 + topic。
+// product_image_keys 必填（≥1）：luna 多模态严格纪律「必须带产品图」。
+export interface ScenePromptRequest {
+  topic?: string;
+  script?: string;
+  product_image_keys: string[];
+}
+
 // POST /videos/scene-prompt → 画面提示词（电商带货 i2v "AI 生成画面" 用）。
 export interface ScenePromptResponse {
   scene_prompt: string;
+  negative_prompt: string; // 新增（契约 §4.2/req6）：luna 同产出负面提示词，前端自动填入负面框
 }
 
 export interface UploadImageResponse {

@@ -6,8 +6,7 @@ import { Sparkles } from "lucide-react";
 import { errorText } from "@/lib/api/error-text";
 import { useBrandVoices, useScenePromptGenerate, useScriptGenerate, useUploadProductImage, useVoices } from "@/lib/api/hooks";
 import { useGenerateConfirm } from "@/lib/api/use-generate-confirm";
-import { useTrackedUpload } from "@/lib/api/use-tracked-upload";
-import type { CreateVideoRequest, VideoGenResolution } from "@/lib/api/types";
+import type { CreateVideoRequest, ScriptLengthTier, VideoGenResolution } from "@/lib/api/types";
 import { useVideoTasks } from "@/lib/videos/tasks-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
@@ -15,9 +14,11 @@ import { AiTextField } from "@/components/workbench/ai-text-field";
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
 import { Input } from "@/components/ui/input";
 import { DurationPicker, isValidDuration } from "@/components/workbench/duration-picker";
-import { ImagePicker } from "@/components/workbench/image-picker";
+import { IMAGE_COUNT_MAX, isValidImageCount, ProductImageCountPicker } from "@/components/workbench/product-image-count-picker";
+import { ReferenceImagesPicker } from "@/components/workbench/reference-images-picker";
 import { MoreSettings } from "@/components/workbench/more-settings";
 import { ResolutionPicker } from "@/components/workbench/resolution-picker";
+import { ScriptLengthPicker } from "@/components/workbench/script-length-picker";
 import { ScriptReview } from "@/components/workbench/script-review";
 import { VoicePicker } from "@/components/workbench/voice-picker";
 import { useAuth } from "@/lib/auth/auth-context";
@@ -54,12 +55,17 @@ export function EcomVideoForm({
   const voices = useVoices();
   const { session, ready: authReady } = useAuth(); // VIP 门禁（§二之二）：doubao 品牌音色可用性
   const brandVoices = useBrandVoices(); // 「选我的音色」：品牌音色(声音复刻)全状态
-  const productImage = useTrackedUpload(uploadProduct.mutateAsync, (r) => r.image_key);
 
   // 一次性 prefill：文案「用此文案」注 script；提示词反推「带入」注 topic + scene_prompt(+script)。惰性消费。
   const [topic, setTopic] = useState(() => initialTopic ?? "");
   const [script, setScript] = useState(() => initialScript ?? "");
   const [scenePrompt, setScenePrompt] = useState(() => initialScenePrompt ?? "");
+  // ECOM-VIDEO-OPTIMIZE-UI-0001：产品图单图→多图（product_image_keys）；张数选择器定上限（默认 1，保底=至少 1 张）；
+  // 负面提示词（可选，「AI生成画面」自动填入）；文案字数档位（默认中）。
+  const [productKeys, setProductKeys] = useState<string[]>([]);
+  const [imageCount, setImageCount] = useState(1);
+  const [negativePrompt, setNegativePrompt] = useState("");
+  const [scriptLength, setScriptLength] = useState<ScriptLengthTier>("medium");
   const [voiceId, setVoiceId] = useState("");
   const [durationSec, setDurationSec] = useState(30);
   // 分辨率（ECOM-RESOLUTION-UI-0001）：默认 720p 与后端缺省一致，不选时行为不变。
@@ -82,7 +88,8 @@ export function EcomVideoForm({
   const submit = async (req: CreateVideoRequest) => {
     setError(null);
     try {
-      await createAndTrack(req, req.topic);
+      // topic 现可空（req1）→ 任务展示标题用 topic 兜底为通用名（createAndTrack 的 title 需非空字符串）。
+      await createAndTrack(req, req.topic || copy.workbench.ecomTitle);
     } catch (err) {
       setError(errorText(err));
     }
@@ -97,13 +104,14 @@ export function EcomVideoForm({
 
   const onGenerateScript = async () => {
     const trimmed = topic.trim();
-    if (!trimmed || scriptGen.isPending) return;
+    if (!trimmed || scriptGen.isPending) return; // 「AI生成文案」仍需卖点/主题作输入（BE ScriptGenerateRequest.topic 必填）
     setError(null);
     try {
       const res = await scriptGen.mutateAsync({
         topic: trimmed,
         video_mode: "seedance_i2v",
-        duration_sec: durationSec
+        duration_sec: durationSec,
+        length_tier: scriptLength // req3：字数档位随请求传（默认 medium）
       });
       setScript(res.script);
     } catch (err) {
@@ -111,31 +119,39 @@ export function EcomVideoForm({
     }
   };
 
-  // 画面提示词 AI 生成 — decoupled from 口播 (separate endpoint + state).
+  // 画面提示词 AI 生成（契约 §4.2/req7）：发产品图 keys（≥1，luna 多模态读图）+ 文案 + topic；同产出负面提示词，自动填入。
   const onGenerateScenePrompt = async () => {
-    const trimmed = topic.trim();
-    if (!trimmed || scenePromptGen.isPending) return;
+    if (productKeys.length < 1 || scenePromptGen.isPending) return; // 严格纪律「必须带产品图」——BE 会 422，前端先友好拦
     setError(null);
     try {
-      const res = await scenePromptGen.mutateAsync(trimmed);
+      const res = await scenePromptGen.mutateAsync({
+        topic: topic.trim() || undefined,
+        script: script.trim() || undefined,
+        product_image_keys: productKeys
+      });
       setScenePrompt(res.scene_prompt);
+      setNegativePrompt(res.negative_prompt); // req6：负面提示词自动填入（用户可再改）
     } catch (err) {
       setError(errorText(err));
     }
   };
 
+  // 已上传产品图数 > 所选张数 → 明确越限（决策2/req2：不静默丢图，沿用 ECOM-REF-LIMIT 先例，让用户删减或调高张数）。
+  const imagesOverLimit = productKeys.length > imageCount;
+
   // Run existing validation, then open the confirm dialog instead of submitting.
   const onGenerate = () => {
-    const trimmed = topic.trim();
-    if (!trimmed || !voiceId || !productImage.value || !isValidDuration(durationSec)) return;
+    // req1/决策2：新下限=产品图 ≥1 + 音色 + 合法时长（topic/文案/画面可全空）；越限时不放行。
+    if (productKeys.length < 1 || imagesOverLimit || !voiceId || !isValidDuration(durationSec)) return;
     setError(null);
     confirm.requestConfirm({
-      topic: trimmed,
+      topic: topic.trim() || undefined, // req1：可选，空则不带
       script: script.trim() || undefined,
       video_mode: "seedance_i2v",
-      image_key: productImage.value,
+      product_image_keys: productKeys, // req2：单图 image_key → 多图 product_image_keys
       voice_id: voiceId,
       scene_prompt: scenePrompt.trim() || undefined,
+      negative_prompt: negativePrompt.trim() || undefined, // req6：可选，空则不带
       duration_sec: durationSec,
       resolution, // ECOM-RESOLUTION-UI-0001：后端 #117 存 params.resolution 按档出片&计费
       speed,
@@ -147,15 +163,16 @@ export function EcomVideoForm({
 
   const generateDisabled =
     uploadProduct.isPending ||
-    !topic.trim() ||
+    productKeys.length < 1 ||
+    imagesOverLimit ||
+    !isValidImageCount(imageCount) || // 自定义张数非法（NaN/越界）不放行；picker 已就地提示
     !voiceId ||
-    !productImage.value ||
     !isValidDuration(durationSec);
 
   // Tell the user which required input is still missing (validation feedback).
   let hint: string | null = null;
-  if (!topic.trim()) hint = copy.workbench.ecomTopicRequired;
-  else if (!productImage.value) hint = copy.workbench.ecomImageRequired;
+  if (productKeys.length < 1) hint = copy.workbench.ecomImageRequired;
+  else if (imagesOverLimit) hint = copy.workbench.productImagesExceed(productKeys.length, imageCount);
 
   return (
     <Card animateIn>
@@ -185,6 +202,23 @@ export function EcomVideoForm({
         />
       </div>
 
+      {/* 产品图前置（req1 后它是唯一必填/保底；且「AI生成画面」依赖它）：张数选择器定上限 → 多图 picker 上传。 */}
+      <ProductImageCountPicker value={imageCount} onChange={setImageCount} />
+
+      <ReferenceImagesPicker
+        onChange={setProductKeys}
+        max={isValidImageCount(imageCount) ? imageCount : IMAGE_COUNT_MAX}
+        inputId="product-image"
+        label={copy.workbench.productImagesLabel}
+        uploadLabel={copy.workbench.productImagesUpload}
+        overLimitError={copy.workbench.productImagesOverLimit}
+        // 产品图走 /uploads→image_key（非参考图的 /uploads/images→asset_id）：注入产品图上传器复用多图能力。
+        uploadFile={(f) => uploadProduct.mutateAsync(f).then((r) => r.image_key)}
+      />
+
+      {/* 文案字数档位（req3）：短/中/长，随「AI生成文案」传 length_tier；紧邻文案区。 */}
+      <ScriptLengthPicker value={scriptLength} onChange={setScriptLength} />
+
       <ScriptReview
         script={script}
         onChange={setScript}
@@ -192,6 +226,7 @@ export function EcomVideoForm({
         loading={scriptGen.isPending}
         speed={speed}
         label={copy.workbench.ecomScriptLabel}
+        actionLabel={copy.workbench.ecomScriptGenerate} // req3：「重写文案」→「AI生成文案」（口播共享组件不传→仍「重写文案」）
         // KEEPALIVE：面板常驻后与口播的 ScriptReview 同存于 DOM → id 必须区分（否则 label[for] 错指隐藏面板）。
         id="ecom-script"
       />
@@ -204,22 +239,22 @@ export function EcomVideoForm({
         onAction={onGenerateScenePrompt}
         actionLabel={copy.workbench.scenePromptGenerate}
         actionIcon="generate"
+        actionDisabled={productKeys.length < 1} // req7：无产品图禁点（BE 会 422，前端友好拦）
         loading={scenePromptGen.isPending}
         rows={3}
         placeholder={copy.workbench.scenePromptPlaceholder}
-        footer={copy.workbench.scenePromptHint}
+        footer={productKeys.length < 1 ? copy.workbench.sceneNeedProductImage : copy.workbench.scenePromptHint}
       />
 
-      <ImagePicker
-        value={productImage.value}
-        onChange={productImage.setValue}
-        uploading={uploadProduct.isPending}
-        onUpload={productImage.onUpload}
-        uploadError={productImage.error}
-        label={copy.workbench.productImageLabel}
-        uploadLabel={copy.workbench.productImageUpload}
-        previewAlt={copy.workbench.productImagePreviewAlt}
-        inputId="product-image"
+      {/* 负面提示词（req6）：可选、无字数限制；「AI生成画面」返回的 negative_prompt 自动填入，用户可再改。纯文本域（无 onAction）。 */}
+      <AiTextField
+        id="ecom-negative-prompt"
+        label={copy.workbench.negativePromptLabel}
+        value={negativePrompt}
+        onChange={setNegativePrompt}
+        rows={2}
+        placeholder={copy.workbench.negativePromptPlaceholder}
+        footer={copy.workbench.negativePromptHint}
       />
 
       <VoicePicker
