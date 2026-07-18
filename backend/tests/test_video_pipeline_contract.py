@@ -1578,6 +1578,46 @@ def test_seedance_video_history_exposes_scene_prompt_from_params_not_topic(
     assert item["scene_prompt"] != item["topic"]
 
 
+def test_seedance_video_history_missing_scene_prompt_is_null_not_topic(
+    auth_context,
+    auth_db,
+) -> None:
+    store = _MemProgressStore()
+    storage = _FakeStorage()
+    with auth_db() as db:
+        db.add(
+            VideoTask(
+                id="history-i2v-missing-scene",
+                tenant_id=auth_context["tenant_id"],
+                created_by_user_id=auth_context["user_id"],
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="done",
+                progress=100,
+                topic="ceramic teapot product benefits",
+                params={},
+            )
+        )
+        db.commit()
+
+    app.dependency_overrides[get_progress_store] = lambda: store
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        resp = TestClient(app).get(
+            "/api/v1/videos?mode=seedance_i2v",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_progress_store, None)
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 200
+    item = resp.json()["data"]["items"][0]
+    assert item["topic"] == "ceramic teapot product benefits"
+    assert item["prompt"] == "ceramic teapot product benefits"
+    assert item["scene_prompt"] is None
+
+
 def test_video_read_openapi_marks_legacy_prompt_deprecated() -> None:
     resp = TestClient(app).get("/openapi.json")
 
