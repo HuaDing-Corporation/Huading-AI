@@ -44,7 +44,6 @@ def list_images(
 @router.get(
     "/images/{category}/{history_id}",
     response_model=ApiResponse[ImageHistoryDetailResponse],
-    response_model_exclude_none=True,
 )
 def get_image(
     request: Request,

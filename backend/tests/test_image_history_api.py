@@ -137,6 +137,7 @@ def _replicate_output(
     index: int,
     status: str,
     storage_key: str | None,
+    actual_size: tuple[int | None, int | None] | None = (768, 1024),
 ) -> EcomReplicateOutput:
     return EcomReplicateOutput(
         id=output_id,
@@ -147,8 +148,8 @@ def _replicate_output(
         status=status,
         requested_size="768x1024",
         requested_aspect="3:4",
-        actual_width=768 if storage_key else None,
-        actual_height=1024 if storage_key else None,
+        actual_width=actual_size[0] if storage_key and actual_size else None,
+        actual_height=actual_size[1] if storage_key and actual_size else None,
         storage_key=storage_key,
     )
 
@@ -160,6 +161,7 @@ def _link_photo_output(
     asset_id: str,
     width: int,
     height: int,
+    requested_size: str | None = None,
 ) -> Asset:
     asset = Asset(
         id=asset_id,
@@ -171,7 +173,7 @@ def _link_photo_output(
         width=width,
         height=height,
         status="ready",
-        metadata_={"size": f"{width}x{height}"},
+        metadata_={"size": requested_size} if requested_size else {},
     )
     db.add(asset)
     db.flush()
@@ -233,8 +235,42 @@ def test_image_history_detail_exposes_each_output_size_evidence(
     assert item["resolved_size"] == "1536x1024"
     assert item["actual_aspect_ratio"] == "16:9"
     assert item["actual_size"] == "160x90"
+    assert (item["requested_width"], item["requested_height"]) == (1536, 1024)
+    assert (item["actual_width"], item["actual_height"]) == (160, 90)
     assert item["width"] == 160
     assert item["height"] == 90
+
+
+def test_image_history_does_not_treat_resolved_photo_size_as_actual_dimensions(
+    auth_context,
+    auth_db,
+) -> None:
+    task = _photo_task(
+        task_id="resolved-size-without-actual",
+        tenant_id=auth_context["tenant_id"],
+        created_at=datetime.now(UTC),
+        topic="resolved request only",
+        params={"resolved_size": "1536x1024"},
+    )
+    with auth_db() as db:
+        db.add(task)
+        db.commit()
+
+    app.dependency_overrides[get_object_storage] = lambda: _FakeStorage()
+    try:
+        response = TestClient(app).get(
+            "/api/v1/history/images/image_gen/resolved-size-without-actual",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 200
+    item = response.json()["data"]["items"][0]
+    assert (item["requested_width"], item["requested_height"]) == (1536, 1024)
+    assert item["actual_width"] is None
+    assert item["actual_height"] is None
+    assert (item["width"], item["height"]) == (0, 0)
 
 
 def test_image_history_paginates_image_generation_newest_first(auth_context, auth_db) -> None:
@@ -544,6 +580,10 @@ def test_image_history_lists_and_opens_cover_without_mixing_image_generation(
     assert detail["category"] == "cover"
     assert detail["items"][0]["width"] == 1280
     assert detail["items"][0]["height"] == 720
+    assert detail["items"][0]["actual_width"] == 1280
+    assert detail["items"][0]["actual_height"] == 720
+    assert detail["items"][0]["requested_width"] is None
+    assert detail["items"][0]["requested_height"] is None
     assert detail["items"][0]["download_url"].startswith(
         f"https://storage.test/{safe_key}?ttl=3600"
     )
@@ -562,6 +602,51 @@ def test_image_history_lists_and_opens_cover_without_mixing_image_generation(
     assert foreign_thumbnail not in cover_list.text
     assert foreign_thumbnail not in storage.presigned_keys
     assert safe_key in storage.presigned_keys
+
+
+def test_image_history_keeps_legacy_photo_request_metadata_out_of_actual_dimensions(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    task = _photo_task(
+        task_id="legacy-request-metadata",
+        tenant_id=tenant_id,
+        created_at=datetime.now(UTC),
+        topic="legacy cutout",
+        params={"kind": "ecom_cutout", "background": "white"},
+    )
+    asset = Asset(
+        id="legacy-request-metadata-asset",
+        tenant_id=tenant_id,
+        type="generated_image",
+        source="generated",
+        storage_key=str(task.storage_key),
+        mime_type="image/png",
+        status="ready",
+        metadata_={"size": "1024x1024"},
+    )
+    with auth_db() as db:
+        db.add_all([task, asset])
+        db.flush()
+        db.add(TaskAsset(video_task_id=task.id, asset_id=asset.id, role="output_image"))
+        db.commit()
+
+    app.dependency_overrides[get_object_storage] = lambda: _FakeStorage()
+    try:
+        response = TestClient(app).get(
+            "/api/v1/history/images/ecom_white/legacy-request-metadata",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 200
+    item = response.json()["data"]["items"][0]
+    assert (item["requested_width"], item["requested_height"]) == (1024, 1024)
+    assert item["actual_width"] is None
+    assert item["actual_height"] is None
+    assert (item["width"], item["height"]) == (1024, 1024)
 
 
 def test_image_history_lists_only_terminal_replicate_jobs(auth_context, auth_db) -> None:
@@ -709,8 +794,22 @@ def test_image_history_reopens_complete_model_batch(auth_context, auth_db) -> No
     db = auth_db()
     db.add_all([first, second])
     db.flush()
-    _link_photo_output(db, task=first, asset_id="model-asset-first", width=800, height=1200)
-    _link_photo_output(db, task=second, asset_id="model-asset-second", width=900, height=1350)
+    _link_photo_output(
+        db,
+        task=first,
+        asset_id="model-asset-first",
+        width=800,
+        height=1200,
+        requested_size="768x1024",
+    )
+    _link_photo_output(
+        db,
+        task=second,
+        asset_id="model-asset-second",
+        width=900,
+        height=1350,
+        requested_size="768x1024",
+    )
     db.commit()
     db.close()
 
@@ -738,6 +837,17 @@ def test_image_history_reopens_complete_model_batch(auth_context, auth_db) -> No
             ),
             "width": 800,
             "height": 1200,
+            "requested_width": 768,
+            "requested_height": 1024,
+            "actual_width": 800,
+            "actual_height": 1200,
+            "requested_aspect_ratio": None,
+            "resolved_aspect_ratio": None,
+            "resolved_size": None,
+            "actual_aspect_ratio": None,
+            "actual_size": None,
+            "theme": None,
+            "label": None,
         },
         {
             "index": 1,
@@ -748,6 +858,17 @@ def test_image_history_reopens_complete_model_batch(auth_context, auth_db) -> No
             ),
             "width": 900,
             "height": 1350,
+            "requested_width": 768,
+            "requested_height": 1024,
+            "actual_width": 900,
+            "actual_height": 1350,
+            "requested_aspect_ratio": None,
+            "resolved_aspect_ratio": None,
+            "resolved_size": None,
+            "actual_aspect_ratio": None,
+            "actual_size": None,
+            "theme": None,
+            "label": None,
         },
     ]
     assert data["meta"] == {
@@ -771,7 +892,7 @@ def test_image_history_reuses_replicate_detail_download_urls(auth_context, auth_
         created_at=now,
         name="便携咖啡杯详情套图",
         product_asset_id=product_asset_id,
-        output_count=3,
+        output_count=4,
     )
     job_id = job.id
     job.selling_points = ["防漏保温"]
@@ -799,6 +920,7 @@ def test_image_history_reuses_replicate_detail_download_urls(auth_context, auth_
                 index=0,
                 status="succeeded",
                 storage_key=f"tenants/{tenant_id}/ecom-replicate/detail-0.png",
+                actual_size=(1086, 1448),
             ),
             _replicate_output(
                 output_id="detail-history-output-1",
@@ -815,6 +937,16 @@ def test_image_history_reuses_replicate_detail_download_urls(auth_context, auth_
                 index=2,
                 status="succeeded",
                 storage_key=f"tenants/{tenant_id}/ecom-replicate/detail-2.png",
+                actual_size=None,
+            ),
+            _replicate_output(
+                output_id="detail-history-output-3",
+                job_id=job.id,
+                tenant_id=tenant_id,
+                index=3,
+                status="succeeded",
+                storage_key=f"tenants/{tenant_id}/ecom-replicate/detail-3.png",
+                actual_size=(1086, None),
             ),
         ]
     )
@@ -844,13 +976,37 @@ def test_image_history_reuses_replicate_detail_download_urls(auth_context, auth_
     assert [(item["index"], item["theme"]) for item in data["items"]] == [
         (0, "theme-0"),
         (2, "theme-2"),
+        (3, "theme-3"),
     ]
-    assert all((item["width"], item["height"]) == (768, 1024) for item in data["items"])
+    measured_item, unknown_item, partial_item = data["items"]
+    assert (
+        measured_item["requested_width"],
+        measured_item["requested_height"],
+    ) == (768, 1024)
+    assert (
+        measured_item["actual_width"],
+        measured_item["actual_height"],
+    ) == (1086, 1448)
+    assert (measured_item["width"], measured_item["height"]) == (1086, 1448)
+    assert (
+        unknown_item["requested_width"],
+        unknown_item["requested_height"],
+    ) == (768, 1024)
+    assert unknown_item["actual_width"] is None
+    assert unknown_item["actual_height"] is None
+    assert (unknown_item["width"], unknown_item["height"]) == (768, 1024)
+    assert (partial_item["requested_width"], partial_item["requested_height"]) == (
+        768,
+        1024,
+    )
+    assert partial_item["actual_width"] is None
+    assert partial_item["actual_height"] is None
+    assert (partial_item["width"], partial_item["height"]) == (1086, 1024)
     assert data["meta"] == {
         "output_mode": "detail",
         "requested_size": "768x1024",
         "requested_aspect": "3:4",
-        "output_count": 3,
+        "output_count": 4,
         "product_info": {"name": "便携咖啡杯详情套图"},
         "selling_points": ["防漏保温"],
         "reference_analysis_json": [],
@@ -1045,6 +1201,12 @@ def test_image_history_reopens_image_generation_and_white_background(
     white_data = white_response.json()["data"]
     assert plain_data["items"][0]["width"] == 640
     assert plain_data["items"][0]["height"] == 480
+    assert (
+        plain_data["items"][0]["requested_width"],
+        plain_data["items"][0]["requested_height"],
+    ) == (640, 480)
+    assert plain_data["items"][0]["actual_width"] is None
+    assert plain_data["items"][0]["actual_height"] is None
     assert plain_data["meta"] == {
         "task_ids": ["plain-detail"],
         "prompt": "精致保温杯",
@@ -1053,6 +1215,12 @@ def test_image_history_reopens_image_generation_and_white_background(
     }
     assert white_data["items"][0]["width"] == 1024
     assert white_data["items"][0]["height"] == 1024
+    assert (
+        white_data["items"][0]["requested_width"],
+        white_data["items"][0]["requested_height"],
+    ) == (1024, 1024)
+    assert white_data["items"][0]["actual_width"] is None
+    assert white_data["items"][0]["actual_height"] is None
     assert white_data["meta"] == {
         "task_ids": ["white-detail"],
         "background": "white",

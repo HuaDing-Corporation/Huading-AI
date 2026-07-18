@@ -385,6 +385,20 @@ def _parse_dimensions(value: object) -> tuple[int, int] | None:
     return width, height
 
 
+def _complete_dimensions(width: object, height: object) -> tuple[int, int] | None:
+    if width is None or height is None:
+        return None
+    return _parse_dimensions(f"{width}x{height}")
+
+
+def _first_dimensions(*values: object) -> tuple[int, int] | None:
+    for value in values:
+        dimensions = _parse_dimensions(value)
+        if dimensions is not None:
+            return dimensions
+    return None
+
+
 def _photo_dimensions(task: VideoTask, asset: Asset | None) -> tuple[int, int]:
     if asset is not None and asset.width and asset.height:
         return int(asset.width), int(asset.height)
@@ -394,6 +408,43 @@ def _photo_dimensions(task: VideoTask, asset: Asset | None) -> tuple[int, int]:
             return dimensions
     dimensions = _parse_dimensions((task.params or {}).get("image_size"))
     return dimensions or (0, 0)
+
+
+def _photo_requested_dimensions(
+    task: VideoTask,
+    asset: Asset | None,
+) -> tuple[int, int] | None:
+    params = task.params or {}
+    metadata = (asset.metadata_ or {}) if asset is not None else {}
+    return _first_dimensions(
+        params.get("resolved_size"),
+        metadata.get("resolved_size"),
+        params.get("image_size"),
+        metadata.get("image_size"),
+        metadata.get("size"),
+    )
+
+
+def _photo_actual_dimensions(
+    task: VideoTask,
+    asset: Asset | None,
+) -> tuple[int, int] | None:
+    if asset is not None:
+        dimensions = _complete_dimensions(asset.width, asset.height)
+        if dimensions is not None:
+            return dimensions
+
+    params = task.params or {}
+    metadata = (asset.metadata_ or {}) if asset is not None else {}
+    for dimensions in (
+        _complete_dimensions(metadata.get("actual_width"), metadata.get("actual_height")),
+        _complete_dimensions(params.get("actual_width"), params.get("actual_height")),
+        _parse_dimensions(metadata.get("actual_size")),
+        _parse_dimensions(params.get("actual_size")),
+    ):
+        if dimensions is not None:
+            return dimensions
+    return None
 
 
 def _photo_size_evidence(task: VideoTask, asset: Asset | None) -> dict[str, str]:
@@ -472,6 +523,8 @@ def _photo_history_detail(
     for index, task in enumerate(tasks):
         asset = _photo_output_asset(db, tenant_id=tenant_id, task_id=task.id)
         width, height = _photo_dimensions(task, asset)
+        requested_dimensions = _photo_requested_dimensions(task, asset)
+        actual_dimensions = _photo_actual_dimensions(task, asset)
         size_evidence = _photo_size_evidence(task, asset)
         storage_key = asset.storage_key if asset is not None else str(task.storage_key)
         items.append(
@@ -485,6 +538,14 @@ def _photo_history_detail(
                 ),
                 width=width,
                 height=height,
+                requested_width=(
+                    requested_dimensions[0] if requested_dimensions is not None else None
+                ),
+                requested_height=(
+                    requested_dimensions[1] if requested_dimensions is not None else None
+                ),
+                actual_width=actual_dimensions[0] if actual_dimensions is not None else None,
+                actual_height=actual_dimensions[1] if actual_dimensions is not None else None,
                 **size_evidence,
             )
         )
@@ -531,13 +592,26 @@ def _replicate_history_detail(
         output = ecom_replicate.output_response(output_row, storage=storage)
         if not output.download_url:  # pragma: no cover - safe rows always have storage keys
             continue
-        fallback_dimensions = _parse_dimensions(output.requested_size) or (0, 0)
+        requested_dimensions = _parse_dimensions(output.requested_size)
+        fallback_dimensions = requested_dimensions or (0, 0)
+        actual_dimensions = _complete_dimensions(
+            output.actual_width,
+            output.actual_height,
+        )
         items.append(
             ImageHistoryDetailItem(
                 index=output.index,
                 download_url=output.download_url,
                 width=output.actual_width or fallback_dimensions[0],
                 height=output.actual_height or fallback_dimensions[1],
+                requested_width=(
+                    requested_dimensions[0] if requested_dimensions is not None else None
+                ),
+                requested_height=(
+                    requested_dimensions[1] if requested_dimensions is not None else None
+                ),
+                actual_width=actual_dimensions[0] if actual_dimensions is not None else None,
+                actual_height=actual_dimensions[1] if actual_dimensions is not None else None,
                 theme=output.theme,
             )
         )
