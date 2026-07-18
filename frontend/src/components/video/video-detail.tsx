@@ -64,10 +64,12 @@ export function VideoDetail({ id }: VideoDetailProps) {
    * VideoPlayer 消费的是同一个 `useVideo(id)` query —— 一次 invalidate 把两者的 URL 一起换新，
    * 故预算属于这个 query，不属于哪个元素。（此处同一时刻只渲染一个分支，但作用域该按资源划、不按现象划。）
    *
-   * 🔴 FIX4（「第 10 处」扫描）：本组件是 `/videos/[id]` 页，`page.tsx` 渲染 `<VideoDetail id={id}/>` **无 `key={id}`**
-   *   → Next.js 换 param 不 remount → 预算 Map 跨 `/videos/a`→`/videos/b` **持续存在**。若用裸根 scope（mediaKey ""），
-   *   a 耗尽的封顶会被 b 继承（与本包 P1 同型）。故按 **video id** 切独立合流域（`forKey(id)`）：换视频 = 换 key，
-   *   结构上撞不上。id 是 VideoTask 主键、全局唯一，就是正确的命名空间。
+   * 🔴 FIX4（「第 10 处」扫描）：本组件是 `/videos/[id]` 页。按 **video id** 切独立合流域（`forKey(id)`）：
+   *   换视频 = 换 key，结构上撞不上。id 是 VideoTask 主键、全局唯一，就是正确的命名空间。
+   *   ⚠️ FIX5 收准（Codex B RV5 证伪我上一版注释）：我原写「`page.tsx` 无 `key={id}` → Next 换 param **不** remount →
+   *   预算 Map 跨 `/videos/a→b` 存活、裸根 scope 会继承封顶」。**「不 remount」这个前提不可靠** —— App Router
+   *   动态 segment 变化**通常会** remount。但 `forKey(id)` **两种情况都对**：remount 时它是 no-op，不 remount 时它
+   *   正确隔离。**保留它不是因为「一定不 remount」，而是因为它对 remount 与否都成立。**
    *
    * 必须在早返回（loading / error / !data）**之前**调用 —— rules-of-hooks，lint 是 error 级。
    * `invalidateQueries` 返回 Promise → 在飞门控靠它判断这次重取回来了没有。
