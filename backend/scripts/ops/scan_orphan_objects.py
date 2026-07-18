@@ -133,7 +133,7 @@ def _as_utc(value: datetime, *, source: str) -> datetime:
 def _local_inventory(root_value: object) -> Iterator[StorageObjectInfo]:
     root = Path(root_value).resolve()
     if not root.exists():
-        return
+        raise OrphanScanCoverageError("Local storage inventory root does not exist.")
     if not root.is_dir():
         raise OrphanScanCoverageError("Local storage inventory root is not a directory.")
     try:

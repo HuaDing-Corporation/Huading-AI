@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
+from botocore.exceptions import ClientError, EndpointConnectionError
 from sqlalchemy import Column, Integer, MetaData, String, Table
 
 from app.db.models import Base, VideoTask
@@ -13,6 +16,7 @@ from scripts.ops.scan_orphan_objects import (
     OrphanScanCoverageError,
     discover_reference_surfaces,
     scan_orphan_objects,
+    storage_inventory,
 )
 
 _NOW = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
@@ -30,6 +34,12 @@ def _put_object(
     path = storage.root.joinpath(*key.split("/"))
     timestamp = modified_at.timestamp()
     os.utime(path, (timestamp, timestamp))
+
+
+def _s3_storage(paginator: Mock) -> SimpleNamespace:
+    client = Mock()
+    client.get_paginator.return_value = paginator
+    return SimpleNamespace(bucket="media", client=client)
 
 
 def test_orphan_scan_reports_unreferenced_object_with_evidence(
@@ -192,6 +202,29 @@ def test_orphan_scan_fails_closed_when_storage_inventory_is_unavailable(
         )
 
 
+def test_orphan_scan_fails_closed_when_local_root_is_missing(
+    auth_db,
+    tmp_path: Path,
+) -> None:
+    missing_root = tmp_path / "not-mounted"
+    storage = LocalObjectStorage(str(missing_root))
+    assert not missing_root.exists()
+
+    with (
+        auth_db() as db,
+        pytest.raises(
+            OrphanScanCoverageError,
+            match="does not exist",
+        ),
+    ):
+        scan_orphan_objects(
+            db,
+            storage=storage,
+            grace_period=timedelta(hours=24),
+            now=_NOW,
+        )
+
+
 def test_s3_inventory_uses_every_list_objects_page(auth_db) -> None:
     first_key = "tenants/tenant-a/uploads/first.bin"
     second_key = "tenants/tenant-b/uploads/second.bin"
@@ -242,3 +275,39 @@ def test_s3_inventory_uses_every_list_objects_page(auth_db) -> None:
         first_key,
         second_key,
     ]
+
+
+def test_s3_inventory_accepts_successful_empty_bucket() -> None:
+    paginator = Mock()
+    paginator.paginate.return_value = [{"KeyCount": 0}]
+
+    assert storage_inventory(_s3_storage(paginator)) == ()
+    paginator.paginate.assert_called_once_with(Bucket="media")
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ClientError(
+            {"Error": {"Code": "NoSuchBucket", "Message": "missing bucket"}},
+            "ListObjectsV2",
+        ),
+        ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "forbidden"}},
+            "ListObjectsV2",
+        ),
+        EndpointConnectionError(endpoint_url="https://storage.invalid"),
+    ],
+    ids=["missing-bucket", "access-denied", "endpoint-unreachable"],
+)
+def test_s3_inventory_fails_closed_when_listing_fails(failure: Exception) -> None:
+    paginator = Mock()
+    paginator.paginate.side_effect = failure
+
+    with pytest.raises(
+        OrphanScanCoverageError,
+        match="S3 storage inventory could not be completed",
+    ) as exc_info:
+        storage_inventory(_s3_storage(paginator))
+
+    assert exc_info.value.__cause__ is failure
