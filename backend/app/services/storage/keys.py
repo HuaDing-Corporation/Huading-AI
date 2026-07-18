@@ -2,7 +2,7 @@ import posixpath
 from collections.abc import Iterable
 
 from app.core.exceptions import AppError
-from app.services.storage.base import ObjectStorage, StorageKeyError
+from app.services.storage.base import ObjectStorage, StorageKeyError, StorageObjectIdentity
 
 _CATALOG_STORAGE_PREFIXES = ("platform/", "library/bgm/")
 
@@ -138,6 +138,19 @@ def get_tenant_storage_bytes(
     storage_key: str | None,
 ) -> bytes:
     return storage.get_bytes(validate_tenant_storage_key(tenant_id, storage_key))
+
+
+def head_tenant_storage_identity(
+    storage: ObjectStorage,
+    *,
+    tenant_id: str,
+    storage_key: str | None,
+) -> StorageObjectIdentity | None:
+    safe_key = validate_tenant_storage_key(tenant_id, storage_key)
+    reader = getattr(storage, "head_object_identity", None)
+    if not callable(reader):
+        return None
+    return reader(safe_key)
 
 
 def get_catalog_storage_bytes(

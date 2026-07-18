@@ -46,6 +46,33 @@ class Role(StrEnum):
     DEVELOPER = "developer"
 
 
+class GcCandidateStatus(StrEnum):
+    OBSERVED = "observed"
+    ELIGIBLE = "eligible"
+    APPROVED = "approved"
+    DELETE_PENDING = "delete_pending"
+    DELETING = "deleting"
+    SUCCEEDED = "succeeded"
+    RETRY_WAIT = "retry_wait"
+    SKIPPED = "skipped"
+    DEAD_LETTER = "dead_letter"
+
+
+class GcSkipReason(StrEnum):
+    INVALID_KEY = "invalid_key"
+    CATALOG_EXCLUDED = "catalog_excluded"
+    TENANT_UNKNOWN = "tenant_unknown"
+    OBJECT_CHANGED = "object_changed"
+    OBJECT_IDENTITY_UNAVAILABLE = "object_identity_unavailable"
+    REFERENCE_FOUND = "reference_found"
+    REFERENCE_COVERAGE_CHANGED = "reference_coverage_changed"
+    REFERENCE_SCAN_FAILED = "reference_scan_failed"
+    EXTERNAL_LEASE_UNKNOWN = "external_lease_unknown"
+    WRITE_BARRIER_UNAVAILABLE = "write_barrier_unavailable"
+    APPROVAL_STALE = "approval_stale"
+    STORAGE_UNAVAILABLE = "storage_unavailable"
+
+
 class TenantScopedMixin:
     tenant_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("tenants.id", ondelete="CASCADE"), index=True
@@ -907,3 +934,112 @@ class PaymentOrder(Base):
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class GcCandidate(TenantScopedMixin, Base):
+    __tablename__ = "gc_candidates"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('observed', 'eligible', 'approved', 'delete_pending', "
+            "'deleting', 'succeeded', 'retry_wait', 'skipped', 'dead_letter')",
+            name="ck_gc_candidates_status",
+        ),
+        CheckConstraint(
+            "skip_reason IS NULL OR skip_reason IN ('invalid_key', 'catalog_excluded', "
+            "'tenant_unknown', 'object_changed', 'object_identity_unavailable', "
+            "'reference_found', 'reference_coverage_changed', 'reference_scan_failed', "
+            "'external_lease_unknown', 'write_barrier_unavailable', 'approval_stale', "
+            "'storage_unavailable')",
+            name="ck_gc_candidates_skip_reason",
+        ),
+        CheckConstraint("clean_scan_count >= 0", name="ck_gc_candidates_clean_scan_count"),
+        UniqueConstraint("bucket", "key", name="uq_gc_candidates_bucket_key"),
+        Index("ix_gc_candidates_tenant_status", "tenant_id", "status"),
+        Index("ix_gc_candidates_scan_id", "scan_id"),
+        {"info": {"gc_reference_class": "gc_control"}},
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    status: Mapped[str] = mapped_column(String(32), default=GcCandidateStatus.OBSERVED.value)
+    bucket: Mapped[str] = mapped_column(String(255))
+    key: Mapped[str] = mapped_column(String(1024))
+    key_hash: Mapped[str] = mapped_column(String(64))
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_clean_scan_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    clean_scan_count: Mapped[int] = mapped_column(Integer, default=0)
+    scan_id: Mapped[str] = mapped_column(String(36))
+    schema_fingerprint: Mapped[str] = mapped_column(String(64))
+    evidence: Mapped[dict[str, object]] = mapped_column(_json_type(), default=dict)
+    object_version_id: Mapped[str | None] = mapped_column(String(255), default=None)
+    object_etag: Mapped[str | None] = mapped_column(String(255), default=None)
+    object_size: Mapped[int] = mapped_column(BigInteger)
+    object_last_modified: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    skip_reason: Mapped[str | None] = mapped_column(String(64), default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class GcReclamationJob(TenantScopedMixin, Base):
+    __tablename__ = "gc_reclamation_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('delete_pending', 'deleting', 'succeeded', 'retry_wait', "
+            "'skipped', 'dead_letter')",
+            name="ck_gc_reclamation_jobs_status",
+        ),
+        CheckConstraint("attempt >= 0 AND attempt <= 3", name="ck_gc_reclamation_jobs_attempt"),
+        UniqueConstraint("candidate_id", name="uq_gc_reclamation_jobs_candidate_id"),
+        Index("ix_gc_reclamation_jobs_status_retry", "status", "next_retry_at"),
+        Index("ix_gc_reclamation_jobs_tenant_status", "tenant_id", "status"),
+        {"info": {"gc_reference_class": "gc_control"}},
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    candidate_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("gc_candidates.id", ondelete="CASCADE")
+    )
+    status: Mapped[str] = mapped_column(String(32), default="delete_pending")
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    error_code: Mapped[str | None] = mapped_column(String(64), default=None)
+    bucket: Mapped[str] = mapped_column(String(255))
+    key: Mapped[str] = mapped_column(String(1024))
+    key_hash: Mapped[str] = mapped_column(String(64))
+    object_version_id: Mapped[str] = mapped_column(String(255))
+    object_etag: Mapped[str | None] = mapped_column(String(255), default=None)
+    object_size: Mapped[int] = mapped_column(BigInteger)
+    actor: Mapped[str | None] = mapped_column(String(160), default=None)
+    actor_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+
+class GcAuditLog(TenantScopedMixin, Base):
+    __tablename__ = "gc_audit_log"
+    __table_args__ = (
+        Index("ix_gc_audit_log_candidate_created_at", "candidate_id", "created_at"),
+        Index("ix_gc_audit_log_tenant_created_at", "tenant_id", "created_at"),
+        {"info": {"gc_reference_class": "gc_control"}},
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    candidate_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("gc_candidates.id", ondelete="SET NULL"), nullable=True
+    )
+    job_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("gc_reclamation_jobs.id", ondelete="SET NULL"), nullable=True
+    )
+    actor: Mapped[str] = mapped_column(String(160))
+    actor_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    action: Mapped[str] = mapped_column(String(64))
+    key: Mapped[str] = mapped_column(String(1024))
+    key_hash: Mapped[str] = mapped_column(String(64))
+    details: Mapped[dict[str, object]] = mapped_column(_json_type(), default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

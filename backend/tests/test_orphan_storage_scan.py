@@ -8,13 +8,16 @@ from unittest.mock import Mock
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
-from sqlalchemy import Column, Integer, MetaData, String, Table
+from sqlalchemy import Column, Integer, MetaData, String, Table, select
 
-from app.db.models import Base, VideoTask
+from app.db.models import Base, GcCandidate, Tenant, VideoTask
+from app.services.storage.base import StorageObjectIdentity
 from app.services.storage.local import LocalObjectStorage
 from scripts.ops.scan_orphan_objects import (
     OrphanScanCoverageError,
     discover_reference_surfaces,
+    record_gc_candidates,
+    report_payload,
     scan_orphan_objects,
     storage_inventory,
 )
@@ -43,11 +46,13 @@ def _s3_storage(paginator: Mock) -> SimpleNamespace:
 
 
 def test_orphan_scan_reports_unreferenced_object_with_evidence(
+    auth_context,
     auth_db,
     tmp_path: Path,
 ) -> None:
     storage = LocalObjectStorage(str(tmp_path))
-    key = "tenants/unowned/uploads/orphan.bin"
+    tenant_id = auth_context["tenant_id"]
+    key = f"tenants/{tenant_id}/uploads/orphan.bin"
     _put_object(storage, key=key, content=b"orphan-bytes")
 
     with auth_db() as db:
@@ -67,10 +72,63 @@ def test_orphan_scan_reports_unreferenced_object_with_evidence(
     assert finding.size == len(b"orphan-bytes")
     assert finding.last_modified == _OLD
     assert finding.reason == "no_database_reference"
+    assert len(finding.schema_fingerprint) == 64
+    assert finding.reference_evidence["matched_surfaces"] == []
     assert "json:video_tasks.params" in finding.checked_references
     assert "string:assets.storage_key" in finding.checked_references
     assert "asset_fk:task_assets.asset_id" in finding.checked_references
     assert storage.object_exists(key) is True
+    payload = report_payload(report)
+    assert "key" not in payload["orphans"][0]
+    assert payload["orphans"][0]["key_hash"] == finding.key_hash
+
+
+def test_orphan_scan_skips_non_tenant_and_unknown_tenant_keys(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    valid_key = f"tenants/{tenant_id}/uploads/valid.bin"
+    unknown_key = "tenants/unknown/uploads/nope.bin"
+    traversal_key = f"tenants/{tenant_id}/../other/nope.bin"
+    catalog_key = "platform/avatars/catalog.png"
+
+    class Paginator:
+        def paginate(self, **kwargs):
+            assert kwargs == {"Bucket": "media"}
+            return [
+                {
+                    "Contents": [
+                        {"Key": key, "Size": 5, "LastModified": _OLD}
+                        for key in (valid_key, unknown_key, traversal_key, catalog_key)
+                    ]
+                }
+            ]
+
+    class Client:
+        def get_paginator(self, operation_name: str):
+            assert operation_name == "list_objects_v2"
+            return Paginator()
+
+    class S3Storage:
+        bucket = "media"
+        client = Client()
+
+    with auth_db() as db:
+        report = scan_orphan_objects(
+            db,
+            storage=S3Storage(),
+            grace_period=timedelta(hours=24),
+            now=_NOW,
+        )
+
+    assert [finding.key for finding in report.orphans] == [valid_key]
+    assert report.catalog_object_count == 1
+    assert {finding.reason for finding in report.skipped_objects} == {
+        "catalog_excluded",
+        "tenant_unknown",
+        "invalid_key",
+    }
 
 
 def test_orphan_scan_protects_object_referenced_only_from_json(
@@ -128,13 +186,15 @@ def test_orphan_scan_protects_unmanaged_catalog_object(
 
 
 def test_orphan_scan_grace_period_protects_recent_uncommitted_object(
+    auth_context,
     auth_db,
     tmp_path: Path,
 ) -> None:
     storage = LocalObjectStorage(str(tmp_path))
+    key = f"tenants/{auth_context['tenant_id']}/uploads/in-flight.bin"
     _put_object(
         storage,
-        key="tenants/pending/uploads/in-flight.bin",
+        key=key,
         modified_at=_NOW - timedelta(minutes=5),
     )
 
@@ -239,6 +299,7 @@ def test_s3_inventory_uses_every_list_objects_page(auth_db) -> None:
                             "Key": first_key,
                             "Size": 5,
                             "LastModified": _OLD,
+                            "ETag": '"first-etag"',
                         }
                     ]
                 },
@@ -248,6 +309,7 @@ def test_s3_inventory_uses_every_list_objects_page(auth_db) -> None:
                             "Key": second_key,
                             "Size": 6,
                             "LastModified": _OLD,
+                            "ETag": '"second-etag"',
                         }
                     ]
                 },
@@ -263,6 +325,13 @@ def test_s3_inventory_uses_every_list_objects_page(auth_db) -> None:
         client = Client()
 
     with auth_db() as db:
+        db.add_all(
+            [
+                Tenant(id="tenant-a", slug="tenant-a", name="Tenant A"),
+                Tenant(id="tenant-b", slug="tenant-b", name="Tenant B"),
+            ]
+        )
+        db.commit()
         report = scan_orphan_objects(
             db,
             storage=S3Storage(),
@@ -275,6 +344,7 @@ def test_s3_inventory_uses_every_list_objects_page(auth_db) -> None:
         first_key,
         second_key,
     ]
+    assert [finding.etag for finding in report.orphans] == ["first-etag", "second-etag"]
 
 
 def test_s3_inventory_accepts_successful_empty_bucket() -> None:
@@ -283,6 +353,97 @@ def test_s3_inventory_accepts_successful_empty_bucket() -> None:
 
     assert storage_inventory(_s3_storage(paginator)) == ()
     paginator.paginate.assert_called_once_with(Bucket="media")
+
+
+def test_orphan_scan_records_read_only_s3_version_identity(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    key = f"tenants/{tenant_id}/uploads/versioned.bin"
+
+    class Paginator:
+        def paginate(self, **kwargs):
+            return [
+                {
+                    "Contents": [
+                        {"Key": key, "Size": 7, "LastModified": _OLD, "ETag": '"list-etag"'}
+                    ]
+                }
+            ]
+
+    class Client:
+        def get_paginator(self, operation_name: str):
+            return Paginator()
+
+    class VersionedStorage:
+        bucket = "media"
+        client = Client()
+
+        def head_object_identity(self, object_key: str) -> StorageObjectIdentity:
+            assert object_key == key
+            return StorageObjectIdentity(
+                version_id="version-one",
+                etag="head-etag",
+                size=7,
+                last_modified=_OLD,
+            )
+
+    with auth_db() as db:
+        report = scan_orphan_objects(db, storage=VersionedStorage(), now=_NOW)
+
+    assert report.orphans[0].version_id == "version-one"
+    assert report.orphans[0].etag == "head-etag"
+
+
+def test_recorded_gc_control_key_does_not_protect_itself_on_second_scan(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    key = f"tenants/{tenant_id}/uploads/two-scan.bin"
+    first_scan = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    modified_at = first_scan - timedelta(days=2)
+
+    class Paginator:
+        def paginate(self, **kwargs):
+            return [{"Contents": [{"Key": key, "Size": 9, "LastModified": modified_at}]}]
+
+    class Client:
+        def get_paginator(self, operation_name: str):
+            return Paginator()
+
+    class VersionedStorage:
+        bucket = "media"
+        client = Client()
+
+        def head_object_identity(self, object_key: str) -> StorageObjectIdentity:
+            return StorageObjectIdentity("version-one", "etag-one", 9, modified_at)
+
+    with auth_db() as db:
+        report = scan_orphan_objects(
+            db,
+            storage=VersionedStorage(),
+            now=first_scan,
+            scan_id="first-clean-scan",
+        )
+        record_gc_candidates(db, report)
+        db.commit()
+
+        report = scan_orphan_objects(
+            db,
+            storage=VersionedStorage(),
+            now=first_scan + timedelta(days=7),
+            scan_id="second-clean-scan",
+        )
+        assert [finding.key for finding in report.orphans] == [key]
+        record_gc_candidates(db, report)
+        db.commit()
+
+        candidate = db.scalar(select(GcCandidate))
+
+    assert candidate.status == "eligible"
+    assert candidate.clean_scan_count == 2
 
 
 @pytest.mark.parametrize(

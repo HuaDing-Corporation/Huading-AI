@@ -1,6 +1,7 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
-from app.services.storage.base import StorageKeyError
+from app.services.storage.base import StorageKeyError, StorageObjectIdentity
 
 
 class LocalObjectStorage:
@@ -32,6 +33,15 @@ class LocalObjectStorage:
 
     def object_exists(self, key: str) -> bool:
         return self._resolve(key).is_file()
+
+    def head_object_identity(self, key: str) -> StorageObjectIdentity:
+        stat = self._resolve(key).stat()
+        return StorageObjectIdentity(
+            version_id=None,
+            etag=None,
+            size=int(stat.st_size),
+            last_modified=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+        )
 
     def delete_object(self, key: str) -> None:
         self._resolve(key).unlink(missing_ok=True)

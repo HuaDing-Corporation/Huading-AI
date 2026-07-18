@@ -1,3 +1,6 @@
+from app.services.storage.base import StorageObjectIdentity
+
+
 class S3ObjectStorage:
     def __init__(
         self,
@@ -65,6 +68,19 @@ class S3ObjectStorage:
                 return False
             raise
         return True
+
+    def head_object_identity(self, key: str) -> StorageObjectIdentity:
+        response = self.client.head_object(Bucket=self.bucket, Key=key)
+        version_id = response.get("VersionId")
+        version_value = str(version_id) if version_id not in {None, "", "null"} else None
+        etag = response.get("ETag")
+        etag_value = str(etag).strip('"') if etag else None
+        return StorageObjectIdentity(
+            version_id=version_value,
+            etag=etag_value,
+            size=int(response["ContentLength"]),
+            last_modified=response["LastModified"],
+        )
 
     def delete_object(self, key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=key)

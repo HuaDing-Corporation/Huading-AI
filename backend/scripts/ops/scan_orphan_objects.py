@@ -1,31 +1,38 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-from collections import defaultdict
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from uuid import uuid4
 
-from sqlalchemy import JSON, String, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
-from sqlalchemy.schema import MetaData
 
 from app.core.config import settings
-from app.db.models import Asset, Base
+from app.db.models import Base, Tenant
 from app.db.session import SessionLocal
-from app.services.storage.base import ObjectStorage, StorageKeyError
+from app.services.gc.observation import (
+    GcObjectObservation,
+    GcObservationResult,
+    observe_gc_candidates,
+)
+from app.services.gc.reference_scan import (
+    OrphanScanCoverageError,
+    ReferenceSurface,
+    StorageKeyScope,
+    classify_storage_key,
+    discover_reference_surfaces,
+    find_referenced_keys,
+)
+from app.services.storage.base import ObjectStorage
 from app.services.storage.factory import create_object_storage
-from app.services.storage.keys import validate_catalog_storage_key
-from scripts.ops.scan_storage_keys import persisted_storage_key_columns
+from app.services.storage.keys import head_tenant_storage_identity
 
 DEFAULT_GRACE_HOURS = 24.0
-
-
-class OrphanScanCoverageError(RuntimeError):
-    """Raised when a complete, read-only orphan classification cannot be proven."""
 
 
 @dataclass(frozen=True)
@@ -33,34 +40,37 @@ class StorageObjectInfo:
     key: str
     size: int
     last_modified: datetime
-
-
-ReferenceKind = Literal["string", "json", "asset_fk"]
-
-
-@dataclass(frozen=True)
-class ReferenceSurface:
-    table: str
-    column: str
-    kind: ReferenceKind
-
-    @property
-    def label(self) -> str:
-        return f"{self.kind}:{self.table}.{self.column}"
+    version_id: str | None = None
+    etag: str | None = None
 
 
 @dataclass(frozen=True)
 class OrphanObjectFinding:
+    tenant_id: str
     key: str
+    key_hash: str
     size: int
     last_modified: datetime
+    version_id: str | None
+    etag: str | None
     reason: str
     checked_references: tuple[str, ...]
+    schema_fingerprint: str
+    reference_evidence: dict[str, object]
+
+
+@dataclass(frozen=True)
+class SkippedObjectFinding:
+    key_hash: str
+    reason: str
 
 
 @dataclass(frozen=True)
 class OrphanScanReport:
+    scan_id: str
+    scanned_at: datetime
     bucket: str
+    schema_fingerprint: str
     grace_hours: float
     scanned_object_count: int
     eligible_object_count: int
@@ -69,55 +79,8 @@ class OrphanScanReport:
     catalog_object_count: int
     reference_surfaces: tuple[ReferenceSurface, ...]
     orphans: tuple[OrphanObjectFinding, ...]
-
-
-def _looks_like_storage_locator(column_name: str) -> bool:
-    name = column_name.lower()
-    return name in {"key", "path", "url"} or name.endswith(("_key", "_path", "_url"))
-
-
-def discover_reference_surfaces(metadata: MetaData) -> tuple[ReferenceSurface, ...]:
-    surfaces: list[ReferenceSurface] = []
-    unsupported: list[str] = []
-    for table in sorted(metadata.tables.values(), key=lambda item: item.name):
-        for column in table.columns:
-            locator = _looks_like_storage_locator(column.name)
-            if locator and not isinstance(column.type, String):
-                unsupported.append(f"{table.name}.{column.name}")
-            elif locator:
-                surfaces.append(ReferenceSurface(table.name, column.name, "string"))
-
-            if isinstance(column.type, JSON):
-                surfaces.append(ReferenceSurface(table.name, column.name, "json"))
-
-            if any(
-                foreign_key.target_fullname == "assets.id" for foreign_key in column.foreign_keys
-            ):
-                if not isinstance(column.type, String):
-                    unsupported.append(f"{table.name}.{column.name}")
-                else:
-                    surfaces.append(ReferenceSurface(table.name, column.name, "asset_fk"))
-
-    if unsupported:
-        raise OrphanScanCoverageError(
-            f"Unsupported reflected storage-reference column types: {sorted(set(unsupported))!r}."
-        )
-
-    direct_columns = {
-        (surface.table, surface.column) for surface in surfaces if surface.kind == "string"
-    }
-    if metadata is Base.metadata:
-        missing = persisted_storage_key_columns() - direct_columns
-        if missing:
-            raise OrphanScanCoverageError(
-                f"Persisted storage-key discovery is incomplete: missing={sorted(missing)!r}."
-            )
-
-    if not surfaces:
-        raise OrphanScanCoverageError(
-            "No database reference surfaces were discovered; refusing to report clean."
-        )
-    return tuple(sorted(set(surfaces), key=lambda surface: surface.label))
+    skipped_objects: tuple[SkippedObjectFinding, ...]
+    tenant_objects: tuple[GcObjectObservation, ...]
 
 
 def _as_utc(value: datetime, *, source: str) -> datetime:
@@ -183,6 +146,7 @@ def _s3_inventory(storage: object, client: object) -> Iterator[StorageObjectInfo
                 key = item.get("Key")
                 size = item.get("Size")
                 modified = item.get("LastModified")
+                etag = item.get("ETag")
                 if not isinstance(key, str) or not key or not isinstance(size, int):
                     raise OrphanScanCoverageError(
                         "S3 storage inventory returned incomplete object metadata."
@@ -191,6 +155,7 @@ def _s3_inventory(storage: object, client: object) -> Iterator[StorageObjectInfo
                     key=key,
                     size=size,
                     last_modified=_as_utc(modified, source=key),
+                    etag=str(etag).strip('"') if etag else None,
                 )
     except OrphanScanCoverageError:
         raise
@@ -223,116 +188,44 @@ def storage_inventory(storage: object) -> tuple[StorageObjectInfo, ...]:
                 key=item.key,
                 size=item.size,
                 last_modified=_as_utc(item.last_modified, source=item.key),
+                version_id=item.version_id,
+                etag=item.etag,
             )
         )
     return tuple(sorted(objects, key=lambda item: item.key))
 
 
-def _json_references(
-    value: object,
+def _key_hash(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _read_object_identity(
+    storage: ObjectStorage,
+    item: StorageObjectInfo,
     *,
-    object_keys: set[str],
-    asset_keys_by_id: Mapping[str, str],
-) -> set[str]:
-    if isinstance(value, str):
-        references = {value} & object_keys
-        asset_key = asset_keys_by_id.get(value)
-        if asset_key is not None:
-            references.add(asset_key)
-        return references
-    if isinstance(value, Mapping):
-        references: set[str] = set()
-        for key, item in value.items():
-            references.update(
-                _json_references(
-                    key,
-                    object_keys=object_keys,
-                    asset_keys_by_id=asset_keys_by_id,
-                )
-            )
-            references.update(
-                _json_references(
-                    item,
-                    object_keys=object_keys,
-                    asset_keys_by_id=asset_keys_by_id,
-                )
-            )
-        return references
-    if isinstance(value, (list, tuple, set)):
-        references: set[str] = set()
-        for item in value:
-            references.update(
-                _json_references(
-                    item,
-                    object_keys=object_keys,
-                    asset_keys_by_id=asset_keys_by_id,
-                )
-            )
-        return references
-    return set()
-
-
-def _asset_keys_by_id(db: Session, object_keys: set[str]) -> dict[str, str]:
-    result: dict[str, str] = {}
+    tenant_id: str,
+) -> StorageObjectInfo:
     try:
-        rows = db.execute(select(Asset.id, Asset.storage_key).execution_options(yield_per=500))
-        for asset_id, storage_key in rows:
-            if isinstance(storage_key, str) and storage_key in object_keys:
-                result[str(asset_id)] = storage_key
+        identity = head_tenant_storage_identity(
+            storage,
+            tenant_id=tenant_id,
+            storage_key=item.key,
+        )
+        if identity is None:
+            return item
+        if identity.size < 0:
+            raise ValueError("negative object size")
+        return StorageObjectInfo(
+            key=item.key,
+            size=int(identity.size),
+            last_modified=_as_utc(identity.last_modified, source=item.key),
+            version_id=identity.version_id,
+            etag=identity.etag,
+        )
     except Exception as exc:
-        raise OrphanScanCoverageError("Asset reference mapping could not be completed.") from exc
-    return result
-
-
-def _referenced_object_keys(
-    db: Session,
-    *,
-    object_keys: set[str],
-    surfaces: Iterable[ReferenceSurface],
-) -> set[str]:
-    if not object_keys:
-        return set()
-    asset_keys_by_id = _asset_keys_by_id(db, object_keys)
-    by_table: dict[str, list[ReferenceSurface]] = defaultdict(list)
-    for surface in surfaces:
-        by_table[surface.table].append(surface)
-
-    referenced: set[str] = set()
-    for table_name, table_surfaces in sorted(by_table.items()):
-        table = Base.metadata.tables[table_name]
-        columns = [table.c[surface.column] for surface in table_surfaces]
-        try:
-            rows = db.execute(select(*columns).execution_options(yield_per=500))
-            for row in rows:
-                for surface, value in zip(table_surfaces, row, strict=True):
-                    if surface.kind == "string":
-                        if isinstance(value, str) and value in object_keys:
-                            referenced.add(value)
-                    elif surface.kind == "asset_fk":
-                        storage_key = asset_keys_by_id.get(str(value or ""))
-                        if storage_key is not None:
-                            referenced.add(storage_key)
-                    else:
-                        referenced.update(
-                            _json_references(
-                                value,
-                                object_keys=object_keys,
-                                asset_keys_by_id=asset_keys_by_id,
-                            )
-                        )
-        except Exception as exc:
-            raise OrphanScanCoverageError(
-                f"Database reference scan failed for table {table_name!r}."
-            ) from exc
-    return referenced
-
-
-def _is_catalog_object(key: str) -> bool:
-    try:
-        validate_catalog_storage_key(key)
-    except StorageKeyError:
-        return False
-    return True
+        raise OrphanScanCoverageError(
+            f"Storage identity read failed for key hash {_key_hash(item.key)}."
+        ) from exc
 
 
 def scan_orphan_objects(
@@ -341,45 +234,95 @@ def scan_orphan_objects(
     storage: object,
     grace_period: timedelta = timedelta(hours=DEFAULT_GRACE_HOURS),
     now: datetime | None = None,
+    scan_id: str | None = None,
 ) -> OrphanScanReport:
     if grace_period < timedelta(0):
         raise ValueError("grace_period must be non-negative.")
     scan_time = _as_utc(now or datetime.now(UTC), source="scan clock")
     objects = storage_inventory(storage)
     surfaces = discover_reference_surfaces(Base.metadata)
+    known_tenant_ids = set(db.scalars(select(Tenant.id)))
     cutoff = scan_time - grace_period
 
     catalog_count = 0
     recent_count = 0
     eligible: list[StorageObjectInfo] = []
+    tenant_ids_by_key: dict[str, str] = {}
+    skipped: list[SkippedObjectFinding] = []
     for item in objects:
-        if _is_catalog_object(item.key):
+        classification = classify_storage_key(
+            item.key,
+            known_tenant_ids=known_tenant_ids,
+        )
+        if classification.scope is StorageKeyScope.CATALOG:
             catalog_count += 1
+            skipped.append(
+                SkippedObjectFinding(
+                    key_hash=_key_hash(item.key),
+                    reason=str(classification.skip_reason),
+                )
+            )
+        elif classification.scope is StorageKeyScope.INVALID:
+            skipped.append(
+                SkippedObjectFinding(
+                    key_hash=_key_hash(item.key),
+                    reason=str(classification.skip_reason),
+                )
+            )
         elif item.last_modified > cutoff:
             recent_count += 1
         else:
+            item = _read_object_identity(
+                storage,
+                item,
+                tenant_id=str(classification.tenant_id),
+            )
             eligible.append(item)
+            tenant_ids_by_key[item.key] = str(classification.tenant_id)
 
     eligible_keys = {item.key for item in eligible}
-    referenced = _referenced_object_keys(
+    references = find_referenced_keys(
         db,
         object_keys=eligible_keys,
         surfaces=surfaces,
     )
-    checked_references = tuple(surface.label for surface in surfaces)
+    referenced = references.referenced_keys
+    checked_references = references.checked_protective_surfaces
     orphans = tuple(
         OrphanObjectFinding(
+            tenant_id=tenant_ids_by_key[item.key],
             key=item.key,
+            key_hash=_key_hash(item.key),
             size=item.size,
             last_modified=item.last_modified,
+            version_id=item.version_id,
+            etag=item.etag,
             reason="no_database_reference",
             checked_references=checked_references,
+            schema_fingerprint=references.schema_fingerprint,
+            reference_evidence=references.evidence_for(item.key),
         )
         for item in eligible
         if item.key not in referenced
     )
+    tenant_objects = tuple(
+        GcObjectObservation(
+            tenant_id=tenant_ids_by_key[item.key],
+            key=item.key,
+            size=item.size,
+            last_modified=item.last_modified,
+            version_id=item.version_id,
+            etag=item.etag,
+            referenced=item.key in referenced,
+            reference_evidence=references.evidence_for(item.key),
+        )
+        for item in eligible
+    )
     return OrphanScanReport(
+        scan_id=scan_id or str(uuid4()),
+        scanned_at=scan_time,
         bucket=str(getattr(storage, "bucket", "") or ""),
+        schema_fingerprint=references.schema_fingerprint,
         grace_hours=grace_period.total_seconds() / 3600,
         scanned_object_count=len(objects),
         eligible_object_count=len(eligible),
@@ -388,23 +331,43 @@ def scan_orphan_objects(
         catalog_object_count=catalog_count,
         reference_surfaces=surfaces,
         orphans=orphans,
+        skipped_objects=tuple(skipped),
+        tenant_objects=tenant_objects,
+    )
+
+
+def record_gc_candidates(db: Session, report: OrphanScanReport) -> GcObservationResult:
+    return observe_gc_candidates(
+        db,
+        bucket=report.bucket,
+        scan_id=report.scan_id,
+        schema_fingerprint=report.schema_fingerprint,
+        scanned_at=report.scanned_at,
+        observations=report.tenant_objects,
     )
 
 
 def _finding_payload(finding: OrphanObjectFinding) -> dict[str, object]:
     return {
-        "key": finding.key,
+        "key_hash": finding.key_hash,
         "size": finding.size,
         "last_modified": finding.last_modified.isoformat(),
+        "version_id": finding.version_id,
+        "etag": finding.etag,
         "reason": finding.reason,
         "checked_references": list(finding.checked_references),
+        "schema_fingerprint": finding.schema_fingerprint,
+        "reference_evidence": finding.reference_evidence,
     }
 
 
 def report_payload(report: OrphanScanReport) -> dict[str, object]:
     return {
         "mode": "dry-run-read-only",
+        "scan_id": report.scan_id,
+        "scanned_at": report.scanned_at.isoformat(),
         "bucket": report.bucket,
+        "schema_fingerprint": report.schema_fingerprint,
         "grace_hours": report.grace_hours,
         "scanned_object_count": report.scanned_object_count,
         "eligible_object_count": report.eligible_object_count,
@@ -412,16 +375,22 @@ def report_payload(report: OrphanScanReport) -> dict[str, object]:
         "recent_object_count": report.recent_object_count,
         "catalog_object_count": report.catalog_object_count,
         "orphan_count": len(report.orphans),
+        "skipped_object_count": len(report.skipped_objects),
         "reference_surfaces": [
             {
                 "kind": surface.kind,
                 "table": surface.table,
                 "column": surface.column,
                 "label": surface.label,
+                "classification": surface.classification.value,
             }
             for surface in report.reference_surfaces
         ],
         "orphans": [_finding_payload(finding) for finding in report.orphans],
+        "skipped_objects": [
+            {"key_hash": finding.key_hash, "reason": finding.reason}
+            for finding in report.skipped_objects
+        ],
     }
 
 
@@ -434,9 +403,14 @@ def _nonnegative_hours(value: str) -> float:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Read-only scan for storage objects without database references."
+        description="Scan storage references without deleting objects or product records."
     )
     parser.add_argument("--json", action="store_true", help="Emit a JSON report.")
+    parser.add_argument(
+        "--record-candidates",
+        action="store_true",
+        help="Persist Phase 1 observations in GC control tables; never deletes media.",
+    )
     parser.add_argument(
         "--grace-hours",
         type=_nonnegative_hours,
@@ -449,17 +423,28 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     storage: ObjectStorage = create_object_storage(settings)
+    observation_result: GcObservationResult | None = None
     with SessionLocal() as db:
         report = scan_orphan_objects(
             db,
             storage=storage,
             grace_period=timedelta(hours=args.grace_hours),
         )
+        if args.record_candidates:
+            observation_result = record_gc_candidates(db, report)
+            db.commit()
     payload = report_payload(report)
+    if observation_result is not None:
+        payload["mode"] = "gc-candidate-observation"
+        payload["candidate_observation"] = {
+            "observed_count": observation_result.observed_count,
+            "eligible_count": observation_result.eligible_count,
+            "skipped_count": observation_result.skipped_count,
+        }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
-        print("Orphan object scan (dry-run, read-only)")
+        print(f"Orphan object scan ({payload['mode']})")
         print(f"Scanned objects: {payload['scanned_object_count']}")
         print(f"Orphans: {payload['orphan_count']}")
         for finding in payload["orphans"]:

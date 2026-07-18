@@ -1,4 +1,14 @@
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
+
+
+@dataclass(frozen=True)
+class StorageObjectIdentity:
+    version_id: str | None
+    etag: str | None
+    size: int
+    last_modified: datetime
 
 
 class StorageKeyError(ValueError):
@@ -18,6 +28,9 @@ class ObjectStorage(Protocol):
         ...
 
     def object_exists(self, key: str) -> bool:
+        ...
+
+    def head_object_identity(self, key: str) -> StorageObjectIdentity:
         ...
 
     def delete_object(self, key: str) -> None:
