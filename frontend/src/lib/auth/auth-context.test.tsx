@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CurrentUserResponse } from "@/lib/api/types";
@@ -103,12 +103,18 @@ describe("AuthProvider · mount 刷新 entitlement", () => {
     );
     await waitFor(() => expect(authApi.fetchMe).toHaveBeenCalledTimes(1));
 
-    // 刷新未落定 → 登出并改登账号 B（不同 userId，B 有自己的 vip 权限/身份）。
-    authStore.set({ token: "tB", tenantId: "ten-B", userId: "u-B", role: "admin", user: me(["video:create", "voice_clone_vip"], "u-B", "b@huading.test") });
-    // 旧 /me（账号 A）此刻才 resolve。
-    resolveMe(me(["video:create"], "u-A", "a@huading.test"));
-    await Promise.resolve();
-    await Promise.resolve();
+    // 🔴 这两步都触发 AuthProvider 的 setState：authStore.set(B) → 订阅通知 → setSession；
+    // resolveMe(A) → mount 的 fetchMe.then → authStore.update → setSession。二者都是 React 状态更新，
+    // 必须包进 act(...)，否则「An update … was not wrapped in act」警告（FE-TEST-STABILITY-0001，只改测试、
+    // 不动 auth-context 产品逻辑）。用一个 async act 一并把随后的微任务 flush（旧 /me 的 .then 链）纳入。
+    await act(async () => {
+      // 刷新未落定 → 登出并改登账号 B（不同 userId，B 有自己的 vip 权限/身份）。
+      authStore.set({ token: "tB", tenantId: "ten-B", userId: "u-B", role: "admin", user: me(["video:create", "voice_clone_vip"], "u-B", "b@huading.test") });
+      // 旧 /me（账号 A）此刻才 resolve —— 晚到的它不得覆盖 B。
+      resolveMe(me(["video:create"], "u-A", "a@huading.test"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
 
     // B 的会话未被 A 覆盖：身份仍是 B、权限仍是 B 的。
     const s = authStore.get();

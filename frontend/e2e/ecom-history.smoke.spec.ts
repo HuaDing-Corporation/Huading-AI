@@ -59,8 +59,14 @@ test("电商视频历史真点渲染无 #130 白屏（运行时 undefined 组件
   await expect(historyPanel.getByText("已取消")).toBeVisible();
 
   // VIDEO-ERR-MAP-UI：失败项(error_code=VIDEO_TIMEOUT) → 友好中文映射，且**不露裸 error_message**（英文/技术串）。
+  // 正向断言仍 scope 到 tabpanel：seed 同时出现在顶部 TaskList 与本 panel → page 级 getByText 命中 2 →
+  // strict-mode 失败（#156 flake 真因）。
   await expect(historyPanel.getByText("生成超时，请稍后重试")).toBeVisible();
-  await expect(historyPanel.getByText(/Error code: 504/)).toHaveCount(0);
+  // 🔴 负断言恢复到 **page 级**（FE-TEST-STABILITY-0001，#156 flake 修时被一并缩到 panel）：
+  //   ① `toHaveCount(0)` 不受 strict-mode 多命中影响——它是计数、不做单元素解析，0 恒稳、不 flaky；
+  //   ② 更强：失败项「台灯带货」也渲染在**顶部 TaskList**，裸 error 泄漏若发生在那里，panel 级断言会漏掉。
+  //      裸 `Error code: 504` 不该出现在**页面任何位置** → page 级才是这条契约的正确作用域。
+  await expect(page.getByText(/Error code: 504/)).toHaveCount(0);
 
   // 主门禁：无 #130 白屏。
   expect(pageErrors, `page errors（含 React #130 白屏）：\n${pageErrors.join("\n")}`).toEqual([]);
