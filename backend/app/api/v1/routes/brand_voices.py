@@ -348,6 +348,17 @@ def _allocate_voice_clone_speaker_id(
         _lock_platform_voice_clone_slot_pool(db)
         config = _voice_clone_provider_config(db, tenant_id=tenant_id, for_update=True)
         if config is None:
+            # Inactive rows retain the slot ledger and provider credentials.
+            config = db.scalar(
+                select(ProviderConfig)
+                .where(
+                    ProviderConfig.tenant_id.is_(None),
+                    ProviderConfig.capability == "voice_clone",
+                    ProviderConfig.provider == _VOICE_CLONE_PROVIDER,
+                )
+                .with_for_update()
+            )
+        if config is None:
             config = ProviderConfig(
                 tenant_id=None,
                 capability="voice_clone",
@@ -356,6 +367,9 @@ def _allocate_voice_clone_speaker_id(
                 is_active=True,
             )
             db.add(config)
+            db.flush()
+        elif not config.is_active:
+            config.is_active = True
             db.flush()
     values = dict(config.config or {}) if config is not None else {}
     has_db_speaker_ids = "speaker_ids" in values
