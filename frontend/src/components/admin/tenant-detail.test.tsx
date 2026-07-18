@@ -7,6 +7,7 @@ import { fetchAdminAudit, fetchAdminTenantDetail } from "@/lib/api/admin-console
 import { AuthProvider } from "@/lib/auth/auth-context";
 import { authStore } from "@/lib/auth/store";
 import { copy } from "@/lib/copy";
+import { resetAdminConsole } from "@/mocks/handlers";
 
 // 余额调整承重（ADMIN-CONSOLE-UI-0001 §四.3）：真打 MSW（不 mock hooks/adapter），资金红线全钉：
 // ① 确认弹窗显示「当前余额 → 调整后余额」确定值；② **确认恰调一次**（同一 tick 连点两次 → 余额只加一次、
@@ -36,9 +37,12 @@ async function openCreditsConfirm(delta: string, reason: string) {
   await screen.findByText(copy.admin.creditsConfirmTitle);
 }
 
+// 🔴 ADMIN-MOCK-STORE-RESET-0001：与 admin-console.test.ts 同口径 —— admin mock store 每条测试前重置，顺序无关。
+// （本文件的「取消不调」原本断言 total=25000 / 审计 1 条，赌的正是「上一条 +5000 的用例已经跑过」。）
 beforeEach(() => {
   localStorage.clear();
   authStore.clear();
+  resetAdminConsole();
 });
 afterEach(() => {
   localStorage.clear();
@@ -70,9 +74,12 @@ describe("TenantDetailDialog · 余额调整（资金安全）", () => {
     fireEvent.click(screen.getByRole("button", { name: copy.common.cancel }));
     await waitFor(() => expect(screen.queryByText(copy.admin.creditsConfirmTitle)).not.toBeInTheDocument());
     const detail = await fetchAdminTenantDetail("ten-acme");
-    expect(detail.tenant.subscription?.total).toBe(25000); // 上一用例后的值，取消未再动
+    expect(detail.tenant.subscription?.total).toBe(20000); // acme 的 seed 值：取消 → 分文未动
     const audit = await fetchAdminAudit({ action: "credits_adjust", page: 1, page_size: 20 });
-    expect(audit.total).toBe(1); // 仍是上一用例那一条
+    // 0 才是这条测试名字里那个「无新审计」。重置前它断言 1 =「仍是上一用例那一条」——数的是残留而不是新增：
+    // 顺序执行时它确实能红（1 残留 + 1 误写 = 2），但它一旦被排到 +5000 那条**前面**（shuffle 下就会），
+    // 残留是 0，取消若真误写一条审计 → 总数正好 1 → **绿**。断言的意义随座位变，这才是要治的。
+    expect(audit.total).toBe(0);
   });
 
   // 🔴 P1-2 前端承重：理由 501 字 → 提交前拦住（friendly 提示 + 确认弹窗不弹 = 不发请求）。
