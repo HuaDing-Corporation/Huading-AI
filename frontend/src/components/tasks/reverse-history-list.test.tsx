@@ -295,7 +295,7 @@ describe("ReverseHistoryList (提示词反推历史)", () => {
   });
 
   // 🔴 danger 承重（DANGER-SEMANTICS-SIGNPOSTS-0001）：反推历史删除是**软删**（deleted_at），但列表过滤已删 +
-  // 详情 404 + 无恢复入口 = **用户不可撤销** → 确认按钮必须是危险样式。判据 = 用户能否撤销，不是 BE 是否硬删。
+  // 详情 404 + 无恢复入口 = **不可恢复的删除**（方案 A ①支）→ 确认按钮必须是危险样式。与 BE 是否硬删无关。
   // 变异门：去掉 reverse 删除 ConfirmDialog 的 danger（回到「软删=非 danger」旧判据）→ 本条必红。
   // 钉**渲染出的样式**（danger 按钮专属 bg-error-bg），不是"确认框存在"。
   it("danger 承重：反推历史删除确认渲染危险样式（软删但用户不可撤销）", () => {
