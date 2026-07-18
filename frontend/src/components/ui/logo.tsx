@@ -42,12 +42,17 @@ export function LogoBadge({ className }: { className?: string }) {
   );
 }
 
-/** Full brand lockup: glass badge + wordmark. */
-export function Logo({ className }: { className?: string }) {
+/**
+ * Full brand lockup: glass badge + wordmark.
+ * `hideWordmarkOnMobile`（LANDING-CONTACT-UI-0001 · FIX1）：<640px 只留 badge、隐藏字标 —— 供 TopBar 在
+ * 移动端收缩顶栏用（字标约 104px，是顶栏在 375px 溢出的最大单项）。**opt-in，默认不变** → 登录/注册页
+ * 的 `<Logo />` 照常显示字标，零回归。
+ */
+export function Logo({ className, hideWordmarkOnMobile }: { className?: string; hideWordmarkOnMobile?: boolean }) {
   return (
     <div className={cn("flex items-center gap-3.5", className)}>
       <LogoBadge />
-      <div className="leading-none">
+      <div className={cn("leading-none", hideWordmarkOnMobile && "hidden sm:block")}>
         <b className="text-[18px] font-semibold tracking-[1px] text-ink">华鼎 AI</b>
         <span className="mt-0.5 block text-[11px] tracking-brand text-ink-faint">VIDEO&nbsp;ENGINE</span>
       </div>

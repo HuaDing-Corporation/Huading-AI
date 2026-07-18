@@ -67,16 +67,16 @@ export default function RegisterPage() {
     setError(null);
     setSubmitting(true);
     try {
-      await register({
+      const { tenantId, userId } = await register({
         tenantSlug: slug.trim(),
         tenantName: teamName.trim(),
         email: email.trim(),
         password,
         fullName: fullName.trim() || undefined
       });
-      // LANDING-CONTACT-UI-0001：落标记（绑注册者 email，防同一浏览器换账号串号）→
+      // LANDING-CONTACT-UI-0001 · FIX1：按**注册者身份**（tenantId+userId，非 email）落标记 →
       // 工作台首屏显示「联系开通额度」欢迎横幅。跳转行为不动（#155：landToken → 直接进控制台）。
-      markJustRegistered(email.trim());
+      markJustRegistered(tenantId, userId);
       router.replace("/"); // 后端随注册发 token → 直接进控制台
     } catch (err) {
       setError(friendlyRegisterError(err));

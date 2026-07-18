@@ -20,24 +20,28 @@ import { copy } from "@/lib/copy";
  *  3. **能再次找到** —— 关闭横幅后，顶栏的「开通额度」**常驻**入口（TopBar）打开同一个弹窗。
  *     常驻入口不依赖注册标记，对所有 0 余额账号（不只新注册）都在。
  *
- * 挂载时读一次 localStorage（避免 SSR/hydration 不一致：初始 false，effect 后显示）。
- * 🔴 标记绑注册者 email、读时比对**当前 session**（review 抓的串号 bug）：同一浏览器上
- * A 注册没关横幅就退出、B 登录 —— B 不该看到「注册成功，欢迎加入华鼎！」。
+ * 初始 false、effect 后按 localStorage 置（避免 SSR/hydration 不一致）。
+ * 🔴 FIX1：身份用 **session.tenantId + session.userId**（不是 email）。四条坏路径的修法见 welcome-flag.ts；
+ * 本组件负责 ③「session 换人横幅要消失」——effect 把 `visible` **等于完整匹配结果**（deps 含身份 →
+ * 换人时 effect 重跑、无标记即 setVisible(false)），不再只在匹配时置 true。dismiss 只清当前身份的标记（④）。
+ * （tenantId/userId 在裸 session 上，比 `session.user.user.email` 更稳 —— 后者要 fetchMe 补全成功才有。）
  */
 export function WelcomeContactBanner() {
   const { session } = useAuth();
-  const email = session?.user?.user.email;
+  const tenantId = session?.tenantId;
+  const userId = session?.userId;
   const [visible, setVisible] = useState(false);
   const [qrOpen, setQrOpen] = useState(false);
 
   useEffect(() => {
-    if (hasWelcomePending(email)) setVisible(true);
-  }, [email]);
+    // 🔴 ③：可见性 = 完整匹配结果（true 或 false）。换人 → 身份变 → 重跑 → 无标记即隐。
+    setVisible(hasWelcomePending(tenantId, userId));
+  }, [tenantId, userId]);
 
   if (!visible) return null;
 
   const dismiss = () => {
-    clearWelcomePending();
+    clearWelcomePending(tenantId, userId); // 🔴 ④：只清当前身份，不误删同设备其它身份的标记
     setVisible(false);
   };
 

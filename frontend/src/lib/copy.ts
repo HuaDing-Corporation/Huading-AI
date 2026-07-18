@@ -1036,6 +1036,10 @@ export const copy = {
     hintDesktop: "打开手机微信「扫一扫」，扫描左侧二维码",
     hintMobile: "保存二维码图片，打开微信「扫一扫」，从相册选取识别",
     saveQr: "保存二维码",
+    // iOS 兜底（FIX1 · P2-1）：iPhone Safari 的 `download` 存进「文件」App、不进「照片」，而微信从相册
+    // 扫一扫要的是**照片库**里的图 → 「保存」按钮在 iOS 上不可靠。长按二维码「存储到照片」才是 iOS 的可靠路径。
+    // （Android/Chromium 的 `download` 直接进可被相册访问的目录，故保存按钮对它有效。）
+    hintSaveIos: "iPhone 可长按二维码 →「存储到照片」",
     // 注册成功横幅（工作台）：不一闪而过（常显直到关闭）/ 不阻断（横幅非弹窗）/ 能再次找到（顶栏常驻入口）
     welcomeTitle: "注册成功，欢迎加入华鼎！",
     welcomeBody: "新账号需要开通生成额度——添加客服微信，当天开通，即可开始生成。",

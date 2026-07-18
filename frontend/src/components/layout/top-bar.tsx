@@ -27,8 +27,11 @@ export function TopBar() {
   const showAdmin = canUseAdminConsole(session);
 
   return (
-    <Glass className="col-span-full flex items-center gap-3 rounded-card px-4 py-[15px] sm:gap-[18px] sm:px-6">
-      <Logo />
+    // FIX1：移动端顶栏收缩策略 —— Logo 收成纯 badge（隐字标）+ 动作组允许收缩（min-w-0）+ px 减小。
+    // 加了「开通额度」入口后，375px 顶栏原会横向溢出、退出按钮被挤出首屏（Codex B 实测 scroll 457px）。
+    // 根因是「已登录态移动端从没测过」—— 补的浏览器门禁见 e2e/landing。
+    <Glass className="col-span-full flex items-center gap-2 rounded-card px-3 py-[15px] sm:gap-[18px] sm:px-6">
+      <Logo hideWordmarkOnMobile className="flex-none" />
 
       <div className="relative mx-2 hidden max-w-[440px] flex-1 sm:block">
         <Search
@@ -43,7 +46,7 @@ export function TopBar() {
         />
       </div>
 
-      <div className="ml-auto flex items-center gap-2.5 sm:gap-3">
+      <div className="ml-auto flex min-w-0 flex-none items-center gap-2 sm:gap-3">
         {showAdmin && (
           <Link
             href="/admin"

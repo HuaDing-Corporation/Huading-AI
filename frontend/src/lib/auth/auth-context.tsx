@@ -17,7 +17,8 @@ interface AuthContextValue {
   /** True once localStorage has been read (avoids redirect flicker). */
   ready: boolean;
   login: (input: LoginInput) => Promise<void>;
-  register: (input: RegisterInput) => Promise<void>;
+  /** 返回注册者身份（tenantId+userId）—— 供欢迎横幅按身份落标记（LANDING-CONTACT-UI-0001 · FIX1）。 */
+  register: (input: RegisterInput) => Promise<{ tenantId: string; userId: string }>;
   logout: () => void;
 }
 
@@ -79,6 +80,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (input: RegisterInput) => {
       const res = await apiRegister(input);
       await landToken(res.token);
+      // 身份从 token 出（与 landToken 存进 session 的 tenantId/userId 同源）→ 调用方据此落欢迎标记。
+      return { tenantId: res.token.tenant_id, userId: res.token.user_id };
     },
     [landToken]
   );

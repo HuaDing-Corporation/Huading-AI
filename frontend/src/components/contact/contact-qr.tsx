@@ -47,7 +47,9 @@ export function ContactQr({ compact }: { compact?: boolean }) {
           {C.hintMobile}
         </p>
         {/* 保存按钮只给移动端：PC 主路径是直接扫屏，多一个下载按钮反而分散（每屏一个主动作）。
-            h-11 = 44px 触控目标下限。download 属性 → 浏览器存图而非导航。 */}
+            h-11 = 44px 触控目标（WCAG 2.5.5 AAA）。download 属性 → 浏览器存图而非导航。
+            ⚠️ download 在 Android/Chromium 有效（进可被相册访问的目录）；iOS Safari 存进「文件」App、不进
+            「照片」→ 微信从相册扫不到 → 故下方补 iOS 长按兜底（FIX1 · P2-1）。 */}
         <a
           href="/wechat-qr.png"
           download="华鼎客服微信二维码.png"
@@ -55,6 +57,8 @@ export function ContactQr({ compact }: { compact?: boolean }) {
         >
           <Download size={15} strokeWidth={2} aria-hidden /> {C.saveQr}
         </a>
+        {/* iOS 兜底文案：只在移动端出现（PC 用户直接扫屏，不需要）。 */}
+        <p className="text-[12px] leading-[1.5] text-ink-faint sm:hidden">{C.hintSaveIos}</p>
       </div>
     </div>
   );

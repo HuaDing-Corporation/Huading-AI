@@ -1,42 +1,53 @@
-// 注册成功 → 工作台欢迎横幅的一次性标记（LANDING-CONTACT-UI-0001）。
+// 注册成功 → 工作台欢迎横幅的一次性标记（LANDING-CONTACT-UI-0001 · FIX1）。
 //
-// 为什么走 localStorage 而不是改注册跳转：硬门 5 要求 #155 的「注册成功 → landToken → 直接进控制台」
-// **行为不变** —— 所以提示不能拦在注册页（成功态中转页 = 改了跳转），只能由控制台侧读标记显示。
+// 为什么走 localStorage 而不是改注册跳转：硬门要求 #155 的「注册成功 → landToken → 直接进控制台」
+// **行为不变** —— 提示不能拦在注册页（成功态中转页 = 改了跳转），只能由控制台侧读标记显示。
 // 为什么不是 sessionStorage：注册后若立刻关了标签、下次再进控制台，提示仍该在（他还是没额度）——
 // 标记**只在用户主动关闭横幅时清除**，不随会话蒸发。这正是「不一闪而过」的存储层含义。
 //
-// 🔴 标记**存注册者的 email、读时比对当前 session**（review 抓的串号 bug）：localStorage 是设备级的，
-// 光存个布尔 → A 注册后没关横幅就退出，同一浏览器上老账号 B 登录会看到「注册成功，欢迎加入华鼎！」——
-// 错误的欢迎发给错误的人。绑 email 后：B 登录读到的是 A 的 email → 不显示；A 自己再登录 → 仍显示。
-// （比「logout 时清标记」准确：那会把 A 自己重新登录该看到的横幅也误清掉。）
+// 🔴 FIX1：身份从 **email 改成 `tenantId + userId`**，且**每身份一把 key**。review1 用 email 绑定，
+// Codex B 核出四条坏路径，逐条为什么这样改能修掉：
+//  ① **同 email 不同 tenant**：BE 唯一约束是 `(tenant_id, email)`，同一 email 可注册多个租户 →
+//     email 不是身份。tenantId+userId 才是。
+//  ② **大写 email 永不匹配**：BE 把 email 转小写存，注册页存的是**未转小写**的输入 → session 返回
+//     小写、标记是大写 → 恒不等。tenantId/userId 是 BE 下发的 ID，读写同源自同一个 token，无大小写问题。
+//  ③ **session 换人横幅不消失**：见 welcome-contact-banner —— effect 现在把可见性**等于完整匹配结果**
+//     （匹配则显、不匹配则隐），不再只在匹配时置 true。本模块只负责「当前身份是否有标记」。
+//  ④ **多标签页互删**：单一设备级 key 会被后写覆盖、清除会误删别人的。**每身份一把 key**（keyFor）
+//     → 两身份的标记能共存、清除只动当前身份那把。是否该支持多身份共存的判断见 PR body / 回执：
+//     结论是「支持」——分 key 成本是几字节的罕见残留（只在注册时写、关闭时清），不值得为它建 GC。
 //
 // SSR/隐私模式下 localStorage 可能不可用 → 全部 try/catch 吞掉：提示是增强，不值得为它崩注册流程。
 
-const KEY = "hd:welcome-contact";
+/** 每身份一把 key —— tenantId+userId 唯一确定「哪个账号在哪个租户」。 */
+function keyFor(tenantId: string, userId: string): string {
+  return `hd:welcome-contact:${tenantId}:${userId}`;
+}
 
 /** 注册成功时调用（register/page.tsx 成功分支），记下注册者身份。 */
-export function markJustRegistered(email: string): void {
+export function markJustRegistered(tenantId: string, userId: string): void {
   try {
-    localStorage.setItem(KEY, email);
+    localStorage.setItem(keyFor(tenantId, userId), "1");
   } catch {
     // 存不进去 → 顶多少一次横幅，顶栏常驻入口仍在
   }
 }
 
-/** 工作台首屏读：**当前登录者**是不是刚注册的那个人。 */
-export function hasWelcomePending(currentEmail: string | undefined): boolean {
-  if (!currentEmail) return false;
+/** 工作台读：**当前登录身份**是不是刚注册的那个（tenantId 或 userId 缺一即否）。 */
+export function hasWelcomePending(tenantId: string | undefined, userId: string | undefined): boolean {
+  if (!tenantId || !userId) return false;
   try {
-    return localStorage.getItem(KEY) === currentEmail;
+    return localStorage.getItem(keyFor(tenantId, userId)) === "1";
   } catch {
     return false;
   }
 }
 
-/** 用户主动关闭横幅时清除。 */
-export function clearWelcomePending(): void {
+/** 用户主动关闭横幅时清除 —— **只清当前身份**那把 key（不碰同设备其它身份的标记，修 ④）。 */
+export function clearWelcomePending(tenantId: string | undefined, userId: string | undefined): void {
+  if (!tenantId || !userId) return;
   try {
-    localStorage.removeItem(KEY);
+    localStorage.removeItem(keyFor(tenantId, userId));
   } catch {
     // 清不掉 → 下次还显示，无害
   }
