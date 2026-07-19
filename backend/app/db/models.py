@@ -347,7 +347,7 @@ class CreditRate(Base):
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
             "'publish', 'voice_clone', 'video_gen', 'reverse_prompt', "
-            "'reverse_prompt_video')",
+            "'reverse_prompt_video', 'chat')",
             name="ck_credit_rates_capability",
         ),
         CheckConstraint(
@@ -698,12 +698,152 @@ class TaskAsset(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class ReasoningWallet(Base):
+    __tablename__ = "reasoning_wallets"
+    __table_args__ = (
+        CheckConstraint(
+            "available_credits >= 0",
+            name="ck_reasoning_wallets_available_nonnegative",
+        ),
+        CheckConstraint(
+            "reserved_credits >= 0",
+            name="ck_reasoning_wallets_reserved_nonnegative",
+        ),
+        CheckConstraint(
+            "total_topup_credits >= 0 AND total_spent_credits >= 0",
+            name="ck_reasoning_wallets_totals_nonnegative",
+        ),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    available_credits: Mapped[Decimal] = mapped_column(
+        Numeric(18, 6), default=Decimal("0")
+    )
+    reserved_credits: Mapped[Decimal] = mapped_column(
+        Numeric(18, 6), default=Decimal("0")
+    )
+    total_topup_credits: Mapped[Decimal] = mapped_column(
+        Numeric(18, 6), default=Decimal("0")
+    )
+    total_spent_credits: Mapped[Decimal] = mapped_column(
+        Numeric(18, 6), default=Decimal("0")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ChatConversation(TenantScopedMixin, Base):
+    __tablename__ = "chat_conversations"
+    __table_args__ = (
+        Index("ix_chat_conversations_tenant_updated", "tenant_id", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    title: Mapped[str] = mapped_column(String(200), default="新对话")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+
+class ChatMessage(TenantScopedMixin, Base):
+    __tablename__ = "chat_messages"
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'assistant')", name="ck_chat_messages_role"),
+        CheckConstraint(
+            "tier IS NULL OR tier IN ('low', 'mid', 'high')",
+            name="ck_chat_messages_tier",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'completed', 'failed')",
+            name="ck_chat_messages_status",
+        ),
+        Index(
+            "ix_chat_messages_conversation_created",
+            "conversation_id",
+            "created_at",
+        ),
+        Index("ix_chat_messages_tenant_created", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    conversation_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("chat_conversations.id", ondelete="CASCADE")
+    )
+    role: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str] = mapped_column(Text)
+    attachments: Mapped[list[dict[str, object]]] = mapped_column(
+        _json_type(), default=list
+    )
+    tier: Mapped[str | None] = mapped_column(String(16), default=None)
+    provider: Mapped[str | None] = mapped_column(String(40), default=None)
+    model: Mapped[str | None] = mapped_column(String(80), default=None)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    input_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), default=None)
+    output_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), default=None)
+    reserved_credits: Mapped[Decimal] = mapped_column(
+        Numeric(18, 6), default=Decimal("0")
+    )
+    charged_credits: Mapped[Decimal] = mapped_column(
+        Numeric(18, 6), default=Decimal("0")
+    )
+    provider_cost_usd: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 8), default=None
+    )
+    error_code: Mapped[str | None] = mapped_column(String(64), default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ReasoningLedgerEntry(TenantScopedMixin, Base):
+    __tablename__ = "reasoning_ledger_entries"
+    __table_args__ = (
+        CheckConstraint(
+            "entry_type IN ('topup', 'reserve', 'settle', 'release')",
+            name="ck_reasoning_ledger_entries_type",
+        ),
+        Index("ix_reasoning_ledger_tenant_created", "tenant_id", "created_at"),
+        Index("ix_reasoning_ledger_message", "chat_message_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("reasoning_wallets.tenant_id", ondelete="CASCADE"),
+        index=False,
+    )
+    entry_type: Mapped[str] = mapped_column(String(16))
+    amount_credits: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    available_delta: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    reserved_delta: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    available_after: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    reserved_after: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    subscription_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("subscriptions.id", ondelete="SET NULL"), nullable=True
+    )
+    chat_message_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True
+    )
+    operation_key: Mapped[str | None] = mapped_column(
+        String(100), unique=True, default=None
+    )
+    details: Mapped[dict[str, object]] = mapped_column(_json_type(), default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class ProviderConfig(Base):
     __tablename__ = "provider_configs"
     __table_args__ = (
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
-            "'publish', 'voice_clone', 'reverse_prompt', 'scene_prompt')",
+            "'publish', 'voice_clone', 'reverse_prompt', 'scene_prompt', 'chat')",
             name="ck_provider_configs_capability",
         ),
         Index(
@@ -758,7 +898,7 @@ class UsageRecord(Base):
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
             "'publish', 'voice_clone', 'video_gen', 'reverse_prompt', "
-            "'reverse_prompt_video', 'scene_prompt')",
+            "'reverse_prompt_video', 'scene_prompt', 'chat')",
             name="ck_usage_records_capability",
         ),
         CheckConstraint(
@@ -792,13 +932,19 @@ class UsageRecord(Base):
     reverse_prompt_job_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("reverse_prompt_jobs.id", ondelete="SET NULL"), nullable=True
     )
+    chat_message_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True
+    )
     capability: Mapped[str] = mapped_column(String(32))
     provider: Mapped[str] = mapped_column(String(40))
     model: Mapped[str | None] = mapped_column(String(80), default=None)
     unit: Mapped[str] = mapped_column(String(32))
     quantity: Mapped[Decimal] = mapped_column(Numeric(12, 3))
-    credits: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    credits: Mapped[Decimal] = mapped_column(Numeric(18, 6))
     cost_cents: Mapped[int] = mapped_column(Integer)
+    provider_cost_usd: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 8), default=None
+    )
     currency: Mapped[str] = mapped_column(String(3), default="CNY")
     status: Mapped[str] = mapped_column(String(32), default="reserved")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

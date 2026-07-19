@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.v1.routes import (
     admin_console,
+    aibrain,
     analytics,
     auth,
     avatars,
@@ -27,6 +28,7 @@ from app.api.v1.routes import (
 )
 
 api_router = APIRouter()
+api_router.include_router(aibrain.router, prefix="/aibrain", tags=["aibrain"])
 api_router.include_router(
     admin_console.router,
     prefix="/admin/console",

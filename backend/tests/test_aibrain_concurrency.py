@@ -1,0 +1,323 @@
+import ast
+import os
+import threading
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import create_engine, event, select, text
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import sessionmaker
+
+from app.core.exceptions import AppError
+from app.db.models import (
+    Base,
+    Plan,
+    ReasoningLedgerEntry,
+    ReasoningWallet,
+    Subscription,
+    Tenant,
+)
+from app.services import aibrain
+
+_RUNTIME_WALLET_FIELDS = {
+    "available_credits",
+    "reserved_credits",
+    "total_topup_credits",
+    "total_spent_credits",
+}
+_ALLOWED_RUNTIME_WRITES_BY_FUNCTION = {
+    "app/services/aibrain.py": {
+        "_apply_reasoning_wallet_change": _RUNTIME_WALLET_FIELDS,
+    }
+}
+
+
+def _assignment_attributes(node: ast.AST) -> list[ast.Attribute]:
+    targets: list[ast.expr] = []
+    if isinstance(node, ast.Assign):
+        targets.extend(node.targets)
+    elif isinstance(node, ast.AugAssign | ast.AnnAssign):
+        targets.append(node.target)
+    return [target for target in targets if isinstance(target, ast.Attribute)]
+
+
+def _is_wallet_attribute(target: ast.Attribute) -> bool:
+    return (
+        isinstance(target.value, ast.Name)
+        and "wallet" in target.value.id.lower()
+        and target.attr in _RUNTIME_WALLET_FIELDS
+    )
+
+
+def _enclosing_function_name(
+    functions: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    node: ast.AST,
+) -> str:
+    if not hasattr(node, "lineno"):
+        return "<module>"
+    enclosing = [
+        function for function in functions if function.lineno <= node.lineno <= function.end_lineno
+    ]
+    return max(enclosing, key=lambda function: function.lineno).name if enclosing else "<module>"
+
+
+def test_runtime_wallet_writes_only_occur_in_the_locked_helper() -> None:
+    app_root = Path(__file__).resolve().parents[1] / "app"
+    violations: list[str] = []
+    for path in app_root.rglob("*.py"):
+        relative = path.relative_to(app_root.parent).as_posix()
+        allowed_by_function = _ALLOWED_RUNTIME_WRITES_BY_FUNCTION.get(relative, {})
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        functions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        ]
+        for node in ast.walk(tree):
+            assignment_attributes = _assignment_attributes(node)
+            function_name = _enclosing_function_name(functions, node)
+            allowed = allowed_by_function.get(function_name, set())
+            for target in assignment_attributes:
+                if _is_wallet_attribute(target) and target.attr not in allowed:
+                    violations.append(f"{relative}:{function_name}:{node.lineno}:{target.attr}")
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "values"
+            ):
+                for keyword in node.keywords:
+                    if keyword.arg in _RUNTIME_WALLET_FIELDS and keyword.arg not in allowed:
+                        violations.append(f"{relative}:{function_name}:{node.lineno}:{keyword.arg}")
+
+    assert violations == []
+
+
+def test_wallet_mutation_query_uses_for_update_and_populate_existing(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        statements: list[tuple[str, bool]] = []
+
+        @event.listens_for(db, "do_orm_execute")
+        def _capture(orm_execute_state) -> None:
+            if orm_execute_state.is_select:
+                statements.append(
+                    (
+                        str(orm_execute_state.statement.compile(dialect=postgresql.dialect())),
+                        bool(orm_execute_state.execution_options.get("populate_existing", False)),
+                    )
+                )
+
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+        )
+
+    wallet_selects = [item for item in statements if "FROM reasoning_wallets" in item[0]]
+    assert any("FOR UPDATE" in statement for statement, _refresh in wallet_selects)
+    assert any(refresh for _statement, refresh in wallet_selects)
+
+
+@pytest.fixture(scope="module")
+def postgres_session_factory():
+    database_url = os.getenv("TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("TEST_POSTGRES_URL is required for AIBRAIN concurrency tests.")
+
+    engine = create_engine(database_url, pool_pre_ping=True)
+    schema = f"aibrain_concurrency_{uuid4().hex}"
+    with engine.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    scoped_engine = engine.execution_options(schema_translate_map={None: schema})
+    Base.metadata.create_all(scoped_engine)
+    factory = sessionmaker(bind=scoped_engine, autoflush=False, autocommit=False)
+    try:
+        yield factory
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        engine.dispose()
+
+
+def _seed_postgres_wallet(factory, *, available: Decimal) -> str:
+    tenant_id = str(uuid4())
+    with factory() as db:
+        db.add(
+            Tenant(
+                id=tenant_id,
+                slug=f"aibrain-{uuid4().hex[:10]}",
+                name="AIBRAIN Concurrency",
+            )
+        )
+        db.flush()
+        db.add(
+            ReasoningWallet(
+                tenant_id=tenant_id,
+                available_credits=available,
+                reserved_credits=Decimal("0"),
+                total_topup_credits=available,
+                total_spent_credits=Decimal("0"),
+            )
+        )
+        db.commit()
+    return tenant_id
+
+
+def _start_reservation(factory, *, tenant_id: str, operation_key: str):
+    done = threading.Event()
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            with factory() as db:
+                aibrain._apply_reasoning_wallet_change(
+                    db,
+                    tenant_id=tenant_id,
+                    entry_type="reserve",
+                    amount_credits=Decimal("200"),
+                    operation_key=operation_key,
+                )
+                db.commit()
+        except BaseException as exc:  # noqa: BLE001 - thread failures are evidence.
+            errors.append(exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, done, errors
+
+
+def test_postgres_concurrent_reservations_allow_exactly_one_request(
+    postgres_session_factory,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id = _seed_postgres_wallet(factory, available=Decimal("200"))
+    first = factory()
+    second_thread = None
+    try:
+        aibrain._apply_reasoning_wallet_change(
+            first,
+            tenant_id=tenant_id,
+            entry_type="reserve",
+            amount_credits=Decimal("200"),
+            operation_key="first-reservation",
+        )
+        second_thread, second_done, second_errors = _start_reservation(
+            factory,
+            tenant_id=tenant_id,
+            operation_key="second-reservation",
+        )
+        second_was_blocked = not second_done.wait(timeout=0.4)
+        first.commit()
+        second_thread.join(timeout=5)
+    finally:
+        first.rollback()
+        first.close()
+        if second_thread is not None:
+            second_thread.join(timeout=5)
+
+    assert second_was_blocked
+    assert not second_thread.is_alive()
+    assert len(second_errors) == 1
+    assert isinstance(second_errors[0], AppError)
+    assert second_errors[0].code == "AIBRAIN_INSUFFICIENT_BALANCE"
+    with factory() as db:
+        wallet = db.get(ReasoningWallet, tenant_id)
+        ledger_entries = list(
+            db.scalars(
+                select(ReasoningLedgerEntry).where(ReasoningLedgerEntry.tenant_id == tenant_id)
+            )
+        )
+        assert wallet.available_credits == Decimal("0")
+        assert wallet.reserved_credits == Decimal("200")
+        assert len(ledger_entries) == 1
+
+
+def _seed_postgres_subscription(factory, *, total: int) -> tuple[str, str]:
+    tenant_id = str(uuid4())
+    now = datetime.now(UTC)
+    with factory() as db:
+        tenant = Tenant(
+            id=tenant_id,
+            slug=f"aibrain-topup-{uuid4().hex[:8]}",
+            name="AIBRAIN Top-up Concurrency",
+        )
+        plan = Plan(
+            code=f"aibrain-topup-{uuid4().hex[:8]}",
+            name="AIBRAIN Top-up Concurrency",
+            price_cents=0,
+            period="monthly",
+            quota_credits=total,
+        )
+        db.add_all([tenant, plan])
+        db.flush()
+        subscription = Subscription(
+            tenant_id=tenant_id,
+            plan_id=plan.id,
+            status="active",
+            period_start=now - timedelta(days=1),
+            period_end=now + timedelta(days=30),
+            quota_credits_total=total,
+            quota_credits_used=0,
+            quota_credits_reserved=0,
+        )
+        db.add(subscription)
+        db.commit()
+        return tenant_id, subscription.id
+
+
+def test_postgres_concurrent_topups_cannot_overdraw_primary_quota(
+    postgres_session_factory,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id, subscription_id = _seed_postgres_subscription(factory, total=100)
+    start = threading.Event()
+    done = [threading.Event(), threading.Event()]
+    errors: list[BaseException] = []
+
+    def top_up(index: int) -> None:
+        try:
+            assert start.wait(timeout=5)
+            with factory() as db:
+                aibrain.top_up_reasoning_wallet(
+                    db,
+                    tenant_id=tenant_id,
+                    amount=100,
+                )
+        except BaseException as exc:  # noqa: BLE001 - thread failures are evidence.
+            errors.append(exc)
+        finally:
+            done[index].set()
+
+    threads = [threading.Thread(target=top_up, args=(index,), daemon=True) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    start.set()
+    for event_ in done:
+        assert event_.wait(timeout=5)
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(errors) == 1
+    assert isinstance(errors[0], AppError)
+    assert errors[0].code == "TENANT_QUOTA_EXCEEDED"
+    with factory() as db:
+        subscription = db.get(Subscription, subscription_id)
+        wallet = db.get(ReasoningWallet, tenant_id)
+        ledger_entries = list(
+            db.scalars(
+                select(ReasoningLedgerEntry).where(ReasoningLedgerEntry.tenant_id == tenant_id)
+            )
+        )
+        assert subscription.quota_credits_used == 100
+        assert wallet.available_credits == Decimal("100")
+        assert wallet.reserved_credits == Decimal("0")
+        assert len(ledger_entries) == 1
