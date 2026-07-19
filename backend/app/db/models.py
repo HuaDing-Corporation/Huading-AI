@@ -735,9 +735,6 @@ class ReasoningWallet(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
-install_reasoning_wallet_guard(ReasoningWallet)
-
-
 class ChatConversation(TenantScopedMixin, Base):
     __tablename__ = "chat_conversations"
     __table_args__ = (
@@ -840,6 +837,9 @@ class ReasoningLedgerEntry(TenantScopedMixin, Base):
     )
     details: Mapped[dict[str, object]] = mapped_column(_json_type(), default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+install_reasoning_wallet_guard(ReasoningWallet, ReasoningLedgerEntry)
 
 
 class ProviderConfig(Base):

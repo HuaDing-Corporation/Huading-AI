@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, event, insert, select, text, update
+from sqlalchemy import create_engine, delete, event, insert, select, text, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import sessionmaker
 
@@ -25,6 +25,7 @@ from app.db.models import (
     UsageRecord,
     User,
 )
+from app.db.reasoning_wallet_guard import allow_reasoning_wallet_mutation
 from app.services import aibrain
 
 _WALLET_MONETARY_FIELDS = {
@@ -38,6 +39,11 @@ _STATIC_ALLOWED_WRITES_BY_FUNCTION = {
         "_apply_reasoning_wallet_change": _WALLET_MONETARY_FIELDS,
     }
 }
+
+
+@allow_reasoning_wallet_mutation
+def _execute_inside_wallet_mutation_window(db, statement) -> None:
+    db.execute(statement)
 
 
 def _assignment_attributes(node: ast.AST) -> list[ast.Attribute]:
@@ -338,6 +344,223 @@ def test_runtime_guard_rejects_typed_core_wallet_insert(
     with auth_db() as db:
         with pytest.raises(RuntimeError, match="locked AIBRAIN wallet helper"):
             db.execute(insert(ReasoningWallet).values(**payload))
+
+
+def test_runtime_guard_rejects_typed_core_wallet_delete(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+        )
+        db.commit()
+
+        with pytest.raises(RuntimeError, match="locked AIBRAIN wallet helper"):
+            db.execute(
+                delete(ReasoningWallet).where(
+                    ReasoningWallet.tenant_id == auth_context["tenant_id"]
+                )
+            )
+
+
+def test_runtime_guard_rejects_orm_wallet_delete(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+        )
+        db.commit()
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+
+        db.delete(wallet)
+        with pytest.raises(RuntimeError, match="locked AIBRAIN wallet helper"):
+            db.flush()
+
+
+def test_runtime_guard_rejects_typed_core_ledger_delete(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        mutation = aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+        )
+        ledger_entry_id = mutation.ledger_entry.id
+        db.commit()
+
+        with pytest.raises(RuntimeError, match="append-only"):
+            db.execute(
+                delete(ReasoningLedgerEntry).where(
+                    ReasoningLedgerEntry.id == ledger_entry_id
+                )
+            )
+
+
+def test_runtime_guard_rejects_orm_ledger_delete(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        mutation = aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+        )
+        ledger_entry_id = mutation.ledger_entry.id
+        db.commit()
+        ledger_entry = db.get(ReasoningLedgerEntry, ledger_entry_id)
+
+        db.delete(ledger_entry)
+        with pytest.raises(RuntimeError, match="append-only"):
+            db.flush()
+
+
+def test_runtime_guard_rejects_typed_core_ledger_update(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        mutation = aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+        )
+        ledger_entry_id = mutation.ledger_entry.id
+        db.commit()
+
+        with pytest.raises(RuntimeError, match="append-only"):
+            db.execute(
+                update(ReasoningLedgerEntry)
+                .where(ReasoningLedgerEntry.id == ledger_entry_id)
+                .values(details={"tampered": True})
+            )
+
+
+def test_runtime_guard_rejects_typed_core_ledger_insert_outside_helper(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+        )
+        db.commit()
+        payload = {
+            "id": str(uuid4()),
+            "tenant_id": auth_context["tenant_id"],
+            "entry_type": "release",
+            "amount_credits": Decimal("1"),
+            "available_delta": Decimal("1"),
+            "reserved_delta": Decimal("-1"),
+            "available_after": Decimal("101"),
+            "reserved_after": Decimal("0"),
+            "details": {"forged": True},
+        }
+
+        with pytest.raises(RuntimeError, match="locked AIBRAIN wallet helper"):
+            db.execute(insert(ReasoningLedgerEntry).values(**payload))
+
+
+@pytest.mark.parametrize("operation", ["update", "delete"])
+def test_runtime_guard_rejects_ledger_rewrites_inside_helper_window(
+    auth_context,
+    auth_db,
+    operation: str,
+) -> None:
+    with auth_db() as db:
+        mutation = aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+        )
+        ledger_entry_id = mutation.ledger_entry.id
+        db.commit()
+        statement = (
+            update(ReasoningLedgerEntry)
+            .where(ReasoningLedgerEntry.id == ledger_entry_id)
+            .values(details={"tampered": True})
+            if operation == "update"
+            else delete(ReasoningLedgerEntry).where(
+                ReasoningLedgerEntry.id == ledger_entry_id
+            )
+        )
+
+        with pytest.raises(RuntimeError, match="append-only"):
+            _execute_inside_wallet_mutation_window(db, statement)
+
+
+def test_topup_ledger_cannot_be_deleted_to_replay_primary_quota_debit(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    idempotency_key = uuid4()
+    with auth_db() as db:
+        first_response = aibrain.top_up_reasoning_wallet(
+            db,
+            tenant_id=tenant_id,
+            amount=100,
+            idempotency_key=idempotency_key,
+        )
+        subscription = db.scalar(
+            select(Subscription).where(Subscription.tenant_id == tenant_id)
+        )
+        topup_entry = db.scalar(
+            select(ReasoningLedgerEntry).where(
+                ReasoningLedgerEntry.tenant_id == tenant_id,
+                ReasoningLedgerEntry.entry_type == "topup",
+            )
+        )
+        assert subscription.quota_credits_used == 100
+
+        db.delete(topup_entry)
+        with pytest.raises(RuntimeError, match="append-only"):
+            db.flush()
+        db.rollback()
+
+    with auth_db() as db:
+        replay_response = aibrain.top_up_reasoning_wallet(
+            db,
+            tenant_id=tenant_id,
+            amount=100,
+            idempotency_key=idempotency_key,
+        )
+        subscription = db.scalar(
+            select(Subscription).where(Subscription.tenant_id == tenant_id)
+        )
+        wallet = db.get(ReasoningWallet, tenant_id)
+        topups = list(
+            db.scalars(
+                select(ReasoningLedgerEntry).where(
+                    ReasoningLedgerEntry.tenant_id == tenant_id,
+                    ReasoningLedgerEntry.entry_type == "topup",
+                )
+            )
+        )
+
+        assert replay_response == first_response
+        assert subscription.quota_credits_used == 100
+        assert wallet.available_credits == Decimal("100")
+        assert wallet.total_topup_credits == Decimal("100")
+        assert len(topups) == 1
 
 
 def test_wallet_mutation_query_uses_for_update_and_populate_existing(

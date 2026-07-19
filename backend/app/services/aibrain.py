@@ -539,6 +539,7 @@ def _apply_reasoning_wallet_change(
         details=ledger_details,
     )
     db.add(ledger_entry)
+    # Keep the identity map current and execute both writes before the guard window closes.
     db.flush([wallet, ledger_entry])
     return WalletMutation(wallet=wallet, ledger_entry=ledger_entry)
 
