@@ -30,9 +30,9 @@ export function Slider({
   id,
   value,
   onChange,
-  min = 10,
+  min = 0,
   max = 100,
-  step = 10,
+  step = 1,
   disabled = false,
   ariaLabel,
   valueText,
@@ -71,8 +71,9 @@ export function Slider({
             // 拇指（webkit）：暖金圆 + 白描边 + 聚焦金环
             "[&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-white [&::-webkit-slider-thumb]:bg-gold",
             "focus-visible:[&::-webkit-slider-thumb]:shadow-focus-gold disabled:[&::-webkit-slider-thumb]:bg-ink-faint",
-            // 拇指（firefox）
-            "[&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-2 [&::-moz-range-thumb]:border-white [&::-moz-range-thumb]:bg-gold disabled:[&::-moz-range-thumb]:bg-ink-faint"
+            // 拇指（firefox）：outline-none 抹掉了原生焦点环，故 moz 拇指也要补 focus-visible 金环，否则 Firefox 键盘聚焦无指示（Code Review medium · WCAG 2.4.7）
+            "[&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-2 [&::-moz-range-thumb]:border-white [&::-moz-range-thumb]:bg-gold",
+            "focus-visible:[&::-moz-range-thumb]:shadow-focus-gold disabled:[&::-moz-range-thumb]:bg-ink-faint"
           )}
         />
       </div>

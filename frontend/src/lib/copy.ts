@@ -195,7 +195,7 @@ export const copy = {
     productImageCount: (n: number) => `${n} 张`,
     productImageCountCustom: "自定义",
     productImageCountCustomLabel: "自定义张数",
-    productImageCountPlaceholder: "1–9",
+    productImageCountPlaceholder: (max: number) => `1–${max}`, // IMAGE-GEN-OPTIMIZE-UI-0001：随 per-call max（电商 9 / 图片生成 6），与 range 错误一致
     productImageCountRange: (max: number) => `请输入 1–${max} 张`, // IMAGE-GEN-OPTIMIZE-UI-0001：上限 per-call（电商 9 / 图片生成 6）
     productImageCountHint: "选择要用几张产品图；多图会分配到不同分镜。切换张数不会自动删图",
     // 产品图多图 picker（复用 ReferenceImagesPicker）
@@ -247,6 +247,9 @@ export const copy = {
     masterNegativePlaceholder: "本次统一想避免的元素（软性约束，非硬性禁止），如：文字、水印",
     imageNegativeLabel: "图片负面提示词（可选）",
     imageNegativePlaceholder: "这张图想尽量避免出现的元素（软性约束，非硬性禁止），如：多余的手、畸变",
+    // 清晰度档位 1K/2K/4K（§3之二）——诚实文案：是「更大尺寸」不是「变清晰」；暂不提价格差异（本期三档同价）。
+    imageResolutionLabel: "清晰度档位",
+    imageResolutionHint: "决定输出尺寸大小（与画面比例共同决定像素）：档位越高图越大越细腻，但模型没画出的细节不会凭空出现——不是「一键提升画质」",
     // 画面比例（IMAGE-ASPECT-RATIO-UI-0001）——替代旧「尺寸 / 质量」下拉；8 定比 + 自适应，默认 1:1
     aspectLabel: "画面比例",
     aspectAuto: "自适应",

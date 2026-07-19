@@ -55,7 +55,8 @@ export function StrengthSlider({ label, hint, enabled, value, onEnabledChange, o
         step={10}
         disabled={!enabled}
         ariaLabel={label}
-        valueText={`${value}%`}
+        // 关态诚实播报：disabled 时 SR 说「未开启」而非「50%」（该值不入提交体，Code Review 低危矫正）
+        valueText={enabled ? `${value}%` : copy.workbench.strengthOff}
         ariaDescribedby={hint ? hintId : undefined}
         className="mt-2"
       />

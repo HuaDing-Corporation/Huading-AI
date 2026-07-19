@@ -100,6 +100,12 @@ describe("createVideo · photo 提交校验（apiFetch 真走 MSW · IMAGE-GEN-O
     await expect(createVideo({ topic: "x", video_mode: "photo", creativity_strength: 110 })).rejects.toThrow();
   });
 
+  it("§3之二：合法 image_resolution(2k) → 202；非法(8k) → 422（mock 不比 BE 宽松）", async () => {
+    const ok = await createVideo({ topic: "x", video_mode: "photo", image_resolution: "2k" });
+    expect(ok.status).toBe("queued");
+    await expect(createVideo({ topic: "x", video_mode: "photo", image_resolution: "8k" })).rejects.toThrow();
+  });
+
   it("零回归：AI 封面（purpose:cover + image_size/image_quality，无 image_keys/强度）→ 202 全过", async () => {
     const res = await createVideo({
       topic: "封面",

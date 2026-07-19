@@ -1497,6 +1497,7 @@ export const handlers = [
       creativity_strength?: number;
       subject_strength?: number;
       background_strength?: number;
+      image_resolution?: string; // §3之二：清晰度档位 1k/2k/4k
     };
     // resolution 是后端全模式 Literal["480p","720p","1080p"]（含 seedance_i2v，见 schemas/videos.py:154）：
     // 非法即 422，不按模式放宽（ECOM-RESOLUTION-UI-0001：电商也带 resolution，需与 video_gen 同等把关，不伪造放行）。
@@ -1563,6 +1564,10 @@ export const handlers = [
         badStrength(body.background_strength)
       ) {
         return err(422, "PHOTO_INVALID", "强度取值须为 10..100 步长 10");
+      }
+      // §3之二 清晰度档位：present 时须 1k/2k/4k（mock 不比 BE 宽松）。AI 封面不带 → 天然放过。
+      if (body.image_resolution !== undefined && !["1k", "2k", "4k"].includes(body.image_resolution)) {
+        return err(422, "PHOTO_INVALID", "image_resolution 须为 1k/2k/4k");
       }
     }
     const id = `mock-${++videoSeq}`;

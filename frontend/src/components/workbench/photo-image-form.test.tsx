@@ -67,6 +67,7 @@ describe("PhotoImageForm (图片生成 / 修改 · IMAGE-GEN-OPTIMIZE-UI-0001)",
       topic: "一只橘猫",
       video_mode: "photo",
       aspect_ratio: "1:1",
+      image_resolution: "1k", // §3之二：清晰度档位默认 1k，总随请求传
       apply_visible_label: false
     });
     expect(request).not.toHaveProperty("image_key");
@@ -85,6 +86,19 @@ describe("PhotoImageForm (图片生成 / 修改 · IMAGE-GEN-OPTIMIZE-UI-0001)",
     fireEvent.click(await screen.findByRole("button", { name: "确定" }));
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0].aspect_ratio).toBe("16:9");
+  });
+
+  // §3之二 承重：清晰度档位默认 1k 总随请求传；选 4K → image_resolution:"4k"（界面选择是硬条件）。
+  it("清晰度档位: 默认 1k 总带；选 4K → 提交体 image_resolution:4k", async () => {
+    render(<PhotoImageForm />);
+    setPrompt("香水瓶特写");
+    // 默认 1K 选中。
+    expect(screen.getByRole("button", { name: "1K" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "4K" }));
+    fireEvent.click(screen.getByRole("button", { name: /生成图片/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    expect(taskMocks.createAndTrack.mock.calls[0][0].image_resolution).toBe("4k");
   });
 
   it("开启 AI 标识开关 → 提交体 apply_visible_label:true（承重）", async () => {
@@ -144,6 +158,15 @@ describe("PhotoImageForm (图片生成 / 修改 · IMAGE-GEN-OPTIMIZE-UI-0001)",
     fireEvent.click(screen.getByRole("button", { name: "1 张" }));
     await waitFor(() => expect(generate).toBeDisabled());
     expect(screen.getByText(/已上传 3 张，超过所选 1 张/)).toBeInTheDocument();
+  });
+
+  // 承重（Code Review medium · 文案诚实）：photo 张数上限=6，自定义输入 placeholder 须随 per-call max 显「1–6」，
+  // 不得回归静态「1–9」（否则占位提示比校验范围更宽，误导用户 7/8/9 合法）。
+  it("参考图张数自定义输入 placeholder 随 max=6 显「1–6」（非静态 1–9）", async () => {
+    render(<PhotoImageForm />);
+    fireEvent.click(screen.getByRole("button", { name: "自定义" }));
+    const customInput = screen.getByLabelText("自定义张数");
+    expect(customInput).toHaveAttribute("placeholder", "1–6");
   });
 
   // 🔴 req2 承重（关键防假绿）：四个强度默认关闭 → 提交体**不含任何 *_strength**。

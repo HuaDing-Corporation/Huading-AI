@@ -140,6 +140,7 @@ export interface CreateVideoRequest {
   creativity_strength?: number; // AI 创意程度
   subject_strength?: number; // 主体保持强度
   background_strength?: number; // 背景参考强度
+  image_resolution?: string; // 清晰度档位 "1k"|"2k"|"4k"（§3之二，默认 1k）；界面选择是硬条件、总随请求传（BE 保证参数来源唯一）
   // 注：图片负面提示词复用上方 negative_prompt 字段（视频链路已有；photo 分支此前不读，本期起读）。
   // ── 视频生成 video_gen (VIDEOGEN-UI-0001, seam §2) ──
   prompt?: string; // 不限字数提示词（seam 字段）；同时 topic 复用此文本作标题/展示

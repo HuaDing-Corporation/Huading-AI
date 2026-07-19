@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { ChevronDown, Sparkles } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
@@ -13,6 +13,7 @@ import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
 import { AiTextField } from "@/components/workbench/ai-text-field";
 import { AspectRatioSelect, DEFAULT_IMAGE_ASPECT_RATIO, type ImageAspectRatio } from "@/components/workbench/aspect-ratio-select";
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
+import { DEFAULT_IMAGE_RESOLUTION, ImageResolutionPicker, type ImageResolutionTier } from "@/components/workbench/image-resolution-picker";
 import { isValidImageCount, ProductImageCountPicker } from "@/components/workbench/product-image-count-picker";
 import { ReferenceImagesPicker } from "@/components/workbench/reference-images-picker";
 import { StrengthSlider } from "@/components/workbench/strength-slider";
@@ -36,6 +37,19 @@ const DEFAULT_STRENGTH: StrengthState = { enabled: false, value: 50 }; // 默认
 
 const summaryClass =
   "flex cursor-pointer list-none items-center justify-between gap-2 rounded-field px-3.5 py-3 text-[13px] text-ink-soft outline-none transition-colors hover:bg-glass-hover focus-visible:shadow-focus-gold [&::-webkit-details-marker]:hidden";
+
+/** 折叠分组壳（<details> 默认收起）——生成强度 / 任务总控共用（镜像 more-settings 的折叠壳）。 */
+function CollapsibleSection({ label, bodyClassName, children }: { label: string; bodyClassName?: string; children: ReactNode }) {
+  return (
+    <details className="mb-[15px] rounded-field border border-line-gold bg-glass-fill">
+      <summary className={summaryClass}>
+        {label}
+        <ChevronDown size={16} strokeWidth={2} className="text-ink-faint" />
+      </summary>
+      <div className={`border-t border-line-gold px-3.5 py-3.5 ${bodyClassName ?? ""}`}>{children}</div>
+    </details>
+  );
+}
 
 /**
  * 图片生成 / 修改 (video_mode="photo") workbench container — the third mode. IMAGE-GEN-OPTIMIZE-UI-0001：
@@ -76,6 +90,7 @@ export function PhotoImageForm({
     setStrengths((s) => ({ ...s, [key]: { ...s[key], ...patch } }));
 
   const [aspectRatio, setAspectRatio] = useState<ImageAspectRatio>(DEFAULT_IMAGE_ASPECT_RATIO); // 默认 1:1
+  const [imageResolution, setImageResolution] = useState<ImageResolutionTier>(DEFAULT_IMAGE_RESOLUTION); // §3之二：清晰度档位，默认 1k
   const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）
   const [error, setError] = useState<string | null>(null);
 
@@ -91,12 +106,15 @@ export function PhotoImageForm({
   const confirm = useGenerateConfirm(submit);
 
   // 已上传参考图 > 所选张数 → 明确越限（不静默丢图，沿用 ECOM-REF-LIMIT 先例）；仅在张数合法时判。
-  const refOverLimit = isValidImageCount(refCount, PHOTO_REF_MAX) && refKeys.length > refCount;
+  const refCountValid = isValidImageCount(refCount, PHOTO_REF_MAX);
+  const refOverLimit = refCountValid && refKeys.length > refCount;
+  // onGenerate 守卫 与 generateDisabled 共用同一判据，杜绝漂移（uploadRef.isPending 仅在按钮禁用侧、守卫侧不判）。
+  const inputInvalid = !prompt.trim() || !refCountValid || refOverLimit;
 
   const onGenerate = () => {
-    const trimmed = prompt.trim();
-    if (!trimmed || refOverLimit || !isValidImageCount(refCount, PHOTO_REF_MAX)) return;
+    if (inputInvalid) return;
     setError(null);
+    const trimmed = prompt.trim();
     // 未开启的强度**不出现在提交体**（承重）：只放 enabled 的。
     const enabledStrengths: Partial<Record<StrengthKey, number>> = {};
     for (const k of STRENGTH_KEYS) if (strengths[k].enabled) enabledStrengths[k] = strengths[k].value;
@@ -109,16 +127,16 @@ export function PhotoImageForm({
       ...(imageNegative.trim() ? { negative_prompt: imageNegative.trim() } : {}), // 图片负面复用 negative_prompt 字段
       ...enabledStrengths,
       aspect_ratio: aspectRatio, // 画面比例（默认 1:1）；不再带 image_quality/image_size
+      image_resolution: imageResolution, // §3之二：清晰度档位，界面选择是硬条件、总随请求传（默认 1k）
       apply_visible_label: applyLabel
     });
   };
 
-  const generateDisabled =
-    uploadRef.isPending || !prompt.trim() || refOverLimit || !isValidImageCount(refCount, PHOTO_REF_MAX);
+  const generateDisabled = uploadRef.isPending || inputInvalid;
 
-  let hint: string | null = null;
-  if (!prompt.trim()) hint = copy.workbench.photoPromptRequired;
-  else if (refOverLimit) hint = copy.workbench.photoRefImagesExceed(refKeys.length, refCount);
+  let statusHint: string | null = null;
+  if (!prompt.trim()) statusHint = copy.workbench.photoPromptRequired;
+  else if (refOverLimit) statusHint = copy.workbench.photoRefImagesExceed(refKeys.length, refCount);
 
   return (
     <Card animateIn>
@@ -155,7 +173,7 @@ export function PhotoImageForm({
       />
       <ReferenceImagesPicker
         onChange={setRefKeys}
-        max={isValidImageCount(refCount, PHOTO_REF_MAX) ? refCount : PHOTO_REF_MAX}
+        max={refCountValid ? refCount : PHOTO_REF_MAX}
         inputId="photo-ref"
         label={copy.workbench.photoRefImagesLabel}
         uploadLabel={copy.workbench.photoRefImagesUpload}
@@ -166,54 +184,45 @@ export function PhotoImageForm({
 
       <AspectRatioSelect value={aspectRatio} onValueChange={setAspectRatio} />
 
+      {/* §3之二 清晰度档位 1K/2K/4K：与画面比例并列（比例定形状、档位定大小）。 */}
+      <ImageResolutionPicker value={imageResolution} onChange={setImageResolution} />
+
       {/* 生成强度（可选）：4 个滑块，各带开关、默认关、关闭不提交。默认收起，避免表单过长。 */}
-      <details className="mb-[15px] rounded-field border border-line-gold bg-glass-fill">
-        <summary className={summaryClass}>
-          {copy.workbench.strengthGroupLabel}
-          <ChevronDown size={16} strokeWidth={2} className="text-ink-faint" />
-        </summary>
-        <div className="border-t border-line-gold px-3.5 py-3.5">
-          <p className="mb-3 text-[12px] leading-relaxed text-ink-faint">{copy.workbench.strengthGroupHint}</p>
-          {STRENGTH_META.map(({ key, label, hint: sHint }) => (
-            <StrengthSlider
-              key={key}
-              id={`photo-strength-${key}`}
-              label={label}
-              hint={sHint}
-              enabled={strengths[key].enabled}
-              value={strengths[key].value}
-              onEnabledChange={(enabled) => setStrength(key, { enabled })}
-              onValueChange={(value) => setStrength(key, { value })}
-            />
-          ))}
-        </div>
-      </details>
+      <CollapsibleSection label={copy.workbench.strengthGroupLabel}>
+        <p className="mb-3 text-[12px] leading-relaxed text-ink-faint">{copy.workbench.strengthGroupHint}</p>
+        {STRENGTH_META.map(({ key, label, hint }) => (
+          <StrengthSlider
+            key={key}
+            id={`photo-strength-${key}`}
+            label={label}
+            hint={hint}
+            enabled={strengths[key].enabled}
+            value={strengths[key].value}
+            onEnabledChange={(enabled) => setStrength(key, { enabled })}
+            onValueChange={(value) => setStrength(key, { value })}
+          />
+        ))}
+      </CollapsibleSection>
 
       {/* layer1+2 任务总控（可选·全局风格）：默认收起 */}
-      <details className="mb-[15px] rounded-field border border-line-gold bg-glass-fill">
-        <summary className={summaryClass}>
-          {copy.workbench.photoMasterGroupLabel}
-          <ChevronDown size={16} strokeWidth={2} className="text-ink-faint" />
-        </summary>
-        <div className="flex flex-col gap-1 border-t border-line-gold px-3.5 py-3.5">
-          <AiTextField
-            id="photo-master-prompt"
-            label={copy.workbench.masterPromptLabel}
-            value={masterPrompt}
-            onChange={setMasterPrompt}
-            rows={2}
-            placeholder={copy.workbench.masterPromptPlaceholder}
-          />
-          <AiTextField
-            id="photo-master-negative"
-            label={copy.workbench.masterNegativeLabel}
-            value={masterNegative}
-            onChange={setMasterNegative}
-            rows={2}
-            placeholder={copy.workbench.masterNegativePlaceholder}
-          />
-        </div>
-      </details>
+      <CollapsibleSection label={copy.workbench.photoMasterGroupLabel} bodyClassName="flex flex-col gap-1">
+        <AiTextField
+          id="photo-master-prompt"
+          label={copy.workbench.masterPromptLabel}
+          value={masterPrompt}
+          onChange={setMasterPrompt}
+          rows={2}
+          placeholder={copy.workbench.masterPromptPlaceholder}
+        />
+        <AiTextField
+          id="photo-master-negative"
+          label={copy.workbench.masterNegativeLabel}
+          value={masterNegative}
+          onChange={setMasterNegative}
+          rows={2}
+          placeholder={copy.workbench.masterNegativePlaceholder}
+        />
+      </CollapsibleSection>
 
       <AiLabelToggle checked={applyLabel} onChange={setApplyLabel} />
 
@@ -223,9 +232,9 @@ export function PhotoImageForm({
         </p>
       )}
 
-      {hint && !error && (
+      {statusHint && !error && (
         <p className="mb-3 text-[12.5px] text-ink-soft" aria-live="polite">
-          {hint}
+          {statusHint}
         </p>
       )}
 

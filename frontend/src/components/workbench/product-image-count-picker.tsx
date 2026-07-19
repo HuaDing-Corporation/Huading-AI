@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 
 import { SelectableOption } from "@/components/ui/selectable-option";
 import { copy } from "@/lib/copy";
@@ -41,6 +41,7 @@ export function ProductImageCountPicker({
   label = copy.workbench.productImageCountLabel,
   hint = copy.workbench.productImageCountHint
 }: ProductImageCountPickerProps) {
+  const errorId = useId(); // 关联 aria-invalid 输入 ↔ 错误提示（Code Review 低危：无 aria-describedby，聚焦不复述范围）
   const isPreset = (IMAGE_COUNT_PRESETS as readonly number[]).includes(value);
   const [custom, setCustom] = useState(!isPreset);
   const [customText, setCustomText] = useState(isPreset ? "" : String(value));
@@ -98,13 +99,14 @@ export function ProductImageCountPicker({
             onChange={(e) => onCustomInput(e.target.value)}
             aria-label={copy.workbench.productImageCountCustomLabel}
             aria-invalid={showError}
-            placeholder={copy.workbench.productImageCountPlaceholder}
+            aria-describedby={showError ? errorId : undefined}
+            placeholder={copy.workbench.productImageCountPlaceholder(max)}
             className={`w-full rounded-field border bg-glass-fill px-4 py-2.5 text-sm text-ink outline-none transition-shadow placeholder:text-ink-faint focus:border-line-sel focus:shadow-focus-gold ${
               showError ? "border-error-fg" : "border-line-gold"
             }`}
           />
           {showError && (
-            <p role="alert" className="mt-1.5 text-[12.5px] text-error-fg">
+            <p id={errorId} role="alert" className="mt-1.5 text-[12.5px] text-error-fg">
               {copy.workbench.productImageCountRange(max)}
             </p>
           )}

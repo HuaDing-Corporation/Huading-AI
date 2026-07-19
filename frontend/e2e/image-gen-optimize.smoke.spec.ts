@@ -95,6 +95,8 @@ test("图片生成优化：新控件 + 多图参考(image_keys) + 强度端到�
   await expect(photo.getByText("图片负面提示词（可选）")).toBeVisible();
   await expect(photo.getByText("生成强度（可选）")).toBeVisible();
   await expect(photo.getByText("任务总控（可选 · 全局风格）")).toBeVisible();
+  await expect(photo.getByText("清晰度档位")).toBeVisible(); // §3之二
+  await expect(photo.getByRole("button", { name: "1K" })).toHaveAttribute("aria-pressed", "true"); // 默认 1K
 
   // 图片提示词（必填）。
   await photo.getByPlaceholder(/描述想要的图片/).fill("白色大理石台面上的香水瓶");
@@ -125,6 +127,7 @@ test("图片生成优化：新控件 + 多图参考(image_keys) + 强度端到�
   expect(typeof body?.similarity_strength).toBe("number");
   expect(body).not.toHaveProperty("creativity_strength"); // 未开启的强度不出现
   expect(body).not.toHaveProperty("image_key");
+  expect(body?.image_resolution).toBe("1k"); // §3之二：清晰度档位总随请求传（默认 1k）
 
   expect(g.pageErrors(), `page errors（含 #130）：\n${g.pageErrors().join("\n")}`).toEqual([]);
   expect(g.apiFailures(), `/api 网络失败：\n${g.apiFailures().join("\n")}`).toEqual([]);

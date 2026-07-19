@@ -48,9 +48,10 @@ test("图片生成：去质量 + 画面比例(选 16:9 提交) + 自适应提示
 
   // 进「图片生成 / 修改」。
   await page.getByRole("button", { name: "图片生成" }).click();
-  // 去「质量」下拉；有「画面比例」。
+  // 去「质量」下拉；有「画面比例」。IMAGE-GEN-OPTIMIZE-UI-0001 §3之二：清晰度档位诚实提示含子串「画面比例」，
+  // 故精确命中标签本身（scope 到 photo 面板 + exact），断言意图不变（图片生成有画面比例控件）。
   await expect(page.getByText("质量", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("画面比例")).toBeVisible();
+  await expect(page.getByTestId("panel-photo").getByText("画面比例", { exact: true })).toBeVisible();
 
   // 选 16:9。
   await page.getByRole("combobox").click();
