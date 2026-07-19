@@ -19,6 +19,7 @@ from app.api.deps import (
     get_progress_store,
     require_permission,
     scoped_task_id,
+    tenant_storage_key,
 )
 from app.core.config import settings
 from app.core.exceptions import AppError
@@ -31,7 +32,12 @@ from app.db.models import (
     User,
     VideoTask,
 )
-from app.providers.base import invoke, resolve
+from app.providers.base import (
+    ProviderInvocationError,
+    ProviderResolutionError,
+    invoke,
+    resolve,
+)
 from app.schemas.response import ApiResponse, ok
 from app.schemas.videos import (
     ScenePromptRequest,
@@ -71,10 +77,11 @@ from app.services.quota import (
     seedance_i2v_billable_seconds,
     seedance_i2v_target_seconds,
 )
-from app.services.storage.base import ObjectStorage
+from app.services.storage.base import ObjectStorage, StorageKeyError
 from app.services.storage.keys import (
     get_tenant_storage_bytes,
     presign_tenant_storage_key,
+    tenant_storage_key_exists,
 )
 from app.services.voices import resolve_narration_voice
 from app.workers.avatar_talk import (
@@ -113,6 +120,18 @@ _CHANGE_LIPS_OPTIONAL_FIELDS = {
     "separate_vocal",
     "open_scenedet",
 }
+
+
+def _provider_usage_result_from_error(exc: BaseException) -> dict[str, object] | None:
+    current: BaseException | None = exc
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        usage_result = getattr(current, "usage_result", None)
+        if isinstance(usage_result, dict) and usage_result:
+            return usage_result
+        current = current.__cause__ or current.__context__
+    return None
 
 
 @dataclass(frozen=True)
@@ -454,7 +473,7 @@ def _quota_estimate_for_payload(
         return estimate_seedance_i2v_quota(
             db,
             tenant_id=tenant_id,
-            script=payload.script or payload.topic,
+            script=payload.script or payload.topic or "",
             speed=payload.speed,
             estimated_seconds=seedance_i2v_billable_seconds(target_duration_sec),
             resolution=payload.resolution,
@@ -742,6 +761,7 @@ def _create_seedance_i2v_video(
     *,
     user: User,
     db: Session,
+    storage: ObjectStorage,
 ) -> str:
     if not payload.voice_id:
         raise AppError("seedance_i2v requires voice_id.", code="VALIDATION_ERROR", status_code=422)
@@ -756,12 +776,18 @@ def _create_seedance_i2v_video(
             tenant_id=user.tenant_id,
         )
 
+    _validate_product_image_storage_keys(
+        payload.product_image_keys,
+        tenant_id=user.tenant_id,
+        storage=storage,
+    )
     task_id = str(uuid4())
     script = payload.script
     target_duration_sec = seedance_i2v_target_seconds(payload.duration_sec)
     params = {
-        "image_key": payload.image_key,
+        "product_image_keys": list(payload.product_image_keys),
         "scene_prompt": payload.scene_prompt,
+        "negative_prompt": payload.negative_prompt,
         "duration_sec": target_duration_sec,
         "resolution": payload.resolution,
         "estimated": True,
@@ -803,7 +829,7 @@ def _create_seedance_i2v_video(
         db,
         tenant_id=user.tenant_id,
         video_task_id=task.id,
-        script=script or payload.topic,
+        script=script or payload.topic or "",
         speed=payload.speed,
         estimated_seconds=seedance_i2v_billable_seconds(target_duration_sec),
         resolution=payload.resolution,
@@ -1003,54 +1029,121 @@ def _prune_after_create(
         )
 
 
+def _validate_product_image_storage_keys(
+    product_image_keys: list[str],
+    *,
+    tenant_id: str,
+    storage: ObjectStorage,
+) -> list[str]:
+    storage_keys = [tenant_storage_key(tenant_id, image_key) for image_key in product_image_keys]
+    for storage_key in storage_keys:
+        try:
+            exists = tenant_storage_key_exists(
+                storage,
+                tenant_id=tenant_id,
+                storage_key=storage_key,
+            )
+        except StorageKeyError as exc:
+            raise AppError(
+                "Product image not found.",
+                code="PRODUCT_IMAGE_NOT_FOUND",
+                status_code=422,
+            ) from exc
+        if not exists:
+            raise AppError(
+                "Product image not found.",
+                code="PRODUCT_IMAGE_NOT_FOUND",
+                status_code=422,
+            )
+    return storage_keys
+
+
 @router.post("/scene-prompt", response_model=ApiResponse[ScenePromptResponse])
 def generate_scene_prompt(
     request: Request,
     payload: ScenePromptRequest,
-    user: User = CurrentUserDependency,
+    user: User = CreateVideoPermissionDependency,
     db: Session = DbSessionDependency,
+    storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[ScenePromptResponse]:
-    if not (
-        settings.engine_llm_api_key
-        and settings.engine_llm_base_url
-        and settings.engine_llm_model
-    ):
-        raise AppError(
-            "DeepSeek is not configured.",
-            code="LLM_NOT_CONFIGURED",
-            status_code=503,
-        )
-
-    provider = resolve(db, tenant_id=user.tenant_id, capability="llm")
-    result = asyncio.run(
-        invoke(
-            db,
-            tenant_id=user.tenant_id,
-            capability="llm",
-            provider=provider.__class__.__name__,
-            operation=lambda: provider.generate_text(
-                build_seedance_scene_prompt_payload(
-                    payload.topic,
-                    duration_sec=payload.duration_sec,
-                )
-            ),
-            timeout_seconds=30.0,
-        )
+    storage_keys = _validate_product_image_storage_keys(
+        payload.product_image_keys,
+        tenant_id=user.tenant_id,
+        storage=storage,
     )
-    provider_costs.record_deepseek_usage(
+    image_urls = [
+        presign_tenant_storage_key(
+            storage,
+            tenant_id=user.tenant_id,
+            storage_key=storage_key,
+            expires_in=settings.engine_s3_presign_ttl,
+        )
+        for storage_key in storage_keys
+    ]
+    try:
+        provider = resolve(db, tenant_id=user.tenant_id, capability="scene_prompt")
+    except ProviderResolutionError as exc:
+        raise AppError(
+            "Scene prompt provider is not configured.",
+            code="SCENE_PROMPT_PROVIDER_NOT_CONFIGURED",
+            status_code=503,
+        ) from exc
+    try:
+        result = asyncio.run(
+            invoke(
+                db,
+                tenant_id=user.tenant_id,
+                capability="scene_prompt",
+                provider=provider.__class__.__name__,
+                operation=lambda: provider.generate_scene_prompt(
+                    build_seedance_scene_prompt_payload(
+                        payload.topic,
+                        script=payload.script,
+                        image_urls=image_urls,
+                        duration_sec=payload.duration_sec,
+                    )
+                ),
+                timeout_seconds=None,
+            )
+        )
+    except ProviderInvocationError as exc:
+        failure_usage = _provider_usage_result_from_error(exc)
+        if failure_usage is not None:
+            usage_record = provider_costs.record_scene_prompt_usage(
+                db,
+                tenant_id=user.tenant_id,
+                result=failure_usage,
+            )
+            if usage_record is not None:
+                db.commit()
+        raise AppError(
+            "Scene prompt provider failed.",
+            code="SCENE_PROMPT_PROVIDER_FAILED",
+            status_code=502,
+        ) from exc
+    usage_record = provider_costs.record_scene_prompt_usage(
         db,
         tenant_id=user.tenant_id,
         result=result,
     )
-    scene_prompt = str(result.get("text") or "").strip()
-    if not scene_prompt:
+    scene_prompt = str(result.get("scene_prompt") or "").strip()
+    negative_prompt = str(result.get("negative_prompt") or "").strip()
+    if not scene_prompt or not negative_prompt:
+        if usage_record is not None:
+            db.commit()
         raise AppError(
-            "DeepSeek returned an empty scene prompt.",
-            code="LLM_EMPTY_RESULT",
+            "Luna returned an incomplete scene prompt.",
+            code="SCENE_PROMPT_EMPTY_RESULT",
             status_code=502,
         )
     db.commit()
-    return ok(request, ScenePromptResponse(scene_prompt=scene_prompt))
+    return ok(
+        request,
+        ScenePromptResponse(
+            scene_prompt=scene_prompt,
+            negative_prompt=negative_prompt,
+        ),
+    )
 
 
 @router.post("/estimate", response_model=ApiResponse[VideoEstimateResponse])
@@ -1089,7 +1182,7 @@ def create_video(
         return ok(request, VideoAccepted(id=task_id, task_id=task_id, status="queued"))
 
     if payload.video_mode == "seedance_i2v":
-        task_id = _create_seedance_i2v_video(payload, user=user, db=db)
+        task_id = _create_seedance_i2v_video(payload, user=user, db=db, storage=storage)
         _prune_after_create(db, tenant_id=user.tenant_id, mode="seedance_i2v", storage=storage)
         params = _worker_params(payload)
         params["tenant_id"] = user.tenant_id

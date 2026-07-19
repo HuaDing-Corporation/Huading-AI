@@ -434,7 +434,11 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
                 script="soft scarf script",
                 duration_sec=12,
                 params={
-                    "image_key": "uploads/product.png",
+                    "product_image_keys": [
+                        "uploads/product-a.png",
+                        "uploads/product-b.png",
+                    ],
+                    "negative_prompt": "blurry, warped product, extra text",
                     "duration_sec": 12,
                     "resolution": "1080p",
                 },
@@ -487,6 +491,11 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
             "visual prompt 2",
             "visual prompt 3",
         ]
+        assert [call["image_urls"] for call in calls] == [
+            [f"https://storage.test/tenants/{tenant_id}/uploads/product-a.png"],
+            [f"https://storage.test/tenants/{tenant_id}/uploads/product-b.png"],
+            [f"https://storage.test/tenants/{tenant_id}/uploads/product-a.png"],
+        ]
         assert concat_calls["scene_paths"] == [
             "seedance_scene_00.mp4",
             "seedance_scene_01.mp4",
@@ -494,9 +503,8 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
         ]
         for call in calls:
             assert call["model"] == "doubao-seedance-2.0"
-            assert call["image_urls"] == [
-                f"https://storage.test/tenants/{tenant_id}/uploads/product.png"
-            ]
+            assert len(call["image_urls"]) == 1
+            assert call["negative_prompt"] == "blurry, warped product, extra text"
             assert call["size"] == "adaptive"
             assert call["resolution"] == "1080p"
             assert call["generate_audio"] is False
@@ -959,7 +967,10 @@ def test_seedance_i2v_scene_planner_requests_visual_prompts(monkeypatch):
         assert payload["clip_duration_sec"] == 5
         assert payload["target_duration_sec"] == 15
         assert "视觉分镜" in payload["system_prompt"]
+        assert "同一张产品图" not in payload["system_prompt"]
         assert "first_frame" in payload["user_prompt"]
+        assert "同一张产品图" not in payload["user_prompt"]
+        assert "循环分配" in payload["user_prompt"]
         assert prompts == [
             "镜头1：产品从水墨背景中缓慢推进，突出釉面质感。",
             "镜头2：俯拍碗口与礼盒组合，强调送礼场景。",
@@ -1077,6 +1088,62 @@ def test_seedance_i2v_scene_planner_falls_back_to_topic_without_script_leak(monk
             "voiceover copy should stay out of fallback prompts" not in prompt
             for prompt in prompts
         )
+
+    Base.metadata.drop_all(engine)
+
+
+def test_seedance_i2v_scene_planner_uses_product_fallback_when_text_inputs_are_empty(
+    monkeypatch,
+):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-i2v-empty-topic"
+    unit_id = "i2v-empty-topic-unit"
+    payloads: list[dict] = []
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="i2v-empty-topic", name="I2V Empty Topic"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic=None,
+                script=None,
+                duration_sec=10,
+                params={"duration_sec": 10, "scene_prompt": ""},
+            )
+        )
+        db.commit()
+
+        class _FakeDeepSeek:
+            async def generate_text(self, payload: dict):
+                payloads.append(payload)
+                return {"text": json.dumps(["scene one", "scene two"])}
+
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
+        )
+        ctx = avatar_talk.AvatarTalkContext(
+            task_id=unit_id,
+            tenant_id=tenant_id,
+            db=db,
+            store=_Store(),
+            storage=_Storage(),
+            duration_sec=10,
+        )
+
+        prompts = avatar_talk._plan_seedance_i2v_scenes(
+            ctx,
+            scene_count=2,
+            clip_duration=5,
+        )
+
+        assert payloads[0]["topic"] == "product"
+        assert payloads[0]["scene_prompt"] == "product"
+        assert prompts == ["scene one", "scene two"]
 
     Base.metadata.drop_all(engine)
 
@@ -1407,6 +1474,58 @@ def test_script_step_uses_ecommerce_prompt_and_duration_budget(monkeypatch):
         assert "行动号召" in payload["user_prompt"]
         assert "30秒" in payload["user_prompt"]
         assert db.get(VideoTask, unit_id).script.startswith("这只陶瓷碗")
+
+    Base.metadata.drop_all(engine)
+
+
+def test_seedance_script_step_falls_back_to_product_when_text_inputs_are_empty(monkeypatch):
+    SessionTesting, engine = _session()
+    tenant_id = "tenant-script-empty-ecom"
+    unit_id = "script-empty-ecom-job"
+    payloads: list[dict] = []
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug="script-empty-ecom", name="Script Empty Ecom"))
+        db.add(
+            VideoTask(
+                id=unit_id,
+                tenant_id=tenant_id,
+                mode="seedance_i2v",
+                video_mode="seedance_i2v",
+                status="running",
+                topic=None,
+                script=None,
+                duration_sec=15,
+                params={"duration_sec": 15, "scene_prompt": ""},
+            )
+        )
+        db.commit()
+
+        class _FakeDeepSeek:
+            async def generate_text(self, payload: dict):
+                payloads.append(payload)
+                return {"text": "A useful product for everyday life."}
+
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_api_key", "k")
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_base_url", "https://deepseek.test")
+        monkeypatch.setattr(avatar_talk.settings, "engine_llm_model", "m")
+        monkeypatch.setattr(
+            avatar_talk,
+            "resolve",
+            lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
+        )
+
+        avatar_talk.script_step(
+            avatar_talk.AvatarTalkContext(
+                task_id=unit_id,
+                tenant_id=tenant_id,
+                db=db,
+                store=_Store(),
+                storage=_Storage(),
+            )
+        )
+
+        assert payloads[0]["topic"] == "product"
+        assert db.get(VideoTask, unit_id).script == "A useful product for everyday life."
 
     Base.metadata.drop_all(engine)
 

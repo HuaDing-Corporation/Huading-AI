@@ -703,7 +703,7 @@ class ProviderConfig(Base):
     __table_args__ = (
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
-            "'publish', 'voice_clone', 'reverse_prompt')",
+            "'publish', 'voice_clone', 'reverse_prompt', 'scene_prompt')",
             name="ck_provider_configs_capability",
         ),
         Index(
@@ -758,7 +758,7 @@ class UsageRecord(Base):
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
             "'publish', 'voice_clone', 'video_gen', 'reverse_prompt', "
-            "'reverse_prompt_video')",
+            "'reverse_prompt_video', 'scene_prompt')",
             name="ck_usage_records_capability",
         ),
         CheckConstraint(

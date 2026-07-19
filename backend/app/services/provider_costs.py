@@ -76,6 +76,31 @@ def deepseek_cost_cents(*, prompt_tokens: int, completion_tokens: int) -> int:
     return cny_to_cents(input_cny + output_cny)
 
 
+def apimart_scene_prompt_cost_cents(
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int = 0,
+) -> int:
+    safe_prompt_tokens = max(0, int(prompt_tokens))
+    safe_completion_tokens = max(0, int(completion_tokens))
+    if safe_prompt_tokens + safe_completion_tokens <= 0:
+        safe_prompt_tokens = max(0, int(total_tokens))
+    input_usd = (
+        Decimal(safe_prompt_tokens)
+        / Decimal("1000000")
+        * _decimal_setting(settings.engine_apimart_scene_prompt_input_usd_per_m)
+    )
+    output_usd = (
+        Decimal(safe_completion_tokens)
+        / Decimal("1000000")
+        * _decimal_setting(settings.engine_apimart_scene_prompt_output_usd_per_m)
+    )
+    return cny_to_cents(
+        (input_usd + output_usd) * _decimal_setting(settings.engine_usd_cny_rate)
+    )
+
+
 def _int_from_usage(usage: Any, key: str) -> int:
     if isinstance(usage, dict):
         value = usage.get(key)
@@ -85,6 +110,15 @@ def _int_from_usage(usage: Any, key: str) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _optional_nonnegative_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def deepseek_usage_from_result(result: Any) -> DeepSeekUsageCost | None:
@@ -216,6 +250,53 @@ def record_deepseek_usage(
         credits=credits,
         subscription_id=subscription_id,
     )
+
+
+def record_scene_prompt_usage(
+    db: Session,
+    *,
+    tenant_id: str,
+    result: Any,
+) -> UsageRecord | None:
+    if not isinstance(result, dict):
+        return None
+    prompt_tokens = _int_from_usage(result, "prompt_tokens")
+    completion_tokens = _int_from_usage(result, "completion_tokens")
+    total_tokens = _int_from_usage(result, "total_tokens")
+    if total_tokens <= 0:
+        total_tokens = prompt_tokens + completion_tokens
+    explicit_cost_cents = _optional_nonnegative_int(result.get("cost_cents"))
+    cost_cents = (
+        explicit_cost_cents
+        if explicit_cost_cents is not None
+        else apimart_scene_prompt_cost_cents(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        )
+    )
+    if total_tokens > 0:
+        unit = "token"
+        quantity = Decimal(total_tokens)
+    elif cost_cents > 0:
+        unit = "call"
+        quantity = Decimal("1")
+    else:
+        return None
+    record = UsageRecord(
+        tenant_id=tenant_id,
+        capability="scene_prompt",
+        provider=str(result.get("provider") or "apimart"),
+        model=str(result.get("model") or settings.engine_apimart_scene_prompt_model),
+        unit=unit,
+        quantity=quantity,
+        credits=Decimal("0"),
+        cost_cents=cost_cents,
+        status="settled",
+        settled_at=datetime.now(UTC),
+    )
+    db.add(record)
+    return record
 
 
 def record_tts_usage(

@@ -152,6 +152,98 @@ def test_scripts_generate_route_uses_provider_registry(monkeypatch, auth_context
     assert resp.json()["data"]["script"] == "DeepSeek script"
 
 
+def test_scripts_generate_rejects_unknown_length_tier(auth_context) -> None:
+    from app.main import app
+
+    resp = TestClient(app).post(
+        "/api/v1/scripts/generate",
+        json={"topic": "cashmere coat", "length_tier": "extra-long"},
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert resp.json()["error"]["details"][0]["type"] == "literal_error"
+
+
+def test_scripts_generate_short_length_tier_reaches_prompt(
+    monkeypatch, auth_context
+) -> None:
+    from app.api.v1.routes import scripts as scripts_route
+    from app.main import app
+
+    payloads: list[dict] = []
+
+    class _FakeDeepSeek:
+        async def generate_text(self, payload: dict):
+            payloads.append(payload)
+            return {"text": "Short sales script"}
+
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_api_key", "k")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_base_url", "https://deepseek.test")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_model", "m")
+    monkeypatch.setattr(
+        scripts_route,
+        "resolve",
+        lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
+    )
+
+    resp = TestClient(app).post(
+        "/api/v1/scripts/generate",
+        json={
+            "topic": "高腰阔腿裤",
+            "video_mode": "seedance_i2v",
+            "duration_sec": 10,
+            "length_tier": "short",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 200
+    assert payloads[0]["target_chars_min"] == 40
+    assert payloads[0]["target_chars_max"] == 50
+    assert "40-50字" in payloads[0]["user_prompt"]
+
+
+def test_scripts_generate_long_length_tier_reaches_prompt(
+    monkeypatch, auth_context
+) -> None:
+    from app.api.v1.routes import scripts as scripts_route
+    from app.main import app
+
+    payloads: list[dict] = []
+
+    class _FakeDeepSeek:
+        async def generate_text(self, payload: dict):
+            payloads.append(payload)
+            return {"text": "Long sales script"}
+
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_api_key", "k")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_base_url", "https://deepseek.test")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_model", "m")
+    monkeypatch.setattr(
+        scripts_route,
+        "resolve",
+        lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
+    )
+
+    resp = TestClient(app).post(
+        "/api/v1/scripts/generate",
+        json={
+            "topic": "高腰阔腿裤",
+            "video_mode": "seedance_i2v",
+            "duration_sec": 10,
+            "length_tier": "long",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert resp.status_code == 200
+    assert payloads[0]["target_chars_min"] == 60
+    assert payloads[0]["target_chars_max"] == 70
+    assert "60-70字" in payloads[0]["user_prompt"]
+
+
 def test_scripts_generate_records_deepseek_token_cost(
     monkeypatch,
     auth_context,

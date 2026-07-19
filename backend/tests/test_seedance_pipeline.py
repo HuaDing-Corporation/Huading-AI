@@ -516,7 +516,11 @@ def test_schema_video_mode_validation(auth_context):
 
     bad_key = client.post(
         "/api/v1/videos",
-        json={"topic": "x", "video_mode": "seedance_i2v", "image_key": "../../sneak.png"},
+        json={
+            "topic": "x",
+            "video_mode": "seedance_i2v",
+            "product_image_keys": ["../../sneak.png"],
+        },
         headers=auth_context["headers"],
     )
     assert bad_key.status_code == 422

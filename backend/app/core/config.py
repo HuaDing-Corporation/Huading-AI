@@ -180,6 +180,9 @@ class Settings(BaseSettings):
     engine_apimart_video_timeout_seconds: float = 1500.0
     engine_apimart_credit_usd: float = 0.10
     engine_apimart_reverse_prompt_model: str = "gemini-3.1-pro-preview"
+    engine_apimart_scene_prompt_model: str = "gpt-5.6-luna"
+    engine_apimart_scene_prompt_input_usd_per_m: float = 1.0
+    engine_apimart_scene_prompt_output_usd_per_m: float = 6.0
     engine_apimart_reverse_prompt_input_credits_per_m: float = 16.0
     engine_apimart_reverse_prompt_output_credits_per_m: float = 96.0
     engine_reverse_prompt_video_credits: float = Field(default=100.0, gt=0)

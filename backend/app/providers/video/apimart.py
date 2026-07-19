@@ -111,6 +111,9 @@ class APIMartVideoProvider:
             body["seed"] = int(seed)
         if image_urls:
             body["image_urls"] = image_urls
+        negative_prompt = str(payload.get("negative_prompt") or "").strip()
+        if negative_prompt:
+            body["negative_prompt"] = negative_prompt
         return body, {"duration": duration, "resolution": resolution, "size": size}
 
     def _headers(self) -> dict[str, str]:

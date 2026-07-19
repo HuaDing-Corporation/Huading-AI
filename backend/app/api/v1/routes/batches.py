@@ -381,7 +381,7 @@ def _create_ecom_table_tasks(
             continue
 
         params: dict[str, object] = {
-            "image_key": image_key,
+            "product_image_keys": [image_key],
             "scene_prompt": row_topic,
             "duration_sec": target_duration_sec,
             "resolution": common.resolution,

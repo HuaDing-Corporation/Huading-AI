@@ -192,6 +192,23 @@ def put_catalog_storage_bytes(
     )
 
 
+def tenant_storage_key_exists(
+    storage: ObjectStorage,
+    *,
+    tenant_id: str,
+    storage_key: str | None,
+) -> bool:
+    safe_key = validate_tenant_storage_key(tenant_id, storage_key)
+    object_exists = getattr(storage, "object_exists", None)
+    if callable(object_exists):
+        return bool(object_exists(safe_key))
+    try:
+        storage.get_bytes(safe_key)
+    except Exception:
+        return False
+    return True
+
+
 def catalog_storage_key_exists(
     storage: ObjectStorage,
     *,
