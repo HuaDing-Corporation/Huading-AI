@@ -112,7 +112,8 @@ export function EcomVideoForm({
 
   const onGenerateScript = async () => {
     const trimmed = topic.trim();
-    if (!trimmed || scriptGen.isPending) return; // 「AI生成文案」仍需卖点/主题作输入（BE ScriptGenerateRequest.topic 必填）
+    // 需卖点/主题（BE topic 必填）+ 时长合法（FIX2：BE ScriptGenerateRequest.duration_sec 也是 int，小数会 422——不发非法时长）。
+    if (!trimmed || !isValidDuration(durationSec) || scriptGen.isPending) return;
     setError(null);
     try {
       const res = await scriptGen.mutateAsync({
@@ -129,13 +130,15 @@ export function EcomVideoForm({
 
   // 画面提示词 AI 生成（契约 §4.2/req7）：发产品图 keys（≥1，luna 多模态读图）+ 文案 + topic；同产出负面提示词，自动填入。
   const onGenerateScenePrompt = async () => {
-    if (!hasProductImage || scenePromptGen.isPending) return; // 严格纪律「必须带产品图」——BE 会 422，前端先友好拦
+    // 必须带产品图（BE 会 422）+ 时长合法（FIX1：BE duration_sec 是 int，小数会 422——不发非法时长的 scene-prompt）。
+    if (!hasProductImage || !isValidDuration(durationSec) || scenePromptGen.isPending) return;
     setError(null);
     try {
       const res = await scenePromptGen.mutateAsync({
         topic: topic.trim() || undefined,
         script: script.trim() || undefined,
-        product_image_keys: productKeys
+        product_image_keys: productKeys,
+        duration_sec: durationSec // SCENE-DURATION-FIX：带当前选中时长（含自定义值），让画面提示词秒数随选择变化（BE 夹取 [5,120]）
       });
       // ?? "" 防御：契约保证二者恒为 string，但真 BE 若漏字段返 undefined 会把受控 textarea 翻成非受控（React 告警）。
       setScenePrompt(res.scene_prompt ?? "");
@@ -226,7 +229,7 @@ export function EcomVideoForm({
         speed={speed}
         label={copy.workbench.ecomScriptLabel}
         actionLabel={copy.workbench.ecomScriptGenerate} // req3：「重写文案」→「AI生成文案」（口播共享组件不传→仍「重写文案」）
-        actionDisabled={!topic.trim()} // 主题去必填后，主题空时禁「AI生成文案」（文案生成仍需主题；与「AI生成画面」缺图禁用对称，消死点击）
+        actionDisabled={!topic.trim() || !isValidDuration(durationSec)} // 主题空 / 时长非整数(FIX2) 禁「AI生成文案」（消死点击 + 不发小数时长）
         // KEEPALIVE：面板常驻后与口播的 ScriptReview 同存于 DOM → id 必须区分（否则 label[for] 错指隐藏面板）。
         id="ecom-script"
       />
@@ -239,7 +242,7 @@ export function EcomVideoForm({
         onAction={onGenerateScenePrompt}
         actionLabel={copy.workbench.scenePromptGenerate}
         actionIcon="generate"
-        actionDisabled={!hasProductImage} // req7：无产品图禁点（BE 会 422，前端友好拦）
+        actionDisabled={!hasProductImage || !isValidDuration(durationSec)} // req7：无产品图 / 时长非整数(FIX1) 禁点（BE 会 422，前端友好拦）
         loading={scenePromptGen.isPending}
         rows={3}
         placeholder={copy.workbench.scenePromptPlaceholder}

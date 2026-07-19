@@ -111,4 +111,16 @@ describe("batches API ↔ MSW（mock 忠实，据 seam 契约）", () => {
   it("404：未知批次", async () => {
     expect(await status(() => getBatch("nope"))).toBe(404);
   });
+
+  // ECOM-VIDEO-SCENE-DURATION-FIX-UI-0001 · FIX2（CB P1 · 机制）：批量 common.duration_sec 也是 int——小数 → 422
+  // VALIDATION_ERROR（前端 ecom-table-form durationOk=isValidDuration 已从源头拦；此为 mock 拒非整数，未加门即 red）。
+  it("机制：common.duration_sec 小数(5.5) → 422 VALIDATION_ERROR（estimate + create 皆拒）", async () => {
+    const frac: BatchRequest = {
+      kind: "ecom_table",
+      rows: [{ product_name: "p", selling_points: "s", image_url: "http://x/1.png" }],
+      common: { video_mode: "seedance_i2v", duration_sec: 5.5, resolution: "720p", apply_visible_label: false }
+    };
+    expect(await status(() => estimateBatch(frac))).toBe(422);
+    expect(await status(() => createBatch(frac))).toBe(422);
+  });
 });

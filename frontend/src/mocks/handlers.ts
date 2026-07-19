@@ -7,6 +7,11 @@ const ok = <T>(data: T) => HttpResponse.json({ data, error: null, request_id: "m
 const err = (status: number, code: string, message: string) =>
   HttpResponse.json({ data: null, error: { code, message, request_id: "mock-req" }, request_id: "mock-req" }, { status });
 
+// ECOM-VIDEO-SCENE-DURATION-FIX-UI-0001 · FIX1（CB P1）：真 BE duration_sec 是 int（ScenePromptRequest /
+// VideoGenerateRequest 皆然），拒绝小数(5.5/5.4)与字符串("5.5")。mock 不比 BE 宽松、不四舍五入放行——present 且
+// 非整数即非法（调用处返 422）；undefined/null（可选未传）不算非法。scene-prompt / estimate / videos 提交三处共用。
+const badDuration = (v: unknown): boolean => v !== undefined && v !== null && !Number.isInteger(v);
+
 // in-memory store so list/detail/SSE stay consistent within a session
 const videos = new Map<string, Record<string, unknown>>();
 // mock 种子（ECOM-FIXES-0001 ③ / cancelled 补 ECOM-HISTORY-CANCELLED-FIX-0001 ③）：预置电商(seedance_i2v)历史项，
@@ -414,6 +419,7 @@ function invalidBatchCommon(kind: string, common: unknown): boolean {
   if (!c.video_mode) return true; // video_mode 必填
   if (kind === "ecom_table" && c.video_mode !== "seedance_i2v") return true;
   if (kind === "prompt_set" && c.video_mode !== "video_gen") return true;
+  if (badDuration(c.duration_sec)) return true; // FIX2（CB P1 · 机制）：批量 common.duration_sec 也是 int，小数非法（未加门即 red）
   return false;
 }
 // BatchSummary 形状（逐字对齐后端：含 common_params）。
@@ -1225,12 +1231,15 @@ export const handlers = [
     ok({ items: [{ asset_id: "preset-1", display_name: "默认主播", thumbnail_url: "https://mock.local/p1.jpg" }], total: 1 })
   ),
   http.post(`${BASE}/api/v1/scripts/generate`, async ({ request }) => {
-    const body = (await request.json()) as { topic?: string; length_tier?: string };
+    const body = (await request.json()) as { topic?: string; length_tier?: string; duration_sec?: number };
     // topic 必填（BE ScriptGenerateRequest.topic 非可选）——mock 不比 BE 宽松：缺/空即 422，守住前端两处调用方
     // （电商 onGenerateScript、口播 onGenerateScript）都在 topic 非空时才发。
     if (!body.topic || !body.topic.trim()) {
       return err(422, "VALIDATION_ERROR", "topic is required");
     }
+    // FIX2（CB P1 · 机制）：BE ScriptGenerateRequest.duration_sec 是 int——小数 → 422。此前 scripts mock 没读该字段 =
+    // 「AI生成文案」发小数悄悄假绿的根因。任何接受 duration_sec 的 mock 都拒绝非整数，未加门的路径即在测试里响亮失败。
+    if (badDuration(body.duration_sec)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
     // 字数档位（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.5）：可选，present 时须 short/medium/long（镜像 BE Literal，
     // mock 不比 BE 宽松——非法枚举即 422，守住前端只发合法档位）。反映到 mock 文案长度供承重区分档位真接线。
     if (body.length_tier !== undefined && !["short", "medium", "long"].includes(body.length_tier)) {
@@ -1244,12 +1253,20 @@ export const handlers = [
   // 🔴 严格纪律「必须带产品图」——mock 不比 BE 宽松：product_image_keys 缺失/空 → 422（luna 多模态强制读图）。
   // 返回 {scene_prompt, negative_prompt}（新增 negative_prompt，前端自动填入负面框）。
   http.post(`${BASE}/api/v1/videos/scene-prompt`, async ({ request }) => {
-    const body = (await request.json()) as { topic?: string; script?: string; product_image_keys?: string[] };
+    const body = (await request.json()) as { topic?: string; script?: string; product_image_keys?: string[]; duration_sec?: number };
     if (!Array.isArray(body.product_image_keys) || body.product_image_keys.length < 1) {
       return err(422, "VALIDATION_ERROR", "product_image_keys 至少 1 张");
     }
+    // FIX1（CB P1）：duration_sec 是 int——小数/字符串 → 422（镜像 BE，不四舍五入放行；此前 round 5.5→6 是假绿，线上真 422）。
+    if (badDuration(body.duration_sec)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
+    // SCENE-DURATION-FIX：duration_sec 可选整数，镜像 BE ScenePromptRequest._clamp_duration 夹取 [5,120]（不 reject 越界，仅夹取）。
+    // 把生效时长回写进 scene_prompt 秒数——真 BE 由 luna 据时长写节奏，mock 以此如实反映「秒数随所选时长变化」（此前恒「约15秒」即原 bug）。
+    const seconds =
+      typeof body.duration_sec === "number"
+        ? Math.max(5, Math.min(120, body.duration_sec))
+        : 15; // 未传时回退 15（正是漏传 duration 的旧表现，便于承重/变异对照）
     return ok({
-      scene_prompt: "白色大理石台面暖光特写，产品缓慢环绕运镜，浅景深突出材质，蒸汽轻升，节奏舒缓（mock 专业画面提示词，可编辑）",
+      scene_prompt: `白色大理石台面暖光特写，产品缓慢环绕运镜，浅景深突出材质，蒸汽轻升，节奏舒缓，约 ${seconds} 秒（mock 专业画面提示词，可编辑）`,
       negative_prompt: "低分辨率, 变形, 多余文字, 水印, 杂乱背景, 手部畸变"
     });
   }),
@@ -1428,6 +1445,7 @@ export const handlers = [
     if (body.resolution !== undefined && !VIDEO_GEN_RESOLUTIONS.includes(body.resolution)) {
       return err(422, "VALIDATION_ERROR", "resolution 非法");
     }
+    if (badDuration(body.duration_sec)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数"); // FIX1：estimate 用同一 VideoGenerateRequest(int)
     if (body.video_mode === "seedance_i2v") {
       const keys = body.product_image_keys ?? [];
       if (!Array.isArray(keys) || keys.length < 1 || keys.length > 9) {
@@ -1467,6 +1485,9 @@ export const handlers = [
     if (body.resolution !== undefined && !VIDEO_GEN_RESOLUTIONS.includes(body.resolution)) {
       return err(422, "VALIDATION_ERROR", "resolution 非法");
     }
+    // FIX1（CB P1 · 提交路径核查）：VideoGenerateRequest.duration_sec 也是 int——小数 → 422（前端 isValidDuration 已从源头拦，
+    // 此为 mock 防漂移把关，不比 BE 宽松；提交路径此前也能漏小数，属既有 bug，一并堵住）。
+    if (badDuration(body.duration_sec)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
     // 数字人形象源二选一互斥（AVATAR-VIDEO-SOURCE-UI-0001）：照片 avatar_asset_id 与视频 avatar_video_asset_id
     // 不可同发（BE 权威，mock 先行守住互斥）。前端只发其一，此为防漂移。
     if (body.avatar_asset_id && body.avatar_video_asset_id) {
@@ -1552,7 +1573,10 @@ export const handlers = [
 
   // ── 文案仿写 + 标题/话题生成 (COPY-UI-0001) — 同步 REST mock ──
   http.post(`${BASE}/api/v1/copy/rewrite`, async ({ request }) => {
-    const body = (await request.json()) as { source_text: string; mode: string; n?: number };
+    const body = (await request.json()) as { source_text: string; mode: string; n?: number; duration_sec?: number };
+    // FIX3（CB P2-1 · 机制按"接受方"算）：CopyRewriteRequest.duration_sec 是 int（copy.py，extra=forbid）——小数 → 422。
+    // 该端点当前无发送方，但类型支持该字段；凡**接受** duration_sec 的 mock 一律拒非整数，堵住"将来有人发就假绿"。
+    if (badDuration(body.duration_sec)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
     const base = (body.source_text ?? "").trim();
     if (body.mode === "auto") {
       const n = Math.min(5, Math.max(1, body.n ?? 3));

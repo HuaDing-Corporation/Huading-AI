@@ -216,7 +216,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
 
     fireEvent.change(durationInput, { target: { value: "200" } });
     await waitFor(() => expect(generate).toBeDisabled());
-    expect(screen.getByText("请输入 5–120 秒")).toBeInTheDocument();
+    expect(screen.getByText("请输入 5–120 的整数秒")).toBeInTheDocument();
 
     fireEvent.change(durationInput, { target: { value: "90" } });
     await waitFor(() => expect(generate).toBeEnabled());
@@ -263,12 +263,13 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     await waitFor(() => expect(sceneBtn).toBeEnabled());
     fireEvent.click(sceneBtn);
 
-    // 发产品图 keys + topic（非只 topic 字符串）。
+    // 发产品图 keys + topic（非只 topic 字符串）+ 当前时长（SCENE-DURATION-FIX：默认 30 秒）。
     await waitFor(() =>
       expect(scenePromptMock.mutateAsync).toHaveBeenCalledWith({
         topic: "保温杯",
         script: undefined,
-        product_image_keys: ["uploads/key-1.png"]
+        product_image_keys: ["uploads/key-1.png"],
+        duration_sec: 30
       })
     );
     // 画面 + 负面各自填入。
@@ -286,6 +287,73 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
       scene_prompt: "明亮影棚，产品特写旋转",
       negative_prompt: "水印, 杂乱背景, 变形"
     });
+  });
+
+  // SCENE-DURATION-FIX 承重：「AI生成画面」请求体带当前选中时长——预设「10 秒」→ 10；「自定义 5」→ 5（截图里自定义 5 秒没生效即本 bug）。
+  it("AI 生成画面带当前时长：选「10 秒」→ duration_sec:10；「自定义 5」→ duration_sec:5", async () => {
+    render(<EcomVideoForm />);
+    fireEvent.change(screen.getByPlaceholderText(/输入产品卖点/), { target: { value: "保温杯" } });
+    uploadProductImages(1);
+    const sceneBtn = screen.getByRole("button", { name: /AI 生成画面/ });
+    await waitFor(() => expect(sceneBtn).toBeEnabled());
+
+    // 预设 10 秒 → duration_sec:10。
+    fireEvent.click(screen.getByRole("button", { name: "10 秒" }));
+    fireEvent.click(sceneBtn);
+    await waitFor(() =>
+      expect(scenePromptMock.mutateAsync).toHaveBeenLastCalledWith(
+        expect.objectContaining({ duration_sec: 10 })
+      )
+    );
+
+    // 自定义 5 秒（下限）→ duration_sec:5（必须含自定义输入的值）。
+    const durationFieldset = screen.getByText("视频时长（与文案、字幕一致）").closest("fieldset") as HTMLElement;
+    fireEvent.click(within(durationFieldset).getByRole("button", { name: "自定义" }));
+    fireEvent.change(screen.getByLabelText("自定义时长（秒）"), { target: { value: "5" } });
+    fireEvent.click(sceneBtn);
+    await waitFor(() =>
+      expect(scenePromptMock.mutateAsync).toHaveBeenLastCalledWith(
+        expect.objectContaining({ duration_sec: 5 })
+      )
+    );
+  });
+
+  // FIX2（CB P1）承重：小数时长 5.5 在电商**每条发送路径**分别不发请求（真 BE ScriptGenerateRequest /
+  // ScenePromptRequest / VideoGenerateRequest.duration_sec 皆 int，小数 → 422，前端从源头拦、不假绿）。每路径一条。
+  async function setup55() {
+    render(<EcomVideoForm />);
+    fireEvent.change(screen.getByPlaceholderText(/输入产品卖点/), { target: { value: "保温杯" } });
+    uploadProductImages(1);
+    await waitFor(() => expect(screen.getByRole("button", { name: /AI 生成画面/ })).toBeEnabled());
+    const durationFieldset = screen.getByText("视频时长（与文案、字幕一致）").closest("fieldset") as HTMLElement;
+    fireEvent.click(within(durationFieldset).getByRole("button", { name: "自定义" }));
+    fireEvent.change(screen.getByLabelText("自定义时长（秒）"), { target: { value: "5.5" } });
+    // FIX3（P2-2）：文案断言**移出**共享 setup（否则变异下三条测试都在这里提前失败、掩盖各自路径断言）。
+    // 5.5 错误文案的显示由 duration-picker.test.tsx 与本文件「submits a custom duration」用例覆盖。
+  }
+
+  it("小数时长 5.5 · 路径1「AI生成文案」→ 禁点 + 不发（scripts；FIX2 此前漏门真发 {duration_sec:5.5}）", async () => {
+    await setup55();
+    const btn = screen.getByRole("button", { name: /AI生成文案/ });
+    await waitFor(() => expect(btn).toBeDisabled());
+    fireEvent.click(btn);
+    expect(scriptMock.mutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("小数时长 5.5 · 路径2「AI生成画面」→ 禁点 + 不发（scene-prompt）", async () => {
+    await setup55();
+    const btn = screen.getByRole("button", { name: /AI 生成画面/ });
+    await waitFor(() => expect(btn).toBeDisabled());
+    fireEvent.click(btn);
+    expect(scenePromptMock.mutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("小数时长 5.5 · 路径3「生成视频」→ 禁用 + 不提交（videos + estimate）", async () => {
+    await setup55();
+    await waitFor(() => expect(screen.getByRole("button", { name: /生成视频/ })).toBeDisabled());
+    fireEvent.click(screen.getByRole("button", { name: /生成视频/ }));
+    expect(taskMocks.createAndTrack).not.toHaveBeenCalled();
+    expect(estimateMock.mutate).not.toHaveBeenCalled();
   });
 
   // req3 承重：「重写文案」→「AI生成文案」重命名；字数档位随 scripts/generate 传 length_tier（默认 medium，切「长」→ long）。

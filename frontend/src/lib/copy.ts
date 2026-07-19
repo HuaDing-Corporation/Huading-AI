@@ -167,7 +167,7 @@ export const copy = {
     durationCustom: "自定义",
     durationCustomLabel: "自定义时长（秒）",
     durationCustomPlaceholder: "5–120",
-    durationRange: "请输入 5–120 秒",
+    durationRange: "请输入 5–120 的整数秒", // FIX1：BE duration_sec 是 int，5.5/5.4 等小数不合法（friendly 提示含「整数」）
     durationHint: "时长越长，生成越慢、消耗额度越多",
     // 文案/画面解耦（电商带货）
     ecomScriptLabel: "AI 口播文案（仅配音）",
