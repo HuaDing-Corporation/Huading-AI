@@ -118,7 +118,9 @@ test("华鼎AI智脑：选档 → 余额不足弹充值 → 充值 → 发消息
   await expect(page.locator('img[src^="blob:"]')).toBeVisible({ timeout: 10_000 }); // 上传完成、组件本地预览出现
   await page.locator("#aibrain-composer").fill("看这张图");
   await page.getByRole("button", { name: "发送" }).click();
-  await expect(page.locator('img[src*="mock.local/aibrain"]').first()).toBeVisible({ timeout: 15_000 }); // 消息里的真缩略图
+  // 消息里的真缩略图：src = **注册表里真资产**的 download_url（上传 mock 登记的 mock.local/u{n}.jpg）——
+  // 走的是「真上传→登记→发消息校验→响应带 download_url」的真链路（P1-2 修复后不再凭空伪造）。
+  await expect(page.locator('img[src*="mock.local/u"]').first()).toBeVisible({ timeout: 15_000 });
 
   // ④ 新建对话 → 切到新对话 → 不串数据（上一条消息不在新对话里）。
   await page.getByRole("button", { name: "新建对话" }).click();

@@ -18,6 +18,11 @@ import {
   type Conversation,
   type IntensityTier
 } from "@/lib/aibrain/types";
+import { getMockAsset, resetMockAssets } from "./asset-registry";
+
+// 镜像 BE `_IMAGE_ASSET_TYPES` / `_IMAGE_MIME_TYPES`（services/aibrain.py:53-54）。
+const IMAGE_ASSET_TYPES = new Set(["avatar_image", "product_image", "generated_image", "cover"]);
+const IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
 const BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000").replace(/\/$/, "");
 const ok = <T>(data: T, status = 200) =>
@@ -54,6 +59,7 @@ export function resetAibrain(): void {
   totalTopup = 0;
   totalSpent = 0;
   topupIdempotency.clear();
+  resetMockAssets();
 }
 
 function isTier(v: unknown): v is IntensityTier {
@@ -86,14 +92,22 @@ function newConversation(): MockConversation {
   return { id, title: "新对话", created_at: now, updated_at: now, messages: [] };
 }
 
-function attachmentsFrom(ids: string[]): ChatAttachment[] {
-  // FIX2：BE 补了 download_url（presign，只签 image）——mock 给个可渲染的占位 URL，让前端走真缩略图路径。
-  return ids.map((asset_id) => ({
-    asset_id,
-    asset_type: "generated_image",
-    mime_type: "image/png",
-    download_url: `https://mock.local/aibrain/${asset_id}.png`
-  }));
+/**
+ * 从**注册表**取已校验的资产构造响应附件（FIX4：不再凭空伪造）。
+ * @returns 全部 asset_id 合法 → 附件数组；否则第一个不合法的错误（404 未注册 / 422 非图片或非 ready）。
+ */
+function resolveAttachments(ids: string[]): { attachments: ChatAttachment[] } | { error: ReturnType<typeof err> } {
+  const attachments: ChatAttachment[] = [];
+  for (const asset_id of ids) {
+    const asset = getMockAsset(asset_id);
+    // 查不到 = 不存在/跨租户/已删 → 404（BE aibrain.py:633）。
+    if (!asset) return { error: err(404, AIBRAIN_ERROR.ATTACHMENT_NOT_FOUND, "附件不存在或无权访问") };
+    // 非 ready / 非图片类型 / 非图片 MIME → 422（BE aibrain.py:641-647）。
+    if (asset.status !== "ready" || !IMAGE_ASSET_TYPES.has(asset.asset_type) || !IMAGE_MIME_TYPES.has(asset.mime_type))
+      return { error: err(422, AIBRAIN_ERROR.ATTACHMENT_INVALID, "附件类型不支持（仅 ready 的 JPG/PNG/WebP 图片）") };
+    attachments.push({ asset_id, asset_type: asset.asset_type, mime_type: asset.mime_type, download_url: asset.download_url });
+  }
+  return { attachments };
 }
 
 export function aibrainHandlers() {
@@ -160,11 +174,17 @@ export function aibrainHandlers() {
       // 档位（BE Literal → 422 校验错）。
       if (!isTier(body.tier)) return err(422, "VALIDATION_ERROR", "智能强度档位非法（low/mid/high）");
       const content = (body.content ?? "").trim();
+      // 🔴 FIX4 · P1-2：**不再静默把非数组转空数组**——非法形状应报错（BE pydantic list[str] → 422）。
+      if (body.attachment_asset_ids !== undefined && !Array.isArray(body.attachment_asset_ids))
+        return err(422, "VALIDATION_ERROR", "attachment_asset_ids 必须是数组");
       const ids = Array.isArray(body.attachment_asset_ids) ? (body.attachment_asset_ids as string[]) : [];
-      // 附件校验（BE：max 10、唯一、非空）。
+      // 形状校验（BE：max 10、唯一、非空）。
       if (ids.length > 10 || ids.some((x) => typeof x !== "string" || !x.trim()) || new Set(ids).size !== ids.length)
         return err(422, "VALIDATION_ERROR", "attachment_asset_ids 非法（≤10、唯一、非空）");
       if (!content && ids.length === 0) return err(422, "VALIDATION_ERROR", "消息不能为空");
+      // 🔴 FIX4 · P1-2：附件必须是**注册表里真存在**的 ready 图片资产（不再凭空伪造）→ 404/422（BE aibrain.py:612-647）。
+      const resolved = resolveAttachments(ids);
+      if ("error" in resolved) return resolved.error;
 
       // 🔴 预留：flat min(200, available)。available<=0 → 402（BE：reserve<=0）。
       if (available <= 0) return err(402, AIBRAIN_ERROR.INSUFFICIENT_BALANCE, "推理积分不足，请充值后再试");
@@ -181,7 +201,7 @@ export function aibrainHandlers() {
       available -= charged;
       totalSpent += charged;
 
-      const attachments = attachmentsFrom(ids);
+      const attachments = resolved.attachments;
       const now = new Date(2026, 6, 19, 10, 30, msgSeq).toISOString();
       const userMsg: ChatMessage = {
         id: `msg-${++msgSeq}`,

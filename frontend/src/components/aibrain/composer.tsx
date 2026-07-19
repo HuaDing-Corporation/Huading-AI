@@ -30,7 +30,8 @@ export function Composer({
   /** 可用推理积分（wallet.available_credits）；`undefined` = 钱包未加载 → 预检不拦（CR#2）。 */
   balance: number | undefined;
   sending: boolean;
-  onSend: (body: SendMessageRequest) => void;
+  /** 🔴 返回是否**发送成功**（P1-1）：只有 true 才清空输入/附件/revoke 预览；失败则原样保留，用户不必重打重传。 */
+  onSend: (body: SendMessageRequest) => Promise<boolean>;
   /** 余额不足 → 让父层弹充值窗（不是普通报错）。 */
   onInsufficient: () => void;
 }) {
@@ -55,7 +56,7 @@ export function Composer({
 
   const canSend = (text.trim().length > 0 || attachments.length > 0) && !sending && !uploading;
 
-  const submit = () => {
+  const submit = async () => {
     if (!canSend) return; // 与按钮 disabled 同一判据；此处兜住 Enter 提交路径
     const content = text.trim();
     setInlineError(null);
@@ -65,17 +66,20 @@ export function Composer({
       onInsufficient(); // 弹充值窗、**不发请求**
       return;
     }
-    onSend({ content, tier, attachment_asset_ids: attachments.map((a) => a.asset_id) });
+    // 🔴 P1-1：**await 结果，只有成功才清空**（文字/附件/revoke 预览）。失败（网络/402/422/502）→ 全部保留，
+    //   用户不必重打字、更不必重传图片；预览也不碎（objectURL 未被提前 revoke）。
+    const sent = await onSend({ content, tier, attachment_asset_ids: attachments.map((a) => a.asset_id) });
+    if (!sent) return;
     setText("");
     setAttachments([]);
-    revokeAll();
+    revokeAll(); // 只在成功后 revoke（失败保留预览）
     voiceBase.current = "";
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      submit();
+      void submit();
     }
   };
 
@@ -183,7 +187,7 @@ export function Composer({
           )}
         </div>
 
-        <Button variant="primary" size="sm" onClick={submit} disabled={!canSend} aria-label={copy.aibrain.send}>
+        <Button variant="primary" size="sm" onClick={() => void submit()} disabled={!canSend} aria-label={copy.aibrain.send}>
           {sending || uploading ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} strokeWidth={2} />}
           {sending ? copy.aibrain.sending : copy.aibrain.send}
         </Button>

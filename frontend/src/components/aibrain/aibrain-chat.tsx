@@ -31,10 +31,11 @@ export function AibrainChat() {
   const messages = convQuery.data?.messages ?? [];
   const busy = send.isPending || create.isPending; // 建会话在途也禁用发送，防双建（CR#7）
 
-  const handleSend = async (body: SendMessageRequest) => {
+  // 🔴 P1-1：返回是否**发送成功**——composer 据此决定清不清空（失败保留文字/附件/预览）。
+  const handleSend = async (body: SendMessageRequest): Promise<boolean> => {
     setSendError(null);
     try {
-      // 🔴 建会话与发消息**同在 try 内**：首条消息若建会话失败，也走错误分流、不静默丢消息（CR#1）。
+      // 建会话与发消息**同在 try 内**：首条消息若建会话失败，也走错误分流、不静默丢消息（CR#1）。
       let convId = activeId;
       if (!convId) {
         const conv = await create.mutateAsync();
@@ -42,16 +43,20 @@ export function AibrainChat() {
         setActiveId(conv.id);
       }
       await send.mutateAsync({ conversationId: convId, body });
+      return true;
     } catch (err) {
       if (!(err instanceof ApiError)) {
         setSendError(copy.aibrain.error);
-        return;
+        return false;
       }
       // 402 余额不足 → 弹充值窗（不是普通报错）。
       if (err.status === 402 || err.code === AIBRAIN_ERROR.INSUFFICIENT_BALANCE) setRechargeOpen(true);
       else if (err.code === AIBRAIN_ERROR.REQUEST_LIMIT_EXCEEDED) setSendError(copy.aibrain.reqLimit);
       else if (err.code === AIBRAIN_ERROR.PROVIDER_FAILED) setSendError(copy.aibrain.providerFailed);
+      else if (err.code === AIBRAIN_ERROR.ATTACHMENT_NOT_FOUND || err.code === AIBRAIN_ERROR.ATTACHMENT_INVALID)
+        setSendError(copy.aibrain.attachmentRejected);
       else setSendError(err.message || copy.aibrain.error);
+      return false;
     }
   };
 
@@ -89,7 +94,7 @@ export function AibrainChat() {
               onTierChange={setTier}
               balance={balance}
               sending={busy}
-              onSend={(body) => void handleSend(body)}
+              onSend={handleSend}
               onInsufficient={() => setRechargeOpen(true)}
             />
           </div>

@@ -1312,6 +1312,7 @@ export const copy = {
     // 发送错误分流（对齐 BE status/code）
     reqLimit: "本次问答超过单次上限或余额不足以作答，请精简内容或充值后重试。",
     providerFailed: "AI 服务暂时不可用，请稍后重试。",
+    attachmentRejected: "附件无效或已失效，请移除后重新上传。",
     // 通用错误
     error: "出错了，请重试"
   }

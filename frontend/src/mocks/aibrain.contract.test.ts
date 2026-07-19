@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createConversation, getConversation, getWallet, sendMessage, topupWallet } from "@/lib/aibrain/api";
+import { uploadImage } from "@/lib/api/uploads";
 import type { SendMessageRequest } from "@/lib/aibrain/types";
 import { resetAibrain } from "./aibrain-handlers";
+import { registerMockAsset } from "./asset-registry";
 
 // 🔴 mock 逐字段镜像 BE f2e9a2e0、**不比 BE 宽松**（含 402/422/502 状态码本身 + 充值幂等）。
 beforeEach(() => resetAibrain());
@@ -107,6 +109,41 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
     expect(res.assistant_message.status).toBe("completed");
     expect(res.wallet.available_credits).toBe(500 - 6); // low 典型 6
     expect(res.wallet.total_spent_credits).toBe(6);
+  });
+
+  // ── P1-2：附件必须真存在于资产注册表（不再凭空伪造）──────────────────────────
+  it("🔴 P1-2 有效附件（真上传 → asset_id）→ 接受、响应带 download_url", async () => {
+    await topup(100);
+    const { asset_id } = await uploadImage(new File([new Uint8Array([1, 2, 3])], "p.png", { type: "image/png" }));
+    const conv = await createConversation();
+    const res = await sendMessage(conv.id, { content: "看图", tier: "low", attachment_asset_ids: [asset_id] });
+    expect(res.user_message.attachments[0].asset_id).toBe(asset_id);
+    expect(res.user_message.attachments[0].download_url).toBeTruthy(); // 真缩略图 URL
+  });
+
+  it("🔴 P1-2 不存在的 asset → 404 AIBRAIN_ATTACHMENT_NOT_FOUND，且**不扣费**", async () => {
+    await topup(100);
+    const conv = await createConversation();
+    await expect(
+      sendMessage(conv.id, { content: "看图", tier: "low", attachment_asset_ids: ["missing-asset"] })
+    ).rejects.toMatchObject({ status: 404, code: "AIBRAIN_ATTACHMENT_NOT_FOUND" });
+    expect((await getWallet()).available_credits).toBe(100); // 附件校验先于扣费 → 余额不动
+  });
+
+  it("🔴 P1-2 非图片 / 非 ready asset → 422 AIBRAIN_ATTACHMENT_INVALID", async () => {
+    await topup(100);
+    registerMockAsset({ asset_id: "doc-1", asset_type: "document", mime_type: "application/pdf", status: "ready", download_url: "x" });
+    const conv = await createConversation();
+    await expect(
+      sendMessage(conv.id, { content: "看图", tier: "low", attachment_asset_ids: ["doc-1"] })
+    ).rejects.toMatchObject({ status: 422, code: "AIBRAIN_ATTACHMENT_INVALID" });
+  });
+
+  it("🔴 P1-2 attachment_asset_ids 非数组 → 422（不再静默转空数组）", async () => {
+    await topup(100);
+    const conv = await createConversation();
+    const body = { content: "hi", tier: "low", attachment_asset_ids: "nope" } as unknown as SendMessageRequest;
+    await expect(sendMessage(conv.id, body)).rejects.toMatchObject({ status: 422 });
   });
 
   it("🔴 会话切换不串数据：两个会话各自独立的消息", async () => {
