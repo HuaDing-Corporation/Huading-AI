@@ -208,6 +208,9 @@ export interface ScenePromptRequest {
   topic?: string;
   script?: string;
   product_image_keys: string[];
+  // ECOM-VIDEO-SCENE-DURATION-FIX-UI-0001：Cowork 冻结 §4.2 时漏了 duration_sec，致画面提示词秒数恒「约 15 秒」。
+  // 补传当前选中时长（含自定义值）。可选，BE 侧夹取 [5,120]（schemas/videos.py::ScenePromptRequest._clamp_duration）。
+  duration_sec?: number;
 }
 
 // POST /videos/scene-prompt → 画面提示词（电商带货 i2v "AI 生成画面" 用）。

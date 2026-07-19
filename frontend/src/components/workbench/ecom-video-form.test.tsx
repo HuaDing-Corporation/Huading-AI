@@ -263,12 +263,13 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     await waitFor(() => expect(sceneBtn).toBeEnabled());
     fireEvent.click(sceneBtn);
 
-    // 发产品图 keys + topic（非只 topic 字符串）。
+    // 发产品图 keys + topic（非只 topic 字符串）+ 当前时长（SCENE-DURATION-FIX：默认 30 秒）。
     await waitFor(() =>
       expect(scenePromptMock.mutateAsync).toHaveBeenCalledWith({
         topic: "保温杯",
         script: undefined,
-        product_image_keys: ["uploads/key-1.png"]
+        product_image_keys: ["uploads/key-1.png"],
+        duration_sec: 30
       })
     );
     // 画面 + 负面各自填入。
@@ -286,6 +287,35 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
       scene_prompt: "明亮影棚，产品特写旋转",
       negative_prompt: "水印, 杂乱背景, 变形"
     });
+  });
+
+  // SCENE-DURATION-FIX 承重：「AI生成画面」请求体带当前选中时长——预设「10 秒」→ 10；「自定义 5」→ 5（截图里自定义 5 秒没生效即本 bug）。
+  it("AI 生成画面带当前时长：选「10 秒」→ duration_sec:10；「自定义 5」→ duration_sec:5", async () => {
+    render(<EcomVideoForm />);
+    fireEvent.change(screen.getByPlaceholderText(/输入产品卖点/), { target: { value: "保温杯" } });
+    uploadProductImages(1);
+    const sceneBtn = screen.getByRole("button", { name: /AI 生成画面/ });
+    await waitFor(() => expect(sceneBtn).toBeEnabled());
+
+    // 预设 10 秒 → duration_sec:10。
+    fireEvent.click(screen.getByRole("button", { name: "10 秒" }));
+    fireEvent.click(sceneBtn);
+    await waitFor(() =>
+      expect(scenePromptMock.mutateAsync).toHaveBeenLastCalledWith(
+        expect.objectContaining({ duration_sec: 10 })
+      )
+    );
+
+    // 自定义 5 秒（下限）→ duration_sec:5（必须含自定义输入的值）。
+    const durationFieldset = screen.getByText("视频时长（与文案、字幕一致）").closest("fieldset") as HTMLElement;
+    fireEvent.click(within(durationFieldset).getByRole("button", { name: "自定义" }));
+    fireEvent.change(screen.getByLabelText("自定义时长（秒）"), { target: { value: "5" } });
+    fireEvent.click(sceneBtn);
+    await waitFor(() =>
+      expect(scenePromptMock.mutateAsync).toHaveBeenLastCalledWith(
+        expect.objectContaining({ duration_sec: 5 })
+      )
+    );
   });
 
   // req3 承重：「重写文案」→「AI生成文案」重命名；字数档位随 scripts/generate 传 length_tier（默认 medium，切「长」→ long）。

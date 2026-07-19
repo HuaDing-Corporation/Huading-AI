@@ -1244,12 +1244,18 @@ export const handlers = [
   // 🔴 严格纪律「必须带产品图」——mock 不比 BE 宽松：product_image_keys 缺失/空 → 422（luna 多模态强制读图）。
   // 返回 {scene_prompt, negative_prompt}（新增 negative_prompt，前端自动填入负面框）。
   http.post(`${BASE}/api/v1/videos/scene-prompt`, async ({ request }) => {
-    const body = (await request.json()) as { topic?: string; script?: string; product_image_keys?: string[] };
+    const body = (await request.json()) as { topic?: string; script?: string; product_image_keys?: string[]; duration_sec?: number };
     if (!Array.isArray(body.product_image_keys) || body.product_image_keys.length < 1) {
       return err(422, "VALIDATION_ERROR", "product_image_keys 至少 1 张");
     }
+    // SCENE-DURATION-FIX：duration_sec 可选，镜像 BE ScenePromptRequest._clamp_duration 夹取 [5,120]（不 reject，mock 不比 BE 宽松）。
+    // 把生效时长回写进 scene_prompt 秒数——真 BE 由 luna 据时长写节奏，mock 以此如实反映「秒数随所选时长变化」（此前恒「约15秒」即本 bug）。
+    const seconds =
+      typeof body.duration_sec === "number" && Number.isFinite(body.duration_sec)
+        ? Math.max(5, Math.min(120, Math.round(body.duration_sec)))
+        : 15; // 未传时回退 15（正是漏传 duration 的旧表现，便于承重/变异对照）
     return ok({
-      scene_prompt: "白色大理石台面暖光特写，产品缓慢环绕运镜，浅景深突出材质，蒸汽轻升，节奏舒缓（mock 专业画面提示词，可编辑）",
+      scene_prompt: `白色大理石台面暖光特写，产品缓慢环绕运镜，浅景深突出材质，蒸汽轻升，节奏舒缓，约 ${seconds} 秒（mock 专业画面提示词，可编辑）`,
       negative_prompt: "低分辨率, 变形, 多余文字, 水印, 杂乱背景, 手部畸变"
     });
   }),

@@ -135,7 +135,8 @@ export function EcomVideoForm({
       const res = await scenePromptGen.mutateAsync({
         topic: topic.trim() || undefined,
         script: script.trim() || undefined,
-        product_image_keys: productKeys
+        product_image_keys: productKeys,
+        duration_sec: durationSec // SCENE-DURATION-FIX：带当前选中时长（含自定义值），让画面提示词秒数随选择变化（BE 夹取 [5,120]）
       });
       // ?? "" 防御：契约保证二者恒为 string，但真 BE 若漏字段返 undefined 会把受控 textarea 翻成非受控（React 告警）。
       setScenePrompt(res.scene_prompt ?? "");
