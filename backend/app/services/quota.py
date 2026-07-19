@@ -93,6 +93,10 @@ def _active_subscription_for_update(db: Session, tenant_id: str) -> Subscription
     return subscription
 
 
+def lock_active_subscription(db: Session, *, tenant_id: str) -> Subscription:
+    return _active_subscription_for_update(db, tenant_id)
+
+
 def _subscription_for_update(
     db: Session,
     subscription_id: str,

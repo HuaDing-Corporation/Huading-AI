@@ -14,6 +14,7 @@ from app.db.models import (
     ReasoningLedgerEntry,
     ReasoningWallet,
     Subscription,
+    Tenant,
     UsageRecord,
     User,
 )
@@ -52,6 +53,9 @@ class _CancelledChatProvider:
 class _FakeObjectStorage:
     bucket = "test-bucket"
 
+    def __init__(self) -> None:
+        self.presigned_keys: list[str] = []
+
     def presign_get_url(
         self,
         key: str,
@@ -61,7 +65,19 @@ class _FakeObjectStorage:
     ) -> str:
         assert expires_in > 0
         assert download_filename is None
+        self.presigned_keys.append(key)
         return f"https://storage.example/{key}"
+
+
+def _topup_payload(
+    amount: int,
+    *,
+    idempotency_key: str | None = None,
+) -> dict[str, object]:
+    return {
+        "amount": amount,
+        "idempotency_key": idempotency_key or str(uuid4()),
+    }
 
 
 def test_user_can_create_list_and_read_an_aibrain_conversation(
@@ -120,7 +136,7 @@ def test_user_can_top_up_the_reasoning_wallet_from_primary_quota(
 
     topped_up = client.post(
         "/api/v1/aibrain/wallet/topup",
-        json={"amount": 500},
+        json=_topup_payload(500),
         headers=auth_context["headers"],
     )
 
@@ -151,6 +167,93 @@ def test_user_can_top_up_the_reasoning_wallet_from_primary_quota(
         assert ledger.subscription_id == subscription.id
 
 
+def test_reasoning_wallet_topup_replay_is_idempotent_before_primary_quota_debit(
+    auth_context,
+    auth_db,
+) -> None:
+    client = TestClient(app)
+    payload = {
+        "amount": 100,
+        "idempotency_key": str(uuid4()),
+    }
+
+    first = client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=payload,
+        headers=auth_context["headers"],
+    )
+    replay = client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=payload,
+        headers=auth_context["headers"],
+    )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.json()["data"] == first.json()["data"]
+    with auth_db() as db:
+        subscription = db.scalar(
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+        )
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        topups = list(
+            db.scalars(
+                select(ReasoningLedgerEntry).where(
+                    ReasoningLedgerEntry.tenant_id == auth_context["tenant_id"],
+                    ReasoningLedgerEntry.entry_type == "topup",
+                )
+            )
+        )
+        assert subscription.quota_credits_used == 100
+        assert wallet.available_credits == Decimal("100")
+        assert wallet.total_topup_credits == Decimal("100")
+        assert len(topups) == 1
+
+
+def test_reasoning_wallet_topup_replay_returns_the_original_balance_snapshot(
+    auth_context,
+    auth_db,
+) -> None:
+    client = TestClient(app)
+    idempotency_key = str(uuid4())
+    first = client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=_topup_payload(100, idempotency_key=idempotency_key),
+        headers=auth_context["headers"],
+    )
+    later = client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=_topup_payload(100),
+        headers=auth_context["headers"],
+    )
+    replay = client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=_topup_payload(100, idempotency_key=idempotency_key),
+        headers=auth_context["headers"],
+    )
+
+    assert first.status_code == 200
+    assert first.json()["data"]["available_credits"] == 100
+    assert later.json()["data"]["available_credits"] == 200
+    assert replay.json()["data"] == first.json()["data"]
+    with auth_db() as db:
+        subscription = db.scalar(
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+        )
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        topups = list(
+            db.scalars(
+                select(ReasoningLedgerEntry).where(
+                    ReasoningLedgerEntry.tenant_id == auth_context["tenant_id"],
+                    ReasoningLedgerEntry.entry_type == "topup",
+                )
+            )
+        )
+        assert subscription.quota_credits_used == 200
+        assert wallet.available_credits == Decimal("200")
+        assert len(topups) == 2
+
+
 def test_message_reserves_then_settles_exact_token_usage(
     auth_context,
     auth_db,
@@ -160,7 +263,7 @@ def test_message_reserves_then_settles_exact_token_usage(
     assert (
         client.post(
             "/api/v1/aibrain/wallet/topup",
-            json={"amount": 500},
+            json=_topup_payload(500),
             headers=auth_context["headers"],
         ).status_code
         == 200
@@ -279,7 +382,7 @@ def test_single_answer_charge_is_capped_at_200_reasoning_credits(
     client = TestClient(app)
     client.post(
         "/api/v1/aibrain/wallet/topup",
-        json={"amount": 500},
+        json=_topup_payload(500),
         headers=auth_context["headers"],
     )
     conversation_id = client.post(
@@ -320,7 +423,7 @@ def test_provider_failure_releases_reservation_without_user_charge(
     client = TestClient(app)
     client.post(
         "/api/v1/aibrain/wallet/topup",
-        json={"amount": 500},
+        json=_topup_payload(500),
         headers=auth_context["headers"],
     )
     conversation_id = client.post(
@@ -368,7 +471,7 @@ def test_missing_usage_releases_reservation_without_a_second_provider_call(
     client = TestClient(app)
     client.post(
         "/api/v1/aibrain/wallet/topup",
-        json={"amount": 100},
+        json=_topup_payload(100),
         headers=auth_context["headers"],
     )
     conversation_id = client.post(
@@ -411,7 +514,7 @@ async def test_cancelled_provider_call_releases_the_reasoning_reservation(
     client = TestClient(app)
     client.post(
         "/api/v1/aibrain/wallet/topup",
-        json={"amount": 100},
+        json=_topup_payload(100),
         headers=auth_context["headers"],
     )
     conversation_id = client.post(
@@ -458,7 +561,7 @@ def test_only_the_latest_20_completed_rounds_are_sent_as_context(
     client = TestClient(app)
     client.post(
         "/api/v1/aibrain/wallet/topup",
-        json={"amount": 500},
+        json=_topup_payload(500),
         headers=auth_context["headers"],
     )
     conversation_id = client.post(
@@ -559,7 +662,7 @@ def test_ready_tenant_image_is_sent_as_a_presigned_vision_attachment(
     client = TestClient(app)
     client.post(
         "/api/v1/aibrain/wallet/topup",
-        json={"amount": 100},
+        json=_topup_payload(100),
         headers=auth_context["headers"],
     )
     conversation_id = client.post(
@@ -600,17 +703,25 @@ def test_ready_tenant_image_is_sent_as_a_presigned_vision_attachment(
             },
             headers=auth_context["headers"],
         )
+        history = client.get(
+            f"/api/v1/aibrain/conversations/{conversation_id}",
+            headers=auth_context["headers"],
+        )
     finally:
         app.dependency_overrides.pop(get_object_storage, None)
 
     assert response.status_code == 200
-    assert response.json()["data"]["user_message"]["attachments"] == [
-        {
-            "asset_id": image_id,
-            "asset_type": "product_image",
-            "mime_type": "image/png",
-        }
-    ]
+    expected_attachment = {
+        "asset_id": image_id,
+        "asset_type": "product_image",
+        "mime_type": "image/png",
+        "download_url": (
+            f"https://storage.example/tenants/{auth_context['tenant_id']}/uploads/product.png"
+        ),
+    }
+    assert response.json()["data"]["user_message"]["attachments"] == [expected_attachment]
+    assert history.status_code == 200
+    assert history.json()["data"]["messages"][0]["attachments"] == [expected_attachment]
     assert provider.calls[0]["messages"][-1] == {
         "role": "user",
         "content": [
@@ -642,7 +753,7 @@ def test_conversations_wallets_and_attachments_are_tenant_isolated(
     ).json()["data"]["id"]
     client.post(
         "/api/v1/aibrain/wallet/topup",
-        json={"amount": 100},
+        json=_topup_payload(100),
         headers=auth_context["headers"],
     )
     tenant_b = client.post(
@@ -697,6 +808,122 @@ def test_conversations_wallets_and_attachments_are_tenant_isolated(
     assert provider.calls == []
 
 
+def test_conversation_detail_filters_a_foreign_tenant_message_with_a_corrupt_link(
+    auth_context,
+    auth_db,
+) -> None:
+    client = TestClient(app)
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={"title": "Tenant-safe messages"},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    foreign_tenant_id = str(uuid4())
+    with auth_db() as db:
+        db.add(
+            Tenant(
+                id=foreign_tenant_id,
+                slug=f"aibrain-foreign-{uuid4().hex[:8]}",
+                name="Foreign AIBRAIN Tenant",
+            )
+        )
+        db.flush()
+        db.add(
+            ChatMessage(
+                tenant_id=foreign_tenant_id,
+                conversation_id=conversation_id,
+                role="assistant",
+                content="must not leak",
+                attachments=[],
+                tier="low",
+                model="gpt-5.6-luna",
+                status="completed",
+            )
+        )
+        db.commit()
+
+    detail = client.get(
+        f"/api/v1/aibrain/conversations/{conversation_id}",
+        headers=auth_context["headers"],
+    )
+
+    assert detail.status_code == 200
+    assert detail.json()["data"]["messages"] == []
+
+
+def test_conversation_detail_never_presigns_a_foreign_attachment_from_corrupt_data(
+    auth_context,
+    auth_db,
+) -> None:
+    client = TestClient(app)
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={"title": "Tenant-safe attachment URLs"},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    foreign_tenant_id = str(uuid4())
+    with auth_db() as db:
+        db.add(
+            Tenant(
+                id=foreign_tenant_id,
+                slug=f"aibrain-foreign-asset-{uuid4().hex[:8]}",
+                name="Foreign AIBRAIN Asset Tenant",
+            )
+        )
+        db.flush()
+        foreign_asset = Asset(
+            tenant_id=foreign_tenant_id,
+            type="product_image",
+            source="upload",
+            storage_key=f"tenants/{foreign_tenant_id}/uploads/private.png",
+            mime_type="image/png",
+            status="ready",
+        )
+        db.add(foreign_asset)
+        db.flush()
+        foreign_asset_id = foreign_asset.id
+        db.add(
+            ChatMessage(
+                tenant_id=auth_context["tenant_id"],
+                conversation_id=conversation_id,
+                role="user",
+                content="corrupt foreign attachment link",
+                attachments=[
+                    {
+                        "asset_id": foreign_asset_id,
+                        "asset_type": foreign_asset.type,
+                        "mime_type": foreign_asset.mime_type,
+                    }
+                ],
+                tier="low",
+                model="gpt-5.6-luna",
+                status="completed",
+            )
+        )
+        db.commit()
+
+    storage = _FakeObjectStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        detail = client.get(
+            f"/api/v1/aibrain/conversations/{conversation_id}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert detail.status_code == 200
+    assert detail.json()["data"]["messages"][0]["attachments"] == [
+        {
+            "asset_id": foreign_asset_id,
+            "asset_type": "product_image",
+            "mime_type": "image/png",
+            "download_url": None,
+        }
+    ]
+    assert storage.presigned_keys == []
+
+
 def test_aibrain_endpoints_require_the_aibrain_permission(
     auth_context,
     auth_db,
@@ -728,12 +955,24 @@ def test_aibrain_requests_forbid_extra_fields_and_invalid_topup_amounts(
     )
     invalid_topup = client.post(
         "/api/v1/aibrain/wallet/topup",
-        json={"amount": 300},
+        json=_topup_payload(300),
+        headers=auth_context["headers"],
+    )
+    missing_idempotency_key = client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json={"amount": 100},
+        headers=auth_context["headers"],
+    )
+    malformed_idempotency_key = client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json={"amount": 100, "idempotency_key": "not-a-uuid"},
         headers=auth_context["headers"],
     )
 
     assert extra.status_code == 422
     assert invalid_topup.status_code == 422
+    assert missing_idempotency_key.status_code == 422
+    assert malformed_idempotency_key.status_code == 422
     with auth_db() as db:
         subscription = db.scalar(
             select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
@@ -755,7 +994,7 @@ def test_wallet_topup_rolls_back_when_primary_quota_is_insufficient(
 
     response = TestClient(app).post(
         "/api/v1/aibrain/wallet/topup",
-        json={"amount": 100},
+        json=_topup_payload(100),
         headers=auth_context["headers"],
     )
 

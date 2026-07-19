@@ -30,16 +30,6 @@ _USAGE_CAPABILITY_LEGACY = (
     "'publish', 'voice_clone', 'video_gen', 'reverse_prompt', "
     "'reverse_prompt_video', 'scene_prompt')"
 )
-_CREDIT_RATE_CAPABILITY_WITH_CHAT = (
-    "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
-    "'publish', 'voice_clone', 'video_gen', 'reverse_prompt', "
-    "'reverse_prompt_video', 'chat')"
-)
-_CREDIT_RATE_CAPABILITY_LEGACY = (
-    "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
-    "'publish', 'voice_clone', 'video_gen', 'reverse_prompt', "
-    "'reverse_prompt_video')"
-)
 _PROVIDER_ID = "chat-apimart-gpt56"
 _JSON_TYPE = sa.JSON().with_variant(postgresql.JSONB(), "postgresql")
 
@@ -285,12 +275,6 @@ def upgrade() -> None:
             "ck_provider_configs_capability",
             _PROVIDER_CAPABILITY_WITH_CHAT,
         )
-    with op.batch_alter_table("credit_rates") as batch_op:
-        batch_op.drop_constraint("ck_credit_rates_capability", type_="check")
-        batch_op.create_check_constraint(
-            "ck_credit_rates_capability",
-            _CREDIT_RATE_CAPABILITY_WITH_CHAT,
-        )
     with op.batch_alter_table("usage_records") as batch_op:
         batch_op.drop_constraint("ck_usage_records_capability", type_="check")
         batch_op.create_check_constraint(
@@ -344,11 +328,6 @@ def downgrade() -> None:
         )
     )
     op.execute(
-        sa.text("DELETE FROM credit_rates WHERE capability = :capability").bindparams(
-            capability="chat"
-        )
-    )
-    op.execute(
         sa.text("DELETE FROM provider_configs WHERE capability = :capability").bindparams(
             capability="chat"
         )
@@ -368,12 +347,6 @@ def downgrade() -> None:
         batch_op.create_check_constraint(
             "ck_usage_records_capability",
             _USAGE_CAPABILITY_LEGACY,
-        )
-    with op.batch_alter_table("credit_rates") as batch_op:
-        batch_op.drop_constraint("ck_credit_rates_capability", type_="check")
-        batch_op.create_check_constraint(
-            "ck_credit_rates_capability",
-            _CREDIT_RATE_CAPABILITY_LEGACY,
         )
     with op.batch_alter_table("provider_configs") as batch_op:
         batch_op.drop_constraint("ck_provider_configs_capability", type_="check")

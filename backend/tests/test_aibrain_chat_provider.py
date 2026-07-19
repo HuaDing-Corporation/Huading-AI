@@ -176,6 +176,7 @@ def test_apimart_gpt56_factory_never_accepts_an_api_key_from_database_config(
 
 
 def test_aibrain_rate_defaults_are_declared_in_runtime_and_env_examples() -> None:
+    assert settings.engine_aibrain_reservation_stale_minutes == 30
     assert (
         settings.engine_aibrain_low_input_credits_per_1k,
         settings.engine_aibrain_low_output_credits_per_1k,
@@ -199,6 +200,7 @@ def test_aibrain_rate_defaults_are_declared_in_runtime_and_env_examples() -> Non
         "ENGINE_AIBRAIN_MID_OUTPUT_CREDITS_PER_1K=25.92",
         "ENGINE_AIBRAIN_HIGH_INPUT_CREDITS_PER_1K=8.64",
         "ENGINE_AIBRAIN_HIGH_OUTPUT_CREDITS_PER_1K=51.84",
+        "ENGINE_AIBRAIN_RESERVATION_STALE_MINUTES=30",
     }
     for path in (
         repository_root / "backend" / ".env.example",

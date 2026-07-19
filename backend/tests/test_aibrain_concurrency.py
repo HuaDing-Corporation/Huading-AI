@@ -14,6 +14,8 @@ from sqlalchemy.orm import sessionmaker
 from app.core.exceptions import AppError
 from app.db.models import (
     Base,
+    ChatConversation,
+    ChatMessage,
     Plan,
     ReasoningLedgerEntry,
     ReasoningWallet,
@@ -44,28 +46,92 @@ def _assignment_attributes(node: ast.AST) -> list[ast.Attribute]:
     return [target for target in targets if isinstance(target, ast.Attribute)]
 
 
-def _is_wallet_attribute(target: ast.Attribute) -> bool:
-    return (
-        isinstance(target.value, ast.Name)
-        and "wallet" in target.value.id.lower()
-        and target.attr in _RUNTIME_WALLET_FIELDS
+def _mentions_reasoning_wallet(node: ast.AST | None) -> bool:
+    return node is not None and any(
+        isinstance(item, ast.Name) and item.id == "ReasoningWallet" for item in ast.walk(node)
     )
 
 
-def _enclosing_function_name(
-    functions: list[ast.FunctionDef | ast.AsyncFunctionDef],
+def _literal_dict_keys(
     node: ast.AST,
-) -> str:
-    if not hasattr(node, "lineno"):
-        return "<module>"
-    enclosing = [
-        function for function in functions if function.lineno <= node.lineno <= function.end_lineno
+    dictionaries: dict[str, set[str]],
+) -> set[str]:
+    if isinstance(node, ast.Name):
+        return dictionaries.get(node.id, set())
+    if not isinstance(node, ast.Dict):
+        return set()
+    return {
+        key.value
+        for key in node.keys
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+
+
+def _function_wallet_bindings(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> tuple[set[str], dict[str, set[str]]]:
+    wallet_names = {
+        argument.arg
+        for argument in (
+            *function.args.posonlyargs,
+            *function.args.args,
+            *function.args.kwonlyargs,
+        )
+        if _mentions_reasoning_wallet(argument.annotation)
+    }
+    dictionaries: dict[str, set[str]] = {}
+    assignments = [
+        node for node in ast.walk(function) if isinstance(node, ast.Assign | ast.AnnAssign)
     ]
-    return max(enclosing, key=lambda function: function.lineno).name if enclosing else "<module>"
+    changed = True
+    while changed:
+        changed = False
+        for assignment in assignments:
+            value = assignment.value
+            targets = (
+                assignment.targets if isinstance(assignment, ast.Assign) else [assignment.target]
+            )
+            for target in targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                keys = _literal_dict_keys(value, dictionaries)
+                known_keys = dictionaries.get(target.id, set())
+                if keys - known_keys:
+                    dictionaries[target.id] = known_keys | keys
+                    changed = True
+                is_wallet = _mentions_reasoning_wallet(value) or (
+                    isinstance(value, ast.Name) and value.id in wallet_names
+                )
+                if isinstance(assignment, ast.AnnAssign) and _mentions_reasoning_wallet(
+                    assignment.annotation
+                ):
+                    is_wallet = True
+                if is_wallet and target.id not in wallet_names:
+                    wallet_names.add(target.id)
+                    changed = True
+    return wallet_names, dictionaries
 
 
-def test_runtime_wallet_writes_only_occur_in_the_locked_helper() -> None:
-    app_root = Path(__file__).resolve().parents[1] / "app"
+def _wallet_update_fields(
+    node: ast.Call,
+    dictionaries: dict[str, set[str]],
+) -> set[str]:
+    if (
+        not isinstance(node.func, ast.Attribute)
+        or node.func.attr != "values"
+        or not _mentions_reasoning_wallet(node.func.value)
+    ):
+        return set()
+    fields = {keyword.arg for keyword in node.keywords if keyword.arg in _RUNTIME_WALLET_FIELDS}
+    for keyword in node.keywords:
+        if keyword.arg is None:
+            fields.update(_literal_dict_keys(keyword.value, dictionaries))
+    for argument in node.args:
+        fields.update(_literal_dict_keys(argument, dictionaries))
+    return fields & _RUNTIME_WALLET_FIELDS
+
+
+def _runtime_wallet_write_violations(app_root: Path) -> list[str]:
     violations: list[str] = []
     for path in app_root.rglob("*.py"):
         relative = path.relative_to(app_root.parent).as_posix()
@@ -76,23 +142,104 @@ def test_runtime_wallet_writes_only_occur_in_the_locked_helper() -> None:
             for node in ast.walk(tree)
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
         ]
+        bindings = {id(function): _function_wallet_bindings(function) for function in functions}
         for node in ast.walk(tree):
             assignment_attributes = _assignment_attributes(node)
-            function_name = _enclosing_function_name(functions, node)
+            function = next(
+                (
+                    item
+                    for item in sorted(functions, key=lambda value: value.lineno, reverse=True)
+                    if item.lineno <= getattr(node, "lineno", -1) <= item.end_lineno
+                ),
+                None,
+            )
+            function_name = function.name if function is not None else "<module>"
             allowed = allowed_by_function.get(function_name, set())
+            wallet_names, dictionaries = bindings.get(id(function), (set(), {}))
             for target in assignment_attributes:
-                if _is_wallet_attribute(target) and target.attr not in allowed:
+                if (
+                    isinstance(target.value, ast.Name)
+                    and target.value.id in wallet_names
+                    and target.attr in _RUNTIME_WALLET_FIELDS
+                    and target.attr not in allowed
+                ):
                     violations.append(f"{relative}:{function_name}:{node.lineno}:{target.attr}")
             if (
                 isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "values"
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "setattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id in wallet_names
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value in _RUNTIME_WALLET_FIELDS
+                and node.args[1].value not in allowed
             ):
-                for keyword in node.keywords:
-                    if keyword.arg in _RUNTIME_WALLET_FIELDS and keyword.arg not in allowed:
-                        violations.append(f"{relative}:{function_name}:{node.lineno}:{keyword.arg}")
+                violations.append(f"{relative}:{function_name}:{node.lineno}:{node.args[1].value}")
+            if isinstance(node, ast.Call):
+                for field in _wallet_update_fields(node, dictionaries) - allowed:
+                    violations.append(f"{relative}:{function_name}:{node.lineno}:{field}")
 
-    assert violations == []
+    return violations
+
+
+def _write_wallet_guard_probe(tmp_path: Path, source: str) -> Path:
+    app_root = tmp_path / "app"
+    probe = app_root / "services" / "wallet_guard_probe.py"
+    probe.parent.mkdir(parents=True)
+    probe.write_text(source, encoding="utf-8")
+    return app_root
+
+
+def test_wallet_guard_rejects_an_aliased_wallet_assignment(tmp_path: Path) -> None:
+    app_root = _write_wallet_guard_probe(
+        tmp_path,
+        """
+from app.db.models import ReasoningWallet
+
+def bypass(wallet: ReasoningWallet) -> None:
+    account = wallet
+    account.available_credits = 999
+""",
+    )
+
+    assert _runtime_wallet_write_violations(app_root)
+
+
+def test_wallet_guard_rejects_setattr_on_a_wallet(tmp_path: Path) -> None:
+    app_root = _write_wallet_guard_probe(
+        tmp_path,
+        """
+from app.db.models import ReasoningWallet
+
+def bypass(obj: ReasoningWallet) -> None:
+    setattr(obj, "available_credits", 999)
+""",
+    )
+
+    assert _runtime_wallet_write_violations(app_root)
+
+
+def test_wallet_guard_rejects_unpacked_bulk_wallet_updates(tmp_path: Path) -> None:
+    app_root = _write_wallet_guard_probe(
+        tmp_path,
+        """
+from sqlalchemy import update
+from app.db.models import ReasoningWallet
+
+def bypass() -> None:
+    fields = {"available_credits": 999}
+    update(ReasoningWallet).values(**fields)
+""",
+    )
+
+    assert _runtime_wallet_write_violations(app_root)
+
+
+def test_runtime_wallet_writes_only_occur_in_the_locked_helper() -> None:
+    app_root = Path(__file__).resolve().parents[1] / "app"
+
+    assert _runtime_wallet_write_violations(app_root) == []
 
 
 def test_wallet_mutation_query_uses_for_update_and_populate_existing(
@@ -281,6 +428,7 @@ def test_postgres_concurrent_topups_cannot_overdraw_primary_quota(
     start = threading.Event()
     done = [threading.Event(), threading.Event()]
     errors: list[BaseException] = []
+    idempotency_keys = [uuid4(), uuid4()]
 
     def top_up(index: int) -> None:
         try:
@@ -290,6 +438,7 @@ def test_postgres_concurrent_topups_cannot_overdraw_primary_quota(
                     db,
                     tenant_id=tenant_id,
                     amount=100,
+                    idempotency_key=idempotency_keys[index],
                 )
         except BaseException as exc:  # noqa: BLE001 - thread failures are evidence.
             errors.append(exc)
@@ -321,3 +470,167 @@ def test_postgres_concurrent_topups_cannot_overdraw_primary_quota(
         assert wallet.available_credits == Decimal("100")
         assert wallet.reserved_credits == Decimal("0")
         assert len(ledger_entries) == 1
+
+
+def test_postgres_concurrent_topup_replays_transfer_primary_quota_once(
+    postgres_session_factory,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id, subscription_id = _seed_postgres_subscription(factory, total=200)
+    idempotency_key = uuid4()
+    start = threading.Event()
+    done = [threading.Event(), threading.Event()]
+    errors: list[BaseException] = []
+    responses = []
+
+    def top_up(index: int) -> None:
+        try:
+            assert start.wait(timeout=5)
+            with factory() as db:
+                responses.append(
+                    aibrain.top_up_reasoning_wallet(
+                        db,
+                        tenant_id=tenant_id,
+                        amount=100,
+                        idempotency_key=idempotency_key,
+                    )
+                )
+        except BaseException as exc:  # noqa: BLE001 - thread failures are evidence.
+            errors.append(exc)
+        finally:
+            done[index].set()
+
+    threads = [threading.Thread(target=top_up, args=(index,), daemon=True) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    start.set()
+    for event_ in done:
+        assert event_.wait(timeout=5)
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert len(responses) == 2
+    assert responses[0] == responses[1]
+    with factory() as db:
+        subscription = db.get(Subscription, subscription_id)
+        wallet = db.get(ReasoningWallet, tenant_id)
+        topups = list(
+            db.scalars(
+                select(ReasoningLedgerEntry).where(
+                    ReasoningLedgerEntry.tenant_id == tenant_id,
+                    ReasoningLedgerEntry.entry_type == "topup",
+                )
+            )
+        )
+        assert subscription.quota_credits_used == 100
+        assert wallet.available_credits == Decimal("100")
+        assert wallet.total_topup_credits == Decimal("100")
+        assert len(topups) == 1
+
+
+def test_postgres_aibrain_recovery_skips_a_message_locked_for_settlement(
+    postgres_session_factory,
+) -> None:
+    from app.services import task_recovery
+
+    factory = postgres_session_factory
+    tenant_id = _seed_postgres_wallet(factory, available=Decimal("200"))
+    now = datetime.now(UTC)
+    with factory() as db:
+        conversation = ChatConversation(
+            tenant_id=tenant_id,
+            title="Settlement race",
+        )
+        db.add(conversation)
+        db.flush()
+        message = ChatMessage(
+            tenant_id=tenant_id,
+            conversation_id=conversation.id,
+            role="user",
+            content="settling",
+            attachments=[],
+            tier="low",
+            model="gpt-5.6-luna",
+            status="pending",
+            created_at=now - timedelta(minutes=31),
+            updated_at=now - timedelta(minutes=31),
+        )
+        db.add(message)
+        db.flush()
+        reservation = aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=tenant_id,
+            entry_type="reserve",
+            amount_credits=Decimal("200"),
+            chat_message_id=message.id,
+            operation_key=f"reserve:{message.id}",
+        )
+        message.reserved_credits = reservation.ledger_entry.amount_credits
+        message_id = message.id
+        db.commit()
+
+    settlement = factory()
+    recovery_done = threading.Event()
+    recovery_errors: list[BaseException] = []
+    recovery_results = []
+    try:
+        message = aibrain._chat_message_for_update(
+            settlement,
+            tenant_id=tenant_id,
+            message_id=message_id,
+        )
+
+        def recover() -> None:
+            try:
+                recovery_results.append(
+                    task_recovery.recover_orphaned_image_queue_tasks(
+                        session_factory=factory,
+                        now=now,
+                        stale_after_seconds=1800,
+                        aibrain_stale_after_seconds=1800,
+                    )
+                )
+            except BaseException as exc:  # noqa: BLE001 - thread failures are evidence.
+                recovery_errors.append(exc)
+            finally:
+                recovery_done.set()
+
+        recovery_thread = threading.Thread(target=recover, daemon=True)
+        recovery_thread.start()
+        assert recovery_done.wait(timeout=5)
+        recovery_thread.join(timeout=5)
+        assert recovery_errors == []
+        assert recovery_results[0].aibrain_reservations == 0
+
+        message.status = "completed"
+        aibrain._apply_reasoning_wallet_change(
+            settlement,
+            tenant_id=tenant_id,
+            entry_type="settle",
+            amount_credits=Decimal("25"),
+            reserved_credits=message.reserved_credits,
+            chat_message_id=message.id,
+            operation_key=f"settle:{message.id}",
+        )
+        settlement.commit()
+    finally:
+        settlement.rollback()
+        settlement.close()
+
+    with factory() as db:
+        wallet = db.get(ReasoningWallet, tenant_id)
+        message = db.get(ChatMessage, message_id)
+        releases = list(
+            db.scalars(
+                select(ReasoningLedgerEntry).where(
+                    ReasoningLedgerEntry.tenant_id == tenant_id,
+                    ReasoningLedgerEntry.entry_type == "release",
+                )
+            )
+        )
+        assert message.status == "completed"
+        assert wallet.available_credits == Decimal("175")
+        assert wallet.reserved_credits == Decimal("0")
+        assert releases == []

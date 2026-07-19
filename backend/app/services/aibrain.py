@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from typing import Literal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -235,14 +235,19 @@ async def send_chat_message(
         prompt_tokens,
         completion_tokens,
     )
-    persisted_user_message = db.scalar(
-        select(ChatMessage).where(
-            ChatMessage.id == user_message.id,
-            ChatMessage.tenant_id == user.tenant_id,
-        )
+    persisted_user_message = _chat_message_for_update(
+        db,
+        tenant_id=user.tenant_id,
+        message_id=user_message.id,
     )
     if persisted_user_message is None:  # pragma: no cover - row was committed above.
         raise RuntimeError("Pending AIBRAIN message disappeared before settlement.")
+    if persisted_user_message.status != "pending":
+        raise AppError(
+            "The AIBRAIN request is no longer pending.",
+            code="AIBRAIN_REQUEST_EXPIRED",
+            status_code=409,
+        )
     persisted_user_message.status = "completed"
     persisted_user_message.updated_at = datetime.now(UTC)
     assistant_message = ChatMessage(
@@ -300,8 +305,17 @@ async def send_chat_message(
         )
     )
     db.commit()
+    attachment_urls = _attachment_download_urls(
+        db,
+        tenant_id=user.tenant_id,
+        messages=[persisted_user_message],
+        storage=storage,
+    )
     return ChatMessageCreateResponse(
-        user_message=message_to_read(persisted_user_message),
+        user_message=message_to_read(
+            persisted_user_message,
+            attachment_download_urls=attachment_urls,
+        ),
         assistant_message=message_to_read(assistant_message),
         wallet=wallet_to_read(settlement.wallet),
     )
@@ -317,7 +331,29 @@ def top_up_reasoning_wallet(
     *,
     tenant_id: str,
     amount: int,
+    idempotency_key: UUID,
 ) -> ReasoningWalletRead:
+    operation_key = f"topup:{tenant_id}:{idempotency_key}"
+    existing_entry = _topup_ledger_entry(
+        db,
+        tenant_id=tenant_id,
+        operation_key=operation_key,
+    )
+    if existing_entry is not None:
+        return _topup_replay_response(existing_entry, amount=amount)
+
+    quota.lock_active_subscription(db, tenant_id=tenant_id)
+    # A concurrent replay can only commit its ledger while this request waits here.
+    existing_entry = _topup_ledger_entry(
+        db,
+        tenant_id=tenant_id,
+        operation_key=operation_key,
+    )
+    if existing_entry is not None:
+        response = _topup_replay_response(existing_entry, amount=amount)
+        db.commit()
+        return response
+
     subscription = quota.consume_active_quota(
         db,
         tenant_id=tenant_id,
@@ -329,9 +365,53 @@ def top_up_reasoning_wallet(
         entry_type="topup",
         amount_credits=Decimal(amount),
         subscription_id=subscription.id,
+        operation_key=operation_key,
     )
+    response = _wallet_snapshot_from_ledger(mutation.ledger_entry)
     db.commit()
-    return wallet_to_read(mutation.wallet)
+    return response
+
+
+def _topup_ledger_entry(
+    db: Session,
+    *,
+    tenant_id: str,
+    operation_key: str,
+) -> ReasoningLedgerEntry | None:
+    return db.scalar(
+        select(ReasoningLedgerEntry).where(
+            ReasoningLedgerEntry.tenant_id == tenant_id,
+            ReasoningLedgerEntry.operation_key == operation_key,
+            ReasoningLedgerEntry.entry_type == "topup",
+        )
+    )
+
+
+def _topup_replay_response(
+    entry: ReasoningLedgerEntry,
+    *,
+    amount: int,
+) -> ReasoningWalletRead:
+    if _reasoning_credits(entry.amount_credits) != _reasoning_credits(amount):
+        raise AppError(
+            "The idempotency key was already used for a different top-up amount.",
+            code="AIBRAIN_IDEMPOTENCY_KEY_REUSED",
+            status_code=409,
+        )
+    return _wallet_snapshot_from_ledger(entry)
+
+
+def _wallet_snapshot_from_ledger(entry: ReasoningLedgerEntry) -> ReasoningWalletRead:
+    snapshot = (entry.details or {}).get("wallet_snapshot")
+    if not isinstance(snapshot, dict):
+        raise RuntimeError("Reasoning top-up ledger is missing its wallet snapshot.")
+    return ReasoningWalletRead(
+        available_credits=float(snapshot["available_credits"]),
+        reserved_credits=float(snapshot["reserved_credits"]),
+        total_topup_credits=float(snapshot["total_topup_credits"]),
+        total_spent_credits=float(snapshot["total_spent_credits"]),
+        single_request_limit=int(_SINGLE_REQUEST_LIMIT),
+    )
 
 
 def _apply_reasoning_wallet_change(
@@ -434,6 +514,14 @@ def _apply_reasoning_wallet_change(
     elif entry_type == "settle":
         wallet.total_spent_credits = _reasoning_credits(wallet.total_spent_credits + requested)
     wallet.updated_at = datetime.now(UTC)
+    ledger_details = dict(details or {})
+    if entry_type == "topup":
+        ledger_details["wallet_snapshot"] = {
+            "available_credits": str(next_available),
+            "reserved_credits": str(next_reserved),
+            "total_topup_credits": str(wallet.total_topup_credits),
+            "total_spent_credits": str(wallet.total_spent_credits),
+        }
     ledger_entry = ReasoningLedgerEntry(
         id=str(uuid4()),
         tenant_id=tenant_id,
@@ -446,7 +534,7 @@ def _apply_reasoning_wallet_change(
         subscription_id=subscription_id,
         chat_message_id=chat_message_id,
         operation_key=operation_key,
-        details=details or {},
+        details=ledger_details,
     )
     db.add(ledger_entry)
     db.flush([wallet, ledger_entry])
@@ -753,6 +841,23 @@ def _provider_cost_cents(cost_usd: Decimal) -> int:
     )
 
 
+def _chat_message_for_update(
+    db: Session,
+    *,
+    tenant_id: str,
+    message_id: str,
+) -> ChatMessage | None:
+    return db.scalar(
+        select(ChatMessage)
+        .where(
+            ChatMessage.id == message_id,
+            ChatMessage.tenant_id == tenant_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
 def _fail_chat_message(
     db: Session,
     *,
@@ -764,14 +869,15 @@ def _fail_chat_message(
     usage_result: dict[str, object],
     error_code: str,
 ) -> None:
-    user_message = db.scalar(
-        select(ChatMessage).where(
-            ChatMessage.id == user_message_id,
-            ChatMessage.tenant_id == tenant_id,
-        )
+    user_message = _chat_message_for_update(
+        db,
+        tenant_id=tenant_id,
+        message_id=user_message_id,
     )
     if user_message is None:  # pragma: no cover - committed before provider invocation.
         raise RuntimeError("Pending AIBRAIN message disappeared before release.")
+    if user_message.status != "pending":
+        return
     prompt_tokens = _nonnegative_int(usage_result.get("prompt_tokens"))
     completion_tokens = _nonnegative_int(usage_result.get("completion_tokens"))
     if prompt_tokens + completion_tokens == 0:
@@ -822,6 +928,41 @@ def _fail_chat_message(
         )
     )
     db.commit()
+
+
+def recover_stale_reasoning_reservations(
+    db: Session,
+    *,
+    cutoff: datetime,
+    recovered_at: datetime,
+) -> int:
+    messages = list(
+        db.scalars(
+            select(ChatMessage)
+            .where(
+                ChatMessage.role == "user",
+                ChatMessage.status == "pending",
+                ChatMessage.reserved_credits > 0,
+                ChatMessage.updated_at <= cutoff,
+            )
+            .with_for_update(skip_locked=True)
+        )
+    )
+    for message in messages:
+        message.status = "failed"
+        message.error_code = "AIBRAIN_RESERVATION_EXPIRED"
+        message.updated_at = recovered_at
+        _apply_reasoning_wallet_change(
+            db,
+            tenant_id=message.tenant_id,
+            entry_type="release",
+            amount_credits=message.reserved_credits,
+            reserved_credits=message.reserved_credits,
+            chat_message_id=message.id,
+            operation_key=f"release:{message.id}",
+            details={"error_code": message.error_code, "orphan_recovery": True},
+        )
+    return len(messages)
 
 
 def _conversation_title(content: str, *, has_attachments: bool) -> str:
@@ -892,6 +1033,7 @@ def get_conversation(
     *,
     tenant_id: str,
     conversation_id: str,
+    storage: ObjectStorage,
 ) -> ConversationRead:
     conversation = conversation_or_404(
         db,
@@ -908,7 +1050,17 @@ def get_conversation(
             .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
         )
     )
-    return conversation_to_read(conversation, messages=messages)
+    attachment_urls = _attachment_download_urls(
+        db,
+        tenant_id=tenant_id,
+        messages=messages,
+        storage=storage,
+    )
+    return conversation_to_read(
+        conversation,
+        messages=messages,
+        attachment_download_urls=attachment_urls,
+    )
 
 
 def conversation_or_404(
@@ -950,20 +1102,39 @@ def conversation_to_read(
     conversation: ChatConversation,
     *,
     messages: list[ChatMessage],
+    attachment_download_urls: dict[str, str] | None = None,
 ) -> ConversationRead:
     return ConversationRead(
         **conversation_to_summary(conversation).model_dump(),
-        messages=[message_to_read(message) for message in messages],
+        messages=[
+            message_to_read(
+                message,
+                attachment_download_urls=attachment_download_urls,
+            )
+            for message in messages
+        ],
     )
 
 
-def message_to_read(message: ChatMessage) -> ChatMessageRead:
+def message_to_read(
+    message: ChatMessage,
+    *,
+    attachment_download_urls: dict[str, str] | None = None,
+) -> ChatMessageRead:
+    urls = attachment_download_urls or {}
+    attachments = [
+        {
+            **attachment,
+            "download_url": urls.get(str(attachment.get("asset_id") or "")),
+        }
+        for attachment in (message.attachments or [])
+    ]
     return ChatMessageRead(
         id=message.id,
         conversation_id=message.conversation_id,
         role=message.role,
         content=message.content,
-        attachments=message.attachments or [],
+        attachments=attachments,
         tier=message.tier,
         model=message.model,
         status=message.status,
@@ -974,3 +1145,44 @@ def message_to_read(message: ChatMessage) -> ChatMessageRead:
         charged_credits=float(message.charged_credits),
         created_at=message.created_at,
     )
+
+
+def _attachment_download_urls(
+    db: Session,
+    *,
+    tenant_id: str,
+    messages: list[ChatMessage],
+    storage: ObjectStorage,
+) -> dict[str, str]:
+    asset_ids = {
+        str(attachment.get("asset_id") or "")
+        for message in messages
+        for attachment in (message.attachments or [])
+        if attachment.get("asset_id")
+    }
+    if not asset_ids:
+        return {}
+    assets = db.scalars(
+        select(Asset).where(
+            Asset.id.in_(asset_ids),
+            Asset.tenant_id == tenant_id,
+            Asset.status == "ready",
+            Asset.deleted_at.is_(None),
+        )
+    )
+    urls: dict[str, str] = {}
+    for asset in assets:
+        if asset.type not in _IMAGE_ASSET_TYPES:
+            continue
+        if str(asset.mime_type or "").lower() not in _IMAGE_MIME_TYPES:
+            continue
+        try:
+            urls[asset.id] = presign_tenant_storage_key(
+                storage,
+                tenant_id=tenant_id,
+                storage_key=asset.storage_key,
+                expires_in=settings.engine_s3_presign_ttl,
+            )
+        except AppError:
+            continue
+    return urls

@@ -50,6 +50,7 @@ def top_up_aibrain_wallet(
             db,
             tenant_id=user.tenant_id,
             amount=payload.amount,
+            idempotency_key=payload.idempotency_key,
         ),
     )
 
@@ -92,6 +93,7 @@ def get_aibrain_conversation(
     conversation_id: str,
     user: User = AIBrainPermissionDependency,
     db: Session = DbSessionDependency,
+    storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[ConversationRead]:
     return ok(
         request,
@@ -99,6 +101,7 @@ def get_aibrain_conversation(
             db,
             tenant_id=user.tenant_id,
             conversation_id=conversation_id,
+            storage=storage,
         ),
     )
 

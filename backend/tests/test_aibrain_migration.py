@@ -105,7 +105,7 @@ def test_aibrain_migration_creates_wallet_chat_and_billing_schema() -> None:
         table_name
         for table_name, _name, condition in fake_op.created_checks
         if "'chat'" in condition
-    } == {"provider_configs", "usage_records", "credit_rates"}
+    } == {"provider_configs", "usage_records"}
     assert ("usage_records", "provider_cost_usd") in fake_op.added_columns
     assert ("usage_records", "chat_message_id") in fake_op.added_columns
     assert ("usage_records", "credits") in fake_op.altered_columns

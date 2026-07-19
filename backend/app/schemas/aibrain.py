@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -25,6 +26,7 @@ class ChatAttachmentRead(BaseModel):
     asset_id: str
     asset_type: str
     mime_type: str
+    download_url: str | None = None
 
 
 class ChatMessageRead(BaseModel):
@@ -101,6 +103,7 @@ class ReasoningWalletTopupRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     amount: TopupAmount
+    idempotency_key: UUID
 
 
 class ChatMessageCreateResponse(BaseModel):
