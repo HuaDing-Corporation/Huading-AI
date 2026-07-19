@@ -328,7 +328,8 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     const durationFieldset = screen.getByText("视频时长（与文案、字幕一致）").closest("fieldset") as HTMLElement;
     fireEvent.click(within(durationFieldset).getByRole("button", { name: "自定义" }));
     fireEvent.change(screen.getByLabelText("自定义时长（秒）"), { target: { value: "5.5" } });
-    expect(screen.getByText("请输入 5–120 的整数秒")).toBeInTheDocument();
+    // FIX3（P2-2）：文案断言**移出**共享 setup（否则变异下三条测试都在这里提前失败、掩盖各自路径断言）。
+    // 5.5 错误文案的显示由 duration-picker.test.tsx 与本文件「submits a custom duration」用例覆盖。
   }
 
   it("小数时长 5.5 · 路径1「AI生成文案」→ 禁点 + 不发（scripts；FIX2 此前漏门真发 {duration_sec:5.5}）", async () => {

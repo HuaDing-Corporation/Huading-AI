@@ -1573,7 +1573,10 @@ export const handlers = [
 
   // ── 文案仿写 + 标题/话题生成 (COPY-UI-0001) — 同步 REST mock ──
   http.post(`${BASE}/api/v1/copy/rewrite`, async ({ request }) => {
-    const body = (await request.json()) as { source_text: string; mode: string; n?: number };
+    const body = (await request.json()) as { source_text: string; mode: string; n?: number; duration_sec?: number };
+    // FIX3（CB P2-1 · 机制按"接受方"算）：CopyRewriteRequest.duration_sec 是 int（copy.py，extra=forbid）——小数 → 422。
+    // 该端点当前无发送方，但类型支持该字段；凡**接受** duration_sec 的 mock 一律拒非整数，堵住"将来有人发就假绿"。
+    if (badDuration(body.duration_sec)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
     const base = (body.source_text ?? "").trim();
     if (body.mode === "auto") {
       const n = Math.min(5, Math.max(1, body.n ?? 3));
