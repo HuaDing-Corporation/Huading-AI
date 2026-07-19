@@ -707,6 +707,7 @@ def build_seedance_scene_prompt_payload(
     duration_sec: float | int | None = None,
 ) -> dict[str, Any]:
     target_duration = _seedance_i2v_target_duration(duration_sec)
+    scene_count = _seedance_i2v_scene_count(target_duration)
     topic_text = str(topic or "").strip()
     script_text = str(script or "").strip()
     normalized_image_urls = [str(url).strip() for url in image_urls or [] if str(url).strip()]
@@ -723,7 +724,10 @@ def build_seedance_scene_prompt_payload(
             "镜头拆分、主体构图、景别、镜头运动、光线、材质、环境氛围、节奏和转场；"
             "negative_prompt 必须列出应避免的产品变形、颜色漂移、结构增删、重复主体、"
             "文字乱码、抖动、闪烁和低质量画面。不要把口播台词写成画面字幕。"
-            f"目标视频时长约{target_duration}秒。\n"
+            f"目标视频时长约{target_duration}秒。scene_prompt 必须明确写出全片约"
+            f"{target_duration}秒，共{scene_count}个连续分镜，按每镜最多约"
+            f"{_SEEDANCE_I2V_CLIP_DURATION_SEC}秒安排节奏，最后一镜在总时长内完成收束；"
+            "不得改用其他默认时长或分镜数。\n"
             f"产品主题：{topic_text or '未提供'}\n"
             f"口播文案：{script_text or '未提供'}"
         ),

@@ -20,7 +20,7 @@ from app.db.models import (
     Voice,
 )
 from app.main import app
-from app.schemas.videos import VideoGenerateRequest
+from app.schemas.videos import ScenePromptRequest, VideoGenerateRequest
 
 
 class _FakeStorage:
@@ -1637,6 +1637,18 @@ def test_video_generate_request_clamps_seedance_duration() -> None:
     assert high.duration_sec == 120
 
 
+def test_scene_prompt_request_keeps_optional_clamped_duration_contract() -> None:
+    common = {"product_image_keys": ["uploads/product.png"]}
+
+    omitted = ScenePromptRequest(**common)
+    low = ScenePromptRequest(**common, duration_sec=3)
+    high = ScenePromptRequest(**common, duration_sec=999)
+
+    assert omitted.duration_sec is None
+    assert low.duration_sec == 5
+    assert high.duration_sec == 120
+
+
 def test_video_list_uses_limit_offset_and_returns_items_total(
     auth_context,
     auth_db,
@@ -1848,9 +1860,12 @@ def test_scene_prompt_request_openapi_requires_one_to_nine_product_images() -> N
     assert resp.status_code == 200
     schema = resp.json()["components"]["schemas"]["ScenePromptRequest"]
     product_images = schema["properties"]["product_image_keys"]
+    duration = schema["properties"]["duration_sec"]
     assert "product_image_keys" in schema["required"]
+    assert "duration_sec" not in schema["required"]
     assert product_images["minItems"] == 1
     assert product_images["maxItems"] == 9
+    assert duration["anyOf"] == [{"type": "integer"}, {"type": "null"}]
     assert schema["additionalProperties"] is False
 
 
