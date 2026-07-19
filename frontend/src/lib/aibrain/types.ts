@@ -114,9 +114,15 @@ export interface SendMessageResponse {
   wallet: ReasoningWallet;
 }
 
-/** 充值请求/响应（BE `POST /wallet/topup` → `ReasoningWalletRead`）。单向不可退。 */
+/**
+ * 充值请求（BE `POST /wallet/topup` → `ReasoningWalletRead`）。单向不可退。
+ * 🔴 `idempotency_key`（FIX1 · §四之二）：推理积分不可退 → 一次网络重试的双扣是**不可逆**的。故充值必带幂等键，
+ * 服务端对同一 key 重放**返回首次结果、不产生第二笔**。**每次充值尝试生成一次、重试复用同一个、取消后重发=新 key**。
+ * ⚠️ 字段名/形状最终以 BE FIX1 回执为准（先按 `idempotency_key` 实现，回执到再核）。
+ */
 export interface TopupRequest {
   amount: number;
+  idempotency_key: string;
 }
 
 /**

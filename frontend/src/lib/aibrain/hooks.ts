@@ -59,11 +59,15 @@ export function useSendMessage() {
   });
 }
 
-/** 充值（topup）。响应是整份钱包 → 直接回填缓存。 */
+/**
+ * 充值（topup）。响应是整份钱包 → 直接回填缓存。
+ * 🔴 幂等键由**调用方（充值弹窗）**给并跨重试复用（§四之二）——不在这里生成，否则每次 mutate 都是新 key = 没有幂等。
+ */
 export function useTopup() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (amount: number) => topupWallet({ amount }),
+    mutationFn: (vars: { amount: number; idempotencyKey: string }) =>
+      topupWallet({ amount: vars.amount, idempotency_key: vars.idempotencyKey }),
     onSuccess: (wallet: ReasoningWallet) => qc.setQueryData<ReasoningWallet>(aibrainKeys.wallet(), wallet)
   });
 }

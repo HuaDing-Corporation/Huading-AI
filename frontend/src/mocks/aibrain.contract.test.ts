@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { createConversation, getConversation, sendMessage, topupWallet } from "@/lib/aibrain/api";
+import { createConversation, getConversation, getWallet, sendMessage, topupWallet } from "@/lib/aibrain/api";
 import type { SendMessageRequest } from "@/lib/aibrain/types";
 import { resetAibrain } from "./aibrain-handlers";
 
-// 🔴 mock 逐字段镜像 BE f2e9a2e0、**不比 BE 宽松**（含 402/422/502 状态码本身）。
+// 🔴 mock 逐字段镜像 BE f2e9a2e0、**不比 BE 宽松**（含 402/422/502 状态码本身 + 充值幂等）。
 beforeEach(() => resetAibrain());
 const PROVIDER_FAIL = "__mock_provider_fail__"; // 与 mock 内约定一致
+let keySeq = 0;
+const topup = (amount: number, key = `k${++keySeq}`) => topupWallet({ amount, idempotency_key: key });
 
 describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
   it("非法档位 → 422（校验错）", async () => {
@@ -23,7 +25,7 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
   });
 
   it("请求过大（预留 200 也不够）→ 422 AIBRAIN_REQUEST_LIMIT_EXCEEDED", async () => {
-    await topupWallet({ amount: 100 });
+    await topup(100);
     const conv = await createConversation();
     await expect(
       sendMessage(conv.id, { content: "x".repeat(8001), tier: "high", attachment_asset_ids: [] })
@@ -31,7 +33,7 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
   });
 
   it("上游失败 → 502 AIBRAIN_PROVIDER_FAILED（不落通用报错）", async () => {
-    await topupWallet({ amount: 100 });
+    await topup(100);
     const conv = await createConversation();
     await expect(
       sendMessage(conv.id, { content: PROVIDER_FAIL, tier: "low", attachment_asset_ids: [] })
@@ -39,11 +41,25 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
   });
 
   it("非法充值档位 → 422", async () => {
-    await expect(topupWallet({ amount: 123 })).rejects.toMatchObject({ status: 422 });
+    await expect(topup(123)).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("🔴 §四之二 充值幂等：同一 idempotency_key 重放 → 只加一次、返回首次结果（不双扣）", async () => {
+    const first = await topupWallet({ amount: 500, idempotency_key: "same-key" });
+    expect(first.available_credits).toBe(500);
+    // 重放同一 key（模拟网络重试）——**不产生第二笔**。
+    const replay = await topupWallet({ amount: 500, idempotency_key: "same-key" });
+    expect(replay.available_credits).toBe(500); // 不是 1000
+    const w = await getWallet();
+    expect(w.available_credits).toBe(500);
+    expect(w.total_topup_credits).toBe(500);
+    // 不同 key = 新的一次充值 → 真的加。
+    const next = await topupWallet({ amount: 500, idempotency_key: "other-key" });
+    expect(next.available_credits).toBe(1000);
   });
 
   it("🔴 多传字段（BE extra=forbid）→ 422（mock 不比 BE 宽松，CR#4）", async () => {
-    await topupWallet({ amount: 100 });
+    await topup(100);
     const conv = await createConversation();
     const body = { content: "hi", tier: "low", attachment_asset_ids: [], model: "sneaky" } as unknown as SendMessageRequest;
     await expect(sendMessage(conv.id, body)).rejects.toMatchObject({ status: 422 });
@@ -57,7 +73,7 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
   });
 
   it("充值后发送 → 成功 + 结算 + 响应回填 wallet（available 扣典型消耗）", async () => {
-    const w = await topupWallet({ amount: 500 }); // 0 + 500
+    const w = await topup(500); // 0 + 500
     expect(w.available_credits).toBe(500);
     const conv = await createConversation();
     const res = await sendMessage(conv.id, { content: "你好", tier: "low", attachment_asset_ids: [] });
@@ -68,7 +84,7 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
   });
 
   it("🔴 会话切换不串数据：两个会话各自独立的消息", async () => {
-    await topupWallet({ amount: 500 });
+    await topup(500);
     const a = await createConversation();
     const b = await createConversation();
     await sendMessage(a.id, { content: "A的问题", tier: "low", attachment_asset_ids: [] });

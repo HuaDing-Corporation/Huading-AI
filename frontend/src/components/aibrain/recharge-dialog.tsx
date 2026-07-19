@@ -3,7 +3,7 @@
 // 华鼎AI智脑 · 充值弹窗（AIBRAIN-UI-0001）。档位 100/500/1000/2000（D4）；**必须明示「单向不可退」**（D4/任务包 §3）。
 // 复用 ui/dialog + ContactDialog 的关闭约定（DialogClose asChild → Button ghost icon）。
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -24,11 +24,24 @@ export function RechargeDialog({
   const recharge = useTopup();
   const [amount, setAmount] = useState<number>(TOPUP_OPTIONS[1]);
   const [error, setError] = useState<string | null>(null);
+  // 🔴 幂等键：一次充值尝试生成一次、**重试复用**（§四之二）。每次打开 = 新尝试 = 新 key；改档位 = 新意图 = 新 key。
+  // 生成放客户端副作用/交互里（不在 render/SSR 里调 crypto），空则 onConfirm 兜底生成一个。
+  const idemKey = useRef<string>("");
+  useEffect(() => {
+    if (open) idemKey.current = crypto.randomUUID();
+  }, [open]);
+
+  const pickAmount = (next: number) => {
+    setAmount(next);
+    idemKey.current = crypto.randomUUID(); // 改金额 = 新充值意图 = 新 key
+  };
 
   const onConfirm = async () => {
     setError(null);
+    if (!idemKey.current) idemKey.current = crypto.randomUUID();
     try {
-      await recharge.mutateAsync(amount);
+      // 复用 idemKey.current：上一次失败后再点「确认充值」= 同一 key → 服务端去重、不双扣。
+      await recharge.mutateAsync({ amount, idempotencyKey: idemKey.current });
       onOpenChange(false);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : copy.aibrain.rechargeFailed);
@@ -59,7 +72,7 @@ export function RechargeDialog({
                 type="button"
                 role="radio"
                 aria-checked={selected}
-                onClick={() => setAmount(tier)}
+                onClick={() => pickAmount(tier)}
                 className={cn(
                   "rounded-field border px-4 py-3 text-center text-sm tabular-nums outline-none transition-colors focus-visible:shadow-focus-gold",
                   selected

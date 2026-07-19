@@ -41,6 +41,8 @@ let msgSeq = 0;
 let available = 0;
 let totalTopup = 0;
 let totalSpent = 0;
+// 充值幂等（§四之二）：key → 首次结果。同 key 重放返回首次结果、不产生第二笔（否则又是「mock 比 BE 宽松」的假绿）。
+const topupIdempotency = new Map<string, ReturnType<typeof walletView>>();
 
 /** 测试重置（stores 模块级，server.resetHandlers 不清）。 */
 export function resetAibrain(): void {
@@ -50,6 +52,7 @@ export function resetAibrain(): void {
   available = 0;
   totalTopup = 0;
   totalSpent = 0;
+  topupIdempotency.clear();
 }
 
 function isTier(v: unknown): v is IntensityTier {
@@ -91,13 +94,22 @@ export function aibrainHandlers() {
     // ── 钱包 / 充值（topup）───────────────────────────────────────────
     http.get(`${BASE}/api/v1/aibrain/wallet`, () => ok(walletView())),
     http.post(`${BASE}/api/v1/aibrain/wallet/topup`, async ({ request }) => {
-      const body = (await request.json().catch(() => ({}))) as Record<string, unknown> & { amount?: unknown };
-      if (hasExtraKeys(body, ["amount"])) return err(422, "VALIDATION_ERROR", "extra fields forbidden");
+      const body = (await request.json().catch(() => ({}))) as Record<string, unknown> & {
+        amount?: unknown;
+        idempotency_key?: unknown;
+      };
+      if (hasExtraKeys(body, ["amount", "idempotency_key"])) return err(422, "VALIDATION_ERROR", "extra fields forbidden");
+      const key = typeof body.idempotency_key === "string" ? body.idempotency_key : "";
+      // 🔴 幂等：同 key 重放 → 返回首次结果，**不再加钱**（推理积分不可退，双扣不可逆，§四之二）。
+      const prev = key ? topupIdempotency.get(key) : undefined;
+      if (prev) return ok(prev);
       if (typeof body.amount !== "number" || !TOPUP_OPTIONS.includes(body.amount))
         return err(422, "VALIDATION_ERROR", "充值档位非法（100 / 500 / 1000 / 2000）");
       available += body.amount; // 1:1；单向不可退（无退款端点）
       totalTopup += body.amount;
-      return ok(walletView());
+      const result = walletView();
+      if (key) topupIdempotency.set(key, result);
+      return ok(result);
     }),
 
     // ── 会话列表 / 新建 ──────────────────────────────────────────────
