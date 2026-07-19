@@ -24,13 +24,13 @@ import { copy } from "@/lib/copy";
 // IMAGE-GEN-OPTIMIZE-UI-0001 契约 §四：参考图上限 6（决策 D2）。张数选择器 + 多图 picker 复用电商带货那套（max=per-call）。
 const PHOTO_REF_MAX = 6;
 
-const STRENGTH_KEYS = ["similarity_strength", "creativity_strength", "subject_strength", "background_strength"] as const;
+// 三个强度（背景参考强度已于 2026-07-19 砍除：BE 盲评无作用、#208 内删除、从未上线）。
+const STRENGTH_KEYS = ["similarity_strength", "creativity_strength", "subject_strength"] as const;
 type StrengthKey = (typeof STRENGTH_KEYS)[number];
 const STRENGTH_META: { key: StrengthKey; label: string; hint: string }[] = [
   { key: "similarity_strength", label: copy.workbench.strengthSimilarity, hint: copy.workbench.strengthSimilarityHint },
   { key: "creativity_strength", label: copy.workbench.strengthCreativity, hint: copy.workbench.strengthCreativityHint },
-  { key: "subject_strength", label: copy.workbench.strengthSubject, hint: copy.workbench.strengthSubjectHint },
-  { key: "background_strength", label: copy.workbench.strengthBackground, hint: copy.workbench.strengthBackgroundHint }
+  { key: "subject_strength", label: copy.workbench.strengthSubject, hint: copy.workbench.strengthSubjectHint }
 ];
 type StrengthState = { enabled: boolean; value: number };
 const DEFAULT_STRENGTH: StrengthState = { enabled: false, value: 50 }; // 默认关闭；开启后从 50% 起（十档中位）
@@ -53,7 +53,7 @@ function CollapsibleSection({ label, bodyClassName, children }: { label: string;
 
 /**
  * 图片生成 / 修改 (video_mode="photo") workbench container — the third mode. IMAGE-GEN-OPTIMIZE-UI-0001：
- * 参考图单张→1–6 张（复用张数选择器 + ReferenceImagesPicker，注入产品图上传器）；四个强度滑块（各带开关、默认关、
+ * 参考图单张→1–6 张（复用张数选择器 + ReferenceImagesPicker，注入产品图上传器）；三个强度滑块（各带开关、默认关、
  * 关闭不提交，软性倾向非精确参数）；四层提示词（任务总控/统一负面/图片提示词/图片负面，无字数上限，总控可折叠）。
  * ⚠️ 零回归：AI 封面（cover-panel，video_mode:"photo"+purpose:"cover"+image_size/image_quality）不走本表单、不受影响。
  */
@@ -79,12 +79,11 @@ export function PhotoImageForm({
   const [masterPrompt, setMasterPrompt] = useState("");
   const [masterNegative, setMasterNegative] = useState("");
   const [imageNegative, setImageNegative] = useState("");
-  // 四个强度（各 {enabled,value}，默认关）。
+  // 三个强度（各 {enabled,value}，默认关）。
   const [strengths, setStrengths] = useState<Record<StrengthKey, StrengthState>>({
     similarity_strength: { ...DEFAULT_STRENGTH },
     creativity_strength: { ...DEFAULT_STRENGTH },
-    subject_strength: { ...DEFAULT_STRENGTH },
-    background_strength: { ...DEFAULT_STRENGTH }
+    subject_strength: { ...DEFAULT_STRENGTH }
   });
   const setStrength = (key: StrengthKey, patch: Partial<StrengthState>) =>
     setStrengths((s) => ({ ...s, [key]: { ...s[key], ...patch } }));
@@ -187,7 +186,7 @@ export function PhotoImageForm({
       {/* §3之二 清晰度档位 1K/2K/4K：与画面比例并列（比例定形状、档位定大小）。 */}
       <ImageResolutionPicker value={imageResolution} onChange={setImageResolution} />
 
-      {/* 生成强度（可选）：4 个滑块，各带开关、默认关、关闭不提交。默认收起，避免表单过长。 */}
+      {/* 生成强度（可选）：三个滑块，各带开关、默认关、关闭不提交。默认收起，避免表单过长。 */}
       <CollapsibleSection label={copy.workbench.strengthGroupLabel}>
         <p className="mb-3 text-[12px] leading-relaxed text-ink-faint">{copy.workbench.strengthGroupHint}</p>
         {STRENGTH_META.map(({ key, label, hint }) => (

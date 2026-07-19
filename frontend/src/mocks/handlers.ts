@@ -15,7 +15,7 @@ const err = (status: number, code: string, message: string) =>
 // 非整数即非法（调用处返 422）；undefined/null（可选未传）不算非法。scene-prompt / estimate / videos 提交三处共用。
 const badDuration = (v: unknown): boolean => v !== undefined && v !== null && !Number.isInteger(v);
 
-// IMAGE-GEN-OPTIMIZE-UI-0001 §四：四个强度取值 10..100 步长 10，None=未开启。present 且非「10..100 步10 整数」即非法。
+// IMAGE-GEN-OPTIMIZE-UI-0001 §四：三个强度取值 10..100 步长 10，None=未开启（背景参考强度已砍除·从未上线）。present 且非「10..100 步10 整数」即非法。
 const badStrength = (v: unknown): boolean =>
   v !== undefined && v !== null && !(typeof v === "number" && Number.isInteger(v) && v >= 10 && v <= 100 && v % 10 === 0);
 
@@ -1493,10 +1493,9 @@ export const handlers = [
       image_keys?: string[]; // 参考图 1–6（可选）
       master_prompt?: string; // 任务总控（可选）
       master_negative_prompt?: string; // 任务统一负面（可选）
-      similarity_strength?: number; // 四个强度：10..100 步长 10，未开启不出现
+      similarity_strength?: number; // 三个强度：10..100 步长 10，未开启不出现（背景参考强度已砍除·从未上线）
       creativity_strength?: number;
       subject_strength?: number;
-      background_strength?: number;
       image_resolution?: string; // §3之二：清晰度档位 1k/2k/4k
     };
     // resolution 是后端全模式 Literal["480p","720p","1080p"]（含 seedance_i2v，见 schemas/videos.py:154）：
@@ -1548,7 +1547,7 @@ export const handlers = [
     }
     // 图片生成/修改 photo 校验（IMAGE-GEN-OPTIMIZE-UI-0001 契约 §四）。mock 不比 BE 宽松：
     //  · image_keys 若present 须 1–6（7 张 → 422）——可选（纯文生图 / AI 封面均不带，不误杀）；
-    //  · 四个强度若present 须 10..100 步长 10（非法 → 422）；未开启的强度**不应出现**（前端已保证，此为防漂移）。
+    //  · 三个强度若present 须 10..100 步长 10（非法 → 422）；未开启的强度**不应出现**（前端已保证，此为防漂移）。
     // ⚠️ 零回归：AI 封面（purpose:cover，只带 image_size/image_quality，无 image_keys/强度）在此天然全过。
     if (body.video_mode === "photo") {
       if (body.image_keys !== undefined) {
@@ -1560,8 +1559,7 @@ export const handlers = [
       if (
         badStrength(body.similarity_strength) ||
         badStrength(body.creativity_strength) ||
-        badStrength(body.subject_strength) ||
-        badStrength(body.background_strength)
+        badStrength(body.subject_strength)
       ) {
         return err(422, "PHOTO_INVALID", "强度取值须为 10..100 步长 10");
       }

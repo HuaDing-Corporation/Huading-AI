@@ -135,11 +135,11 @@ export interface CreateVideoRequest {
   image_keys?: string[]; // 参考图 1–6（取代标量 image_key；来自 POST /uploads→key）。可选（纯文生图不带）；image_key 保留兼容 AI 封面等既有 caller
   master_prompt?: string; // 任务总控提示词（全局风格前缀，可选，无字数上限）
   master_negative_prompt?: string; // 任务统一负面提示词（可选，无上限）——同 negative_prompt 编码进 prompt，非硬约束
-  // 四个强度：均 int|None，取值 10..100 步长 10，None=未开启（默认）。底层编码进提示词（provider 无原生参数），软性倾向、非精确控制。
+  // 三个强度：均 int|None，取值 10..100 步长 10，None=未开启（默认）。底层编码进提示词（provider 无原生参数），软性倾向、非精确控制。
+  // 注：背景参考强度(background_strength)已于 2026-07-19 砍除——BE 盲评判定无作用、#208 内删除、从未上线。
   similarity_strength?: number; // 图片相似度
   creativity_strength?: number; // AI 创意程度
   subject_strength?: number; // 主体保持强度
-  background_strength?: number; // 背景参考强度
   image_resolution?: string; // 清晰度档位 "1k"|"2k"|"4k"（§3之二，默认 1k）；界面选择是硬条件、总随请求传（BE 保证参数来源唯一）
   // 注：图片负面提示词复用上方 negative_prompt 字段（视频链路已有；photo 分支此前不读，本期起读）。
   // ── 视频生成 video_gen (VIDEOGEN-UI-0001, seam §2) ──

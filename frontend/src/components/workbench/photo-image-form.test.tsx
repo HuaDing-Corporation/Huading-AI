@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const taskMocks = vi.hoisted(() => ({ createAndTrack: vi.fn() }));
@@ -104,7 +104,7 @@ describe("PhotoImageForm (图片生成 / 修改 · IMAGE-GEN-OPTIMIZE-UI-0001)",
   it("开启 AI 标识开关 → 提交体 apply_visible_label:true（承重）", async () => {
     render(<PhotoImageForm />);
     setPrompt("一只橘猫");
-    fireEvent.click(screen.getByRole("switch", { name: "AI 生成标识" })); // 消歧：现有 4 个强度开关
+    fireEvent.click(screen.getByRole("switch", { name: "AI 生成标识" })); // 精确全名，与三个强度开关不撞
     fireEvent.click(screen.getByRole("button", { name: /生成图片/ }));
     fireEvent.click(await screen.findByRole("button", { name: "确定" }));
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
@@ -169,7 +169,7 @@ describe("PhotoImageForm (图片生成 / 修改 · IMAGE-GEN-OPTIMIZE-UI-0001)",
     expect(customInput).toHaveAttribute("placeholder", "1–6");
   });
 
-  // 🔴 req2 承重（关键防假绿）：四个强度默认关闭 → 提交体**不含任何 *_strength**。
+  // 🔴 req2 承重（关键防假绿）：三个强度默认关闭 → 提交体**不含任何 *_strength**。
   it("强度默认关闭 → 提交体不含任何 *_strength", async () => {
     render(<PhotoImageForm />);
     setPrompt("一只橘猫");
@@ -177,9 +177,26 @@ describe("PhotoImageForm (图片生成 / 修改 · IMAGE-GEN-OPTIMIZE-UI-0001)",
     fireEvent.click(await screen.findByRole("button", { name: "确定" }));
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     const [request] = taskMocks.createAndTrack.mock.calls[0];
-    for (const k of ["similarity_strength", "creativity_strength", "subject_strength", "background_strength"]) {
+    for (const k of ["similarity_strength", "creativity_strength", "subject_strength"]) {
       expect(request).not.toHaveProperty(k);
     }
+  });
+
+  // 承重（2026-07-19 需求变更）：背景参考强度已砍除 → 生成强度组只剩三个强度开关，且「背景参考强度」不再渲染。
+  // 变异：把 background_strength 加回 STRENGTH_KEYS → 本条红（开关数 4 / 出现「背景参考强度」）。
+  it("背景参考强度已移除：只剩三个强度开关（图片相似度/AI创意程度/主体保持强度），无背景参考强度", () => {
+    render(<PhotoImageForm />);
+    // 三个保留强度开关在册。
+    expect(screen.getByRole("switch", { name: "图片相似度开关" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "AI 创意程度开关" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "主体保持强度开关" })).toBeInTheDocument();
+    // 强度开关恰好三个——结构隔离到「生成强度」分组内计数（AI 标识开关在组外，即便改名带「开关」后缀也不会误计；
+    // 不再用 /开关$/ 过滤全页 switch，避免评审指出的假红：无关文案改名把标识开关计进强度数）。
+    const strengthGroup = screen.getByText("生成强度（可选）").closest("details") as HTMLElement;
+    expect(within(strengthGroup).getAllByRole("switch")).toHaveLength(3);
+    // 背景参考强度彻底消失（label 与开关均无）。
+    expect(screen.queryByText("背景参考强度")).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch", { name: "背景参考强度开关" })).not.toBeInTheDocument();
   });
 
   // req2 承重：开启「图片相似度」并设 80% → 提交体 similarity_strength:80；未开启的其余强度仍不出现。
@@ -199,7 +216,6 @@ describe("PhotoImageForm (图片生成 / 修改 · IMAGE-GEN-OPTIMIZE-UI-0001)",
     expect(request.similarity_strength).toBe(80);
     expect(request).not.toHaveProperty("creativity_strength");
     expect(request).not.toHaveProperty("subject_strength");
-    expect(request).not.toHaveProperty("background_strength");
   });
 
   // req3 承重：四层提示词——图片提示词(topic) + 图片负面(negative_prompt) + 任务总控(master_prompt) + 统一负面(master_negative_prompt) 随请求传。

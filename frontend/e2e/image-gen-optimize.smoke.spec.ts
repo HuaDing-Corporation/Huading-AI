@@ -2,7 +2,7 @@ import { expect, test, type Page, type Request } from "@playwright/test";
 
 /**
  * IMAGE-GEN-OPTIMIZE-UI-0001 图片生成/修改优化 交互冒烟（生产构建 next start，真走 MSW 新契约）：
- *  ① 新控件渲染：参考图「张数选择器」+ 多图 picker（替代单图）、四个「强度滑块」组（可折叠）、四层提示词（图片负面 + 任务总控组）。
+ *  ① 新控件渲染：参考图「张数选择器」+ 多图 picker（替代单图）、三个「强度滑块」组（可折叠；背景参考强度已砍除）、四层提示词（图片负面 + 任务总控组）。
  *  ② req1：参考图多图 —— 上传 1 张 → 提交体带 image_keys（非标量 image_key）。
  *  ③ req2：开启「图片相似度」强度 → slider 启用 → 提交体带 similarity_strength（默认关的其余强度不出现）。
  *  ④ 端到端提交 → 202（mock 校验 image_keys 1–6 / 强度 10..100 步10，接线断即报错）。

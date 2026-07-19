@@ -226,7 +226,7 @@ export const copy = {
     photoRefImagesOverLimit: "超过所选张数，多余参考图未添加",
     photoRefImagesExceed: (uploaded: number, allowed: number) =>
       `已上传 ${uploaded} 张，超过所选 ${allowed} 张，请删除多余参考图或调高张数`,
-    // 四个强度滑块（诚实文案：软性倾向、编码进提示词，非 provider 原生精确参数）
+    // 三个强度滑块（诚实文案：软性倾向、编码进提示词，非 provider 原生精确参数）；背景参考强度已于 2026-07-19 砍除
     strengthGroupLabel: "生成强度（可选）",
     strengthGroupHint: "以下为软性倾向控制——底层编码进提示词、并非精确参数；默认关闭，开启后才生效并参与生成",
     strengthOff: "未开启",
@@ -237,8 +237,6 @@ export const copy = {
     strengthCreativityHint: "越高 AI 发挥空间越大、越可能偏离参考图（软性倾向）",
     strengthSubject: "主体保持强度",
     strengthSubjectHint: "越高越倾向保留参考图主体的特征（软性倾向，非精确锁定）",
-    strengthBackground: "背景参考强度",
-    strengthBackgroundHint: "越高越倾向参考背景元素（软性倾向）",
     // 四层提示词（总控类可折叠、默认收起；均无字数上限）
     photoMasterGroupLabel: "任务总控（可选 · 全局风格）",
     masterPromptLabel: "任务总控提示词（可选）",
