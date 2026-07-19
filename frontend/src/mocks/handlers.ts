@@ -15,6 +15,10 @@ const err = (status: number, code: string, message: string) =>
 // 非整数即非法（调用处返 422）；undefined/null（可选未传）不算非法。scene-prompt / estimate / videos 提交三处共用。
 const badDuration = (v: unknown): boolean => v !== undefined && v !== null && !Number.isInteger(v);
 
+// IMAGE-GEN-OPTIMIZE-UI-0001 §四：四个强度取值 10..100 步长 10，None=未开启。present 且非「10..100 步10 整数」即非法。
+const badStrength = (v: unknown): boolean =>
+  v !== undefined && v !== null && !(typeof v === "number" && Number.isInteger(v) && v >= 10 && v <= 100 && v % 10 === 0);
+
 // in-memory store so list/detail/SSE stay consistent within a session
 const videos = new Map<string, Record<string, unknown>>();
 // mock 种子（ECOM-FIXES-0001 ③ / cancelled 补 ECOM-HISTORY-CANCELLED-FIX-0001 ③）：预置电商(seedance_i2v)历史项，
@@ -1477,7 +1481,7 @@ export const handlers = [
       prompt?: string;
       reference_image_asset_ids?: string[];
       product_image_keys?: string[]; // 电商带货 i2v 产品图（ECOM-VIDEO-OPTIMIZE-UI-0001 §4.3）
-      negative_prompt?: string; // 电商带货 i2v 负面提示词（§4.3/req6）
+      negative_prompt?: string; // 电商带货 i2v 负面 / 图片负面（photo 复用，IMAGE-GEN-OPTIMIZE-UI-0001 §四）
       voice_id?: string; // 电商带货/数字人口播必填
       duration_sec?: number;
       resolution?: string;
@@ -1485,6 +1489,14 @@ export const handlers = [
       apply_visible_label?: boolean;
       avatar_asset_id?: string;
       avatar_video_asset_id?: string;
+      // 图片生成/修改 photo 优化（IMAGE-GEN-OPTIMIZE-UI-0001 §四）
+      image_keys?: string[]; // 参考图 1–6（可选）
+      master_prompt?: string; // 任务总控（可选）
+      master_negative_prompt?: string; // 任务统一负面（可选）
+      similarity_strength?: number; // 四个强度：10..100 步长 10，未开启不出现
+      creativity_strength?: number;
+      subject_strength?: number;
+      background_strength?: number;
     };
     // resolution 是后端全模式 Literal["480p","720p","1080p"]（含 seedance_i2v，见 schemas/videos.py:154）：
     // 非法即 422，不按模式放宽（ECOM-RESOLUTION-UI-0001：电商也带 resolution，需与 video_gen 同等把关，不伪造放行）。
@@ -1531,6 +1543,26 @@ export const handlers = [
       // 电商带货音色必填（BE：数字人口播/电商带货 voice_id 必填）——mock 不比 BE 宽松，守住前端 generateDisabled 的音色门。
       if (!body.voice_id) {
         return err(422, "ECOM_I2V_INVALID", "电商带货需选择音色");
+      }
+    }
+    // 图片生成/修改 photo 校验（IMAGE-GEN-OPTIMIZE-UI-0001 契约 §四）。mock 不比 BE 宽松：
+    //  · image_keys 若present 须 1–6（7 张 → 422）——可选（纯文生图 / AI 封面均不带，不误杀）；
+    //  · 四个强度若present 须 10..100 步长 10（非法 → 422）；未开启的强度**不应出现**（前端已保证，此为防漂移）。
+    // ⚠️ 零回归：AI 封面（purpose:cover，只带 image_size/image_quality，无 image_keys/强度）在此天然全过。
+    if (body.video_mode === "photo") {
+      if (body.image_keys !== undefined) {
+        const keys = body.image_keys;
+        if (!Array.isArray(keys) || keys.length < 1 || keys.length > 6) {
+          return err(422, "PHOTO_INVALID", "参考图 1–6 张");
+        }
+      }
+      if (
+        badStrength(body.similarity_strength) ||
+        badStrength(body.creativity_strength) ||
+        badStrength(body.subject_strength) ||
+        badStrength(body.background_strength)
+      ) {
+        return err(422, "PHOTO_INVALID", "强度取值须为 10..100 步长 10");
       }
     }
     const id = `mock-${++videoSeq}`;

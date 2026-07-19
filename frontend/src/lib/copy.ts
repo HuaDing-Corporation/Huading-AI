@@ -196,7 +196,7 @@ export const copy = {
     productImageCountCustom: "自定义",
     productImageCountCustomLabel: "自定义张数",
     productImageCountPlaceholder: "1–9",
-    productImageCountRange: "请输入 1–9 张",
+    productImageCountRange: (max: number) => `请输入 1–${max} 张`, // IMAGE-GEN-OPTIMIZE-UI-0001：上限 per-call（电商 9 / 图片生成 6）
     productImageCountHint: "选择要用几张产品图；多图会分配到不同分镜。切换张数不会自动删图",
     // 产品图多图 picker（复用 ReferenceImagesPicker）
     productImagesLabel: "产品图（必填，至少 1 张）",
@@ -217,6 +217,36 @@ export const copy = {
     photoRefPreviewAlt: "参考图预览",
     photoRefHint: "上传参考图做换背景 / 修图；留空则纯文生图",
     photoResultAlt: "生成的图片",
+    // ── 图片生成/修改 优化（IMAGE-GEN-OPTIMIZE-UI-0001）——只追加，勿重排（与智脑线共享 copy.ts）──
+    // 参考图：单张 → 1–6 张（复用张数选择器 + 多图 picker）
+    photoRefCountLabel: "参考图张数",
+    photoRefCountHint: "选择要用几张参考图（留空可纯文生图）；多图共同参考生成一张。切换张数不会自动删图",
+    photoRefImagesLabel: "参考图（可选，最多 6 张）",
+    photoRefImagesUpload: "上传参考图",
+    photoRefImagesOverLimit: "超过所选张数，多余参考图未添加",
+    photoRefImagesExceed: (uploaded: number, allowed: number) =>
+      `已上传 ${uploaded} 张，超过所选 ${allowed} 张，请删除多余参考图或调高张数`,
+    // 四个强度滑块（诚实文案：软性倾向、编码进提示词，非 provider 原生精确参数）
+    strengthGroupLabel: "生成强度（可选）",
+    strengthGroupHint: "以下为软性倾向控制——底层编码进提示词、并非精确参数；默认关闭，开启后才生效并参与生成",
+    strengthOff: "未开启",
+    strengthToggleSuffix: "开关",
+    strengthSimilarity: "图片相似度",
+    strengthSimilarityHint: "越高越倾向贴近参考图的整体风格与构图（软性倾向）",
+    strengthCreativity: "AI 创意程度",
+    strengthCreativityHint: "越高 AI 发挥空间越大、越可能偏离参考图（软性倾向）",
+    strengthSubject: "主体保持强度",
+    strengthSubjectHint: "越高越倾向保留参考图主体的特征（软性倾向，非精确锁定）",
+    strengthBackground: "背景参考强度",
+    strengthBackgroundHint: "越高越倾向参考背景元素（软性倾向）",
+    // 四层提示词（总控类可折叠、默认收起；均无字数上限）
+    photoMasterGroupLabel: "任务总控（可选 · 全局风格）",
+    masterPromptLabel: "任务总控提示词（可选）",
+    masterPromptPlaceholder: "全局风格前缀，如：统一暖色胶片质感、柔光——会拼进本次图片提示词",
+    masterNegativeLabel: "任务统一负面提示词（可选）",
+    masterNegativePlaceholder: "本次统一想避免的元素（软性约束，非硬性禁止），如：文字、水印",
+    imageNegativeLabel: "图片负面提示词（可选）",
+    imageNegativePlaceholder: "这张图想尽量避免出现的元素（软性约束，非硬性禁止），如：多余的手、畸变",
     // 画面比例（IMAGE-ASPECT-RATIO-UI-0001）——替代旧「尺寸 / 质量」下拉；8 定比 + 自适应，默认 1:1
     aspectLabel: "画面比例",
     aspectAuto: "自适应",

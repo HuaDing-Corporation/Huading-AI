@@ -131,6 +131,16 @@ export interface CreateVideoRequest {
   subtitle_style?: SubtitleStyle; // 数字人口播：字幕样式覆盖（ORAL-PROD-UI-0001）；缺省=与 0001 默认烧入一致（不回归）
   apply_visible_label?: boolean; // AI 生成显式标识开关（LABEL-TOGGLE-UI-0001）；默认关(false)，开=true。对齐后端 VideoGenerateRequest.apply_visible_label
   purpose?: string; // 照片/封面：用途标识，如 "cover"（AI 封面复用 0003 文生图标识；进图片历史作为 photo）
+  // ── 图片生成/修改 photo 优化 (IMAGE-GEN-OPTIMIZE-UI-0001 契约 §四) ──
+  image_keys?: string[]; // 参考图 1–6（取代标量 image_key；来自 POST /uploads→key）。可选（纯文生图不带）；image_key 保留兼容 AI 封面等既有 caller
+  master_prompt?: string; // 任务总控提示词（全局风格前缀，可选，无字数上限）
+  master_negative_prompt?: string; // 任务统一负面提示词（可选，无上限）——同 negative_prompt 编码进 prompt，非硬约束
+  // 四个强度：均 int|None，取值 10..100 步长 10，None=未开启（默认）。底层编码进提示词（provider 无原生参数），软性倾向、非精确控制。
+  similarity_strength?: number; // 图片相似度
+  creativity_strength?: number; // AI 创意程度
+  subject_strength?: number; // 主体保持强度
+  background_strength?: number; // 背景参考强度
+  // 注：图片负面提示词复用上方 negative_prompt 字段（视频链路已有；photo 分支此前不读，本期起读）。
   // ── 视频生成 video_gen (VIDEOGEN-UI-0001, seam §2) ──
   prompt?: string; // 不限字数提示词（seam 字段）；同时 topic 复用此文本作标题/展示
   reference_image_asset_ids?: string[]; // 参考图 1–9 张（POST /uploads/images → asset_id）
