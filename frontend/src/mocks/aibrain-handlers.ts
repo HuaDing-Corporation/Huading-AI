@@ -56,6 +56,11 @@ function isTier(v: unknown): v is IntensityTier {
   return v === "low" || v === "mid" || v === "high";
 }
 
+/** BE 全系 `extra="forbid"` → 多传字段即 422。mock 同样拒，才不比 BE 宽松（CR#4）。 */
+function hasExtraKeys(body: Record<string, unknown>, allowed: string[]): boolean {
+  return Object.keys(body).some((k) => !allowed.includes(k));
+}
+
 function walletView() {
   return {
     available_credits: available,
@@ -86,7 +91,8 @@ export function aibrainHandlers() {
     // ── 钱包 / 充值（topup）───────────────────────────────────────────
     http.get(`${BASE}/api/v1/aibrain/wallet`, () => ok(walletView())),
     http.post(`${BASE}/api/v1/aibrain/wallet/topup`, async ({ request }) => {
-      const body = (await request.json().catch(() => ({}))) as { amount?: unknown };
+      const body = (await request.json().catch(() => ({}))) as Record<string, unknown> & { amount?: unknown };
+      if (hasExtraKeys(body, ["amount"])) return err(422, "VALIDATION_ERROR", "extra fields forbidden");
       if (typeof body.amount !== "number" || !TOPUP_OPTIONS.includes(body.amount))
         return err(422, "VALIDATION_ERROR", "充值档位非法（100 / 500 / 1000 / 2000）");
       available += body.amount; // 1:1；单向不可退（无退款端点）
@@ -99,7 +105,9 @@ export function aibrainHandlers() {
       const items = [...conversations.values()].map(metaOf).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
       return ok({ items, total: items.length });
     }),
-    http.post(`${BASE}/api/v1/aibrain/conversations`, () => {
+    http.post(`${BASE}/api/v1/aibrain/conversations`, async ({ request }) => {
+      const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+      if (hasExtraKeys(body, ["title"])) return err(422, "VALIDATION_ERROR", "extra fields forbidden");
       const conv = newConversation();
       conversations.set(conv.id, conv);
       return ok({ ...metaOf(conv), messages: [] }, 201);
@@ -117,11 +125,13 @@ export function aibrainHandlers() {
       const conv = conversations.get(String(params.id));
       if (!conv) return err(404, AIBRAIN_ERROR.CONVERSATION_NOT_FOUND, "会话不存在或无权访问");
 
-      const body = (await request.json().catch(() => ({}))) as {
+      const body = (await request.json().catch(() => ({}))) as Record<string, unknown> & {
         content?: string;
         tier?: unknown;
         attachment_asset_ids?: unknown;
       };
+      if (hasExtraKeys(body, ["content", "tier", "attachment_asset_ids"]))
+        return err(422, "VALIDATION_ERROR", "extra fields forbidden");
       // 档位（BE Literal → 422 校验错）。
       if (!isTier(body.tier)) return err(422, "VALIDATION_ERROR", "智能强度档位非法（low/mid/high）");
       const content = (body.content ?? "").trim();

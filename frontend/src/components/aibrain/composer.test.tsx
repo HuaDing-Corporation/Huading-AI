@@ -37,6 +37,16 @@ describe("Composer 承重", () => {
     expect(p.onInsufficient).not.toHaveBeenCalled();
   });
 
+  it("🔴 钱包未加载（balance=undefined）→ **不预拦**、照发（CR#2：不把有余额用户锁死）", () => {
+    const p = props();
+    wrap(<Composer tier="mid" balance={undefined} sending={false} {...p} />);
+    fireEvent.change(screen.getByLabelText(/输入问题/), { target: { value: "你好" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(p.onSend).toHaveBeenCalledTimes(1); // 放行，由 BE 402 兜底
+    expect(p.onInsufficient).not.toHaveBeenCalled();
+  });
+
   it("语音不支持（jsdom 无 SpeechRecognition）→ 降级：不渲染录音按钮、给说明、不报错", () => {
     const p = props();
     wrap(<Composer tier="mid" balance={100} sending={false} {...p} />);

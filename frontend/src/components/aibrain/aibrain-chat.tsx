@@ -23,21 +23,24 @@ export function AibrainChat() {
   const [sendError, setSendError] = useState<string | null>(null);
 
   const { data: wallet } = useWallet();
-  const balance = wallet?.available_credits ?? 0;
+  // 🔴 钱包未加载/加载失败时余额是 undefined（**不是 0**）——否则 available<=0 的预检会把有余额的用户也锁死（CR#2）。
+  const balance = wallet?.available_credits;
   const create = useCreateConversation();
   const send = useSendMessage();
   const convQuery = useConversation(activeId ?? undefined);
   const messages = convQuery.data?.messages ?? [];
+  const busy = send.isPending || create.isPending; // 建会话在途也禁用发送，防双建（CR#7）
 
   const handleSend = async (body: SendMessageRequest) => {
     setSendError(null);
-    let convId = activeId;
-    if (!convId) {
-      const conv = await create.mutateAsync();
-      convId = conv.id;
-      setActiveId(conv.id);
-    }
     try {
+      // 🔴 建会话与发消息**同在 try 内**：首条消息若建会话失败，也走错误分流、不静默丢消息（CR#1）。
+      let convId = activeId;
+      if (!convId) {
+        const conv = await create.mutateAsync();
+        convId = conv.id;
+        setActiveId(conv.id);
+      }
       await send.mutateAsync({ conversationId: convId, body });
     } catch (err) {
       if (!(err instanceof ApiError)) {
@@ -85,7 +88,7 @@ export function AibrainChat() {
               tier={tier}
               onTierChange={setTier}
               balance={balance}
-              sending={send.isPending}
+              sending={busy}
               onSend={(body) => void handleSend(body)}
               onInsufficient={() => setRechargeOpen(true)}
             />

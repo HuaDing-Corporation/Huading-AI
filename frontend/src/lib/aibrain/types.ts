@@ -139,10 +139,12 @@ export type SendPrecheck = { ok: true } | { ok: false; reason: "insufficient" };
 /**
  * 🔴 发送前预检（承重核心）——**对齐 BE 口径**（FIX1）：BE 预留 `min(200, available)`，`available<=0` → 402。
  * 故 FE 唯一能可靠预判的是「**有没有余额可预留**」：`available_credits <= 0` → 弹充值窗、**不发请求**。
- * 更细的「预留够不够买 token」需 tokenize + 定价，FE 算不了 → 交给 BE 的 422（`AibrainChat` 收到再 friendly 提示）。
+ * ⚠️ `available` 为 `undefined`（钱包**未加载/加载失败**）时**不预拦**——否则会把有余额的用户也锁死（CR#2）；
+ *    此时放行，由 BE 的 402 权威兜底（`AibrainChat` 收到再弹充值窗）。
+ * 更细的「预留够不够买 token」需 tokenize + 定价，FE 算不了 → 交给 BE 的 422。
  * ⚠️ 不拿「预留额 200」当「本次消耗」展示给用户（那是瞬时锁再退回）——展示用 `TIERS[tier].typical`（6/15/30）。
  */
-export function precheckSend(availableCredits: number): SendPrecheck {
-  if (availableCredits <= 0) return { ok: false, reason: "insufficient" };
+export function precheckSend(availableCredits: number | undefined): SendPrecheck {
+  if (typeof availableCredits === "number" && availableCredits <= 0) return { ok: false, reason: "insufficient" };
   return { ok: true };
 }

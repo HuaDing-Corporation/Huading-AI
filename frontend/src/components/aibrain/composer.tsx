@@ -5,7 +5,7 @@
 // 图片走既有 `/uploads/images`（→ asset_id，喂 attachment_asset_ids）；语音走 Web Speech（不支持则隐藏）。
 // ⚠️ 文档上传是 BE 增量 3，一期无端点 → **本期不提供文档入口**（不硬塞、不在一期路径调用）。
 
-import { useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { ImagePlus, Loader2, Mic, MicOff, Send, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -27,8 +27,8 @@ export function Composer({
 }: {
   tier: IntensityTier;
   onTierChange: (t: IntensityTier) => void;
-  /** 可用推理积分（wallet.available_credits）。 */
-  balance: number;
+  /** 可用推理积分（wallet.available_credits）；`undefined` = 钱包未加载 → 预检不拦（CR#2）。 */
+  balance: number | undefined;
   sending: boolean;
   onSend: (body: SendMessageRequest) => void;
   /** 余额不足 → 让父层弹充值窗（不是普通报错）。 */
@@ -40,15 +40,24 @@ export function Composer({
   const [uploading, setUploading] = useState(false);
   const imageInput = useRef<HTMLInputElement>(null);
   const voiceBase = useRef("");
+  const objectUrls = useRef<string[]>([]); // 本地预览 objectURL，须显式 revoke（CR#3）
   const uploadImage = useUploadImage();
 
   const voice = useVoiceInput((t) => setText(voiceBase.current + t));
 
+  // 卸载时释放所有未撤销的预览 URL（换页/关闭仍会遗留，浏览器只在整页卸载时兜底）。
+  useEffect(() => () => objectUrls.current.forEach((u) => URL.revokeObjectURL(u)), []);
+
+  const revokeAll = () => {
+    objectUrls.current.forEach((u) => URL.revokeObjectURL(u));
+    objectUrls.current = [];
+  };
+
   const canSend = (text.trim().length > 0 || attachments.length > 0) && !sending && !uploading;
 
   const submit = () => {
+    if (!canSend) return; // 与按钮 disabled 同一判据；此处兜住 Enter 提交路径
     const content = text.trim();
-    if ((!content && attachments.length === 0) || sending || uploading) return;
     setInlineError(null);
     // 🔴 发送前预检（拦在开答前，对齐 BE 402 口径：available<=0 才是「压根发不了」）。
     const check = precheckSend(balance);
@@ -59,6 +68,7 @@ export function Composer({
     onSend({ content, tier, attachment_asset_ids: attachments.map((a) => a.asset_id) });
     setText("");
     setAttachments([]);
+    revokeAll();
     voiceBase.current = "";
   };
 
@@ -81,7 +91,9 @@ export function Composer({
     try {
       // /uploads/images → asset_id（BE 附件校验认 asset_id + 图片类型）。
       const { asset_id } = await uploadImage.mutateAsync(file);
-      setAttachments((prev) => [...prev, { asset_id, name: file.name, preview_url: URL.createObjectURL(file) }]);
+      const preview_url = URL.createObjectURL(file);
+      objectUrls.current.push(preview_url);
+      setAttachments((prev) => [...prev, { asset_id, name: file.name, preview_url }]);
     } catch (err) {
       setInlineError(err instanceof ApiError ? err.message : copy.aibrain.uploadFailed);
     } finally {
@@ -111,7 +123,11 @@ export function Composer({
               <button
                 type="button"
                 aria-label={copy.aibrain.attachRemove}
-                onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
+                onClick={() => {
+                  URL.revokeObjectURL(att.preview_url);
+                  objectUrls.current = objectUrls.current.filter((u) => u !== att.preview_url);
+                  setAttachments((prev) => prev.filter((_, j) => j !== i));
+                }}
                 className="rounded p-0.5 text-ink-faint outline-none transition-colors hover:text-error-fg focus-visible:shadow-focus-gold"
               >
                 <X size={13} strokeWidth={2} />

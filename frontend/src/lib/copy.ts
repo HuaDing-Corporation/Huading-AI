@@ -1303,7 +1303,7 @@ export const copy = {
     recharge: "充值",
     rechargeTitle: "充值推理积分",
     rechargeDesc: "余额按 1:1 充值为推理积分。",
-    rechargeIrreversible: "🔴 推理积分单向兑换，充值后不可退回余额。",
+    rechargeIrreversible: "🔴 推理积分单向不可退：充值后不可退回余额。",
     rechargeAmount: (n: number) => `${n} 积分`,
     rechargeConfirm: "确认充值",
     rechargeFailed: "充值失败，请重试",

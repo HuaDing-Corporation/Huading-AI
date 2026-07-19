@@ -22,8 +22,12 @@ export function ConversationList({
   const items = data ?? [];
 
   const onNew = async () => {
-    const conv = await create.mutateAsync();
-    onSelect(conv.id);
+    try {
+      const conv = await create.mutateAsync();
+      onSelect(conv.id);
+    } catch {
+      /* 新建失败：按钮复位即可，不抛未捕获拒绝（CR#6）。 */
+    }
   };
 
   return (
@@ -32,7 +36,7 @@ export function ConversationList({
         <MessageSquarePlus size={15} strokeWidth={1.9} /> {copy.aibrain.newChat}
       </Button>
 
-      <div className="flex flex-col gap-1 overflow-y-auto" role="list" aria-label={copy.aibrain.conversationsTitle}>
+      <div className="flex flex-col gap-1 overflow-y-auto" aria-label={copy.aibrain.conversationsTitle}>
         {isLoading ? (
           <p className="px-2 py-3 text-[12.5px] text-ink-faint">{copy.aibrain.loading}</p>
         ) : items.length === 0 ? (
@@ -44,7 +48,6 @@ export function ConversationList({
               <button
                 key={conv.id}
                 type="button"
-                role="listitem"
                 onClick={() => onSelect(conv.id)}
                 aria-current={active ? "true" : undefined}
                 className={cn(

@@ -42,6 +42,13 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
     await expect(topupWallet({ amount: 123 })).rejects.toMatchObject({ status: 422 });
   });
 
+  it("🔴 多传字段（BE extra=forbid）→ 422（mock 不比 BE 宽松，CR#4）", async () => {
+    await topupWallet({ amount: 100 });
+    const conv = await createConversation();
+    const body = { content: "hi", tier: "low", attachment_asset_ids: [], model: "sneaky" } as unknown as SendMessageRequest;
+    await expect(sendMessage(conv.id, body)).rejects.toMatchObject({ status: 422 });
+  });
+
   it("未知会话 → 404 AIBRAIN_CONVERSATION_NOT_FOUND", async () => {
     await expect(getConversation("no-such-conv")).rejects.toMatchObject({
       status: 404,
