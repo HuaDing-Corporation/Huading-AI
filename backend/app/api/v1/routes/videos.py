@@ -585,6 +585,11 @@ def _video_read(
         script=task.script,
         voice_id=task.voice_id,
         aspect_ratio=task.aspect_ratio,
+        image_resolution=(
+            params.get("image_resolution")
+            if mode == "photo" and params.get("image_resolution") in {"1k", "2k", "4k"}
+            else None
+        ),
         requested_aspect_ratio=(
             params.get("requested_aspect_ratio") if mode == "photo" else None
         )
@@ -977,11 +982,23 @@ def _create_photo_video(
     task_id = str(uuid4())
     params = {
         "image_key": payload.image_key,
+        "image_keys": list(payload.image_keys),
         "aspect_ratio": payload.aspect_ratio,
         "requested_aspect_ratio": payload.aspect_ratio,
+        "image_resolution": payload.image_resolution or "1k",
         "estimated": True,
         "apply_visible_label": payload.apply_visible_label,
     }
+    prompt_controls = {
+        "master_prompt": payload.master_prompt,
+        "master_negative_prompt": payload.master_negative_prompt,
+        "negative_prompt": payload.negative_prompt,
+        "similarity_strength": payload.similarity_strength,
+        "creativity_strength": payload.creativity_strength,
+        "subject_strength": payload.subject_strength,
+        "background_strength": payload.background_strength,
+    }
+    params.update({key: value for key, value in prompt_controls.items() if value is not None})
     if payload.purpose == "cover" or payload.kind == "cover":
         params["purpose"] = "cover"
         params["kind"] = "cover"

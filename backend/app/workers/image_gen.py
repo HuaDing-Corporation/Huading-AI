@@ -70,6 +70,47 @@ _IMAGE_MIME_BY_SUFFIX = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
+_PHOTO_STRENGTH_LEVEL_INSTRUCTIONS = {
+    10: "Apply this only as a faint preference; broad departures are encouraged.",
+    20: "Apply this as a light preference; visible departures are welcome.",
+    30: "Apply this as a flexible preference; noticeable departures are acceptable.",
+    40: "Apply this as a moderate preference; balance adherence with variation.",
+    50: "Apply this as a clear preference; keep recognizable alignment while allowing variation.",
+    60: "Apply this as a strong preference; departures should remain controlled.",
+    70: "Apply this as a very strong priority; allow only limited departures.",
+    80: "Apply this as a strict priority; permit only small departures.",
+    90: "Apply this as a very strict priority; allow only minimal departures.",
+    100: (
+        "Apply this as an overriding requirement; do not depart unless another enabled "
+        "control explicitly requires it."
+    ),
+}
+_PHOTO_STRENGTH_SPECS = (
+    (
+        "similarity_strength",
+        "Reference similarity",
+        "Keep the result visually similar to all reference images in overall appearance, "
+        "composition, palette, proportions, and distinctive details.",
+    ),
+    (
+        "creativity_strength",
+        "Creative freedom",
+        "Introduce new composition, styling, lighting, color, and decorative ideas in "
+        "areas not protected by other enabled controls.",
+    ),
+    (
+        "subject_strength",
+        "Subject preservation",
+        "Preserve each referenced subject's identity, count, shape, proportions, colors, "
+        "logos, text, materials, and defining details.",
+    ),
+    (
+        "background_strength",
+        "Background reference",
+        "Preserve the referenced background's layout, setting, palette, lighting, spatial "
+        "relationships, and atmosphere.",
+    ),
+)
 _POSTER_SIZE = (1080, 1350)
 _POSTER_TEMPLATES = {
     "promo_bold": {
@@ -191,6 +232,76 @@ def _ecom_cutout_prompt(prompt: str, *, background: str) -> str:
     return f"{prompt}\n\nE-commerce cutout instructions: {instruction}"
 
 
+def build_photo_prompt(
+    prompt: str,
+    *,
+    master_prompt: str | None = None,
+    master_negative_prompt: str | None = None,
+    negative_prompt: str | None = None,
+    similarity_strength: int | None = None,
+    creativity_strength: int | None = None,
+    subject_strength: int | None = None,
+    background_strength: int | None = None,
+) -> str:
+    parts = []
+    master_text = str(master_prompt or "").strip()
+    if master_text:
+        parts.append(master_text)
+    parts.append(str(prompt).strip())
+
+    strength_values = {
+        "similarity_strength": similarity_strength,
+        "creativity_strength": creativity_strength,
+        "subject_strength": subject_strength,
+        "background_strength": background_strength,
+    }
+    strength_lines = []
+    for field_name, label, instruction in _PHOTO_STRENGTH_SPECS:
+        value = strength_values[field_name]
+        if value is None:
+            continue
+        level_instruction = _PHOTO_STRENGTH_LEVEL_INSTRUCTIONS[int(value)]
+        strength_lines.append(
+            f"- {label} ({value}%): {level_instruction} {instruction}"
+        )
+    if similarity_strength is not None and creativity_strength is not None:
+        if similarity_strength > creativity_strength:
+            strength_lines.append(
+                "Conflict resolution: Reference similarity takes priority over creative "
+                "freedom; apply creative changes only where they do not weaken reference "
+                "fidelity."
+            )
+        elif creativity_strength > similarity_strength:
+            strength_lines.append(
+                "Conflict resolution: Creative freedom takes priority for composition, "
+                "styling, lighting, and environment; keep referenced subjects recognizable."
+            )
+        else:
+            strength_lines.append(
+                "Conflict resolution: At equal strengths, preserve reference-defining "
+                "subject identity while applying creativity only to composition, styling, "
+                "lighting, and non-identity details."
+            )
+    if strength_lines:
+        parts.append("Reference strength controls:\n" + "\n".join(strength_lines))
+
+    negative_lines = []
+    master_negative_text = str(master_negative_prompt or "").strip()
+    if master_negative_text:
+        negative_lines.append(f"- Task-wide: {master_negative_text}")
+    negative_text = str(negative_prompt or "").strip()
+    if negative_text:
+        negative_lines.append(f"- Image-specific: {negative_text}")
+    if negative_lines:
+        parts.append(
+            "Avoid the following where possible; this is soft guidance, not a hard "
+            "constraint:\n"
+            + "\n".join(negative_lines)
+        )
+
+    return "\n\n".join(parts)
+
+
 def _validate_source_storage_key(tenant_id: str, storage_key: str) -> str:
     safe_tenant_id = _safe_task_id(tenant_id)
     if (
@@ -222,6 +333,11 @@ def _source_storage_keys(params: Mapping[str, Any], tenant_id: str) -> list[str]
         if not isinstance(raw_keys, list | tuple):
             raise ValueError("source_storage_keys must be a list.")
         return [_validate_source_storage_key(tenant_id, str(key)) for key in raw_keys]
+    image_keys = params.get("image_keys")
+    if image_keys:
+        if not isinstance(image_keys, list | tuple):
+            raise ValueError("image_keys must be a list.")
+        return [_tenant_upload_storage_key(tenant_id, str(key)) for key in image_keys]
     if params.get("source_storage_key"):
         return [_validate_source_storage_key(tenant_id, str(params["source_storage_key"]))]
     return []
@@ -605,6 +721,16 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
         prompt = str(params.get("script") or params.get("topic") or "").strip()
         if not prompt and not ecom_poster:
             raise ValueError("Image prompt is required.")
+        prompt = build_photo_prompt(
+            prompt,
+            master_prompt=params.get("master_prompt"),
+            master_negative_prompt=params.get("master_negative_prompt"),
+            negative_prompt=params.get("negative_prompt"),
+            similarity_strength=params.get("similarity_strength"),
+            creativity_strength=params.get("creativity_strength"),
+            subject_strength=params.get("subject_strength"),
+            background_strength=params.get("background_strength"),
+        )
         ecom_cutout = _is_ecom_cutout_request(params)
         ecom_model = _is_ecom_model_request(params)
         ecom_background = _ecom_cutout_background(params)
@@ -724,7 +850,7 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                 provider_payload = {
                     "prompt": prompt,
                     "size": resolved_aspect_ratio,
-                    "resolution": "1k",
+                    "resolution": str(params.get("image_resolution") or "1k"),
                     "quality": "high",
                     "n": 1,
                 }
