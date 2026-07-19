@@ -24,10 +24,10 @@ from app.schemas.videos import VideoGenerateRequest
 
 
 class _FakeStorage:
-    def __init__(self, *, missing_keys: set[str] | None = None) -> None:
+    def __init__(self, *, existing_keys: set[str] | None = None) -> None:
         self.bucket = "test-bucket"
         self.saved: dict[str, tuple[bytes, str]] = {}
-        self.missing_keys = missing_keys or set()
+        self.existing_keys = existing_keys or set()
         self.existence_checks: list[str] = []
 
     def put_bytes(self, key: str, content: bytes, *, content_type: str) -> str:
@@ -39,7 +39,7 @@ class _FakeStorage:
 
     def object_exists(self, key: str) -> bool:
         self.existence_checks.append(key)
-        return key not in self.missing_keys
+        return key in self.existing_keys or key in self.saved
 
     def presign_get_url(
         self,
@@ -50,6 +50,12 @@ class _FakeStorage:
     ) -> str:
         suffix = "&download=1" if download_filename else ""
         return f"https://storage.test/{key}?ttl={expires_in}{suffix}"
+
+
+def _tenant_storage(tenant_id: str, *relative_keys: str) -> _FakeStorage:
+    return _FakeStorage(
+        existing_keys={f"tenants/{tenant_id}/{relative_key}" for relative_key in relative_keys}
+    )
 
 
 class _MemProgressStore:
@@ -927,27 +933,35 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
 
     scene_prompt = "hero product on a bright kitchen counter" + ("，细节镜头" * 900)
     negative_prompt = "No warped product, no duplicated parts, no flicker."
-    client = TestClient(app)
-    resp = client.post(
-        "/api/v1/videos",
-        json={
-            "topic": "premium scarf product benefits",
-            "video_mode": "seedance_i2v",
-            "product_image_keys": [
-                "uploads/product-front.png",
-                "uploads/product-side.webp",
-            ],
-            "voice_id": voice_id,
-            "scene_prompt": scene_prompt,
-            "negative_prompt": negative_prompt,
-            "duration_sec": 30,
-            "resolution": "1080p",
-            "speed": 1.0,
-            "aspect_ratio": "9:16",
-            "subtitle_enabled": True,
-        },
-        headers=auth_context["headers"],
+    storage = _tenant_storage(
+        auth_context["tenant_id"],
+        "uploads/product-front.png",
+        "uploads/product-side.webp",
     )
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        resp = TestClient(app).post(
+            "/api/v1/videos",
+            json={
+                "topic": "premium scarf product benefits",
+                "video_mode": "seedance_i2v",
+                "product_image_keys": [
+                    "uploads/product-front.png",
+                    "uploads/product-side.webp",
+                ],
+                "voice_id": voice_id,
+                "scene_prompt": scene_prompt,
+                "negative_prompt": negative_prompt,
+                "duration_sec": 30,
+                "resolution": "1080p",
+                "speed": 1.0,
+                "aspect_ratio": "9:16",
+                "subtitle_enabled": True,
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
 
     assert resp.status_code == 202
     data = resp.json()["data"]
@@ -989,7 +1003,7 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
         assert reserved.credits == Decimal("8403.00")
 
 
-def test_seedance_i2v_accepts_image_only_submission(
+def test_seedance_i2v_rejects_missing_product_image_without_side_effects(
     monkeypatch,
     auth_context,
     auth_db,
@@ -999,32 +1013,109 @@ def test_seedance_i2v_accepts_image_only_submission(
         subscription.quota_credits_total = 10000
         voice, _avatar = _seed_voice_and_avatar(db, auth_context["tenant_id"])
         voice_id = voice.id
+        subscription_id = subscription.id
+        reserved_before = subscription.quota_credits_reserved
+        used_before = subscription.quota_credits_used
+        task_count_before = db.scalar(select(func.count()).select_from(VideoTask))
+        usage_count_before = db.scalar(select(func.count()).select_from(UsageRecord))
+
+    enqueued = False
 
     class _FakeI2VTask:
         def apply_async(self, *, args, task_id, queue=None):
+            nonlocal enqueued
+            enqueued = True
             return type("Result", (), {"status": "PENDING"})()
 
     from app.api.v1.routes import videos as videos_route
 
     monkeypatch.setattr(videos_route, "generate_seedance_i2v_task", _FakeI2VTask())
-    client = TestClient(app)
-    resp = client.post(
-        "/api/v1/videos",
-        json={
-            "video_mode": "seedance_i2v",
-            "product_image_keys": ["uploads/product.png"],
-            "voice_id": voice_id,
-        },
-        headers=auth_context["headers"],
-    )
+    missing_key = f"tenants/{auth_context['tenant_id']}/uploads/product.png"
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        resp = TestClient(app).post(
+            "/api/v1/videos",
+            json={
+                "video_mode": "seedance_i2v",
+                "product_image_keys": ["uploads/product.png"],
+                "voice_id": voice_id,
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
 
-    assert resp.status_code == 202
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "PRODUCT_IMAGE_NOT_FOUND"
+    assert storage.existence_checks == [missing_key]
+    assert enqueued is False
     with auth_db() as db:
-        task = db.get(VideoTask, resp.json()["data"]["id"])
-        assert task is not None
-        assert task.topic is None
-        assert task.script is None
-        assert task.params["product_image_keys"] == ["uploads/product.png"]
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved == reserved_before
+        assert subscription.quota_credits_used == used_before
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == task_count_before
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == usage_count_before
+
+
+def test_seedance_i2v_rejects_cross_tenant_product_image_without_side_effects(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(db, auth_context["tenant_id"])
+        subscription.quota_credits_total = 10000
+        voice, _avatar = _seed_voice_and_avatar(db, auth_context["tenant_id"])
+        voice_id = voice.id
+        subscription_id = subscription.id
+        reserved_before = subscription.quota_credits_reserved
+        used_before = subscription.quota_credits_used
+        task_count_before = db.scalar(select(func.count()).select_from(VideoTask))
+        usage_count_before = db.scalar(select(func.count()).select_from(UsageRecord))
+
+    enqueued = False
+
+    class _FakeI2VTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            nonlocal enqueued
+            enqueued = True
+            return type("Result", (), {"status": "PENDING"})()
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route, "generate_seedance_i2v_task", _FakeI2VTask())
+    foreign_key = "tenants/other-tenant/uploads/product.png"
+    monkeypatch.setattr(
+        videos_route,
+        "tenant_storage_key",
+        lambda _tenant_id, _image_key: foreign_key,
+    )
+    storage = _FakeStorage(existing_keys={foreign_key})
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        resp = TestClient(app).post(
+            "/api/v1/videos",
+            json={
+                "video_mode": "seedance_i2v",
+                "product_image_keys": ["uploads/product.png"],
+                "voice_id": voice_id,
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "PRODUCT_IMAGE_NOT_FOUND"
+    assert storage.existence_checks == []
+    assert enqueued is False
+    with auth_db() as db:
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved == reserved_before
+        assert subscription.quota_credits_used == used_before
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == task_count_before
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == usage_count_before
 
 
 def test_photo_order_routes_before_avatar_when_voice_is_present(
@@ -1145,16 +1236,21 @@ def test_video_estimate_seedance_i2v_matches_reserved_quota_with_tenant_rate(
         "duration_sec": 30,
     }
 
-    estimate_resp = client.post(
-        "/api/v1/videos/estimate",
-        json=payload,
-        headers=auth_context["headers"],
-    )
-    create_resp = client.post(
-        "/api/v1/videos",
-        json=payload,
-        headers=auth_context["headers"],
-    )
+    storage = _tenant_storage(auth_context["tenant_id"], "uploads/product.png")
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        estimate_resp = client.post(
+            "/api/v1/videos/estimate",
+            json=payload,
+            headers=auth_context["headers"],
+        )
+        create_resp = client.post(
+            "/api/v1/videos",
+            json=payload,
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
 
     assert estimate_resp.status_code == 200
     assert estimate_resp.json()["data"] == {
@@ -1494,18 +1590,22 @@ def test_seedance_i2v_duration_is_clamped_and_forwarded(
     from app.api.v1.routes import videos as videos_route
 
     monkeypatch.setattr(videos_route, "generate_seedance_i2v_task", _FakeI2VTask())
-    client = TestClient(app)
-    resp = client.post(
-        "/api/v1/videos",
-        json={
-            "topic": "premium scarf product benefits",
-            "video_mode": "seedance_i2v",
-            "product_image_keys": ["uploads/product.png"],
-            "voice_id": voice_id,
-            "duration_sec": 999,
-        },
-        headers=auth_context["headers"],
-    )
+    storage = _tenant_storage(auth_context["tenant_id"], "uploads/product.png")
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        resp = TestClient(app).post(
+            "/api/v1/videos",
+            json={
+                "topic": "premium scarf product benefits",
+                "video_mode": "seedance_i2v",
+                "product_image_keys": ["uploads/product.png"],
+                "voice_id": voice_id,
+                "duration_sec": 999,
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
 
     assert resp.status_code == 202
     assert enqueued["args"][0]["duration_sec"] == 120
@@ -1883,7 +1983,11 @@ def test_scene_prompt_endpoint_generates_visual_prompt_without_creating_video(
             else (_ for _ in ()).throw(AssertionError(f"unexpected capability {capability}"))
         ),
     )
-    storage = _FakeStorage()
+    storage = _tenant_storage(
+        auth_context["tenant_id"],
+        "uploads/product-front.png",
+        "uploads/product-side.webp",
+    )
     app.dependency_overrides[get_object_storage] = lambda: storage
     with auth_db() as db:
         before = db.scalar(select(func.count()).select_from(VideoTask))
@@ -1977,7 +2081,9 @@ def test_scene_prompt_endpoint_maps_provider_resolution_failure_to_503(
         raise ProviderResolutionError("No scene prompt provider configured.")
 
     monkeypatch.setattr(videos_route, "resolve", fail_resolve)
-    app.dependency_overrides[get_object_storage] = lambda: _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: _tenant_storage(
+        auth_context["tenant_id"], "uploads/product.png"
+    )
     try:
         resp = TestClient(app).post(
             "/api/v1/videos/scene-prompt",
@@ -2013,7 +2119,7 @@ def test_scene_prompt_endpoint_rejects_missing_product_image_before_provider_res
 
     first_key = f"tenants/{auth_context['tenant_id']}/uploads/product-front.png"
     missing_key = f"tenants/{auth_context['tenant_id']}/uploads/product-missing.png"
-    storage = _FakeStorage(missing_keys={missing_key})
+    storage = _FakeStorage(existing_keys={first_key})
     monkeypatch.setattr(videos_route, "resolve", resolve_provider)
     app.dependency_overrides[get_object_storage] = lambda: storage
     try:
@@ -2030,10 +2136,52 @@ def test_scene_prompt_endpoint_rejects_missing_product_image_before_provider_res
     finally:
         app.dependency_overrides.pop(get_object_storage, None)
 
-    assert resp.status_code == 404
+    assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "PRODUCT_IMAGE_NOT_FOUND"
     assert provider_resolved is False
     assert storage.existence_checks == [first_key, missing_key]
+
+
+def test_scene_prompt_endpoint_rejects_cross_tenant_product_image_before_provider_resolution(
+    monkeypatch,
+    auth_context,
+) -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    provider_resolved = False
+
+    def resolve_provider(*_args, **_kwargs):
+        nonlocal provider_resolved
+        provider_resolved = True
+        raise AssertionError("provider must not resolve for a cross-tenant product image")
+
+    foreign_key = "tenants/other-tenant/uploads/product.png"
+    monkeypatch.setattr(videos_route, "resolve", resolve_provider)
+    monkeypatch.setattr(
+        videos_route,
+        "tenant_storage_key",
+        lambda _tenant_id, _image_key: foreign_key,
+    )
+    storage = _FakeStorage(existing_keys={foreign_key})
+    monkeypatch.setattr(
+        videos_route,
+        "presign_tenant_storage_key",
+        lambda *_args, **_kwargs: "https://storage.test/foreign-product.png",
+    )
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        resp = TestClient(app).post(
+            "/api/v1/videos/scene-prompt",
+            json={"product_image_keys": ["uploads/product.png"]},
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "PRODUCT_IMAGE_NOT_FOUND"
+    assert provider_resolved is False
+    assert storage.existence_checks == []
 
 
 def test_scene_prompt_endpoint_maps_provider_invocation_failure_to_502(
@@ -2073,7 +2221,9 @@ def test_scene_prompt_endpoint_maps_provider_invocation_failure_to_502(
         lambda *_args, **_kwargs: _FakeScenePromptProvider(),
     )
     monkeypatch.setattr(videos_route, "invoke", fail_invoke)
-    app.dependency_overrides[get_object_storage] = lambda: _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: _tenant_storage(
+        auth_context["tenant_id"], "uploads/product.png"
+    )
     try:
         resp = TestClient(app).post(
             "/api/v1/videos/scene-prompt",
@@ -2118,7 +2268,9 @@ def test_scene_prompt_endpoint_records_usage_for_incomplete_provider_result(
         "resolve",
         lambda *_args, **_kwargs: _IncompleteScenePromptProvider(),
     )
-    app.dependency_overrides[get_object_storage] = lambda: _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: _tenant_storage(
+        auth_context["tenant_id"], "uploads/product.png"
+    )
     try:
         resp = TestClient(app).post(
             "/api/v1/videos/scene-prompt",
@@ -2158,7 +2310,9 @@ def test_scene_prompt_endpoint_allows_images_without_topic_or_script(
         "resolve",
         lambda _db, *, tenant_id, capability: _FakeLuna(),
     )
-    app.dependency_overrides[get_object_storage] = lambda: _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: _tenant_storage(
+        auth_context["tenant_id"], "uploads/product.png"
+    )
     try:
         client = TestClient(app)
         resp = client.post(

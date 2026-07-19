@@ -77,7 +77,7 @@ from app.services.quota import (
     seedance_i2v_billable_seconds,
     seedance_i2v_target_seconds,
 )
-from app.services.storage.base import ObjectStorage
+from app.services.storage.base import ObjectStorage, StorageKeyError
 from app.services.storage.keys import (
     get_tenant_storage_bytes,
     presign_tenant_storage_key,
@@ -761,6 +761,7 @@ def _create_seedance_i2v_video(
     *,
     user: User,
     db: Session,
+    storage: ObjectStorage,
 ) -> str:
     if not payload.voice_id:
         raise AppError("seedance_i2v requires voice_id.", code="VALIDATION_ERROR", status_code=422)
@@ -775,6 +776,11 @@ def _create_seedance_i2v_video(
             tenant_id=user.tenant_id,
         )
 
+    _validate_product_image_storage_keys(
+        payload.product_image_keys,
+        tenant_id=user.tenant_id,
+        storage=storage,
+    )
     task_id = str(uuid4())
     script = payload.script
     target_duration_sec = seedance_i2v_target_seconds(payload.duration_sec)
@@ -1023,6 +1029,35 @@ def _prune_after_create(
         )
 
 
+def _validate_product_image_storage_keys(
+    product_image_keys: list[str],
+    *,
+    tenant_id: str,
+    storage: ObjectStorage,
+) -> list[str]:
+    storage_keys = [tenant_storage_key(tenant_id, image_key) for image_key in product_image_keys]
+    for storage_key in storage_keys:
+        try:
+            exists = tenant_storage_key_exists(
+                storage,
+                tenant_id=tenant_id,
+                storage_key=storage_key,
+            )
+        except StorageKeyError as exc:
+            raise AppError(
+                "Product image not found.",
+                code="PRODUCT_IMAGE_NOT_FOUND",
+                status_code=422,
+            ) from exc
+        if not exists:
+            raise AppError(
+                "Product image not found.",
+                code="PRODUCT_IMAGE_NOT_FOUND",
+                status_code=422,
+            )
+    return storage_keys
+
+
 @router.post("/scene-prompt", response_model=ApiResponse[ScenePromptResponse])
 def generate_scene_prompt(
     request: Request,
@@ -1031,21 +1066,11 @@ def generate_scene_prompt(
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[ScenePromptResponse]:
-    storage_keys = [
-        tenant_storage_key(user.tenant_id, image_key)
-        for image_key in payload.product_image_keys
-    ]
-    for storage_key in storage_keys:
-        if not tenant_storage_key_exists(
-            storage,
-            tenant_id=user.tenant_id,
-            storage_key=storage_key,
-        ):
-            raise AppError(
-                "Product image not found.",
-                code="PRODUCT_IMAGE_NOT_FOUND",
-                status_code=404,
-            )
+    storage_keys = _validate_product_image_storage_keys(
+        payload.product_image_keys,
+        tenant_id=user.tenant_id,
+        storage=storage,
+    )
     image_urls = [
         presign_tenant_storage_key(
             storage,
@@ -1157,7 +1182,7 @@ def create_video(
         return ok(request, VideoAccepted(id=task_id, task_id=task_id, status="queued"))
 
     if payload.video_mode == "seedance_i2v":
-        task_id = _create_seedance_i2v_video(payload, user=user, db=db)
+        task_id = _create_seedance_i2v_video(payload, user=user, db=db, storage=storage)
         _prune_after_create(db, tenant_id=user.tenant_id, mode="seedance_i2v", storage=storage)
         params = _worker_params(payload)
         params["tenant_id"] = user.tenant_id

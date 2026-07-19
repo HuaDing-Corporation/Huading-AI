@@ -1473,17 +1473,23 @@ def test_seedance_i2v_allows_cosyvoice_brand_voice_on_free_plan(
         "app.api.v1.routes.videos.generate_seedance_i2v_task",
         _FakeI2VTask(),
     )
-    response = TestClient(app).post(
-        "/api/v1/videos",
-        json={
-            "topic": "free ecommerce voice",
-            "video_mode": "seedance_i2v",
-            "product_image_keys": ["uploads/product.png"],
-            "voice_id": brand_voice_id,
-            "duration_sec": 15,
-        },
-        headers=auth_context["headers"],
-    )
+    storage = _Storage()
+    storage.objects[f"tenants/{auth_context['tenant_id']}/uploads/product.png"] = b"image"
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app).post(
+            "/api/v1/videos",
+            json={
+                "topic": "free ecommerce voice",
+                "video_mode": "seedance_i2v",
+                "product_image_keys": ["uploads/product.png"],
+                "voice_id": brand_voice_id,
+                "duration_sec": 15,
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
 
     assert response.status_code == 202
     task_id = response.json()["data"]["id"]
