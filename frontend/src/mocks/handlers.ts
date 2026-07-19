@@ -419,6 +419,7 @@ function invalidBatchCommon(kind: string, common: unknown): boolean {
   if (!c.video_mode) return true; // video_mode 必填
   if (kind === "ecom_table" && c.video_mode !== "seedance_i2v") return true;
   if (kind === "prompt_set" && c.video_mode !== "video_gen") return true;
+  if (badDuration(c.duration_sec)) return true; // FIX2（CB P1 · 机制）：批量 common.duration_sec 也是 int，小数非法（未加门即 red）
   return false;
 }
 // BatchSummary 形状（逐字对齐后端：含 common_params）。
@@ -1230,12 +1231,15 @@ export const handlers = [
     ok({ items: [{ asset_id: "preset-1", display_name: "默认主播", thumbnail_url: "https://mock.local/p1.jpg" }], total: 1 })
   ),
   http.post(`${BASE}/api/v1/scripts/generate`, async ({ request }) => {
-    const body = (await request.json()) as { topic?: string; length_tier?: string };
+    const body = (await request.json()) as { topic?: string; length_tier?: string; duration_sec?: number };
     // topic 必填（BE ScriptGenerateRequest.topic 非可选）——mock 不比 BE 宽松：缺/空即 422，守住前端两处调用方
     // （电商 onGenerateScript、口播 onGenerateScript）都在 topic 非空时才发。
     if (!body.topic || !body.topic.trim()) {
       return err(422, "VALIDATION_ERROR", "topic is required");
     }
+    // FIX2（CB P1 · 机制）：BE ScriptGenerateRequest.duration_sec 是 int——小数 → 422。此前 scripts mock 没读该字段 =
+    // 「AI生成文案」发小数悄悄假绿的根因。任何接受 duration_sec 的 mock 都拒绝非整数，未加门的路径即在测试里响亮失败。
+    if (badDuration(body.duration_sec)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
     // 字数档位（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.5）：可选，present 时须 short/medium/long（镜像 BE Literal，
     // mock 不比 BE 宽松——非法枚举即 422，守住前端只发合法档位）。反映到 mock 文案长度供承重区分档位真接线。
     if (body.length_tier !== undefined && !["short", "medium", "long"].includes(body.length_tier)) {

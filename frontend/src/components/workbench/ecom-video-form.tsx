@@ -112,7 +112,8 @@ export function EcomVideoForm({
 
   const onGenerateScript = async () => {
     const trimmed = topic.trim();
-    if (!trimmed || scriptGen.isPending) return; // 「AI生成文案」仍需卖点/主题作输入（BE ScriptGenerateRequest.topic 必填）
+    // 需卖点/主题（BE topic 必填）+ 时长合法（FIX2：BE ScriptGenerateRequest.duration_sec 也是 int，小数会 422——不发非法时长）。
+    if (!trimmed || !isValidDuration(durationSec) || scriptGen.isPending) return;
     setError(null);
     try {
       const res = await scriptGen.mutateAsync({
@@ -228,7 +229,7 @@ export function EcomVideoForm({
         speed={speed}
         label={copy.workbench.ecomScriptLabel}
         actionLabel={copy.workbench.ecomScriptGenerate} // req3：「重写文案」→「AI生成文案」（口播共享组件不传→仍「重写文案」）
-        actionDisabled={!topic.trim()} // 主题去必填后，主题空时禁「AI生成文案」（文案生成仍需主题；与「AI生成画面」缺图禁用对称，消死点击）
+        actionDisabled={!topic.trim() || !isValidDuration(durationSec)} // 主题空 / 时长非整数(FIX2) 禁「AI生成文案」（消死点击 + 不发小数时长）
         // KEEPALIVE：面板常驻后与口播的 ScriptReview 同存于 DOM → id 必须区分（否则 label[for] 错指隐藏面板）。
         id="ecom-script"
       />
