@@ -61,11 +61,18 @@ DbSessionDependency = Depends(get_db_session)
 TokenDependency = Depends(oauth2_scheme)
 
 _ROLE_PERMISSIONS: dict[Role, set[str]] = {
-    Role.ADMIN: {"tenant:admin", "content:operate", "video:create", "video:review", "dev:access"},
+    Role.ADMIN: {
+        "tenant:admin",
+        "content:operate",
+        "video:create",
+        "video:review",
+        "dev:access",
+        "aibrain:chat",
+    },
     Role.OPS: {"content:operate", "video:review"},
-    Role.CREATOR: {"video:create"},
+    Role.CREATOR: {"video:create", "aibrain:chat"},
     Role.REVIEWER: {"video:review"},
-    Role.DEVELOPER: {"dev:access", "video:create"},
+    Role.DEVELOPER: {"dev:access", "video:create", "aibrain:chat"},
 }
 
 

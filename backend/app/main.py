@@ -68,6 +68,7 @@ async def _run_orphan_recovery_loop() -> None:
                     result.photo_tasks,
                     result.reverse_prompt_jobs,
                     result.ecom_replicate_jobs,
+                    result.aibrain_reservations,
                 )
             ):
                 logger.warning(
@@ -75,6 +76,7 @@ async def _run_orphan_recovery_loop() -> None:
                     photo_tasks=result.photo_tasks,
                     reverse_prompt_jobs=result.reverse_prompt_jobs,
                     ecom_replicate_jobs=result.ecom_replicate_jobs,
+                    aibrain_reservations=result.aibrain_reservations,
                 )
         except asyncio.CancelledError:
             raise

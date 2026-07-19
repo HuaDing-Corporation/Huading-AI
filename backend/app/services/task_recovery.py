@@ -15,6 +15,7 @@ from app.db.models import (
     VideoTask,
 )
 from app.db.session import SessionLocal
+from app.services.aibrain import recover_stale_reasoning_reservations
 from app.services.quota import (
     release_reserved_quota,
     release_reverse_prompt_video_quota,
@@ -34,6 +35,7 @@ class ImageQueueRecoveryResult:
     photo_tasks: int = 0
     reverse_prompt_jobs: int = 0
     ecom_replicate_jobs: int = 0
+    aibrain_reservations: int = 0
 
 
 def recover_orphaned_image_queue_tasks(
@@ -41,6 +43,7 @@ def recover_orphaned_image_queue_tasks(
     session_factory: Any = SessionLocal,
     now: datetime | None = None,
     stale_after_seconds: float | None = None,
+    aibrain_stale_after_seconds: float | None = None,
     progress_store: Any | None = None,
 ) -> ImageQueueRecoveryResult:
     recovered_at = now or datetime.now(UTC)
@@ -50,6 +53,12 @@ def recover_orphaned_image_queue_tasks(
         else stale_after_seconds
     )
     cutoff = recovered_at - timedelta(seconds=stale_seconds)
+    aibrain_stale_seconds = (
+        settings.engine_aibrain_reservation_stale_minutes * 60
+        if aibrain_stale_after_seconds is None
+        else aibrain_stale_after_seconds
+    )
+    aibrain_cutoff = recovered_at - timedelta(seconds=aibrain_stale_seconds)
     recovered_progress: list[tuple[str, str]] = []
 
     with session_factory() as db:
@@ -149,6 +158,11 @@ def recover_orphaned_image_queue_tasks(
                 job.error_message = _REPLICATE_WORKER_LOST_MESSAGE
             job.finished_at = recovered_at
             job.updated_at = recovered_at
+        aibrain_reservations = recover_stale_reasoning_reservations(
+            db,
+            cutoff=aibrain_cutoff,
+            recovered_at=recovered_at,
+        )
         db.commit()
 
     if progress_store is not None:
@@ -173,4 +187,5 @@ def recover_orphaned_image_queue_tasks(
         photo_tasks=len(photo_tasks),
         reverse_prompt_jobs=len(reverse_prompt_jobs),
         ecom_replicate_jobs=len(replicate_jobs),
+        aibrain_reservations=aibrain_reservations,
     )

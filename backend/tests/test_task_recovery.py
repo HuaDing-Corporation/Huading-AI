@@ -8,14 +8,19 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.db.models import (
+    ChatConversation,
+    ChatMessage,
     EcomReplicateJob,
     EcomReplicateOutput,
+    ReasoningLedgerEntry,
+    ReasoningWallet,
     ReversePromptJob,
     Subscription,
     UsageRecord,
     VideoTask,
 )
 from app.main import app
+from app.services import aibrain
 
 
 class _ProgressStore:
@@ -24,6 +29,119 @@ class _ProgressStore:
 
     def update(self, task_id: str, **fields: object) -> None:
         self.updates.append((task_id, fields))
+
+
+def test_stale_aibrain_reservation_is_released_once_without_touching_live_or_completed(
+    auth_db,
+    auth_context,
+) -> None:
+    from app.services.task_recovery import recover_orphaned_image_queue_tasks
+
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    stale_at = now - timedelta(seconds=1901)
+    fresh_at = now - timedelta(seconds=30)
+    with auth_db() as db:
+        conversation = ChatConversation(
+            tenant_id=auth_context["tenant_id"],
+            created_by_user_id=auth_context["user_id"],
+            title="Recovery",
+        )
+        db.add(conversation)
+        db.flush()
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("200"),
+            operation_key=f"seed-topup:{auth_context['tenant_id']}",
+        )
+        orphan = ChatMessage(
+            tenant_id=auth_context["tenant_id"],
+            conversation_id=conversation.id,
+            role="user",
+            content="orphan",
+            attachments=[],
+            tier="low",
+            model="gpt-5.6-luna",
+            status="pending",
+            created_at=stale_at,
+            updated_at=stale_at,
+        )
+        live = ChatMessage(
+            tenant_id=auth_context["tenant_id"],
+            conversation_id=conversation.id,
+            role="user",
+            content="live",
+            attachments=[],
+            tier="low",
+            model="gpt-5.6-luna",
+            status="pending",
+            created_at=fresh_at,
+            updated_at=fresh_at,
+        )
+        completed = ChatMessage(
+            tenant_id=auth_context["tenant_id"],
+            conversation_id=conversation.id,
+            role="user",
+            content="completed",
+            attachments=[],
+            tier="low",
+            model="gpt-5.6-luna",
+            status="completed",
+            reserved_credits=Decimal("100"),
+            created_at=stale_at,
+            updated_at=stale_at,
+        )
+        db.add_all([orphan, live, completed])
+        db.flush()
+        for message in (orphan, live):
+            reservation = aibrain._apply_reasoning_wallet_change(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                entry_type="reserve",
+                amount_credits=Decimal("100"),
+                chat_message_id=message.id,
+                operation_key=f"reserve:{message.id}",
+            )
+            message.reserved_credits = reservation.ledger_entry.amount_credits
+        orphan_id = orphan.id
+        live_id = live.id
+        completed_id = completed.id
+        db.commit()
+
+    result = recover_orphaned_image_queue_tasks(
+        session_factory=auth_db,
+        now=now,
+        stale_after_seconds=1800,
+        aibrain_stale_after_seconds=1800,
+    )
+    repeated = recover_orphaned_image_queue_tasks(
+        session_factory=auth_db,
+        now=now,
+        stale_after_seconds=1800,
+        aibrain_stale_after_seconds=1800,
+    )
+
+    with auth_db() as db:
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        releases = list(
+            db.scalars(
+                select(ReasoningLedgerEntry).where(
+                    ReasoningLedgerEntry.tenant_id == auth_context["tenant_id"],
+                    ReasoningLedgerEntry.entry_type == "release",
+                )
+            )
+        )
+        assert db.get(ChatMessage, orphan_id).status == "failed"
+        assert db.get(ChatMessage, live_id).status == "pending"
+        assert db.get(ChatMessage, completed_id).status == "completed"
+        assert wallet.available_credits == Decimal("100")
+        assert wallet.reserved_credits == Decimal("100")
+        assert len(releases) == 1
+        assert releases[0].operation_key == f"release:{orphan_id}"
+
+    assert result.aibrain_reservations == 1
+    assert repeated.aibrain_reservations == 0
 
 
 def test_stale_running_photo_becomes_failed_and_releases_reserved_quota(

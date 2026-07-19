@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 from functools import lru_cache
 from typing import Annotated
 
@@ -183,6 +184,22 @@ class Settings(BaseSettings):
     engine_apimart_scene_prompt_model: str = "gpt-5.6-luna"
     engine_apimart_scene_prompt_input_usd_per_m: float = 1.0
     engine_apimart_scene_prompt_output_usd_per_m: float = 6.0
+    # AIBRAIN user rates are reasoning credits per 1K tokens. Provider rates are
+    # APIMart credits per 1M tokens and only feed high-precision cost accounting.
+    engine_aibrain_low_input_credits_per_1k: Decimal = Decimal("1.73")
+    engine_aibrain_low_output_credits_per_1k: Decimal = Decimal("10.37")
+    engine_aibrain_mid_input_credits_per_1k: Decimal = Decimal("4.32")
+    engine_aibrain_mid_output_credits_per_1k: Decimal = Decimal("25.92")
+    engine_aibrain_high_input_credits_per_1k: Decimal = Decimal("8.64")
+    engine_aibrain_high_output_credits_per_1k: Decimal = Decimal("51.84")
+    engine_aibrain_low_input_provider_credits_per_m: Decimal = Decimal("8")
+    engine_aibrain_low_output_provider_credits_per_m: Decimal = Decimal("48")
+    engine_aibrain_mid_input_provider_credits_per_m: Decimal = Decimal("20")
+    engine_aibrain_mid_output_provider_credits_per_m: Decimal = Decimal("120")
+    engine_aibrain_high_input_provider_credits_per_m: Decimal = Decimal("40")
+    engine_aibrain_high_output_provider_credits_per_m: Decimal = Decimal("240")
+    engine_aibrain_max_completion_tokens: int = Field(default=4096, ge=1, le=16384)
+    engine_aibrain_reservation_stale_minutes: int = Field(default=30, ge=1)
     engine_apimart_reverse_prompt_input_credits_per_m: float = 16.0
     engine_apimart_reverse_prompt_output_credits_per_m: float = 96.0
     engine_reverse_prompt_video_credits: float = Field(default=100.0, gt=0)
