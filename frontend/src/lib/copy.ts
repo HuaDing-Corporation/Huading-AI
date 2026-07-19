@@ -1307,6 +1307,8 @@ export const copy = {
     rechargeAmount: (n: number) => `${n} 积分`,
     rechargeConfirm: "确认充值",
     rechargeFailed: "充值失败，请重试",
+    // 409：同一幂等键用于了不同金额（正常流程不该触发——改档位会换新键——但触发了要看得懂）。
+    idempotencyReuse: "充值请求状态异常，请关闭弹窗后重新发起。",
     // 发送错误分流（对齐 BE status/code）
     reqLimit: "本次问答超过单次上限或余额不足以作答，请精简内容或充值后重试。",
     providerFailed: "AI 服务暂时不可用，请稍后重试。",

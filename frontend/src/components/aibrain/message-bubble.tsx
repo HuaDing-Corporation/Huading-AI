@@ -31,15 +31,27 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
       <span className="px-1 text-[11.5px] text-ink-faint">{isUser ? copy.aibrain.you : copy.aibrain.assistant}</span>
       {message.attachments.length > 0 ? (
         <div className={cn("flex flex-wrap gap-2", isUser ? "justify-end" : "justify-start")}>
-          {message.attachments.map((att) => (
-            <span
-              key={att.asset_id}
-              className="inline-flex items-center gap-1.5 rounded-mark border border-line-gold bg-glass-soft px-2.5 py-1.5 text-[12px] text-ink-soft"
-            >
-              <ImageIcon size={13} strokeWidth={1.8} className="text-gold-deep" aria-hidden />
-              {copy.aibrain.imageAttachment}
-            </span>
-          ))}
+          {message.attachments.map((att) =>
+            att.download_url ? (
+              // FIX2：BE 补了 download_url（presign，只签 image）→ 显真缩略图。
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                key={att.asset_id}
+                src={att.download_url}
+                alt={copy.aibrain.imageAttachment}
+                className="h-16 w-16 rounded-mark border border-line-gold object-cover"
+              />
+            ) : (
+              // download_url 为 null（非 image / 签发失败）→ 降级占位片。
+              <span
+                key={att.asset_id}
+                className="inline-flex items-center gap-1.5 rounded-mark border border-line-gold bg-glass-soft px-2.5 py-1.5 text-[12px] text-ink-soft"
+              >
+                <ImageIcon size={13} strokeWidth={1.8} className="text-gold-deep" aria-hidden />
+                {copy.aibrain.imageAttachment}
+              </span>
+            )
+          )}
         </div>
       ) : null}
       {message.content || message.status === "pending" ? (

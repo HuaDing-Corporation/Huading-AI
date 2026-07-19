@@ -41,8 +41,9 @@ let msgSeq = 0;
 let available = 0;
 let totalTopup = 0;
 let totalSpent = 0;
-// 充值幂等（§四之二）：key → 首次结果。同 key 重放返回首次结果、不产生第二笔（否则又是「mock 比 BE 宽松」的假绿）。
-const topupIdempotency = new Map<string, ReturnType<typeof walletView>>();
+// 充值幂等（§四之二 + FIX2）：key → {首次金额, 首次结果}。同 key+同额 → 返首次；同 key+异额 → 409（对齐 BE FIX1）。
+const topupIdempotency = new Map<string, { amount: number; result: ReturnType<typeof walletView> }>();
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** 测试重置（stores 模块级，server.resetHandlers 不清）。 */
 export function resetAibrain(): void {
@@ -86,7 +87,13 @@ function newConversation(): MockConversation {
 }
 
 function attachmentsFrom(ids: string[]): ChatAttachment[] {
-  return ids.map((asset_id) => ({ asset_id, asset_type: "generated_image", mime_type: "image/png" }));
+  // FIX2：BE 补了 download_url（presign，只签 image）——mock 给个可渲染的占位 URL，让前端走真缩略图路径。
+  return ids.map((asset_id) => ({
+    asset_id,
+    asset_type: "generated_image",
+    mime_type: "image/png",
+    download_url: `https://mock.local/aibrain/${asset_id}.png`
+  }));
 }
 
 export function aibrainHandlers() {
@@ -99,16 +106,22 @@ export function aibrainHandlers() {
         idempotency_key?: unknown;
       };
       if (hasExtraKeys(body, ["amount", "idempotency_key"])) return err(422, "VALIDATION_ERROR", "extra fields forbidden");
+      // idempotency_key 是 BE 必填 UUID（无默认）→ 缺失/非 UUID 即 422（不比 BE 宽松）。
       const key = typeof body.idempotency_key === "string" ? body.idempotency_key : "";
-      // 🔴 幂等：同 key 重放 → 返回首次结果，**不再加钱**（推理积分不可退，双扣不可逆，§四之二）。
-      const prev = key ? topupIdempotency.get(key) : undefined;
-      if (prev) return ok(prev);
+      if (!UUID_RE.test(key)) return err(422, "VALIDATION_ERROR", "idempotency_key 缺失或非法（须为 UUID）");
       if (typeof body.amount !== "number" || !TOPUP_OPTIONS.includes(body.amount))
         return err(422, "VALIDATION_ERROR", "充值档位非法（100 / 500 / 1000 / 2000）");
+      // 🔴 幂等：同 key + **同额** → 返首次结果、不再加钱；同 key + **异额** → 409（对齐 BE FIX1）。
+      const prev = topupIdempotency.get(key);
+      if (prev) {
+        if (prev.amount !== body.amount)
+          return err(409, AIBRAIN_ERROR.IDEMPOTENCY_KEY_REUSED, "该幂等键已用于不同金额的充值");
+        return ok(prev.result);
+      }
       available += body.amount; // 1:1；单向不可退（无退款端点）
       totalTopup += body.amount;
       const result = walletView();
-      if (key) topupIdempotency.set(key, result);
+      topupIdempotency.set(key, { amount: body.amount, result });
       return ok(result);
     }),
 
@@ -156,12 +169,12 @@ export function aibrainHandlers() {
       // 🔴 预留：flat min(200, available)。available<=0 → 402（BE：reserve<=0）。
       if (available <= 0) return err(402, AIBRAIN_ERROR.INSUFFICIENT_BALANCE, "推理积分不足，请充值后再试");
       const reservation = Math.min(SINGLE_REQUEST_LIMIT, available);
-      // 上游失败（测 502 分流）。
-      if (content.includes(PROVIDER_FAIL_MARKER))
-        return err(502, AIBRAIN_ERROR.PROVIDER_FAILED, "AI 服务暂时不可用，请稍后重试");
-      // 预留不够买最小答复（BE：max_completion_tokens<=0 → 422，provider 不被调用）。
+      // 🔴 FIX2 · 次序对齐 BE：预留不够买最小答复 → 422，**先于** provider 调用（BE aibrain.py:138-144 rollback+422）。
       if (content.length > OVERSIZED_CONTENT || reservation < TIERS[body.tier].typical)
         return err(422, AIBRAIN_ERROR.REQUEST_LIMIT_EXCEEDED, `单次问答超过 ${SINGLE_REQUEST_LIMIT} 积分上限或余额不足以作答，请精简内容或充值`);
+      // 上游失败（测 502 分流）——在 422 之后（只有实际调用了 provider 才可能 502）。
+      if (content.includes(PROVIDER_FAIL_MARKER))
+        return err(502, AIBRAIN_ERROR.PROVIDER_FAILED, "AI 服务暂时不可用，请稍后重试");
 
       // 结算：min(实耗, 预留)。实耗用典型消耗；退回未用（available 只减实扣）。
       const charged = Math.min(TIERS[body.tier].typical, reservation);

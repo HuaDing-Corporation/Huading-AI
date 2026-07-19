@@ -7,8 +7,8 @@ import { resetAibrain } from "./aibrain-handlers";
 // 🔴 mock 逐字段镜像 BE f2e9a2e0、**不比 BE 宽松**（含 402/422/502 状态码本身 + 充值幂等）。
 beforeEach(() => resetAibrain());
 const PROVIDER_FAIL = "__mock_provider_fail__"; // 与 mock 内约定一致
-let keySeq = 0;
-const topup = (amount: number, key = `k${++keySeq}`) => topupWallet({ amount, idempotency_key: key });
+// idempotency_key 是 BE 必填 UUID → 测试用真 UUID（每次唯一，避免跨用例串键）。
+const topup = (amount: number, key = crypto.randomUUID()) => topupWallet({ amount, idempotency_key: key });
 
 describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
   it("非法档位 → 422（校验错）", async () => {
@@ -44,18 +44,44 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
     await expect(topup(123)).rejects.toMatchObject({ status: 422 });
   });
 
-  it("🔴 §四之二 充值幂等：同一 idempotency_key 重放 → 只加一次、返回首次结果（不双扣）", async () => {
-    const first = await topupWallet({ amount: 500, idempotency_key: "same-key" });
+  it("🔴 §四之二 充值幂等：同 key + 同额 重放 → 只加一次、返回首次结果（不双扣）", async () => {
+    const key = crypto.randomUUID();
+    const first = await topupWallet({ amount: 500, idempotency_key: key });
     expect(first.available_credits).toBe(500);
-    // 重放同一 key（模拟网络重试）——**不产生第二笔**。
-    const replay = await topupWallet({ amount: 500, idempotency_key: "same-key" });
+    const replay = await topupWallet({ amount: 500, idempotency_key: key }); // 网络重试
     expect(replay.available_credits).toBe(500); // 不是 1000
     const w = await getWallet();
     expect(w.available_credits).toBe(500);
     expect(w.total_topup_credits).toBe(500);
     // 不同 key = 新的一次充值 → 真的加。
-    const next = await topupWallet({ amount: 500, idempotency_key: "other-key" });
+    const next = await topup(500);
     expect(next.available_credits).toBe(1000);
+  });
+
+  it("🔴 FIX2 幂等键复用异额 → 409 AIBRAIN_IDEMPOTENCY_KEY_REUSED（同 key 同额才返首次）", async () => {
+    const key = crypto.randomUUID();
+    await topupWallet({ amount: 100, idempotency_key: key });
+    await expect(topupWallet({ amount: 500, idempotency_key: key })).rejects.toMatchObject({
+      status: 409,
+      code: "AIBRAIN_IDEMPOTENCY_KEY_REUSED"
+    });
+    // 且没有第二笔：余额仍 100。
+    expect((await getWallet()).available_credits).toBe(100);
+  });
+
+  it("🔴 FIX2 idempotency_key 缺失/非 UUID → 422（BE 必填 UUID，mock 不比 BE 宽松）", async () => {
+    await expect(topupWallet({ amount: 100, idempotency_key: "not-a-uuid" })).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("🔴 FIX2 次序：同时超上限 + 上游标记 → **422 先于 502**（BE：预留不够时 provider 不被调用）", async () => {
+    await topup(100);
+    const conv = await createConversation();
+    // content 既超长(→422) 又含上游失败标记(→502)：应得 422（BE 在调 provider 前就 422 rollback）。
+    const content = PROVIDER_FAIL + "x".repeat(8001);
+    await expect(sendMessage(conv.id, { content, tier: "high", attachment_asset_ids: [] })).rejects.toMatchObject({
+      status: 422,
+      code: "AIBRAIN_REQUEST_LIMIT_EXCEEDED"
+    });
   });
 
   it("🔴 多传字段（BE extra=forbid）→ 422（mock 不比 BE 宽松，CR#4）", async () => {

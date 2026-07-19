@@ -12,7 +12,7 @@ import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
 import { ApiError } from "@/lib/api/client";
 import { useTopup } from "@/lib/aibrain/hooks";
-import { TOPUP_OPTIONS } from "@/lib/aibrain/types";
+import { AIBRAIN_ERROR, TOPUP_OPTIONS } from "@/lib/aibrain/types";
 
 export function RechargeDialog({
   open,
@@ -44,7 +44,9 @@ export function RechargeDialog({
       await recharge.mutateAsync({ amount, idempotencyKey: idemKey.current });
       onOpenChange(false);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : copy.aibrain.rechargeFailed);
+      if (err instanceof ApiError && err.code === AIBRAIN_ERROR.IDEMPOTENCY_KEY_REUSED)
+        setError(copy.aibrain.idempotencyReuse);
+      else setError(err instanceof ApiError ? err.message : copy.aibrain.rechargeFailed);
     }
   };
 

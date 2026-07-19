@@ -31,11 +31,16 @@ export const TIER_ORDER: IntensityTier[] = ["low", "mid", "high"];
 /** 充值档位（BE `TopupAmount = Literal[100,500,1000,2000]`；钱包 `topup_options` 亦下发同值）。 */
 export const TOPUP_OPTIONS: number[] = [100, 500, 1000, 2000];
 
-/** 响应里的附件（BE `ChatAttachmentRead`）——**只有 asset_id/asset_type/mime_type，无 URL**。 */
+/**
+ * 响应里的附件（BE `ChatAttachmentRead`）。
+ * 🔴 FIX2：BE FIX1 补了 `download_url`（`_attachment_download_urls`：SQL 租户过滤 + presign + 只签 image）→
+ * 历史图片附件现在能显**真缩略图**（`download_url` 为 null 时降级为占位片）。
+ */
 export interface ChatAttachment {
   asset_id: string;
   asset_type: string;
   mime_type: string;
+  download_url?: string | null;
 }
 
 /** 客户端待发附件（组件本地态：图片 asset_id + 本地预览）。发送时只提取 asset_id 进 attachment_asset_ids。 */
@@ -137,7 +142,9 @@ export const AIBRAIN_ERROR = {
   CONVERSATION_NOT_FOUND: "AIBRAIN_CONVERSATION_NOT_FOUND", // 404
   ATTACHMENT_NOT_FOUND: "AIBRAIN_ATTACHMENT_NOT_FOUND", // 404
   ATTACHMENT_INVALID: "AIBRAIN_ATTACHMENT_INVALID", // 422
-  PROVIDER_FAILED: "AIBRAIN_PROVIDER_FAILED" // 502
+  PROVIDER_FAILED: "AIBRAIN_PROVIDER_FAILED", // 502
+  // 🔴 FIX2：同 idempotency_key + 不同金额 → 409（正常流程不该触发——改档位就换新键——但触发了要看得懂）。
+  IDEMPOTENCY_KEY_REUSED: "AIBRAIN_IDEMPOTENCY_KEY_REUSED" // 409
 } as const;
 
 export type SendPrecheck = { ok: true } | { ok: false; reason: "insufficient" };
