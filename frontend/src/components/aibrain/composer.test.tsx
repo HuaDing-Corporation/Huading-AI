@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
 import { Composer } from "./composer";
+import { copy } from "@/lib/copy";
 
 function wrap(ui: ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -179,8 +180,36 @@ describe("Composer · P1（FIX5 发送等待窗口不清空新状态）", () => 
       resolve(true); // 第一条成功返回
       await Promise.resolve();
     });
-    expect(container.querySelector('img[src="blob:mock-2"]')).toBeTruthy(); // 🔴 新附件仍在、预览未碎
-    expect(revokeSpy).not.toHaveBeenCalledWith("blob:mock-2"); // 🔴 决不 revoke 新附件 URL
+    expect(container.querySelector('img[src="blob:mock-2"]')).toBeTruthy(); // 🔴 新附件 B 仍在、预览未碎
+    expect(container.querySelector('img[src="blob:mock-1"]')).toBeTruthy(); // 本批 A 也仍在（触碰后全保留）
+    expect(revokeSpy).not.toHaveBeenCalled(); // 🔴 触碰后**不 revoke 任何 URL**（含本批 A 的 mock-1）
+  });
+
+  it("🔴 承重2b：发送中**换附件**（删A加B，长度不变、asset_id 变）→ 成功后 B 仍在、不被误清（钉住 .every 判据）", async () => {
+    const { onSend, resolve } = deferredSend();
+    const { container } = wrap(<Composer tier="low" balance={100} sending={false} {...props()} onSend={onSend} />);
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    // 附件 A（blob:mock-1）随文字一起发送。
+    await uploadFile(fileInput, "a.png");
+    await waitFor(() => expect(container.querySelector('img[src="blob:mock-1"]')).toBeTruthy());
+    fireEvent.change(screen.getByLabelText(/输入问题/), { target: { value: "看" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    });
+    expect(onSend).toHaveBeenCalledTimes(1);
+    // 等待期间「换」附件：先删 A（移除按钮此刻不 disabled，handler 自己 revoke mock-1），再加 B（blob:mock-2）。
+    // 结果集长度仍为 1，但 asset_id 与发送快照 [A] 不同 → 必须靠 .every(asset_id) 判为 touched。
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: copy.aibrain.attachRemove }));
+    });
+    await uploadFile(fileInput, "b.png");
+    await waitFor(() => expect(container.querySelector('img[src="blob:mock-2"]')).toBeTruthy());
+    await act(async () => {
+      resolve(true); // 第一条成功返回
+      await Promise.resolve();
+    });
+    expect(container.querySelector('img[src="blob:mock-2"]')).toBeTruthy(); // 🔴 换上的 B 仍在（未被误清）
+    expect(revokeSpy).not.toHaveBeenCalledWith("blob:mock-2"); // 决不 revoke 换上的 B
   });
 
   it("承重3：发送中**没动** → 成功后文字清空、附件清空并 revoke 本批（正常路径别误伤）", async () => {

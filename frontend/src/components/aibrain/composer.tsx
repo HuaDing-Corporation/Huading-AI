@@ -42,16 +42,18 @@ export function Composer({
   const imageInput = useRef<HTMLInputElement>(null);
   const voiceBase = useRef("");
   const objectUrls = useRef<string[]>([]); // 本地预览 objectURL，须显式 revoke（CR#3）
-  // 🔴 FIX5：镜像最新 attachments。发送在 await 期间开了一个异步窗口，submit 闭包里的 `attachments` 是
-  //   发送**瞬间**的旧值——成功后要判断「窗口期附件有没有被动过」，必须读这个 ref 拿最新值。
+  // 🔴 FIX5：镜像最新 text/attachments。发送在 await 期间开了一个异步窗口，submit 闭包里的 `text`/`attachments`
+  //   是发送**瞬间**的旧值——成功后要判断「窗口期有没有被动过」，必须读这两个 ref 拿最新值。
+  const textRef = useRef(text);
   const attachmentsRef = useRef<PendingAttachment[]>(attachments);
   const uploadImage = useUploadImage();
 
   const voice = useVoiceInput((t) => setText(voiceBase.current + t));
 
   useEffect(() => {
+    textRef.current = text;
     attachmentsRef.current = attachments;
-  }, [attachments]);
+  }, [text, attachments]);
 
   // 卸载时释放所有未撤销的预览 URL（换页/关闭仍会遗留，浏览器只在整页卸载时兜底）。
   useEffect(() => () => objectUrls.current.forEach((u) => URL.revokeObjectURL(u)), []);
@@ -74,12 +76,19 @@ export function Composer({
     // 🔴 P1-1：**await 结果，只有成功才清空**；失败（网络/402/422/502）→ 全部保留，不必重打重传，预览也不碎。
     const sent = await onSend({ content, tier, attachment_asset_ids: sentAttachments.map((a) => a.asset_id) });
     if (!sent) return;
-    // 🔴 FIX5：await 打开了异步窗口——期间用户可能已边等边打下一条 / 加了新附件。**只清「仍等于发送快照」的部分**，
-    //   决不无条件清空（否则把窗口期的新草稿、新附件连同预览一起抹掉；聊天里边等回复边打下一条是标准行为，不锁输入）。
-    setText((cur) => (cur === sentText ? "" : cur)); // 文字没动才清（函数式读最新值）
+    // 🔴 FIX5：await 打开了异步窗口——期间用户可能已边等边打下一条 / 加了新附件 / 用语音继续听写。**只清「仍等于
+    //   发送快照」的部分**，决不无条件清空（否则把窗口期的新草稿、新附件、语音前缀一起抹掉；聊天里边等回复边打下
+    //   一条是标准行为，不锁输入）。读 ref 取「窗口结束那一刻」的最新值（闭包里的 text/attachments 是发送瞬间旧值）。
+    const currentText = textRef.current;
+    const currentAttachments = attachmentsRef.current;
+    if (currentText === sentText) {
+      setText("");
+      // 语音前缀基准（voiceBase = 开录前已有文字）**只在文字确实被清时才重置**——否则会截断窗口期仍在进行的语音草稿
+      //   （下一次识别回调会 setText(voiceBase + t)，base 被清空 = 丢掉开录前的前缀）。与文字清空同一判据。
+      voiceBase.current = "";
+    }
     // 附件：这批仍原样未动才清空 + revoke **本批** 预览；窗口期加/删/换过 → 全保留、**不 revoke 任何 URL**
     //   （尤其不能 revoke 新附件的 URL——否则附件在、预览碎，等于把上一轮修好的一半又弄坏）。
-    const currentAttachments = attachmentsRef.current;
     const attachmentsUntouched =
       currentAttachments.length === sentAttachments.length &&
       currentAttachments.every((a, i) => a.asset_id === sentAttachments[i].asset_id);
@@ -89,7 +98,6 @@ export function Composer({
       objectUrls.current = objectUrls.current.filter((u) => !sentUrls.has(u));
       setAttachments([]);
     }
-    voiceBase.current = "";
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
