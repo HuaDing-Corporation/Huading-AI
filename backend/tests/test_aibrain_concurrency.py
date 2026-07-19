@@ -1,4 +1,5 @@
 import ast
+import asyncio
 import os
 import threading
 from datetime import UTC, datetime, timedelta
@@ -7,7 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, event, select, text
+from sqlalchemy import create_engine, event, insert, select, text, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import sessionmaker
 
@@ -21,18 +22,20 @@ from app.db.models import (
     ReasoningWallet,
     Subscription,
     Tenant,
+    UsageRecord,
+    User,
 )
 from app.services import aibrain
 
-_RUNTIME_WALLET_FIELDS = {
+_WALLET_MONETARY_FIELDS = {
     "available_credits",
     "reserved_credits",
     "total_topup_credits",
     "total_spent_credits",
 }
-_ALLOWED_RUNTIME_WRITES_BY_FUNCTION = {
+_STATIC_ALLOWED_WRITES_BY_FUNCTION = {
     "app/services/aibrain.py": {
-        "_apply_reasoning_wallet_change": _RUNTIME_WALLET_FIELDS,
+        "_apply_reasoning_wallet_change": _WALLET_MONETARY_FIELDS,
     }
 }
 
@@ -122,20 +125,25 @@ def _wallet_update_fields(
         or not _mentions_reasoning_wallet(node.func.value)
     ):
         return set()
-    fields = {keyword.arg for keyword in node.keywords if keyword.arg in _RUNTIME_WALLET_FIELDS}
+    fields = {keyword.arg for keyword in node.keywords if keyword.arg in _WALLET_MONETARY_FIELDS}
     for keyword in node.keywords:
         if keyword.arg is None:
             fields.update(_literal_dict_keys(keyword.value, dictionaries))
     for argument in node.args:
         fields.update(_literal_dict_keys(argument, dictionaries))
-    return fields & _RUNTIME_WALLET_FIELDS
+    return fields & _WALLET_MONETARY_FIELDS
 
 
-def _runtime_wallet_write_violations(app_root: Path) -> list[str]:
+def _static_wallet_write_hints(app_root: Path) -> list[str]:
+    """Find obvious writes early; this is not the wallet's security boundary.
+
+    Dynamic setattr fields, runtime mappings, reflected aliases, and raw SQL cannot be
+    proven safe by this AST pass. Runtime ORM/Core events enforce the supported paths.
+    """
     violations: list[str] = []
     for path in app_root.rglob("*.py"):
         relative = path.relative_to(app_root.parent).as_posix()
-        allowed_by_function = _ALLOWED_RUNTIME_WRITES_BY_FUNCTION.get(relative, {})
+        allowed_by_function = _STATIC_ALLOWED_WRITES_BY_FUNCTION.get(relative, {})
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         functions = [
             node
@@ -160,7 +168,7 @@ def _runtime_wallet_write_violations(app_root: Path) -> list[str]:
                 if (
                     isinstance(target.value, ast.Name)
                     and target.value.id in wallet_names
-                    and target.attr in _RUNTIME_WALLET_FIELDS
+                    and target.attr in _WALLET_MONETARY_FIELDS
                     and target.attr not in allowed
                 ):
                     violations.append(f"{relative}:{function_name}:{node.lineno}:{target.attr}")
@@ -172,7 +180,7 @@ def _runtime_wallet_write_violations(app_root: Path) -> list[str]:
                 and isinstance(node.args[0], ast.Name)
                 and node.args[0].id in wallet_names
                 and isinstance(node.args[1], ast.Constant)
-                and node.args[1].value in _RUNTIME_WALLET_FIELDS
+                and node.args[1].value in _WALLET_MONETARY_FIELDS
                 and node.args[1].value not in allowed
             ):
                 violations.append(f"{relative}:{function_name}:{node.lineno}:{node.args[1].value}")
@@ -191,7 +199,7 @@ def _write_wallet_guard_probe(tmp_path: Path, source: str) -> Path:
     return app_root
 
 
-def test_wallet_guard_rejects_an_aliased_wallet_assignment(tmp_path: Path) -> None:
+def test_static_wallet_hint_rejects_an_aliased_wallet_assignment(tmp_path: Path) -> None:
     app_root = _write_wallet_guard_probe(
         tmp_path,
         """
@@ -203,10 +211,10 @@ def bypass(wallet: ReasoningWallet) -> None:
 """,
     )
 
-    assert _runtime_wallet_write_violations(app_root)
+    assert _static_wallet_write_hints(app_root)
 
 
-def test_wallet_guard_rejects_setattr_on_a_wallet(tmp_path: Path) -> None:
+def test_static_wallet_hint_rejects_setattr_on_a_wallet(tmp_path: Path) -> None:
     app_root = _write_wallet_guard_probe(
         tmp_path,
         """
@@ -217,10 +225,10 @@ def bypass(obj: ReasoningWallet) -> None:
 """,
     )
 
-    assert _runtime_wallet_write_violations(app_root)
+    assert _static_wallet_write_hints(app_root)
 
 
-def test_wallet_guard_rejects_unpacked_bulk_wallet_updates(tmp_path: Path) -> None:
+def test_static_wallet_hint_rejects_unpacked_bulk_wallet_updates(tmp_path: Path) -> None:
     app_root = _write_wallet_guard_probe(
         tmp_path,
         """
@@ -233,13 +241,103 @@ def bypass() -> None:
 """,
     )
 
-    assert _runtime_wallet_write_violations(app_root)
+    assert _static_wallet_write_hints(app_root)
 
 
-def test_runtime_wallet_writes_only_occur_in_the_locked_helper() -> None:
+def test_static_wallet_hints_only_allow_the_locked_helper() -> None:
     app_root = Path(__file__).resolve().parents[1] / "app"
 
-    assert _runtime_wallet_write_violations(app_root) == []
+    assert _static_wallet_write_hints(app_root) == []
+
+
+def test_runtime_guard_rejects_dynamic_setattr_on_a_wallet(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+        )
+        db.commit()
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        field_name = "available_credits"
+
+        with pytest.raises(RuntimeError, match="locked AIBRAIN wallet helper"):
+            setattr(wallet, field_name, Decimal("999"))
+
+
+def test_runtime_guard_rejects_dynamic_core_wallet_update(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+        )
+        db.commit()
+        payload = {"available_credits": Decimal("999")}
+
+        with pytest.raises(RuntimeError, match="locked AIBRAIN wallet helper"):
+            db.execute(
+                update(ReasoningWallet)
+                .where(ReasoningWallet.tenant_id == auth_context["tenant_id"])
+                .values(**payload)
+            )
+
+
+def test_runtime_guard_rejects_reflected_wallet_descriptor_write(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+        )
+        db.commit()
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        field_name = "available_credits"
+        descriptor = getattr(ReasoningWallet, field_name)
+
+        with pytest.raises(RuntimeError, match="locked AIBRAIN wallet helper"):
+            descriptor.__set__(wallet, Decimal("999"))
+
+
+def test_runtime_guard_rejects_direct_wallet_balance_construction(
+    auth_context,
+) -> None:
+    with pytest.raises(RuntimeError, match="locked AIBRAIN wallet helper"):
+        ReasoningWallet(
+            tenant_id=auth_context["tenant_id"],
+            available_credits=Decimal("999"),
+            reserved_credits=Decimal("0"),
+            total_topup_credits=Decimal("999"),
+            total_spent_credits=Decimal("0"),
+        )
+
+
+def test_runtime_guard_rejects_typed_core_wallet_insert(
+    auth_context,
+    auth_db,
+) -> None:
+    payload = {
+        "tenant_id": auth_context["tenant_id"],
+        "available_credits": Decimal("999"),
+        "reserved_credits": Decimal("0"),
+        "total_topup_credits": Decimal("999"),
+        "total_spent_credits": Decimal("0"),
+    }
+    with auth_db() as db:
+        with pytest.raises(RuntimeError, match="locked AIBRAIN wallet helper"):
+            db.execute(insert(ReasoningWallet).values(**payload))
 
 
 def test_wallet_mutation_query_uses_for_update_and_populate_existing(
@@ -303,14 +401,12 @@ def _seed_postgres_wallet(factory, *, available: Decimal) -> str:
             )
         )
         db.flush()
-        db.add(
-            ReasoningWallet(
-                tenant_id=tenant_id,
-                available_credits=available,
-                reserved_credits=Decimal("0"),
-                total_topup_credits=available,
-                total_spent_credits=Decimal("0"),
-            )
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=tenant_id,
+            entry_type="topup",
+            amount_credits=available,
+            operation_key=f"seed-topup:{tenant_id}",
         )
         db.commit()
     return tenant_id
@@ -379,7 +475,10 @@ def test_postgres_concurrent_reservations_allow_exactly_one_request(
         wallet = db.get(ReasoningWallet, tenant_id)
         ledger_entries = list(
             db.scalars(
-                select(ReasoningLedgerEntry).where(ReasoningLedgerEntry.tenant_id == tenant_id)
+                select(ReasoningLedgerEntry).where(
+                    ReasoningLedgerEntry.tenant_id == tenant_id,
+                    ReasoningLedgerEntry.entry_type == "reserve",
+                )
             )
         )
         assert wallet.available_credits == Decimal("0")
@@ -634,3 +733,153 @@ def test_postgres_aibrain_recovery_skips_a_message_locked_for_settlement(
         assert wallet.available_credits == Decimal("175")
         assert wallet.reserved_credits == Decimal("0")
         assert releases == []
+
+
+class _DelayedChatProvider:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    async def chat(self, _payload: dict[str, object]) -> dict[str, object]:
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("Delayed chat provider was not released by the test.")
+        return {
+            "content": "late provider response",
+            "model": "gpt-5.6-luna",
+            "prompt_tokens": 120,
+            "completion_tokens": 40,
+            "total_tokens": 160,
+        }
+
+
+def test_postgres_recovery_commits_before_a_delayed_provider_can_settle(
+    postgres_session_factory,
+    monkeypatch,
+) -> None:
+    from app.services import task_recovery
+
+    factory = postgres_session_factory
+    tenant_id = str(uuid4())
+    with factory() as db:
+        tenant = Tenant(
+            id=tenant_id,
+            slug=f"aibrain-late-provider-{uuid4().hex[:8]}",
+            name="AIBRAIN Late Provider",
+        )
+        user = User(
+            tenant_id=tenant_id,
+            email=f"late-provider-{uuid4().hex[:8]}@example.com",
+            password_hash="not-used-by-test",
+        )
+        conversation = ChatConversation(
+            tenant_id=tenant_id,
+            title="Late provider response",
+        )
+        db.add(tenant)
+        db.flush()
+        db.add_all([user, conversation])
+        db.flush()
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=tenant_id,
+            entry_type="topup",
+            amount_credits=Decimal("200"),
+            operation_key=f"seed:{tenant_id}",
+        )
+        user_id = user.id
+        conversation_id = conversation.id
+        db.commit()
+
+    provider = _DelayedChatProvider()
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    send_errors: list[BaseException] = []
+
+    def send_message() -> None:
+        try:
+            with factory() as db:
+                user = db.get(User, user_id)
+                asyncio.run(
+                    aibrain.send_chat_message(
+                        db,
+                        user=user,
+                        conversation_id=conversation_id,
+                        content="Wait for recovery",
+                        tier="low",
+                        attachment_asset_ids=[],
+                        storage=object(),
+                    )
+                )
+        except BaseException as exc:  # noqa: BLE001 - thread failure is evidence.
+            send_errors.append(exc)
+
+    sender = threading.Thread(target=send_message, daemon=True)
+    sender.start()
+    assert provider.started.wait(timeout=5)
+
+    recovery_result = task_recovery.recover_orphaned_image_queue_tasks(
+        session_factory=factory,
+        now=datetime.now(UTC) + timedelta(minutes=31),
+        stale_after_seconds=1800,
+        aibrain_stale_after_seconds=1800,
+    )
+    assert recovery_result.aibrain_reservations == 1
+    with factory() as db:
+        released_wallet = db.get(ReasoningWallet, tenant_id)
+        released_balance = (
+            released_wallet.available_credits,
+            released_wallet.reserved_credits,
+            released_wallet.total_spent_credits,
+        )
+
+    provider.release.set()
+    sender.join(timeout=5)
+
+    assert not sender.is_alive()
+    assert len(send_errors) == 1
+    assert isinstance(send_errors[0], AppError)
+    assert send_errors[0].code == "AIBRAIN_REQUEST_EXPIRED"
+    with factory() as db:
+        wallet = db.get(ReasoningWallet, tenant_id)
+        user_messages = list(
+            db.scalars(
+                select(ChatMessage).where(
+                    ChatMessage.tenant_id == tenant_id,
+                    ChatMessage.role == "user",
+                )
+            )
+        )
+        assistant_messages = list(
+            db.scalars(
+                select(ChatMessage).where(
+                    ChatMessage.tenant_id == tenant_id,
+                    ChatMessage.role == "assistant",
+                )
+            )
+        )
+        settled_usage = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.tenant_id == tenant_id,
+                    UsageRecord.status == "settled",
+                )
+            )
+        )
+        settlements = list(
+            db.scalars(
+                select(ReasoningLedgerEntry).where(
+                    ReasoningLedgerEntry.tenant_id == tenant_id,
+                    ReasoningLedgerEntry.entry_type == "settle",
+                )
+            )
+        )
+        assert len(user_messages) == 1
+        assert user_messages[0].status == "failed"
+        assert assistant_messages == []
+        assert settled_usage == []
+        assert settlements == []
+        assert (
+            wallet.available_credits,
+            wallet.reserved_credits,
+            wallet.total_spent_credits,
+        ) == released_balance

@@ -23,6 +23,7 @@ from app.db.models import (
     UsageRecord,
     User,
 )
+from app.db.reasoning_wallet_guard import allow_reasoning_wallet_mutation
 from app.providers.base import resolve
 from app.providers.chat.apimart_gpt56 import APIMartGPT56ChatError
 from app.schemas.aibrain import (
@@ -414,6 +415,7 @@ def _wallet_snapshot_from_ledger(entry: ReasoningLedgerEntry) -> ReasoningWallet
     )
 
 
+@allow_reasoning_wallet_mutation
 def _apply_reasoning_wallet_change(
     db: Session,
     *,

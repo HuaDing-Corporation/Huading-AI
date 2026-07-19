@@ -46,15 +46,15 @@ def test_stale_aibrain_reservation_is_released_once_without_touching_live_or_com
             created_by_user_id=auth_context["user_id"],
             title="Recovery",
         )
-        wallet = ReasoningWallet(
-            tenant_id=auth_context["tenant_id"],
-            available_credits=Decimal("200"),
-            reserved_credits=Decimal("0"),
-            total_topup_credits=Decimal("200"),
-            total_spent_credits=Decimal("0"),
-        )
-        db.add_all([conversation, wallet])
+        db.add(conversation)
         db.flush()
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("200"),
+            operation_key=f"seed-topup:{auth_context['tenant_id']}",
+        )
         orphan = ChatMessage(
             tenant_id=auth_context["tenant_id"],
             conversation_id=conversation.id,

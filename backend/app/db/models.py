@@ -23,6 +23,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.db.reasoning_wallet_guard import install_reasoning_wallet_guard
 from app.db.session import Base
 
 
@@ -732,6 +733,9 @@ class ReasoningWallet(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+install_reasoning_wallet_guard(ReasoningWallet)
 
 
 class ChatConversation(TenantScopedMixin, Base):
