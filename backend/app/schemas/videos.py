@@ -170,13 +170,6 @@ class VideoGenerateRequest(BaseModel):
         multiple_of=10,
         description="Optional photo subject-preservation guidance encoded into the prompt.",
     )
-    background_strength: int | None = Field(
-        default=None,
-        ge=10,
-        le=100,
-        multiple_of=10,
-        description="Optional photo background-reference guidance encoded into the prompt.",
-    )
     product_image_keys: list[str] = Field(
         default_factory=list,
         min_length=1,

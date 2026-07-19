@@ -104,12 +104,6 @@ _PHOTO_STRENGTH_SPECS = (
         "Preserve each referenced subject's identity, count, shape, proportions, colors, "
         "logos, text, materials, and defining details.",
     ),
-    (
-        "background_strength",
-        "Background reference",
-        "Preserve the referenced background's layout, setting, palette, lighting, spatial "
-        "relationships, and atmosphere.",
-    ),
 )
 _POSTER_SIZE = (1080, 1350)
 _POSTER_TEMPLATES = {
@@ -241,7 +235,6 @@ def build_photo_prompt(
     similarity_strength: int | None = None,
     creativity_strength: int | None = None,
     subject_strength: int | None = None,
-    background_strength: int | None = None,
 ) -> str:
     parts = []
     master_text = str(master_prompt or "").strip()
@@ -253,7 +246,6 @@ def build_photo_prompt(
         "similarity_strength": similarity_strength,
         "creativity_strength": creativity_strength,
         "subject_strength": subject_strength,
-        "background_strength": background_strength,
     }
     strength_lines = []
     for field_name, label, instruction in _PHOTO_STRENGTH_SPECS:
@@ -729,7 +721,6 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             similarity_strength=params.get("similarity_strength"),
             creativity_strength=params.get("creativity_strength"),
             subject_strength=params.get("subject_strength"),
-            background_strength=params.get("background_strength"),
         )
         ecom_cutout = _is_ecom_cutout_request(params)
         ecom_model = _is_ecom_model_request(params)

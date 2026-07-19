@@ -996,7 +996,6 @@ def _create_photo_video(
         "similarity_strength": payload.similarity_strength,
         "creativity_strength": payload.creativity_strength,
         "subject_strength": payload.subject_strength,
-        "background_strength": payload.background_strength,
     }
     params.update({key: value for key, value in prompt_controls.items() if value is not None})
     if payload.purpose == "cover" or payload.kind == "cover":

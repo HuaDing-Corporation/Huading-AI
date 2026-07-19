@@ -1322,7 +1322,6 @@ def test_photo_propagates_layered_prompt_and_strength_controls(
         "similarity_strength": 20,
         "creativity_strength": 40,
         "subject_strength": 60,
-        "background_strength": 80,
     }
 
     response = TestClient(app).post(
@@ -1339,15 +1338,67 @@ def test_photo_propagates_layered_prompt_and_strength_controls(
     task_id = response.json()["data"]["id"]
     for field_name, value in controls.items():
         assert enqueued["args"][0][field_name] == value
+    assert "background_strength" not in enqueued["args"][0]
     with auth_db() as db:
         task = db.get(VideoTask, task_id)
         subscription = db.get(Subscription, subscription_id)
         usage = db.query(UsageRecord).filter_by(video_task_id=task_id).one()
     for field_name, value in controls.items():
         assert task.params[field_name] == value
+    assert "background_strength" not in task.params
     assert subscription.quota_credits_reserved - reserved_before == 10
     assert usage.quantity == Decimal("1.000")
     assert usage.credits == Decimal("10.00")
+
+
+def test_photo_rejects_removed_background_strength(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(db, auth_context["tenant_id"])
+        subscription.quota_credits_total = 200
+        subscription_id = subscription.id
+        reserved_before = subscription.quota_credits_reserved
+        task_count_before = db.scalar(select(func.count()).select_from(VideoTask))
+        usage_count_before = db.scalar(select(func.count()).select_from(UsageRecord))
+
+    enqueued = False
+
+    class _FakeImageTask:
+        def apply_async(self, **_kwargs):
+            nonlocal enqueued
+            enqueued = True
+            return type("Result", (), {"status": "PENDING"})()
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route, "generate_image_task", _FakeImageTask())
+    response = TestClient(app).post(
+        "/api/v1/videos",
+        json={
+            "topic": "premium product image",
+            "video_mode": "photo",
+            "background_strength": 80,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "VALIDATION_ERROR"
+    assert any(
+        detail["type"] == "extra_forbidden"
+        and detail["loc"] == ["body", "background_strength"]
+        for detail in error["details"]
+    )
+    assert enqueued is False
+    with auth_db() as db:
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved == reserved_before
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == task_count_before
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == usage_count_before
 
 
 @pytest.mark.parametrize("image_resolution", ["1k", "2k", "4k"])
@@ -1748,7 +1799,6 @@ def test_photo_negative_prompt_rejects_more_than_twenty_thousand_characters() ->
         "similarity_strength",
         "creativity_strength",
         "subject_strength",
-        "background_strength",
     ],
 )
 def test_photo_strength_contract_uses_ten_percent_steps(field_name: str) -> None:
@@ -2146,11 +2196,11 @@ def test_video_openapi_documents_photo_optimization_contract() -> None:
     }
     assert image_resolution["default"] == "1k"
     assert "image_resolution" not in required
+    assert "background_strength" not in properties
     for field_name in (
         "similarity_strength",
         "creativity_strength",
         "subject_strength",
-        "background_strength",
     ):
         integer_schema = properties[field_name]["anyOf"][0]
         assert integer_schema == {

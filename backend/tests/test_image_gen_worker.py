@@ -496,7 +496,6 @@ def test_image_worker_composes_photo_prompt_layers_and_enabled_strength(
         "similarity_strength",
         "creativity_strength",
         "subject_strength",
-        "background_strength",
     ],
 )
 @pytest.mark.parametrize("strength", [20, 80])
@@ -552,12 +551,6 @@ def test_image_worker_wires_each_strength_to_final_provider_prompt(
             "Subject preservation",
             "Preserve each referenced subject's identity, count, shape, proportions, "
             "colors, logos, text, materials, and defining details.",
-        ),
-        (
-            "background_strength",
-            "Background reference",
-            "Preserve the referenced background's layout, setting, palette, lighting, "
-            "spatial relationships, and atmosphere.",
         ),
     ],
 )
