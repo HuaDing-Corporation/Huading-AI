@@ -25,6 +25,9 @@ export function RechargeDialog({
   const [amount, setAmount] = useState<number>(TOPUP_OPTIONS[1]);
   const [error, setError] = useState<string | null>(null);
   // 🔴 幂等键：一次充值尝试生成一次、**重试复用**（§四之二）。每次打开 = 新尝试 = 新 key；改档位 = 新意图 = 新 key。
+  // 🔴🔴 **别改成每次 POST 新生成**（FIX3 §4，CB 复审的设计约束）：BE 的充值幂等依赖 topup **账本行的存续**
+  //     （账本被守卫保护为追加式、不可删改，所以幂等成立）。前端若每次重试都新生成 key，就绕过了那条账本去重 →
+  //     一次网络重试 = 双倍不可逆扣款（推理积分单向不可退）。键必须由本弹窗**稳定持有、重试复用**。
   // 生成放客户端副作用/交互里（不在 render/SSR 里调 crypto），空则 onConfirm 兜底生成一个。
   const idemKey = useRef<string>("");
   useEffect(() => {

@@ -110,6 +110,16 @@ test("华鼎AI智脑：选档 → 余额不足弹充值 → 充值 → 发消息
   await page.getByRole("button", { name: "发送" }).click();
   await expect(page.getByText(/已收到/)).toBeVisible({ timeout: 15_000 });
 
+  // §3 附件缩略图：上传图片（走既有 /uploads/images → asset_id）→ 发送 → 历史消息显示**真缩略图**
+  // （ChatAttachmentRead.download_url）。⚠️ 真接口下 download_url 是 presign；此处 mock 环境是占位 URL，
+  //   浏览器加载它会 net::ERR（已被资源加载噪音过滤器排除），断言只验「缩略图 <img> 落地 DOM」。
+  const PNG = { name: "p.png", mimeType: "image/png", buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) };
+  await page.locator('input[type="file"]').setInputFiles(PNG);
+  await expect(page.locator('img[src^="blob:"]')).toBeVisible({ timeout: 10_000 }); // 上传完成、组件本地预览出现
+  await page.locator("#aibrain-composer").fill("看这张图");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.locator('img[src*="mock.local/aibrain"]').first()).toBeVisible({ timeout: 15_000 }); // 消息里的真缩略图
+
   // ④ 新建对话 → 切到新对话 → 不串数据（上一条消息不在新对话里）。
   await page.getByRole("button", { name: "新建对话" }).click();
   await expect(page.getByText(/已收到/)).toHaveCount(0, { timeout: 10_000 });
