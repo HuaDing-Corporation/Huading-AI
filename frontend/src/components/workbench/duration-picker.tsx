@@ -11,9 +11,14 @@ export const DURATION_PRESETS = [10, 15, 30] as const;
 export const DURATION_MIN = 5;
 export const DURATION_MAX = 120;
 
-/** Whether a target duration is within the contract range the backend clamps to. */
+/**
+ * 目标时长是否合法：**整数** 且在 [5,120]。ECOM-VIDEO-SCENE-DURATION-FIX-UI-0001 · FIX1（CB P1）：真 BE
+ * duration_sec 是 int（ScenePromptRequest / VideoGenerateRequest 皆然），拒绝 5.5/5.4 等小数——此前用
+ * Number.isFinite 认小数合法、mock 又四舍五入放行 = 假绿，线上用户在「自定义」填 5.5 会真的 422。改用
+ * Number.isInteger 从源头拦住（同时守住 scene-prompt 与 视频提交 两条发送路径）。
+ */
 export function isValidDuration(sec: number): boolean {
-  return Number.isFinite(sec) && sec >= DURATION_MIN && sec <= DURATION_MAX;
+  return Number.isInteger(sec) && sec >= DURATION_MIN && sec <= DURATION_MAX;
 }
 
 export interface DurationPickerProps {

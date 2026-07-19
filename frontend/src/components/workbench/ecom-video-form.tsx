@@ -129,7 +129,8 @@ export function EcomVideoForm({
 
   // 画面提示词 AI 生成（契约 §4.2/req7）：发产品图 keys（≥1，luna 多模态读图）+ 文案 + topic；同产出负面提示词，自动填入。
   const onGenerateScenePrompt = async () => {
-    if (!hasProductImage || scenePromptGen.isPending) return; // 严格纪律「必须带产品图」——BE 会 422，前端先友好拦
+    // 必须带产品图（BE 会 422）+ 时长合法（FIX1：BE duration_sec 是 int，小数会 422——不发非法时长的 scene-prompt）。
+    if (!hasProductImage || !isValidDuration(durationSec) || scenePromptGen.isPending) return;
     setError(null);
     try {
       const res = await scenePromptGen.mutateAsync({
@@ -240,7 +241,7 @@ export function EcomVideoForm({
         onAction={onGenerateScenePrompt}
         actionLabel={copy.workbench.scenePromptGenerate}
         actionIcon="generate"
-        actionDisabled={!hasProductImage} // req7：无产品图禁点（BE 会 422，前端友好拦）
+        actionDisabled={!hasProductImage || !isValidDuration(durationSec)} // req7：无产品图 / 时长非整数(FIX1) 禁点（BE 会 422，前端友好拦）
         loading={scenePromptGen.isPending}
         rows={3}
         placeholder={copy.workbench.scenePromptPlaceholder}

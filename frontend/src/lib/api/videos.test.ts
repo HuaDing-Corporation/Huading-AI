@@ -32,6 +32,13 @@ describe("estimateVideo · POST /videos/estimate（apiFetch 真走 MSW · FIX2 P
       estimateVideo({ video_mode: "seedance_i2v", product_image_keys: ["uploads/x.png"], duration_sec: 30 })
     ).rejects.toThrow();
   });
+
+  // FIX1（CB P1 · 提交/预估路径）：VideoGenerateRequest.duration_sec 也是 int，小数 → 422。
+  it("防假绿：estimate 小数 duration_sec(5.5) → 422", async () => {
+    await expect(
+      estimateVideo({ video_mode: "seedance_i2v", product_image_keys: ["uploads/x.png"], voice_id: "v1", duration_sec: 5.5 })
+    ).rejects.toThrow();
+  });
 });
 
 // ECOM-VIDEO-SCENE-DURATION-FIX-UI-0001：scene-prompt 补传 duration_sec（Cowork 冻结 §4.2 漏了它，致秒数恒「约15秒」）。
@@ -49,5 +56,18 @@ describe("generateScenePrompt · duration 透传（apiFetch 真走 MSW · SCENE-
     expect(
       (await generateScenePrompt({ product_image_keys: ["uploads/x.png"], duration_sec: 200 })).scene_prompt
     ).toContain("约 120 秒");
+  });
+
+  // FIX1（CB P1）防假绿：真 BE duration_sec 是 int，小数/字符串 → 422（不四舍五入放行；此前 round 5.5→6 是假绿，线上真 422）。
+  it("小数 duration_sec(5.5/5.4) → 422（镜像 BE int，不放行）", async () => {
+    await expect(generateScenePrompt({ product_image_keys: ["uploads/x.png"], duration_sec: 5.5 })).rejects.toThrow();
+    await expect(generateScenePrompt({ product_image_keys: ["uploads/x.png"], duration_sec: 5.4 })).rejects.toThrow();
+  });
+
+  it("字符串 duration_sec('5.5') → 422（BE int 也拒字符串）", async () => {
+    await expect(
+      // @ts-expect-error 故意传非法类型：真 BE int 拒字符串，mock 须同样 422（防假绿）
+      generateScenePrompt({ product_image_keys: ["uploads/x.png"], duration_sec: "5.5" })
+    ).rejects.toThrow();
   });
 });

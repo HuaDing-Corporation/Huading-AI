@@ -7,6 +7,11 @@ const ok = <T>(data: T) => HttpResponse.json({ data, error: null, request_id: "m
 const err = (status: number, code: string, message: string) =>
   HttpResponse.json({ data: null, error: { code, message, request_id: "mock-req" }, request_id: "mock-req" }, { status });
 
+// ECOM-VIDEO-SCENE-DURATION-FIX-UI-0001 · FIX1（CB P1）：真 BE duration_sec 是 int（ScenePromptRequest /
+// VideoGenerateRequest 皆然），拒绝小数(5.5/5.4)与字符串("5.5")。mock 不比 BE 宽松、不四舍五入放行——present 且
+// 非整数即非法（调用处返 422）；undefined/null（可选未传）不算非法。scene-prompt / estimate / videos 提交三处共用。
+const badDuration = (v: unknown): boolean => v !== undefined && v !== null && !Number.isInteger(v);
+
 // in-memory store so list/detail/SSE stay consistent within a session
 const videos = new Map<string, Record<string, unknown>>();
 // mock 种子（ECOM-FIXES-0001 ③ / cancelled 补 ECOM-HISTORY-CANCELLED-FIX-0001 ③）：预置电商(seedance_i2v)历史项，
@@ -1248,11 +1253,13 @@ export const handlers = [
     if (!Array.isArray(body.product_image_keys) || body.product_image_keys.length < 1) {
       return err(422, "VALIDATION_ERROR", "product_image_keys 至少 1 张");
     }
-    // SCENE-DURATION-FIX：duration_sec 可选，镜像 BE ScenePromptRequest._clamp_duration 夹取 [5,120]（不 reject，mock 不比 BE 宽松）。
-    // 把生效时长回写进 scene_prompt 秒数——真 BE 由 luna 据时长写节奏，mock 以此如实反映「秒数随所选时长变化」（此前恒「约15秒」即本 bug）。
+    // FIX1（CB P1）：duration_sec 是 int——小数/字符串 → 422（镜像 BE，不四舍五入放行；此前 round 5.5→6 是假绿，线上真 422）。
+    if (badDuration(body.duration_sec)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
+    // SCENE-DURATION-FIX：duration_sec 可选整数，镜像 BE ScenePromptRequest._clamp_duration 夹取 [5,120]（不 reject 越界，仅夹取）。
+    // 把生效时长回写进 scene_prompt 秒数——真 BE 由 luna 据时长写节奏，mock 以此如实反映「秒数随所选时长变化」（此前恒「约15秒」即原 bug）。
     const seconds =
-      typeof body.duration_sec === "number" && Number.isFinite(body.duration_sec)
-        ? Math.max(5, Math.min(120, Math.round(body.duration_sec)))
+      typeof body.duration_sec === "number"
+        ? Math.max(5, Math.min(120, body.duration_sec))
         : 15; // 未传时回退 15（正是漏传 duration 的旧表现，便于承重/变异对照）
     return ok({
       scene_prompt: `白色大理石台面暖光特写，产品缓慢环绕运镜，浅景深突出材质，蒸汽轻升，节奏舒缓，约 ${seconds} 秒（mock 专业画面提示词，可编辑）`,
@@ -1434,6 +1441,7 @@ export const handlers = [
     if (body.resolution !== undefined && !VIDEO_GEN_RESOLUTIONS.includes(body.resolution)) {
       return err(422, "VALIDATION_ERROR", "resolution 非法");
     }
+    if (badDuration(body.duration_sec)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数"); // FIX1：estimate 用同一 VideoGenerateRequest(int)
     if (body.video_mode === "seedance_i2v") {
       const keys = body.product_image_keys ?? [];
       if (!Array.isArray(keys) || keys.length < 1 || keys.length > 9) {
@@ -1473,6 +1481,9 @@ export const handlers = [
     if (body.resolution !== undefined && !VIDEO_GEN_RESOLUTIONS.includes(body.resolution)) {
       return err(422, "VALIDATION_ERROR", "resolution 非法");
     }
+    // FIX1（CB P1 · 提交路径核查）：VideoGenerateRequest.duration_sec 也是 int——小数 → 422（前端 isValidDuration 已从源头拦，
+    // 此为 mock 防漂移把关，不比 BE 宽松；提交路径此前也能漏小数，属既有 bug，一并堵住）。
+    if (badDuration(body.duration_sec)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
     // 数字人形象源二选一互斥（AVATAR-VIDEO-SOURCE-UI-0001）：照片 avatar_asset_id 与视频 avatar_video_asset_id
     // 不可同发（BE 权威，mock 先行守住互斥）。前端只发其一，此为防漂移。
     if (body.avatar_asset_id && body.avatar_video_asset_id) {
