@@ -1412,6 +1412,39 @@ export const handlers = [
     // 那条测试是对的，「让既有测试跟着收敛」在这一项上会是**改测试来掩盖 mock 变得更不忠实**。）
     return ok({ id: job.id, status: "saved", saved_at: job.saved_at });
   }),
+  // 预计积分（ECOM-VIDEO-OPTIMIZE-UI-0001 · FIX2 · P1）：确认窗打开必调 POST /videos/estimate。此前缺该 handler
+  // → MSW 放行到真后端 → CI net::ERR_FAILED。响应契约逐字对齐 #202（backend/app/api/v1/routes/videos.py:1149-1166
+  //  返 ApiResponse[VideoEstimateResponse]{estimated_credits:int, unit:"credits", note:str|None}；schemas/videos.py:297-300）。
+  // 校验镜像 videos POST 同源（resolution 全模式 + seedance_i2v 产品图≥1/voice_id）——estimate 用同一 VideoGenerateRequest
+  // (extra=forbid)，mock 不比 BE 宽松（防假绿：接线断/缺参在 estimate 阶段即暴露，不放到提交才红）。
+  http.post(`${BASE}/api/v1/videos/estimate`, async ({ request }) => {
+    const body = (await request.json()) as {
+      video_mode?: string;
+      product_image_keys?: string[];
+      voice_id?: string;
+      duration_sec?: number;
+      resolution?: string;
+    };
+    if (body.resolution !== undefined && !VIDEO_GEN_RESOLUTIONS.includes(body.resolution)) {
+      return err(422, "VALIDATION_ERROR", "resolution 非法");
+    }
+    if (body.video_mode === "seedance_i2v") {
+      const keys = body.product_image_keys ?? [];
+      if (!Array.isArray(keys) || keys.length < 1 || keys.length > 9) {
+        return err(422, "ECOM_I2V_INVALID", "电商带货产品图 1–9 张");
+      }
+      if (!body.voice_id) return err(422, "ECOM_I2V_INVALID", "电商带货需选择音色");
+    }
+    // estimated_credits 是后端按配额/时长算出的整数；mock 取时长派生一个正整数（默认 30s→12），仅需形状忠实（值非契约）。
+    const estimatedCredits = typeof body.duration_sec === "number" && body.duration_sec > 0
+      ? Math.max(1, Math.round(body.duration_sec / 2.5))
+      : 12;
+    return ok({
+      estimated_credits: estimatedCredits,
+      unit: "credits",
+      note: "Estimated reservation; final settlement uses actual generated duration."
+    });
+  }),
   http.post(`${BASE}/api/v1/videos`, async ({ request }) => {
     const body = (await request.json()) as {
       topic?: string;
