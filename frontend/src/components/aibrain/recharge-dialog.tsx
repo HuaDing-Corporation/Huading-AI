@@ -11,27 +11,24 @@ import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } fr
 import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
 import { ApiError } from "@/lib/api/client";
-import { useRecharge } from "@/lib/aibrain/hooks";
-import { RECHARGE_TIERS } from "@/lib/aibrain/types";
+import { useTopup } from "@/lib/aibrain/hooks";
+import { TOPUP_OPTIONS } from "@/lib/aibrain/types";
 
 export function RechargeDialog({
   open,
-  onOpenChange,
-  onRecharged
+  onOpenChange
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onRecharged?: (balance: number) => void;
 }) {
-  const recharge = useRecharge();
-  const [amount, setAmount] = useState<number>(RECHARGE_TIERS[1]);
+  const recharge = useTopup();
+  const [amount, setAmount] = useState<number>(TOPUP_OPTIONS[1]);
   const [error, setError] = useState<string | null>(null);
 
   const onConfirm = async () => {
     setError(null);
     try {
-      const res = await recharge.mutateAsync(amount);
-      onRecharged?.(res.balance);
+      await recharge.mutateAsync(amount);
       onOpenChange(false);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : copy.aibrain.rechargeFailed);
@@ -54,7 +51,7 @@ export function RechargeDialog({
         </div>
 
         <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label={copy.aibrain.rechargeTitle}>
-          {RECHARGE_TIERS.map((tier) => {
+          {TOPUP_OPTIONS.map((tier) => {
             const selected = tier === amount;
             return (
               <button

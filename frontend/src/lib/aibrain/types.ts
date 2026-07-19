@@ -1,85 +1,77 @@
-// 华鼎AI智脑 · 前端一期类型 + 契约常量（AIBRAIN-UI-0001，mock 先行）。
+// 华鼎AI智脑 · 前端类型 + 契约常量（AIBRAIN-UI-0001 · FIX1：按 BE 增量 1 真实源码逐字段对齐）。
 //
-// 🔴 本文件是 FE 侧对 BE 增量 1 契约的**镜像**。字段命名/枚举/数值以「需求冻结 §决策定稿 D1-D7」为准，
-// BE 合并后逐字段复核（见回执「契约对齐」）。放在独立 `lib/aibrain/` 目录，不碰共享 types.ts（避让电商线 §七）。
+// 🔴 契约源 = BE `f2e9a2e0`（schemas/aibrain.py · routes/aibrain.py · services/aibrain.py）。**以 BE 为准**。
+// 独立 `lib/aibrain/` 目录，不碰共享 types.ts（避让电商线）。
 
-/** 「智能强度」三档（D2，已按成本纠正）。**前端只传档位、不传裸模型名**（服务端固定 allowlist）。 */
+/** 「智能强度」三档（BE `_TIER_MODELS`）。**前端只传档位**（服务端固定 allowlist）。 */
 export type IntensityTier = "low" | "mid" | "high";
 
-/**
- * 一档的展示 + 预检元信息。
- * - `reserve`：开答前**预留上限**（D4「预留上限」）——FE 拿它做**余额预检**的快速第一道（BE 才是权威）。
- *   典型消耗（`typical`）是均值，reserve 是单轮可能的**上限**（≈ 最大输出 token 的成本），且受单次上限 200 封顶。
- * - `typical`：一次典型问答(500入+500出)的消耗（D3），用于选择器旁「让用户有预期」的文案。
- * - `model` 仅用于内部标注/tooltip，**不随请求发送**。
- */
+/** 一档的展示元信息。`typical` 仅**展示**（选择器旁「让用户有预期」），**不是预留额**（预留是 BE 的 flat 200）。 */
 export interface TierMeta {
   tier: IntensityTier;
-  /** 中文档位名（低/中/高）。 */
   label: string;
-  /** 内部模型标识（展示用，不发送）。 */
+  /** 内部模型标识（展示/ tooltip，不发送）。 */
   model: string;
-  /** 开答前预留上限（积分）——FE 余额预检用。 */
-  reserve: number;
-  /** 典型一次问答消耗（积分），选择器旁标注。 */
+  /** 典型一次问答消耗（积分，D3）——展示用。 */
   typical: number;
 }
 
-/** 单次问答上限（D4：200 积分，约 luna 30 轮 / sol 6 轮）。 */
-export const SINGLE_TURN_LIMIT = 200;
+/** 单次问答预留上限（BE `_SINGLE_REQUEST_LIMIT = 200`，不分档位、flat）。 */
+export const SINGLE_REQUEST_LIMIT = 200;
 
-/** 一条附件的额外预留估计（token→积分粗估）。**mock 与 FE 预检共用同一个数**，故 mock 不可能比 FE 松。 */
-export const ATTACH_RESERVE = 30;
-
-/**
- * 三档定稿（D2 档位 + D3 典型消耗）。reserve 为 FE 预检的单轮上限估计（≤ SINGLE_TURN_LIMIT）。
- * 🔴 数值与 BE 增量 1 的 tier 配置须一致；BE 合并后以 BE 为准复核（本表是 mock 先行的镜像）。
- */
+/** 三档（BE services/aibrain.py `_TIER_MODELS`；typical 取 D3 展示值）。 */
 export const TIERS: Record<IntensityTier, TierMeta> = {
-  low: { tier: "low", label: "低", model: "gpt-5.6-luna", reserve: 40, typical: 6 },
-  mid: { tier: "mid", label: "中", model: "gpt-5.6-terra", reserve: 100, typical: 15 },
-  high: { tier: "high", label: "高", model: "gpt-5.6-sol", reserve: SINGLE_TURN_LIMIT, typical: 30 }
+  low: { tier: "low", label: "低", model: "gpt-5.6-luna", typical: 6 },
+  mid: { tier: "mid", label: "中", model: "gpt-5.6-terra", typical: 15 },
+  high: { tier: "high", label: "高", model: "gpt-5.6-sol", typical: 30 }
 };
 
 export const TIER_ORDER: IntensityTier[] = ["low", "mid", "high"];
 
-/** 充值档位（D4：100 / 500 / 1000 / 2000 积分）。 */
-export const RECHARGE_TIERS: number[] = [100, 500, 1000, 2000];
+/** 充值档位（BE `TopupAmount = Literal[100,500,1000,2000]`；钱包 `topup_options` 亦下发同值）。 */
+export const TOPUP_OPTIONS: number[] = [100, 500, 1000, 2000];
 
-/** 附件类型（一期：图片走既有 /uploads；文档 pdf/docx/txt 一期只收不解析——D6，解析在 BE 增量 3）。 */
-export type AttachmentKind = "image" | "document";
-
-/** 一条消息里带的附件（提交时只传引用键，不传 bytes）。 */
+/** 响应里的附件（BE `ChatAttachmentRead`）——**只有 asset_id/asset_type/mime_type，无 URL**。 */
 export interface ChatAttachment {
-  kind: AttachmentKind;
-  /** 图片 = /uploads 返回的 key；文档 = 文档上传返回的 key/asset_id。 */
-  ref: string;
-  /** 原始文件名（展示用）。 */
+  asset_id: string;
+  asset_type: string;
+  mime_type: string;
+}
+
+/** 客户端待发附件（组件本地态：图片 asset_id + 本地预览）。发送时只提取 asset_id 进 attachment_asset_ids。 */
+export interface PendingAttachment {
+  asset_id: string;
   name: string;
-  /** 图片缩略/预览 URL（文档无）。 */
-  preview_url?: string | null;
-  /** 文档一期状态：received=已收到、parsing=解析中（**不假装已解析**，D6/任务包 §4）。 */
-  doc_status?: "received" | "parsing" | null;
+  /** 本地 objectURL 预览（响应无 URL，故仅用户刚上传的这张能预览）。 */
+  preview_url: string;
 }
 
 export type MessageRole = "user" | "assistant";
 
 /**
- * 一条消息。**渲染要为「增量追加」留口**（任务包 §2 / D3 流式在 BE 增量 2）：
- * 一期非流式 `status` 恒 `complete`；增量 2 流式时组件只需把 chunk 追加到 `content`、`status:"streaming"`，
- * 不必二次重写。故 content 始终是单一可追加文本节点。
+ * 一条消息（BE `ChatMessageRead`）。status = pending|completed|failed（**不是 complete/streaming**）。
+ * 一期非流式：助手消息答完即 `completed`。渲染仍把 content 当**单一可追加文本节点**，为增量 2 流式留口
+ * （届时 pending 期间逐 chunk 追加进 content 即可，不必重写）。
  */
 export interface ChatMessage {
   id: string;
+  conversation_id: string;
   role: MessageRole;
   content: string;
-  status: "complete" | "streaming" | "failed";
-  attachments?: ChatAttachment[];
-  /** 助手消息答完后的实扣积分（D4 按 token 实扣，多退少补）；用户消息为 null。 */
-  cost_credits?: number | null;
+  attachments: ChatAttachment[];
+  tier?: IntensityTier | null;
+  model?: string | null;
+  status: "pending" | "completed" | "failed";
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  reserved_credits?: number;
+  /** 实扣积分（BE `charged_credits`，多退少补后）。 */
+  charged_credits?: number;
   created_at: string;
 }
 
+/** 会话摘要（BE `ConversationSummary`）。 */
 export interface Conversation {
   id: string;
   title: string;
@@ -87,75 +79,70 @@ export interface Conversation {
   updated_at: string;
 }
 
+/** 会话列表（BE `ConversationListResponse` = {items, total}）。 */
 export interface ConversationListResponse {
   items: Conversation[];
+  total: number;
 }
 
+/** 会话详情（BE `ConversationRead` = summary + messages）。 */
 export interface ConversationDetail extends Conversation {
   messages: ChatMessage[];
 }
 
-/** 推理积分钱包（D4：独立表 reasoning_wallets 的 FE 视图）。 */
+/** 推理积分钱包（BE `ReasoningWalletRead`）。余额 = `available_credits`（**不是 balance**）。 */
 export interface ReasoningWallet {
-  /** 当前推理积分余额。 */
-  balance: number;
-  /** 单次问答上限（服务端下发，FE 不硬编码——但有 SINGLE_TURN_LIMIT 兜底常量）。 */
-  single_turn_limit: number;
+  available_credits: number;
+  reserved_credits: number;
+  total_topup_credits: number;
+  total_spent_credits: number;
+  topup_options: number[];
+  single_request_limit: number;
 }
 
-/** 发消息请求体。**tier 必传**（承重：档位随请求传）。 */
+/** 发消息请求（BE `ChatMessageCreateRequest`，`extra=forbid`）。**附件是 asset_id 列表**（max 10，唯一，非空）。 */
 export interface SendMessageRequest {
   content: string;
   tier: IntensityTier;
-  attachments?: ChatAttachment[];
+  attachment_asset_ids: string[];
 }
 
-/** 发消息响应（一期非流式：一次返完整助手消息 + 结算后的余额）。 */
+/** 发消息响应（BE `ChatMessageCreateResponse`）——含 **`wallet`**（不是 balance）。 */
 export interface SendMessageResponse {
   user_message: ChatMessage;
   assistant_message: ChatMessage;
-  /** 结算后的最新余额（D4 多退少补后的真实余额）。 */
-  balance: number;
+  wallet: ReasoningWallet;
 }
 
-/** 充值请求/响应（余额 1:1 → 推理积分；单向不可退，D4）。 */
-export interface RechargeRequest {
+/** 充值请求/响应（BE `POST /wallet/topup` → `ReasoningWalletRead`）。单向不可退。 */
+export interface TopupRequest {
   amount: number;
 }
-export interface RechargeResponse {
-  balance: number;
-}
 
 /**
- * 🔴 可辨识错误码（与 BE 增量 1 对齐；FE 靠 code 而非 message 分流）。
- * - 余额不足 → 不是普通报错，是**弹充值窗**（任务包 §3）。
- * - 超单次上限 → friendly 提示（任务包 §3）。
+ * 🔴 可辨识错误码（BE 全系 `AIBRAIN_` 前缀 + 真实 status）。FE 靠 code+status 分流：
+ *  - 402 余额不足 → **弹充值窗**（不是普通报错）；
+ *  - 422 超单次上限/请求过大 → friendly「精简内容」；
+ *  - 502 上游失败 → friendly「服务暂不可用，请重试」。
  */
 export const AIBRAIN_ERROR = {
-  INSUFFICIENT_BALANCE: "INSUFFICIENT_BALANCE",
-  OVER_SINGLE_LIMIT: "OVER_SINGLE_LIMIT",
-  INVALID_TIER: "INVALID_TIER",
-  CONVERSATION_NOT_FOUND: "CONVERSATION_NOT_FOUND"
+  INSUFFICIENT_BALANCE: "AIBRAIN_INSUFFICIENT_BALANCE", // 402
+  REQUEST_LIMIT_EXCEEDED: "AIBRAIN_REQUEST_LIMIT_EXCEEDED", // 422
+  CONVERSATION_NOT_FOUND: "AIBRAIN_CONVERSATION_NOT_FOUND", // 404
+  ATTACHMENT_NOT_FOUND: "AIBRAIN_ATTACHMENT_NOT_FOUND", // 404
+  ATTACHMENT_INVALID: "AIBRAIN_ATTACHMENT_INVALID", // 422
+  PROVIDER_FAILED: "AIBRAIN_PROVIDER_FAILED" // 502
 } as const;
 
-/** 单轮开答前的预留上限（档位基线 + 附件加成）。**mock 与 FE 预检共用**，保证同一口径。 */
-export function reserveFor(tier: IntensityTier, attachments: ChatAttachment[] = []): number {
-  return TIERS[tier].reserve + attachments.length * ATTACH_RESERVE;
-}
-
-export type SendPrecheck =
-  | { ok: true; reserve: number }
-  | { ok: false; reason: "over_limit" | "insufficient"; reserve: number };
+export type SendPrecheck = { ok: true } | { ok: false; reason: "insufficient" };
 
 /**
- * 🔴 发送前预检（承重的核心）——**拦在开答前**（D4）：
- *  - reserve 超单次上限 → `over_limit`（friendly 提示，不发请求）；
- *  - 余额 < reserve → `insufficient`（**弹充值窗、不发请求**，任务包 §3/§6）。
- * 这是快速第一道（BE 才是权威），但它决定「发不发请求」——去掉它，「余额不足不发请求」承重必红。
+ * 🔴 发送前预检（承重核心）——**对齐 BE 口径**（FIX1）：BE 预留 `min(200, available)`，`available<=0` → 402。
+ * 故 FE 唯一能可靠预判的是「**有没有余额可预留**」：`available_credits <= 0` → 弹充值窗、**不发请求**。
+ * 更细的「预留够不够买 token」需 tokenize + 定价，FE 算不了 → 交给 BE 的 422（`AibrainChat` 收到再 friendly 提示）。
+ * ⚠️ 不拿「预留额 200」当「本次消耗」展示给用户（那是瞬时锁再退回）——展示用 `TIERS[tier].typical`（6/15/30）。
  */
-export function precheckSend(balance: number, tier: IntensityTier, attachments: ChatAttachment[] = []): SendPrecheck {
-  const reserve = reserveFor(tier, attachments);
-  if (reserve > SINGLE_TURN_LIMIT) return { ok: false, reason: "over_limit", reserve };
-  if (balance < reserve) return { ok: false, reason: "insufficient", reserve };
-  return { ok: true, reserve };
+export function precheckSend(availableCredits: number): SendPrecheck {
+  if (availableCredits <= 0) return { ok: false, reason: "insufficient" };
+  return { ok: true };
 }

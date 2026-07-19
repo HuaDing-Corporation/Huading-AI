@@ -1,6 +1,7 @@
 "use client";
 
-// 华鼎AI智脑 · 聊天主壳（AIBRAIN-UI-0001）。左会话列表 / 中消息流 / 下输入框 + 顶部余额 + 充值弹窗。
+// 华鼎AI智脑 · 聊天主壳（AIBRAIN-UI-0001 · FIX1）。左会话列表 / 中消息流 / 下输入框 + 顶部余额 + 充值弹窗。
+// 错误分流（对齐 BE 真实 status/code）：402 余额不足 → 弹充值窗；422 超上限 → friendly；502 上游失败 → friendly 重试。
 
 import { useState } from "react";
 
@@ -19,15 +20,17 @@ export function AibrainChat() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [tier, setTier] = useState<IntensityTier>("mid");
   const [rechargeOpen, setRechargeOpen] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
 
   const { data: wallet } = useWallet();
-  const balance = wallet?.balance ?? 0;
+  const balance = wallet?.available_credits ?? 0;
   const create = useCreateConversation();
   const send = useSendMessage();
   const convQuery = useConversation(activeId ?? undefined);
   const messages = convQuery.data?.messages ?? [];
 
   const handleSend = async (body: SendMessageRequest) => {
+    setSendError(null);
     let convId = activeId;
     if (!convId) {
       const conv = await create.mutateAsync();
@@ -37,8 +40,15 @@ export function AibrainChat() {
     try {
       await send.mutateAsync({ conversationId: convId, body });
     } catch (err) {
-      // 服务端兜底：余额不足（FE 预检已拦一道，这里防契约/时序漂移）→ 弹充值窗，不是普通报错。
-      if (err instanceof ApiError && err.code === AIBRAIN_ERROR.INSUFFICIENT_BALANCE) setRechargeOpen(true);
+      if (!(err instanceof ApiError)) {
+        setSendError(copy.aibrain.error);
+        return;
+      }
+      // 402 余额不足 → 弹充值窗（不是普通报错）。
+      if (err.status === 402 || err.code === AIBRAIN_ERROR.INSUFFICIENT_BALANCE) setRechargeOpen(true);
+      else if (err.code === AIBRAIN_ERROR.REQUEST_LIMIT_EXCEEDED) setSendError(copy.aibrain.reqLimit);
+      else if (err.code === AIBRAIN_ERROR.PROVIDER_FAILED) setSendError(copy.aibrain.providerFailed);
+      else setSendError(err.message || copy.aibrain.error);
     }
   };
 
@@ -63,6 +73,12 @@ export function AibrainChat() {
               <MessageStream messages={messages} pending={send.isPending} />
             </div>
           )}
+
+          {sendError ? (
+            <p role="alert" className="mt-2 rounded-field bg-error-bg px-3 py-2 text-[12.5px] text-error-fg">
+              {sendError}
+            </p>
+          ) : null}
 
           <div className="mt-3">
             <Composer

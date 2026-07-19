@@ -1,24 +1,21 @@
 "use client";
 
-// 华鼎AI智脑 · 输入框（AIBRAIN-UI-0001）—— 本组件承载**发送前的核心承重**：
-//  1. 档位（tier）随请求传；
-//  2. **余额预检拦在开答前**：不足 → 弹充值窗、**不发请求**；超单次上限 → friendly 提示、不发请求。
-// 图片复用既有 /uploads（jpeg/png/webp ≤10MiB）；文档 pdf/docx/txt 只收下（mock 已收到）；语音走 Web Speech（不支持则隐藏）。
+// 华鼎AI智脑 · 输入框（AIBRAIN-UI-0001 · FIX1）—— 承载**发送前核心承重**：
+//  1. 档位 tier 随请求传；2. 余额预检拦在开答前：`available<=0` → 弹充值窗、**不发请求**（BE 402 口径）。
+// 图片走既有 `/uploads/images`（→ asset_id，喂 attachment_asset_ids）；语音走 Web Speech（不支持则隐藏）。
+// ⚠️ 文档上传是 BE 增量 3，一期无端点 → **本期不提供文档入口**（不硬塞、不在一期路径调用）。
 
 import { useRef, useState, type KeyboardEvent } from "react";
-import { ImagePlus, Loader2, Mic, MicOff, Paperclip, Send, X } from "lucide-react";
+import { ImagePlus, Loader2, Mic, MicOff, Send, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { copy } from "@/lib/copy";
 import { ApiError } from "@/lib/api/client";
-import { useUploadProductImage } from "@/lib/api/hooks";
+import { useUploadImage } from "@/lib/api/hooks";
 import { validateImageFile } from "@/lib/api/uploads";
-import { uploadDocument } from "@/lib/aibrain/api";
-import { precheckSend, SINGLE_TURN_LIMIT, type ChatAttachment, type IntensityTier, type SendMessageRequest } from "@/lib/aibrain/types";
+import { precheckSend, type IntensityTier, type PendingAttachment, type SendMessageRequest } from "@/lib/aibrain/types";
 import { IntensitySelector } from "@/components/aibrain/intensity-selector";
 import { useVoiceInput } from "@/components/aibrain/use-voice-input";
-
-const DOC_TYPES = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain"];
 
 export function Composer({
   tier,
@@ -30,20 +27,20 @@ export function Composer({
 }: {
   tier: IntensityTier;
   onTierChange: (t: IntensityTier) => void;
+  /** 可用推理积分（wallet.available_credits）。 */
   balance: number;
   sending: boolean;
   onSend: (body: SendMessageRequest) => void;
   /** 余额不足 → 让父层弹充值窗（不是普通报错）。 */
-  onInsufficient: (reserve: number) => void;
+  onInsufficient: () => void;
 }) {
   const [text, setText] = useState("");
-  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const imageInput = useRef<HTMLInputElement>(null);
-  const docInput = useRef<HTMLInputElement>(null);
   const voiceBase = useRef("");
-  const uploadImage = useUploadProductImage();
+  const uploadImage = useUploadImage();
 
   const voice = useVoiceInput((t) => setText(voiceBase.current + t));
 
@@ -53,17 +50,13 @@ export function Composer({
     const content = text.trim();
     if ((!content && attachments.length === 0) || sending || uploading) return;
     setInlineError(null);
-    // 🔴 发送前预检（拦在开答前）。
-    const check = precheckSend(balance, tier, attachments);
+    // 🔴 发送前预检（拦在开答前，对齐 BE 402 口径：available<=0 才是「压根发不了」）。
+    const check = precheckSend(balance);
     if (!check.ok) {
-      if (check.reason === "insufficient") {
-        onInsufficient(check.reserve); // 弹充值窗、**不发请求**
-      } else {
-        setInlineError(copy.aibrain.overLimit(SINGLE_TURN_LIMIT)); // 超上限 friendly、不发请求
-      }
+      onInsufficient(); // 弹充值窗、**不发请求**
       return;
     }
-    onSend({ content, tier, attachments: attachments.length ? attachments : undefined });
+    onSend({ content, tier, attachment_asset_ids: attachments.map((a) => a.asset_id) });
     setText("");
     setAttachments([]);
     voiceBase.current = "";
@@ -86,32 +79,14 @@ export function Composer({
     setInlineError(null);
     setUploading(true);
     try {
-      const { image_key } = await uploadImage.mutateAsync(file);
-      setAttachments((prev) => [...prev, { kind: "image", ref: image_key, name: file.name, preview_url: URL.createObjectURL(file) }]);
+      // /uploads/images → asset_id（BE 附件校验认 asset_id + 图片类型）。
+      const { asset_id } = await uploadImage.mutateAsync(file);
+      setAttachments((prev) => [...prev, { asset_id, name: file.name, preview_url: URL.createObjectURL(file) }]);
     } catch (err) {
       setInlineError(err instanceof ApiError ? err.message : copy.aibrain.uploadFailed);
     } finally {
       setUploading(false);
       if (imageInput.current) imageInput.current.value = "";
-    }
-  };
-
-  const onPickDoc = async (file: File | undefined) => {
-    if (!file) return;
-    if (!DOC_TYPES.includes(file.type)) {
-      setInlineError(copy.aibrain.docTypeError);
-      return;
-    }
-    setInlineError(null);
-    setUploading(true);
-    try {
-      const att = await uploadDocument(file);
-      setAttachments((prev) => [...prev, att]);
-    } catch (err) {
-      setInlineError(err instanceof ApiError ? err.message : copy.aibrain.uploadFailed);
-    } finally {
-      setUploading(false);
-      if (docInput.current) docInput.current.value = "";
     }
   };
 
@@ -129,9 +104,10 @@ export function Composer({
       {attachments.length > 0 && (
         <div className="flex flex-wrap gap-2">
           {attachments.map((att, i) => (
-            <span key={`${att.ref}-${i}`} className="inline-flex items-center gap-1.5 rounded-mark border border-line-gold bg-glass-soft py-1 pl-2 pr-1 text-[12px] text-ink-soft">
-              <span className="max-w-[160px] truncate">{att.name}</span>
-              {att.kind === "document" ? <span className="text-ink-faint">· {copy.aibrain.docReceived}</span> : null}
+            <span key={att.asset_id} className="inline-flex items-center gap-1.5 rounded-mark border border-line-gold bg-glass-soft py-1 pl-1 pr-1.5 text-[12px] text-ink-soft">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={att.preview_url} alt={att.name} className="h-8 w-8 rounded object-cover" />
+              <span className="max-w-[120px] truncate">{att.name}</span>
               <button
                 type="button"
                 aria-label={copy.aibrain.attachRemove}
@@ -171,12 +147,7 @@ export function Composer({
             <ImagePlus size={16} strokeWidth={1.8} />
           </Button>
 
-          <input ref={docInput} type="file" accept=".pdf,.docx,.txt" className="hidden" onChange={(e) => void onPickDoc(e.target.files?.[0])} />
-          <Button variant="icon" size="icon" className="h-9 w-9" aria-label={copy.aibrain.attachDocument} onClick={() => docInput.current?.click()} disabled={uploading || sending}>
-            <Paperclip size={16} strokeWidth={1.8} />
-          </Button>
-
-          {/* 语音：不支持则**隐藏**（优雅降级，不报错）——title 说明。 */}
+          {/* 语音：不支持则隐藏（优雅降级，不报错）。 */}
           {voice.supported ? (
             <Button
               variant={voice.listening ? "primary" : "icon"}

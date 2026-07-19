@@ -1262,8 +1262,6 @@ export const copy = {
     conversationsTitle: "对话",
     conversationsEmpty: "还没有对话，点「新建对话」开始。",
     untitled: "新对话",
-    deleteChat: "删除对话",
-    deleteChatConfirm: "删除这个对话？删除后不可恢复。",
     // 空 / 加载 / 错误态
     emptyTitle: "开始和华鼎AI智脑对话",
     emptyHint: "选一个智能强度，输入问题，或上传图片 / 文档。",
@@ -1276,6 +1274,7 @@ export const copy = {
     copy: "复制",
     copied: "已复制",
     thinking: "正在思考…",
+    imageAttachment: "图片",
     costLabel: (n: number) => `本次消耗 ${n} 积分`,
     // 输入框
     inputPlaceholder: "输入问题…（Enter 发送，Shift+Enter 换行）",
@@ -1288,14 +1287,10 @@ export const copy = {
     intensityHigh: "高",
     intensityCost: (n: number) => `约 ${n} 积分/次`,
     intensityAria: (label: string, cost: number) => `智能强度 ${label}，约 ${cost} 积分每次`,
-    // 附件
+    // 附件（一期只图片；文档解析是 BE 增量 3，本期不提供入口）
     attachImage: "上传图片",
-    attachDocument: "上传文档",
     attachRemove: "移除附件",
-    docReceived: "已收到，解析中…",
-    docHint: "支持 PDF / DOCX / TXT，一期仅收下，解析稍后开放。",
     imageOnly: "仅支持 JPG / PNG / WebP 图片",
-    docTypeError: "仅支持 PDF / DOCX / TXT 文档",
     uploadFailed: "上传失败，请重试",
     // 语音
     voiceStart: "语音输入",
@@ -1311,12 +1306,10 @@ export const copy = {
     rechargeIrreversible: "🔴 推理积分单向兑换，充值后不可退回余额。",
     rechargeAmount: (n: number) => `${n} 积分`,
     rechargeConfirm: "确认充值",
-    rechargeSuccess: (n: number) => `已充值 ${n} 积分`,
     rechargeFailed: "充值失败，请重试",
-    // 余额不足 / 超上限
-    insufficientTitle: "推理积分不足",
-    insufficientDesc: (need: number, have: number) => `本次预计需预留 ${need} 积分，当前余额 ${have} 积分。请充值后再试。`,
-    overLimit: (limit: number) => `单次问答预计消耗超过 ${limit} 积分上限，请精简内容或减少附件。`,
+    // 发送错误分流（对齐 BE status/code）
+    reqLimit: "本次问答超过单次上限或余额不足以作答，请精简内容或充值后重试。",
+    providerFailed: "AI 服务暂时不可用，请稍后重试。",
     // 通用错误
     error: "出错了，请重试"
   }

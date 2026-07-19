@@ -1,16 +1,14 @@
 "use client";
 
-// 华鼎AI智脑 · 会话列表（AIBRAIN-UI-0001）。新建 / 切换 / 删除；当前会话高亮（不靠颜色单一：加描边 + aria-current）。
+// 华鼎AI智脑 · 会话列表（AIBRAIN-UI-0001 · FIX1）。新建 / 切换；当前会话高亮（不靠颜色单一：加描边 + aria-current）。
+// ⚠️ BE 增量 1 无 DELETE 会话端点 → **本期不提供删除入口**（不硬塞、不在一期路径调用）。
 
-import { useState } from "react";
-import { MessageSquarePlus, Trash2 } from "lucide-react";
+import { MessageSquarePlus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
-import { useConversations, useCreateConversation, useDeleteConversation } from "@/lib/aibrain/hooks";
-import type { Conversation } from "@/lib/aibrain/types";
+import { useConversations, useCreateConversation } from "@/lib/aibrain/hooks";
 
 export function ConversationList({
   activeId,
@@ -21,21 +19,11 @@ export function ConversationList({
 }) {
   const { data, isLoading } = useConversations();
   const create = useCreateConversation();
-  const del = useDeleteConversation();
-  const [pendingDelete, setPendingDelete] = useState<Conversation | null>(null);
   const items = data ?? [];
 
   const onNew = async () => {
     const conv = await create.mutateAsync();
     onSelect(conv.id);
-  };
-
-  const onConfirmDelete = async () => {
-    if (!pendingDelete) return;
-    const wasActive = pendingDelete.id === activeId;
-    await del.mutateAsync(pendingDelete.id);
-    setPendingDelete(null);
-    if (wasActive) onSelect(null); // 删的是当前会话 → 回空态，不挂着已删记录
   };
 
   return (
@@ -53,46 +41,23 @@ export function ConversationList({
           items.map((conv) => {
             const active = conv.id === activeId;
             return (
-              <div
+              <button
                 key={conv.id}
+                type="button"
                 role="listitem"
+                onClick={() => onSelect(conv.id)}
+                aria-current={active ? "true" : undefined}
                 className={cn(
-                  "group flex items-center gap-1 rounded-field border px-2.5 py-2 transition-colors",
+                  "truncate rounded-field border px-2.5 py-2 text-left text-[13px] text-ink outline-none transition-colors focus-visible:shadow-focus-gold",
                   active ? "border-line-sel bg-chip-sel" : "border-transparent hover:bg-glass-hover"
                 )}
               >
-                <button
-                  type="button"
-                  onClick={() => onSelect(conv.id)}
-                  aria-current={active ? "true" : undefined}
-                  className="min-w-0 flex-1 truncate text-left text-[13px] text-ink outline-none focus-visible:underline"
-                >
-                  {conv.title || copy.aibrain.untitled}
-                </button>
-                <button
-                  type="button"
-                  aria-label={copy.aibrain.deleteChat}
-                  onClick={() => setPendingDelete(conv)}
-                  className="flex-none rounded p-1 text-ink-faint opacity-0 outline-none transition-opacity hover:text-error-fg focus-visible:opacity-100 focus-visible:shadow-focus-gold group-hover:opacity-100"
-                >
-                  <Trash2 size={13} strokeWidth={1.8} />
-                </button>
-              </div>
+                {conv.title || copy.aibrain.untitled}
+              </button>
             );
           })
         )}
       </div>
-
-      <ConfirmDialog
-        open={pendingDelete !== null}
-        title={copy.aibrain.deleteChat}
-        message={copy.aibrain.deleteChatConfirm}
-        confirmLabel={copy.aibrain.deleteChat}
-        danger
-        submitting={del.isPending}
-        onConfirm={() => void onConfirmDelete()}
-        onCancel={() => setPendingDelete(null)}
-      />
     </aside>
   );
 }

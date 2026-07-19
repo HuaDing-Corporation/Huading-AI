@@ -9,12 +9,12 @@ import { copy } from "@/lib/copy";
 import { useWallet } from "@/lib/aibrain/hooks";
 import { TIERS } from "@/lib/aibrain/types";
 
-/** 低余额阈值：连最低档都预留不起就算低。 */
-const LOW_BALANCE = TIERS.low.reserve;
+/** 低余额阈值：不够一次高档典型消耗就提示（展示口径，非预留口径）。 */
+const LOW_BALANCE = TIERS.high.typical;
 
 export function WalletBalance({ onRecharge }: { onRecharge: () => void }) {
   const { data: wallet } = useWallet();
-  const balance = wallet?.balance ?? 0;
+  const balance = wallet?.available_credits ?? 0;
   const low = wallet != null && balance < LOW_BALANCE;
 
   return (
