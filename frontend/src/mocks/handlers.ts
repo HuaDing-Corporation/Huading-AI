@@ -1,5 +1,8 @@
 import { http, HttpResponse } from "msw";
 
+import { aibrainHandlers } from "./aibrain-handlers"; // 华鼎AI智脑（AIBRAIN-UI-0001）——独立段落，追加在数组末尾
+import { registerMockAsset } from "./asset-registry"; // FIX4：上传登记资产，智脑发消息查表（唯一资产来源）
+
 // Mirror client.ts's trailing-slash normalization so handler URLs always match
 // what apiFetch requests (avoids a latent "mock silently bypassed" footgun).
 const BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000").replace(/\/$/, "");
@@ -1272,8 +1275,11 @@ export const handlers = [
   }),
   http.post(`${BASE}/api/v1/uploads/images`, () => {
     const n = ++imageUploadSeq;
+    const asset_id = `upload-${n}`;
+    // AIBRAIN-UI-0001 · FIX4：登记到唯一资产注册表 → 智脑发消息时才查得到（不再凭空伪造，见 asset-registry.ts）。
+    registerMockAsset({ asset_id, asset_type: "avatar_image", mime_type: "image/png", status: "ready", download_url: `https://mock.local/u${n}.jpg` });
     return HttpResponse.json(
-      { data: { asset_id: `upload-${n}`, type: "avatar_image", status: "ready", thumbnail_url: `https://mock.local/u${n}.jpg` }, error: null, request_id: "mock-req" },
+      { data: { asset_id, type: "avatar_image", status: "ready", thumbnail_url: `https://mock.local/u${n}.jpg` }, error: null, request_id: "mock-req" },
       { status: 201 }
     );
   }),
@@ -2097,5 +2103,8 @@ export const handlers = [
   ...analyticsHandlers(),
 
   // ── 管理员后台 (ADMIN-CONSOLE-UI-0001) ── /api/v1/admin/console/*，门禁与数据全走 resolveMockState 单一源。
-  ...adminConsoleHandlers()
+  ...adminConsoleHandlers(),
+
+  // ── 华鼎AI智脑 (AIBRAIN-UI-0001) ── /api/v1/aibrain/*，会话/消息/钱包/充值 mock；正确拒绝非法档位/余额不足/超上限/未知会话。
+  ...aibrainHandlers()
 ];

@@ -1,4 +1,5 @@
 import {
+  BrainCircuit,
   Image as ImageIcon,
   Layers,
   LayoutDashboard,
@@ -22,6 +23,8 @@ import type { NavItem } from "@/components/ui/sidebar-nav";
  */
 export const navItems: NavItem[] = [
   { key: "workbench", label: "工作台", icon: LayoutDashboard, href: "/" },
+  // AIBRAIN-UI-0001：华鼎AI智脑（真上线功能，不进 coming-soon）——索引 1，工作台正下方（只追加，不重排）。
+  { key: "aibrain", label: "华鼎AI智脑", icon: BrainCircuit, href: "/aibrain" },
   { key: "batch", label: "批量生产", icon: Layers, href: "/batch" },
   // HISTORY-IMAGE-TAB-UI-0001：左侧「图片历史」下线——已并进工作台「历史生成」的图片 tab（6 分类 + 大图 + 详情合并）。
   { key: "templates", label: "模板中心", icon: LayoutTemplate, href: "/templates" },

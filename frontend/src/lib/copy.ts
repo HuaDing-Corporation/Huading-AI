@@ -1251,5 +1251,69 @@ export const copy = {
     // 信噪比（ADMIN-AUDIT-DIFF-NOISE-0001）：未变键折叠标题。信息只折叠不删——点开可逐键复核未变字段。
     auditUnchangedFold: (n: number) => `另有 ${n} 项未变化`,
     auditAllUnchanged: "本次无字段变化"
+  },
+
+  // 华鼎AI智脑 LLM 聊天（AIBRAIN-UI-0001，mock 先行）——**只追加，不重排**（避让电商线 §七）。
+  aibrain: {
+    navLabel: "华鼎AI智脑",
+    title: "华鼎AI智脑",
+    // 会话
+    newChat: "新建对话",
+    conversationsTitle: "对话",
+    conversationsEmpty: "还没有对话，点「新建对话」开始。",
+    untitled: "新对话",
+    // 空 / 加载 / 错误态
+    emptyTitle: "开始和华鼎AI智脑对话",
+    emptyHint: "选一个智能强度，输入问题，或上传图片 / 文档。",
+    loading: "加载中…",
+    loadError: "对话加载失败",
+    retry: "重试",
+    // 消息
+    you: "你",
+    assistant: "华鼎AI智脑",
+    copy: "复制",
+    copied: "已复制",
+    thinking: "正在思考…",
+    imageAttachment: "图片",
+    costLabel: (n: number) => `本次消耗 ${n} 积分`,
+    // 输入框
+    inputPlaceholder: "输入问题…（Enter 发送，Shift+Enter 换行）",
+    send: "发送",
+    sending: "发送中…",
+    // 智能强度
+    intensityLabel: "智能强度",
+    intensityLow: "低",
+    intensityMid: "中",
+    intensityHigh: "高",
+    intensityCost: (n: number) => `约 ${n} 积分/次`,
+    intensityAria: (label: string, cost: number) => `智能强度 ${label}，约 ${cost} 积分每次`,
+    // 附件（一期只图片；文档解析是 BE 增量 3，本期不提供入口）
+    attachImage: "上传图片",
+    attachRemove: "移除附件",
+    imageOnly: "仅支持 JPG / PNG / WebP 图片",
+    uploadFailed: "上传失败，请重试",
+    // 语音
+    voiceStart: "语音输入",
+    voiceStop: "停止录音",
+    voiceUnsupported: "当前浏览器不支持语音输入（建议用 Chrome / Edge）",
+    voiceListening: "正在聆听…",
+    // 钱包 / 充值
+    balanceLabel: "推理积分",
+    balanceLow: "余额偏低",
+    recharge: "充值",
+    rechargeTitle: "充值推理积分",
+    rechargeDesc: "余额按 1:1 充值为推理积分。",
+    rechargeIrreversible: "🔴 推理积分单向不可退：充值后不可退回余额。",
+    rechargeAmount: (n: number) => `${n} 积分`,
+    rechargeConfirm: "确认充值",
+    rechargeFailed: "充值失败，请重试",
+    // 409：同一幂等键用于了不同金额（正常流程不该触发——改档位会换新键——但触发了要看得懂）。
+    idempotencyReuse: "充值请求状态异常，请关闭弹窗后重新发起。",
+    // 发送错误分流（对齐 BE status/code）
+    reqLimit: "本次问答超过单次上限或余额不足以作答，请精简内容或充值后重试。",
+    providerFailed: "AI 服务暂时不可用，请稍后重试。",
+    attachmentRejected: "附件无效或已失效，请移除后重新上传。",
+    // 通用错误
+    error: "出错了，请重试"
   }
 } as const;

@@ -1,0 +1,107 @@
+"use client";
+
+// 华鼎AI智脑 · 聊天主壳（AIBRAIN-UI-0001 · FIX1）。左会话列表 / 中消息流 / 下输入框 + 顶部余额 + 充值弹窗。
+// 错误分流（对齐 BE 真实 status/code）：402 余额不足 → 弹充值窗；422 超上限 → friendly；502 上游失败 → friendly 重试。
+
+import { useState } from "react";
+
+import { copy } from "@/lib/copy";
+import { ApiError } from "@/lib/api/client";
+import { Button } from "@/components/ui/button";
+import { useConversation, useCreateConversation, useSendMessage, useWallet } from "@/lib/aibrain/hooks";
+import { AIBRAIN_ERROR, type IntensityTier, type SendMessageRequest } from "@/lib/aibrain/types";
+import { ConversationList } from "@/components/aibrain/conversation-list";
+import { MessageStream } from "@/components/aibrain/message-stream";
+import { Composer } from "@/components/aibrain/composer";
+import { WalletBalance } from "@/components/aibrain/wallet-balance";
+import { RechargeDialog } from "@/components/aibrain/recharge-dialog";
+
+export function AibrainChat() {
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [tier, setTier] = useState<IntensityTier>("mid");
+  const [rechargeOpen, setRechargeOpen] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+
+  const { data: wallet } = useWallet();
+  // 🔴 钱包未加载/加载失败时余额是 undefined（**不是 0**）——否则 available<=0 的预检会把有余额的用户也锁死（CR#2）。
+  const balance = wallet?.available_credits;
+  const create = useCreateConversation();
+  const send = useSendMessage();
+  const convQuery = useConversation(activeId ?? undefined);
+  const messages = convQuery.data?.messages ?? [];
+  const busy = send.isPending || create.isPending; // 建会话在途也禁用发送，防双建（CR#7）
+
+  // 🔴 P1-1：返回是否**发送成功**——composer 据此决定清不清空（失败保留文字/附件/预览）。
+  const handleSend = async (body: SendMessageRequest): Promise<boolean> => {
+    setSendError(null);
+    try {
+      // 建会话与发消息**同在 try 内**：首条消息若建会话失败，也走错误分流、不静默丢消息（CR#1）。
+      let convId = activeId;
+      if (!convId) {
+        const conv = await create.mutateAsync();
+        convId = conv.id;
+        setActiveId(conv.id);
+      }
+      await send.mutateAsync({ conversationId: convId, body });
+      return true;
+    } catch (err) {
+      if (!(err instanceof ApiError)) {
+        setSendError(copy.aibrain.error);
+        return false;
+      }
+      // 402 余额不足 → 弹充值窗（不是普通报错）。
+      if (err.status === 402 || err.code === AIBRAIN_ERROR.INSUFFICIENT_BALANCE) setRechargeOpen(true);
+      else if (err.code === AIBRAIN_ERROR.REQUEST_LIMIT_EXCEEDED) setSendError(copy.aibrain.reqLimit);
+      else if (err.code === AIBRAIN_ERROR.PROVIDER_FAILED) setSendError(copy.aibrain.providerFailed);
+      else if (err.code === AIBRAIN_ERROR.ATTACHMENT_NOT_FOUND || err.code === AIBRAIN_ERROR.ATTACHMENT_INVALID)
+        setSendError(copy.aibrain.attachmentRejected);
+      else setSendError(err.message || copy.aibrain.error);
+      return false;
+    }
+  };
+
+  return (
+    <section className="flex min-h-[calc(100vh-140px)] min-w-0 flex-col gap-4">
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-[18px] font-semibold tracking-wide text-ink">{copy.aibrain.title}</h1>
+        <WalletBalance onRecharge={() => setRechargeOpen(true)} />
+      </header>
+
+      <div className="flex min-h-0 flex-1 flex-col gap-4 sm:flex-row">
+        <ConversationList activeId={activeId} onSelect={setActiveId} />
+
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col rounded-card border border-line-gold bg-glass-soft p-4">
+          {convQuery.isError ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
+              <p role="alert" className="text-[13px] text-error-fg">{copy.aibrain.loadError}</p>
+              <Button variant="soft" size="sm" onClick={() => void convQuery.refetch()}>{copy.aibrain.retry}</Button>
+            </div>
+          ) : (
+            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+              <MessageStream messages={messages} pending={send.isPending} />
+            </div>
+          )}
+
+          {sendError ? (
+            <p role="alert" className="mt-2 rounded-field bg-error-bg px-3 py-2 text-[12.5px] text-error-fg">
+              {sendError}
+            </p>
+          ) : null}
+
+          <div className="mt-3">
+            <Composer
+              tier={tier}
+              onTierChange={setTier}
+              balance={balance}
+              sending={busy}
+              onSend={handleSend}
+              onInsufficient={() => setRechargeOpen(true)}
+            />
+          </div>
+        </div>
+      </div>
+
+      <RechargeDialog open={rechargeOpen} onOpenChange={setRechargeOpen} />
+    </section>
+  );
+}
