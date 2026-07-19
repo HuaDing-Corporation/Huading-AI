@@ -42,17 +42,19 @@ export function Composer({
   const imageInput = useRef<HTMLInputElement>(null);
   const voiceBase = useRef("");
   const objectUrls = useRef<string[]>([]); // 本地预览 objectURL，须显式 revoke（CR#3）
+  // 🔴 FIX5：镜像最新 attachments。发送在 await 期间开了一个异步窗口，submit 闭包里的 `attachments` 是
+  //   发送**瞬间**的旧值——成功后要判断「窗口期附件有没有被动过」，必须读这个 ref 拿最新值。
+  const attachmentsRef = useRef<PendingAttachment[]>(attachments);
   const uploadImage = useUploadImage();
 
   const voice = useVoiceInput((t) => setText(voiceBase.current + t));
 
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
+
   // 卸载时释放所有未撤销的预览 URL（换页/关闭仍会遗留，浏览器只在整页卸载时兜底）。
   useEffect(() => () => objectUrls.current.forEach((u) => URL.revokeObjectURL(u)), []);
-
-  const revokeAll = () => {
-    objectUrls.current.forEach((u) => URL.revokeObjectURL(u));
-    objectUrls.current = [];
-  };
 
   const canSend = (text.trim().length > 0 || attachments.length > 0) && !sending && !uploading;
 
@@ -66,13 +68,27 @@ export function Composer({
       onInsufficient(); // 弹充值窗、**不发请求**
       return;
     }
-    // 🔴 P1-1：**await 结果，只有成功才清空**（文字/附件/revoke 预览）。失败（网络/402/422/502）→ 全部保留，
-    //   用户不必重打字、更不必重传图片；预览也不碎（objectURL 未被提前 revoke）。
-    const sent = await onSend({ content, tier, attachment_asset_ids: attachments.map((a) => a.asset_id) });
+    // 发送瞬间快照：原始文字 + 这一批附件（用于成功后「比较再清空」，见下）。
+    const sentText = text;
+    const sentAttachments = attachments;
+    // 🔴 P1-1：**await 结果，只有成功才清空**；失败（网络/402/422/502）→ 全部保留，不必重打重传，预览也不碎。
+    const sent = await onSend({ content, tier, attachment_asset_ids: sentAttachments.map((a) => a.asset_id) });
     if (!sent) return;
-    setText("");
-    setAttachments([]);
-    revokeAll(); // 只在成功后 revoke（失败保留预览）
+    // 🔴 FIX5：await 打开了异步窗口——期间用户可能已边等边打下一条 / 加了新附件。**只清「仍等于发送快照」的部分**，
+    //   决不无条件清空（否则把窗口期的新草稿、新附件连同预览一起抹掉；聊天里边等回复边打下一条是标准行为，不锁输入）。
+    setText((cur) => (cur === sentText ? "" : cur)); // 文字没动才清（函数式读最新值）
+    // 附件：这批仍原样未动才清空 + revoke **本批** 预览；窗口期加/删/换过 → 全保留、**不 revoke 任何 URL**
+    //   （尤其不能 revoke 新附件的 URL——否则附件在、预览碎，等于把上一轮修好的一半又弄坏）。
+    const currentAttachments = attachmentsRef.current;
+    const attachmentsUntouched =
+      currentAttachments.length === sentAttachments.length &&
+      currentAttachments.every((a, i) => a.asset_id === sentAttachments[i].asset_id);
+    if (attachmentsUntouched && sentAttachments.length > 0) {
+      const sentUrls = new Set(sentAttachments.map((a) => a.preview_url));
+      sentAttachments.forEach((a) => URL.revokeObjectURL(a.preview_url));
+      objectUrls.current = objectUrls.current.filter((u) => !sentUrls.has(u));
+      setAttachments([]);
+    }
     voiceBase.current = "";
   };
 

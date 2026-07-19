@@ -112,3 +112,94 @@ describe("Composer · P1-1 附件（发送失败保留附件 + objectURL 未 rev
     expect(revokeSpy).not.toHaveBeenCalled(); // 预览未被提前 revoke → 图不碎
   });
 });
+
+// FIX5：发送在 await 期间开了一个异步窗口——期间用户可能已边等边打下一条 / 加了新附件。
+// 「成功后无条件清空」会把窗口期的新状态一起抹掉（FIX4 把同步清空改成 await 后清空引入的二阶竞态）。
+// 修法是「比较后再清空」：只清仍等于发送快照的部分，绝不 revoke 新附件的 URL。
+describe("Composer · P1（FIX5 发送等待窗口不清空新状态）", () => {
+  let revokeSpy: ReturnType<typeof vi.fn>;
+  const origCreate = URL.createObjectURL;
+  const origRevoke = URL.revokeObjectURL;
+  beforeEach(() => {
+    let uid = 0;
+    URL.createObjectURL = vi.fn(() => `blob:mock-${++uid}`); // 每次不同 → 能区分「本批」与「新加」
+    revokeSpy = vi.fn();
+    URL.revokeObjectURL = revokeSpy;
+  });
+  afterEach(() => {
+    URL.createObjectURL = origCreate ?? (() => "blob:noop");
+    URL.revokeObjectURL = origRevoke ?? (() => undefined);
+  });
+
+  /** onSend 挂起，交回 resolve 由用例决定何时/以何结果返回——精确模拟「等待响应」窗口。 */
+  function deferredSend() {
+    let resolve!: (v: boolean) => void;
+    const onSend = vi.fn(() => new Promise<boolean>((r) => (resolve = r)));
+    return { onSend, resolve: (v: boolean) => resolve(v) };
+  }
+  const uploadFile = async (input: HTMLInputElement, name: string) => {
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [new File([new Uint8Array([1])], name, { type: "image/png" })] } });
+    });
+  };
+
+  it("🔴 承重1：发送中打下一条草稿 → 第一条成功后**新草稿仍在**（不被上一条成功清空）", async () => {
+    const { onSend, resolve } = deferredSend();
+    wrap(<Composer tier="low" balance={100} sending={false} {...props()} onSend={onSend} />);
+    const ta = screen.getByLabelText(/输入问题/);
+    fireEvent.change(ta, { target: { value: "第一条" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    });
+    expect(onSend).toHaveBeenCalledTimes(1);
+    fireEvent.change(ta, { target: { value: "下一条草稿" } }); // 等待期间接着打下一条
+    await act(async () => {
+      resolve(true); // 第一条成功返回
+      await Promise.resolve();
+    });
+    expect(ta).toHaveValue("下一条草稿"); // 🔴 新草稿没被抹
+  });
+
+  it("🔴 承重2：发送中新增附件 → 成功后**新附件仍在且预览可显示**，新附件 URL **未被 revoke**", async () => {
+    const { onSend, resolve } = deferredSend();
+    const { container } = wrap(<Composer tier="low" balance={100} sending={false} {...props()} onSend={onSend} />);
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    // 附件 A（blob:mock-1）随文字一起发送。
+    await uploadFile(fileInput, "a.png");
+    await waitFor(() => expect(container.querySelector('img[src="blob:mock-1"]')).toBeTruthy());
+    fireEvent.change(screen.getByLabelText(/输入问题/), { target: { value: "看" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    });
+    expect(onSend).toHaveBeenCalledTimes(1);
+    // 等待期间新增附件 B（blob:mock-2）。
+    await uploadFile(fileInput, "b.png");
+    await waitFor(() => expect(container.querySelector('img[src="blob:mock-2"]')).toBeTruthy());
+    await act(async () => {
+      resolve(true); // 第一条成功返回
+      await Promise.resolve();
+    });
+    expect(container.querySelector('img[src="blob:mock-2"]')).toBeTruthy(); // 🔴 新附件仍在、预览未碎
+    expect(revokeSpy).not.toHaveBeenCalledWith("blob:mock-2"); // 🔴 决不 revoke 新附件 URL
+  });
+
+  it("承重3：发送中**没动** → 成功后文字清空、附件清空并 revoke 本批（正常路径别误伤）", async () => {
+    const { onSend, resolve } = deferredSend();
+    const { container } = wrap(<Composer tier="low" balance={100} sending={false} {...props()} onSend={onSend} />);
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    await uploadFile(fileInput, "a.png");
+    await waitFor(() => expect(container.querySelector('img[src="blob:mock-1"]')).toBeTruthy());
+    const ta = screen.getByLabelText(/输入问题/);
+    fireEvent.change(ta, { target: { value: "看" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    });
+    await act(async () => {
+      resolve(true); // 不做任何改动，直接成功
+      await Promise.resolve();
+    });
+    expect(ta).toHaveValue(""); // 文字清
+    expect(container.querySelector('img[src="blob:mock-1"]')).toBeFalsy(); // 附件清
+    expect(revokeSpy).toHaveBeenCalledWith("blob:mock-1"); // 本批 revoke
+  });
+});
