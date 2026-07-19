@@ -1251,5 +1251,73 @@ export const copy = {
     // 信噪比（ADMIN-AUDIT-DIFF-NOISE-0001）：未变键折叠标题。信息只折叠不删——点开可逐键复核未变字段。
     auditUnchangedFold: (n: number) => `另有 ${n} 项未变化`,
     auditAllUnchanged: "本次无字段变化"
+  },
+
+  // 华鼎AI智脑 LLM 聊天（AIBRAIN-UI-0001，mock 先行）——**只追加，不重排**（避让电商线 §七）。
+  aibrain: {
+    navLabel: "华鼎AI智脑",
+    title: "华鼎AI智脑",
+    // 会话
+    newChat: "新建对话",
+    conversationsTitle: "对话",
+    conversationsEmpty: "还没有对话，点「新建对话」开始。",
+    untitled: "新对话",
+    deleteChat: "删除对话",
+    deleteChatConfirm: "删除这个对话？删除后不可恢复。",
+    // 空 / 加载 / 错误态
+    emptyTitle: "开始和华鼎AI智脑对话",
+    emptyHint: "选一个智能强度，输入问题，或上传图片 / 文档。",
+    loading: "加载中…",
+    loadError: "对话加载失败",
+    retry: "重试",
+    // 消息
+    you: "你",
+    assistant: "华鼎AI智脑",
+    copy: "复制",
+    copied: "已复制",
+    thinking: "正在思考…",
+    costLabel: (n: number) => `本次消耗 ${n} 积分`,
+    // 输入框
+    inputPlaceholder: "输入问题…（Enter 发送，Shift+Enter 换行）",
+    send: "发送",
+    sending: "发送中…",
+    // 智能强度
+    intensityLabel: "智能强度",
+    intensityLow: "低",
+    intensityMid: "中",
+    intensityHigh: "高",
+    intensityCost: (n: number) => `约 ${n} 积分/次`,
+    intensityAria: (label: string, cost: number) => `智能强度 ${label}，约 ${cost} 积分每次`,
+    // 附件
+    attachImage: "上传图片",
+    attachDocument: "上传文档",
+    attachRemove: "移除附件",
+    docReceived: "已收到，解析中…",
+    docHint: "支持 PDF / DOCX / TXT，一期仅收下，解析稍后开放。",
+    imageOnly: "仅支持 JPG / PNG / WebP 图片",
+    docTypeError: "仅支持 PDF / DOCX / TXT 文档",
+    uploadFailed: "上传失败，请重试",
+    // 语音
+    voiceStart: "语音输入",
+    voiceStop: "停止录音",
+    voiceUnsupported: "当前浏览器不支持语音输入（建议用 Chrome / Edge）",
+    voiceListening: "正在聆听…",
+    // 钱包 / 充值
+    balanceLabel: "推理积分",
+    balanceLow: "余额偏低",
+    recharge: "充值",
+    rechargeTitle: "充值推理积分",
+    rechargeDesc: "余额按 1:1 充值为推理积分。",
+    rechargeIrreversible: "🔴 推理积分单向兑换，充值后不可退回余额。",
+    rechargeAmount: (n: number) => `${n} 积分`,
+    rechargeConfirm: "确认充值",
+    rechargeSuccess: (n: number) => `已充值 ${n} 积分`,
+    rechargeFailed: "充值失败，请重试",
+    // 余额不足 / 超上限
+    insufficientTitle: "推理积分不足",
+    insufficientDesc: (need: number, have: number) => `本次预计需预留 ${need} 积分，当前余额 ${have} 积分。请充值后再试。`,
+    overLimit: (limit: number) => `单次问答预计消耗超过 ${limit} 积分上限，请精简内容或减少附件。`,
+    // 通用错误
+    error: "出错了，请重试"
   }
 } as const;

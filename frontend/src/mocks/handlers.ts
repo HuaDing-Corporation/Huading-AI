@@ -1,5 +1,7 @@
 import { http, HttpResponse } from "msw";
 
+import { aibrainHandlers } from "./aibrain-handlers"; // 华鼎AI智脑（AIBRAIN-UI-0001）——独立段落，追加在数组末尾
+
 // Mirror client.ts's trailing-slash normalization so handler URLs always match
 // what apiFetch requests (avoids a latent "mock silently bypassed" footgun).
 const BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000").replace(/\/$/, "");
@@ -2097,5 +2099,8 @@ export const handlers = [
   ...analyticsHandlers(),
 
   // ── 管理员后台 (ADMIN-CONSOLE-UI-0001) ── /api/v1/admin/console/*，门禁与数据全走 resolveMockState 单一源。
-  ...adminConsoleHandlers()
+  ...adminConsoleHandlers(),
+
+  // ── 华鼎AI智脑 (AIBRAIN-UI-0001) ── /api/v1/aibrain/*，会话/消息/钱包/充值 mock；正确拒绝非法档位/余额不足/超上限/未知会话。
+  ...aibrainHandlers()
 ];
