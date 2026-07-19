@@ -1,6 +1,6 @@
 import { ApiError, apiFetch, apiUrl, authHeaders } from "@/lib/api/client";
 import { authStore } from "@/lib/auth/store";
-import type { ClearResult, CreateVideoRequest, DeleteResult, EstimateResponse, ScenePromptResponse, VideoAccepted, VideoDetail, VideoEvent, VideoListItem, VideoListResponse } from "@/lib/api/types";
+import type { ClearResult, CreateVideoRequest, DeleteResult, EstimateResponse, ScenePromptRequest, ScenePromptResponse, VideoAccepted, VideoDetail, VideoEvent, VideoListItem, VideoListResponse } from "@/lib/api/types";
 
 export function createVideo(input: CreateVideoRequest): Promise<VideoAccepted> {
   return apiFetch<VideoAccepted>("/api/v1/videos", { method: "POST", body: input });
@@ -11,10 +11,12 @@ export function estimateVideo(input: CreateVideoRequest): Promise<EstimateRespon
   return apiFetch<EstimateResponse>("/api/v1/videos/estimate", { method: "POST", body: input });
 }
 
-/** Generate a 画面提示词 (scene prompt) for 电商带货 i2v from the topic — decoupled
- *  from the 口播 script so editing one never changes the other. */
-export function generateScenePrompt(topic: string): Promise<ScenePromptResponse> {
-  return apiFetch<ScenePromptResponse>("/api/v1/videos/scene-prompt", { method: "POST", body: { topic } });
+/** Generate a 画面提示词 (scene prompt) + 负面提示词 for 电商带货 i2v — decoupled from
+ *  the 口播 script so editing one never changes the other. ECOM-VIDEO-OPTIMIZE-UI-0001
+ *  契约 §4.2：从只发 topic → 发产品图 keys（≥1，luna 多模态读图）+ 文案 + topic；
+ *  undefined 字段被 JSON.stringify 丢弃，故仅 product_image_keys 恒发。 */
+export function generateScenePrompt(params: ScenePromptRequest): Promise<ScenePromptResponse> {
+  return apiFetch<ScenePromptResponse>("/api/v1/videos/scene-prompt", { method: "POST", body: params });
 }
 
 /** Authoritative record for one video (status + playback/download URLs). */

@@ -54,7 +54,7 @@ export function VideoGenForm({
   const submit = async (req: CreateVideoRequest) => {
     setError(null);
     try {
-      await createAndTrack(req, req.topic);
+      await createAndTrack(req, req.topic ?? ""); // topic 现为可选类型（电商带货可空）；视频生成恒有 prompt→topic，?? "" 仅为类型收敛
     } catch (err) {
       setError(errorText(err));
     }

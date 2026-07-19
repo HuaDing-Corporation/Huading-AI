@@ -31,7 +31,8 @@ export function ReferenceImagesPicker({
   label = copy.workbench.vgRefImagesLabel,
   uploadLabel = copy.workbench.vgRefImagesUpload,
   overLimitError = copy.workbench.vgRefOverLimit,
-  max = MAX_REFERENCE_IMAGES
+  max = MAX_REFERENCE_IMAGES,
+  uploadFile
 }: {
   onChange?: (assetIds: string[]) => void;
   /** 逐行配对（BATCH-PROD-UI-0002）需按序缩略图 → 上抛有序 {assetId,preview} 供父级渲染配对预览。 */
@@ -44,10 +45,19 @@ export function ReferenceImagesPicker({
   overLimitError?: string;
   /** 数量上限；默认 9（视频生成）。电商详情图·复刻按 BE 契约传 4。 */
   max?: number;
+  /**
+   * 自定义上传器（ECOM-VIDEO-OPTIMIZE-UI-0001）：接收 File 返回存储 id/key。缺省=视频/详情图参考图的
+   * /uploads/images→asset_id（useUploadImage）。电商带货产品图传 /uploads→image_key 的上传器复用本组件多图能力，
+   * 避免第 N 份多图上传拷贝。上抛的 item.assetId 字段即存储 id/key（产品图场景装 image_key）。
+   */
+  uploadFile?: (file: File) => Promise<string>;
 }) {
   const uploadImg = useUploadImage();
   const [items, setItems] = useState<RefItem[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // 自定义上传器无 react-query isPending → 用本地 busy 标记上传态（默认路径仍用 uploadImg.isPending，逐字不变）。
+  const [customBusy, setCustomBusy] = useState(false);
+  const pending = uploadFile ? customBusy : uploadImg.isPending;
   const inputRef = useRef<HTMLInputElement>(null);
 
   // 上抛 asset_id 列表 + 有序 items（onChange/onItemsChange 为父级 setState，稳定引用，不触发循环）。
@@ -61,9 +71,12 @@ export function ReferenceImagesPicker({
   useEffect(() => {
     itemsRef.current = items;
   }, [items]);
+  // 上传在途(await 期间)的预览 URL：尚未落入 items，卸载清理不覆盖 → 单独记账，一并在卸载时释放，杜绝在途卸载泄漏。
+  const pendingPreviews = useRef<Set<string>>(new Set());
   useEffect(
     () => () => {
       itemsRef.current.forEach((it) => URL.revokeObjectURL(it.preview));
+      pendingPreviews.current.forEach((url) => URL.revokeObjectURL(url));
     },
     []
   );
@@ -76,24 +89,34 @@ export function ReferenceImagesPicker({
     // 非法/过大不静默丢弃（对齐 ImagePicker 失败友好）。
     if (all.some((f) => !ALLOWED_UPLOAD_TYPES.includes(f.type))) setError(copy.errors.uploadType);
     else if (all.some((f) => f.size > MAX_UPLOAD_BYTES)) setError(copy.errors.uploadTooLarge);
-    // ≤9 承重：room 取剩余位，超出部分不添加并提示。
+    // ≤max 承重：room 取剩余位，超出部分不添加并提示。
     const room = max - itemsRef.current.length;
     if (valid.length > room) setError(overLimitError);
-    for (const file of valid.slice(0, Math.max(0, room))) {
-      const preview = URL.createObjectURL(file);
-      try {
-        const r = await uploadImg.mutateAsync(file);
-        setItems((prev) => {
-          if (prev.length >= max) {
-            URL.revokeObjectURL(preview); // 满额拒收也释放预览 URL，防泄漏
-            return prev;
-          }
-          return [...prev, { assetId: r.asset_id, preview }];
-        });
-      } catch (err) {
-        URL.revokeObjectURL(preview);
-        setError(errorText(err));
+    const toUpload = valid.slice(0, Math.max(0, room));
+    // 自定义上传器路径显式标记 busy（默认 useUploadImage 路径靠 mutateAsync 的 isPending，不触本地态）。
+    if (uploadFile && toUpload.length) setCustomBusy(true);
+    try {
+      for (const file of toUpload) {
+        const preview = URL.createObjectURL(file);
+        pendingPreviews.current.add(preview); // 在途记账：落入 items 或被 revoke 前，卸载清理据此释放
+        try {
+          const key = uploadFile ? await uploadFile(file) : (await uploadImg.mutateAsync(file)).asset_id;
+          setItems((prev) => {
+            if (prev.length >= max) {
+              URL.revokeObjectURL(preview); // 满额拒收也释放预览 URL，防泄漏
+              return prev;
+            }
+            return [...prev, { assetId: key, preview }];
+          });
+        } catch (err) {
+          URL.revokeObjectURL(preview);
+          setError(errorText(err));
+        } finally {
+          pendingPreviews.current.delete(preview); // 已落定（入 items 由 itemsRef 接管，或已 revoke）→ 移出在途集
+        }
       }
+    } finally {
+      if (uploadFile) setCustomBusy(false);
     }
     if (inputRef.current) inputRef.current.value = "";
   };
@@ -141,11 +164,11 @@ export function ReferenceImagesPicker({
       <button
         type="button"
         onClick={() => inputRef.current?.click()}
-        disabled={uploadImg.isPending || full}
+        disabled={pending || full}
         className="flex w-full items-center justify-center gap-2 rounded-field border border-dashed border-line-gold bg-glass-fill py-5 text-[13px] text-ink-soft transition-colors hover:bg-glass-hover disabled:pointer-events-none disabled:opacity-50"
       >
         <ImagePlus size={18} strokeWidth={1.8} />{" "}
-        {uploadImg.isPending ? copy.workbench.vgGenerating : `${uploadLabel}（${items.length}/${max}）`}
+        {pending ? copy.workbench.vgGenerating : `${uploadLabel}（${items.length}/${max}）`}
       </button>
       {error && (
         <p role="alert" className="mt-2 rounded-field bg-error-bg px-3 py-2 text-[12.5px] text-error-fg">
