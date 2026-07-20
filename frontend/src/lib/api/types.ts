@@ -131,6 +131,20 @@ export interface CreateVideoRequest {
   subtitle_style?: SubtitleStyle; // 数字人口播：字幕样式覆盖（ORAL-PROD-UI-0001）；缺省=与 0001 默认烧入一致（不回归）
   apply_visible_label?: boolean; // AI 生成显式标识开关（LABEL-TOGGLE-UI-0001）；默认关(false)，开=true。对齐后端 VideoGenerateRequest.apply_visible_label
   purpose?: string; // 照片/封面：用途标识，如 "cover"（AI 封面复用 0003 文生图标识；进图片历史作为 photo）
+  // ── 图片生成/修改 photo 优化 (IMAGE-GEN-OPTIMIZE-UI-0001 契约 §四) ──
+  // 四层提示词长度（FIX1 真联调订正 · 以合并后 BE schemas/videos.py 为准）：photo 的 topic/master_prompt/
+  // master_negative_prompt/negative_prompt 各有 **≤20000 字符**反滥用上界（Field max_length + extra=forbid，超限→422，
+  // 非静默截断）。前端仍不设 maxLength（正常使用远不及；此为诚实注释，非“无上限”）。negative_prompt 仅 photo 分支受此上界，视频语义不限。
+  image_keys?: string[]; // 参考图 1–6（取代标量 image_key；来自 POST /uploads→key，格式须 uploads/<name>.{jpg,jpeg,png,webp}）。可选（纯文生图不带）；image_key 保留兼容 AI 封面等既有 caller
+  master_prompt?: string; // 任务总控提示词（全局风格前缀，可选，≤20000）
+  master_negative_prompt?: string; // 任务统一负面提示词（可选，≤20000）——同 negative_prompt 编码进 prompt，非硬约束
+  // 三个强度：均 int|None，取值 10..100 步长 10，None=未开启（默认）。底层编码进提示词（provider 无原生参数），软性倾向、非精确控制。
+  // 注：背景参考强度(background_strength)已于 2026-07-19 砍除——BE 盲评判定无作用、#208 内删除、从未上线。
+  similarity_strength?: number; // 图片相似度
+  creativity_strength?: number; // AI 创意程度
+  subject_strength?: number; // 主体保持强度
+  image_resolution?: string; // 清晰度档位 "1k"|"2k"|"4k"（§3之二，默认 1k）；界面选择是硬条件、总随请求传（BE 保证参数来源唯一）
+  // 注：图片负面提示词复用上方 negative_prompt 字段（视频链路已有；photo 分支此前不读，本期起读）。
   // ── 视频生成 video_gen (VIDEOGEN-UI-0001, seam §2) ──
   prompt?: string; // 不限字数提示词（seam 字段）；同时 topic 复用此文本作标题/展示
   reference_image_asset_ids?: string[]; // 参考图 1–9 张（POST /uploads/images → asset_id）

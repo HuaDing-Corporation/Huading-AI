@@ -15,6 +15,17 @@ const err = (status: number, code: string, message: string) =>
 // 非整数即非法（调用处返 422）；undefined/null（可选未传）不算非法。scene-prompt / estimate / videos 提交三处共用。
 const badDuration = (v: unknown): boolean => v !== undefined && v !== null && !Number.isInteger(v);
 
+// IMAGE-GEN-OPTIMIZE-UI-0001 §四：三个强度取值 10..100 步长 10，None=未开启（背景参考强度已砍除·从未上线）。present 且非「10..100 步10 整数」即非法。
+const badStrength = (v: unknown): boolean =>
+  v !== undefined && v !== null && !(typeof v === "number" && Number.isInteger(v) && v >= 10 && v <= 100 && v % 10 === 0);
+
+// FIX1 真联调：逐字对齐 BE schemas/videos.py `_IMAGE_KEY_RE`——参考图 key 须为 POST /uploads 返回的 uploads/<name>.{jpg,jpeg,png,webp}。
+// mock 此前只卡数量不卡格式（比 BE 宽松 → 「a」这类假 key 假绿），本轮收紧防漂移。
+const PHOTO_IMAGE_KEY_RE = /^uploads\/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|webp)$/;
+// photo 四层提示词各 ≤20000（BE Field max_length + extra=forbid，超限 422，非静默截断）。
+const PHOTO_PROMPT_MAX = 20000;
+const overLen = (v: unknown): boolean => typeof v === "string" && v.length > PHOTO_PROMPT_MAX;
+
 // in-memory store so list/detail/SSE stay consistent within a session
 const videos = new Map<string, Record<string, unknown>>();
 // mock 种子（ECOM-FIXES-0001 ③ / cancelled 补 ECOM-HISTORY-CANCELLED-FIX-0001 ③）：预置电商(seedance_i2v)历史项，
@@ -1477,7 +1488,7 @@ export const handlers = [
       prompt?: string;
       reference_image_asset_ids?: string[];
       product_image_keys?: string[]; // 电商带货 i2v 产品图（ECOM-VIDEO-OPTIMIZE-UI-0001 §4.3）
-      negative_prompt?: string; // 电商带货 i2v 负面提示词（§4.3/req6）
+      negative_prompt?: string; // 电商带货 i2v 负面 / 图片负面（photo 复用，IMAGE-GEN-OPTIMIZE-UI-0001 §四）
       voice_id?: string; // 电商带货/数字人口播必填
       duration_sec?: number;
       resolution?: string;
@@ -1485,6 +1496,14 @@ export const handlers = [
       apply_visible_label?: boolean;
       avatar_asset_id?: string;
       avatar_video_asset_id?: string;
+      // 图片生成/修改 photo 优化（IMAGE-GEN-OPTIMIZE-UI-0001 §四）
+      image_keys?: string[]; // 参考图 1–6（可选）
+      master_prompt?: string; // 任务总控（可选）
+      master_negative_prompt?: string; // 任务统一负面（可选）
+      similarity_strength?: number; // 三个强度：10..100 步长 10，未开启不出现（背景参考强度已砍除·从未上线）
+      creativity_strength?: number;
+      subject_strength?: number;
+      image_resolution?: string; // §3之二：清晰度档位 1k/2k/4k
     };
     // resolution 是后端全模式 Literal["480p","720p","1080p"]（含 seedance_i2v，见 schemas/videos.py:154）：
     // 非法即 422，不按模式放宽（ECOM-RESOLUTION-UI-0001：电商也带 resolution，需与 video_gen 同等把关，不伪造放行）。
@@ -1531,6 +1550,39 @@ export const handlers = [
       // 电商带货音色必填（BE：数字人口播/电商带货 voice_id 必填）——mock 不比 BE 宽松，守住前端 generateDisabled 的音色门。
       if (!body.voice_id) {
         return err(422, "ECOM_I2V_INVALID", "电商带货需选择音色");
+      }
+    }
+    // 图片生成/修改 photo 校验（IMAGE-GEN-OPTIMIZE-UI-0001 契约 §四）。mock 不比 BE 宽松：
+    //  · image_keys 若present 须 1–6（7 张 → 422）——可选（纯文生图 / AI 封面均不带，不误杀）；
+    //  · 三个强度若present 须 10..100 步长 10（非法 → 422）；未开启的强度**不应出现**（前端已保证，此为防漂移）。
+    // ⚠️ 零回归：AI 封面（purpose:cover，只带 image_size/image_quality，无 image_keys/强度）在此天然全过。
+    if (body.video_mode === "photo") {
+      if (body.image_keys !== undefined) {
+        const keys = body.image_keys;
+        // FIX1 真联调：数量 1–6 且每个 key 须匹配 BE 格式（uploads/<name>.{jpg,jpeg,png,webp}）——mock 此前只卡数量、放行「a」等假 key（比 BE 宽松）。
+        if (
+          !Array.isArray(keys) ||
+          keys.length < 1 ||
+          keys.length > 6 ||
+          keys.some((k) => typeof k !== "string" || !PHOTO_IMAGE_KEY_RE.test(k))
+        ) {
+          return err(422, "PHOTO_INVALID", "参考图 1–6 张，且 key 须为 uploads/<name>.{jpg,jpeg,png,webp}");
+        }
+      }
+      if (
+        badStrength(body.similarity_strength) ||
+        badStrength(body.creativity_strength) ||
+        badStrength(body.subject_strength)
+      ) {
+        return err(422, "PHOTO_INVALID", "强度取值须为 10..100 步长 10");
+      }
+      // FIX1 真联调：四层提示词各 ≤20000（BE Field max_length + extra=forbid，超限 422，非静默截断）。
+      if (overLen(body.topic) || overLen(body.master_prompt) || overLen(body.master_negative_prompt) || overLen(body.negative_prompt)) {
+        return err(422, "PHOTO_INVALID", "提示词最多 20000 字符");
+      }
+      // §3之二 清晰度档位：present 时须 1k/2k/4k（mock 不比 BE 宽松）。AI 封面不带 → 天然放过。
+      if (body.image_resolution !== undefined && !["1k", "2k", "4k"].includes(body.image_resolution)) {
+        return err(422, "PHOTO_INVALID", "image_resolution 须为 1k/2k/4k");
       }
     }
     const id = `mock-${++videoSeq}`;

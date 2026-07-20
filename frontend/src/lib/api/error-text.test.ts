@@ -38,3 +38,30 @@ describe("errorText · AVATAR_VIDEO_* 后端校验码 → 友好中文", () => {
     expect(out).not.toMatch(/huading plan\.$/);
   });
 });
+
+// IMAGE-GEN-OPTIMIZE-UI-0001-FIX1：图片服务能力 422（BE providers/base.py fail-closed，落钱前拦）→ 优先透 BE 动态友好中文
+// （如 OpenAI provider 选 2K → 「当前图片服务不支持 2K，请选择 1K。」），不落通用「操作失败」；BE message 空时才兜底 curated。
+describe("errorText · IMAGE_PROVIDER_* 能力码（FIX1 真联调）", () => {
+  const codes = [
+    "IMAGE_PROVIDER_RESOLUTION_UNSUPPORTED",
+    "IMAGE_PROVIDER_REFERENCE_IMAGES_UNSUPPORTED",
+    "IMAGE_PROVIDER_CAPABILITIES_UNDECLARED"
+  ];
+  it("有 BE 动态 message → 原样透出（比前端静态文案更精确），不落通用兜底", () => {
+    const msg = "当前图片服务不支持 2K，请选择 1K。"; // 逐字对齐 base.py 的 user_message
+    const out = errorText(new ApiError(msg, "IMAGE_PROVIDER_RESOLUTION_UNSUPPORTED", 422));
+    expect(out).toBe(msg);
+    expect(out).not.toBe(copy.errors.generic);
+  });
+  it("多图越 provider 上限 → 透 BE「最多支持 N 张」", () => {
+    const msg = "当前图片服务最多支持 1 张参考图。";
+    expect(errorText(new ApiError(msg, "IMAGE_PROVIDER_REFERENCE_IMAGES_UNSUPPORTED", 422))).toBe(msg);
+  });
+  for (const code of codes) {
+    it(`${code} 且 message 意外为空 → 兜底 curated 文案，绝不落通用「操作失败」`, () => {
+      const out = errorText(new ApiError("", code, 422));
+      expect(out).toBe(copy.errors.imageProviderCapability);
+      expect(out).not.toBe(copy.errors.generic);
+    });
+  }
+});

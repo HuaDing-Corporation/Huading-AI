@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { estimateVideo, generateScenePrompt } from "@/lib/api/videos";
+import { createVideo, estimateVideo, generateScenePrompt } from "@/lib/api/videos";
 
 // ECOM-VIDEO-OPTIMIZE-UI-0001 · FIX2 · P1：确认窗打开必调 POST /videos/estimate。此前缺 mock handler →
 // MSW 放行到真后端 → CI net::ERR_FAILED（#203 红）。本测真走 apiFetch → 全局 MSW（vitest.setup 已 server.listen），
@@ -69,5 +69,72 @@ describe("generateScenePrompt · duration 透传（apiFetch 真走 MSW · SCENE-
       // @ts-expect-error 故意传非法类型：真 BE int 拒字符串，mock 须同样 422（防假绿）
       generateScenePrompt({ product_image_keys: ["uploads/x.png"], duration_sec: "5.5" })
     ).rejects.toThrow();
+  });
+});
+
+// IMAGE-GEN-OPTIMIZE-UI-0001 §四：photo 提交 mock 校验（createVideo 真走 MSW）。mock 不比 BE 宽松：image_keys 1–6、
+// 四强度 10..100 步10；未开启不出现。⚠️ 零回归：AI 封面(purpose:cover + image_size/image_quality，无 image_keys/强度)天然全过。
+// FIX1 真联调：image_keys 须为 BE 格式 uploads/<name>.{jpg,jpeg,png,webp}（POST /uploads 返回值），mock 已对齐收紧。
+const refKey = (i: number) => `uploads/ref-${i}.png`;
+const sixRefs = Array.from({ length: 6 }, (_, i) => refKey(i));
+
+describe("createVideo · photo 提交校验（apiFetch 真走 MSW · IMAGE-GEN-OPTIMIZE-UI-0001）", () => {
+  it("合法 photo（6 张参考图 + 相似度 80）→ 202 accepted", async () => {
+    const res = await createVideo({
+      topic: "一只橘猫",
+      video_mode: "photo",
+      image_keys: sixRefs,
+      similarity_strength: 80,
+      aspect_ratio: "1:1"
+    });
+    expect(res.status).toBe("queued");
+  });
+
+  it("防假绿：image_keys 7 张 → 422（1–6 上限）", async () => {
+    await expect(
+      createVideo({ topic: "x", video_mode: "photo", image_keys: [...sixRefs, refKey(6)] })
+    ).rejects.toThrow();
+  });
+
+  // FIX1 真联调：逐字对齐 BE _IMAGE_KEY_RE——非 uploads/*.{jpg,jpeg,png,webp} 的假 key → 422（mock 此前放行「a」是假绿）。
+  it("防假绿：image_keys 格式非法（裸「a」非 uploads/*）→ 422", async () => {
+    await expect(createVideo({ topic: "x", video_mode: "photo", image_keys: ["a"] })).rejects.toThrow();
+    await expect(
+      createVideo({ topic: "x", video_mode: "photo", image_keys: ["uploads/x.gif"] })
+    ).rejects.toThrow(); // gif 不在 BE 白名单
+  });
+
+  // FIX1 真联调：四层提示词各 ≤20000（BE Field max_length + extra=forbid）。20001 → 422；20000 → 放行。
+  it("防假绿：提示词超 20000 → 422；恰 20000 → 202", async () => {
+    await expect(
+      createVideo({ topic: "x".repeat(20001), video_mode: "photo" })
+    ).rejects.toThrow();
+    const ok = await createVideo({ topic: "x".repeat(20000), video_mode: "photo", master_prompt: "y".repeat(20000) });
+    expect(ok.status).toBe("queued");
+  });
+
+  it("防假绿：强度非步长10（55）→ 422", async () => {
+    await expect(createVideo({ topic: "x", video_mode: "photo", subject_strength: 55 })).rejects.toThrow();
+  });
+
+  it("防假绿：强度越界（110）→ 422", async () => {
+    await expect(createVideo({ topic: "x", video_mode: "photo", creativity_strength: 110 })).rejects.toThrow();
+  });
+
+  it("§3之二：合法 image_resolution(2k) → 202；非法(8k) → 422（mock 不比 BE 宽松）", async () => {
+    const ok = await createVideo({ topic: "x", video_mode: "photo", image_resolution: "2k" });
+    expect(ok.status).toBe("queued");
+    await expect(createVideo({ topic: "x", video_mode: "photo", image_resolution: "8k" })).rejects.toThrow();
+  });
+
+  it("零回归：AI 封面（purpose:cover + image_size/image_quality，无 image_keys/强度）→ 202 全过", async () => {
+    const res = await createVideo({
+      topic: "封面",
+      video_mode: "photo",
+      purpose: "cover",
+      image_size: "1024x1536",
+      image_quality: "medium"
+    });
+    expect(res.status).toBe("queued");
   });
 });
