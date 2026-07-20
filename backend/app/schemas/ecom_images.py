@@ -7,7 +7,9 @@ from app.core.image_aspect_ratio import RequestedImageAspectRatio
 
 EcomCutoutBackground = Literal["white", "transparent"]
 EcomModelGender = Literal["female", "male", "any"]
+EcomProductImagesMode = Literal["multi_angle", "multi_item"]
 EcomReplicateOutputMode = Literal["main", "detail"]
+_ECOM_MODEL_TEXT_LIMIT = 20_000
 
 
 class EcomCutoutRequest(BaseModel):
@@ -53,12 +55,47 @@ class EcomModelStylesResponse(BaseModel):
 class EcomModelRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    source_asset_id: str = Field(min_length=1, max_length=36)
+    source_asset_id: str | None = Field(default=None, min_length=1, max_length=36)
+    product_asset_ids: list[str] | None = Field(default=None, min_length=1)
+    model_asset_ids: list[str] | None = None
+    product_images_mode: EcomProductImagesMode = "multi_item"
     gender: EcomModelGender
-    style_id: str = Field(min_length=1, max_length=64)
-    extra_prompt: str | None = None
+    style_id: str | None = Field(default=None, min_length=1, max_length=64)
+    custom_style: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=_ECOM_MODEL_TEXT_LIMIT,
+    )
+    extra_prompt: str | None = Field(default=None, max_length=_ECOM_MODEL_TEXT_LIMIT)
     aspect_ratio: RequestedImageAspectRatio = "1:1"
     apply_visible_label: bool = False
+
+    @model_validator(mode="after")
+    def _require_product_image(self) -> "EcomModelRequest":
+        if self.style_id is not None and self.custom_style is not None:
+            raise PydanticCustomError(
+                "friendly_ecom_model_style_conflict",
+                "预设风格与自定义风格不能同时选择",
+            )
+        if not self.product_asset_ids and self.source_asset_id is None:
+            raise PydanticCustomError(
+                "friendly_ecom_model_product_required",
+                "请至少上传一张商品图",
+            )
+        total_images = len(self.resolved_product_asset_ids) + len(self.model_asset_ids or [])
+        if total_images > 6:
+            raise PydanticCustomError(
+                "friendly_ecom_model_image_limit",
+                "商品图与模特图合计最多 6 张",
+            )
+        return self
+
+    @property
+    def resolved_product_asset_ids(self) -> list[str]:
+        if self.product_asset_ids:
+            return self.product_asset_ids
+        assert self.source_asset_id is not None
+        return [self.source_asset_id]
 
 
 class EcomModelAccepted(BaseModel):

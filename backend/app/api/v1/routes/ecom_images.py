@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Request, status
@@ -58,17 +59,55 @@ _ECOM_POSTER_KIND = "ecom_poster"
 _BATCH_LIMIT = 20
 _SOURCE_IMAGE_TYPES = {"avatar_image", "product_image", "generated_image"}
 _SOURCE_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
-_MODEL_STYLES: tuple[EcomModelStyle, ...] = (
-    EcomModelStyle(id="studio_white", name="Studio white"),
-    EcomModelStyle(id="lifestyle", name="Lifestyle"),
-    EcomModelStyle(id="street", name="Street style"),
-)
-_MODEL_STYLE_PROMPTS = {
-    "studio_white": "a clean studio white product catalog scene with controlled lighting",
-    "lifestyle": "a natural lifestyle scene with realistic everyday styling",
-    "street": "a modern street fashion scene with editorial styling",
+
+
+@dataclass(frozen=True)
+class _ModelStyleDefinition:
+    name: str
+    prompt: str
+
+
+_MODEL_STYLE_DEFINITIONS = {
+    "studio_white": _ModelStyleDefinition(
+        name="棚拍白底",
+        prompt="a clean studio white product catalog scene with controlled lighting",
+    ),
+    "lifestyle": _ModelStyleDefinition(
+        name="生活场景",
+        prompt="a natural lifestyle scene with realistic everyday styling",
+    ),
+    "street": _ModelStyleDefinition(
+        name="街拍",
+        prompt="a modern street fashion scene with editorial styling",
+    ),
+    "office_commute": _ModelStyleDefinition(
+        name="通勤职场",
+        prompt="a polished office commute scene with professional urban styling",
+    ),
+    "resort_travel": _ModelStyleDefinition(
+        name="度假旅拍",
+        prompt="a relaxed resort travel scene with bright natural light and destination styling",
+    ),
+    "high_fashion": _ModelStyleDefinition(
+        name="高级时尚大片",
+        prompt="a high-fashion editorial campaign with dramatic lighting and premium art direction",
+    ),
 }
-_EXTRA_PROMPT_LIMIT = 200
+_MODEL_STYLES: tuple[EcomModelStyle, ...] = tuple(
+    EcomModelStyle(id=style_id, name=definition.name)
+    for style_id, definition in _MODEL_STYLE_DEFINITIONS.items()
+)
+_PRODUCT_IMAGE_MODE_PROMPTS = {
+    "multi_item": (
+        "The product reference images show different products. Put, wear, or coordinate every "
+        "product on one model in the same image. Do not merge products together and do not omit "
+        "any product."
+    ),
+    "multi_angle": (
+        "The product reference images show different angles of the same product. Reconstruct "
+        "exactly one coherent product from all angles. Do not duplicate the product."
+    ),
+}
 _POSTER_TITLE_LIMIT = 30
 _POSTER_SUBTITLE_LIMIT = 40
 _POSTER_TEMPLATES: tuple[EcomPosterTemplate, ...] = (
@@ -133,36 +172,60 @@ def _cutout_prompt(background: str) -> str:
 
 
 def _model_style_prompt_or_raise(style_id: str) -> str:
-    prompt = _MODEL_STYLE_PROMPTS.get(style_id)
-    if prompt is None:
+    definition = _MODEL_STYLE_DEFINITIONS.get(style_id)
+    if definition is None:
         raise AppError(
             "Unknown AI model style.",
             code="ECOM_MODEL_STYLE_INVALID",
             status_code=422,
         )
-    return prompt
-
-
-def _clamp_extra_prompt(extra_prompt: str | None) -> str | None:
-    if extra_prompt is None:
-        return None
-    return extra_prompt[:_EXTRA_PROMPT_LIMIT]
+    return definition.prompt
 
 
 def _clamp_text(text: str, *, limit: int) -> str:
     return text[:limit]
 
 
-def _model_prompt(*, gender: str, style_id: str, extra_prompt: str | None) -> str:
-    style_prompt = _model_style_prompt_or_raise(style_id)
-    gender_phrase = "" if gender == "any" else f" Use a {gender} fashion model."
-    extra = f" Additional direction: {extra_prompt}" if extra_prompt else ""
-    return (
-        "Compose the input product image onto an AI fashion model for an e-commerce product "
-        f"image in {style_prompt}.{gender_phrase} Preserve the exact product shape, logo, "
-        "colors, materials, proportions, and visible details. Do not alter the product design, "
-        f"brand marks, text, or colorway.{extra}"
+def _model_prompt(
+    *,
+    gender: str,
+    style_id: str | None,
+    custom_style: str | None,
+    product_images_mode: str,
+    has_model_references: bool,
+    extra_prompt: str | None,
+) -> str:
+    reference_prompt = (
+        "Reference order is strict: product reference images come first, followed by model "
+        "reference images. Use product references only for product design; use model references "
+        "only for the model's identity and appearance."
+        if has_model_references
+        else "All supplied reference images are product references."
     )
+    clauses = [
+        "Create an e-commerce fashion image using the supplied reference images.",
+        reference_prompt,
+        _PRODUCT_IMAGE_MODE_PROMPTS[product_images_mode],
+    ]
+    if gender != "any":
+        clauses.append(f"Use a {gender} fashion model.")
+    if style_id is not None:
+        style_prompt = _model_style_prompt_or_raise(style_id)
+        clauses.append(f"Apply this visual style: {style_prompt}.")
+    elif custom_style is not None:
+        clauses.append(f"Apply this custom visual style: {custom_style}.")
+    clauses.extend(
+        [
+            (
+                "Preserve the exact shape, logos, colors, materials, proportions, and visible "
+                "details of every product."
+            ),
+            "Do not alter product designs, brand marks, text, or colorways.",
+        ]
+    )
+    if extra_prompt:
+        clauses.append(f"Additional direction: {extra_prompt}")
+    return " ".join(clauses)
 
 
 def _poster_template_or_raise(template_id: str) -> str:
@@ -221,20 +284,37 @@ def _poster_task_params(
     return params
 
 
+def _model_source_storage_keys(
+    product_sources: list[Asset],
+    model_sources: list[Asset],
+) -> list[str]:
+    return [
+        *[source.storage_key for source in product_sources],
+        *[source.storage_key for source in model_sources],
+    ]
+
+
 def _model_task_params(
     payload: EcomModelRequest,
     *,
     image_provider: str,
-    source: Asset,
+    product_sources: list[Asset],
+    model_sources: list[Asset],
     extra_prompt: str | None,
     batch_id: str | None = None,
 ) -> dict[str, object]:
+    primary_source = product_sources[0]
+    source_storage_keys = _model_source_storage_keys(product_sources, model_sources)
     params: dict[str, object] = {
         "kind": _ECOM_MODEL_KIND,
         "gender": payload.gender,
         "style_id": payload.style_id,
-        "source_asset_id": source.id,
-        "source_storage_key": source.storage_key,
+        "product_images_mode": payload.product_images_mode,
+        "product_asset_ids": [source.id for source in product_sources],
+        "model_asset_ids": [source.id for source in model_sources],
+        "source_asset_id": primary_source.id,
+        "source_storage_key": primary_source.storage_key,
+        "source_storage_keys": source_storage_keys,
         "image_provider": image_provider,
         "image_resolution": "1k",
         "aspect_ratio": payload.aspect_ratio,
@@ -242,6 +322,8 @@ def _model_task_params(
         "estimated": True,
         "apply_visible_label": payload.apply_visible_label,
     }
+    if payload.custom_style is not None:
+        params["custom_style"] = payload.custom_style
     if extra_prompt:
         params["extra_prompt"] = extra_prompt
     if batch_id is not None:
@@ -326,10 +408,11 @@ def _create_model_task(
     user: User,
     payload: EcomModelRequest,
     image_provider: str,
-    source: Asset,
+    product_sources: list[Asset],
+    model_sources: list[Asset],
     batch_id: str | None = None,
 ) -> VideoTask:
-    extra_prompt = _clamp_extra_prompt(payload.extra_prompt)
+    extra_prompt = payload.extra_prompt
     task = VideoTask(
         id=str(uuid4()),
         tenant_id=user.tenant_id,
@@ -338,6 +421,9 @@ def _create_model_task(
         topic=_model_prompt(
             gender=payload.gender,
             style_id=payload.style_id,
+            custom_style=payload.custom_style,
+            product_images_mode=payload.product_images_mode,
+            has_model_references=bool(model_sources),
             extra_prompt=extra_prompt,
         ),
         mode="photo",
@@ -347,7 +433,8 @@ def _create_model_task(
         params=_model_task_params(
             payload,
             image_provider=image_provider,
-            source=source,
+            product_sources=product_sources,
+            model_sources=model_sources,
             extra_prompt=extra_prompt,
             batch_id=batch_id,
         ),
@@ -376,17 +463,18 @@ def _ecom_image_provider_or_raise(
     db: Session,
     *,
     tenant_id: str,
-    source_storage_key: str,
+    source_storage_key_groups: list[list[str]],
 ) -> ResolvedProvider:
     try:
         selection = resolve_with_name(db, tenant_id=tenant_id, capability="image")
-        validate_image_provider_request(
-            selection.provider,
-            {
-                "image_resolution": "1k",
-                "source_storage_key": source_storage_key,
-            },
-        )
+        for source_storage_keys in source_storage_key_groups:
+            validate_image_provider_request(
+                selection.provider,
+                {
+                    "image_resolution": "1k",
+                    "source_storage_keys": source_storage_keys,
+                },
+            )
     except ProviderResolutionError as exc:
         raise AppError(
             "当前图片服务未配置，暂时无法生成图片。",
@@ -576,22 +664,36 @@ def create_model_image(
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[EcomModelAccepted]:
-    source = _source_asset_or_raise(
-        db,
-        tenant_id=user.tenant_id,
-        source_asset_id=payload.source_asset_id,
-    )
+    product_sources = [
+        _source_asset_or_raise(
+            db,
+            tenant_id=user.tenant_id,
+            source_asset_id=asset_id,
+        )
+        for asset_id in payload.resolved_product_asset_ids
+    ]
+    model_sources = [
+        _source_asset_or_raise(
+            db,
+            tenant_id=user.tenant_id,
+            source_asset_id=asset_id,
+        )
+        for asset_id in (payload.model_asset_ids or [])
+    ]
     selection = _ecom_image_provider_or_raise(
         db,
         tenant_id=user.tenant_id,
-        source_storage_key=source.storage_key,
+        source_storage_key_groups=[
+            _model_source_storage_keys(product_sources, model_sources)
+        ],
     )
     task = _create_model_task(
         db,
         user=user,
         payload=payload,
         image_provider=selection.name,
-        source=source,
+        product_sources=product_sources,
+        model_sources=model_sources,
     )
     db.commit()
     _prune_photo_history_best_effort(db, tenant_id=user.tenant_id, storage=storage)
@@ -612,18 +714,40 @@ def create_model_image_batch(
     storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[EcomModelBatchAccepted]:
     selected_items = payload.items[:_BATCH_LIMIT]
-    sources = [
-        _source_asset_or_raise(
-            db,
-            tenant_id=user.tenant_id,
-            source_asset_id=item.source_asset_id,
-        )
+    product_source_groups = [
+        [
+            _source_asset_or_raise(
+                db,
+                tenant_id=user.tenant_id,
+                source_asset_id=asset_id,
+            )
+            for asset_id in item.resolved_product_asset_ids
+        ]
         for item in selected_items
+    ]
+    model_source_groups = [
+        [
+            _source_asset_or_raise(
+                db,
+                tenant_id=user.tenant_id,
+                source_asset_id=asset_id,
+            )
+            for asset_id in (item.model_asset_ids or [])
+        ]
+        for item in selected_items
+    ]
+    source_storage_key_groups = [
+        _model_source_storage_keys(product_sources, model_sources)
+        for product_sources, model_sources in zip(
+            product_source_groups,
+            model_source_groups,
+            strict=True,
+        )
     ]
     selection = _ecom_image_provider_or_raise(
         db,
         tenant_id=user.tenant_id,
-        source_storage_key=sources[0].storage_key,
+        source_storage_key_groups=source_storage_key_groups,
     )
     batch_id = str(uuid4())
     tasks = [
@@ -632,10 +756,16 @@ def create_model_image_batch(
             user=user,
             payload=item,
             image_provider=selection.name,
-            source=source,
+            product_sources=product_sources,
+            model_sources=model_sources,
             batch_id=batch_id,
         )
-        for item, source in zip(selected_items, sources, strict=True)
+        for item, product_sources, model_sources in zip(
+            selected_items,
+            product_source_groups,
+            model_source_groups,
+            strict=True,
+        )
     ]
     db.commit()
     _prune_photo_history_best_effort(db, tenant_id=user.tenant_id, storage=storage)
@@ -672,7 +802,7 @@ def create_cutout(
     selection = _ecom_image_provider_or_raise(
         db,
         tenant_id=user.tenant_id,
-        source_storage_key=source.storage_key,
+        source_storage_key_groups=[[source.storage_key]],
     )
     task = _create_cutout_task(
         db,
@@ -711,7 +841,7 @@ def create_cutout_batch(
     selection = _ecom_image_provider_or_raise(
         db,
         tenant_id=user.tenant_id,
-        source_storage_key=sources[0].storage_key,
+        source_storage_key_groups=[[source.storage_key] for source in sources],
     )
     batch_id = str(uuid4())
     tasks = [
