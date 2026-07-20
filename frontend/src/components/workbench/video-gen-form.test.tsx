@@ -78,10 +78,87 @@ describe("VideoGenForm (视频生成 编排)", () => {
       video_mode: "video_gen",
       reference_image_asset_ids: ["a1", "a2"],
       duration_sec: 5,
-      resolution: "720p"
+      resolution: "720p",
+      aspect_ratio: "adaptive", // 需求3：默认自适应，总随请求传
+      generate_audio: false // 需求4：默认关，总随请求传（零回归）
     });
     expect(request.bgm).toBeUndefined();
+    expect(request).not.toHaveProperty("negative_prompt"); // 需求1：空则不带
     expect(topic).toBe("赛博城市夜景");
+  });
+
+  // 🔴 需求2/D4 承重（关键）：提示词恰 2000 通过、2001 拦住（红字 + 生成禁用，不发请求）。
+  // 变异：删 video-gen-form 的 promptOverLimit 判据 → 本条红（2001 时按钮仍 enabled / 提交发出）。
+  it("提示词 2000 通过 / 2001 拦住（红字 + 生成禁用，不发请求）", async () => {
+    render(<VideoGenForm />);
+    fireEvent.click(screen.getByText("set-refs"));
+    // 恰 2000 → 可生成、无红字。
+    setPrompt("x".repeat(2000));
+    expect(screen.queryByText(new RegExp(copy.workbench.vgPromptOverLimit))).not.toBeInTheDocument();
+    expect(generateBtn()).toBeEnabled();
+    // 2001 → 红字 + 生成禁用。
+    setPrompt("x".repeat(2001));
+    // Code Review：超限文案=用户原话 + 括号附实际计数（2001 / 2000），故用正则子串匹配 + 单独断言计数在场。
+    expect(screen.getByText(new RegExp(copy.workbench.vgPromptOverLimit))).toBeInTheDocument();
+    expect(screen.getByText(/2001 \/ 2000/)).toBeInTheDocument();
+    expect(generateBtn()).toBeDisabled();
+  });
+
+  // 🔴 需求5 承重：时长自定义越界(3/16)/小数(5.5)拦住（不发）；合法整数(8)通过并随请求传。
+  // 变异：把 isValidDuration 区间改回宽松 / 去掉 durationValid 判据 → 本条红。
+  it("时长自定义：3/16/5.5 拦住，8 通过并随请求传", async () => {
+    render(<VideoGenForm />);
+    fireEvent.click(screen.getByText("set-refs"));
+    setPrompt("p");
+    fireEvent.click(screen.getByRole("button", { name: copy.workbench.durationCustom }));
+    const customInput = screen.getByLabelText(copy.workbench.durationCustomLabel);
+    for (const bad of ["3", "16", "5.5"]) {
+      fireEvent.change(customInput, { target: { value: bad } });
+      expect(generateBtn()).toBeDisabled();
+    }
+    fireEvent.change(customInput, { target: { value: "8" } });
+    expect(generateBtn()).toBeEnabled();
+    fireEvent.click(generateBtn());
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    expect(taskMocks.createAndTrack.mock.calls[0][0].duration_sec).toBe(8);
+  });
+
+  // 🔴 需求4 承重：开启音频开关 → 提交体 generate_audio:true。变异：onGenerate 丢 generate_audio 字段 → 本条红。
+  it("开启音频生成开关 → 提交体 generate_audio:true", async () => {
+    render(<VideoGenForm />);
+    fireEvent.click(screen.getByText("set-refs"));
+    setPrompt("p");
+    fireEvent.click(screen.getByRole("switch", { name: copy.workbench.vgAudioToggleAria }));
+    fireEvent.click(generateBtn());
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    expect(taskMocks.createAndTrack.mock.calls[0][0].generate_audio).toBe(true);
+  });
+
+  // 需求3 承重：画面比例默认 adaptive、可切显式比例 → 提交体随之（下拉用 combobox 选 16:9）。
+  it("画面比例：默认 adaptive，切 16:9 → 提交体 aspect_ratio:16:9", async () => {
+    render(<VideoGenForm />);
+    fireEvent.click(screen.getByText("set-refs"));
+    setPrompt("p");
+    fireEvent.click(screen.getByRole("combobox", { name: new RegExp(copy.workbench.vgAspectLabel) }));
+    fireEvent.click(await screen.findByRole("option", { name: "16:9" }));
+    fireEvent.click(generateBtn());
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    expect(taskMocks.createAndTrack.mock.calls[0][0].aspect_ratio).toBe("16:9");
+  });
+
+  // 需求1 承重：负面提示词填写 → 提交体带 negative_prompt。
+  it("填负面提示词 → 提交体 negative_prompt", async () => {
+    render(<VideoGenForm />);
+    fireEvent.click(screen.getByText("set-refs"));
+    setPrompt("p");
+    fireEvent.change(screen.getByPlaceholderText(copy.workbench.vgNegativePlaceholder), { target: { value: "水印、变形" } });
+    fireEvent.click(generateBtn());
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    expect(taskMocks.createAndTrack.mock.calls[0][0].negative_prompt).toBe("水印、变形");
   });
 
   it("默认关：提交体 apply_visible_label:false（AI 标识默认关）", async () => {
@@ -98,7 +175,7 @@ describe("VideoGenForm (视频生成 编排)", () => {
     render(<VideoGenForm />);
     fireEvent.click(screen.getByText("set-refs"));
     setPrompt("p");
-    fireEvent.click(screen.getByRole("switch")); // 开启 AI 生成标识
+    fireEvent.click(screen.getByRole("switch", { name: "AI 生成标识" })); // 消歧：另有「音频生成开关」
     fireEvent.click(generateBtn());
     fireEvent.click(await screen.findByRole("button", { name: "确定" }));
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));

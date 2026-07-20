@@ -3,6 +3,7 @@
 import { useId } from "react";
 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { RatioGlyph } from "@/components/workbench/ratio-glyph";
 import { copy } from "@/lib/copy";
 
 // 画面比例（IMAGE-ASPECT-RATIO-UI-0001）——对齐 BE RequestedImageAspectRatio：8 定比 + auto(自适应)，默认 1:1。
@@ -14,26 +15,6 @@ const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 
 function aspectLabel(ratio: ImageAspectRatio): string {
   return ratio === "auto" ? copy.workbench.aspectAuto : ratio;
-}
-
-/** 真比例矩形 glyph（装饰性 aria-hidden；border-current 继承文字色，选中/高亮态自然变色）。auto=虚线方框。 */
-function RatioGlyph({ ratio }: { ratio: ImageAspectRatio }) {
-  if (ratio === "auto") {
-    return (
-      <span aria-hidden className="inline-flex h-4 w-4 flex-none items-center justify-center">
-        <span className="h-4 w-4 rounded-[3px] border border-dashed border-current" />
-      </span>
-    );
-  }
-  const [w, h] = ratio.split(":").map(Number);
-  const max = 16;
-  const width = w >= h ? max : Math.round((max * w) / h);
-  const height = h >= w ? max : Math.round((max * h) / w);
-  return (
-    <span aria-hidden className="inline-flex h-4 w-4 flex-none items-center justify-center">
-      <span style={{ width, height }} className="rounded-[2px] border border-current" />
-    </span>
-  );
 }
 
 /**
@@ -61,13 +42,13 @@ export function AspectRatioSelect({
       <Select value={value} onValueChange={(v) => onValueChange(v as ImageAspectRatio)}>
         <SelectTrigger id={triggerId} aria-labelledby={`${labelId} ${triggerId}`} className="w-full">
           <span className="flex min-w-0 items-center gap-2">
-            <RatioGlyph ratio={value} />
+            <RatioGlyph ratio={value} sentinel="auto" />
             <SelectValue />
           </span>
         </SelectTrigger>
         <SelectContent>
           {IMAGE_ASPECT_RATIOS.map((r) => (
-            <SelectItem key={r} value={r} icon={<RatioGlyph ratio={r} />}>
+            <SelectItem key={r} value={r} icon={<RatioGlyph ratio={r} sentinel="auto" />}>
               {aspectLabel(r)}
             </SelectItem>
           ))}

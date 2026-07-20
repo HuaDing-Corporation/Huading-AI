@@ -122,11 +122,11 @@ export interface CreateVideoRequest {
   product_image_keys?: string[]; // 电商带货 i2v 产品图 1–N（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.3；来自 POST /uploads→key）；下限=至少 1 张（决策2 保底）
   scene_prompt?: string; // 电商带货 i2v 画面提示词（与口播解耦，可 AI 生成）；空则后端回退 topic；已去 max_length（契约 §4.3）
   negative_prompt?: string; // 电商带货 i2v 负面提示词（可选、无限，ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.3/req6）；转发 APIMart video body（step0 验 Seedance 吃）
-  duration_sec?: number; // 电商带货 i2v 目标时长（秒，5–120，默认 30）；视频生成限 5/10/15
+  duration_sec?: number; // 电商带货 i2v 目标时长（秒，5–120，默认 30）；视频生成 4–15 整数（预设 5/10/15 + 自定义，VIDEO-GEN-PARAMS-UI-0001）
   image_size?: string; // @deprecated 照片旧「尺寸」（IMAGE-ASPECT-RATIO-UI-0001 起改用 aspect_ratio；BE 仅在 aspect_ratio 省略时回退翻译）；cover 通路仍可带
   image_quality?: string; // @deprecated 照片旧「质量」（IMAGE-ASPECT-RATIO-UI-0001 起去除；BE 已忽略）；cover 通路仍可带、不影响
   speed?: number; // 默认 1.0
-  aspect_ratio?: string; // 画面比例：1:1/4:3/3:2/16:9/21:9/3:4/2:3/9:16/auto（照片默认 1:1，视频默认 9:16）
+  aspect_ratio?: string; // 画面比例：照片 8 定比+auto 默认 1:1；口播/电商带货视频 9:16；**视频生成(video_gen) 7 值默认 adaptive**（见下方 video_gen 段注释）
   subtitle_enabled?: boolean; // 默认 true
   subtitle_style?: SubtitleStyle; // 数字人口播：字幕样式覆盖（ORAL-PROD-UI-0001）；缺省=与 0001 默认烧入一致（不回归）
   apply_visible_label?: boolean; // AI 生成显式标识开关（LABEL-TOGGLE-UI-0001）；默认关(false)，开=true。对齐后端 VideoGenerateRequest.apply_visible_label
@@ -149,7 +149,10 @@ export interface CreateVideoRequest {
   prompt?: string; // 提示词（seam 字段，最大 2000 字）；提交时同时复用作 topic，非-photo topic 超 2000 → BE 422（走口播/电商/数字人共用的那道 2000 墙）
   reference_image_asset_ids?: string[]; // 参考图 1–9 张（POST /uploads/images → asset_id）
   resolution?: string; // 视频分辨率 "480p" | "720p" | "1080p"（默认 720p）
-  bgm?: VideoGenBgm; // 可选背景音乐：上传(asset_id) 或 配乐库(track_id)
+  bgm?: VideoGenBgm; // 可选背景音乐：上传(asset_id) 或 配乐库(track_id)——生成后混音，与 generate_audio 不同
+  // VIDEO-GEN-PARAMS-UI-0001（需求4）：音频生成开关，默认 false（零回归）。true=视频模型生成环境音/配乐（SPIKE 实测真出 AAC、同价）。BE 一行改传（provider 现硬编码 False）
+  generate_audio?: boolean;
+  // aspect_ratio（需求3）复用上方 aspect_ratio 字段：视频侧 7 值 16:9/9:16/1:1/4:3/3:4/21:9/adaptive（默认 adaptive；映射 provider size）
 }
 
 // 视频生成 BGM（seam §2/§3）：上传(复用 /uploads/audio→asset_id) 或 配乐库(track_id) 二选一。
@@ -157,7 +160,10 @@ export type VideoGenBgm =
   | { source: "upload"; asset_id: string }
   | { source: "library"; track_id: string };
 export type VideoGenResolution = "480p" | "720p" | "1080p";
+// 预设档保留 5/10/15；VIDEO-GEN-PARAMS-UI-0001（需求5）新增自定义整数 4–15（provider apimart.py:209 硬钳 max(4,min(15,..))）。
 export const VIDEO_GEN_DURATIONS = [5, 10, 15] as const;
+export const VIDEO_GEN_DURATION_MIN = 4;
+export const VIDEO_GEN_DURATION_MAX = 15;
 export type VideoGenDuration = (typeof VIDEO_GEN_DURATIONS)[number];
 
 // GET /bgm-library（seam §3）：平台预置免版权配乐，preview_url 可试听。

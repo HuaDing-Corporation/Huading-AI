@@ -26,7 +26,7 @@ describe("视频生成 配乐库 + video_gen 校验 ↔ MSW（mock 忠实）", (
     expect(typeof tracks[0].duration_sec).toBe("number");
   });
 
-  it("video_gen 合法（参考图1–9 + prompt + duration枚举 + resolution + 库BGM）→ 接受", async () => {
+  it("video_gen 合法（参考图1–9 + prompt + duration 4–15 + resolution + 库BGM）→ 接受", async () => {
     const res = await createVideo({ ...baseReq, bgm: { source: "library", track_id: "bgm-uplift" } });
     expect(res.id).toBeTruthy();
   });
@@ -36,7 +36,7 @@ describe("视频生成 配乐库 + video_gen 校验 ↔ MSW（mock 忠实）", (
       { ...baseReq, reference_image_asset_ids: [] },
       { ...baseReq, prompt: "" },
       { ...baseReq, reference_image_asset_ids: Array.from({ length: 10 }, (_, i) => `a${i}`) },
-      { ...baseReq, duration_sec: 7 },
+      { ...baseReq, duration_sec: 20 }, // VIDEO-GEN-PARAMS-UI-0001：时长改整数 4–15（7 现已合法）；20 越界仍 422
       { ...baseReq, resolution: "2160p" },
       { ...baseReq, bgm: { source: "library", track_id: "nope" } }
     ];

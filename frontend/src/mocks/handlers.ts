@@ -350,7 +350,7 @@ const BGM_LIBRARY = [
   { track_id: "bgm-energetic", name: "动感节奏", duration_sec: 60, preview_url: "https://mock.local/bgm/energetic.mp3", license: "CC0" }
 ];
 const BGM_TRACK_IDS = BGM_LIBRARY.map((t) => t.track_id);
-const VIDEO_GEN_DURATIONS = [5, 10, 15];
+// VIDEO-GEN-PARAMS-UI-0001：视频生成时长改自定义整数 4–15（原仅 5/10/15），校验内联在 video_gen 分支，故删本地枚举常量。
 const VIDEO_GEN_RESOLUTIONS = ["480p", "720p", "1080p"];
 
 function sseStream(id: string, fail = false): Response {
@@ -1458,6 +1458,7 @@ export const handlers = [
       voice_id?: string;
       duration_sec?: number;
       resolution?: string;
+      aspect_ratio?: string; // VIDEO-GEN-PARAMS-UI-0001：estimate 与提交同校验（视频生成 7 值）
     };
     if (body.resolution !== undefined && !VIDEO_GEN_RESOLUTIONS.includes(body.resolution)) {
       return err(422, "VALIDATION_ERROR", "resolution 非法");
@@ -1469,6 +1470,19 @@ export const handlers = [
         return err(422, "ECOM_I2V_INVALID", "电商带货产品图 1–9 张");
       }
       if (!body.voice_id) return err(422, "ECOM_I2V_INVALID", "电商带货需选择音色");
+    }
+    // VIDEO-GEN-PARAMS-UI-0001（Code Review）：estimate 与提交同一 VideoGenerateRequest 校验——video_gen 的
+    // 时长/比例门也要在 estimate 阶段拦（此前缺失 → estimate 200 而提交 422，estimate 比提交宽松=假绿口）。
+    if (body.video_mode === "video_gen") {
+      if (!Number.isInteger(body.duration_sec) || (body.duration_sec as number) < 4 || (body.duration_sec as number) > 15) {
+        return err(422, "VIDEO_GEN_INVALID", "视频生成时长须为 4–15 的整数秒");
+      }
+      if (
+        body.aspect_ratio !== undefined &&
+        !["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "adaptive"].includes(body.aspect_ratio)
+      ) {
+        return err(422, "VIDEO_GEN_INVALID", "画面比例非法");
+      }
     }
     // estimated_credits 是后端按配额/时长算出的整数；mock 取时长派生一个正整数（默认 30s→12），仅需形状忠实（值非契约）。
     const estimatedCredits = typeof body.duration_sec === "number" && body.duration_sec > 0
@@ -1496,6 +1510,8 @@ export const handlers = [
       apply_visible_label?: boolean;
       avatar_asset_id?: string;
       avatar_video_asset_id?: string;
+      aspect_ratio?: string; // 画面比例（视频生成 7 值 / 图片 8+auto，VIDEO-GEN-PARAMS-UI-0001 需求3）
+      generate_audio?: boolean; // 视频生成音频开关（VIDEO-GEN-PARAMS-UI-0001 需求4，随请求传）
       // 图片生成/修改 photo 优化（IMAGE-GEN-OPTIMIZE-UI-0001 §四）
       image_keys?: string[]; // 参考图 1–6（可选）
       master_prompt?: string; // 任务总控（可选）
@@ -1513,13 +1529,19 @@ export const handlers = [
     // FIX1（CB P1 · 提交路径核查）：VideoGenerateRequest.duration_sec 也是 int——小数 → 422（前端 isValidDuration 已从源头拦，
     // 此为 mock 防漂移把关，不比 BE 宽松；提交路径此前也能漏小数，属既有 bug，一并堵住）。
     if (badDuration(body.duration_sec)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
+    // 提示词 2000 字墙（VIDEO-GEN-PARAMS-UI-0001 需求2/D4）：逐字镜像 BE schemas/videos.py:307-312——**所有非 photo 模式**
+    // 的 topic 超 2000 → 422（video_gen 把 prompt 同时发作 topic，故超 2000 在此拦；photo 自有 20000 上界，走下方分支）。
+    // Code Review：按**码点**计数（Array.from）对齐 Python len()——JS .length 是 UTF-16 码元，增补面 emoji 记 2 会比 BE 严（误杀）。
+    if (body.video_mode !== "photo" && typeof body.topic === "string" && Array.from(body.topic.trim()).length > 2000) {
+      return err(422, "VALIDATION_ERROR", "提示词输入最大上限为 2000 字");
+    }
     // 数字人形象源二选一互斥（AVATAR-VIDEO-SOURCE-UI-0001）：照片 avatar_asset_id 与视频 avatar_video_asset_id
     // 不可同发（BE 权威，mock 先行守住互斥）。前端只发其一，此为防漂移。
     if (body.avatar_asset_id && body.avatar_video_asset_id) {
       return err(422, "AVATAR_SOURCE_CONFLICT", "照片与视频形象只能二选一");
     }
-    // 视频生成 video_gen 校验（逐字对齐后端 schemas/videos.py:213-222：参考图 1–9 且**唯一**、prompt
-    // 非空、duration∈{5,10,15}、bgm 二选一可选）→ 非法 422，不伪造放行/不放宽（resolution 已在上方全模式把关）。
+    // 视频生成 video_gen 校验（对齐后端：参考图 1–9 且**唯一**、prompt 非空、duration 整数 4–15、画面比例 7 值、
+    // bgm 二选一可选）→ 非法 422，不伪造放行/不放宽（resolution 已在上方全模式把关；提示词 2000 墙已在上方非-photo 段拦）。
     if (body.video_mode === "video_gen") {
       const refs = body.reference_image_asset_ids ?? [];
       const refsUnique = new Set(refs).size === refs.length; // 对齐后端唯一性校验（重复→422）
@@ -1527,6 +1549,10 @@ export const handlers = [
         body.bgm === undefined ||
         (body.bgm.source === "upload" && !!body.bgm.asset_id) ||
         (body.bgm.source === "library" && !!body.bgm.track_id && BGM_TRACK_IDS.includes(body.bgm.track_id));
+      // 时长（VIDEO-GEN-PARAMS-UI-0001 需求5）：预设 5/10/15 + 自定义**整数 4–15**（provider apimart.py:209 硬钳 4–15）。
+      // 3/16/20→422（越界），5.5 已由上方 badDuration 拦。mock 不比 BE 宽松、不放宽到旧的仅 5/10/15。
+      const durationOk =
+        Number.isInteger(body.duration_sec) && (body.duration_sec as number) >= 4 && (body.duration_sec as number) <= 15;
       if (
         !Array.isArray(refs) ||
         refs.length < 1 ||
@@ -1534,10 +1560,19 @@ export const handlers = [
         !refsUnique ||
         !body.prompt ||
         !body.prompt.trim() ||
-        !VIDEO_GEN_DURATIONS.includes(body.duration_sec as number) ||
+        !durationOk ||
         !bgmOk
       ) {
         return err(422, "VIDEO_GEN_INVALID", "视频生成参数非法");
+      }
+      // 画面比例（需求3）：present 时须 7 值之一，非法→422（mock 不比 BE 宽松；provider _VALID_SIZES 正好这 7 个）。
+      // ⚠️ 有意不 import 前端 VIDEO_ASPECT_RATIOS：mock 独立镜像 **BE** 值域（防漂移设计，同 VIDEO_GEN_RESOLUTIONS 模式）——
+      // 前端若单方面加值，此处 422 恰是护栏；仅当 BE 同步支持时才在此同步（4–15 时长同理，权威=apimart.py:209）。
+      if (
+        body.aspect_ratio !== undefined &&
+        !["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "adaptive"].includes(body.aspect_ratio)
+      ) {
+        return err(422, "VIDEO_GEN_INVALID", "画面比例非法（须为 16:9/9:16/1:1/4:3/3:4/21:9/adaptive）");
       }
     }
     // 电商带货 i2v 校验（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.3）：产品图下限=至少 1 张（决策2 保底；topic/script/
