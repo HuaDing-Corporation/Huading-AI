@@ -359,6 +359,54 @@ def test_batch_estimate_prompt_set_sums_video_gen_quota(
     }
 
 
+@pytest.mark.parametrize("aspect_ratio", ["9:16", "16:9", "1:1"])
+def test_batch_prompt_set_keeps_its_existing_aspect_ratio_contract(
+    aspect_ratio: str,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        _set_quota(db, auth_context["tenant_id"], total=5000)
+        db.commit()
+
+    response = TestClient(app).post(
+        "/api/v1/batches/estimate",
+        json={
+            "kind": "prompt_set",
+            "rows": [{"prompt": "batch ratio contract"}],
+            "common": {
+                "video_mode": "video_gen",
+                "duration_sec": 5,
+                "aspect_ratio": aspect_ratio,
+            },
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+
+
+def test_batch_prompt_set_does_not_inherit_single_video_ultrawide_ratio(
+    auth_context,
+    auth_db,
+) -> None:
+    response = TestClient(app).post(
+        "/api/v1/batches/estimate",
+        json={
+            "kind": "prompt_set",
+            "rows": [{"prompt": "batch ratio contract"}],
+            "common": {
+                "video_mode": "video_gen",
+                "duration_sec": 5,
+                "aspect_ratio": "21:9",
+            },
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+
+
 def test_batch_estimate_ecom_table_sums_row_tts_characters(
     auth_context,
     auth_db,

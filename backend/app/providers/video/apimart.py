@@ -104,7 +104,7 @@ class APIMartVideoProvider:
             "duration": duration,
             "size": size,
             "resolution": resolution,
-            "generate_audio": False,
+            "generate_audio": payload.get("generate_audio") is True,
         }
         seed = payload.get("seed")
         if seed not in (None, ""):

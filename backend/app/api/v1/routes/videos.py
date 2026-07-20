@@ -186,6 +186,9 @@ def _video_gen_worker_params(payload: VideoGenerateRequest) -> dict:
         "reference_image_asset_ids": list(payload.reference_image_asset_ids),
         "duration_sec": int(payload.duration_sec or 5),
         "resolution": payload.resolution,
+        "negative_prompt": payload.negative_prompt,
+        "aspect_ratio": payload.aspect_ratio,
+        "generate_audio": payload.generate_audio,
         "apply_visible_label": payload.apply_visible_label,
     }
     if payload.bgm is not None:

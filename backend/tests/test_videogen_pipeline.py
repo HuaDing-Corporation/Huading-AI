@@ -5,6 +5,7 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, get_args
 
 import pytest
@@ -250,7 +251,7 @@ def test_bgm_library_returns_seeded_royalty_free_tracks(auth_context, auth_db) -
     assert all(item["license"] == "Mixkit License" for item in items)
 
 
-def test_video_gen_schema_allows_t2v_or_i2v_and_keeps_duration_enum() -> None:
+def test_video_gen_schema_allows_t2v_or_i2v_and_validates_duration_range() -> None:
     ok = VideoGenerateRequest.model_validate(
         {
             "video_mode": "video_gen",
@@ -280,7 +281,7 @@ def test_video_gen_schema_allows_t2v_or_i2v_and_keeps_duration_enum() -> None:
                 "video_mode": "video_gen",
                 "prompt": "x",
                 "reference_image_asset_ids": ["asset-ref-a"],
-                "duration_sec": 7,
+                "duration_sec": 3,
             },
             "duration_sec",
         ),
@@ -300,6 +301,62 @@ def test_video_gen_schema_allows_t2v_or_i2v_and_keeps_duration_enum() -> None:
             assert expected in str(exc)
         else:  # pragma: no cover - assertion aid
             raise AssertionError(f"payload unexpectedly passed: {payload}")
+
+
+def test_video_gen_schema_accepts_custom_duration_inside_four_to_fifteen() -> None:
+    request = VideoGenerateRequest.model_validate(
+        {
+            "video_mode": "video_gen",
+            "prompt": "A seven second product reveal",
+            "duration_sec": 7,
+        }
+    )
+
+    assert request.duration_sec == 7
+
+
+@pytest.mark.parametrize(
+    ("aspect_ratio", "provider_size"),
+    [
+        ("16:9", "16:9"),
+        ("9:16", "9:16"),
+        ("1:1", "1:1"),
+        ("4:3", "4:3"),
+        ("3:4", "3:4"),
+        ("21:9", "21:9"),
+        ("auto", "adaptive"),
+    ],
+)
+def test_video_gen_all_seven_aspect_ratios_reach_provider(
+    aspect_ratio: str,
+    provider_size: str,
+) -> None:
+    from app.workers import video_gen
+
+    request = VideoGenerateRequest.model_validate(
+        {
+            "video_mode": "video_gen",
+            "prompt": "A product reveal",
+            "duration_sec": 5,
+            "aspect_ratio": aspect_ratio,
+        }
+    )
+    ctx = video_gen.VideoGenContext(
+        task_id="ratio-contract",
+        tenant_id="tenant-ratio",
+        db=None,
+        store=None,
+        storage=_Storage(),
+        task=SimpleNamespace(topic=request.topic),
+        reference_assets=[],
+        duration_sec=5,
+        resolution="720p",
+        aspect_ratio=request.aspect_ratio,
+        generate_audio=False,
+        negative_prompt=None,
+    )
+
+    assert video_gen._provider_payload(ctx)["size"] == provider_size
 
 
 def test_video_gen_schema_resolutions_all_have_quota_multipliers() -> None:
@@ -380,6 +437,9 @@ def test_create_video_gen_validates_assets_reserves_quota_and_enqueues(
                     "reference_image_asset_ids": ["asset-ref-a", "asset-ref-b"],
                     "duration_sec": 15,
                     "resolution": "480p",
+                    "negative_prompt": None,
+                    "aspect_ratio": "auto",
+                    "generate_audio": False,
                     "bgm": {"source": "upload", "asset_id": "asset-bgm-a"},
                     "apply_visible_label": True,
                     "tenant_id": auth_context["tenant_id"],
@@ -413,9 +473,160 @@ def test_create_video_gen_validates_assets_reserves_quota_and_enqueues(
         assert usage.provider == "apimart"
         assert usage.model == "doubao-seedance-2.0"
         assert usage.status == "reserved"
+        assert usage.quantity == Decimal("15")
+        assert usage.credits == Decimal("1200.00")
         subscription = _subscription(db, auth_context["tenant_id"])
-        assert subscription.quota_credits_reserved > 0
+        assert subscription.quota_credits_reserved == 1200
         assert subscription.quota_credits_used == 0
+
+
+def test_create_video_gen_preserves_custom_provider_params_and_four_second_quota(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    enqueued: list[dict[str, Any]] = []
+
+    class _Task:
+        @staticmethod
+        def apply_async(*, args: list[dict[str, Any]], task_id: str, queue: str):
+            enqueued.append({"args": args, "task_id": task_id, "queue": queue})
+
+    monkeypatch.setattr(videos_route, "generate_video_gen_task", _Task, raising=False)
+    with auth_db() as db:
+        _reset_subscription_quota(db, auth_context["tenant_id"])
+        _seed_image_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="asset-param-ref",
+        )
+        db.commit()
+
+    response = TestClient(app).post(
+        "/api/v1/videos",
+        json={
+            "video_mode": "video_gen",
+            "prompt": "A cinematic watch reveal",
+            "negative_prompt": "warped hands, duplicate watches",
+            "reference_image_asset_ids": ["asset-param-ref"],
+            "duration_sec": 4,
+            "resolution": "480p",
+            "aspect_ratio": "21:9",
+            "generate_audio": True,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 202
+    task_id = response.json()["data"]["task_id"]
+    worker_params = enqueued[0]["args"][0]
+    assert worker_params["negative_prompt"] == "warped hands, duplicate watches"
+    assert worker_params["aspect_ratio"] == "21:9"
+    assert worker_params["generate_audio"] is True
+    assert worker_params["duration_sec"] == 4
+
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        assert task is not None
+        assert task.aspect_ratio == "21:9"
+        assert task.params["negative_prompt"] == "warped hands, duplicate watches"
+        assert task.params["aspect_ratio"] == "21:9"
+        assert task.params["generate_audio"] is True
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
+        assert usage is not None
+        assert usage.quantity == Decimal("4")
+        assert usage.credits == Decimal("320.00")
+        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 320
+
+
+@pytest.mark.parametrize("duration_sec", [3, 16, 20])
+def test_create_video_gen_rejects_out_of_range_duration_without_side_effects(
+    duration_sec: int,
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    enqueued: list[dict[str, Any]] = []
+
+    class _Task:
+        @staticmethod
+        def apply_async(*, args: list[dict[str, Any]], task_id: str, queue: str):
+            enqueued.append({"args": args, "task_id": task_id, "queue": queue})
+
+    monkeypatch.setattr(videos_route, "generate_video_gen_task", _Task, raising=False)
+    with auth_db() as db:
+        _reset_subscription_quota(db, auth_context["tenant_id"])
+        initial_task_ids = set(db.scalars(select(VideoTask.id)))
+        initial_usage_ids = set(db.scalars(select(UsageRecord.id)))
+        db.commit()
+
+    response = TestClient(app).post(
+        "/api/v1/videos",
+        json={
+            "video_mode": "video_gen",
+            "prompt": "An invalid duration must stop at the API boundary",
+            "duration_sec": duration_sec,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+    assert enqueued == []
+    with auth_db() as db:
+        assert set(db.scalars(select(VideoTask.id))) == initial_task_ids
+        assert set(db.scalars(select(UsageRecord.id))) == initial_usage_ids
+        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 0
+
+
+@pytest.mark.parametrize("include_topic", [False, True])
+def test_create_video_gen_reports_friendly_prompt_limit_without_side_effects(
+    include_topic: bool,
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    enqueued: list[dict[str, Any]] = []
+
+    class _Task:
+        @staticmethod
+        def apply_async(*, args: list[dict[str, Any]], task_id: str, queue: str):
+            enqueued.append({"args": args, "task_id": task_id, "queue": queue})
+
+    monkeypatch.setattr(videos_route, "generate_video_gen_task", _Task, raising=False)
+    with auth_db() as db:
+        _reset_subscription_quota(db, auth_context["tenant_id"])
+        initial_task_ids = set(db.scalars(select(VideoTask.id)))
+        initial_usage_ids = set(db.scalars(select(UsageRecord.id)))
+        db.commit()
+
+    long_prompt = "提" * 2001
+    payload = {
+        "video_mode": "video_gen",
+        "prompt": long_prompt,
+        "duration_sec": 5,
+    }
+    if include_topic:
+        payload["topic"] = long_prompt
+    response = TestClient(app).post(
+        "/api/v1/videos",
+        json=payload,
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VIDEO_GEN_PROMPT_TOO_LONG"
+    assert response.json()["error"]["message"] == "提示词输入最大上限为 2000 字"
+    assert enqueued == []
+    with auth_db() as db:
+        assert set(db.scalars(select(VideoTask.id))) == initial_task_ids
+        assert set(db.scalars(select(UsageRecord.id))) == initial_usage_ids
+        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 0
 
 
 def test_create_video_gen_allows_t2v_without_reference_images(
@@ -456,6 +667,8 @@ def test_create_video_gen_allows_t2v_without_reference_images(
     assert resp.status_code == 202
     task_id = resp.json()["data"]["id"]
     assert enqueued[0]["args"][0]["reference_image_asset_ids"] == []
+    assert enqueued[0]["args"][0]["aspect_ratio"] == "9:16"
+    assert enqueued[0]["args"][0]["generate_audio"] is False
     assert enqueued[0]["task_id"] == task_id
     with auth_db() as db:
         task = db.get(VideoTask, task_id)
@@ -545,6 +758,9 @@ def test_video_gen_pipeline_settles_quota_stores_labeled_output_and_history(
                 "reference_image_asset_ids": [ref.id],
                 "duration_sec": 5,
                 "resolution": "720p",
+                "negative_prompt": "warped hands, duplicate watches",
+                "aspect_ratio": "21:9",
+                "generate_audio": True,
             },
         )
         db.add(TaskAsset(video_task_id=task_id, asset_id=ref.id, role="input_reference_image"))
@@ -602,7 +818,9 @@ def test_video_gen_pipeline_settles_quota_stores_labeled_output_and_history(
     assert provider_payloads[0]["model"] == "doubao-seedance-2.0"
     assert provider_payloads[0]["duration"] == 5
     assert provider_payloads[0]["resolution"] == "720p"
-    assert provider_payloads[0]["size"] == "adaptive"
+    assert provider_payloads[0]["negative_prompt"] == "warped hands, duplicate watches"
+    assert provider_payloads[0]["size"] == "21:9"
+    assert provider_payloads[0]["generate_audio"] is True
     assert provider_payloads[0]["image_urls"] == [
         f"https://storage.test/{ref_storage_key}?ttl=7200"
     ]
