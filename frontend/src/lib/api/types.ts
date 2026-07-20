@@ -466,7 +466,7 @@ export interface ModelRequest {
   source_asset_id: string;
   gender: ModelGender;
   style_id: string;
-  extra_prompt?: string; // 自定义补充（前端 UI ≤200；后端无长度限制）
+  extra_prompt?: string; // 自定义补充。BE ≤20000 字符（EcomModelRequest.extra_prompt max_length=_ECOM_MODEL_TEXT_LIMIT + extra=forbid，#210 起超限 422、不再静默截断到 200）
   aspect_ratio?: string; // 画面比例（IMAGE-ASPECT-RATIO-UI-0001；默认 1:1）
   apply_visible_label?: boolean; // AI 显式标识开关（LABEL-TOGGLE-UI-0001，默认关）
 }

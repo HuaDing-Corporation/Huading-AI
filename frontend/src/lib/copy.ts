@@ -237,7 +237,7 @@ export const copy = {
     strengthCreativityHint: "越高 AI 发挥空间越大、越可能偏离参考图（软性倾向）",
     strengthSubject: "主体保持强度",
     strengthSubjectHint: "越高越倾向保留参考图主体的特征（软性倾向，非精确锁定）",
-    // 四层提示词（总控类可折叠、默认收起；均无字数上限）
+    // 四层提示词（总控类可折叠、默认收起）。长度：每层各 ≤20000 字符（BE Field max_length + extra=forbid，超限 422、非静默截断；前端不设 maxLength 仅因正常使用远不及）
     photoMasterGroupLabel: "任务总控（可选 · 全局风格）",
     masterPromptLabel: "任务总控提示词（可选）",
     masterPromptPlaceholder: "全局风格前缀，如：统一暖色胶片质感、柔光——会拼进本次图片提示词",
