@@ -22,7 +22,7 @@ const badStrength = (v: unknown): boolean =>
 // FIX1 真联调：逐字对齐 BE schemas/videos.py `_IMAGE_KEY_RE`——参考图 key 须为 POST /uploads 返回的 uploads/<name>.{jpg,jpeg,png,webp}。
 // mock 此前只卡数量不卡格式（比 BE 宽松 → 「a」这类假 key 假绿），本轮收紧防漂移。
 const PHOTO_IMAGE_KEY_RE = /^uploads\/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|webp)$/;
-// photo 四层提示词各 ≤20000（BE Field max_length + extra=forbid，超限 422，非静默截断）。
+// photo 四层提示词各 ≤20000（BE schema 校验，超限 422，非静默截断）。
 const PHOTO_PROMPT_MAX = 20000;
 const overLen = (v: unknown): boolean => typeof v === "string" && v.length > PHOTO_PROMPT_MAX;
 
@@ -1576,7 +1576,7 @@ export const handlers = [
       ) {
         return err(422, "PHOTO_INVALID", "强度取值须为 10..100 步长 10");
       }
-      // FIX1 真联调：四层提示词各 ≤20000（BE Field max_length + extra=forbid，超限 422，非静默截断）。
+      // FIX1 真联调：四层提示词各 ≤20000（BE schema 校验，超限 422，非静默截断）。
       if (overLen(body.topic) || overLen(body.master_prompt) || overLen(body.master_negative_prompt) || overLen(body.negative_prompt)) {
         return err(422, "PHOTO_INVALID", "提示词最多 20000 字符");
       }

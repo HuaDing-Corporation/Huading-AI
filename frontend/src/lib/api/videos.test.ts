@@ -104,7 +104,7 @@ describe("createVideo · photo 提交校验（apiFetch 真走 MSW · IMAGE-GEN-O
     ).rejects.toThrow(); // gif 不在 BE 白名单
   });
 
-  // FIX1 真联调：四层提示词各 ≤20000（BE Field max_length + extra=forbid）。20001 → 422；20000 → 放行。
+  // FIX1 真联调：四层提示词各 ≤20000（BE schema 校验）。20001 → 422；20000 → 放行。
   it("防假绿：提示词超 20000 → 422；恰 20000 → 202", async () => {
     await expect(
       createVideo({ topic: "x".repeat(20001), video_mode: "photo" })
