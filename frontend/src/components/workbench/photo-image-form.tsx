@@ -54,7 +54,7 @@ function CollapsibleSection({ label, bodyClassName, children }: { label: string;
 /**
  * 图片生成 / 修改 (video_mode="photo") workbench container — the third mode. IMAGE-GEN-OPTIMIZE-UI-0001：
  * 参考图单张→1–6 张（复用张数选择器 + ReferenceImagesPicker，注入产品图上传器）；三个强度滑块（各带开关、默认关、
- * 关闭不提交，软性倾向非精确参数）；四层提示词（任务总控/统一负面/图片提示词/图片负面，无字数上限，总控可折叠）。
+ * 关闭不提交，软性倾向非精确参数）；四层提示词（任务总控/统一负面/图片提示词/图片负面，各层 ≤20000 字符=BE 反滥用上界、超限 422，总控可折叠）。
  * ⚠️ 零回归：AI 封面（cover-panel，video_mode:"photo"+purpose:"cover"+image_size/image_quality）不走本表单、不受影响。
  */
 export function PhotoImageForm({
@@ -75,7 +75,7 @@ export function PhotoImageForm({
   // 参考图多图（可选）：张数选择器定上限（默认 1，最多 6），multi picker 上传 → image_keys。
   const [refKeys, setRefKeys] = useState<string[]>([]);
   const [refCount, setRefCount] = useState(1);
-  // 四层提示词：图片提示词=prompt（layer3，必填）；下面三层可选、无字数上限。
+  // 四层提示词：图片提示词=prompt（layer3，必填）；下面三层可选。各层 BE 反滥用上界 ≤20000 字符（超限 422，非静默截断）。
   const [masterPrompt, setMasterPrompt] = useState("");
   const [masterNegative, setMasterNegative] = useState("");
   const [imageNegative, setImageNegative] = useState("");
@@ -118,7 +118,7 @@ export function PhotoImageForm({
     const enabledStrengths: Partial<Record<StrengthKey, number>> = {};
     for (const k of STRENGTH_KEYS) if (strengths[k].enabled) enabledStrengths[k] = strengths[k].value;
     confirm.requestConfirm({
-      topic: trimmed, // 图片提示词（layer3，取消 2000 上限——前端本就无 maxLength）
+      topic: trimmed, // 图片提示词（layer3，photo 上限从 2000 放宽到 BE ≤20000；前端不设 maxLength，超 20000 由 BE 422）
       video_mode: "photo",
       ...(refKeys.length > 0 ? { image_keys: refKeys } : {}), // 参考图可选：无则纯文生图，不带 image_keys
       ...(masterPrompt.trim() ? { master_prompt: masterPrompt.trim() } : {}),

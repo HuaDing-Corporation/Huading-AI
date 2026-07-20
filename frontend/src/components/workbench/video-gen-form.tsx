@@ -23,7 +23,7 @@ import { copy } from "@/lib/copy";
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 
 /**
- * 视频生成 第6模式（VIDEOGEN-UI-0001，seam §5）：多参考图(≤9) + 不限 prompt + 时长(5/10/15) +
+ * 视频生成 第6模式（VIDEOGEN-UI-0001，seam §5）：多参考图(≤9) + prompt(最大 2000 字，复用作 topic 走 2000 墙) + 时长(5/10/15) +
  * 分辨率(480p/720p/1080p,默认720p) + BGM(无/上传/库) → POST /videos {video_mode:"video_gen"}，SSE 进度(复用
  * createAndTrack)，出片入历史。复用 useGenerateConfirm/ConfirmGenerateDialog(积分预估 + 防连点)。
  * video_gen 用 prompt(同时作 topic 标题)；其余模式不受影响。

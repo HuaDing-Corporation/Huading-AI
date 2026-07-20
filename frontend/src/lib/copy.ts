@@ -237,7 +237,7 @@ export const copy = {
     strengthCreativityHint: "越高 AI 发挥空间越大、越可能偏离参考图（软性倾向）",
     strengthSubject: "主体保持强度",
     strengthSubjectHint: "越高越倾向保留参考图主体的特征（软性倾向，非精确锁定）",
-    // 四层提示词（总控类可折叠、默认收起；均无字数上限）
+    // 四层提示词（总控类可折叠、默认收起）。长度：每层各 ≤20000 字符（BE schema 校验，超限 422、非静默截断；前端不设 maxLength 仅因正常使用远不及）
     photoMasterGroupLabel: "任务总控（可选 · 全局风格）",
     masterPromptLabel: "任务总控提示词（可选）",
     masterPromptPlaceholder: "全局风格前缀，如：统一暖色胶片质感、柔光——会拼进本次图片提示词",
@@ -426,7 +426,7 @@ export const copy = {
     ecomResultPreviewAlt: (n: number) => `复刻图第 ${n} 张`,
     // 提示词反推 第7模式 (REVERSE-PROMPT-UI-0001) — 上传图片反推提示词 + 一键带入
     modeReverse: "提示词反推",
-    // 视频生成 第6模式 (VIDEOGEN-UI-0001) — 多参考图 + 不限 prompt + 时长/分辨率 + BGM
+    // 视频生成 第6模式 (VIDEOGEN-UI-0001) — 多参考图 + prompt(最大 2000 字) + 时长/分辨率 + BGM
     modeVideoGen: "视频生成",
     vgTitle: "视频生成",
     vgSubtitle: "多张参考图 + 提示词，生成创意短视频；可加背景音乐",
@@ -437,7 +437,7 @@ export const copy = {
     // 名词中性 + 随上限动态（供复用 picker 如电商详情图·商品图 max=4，避免误显「参考图」「9 张」）
     refImagesOverLimit: (max: number) => `最多 ${max} 张，超出部分未添加`,
     vgPromptLabel: "提示词",
-    vgPromptPlaceholder: "描述你想要的画面、风格、运镜、氛围…（不限字数）",
+    vgPromptPlaceholder: "描述你想要的画面、风格、运镜、氛围…（最大 2000 字）",
     vgPromptRequired: "请填写提示词",
     vgDurationLabel: "时长",
     vgResolutionLabel: "分辨率",
