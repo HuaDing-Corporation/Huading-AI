@@ -66,3 +66,36 @@ describe("DurationPicker (电商带货 视频时长)", () => {
     expect(isValidDuration(29.99)).toBe(false);
   });
 });
+
+// VIDEO-GEN-PARAMS-UI-0001：DurationPicker 参数化（presets/min/max）供视频生成复用（[4,15]）。
+// 承重：①带参 isValidDuration 走 per-call 区间；②默认仍电商 [5,120]（零回归）；③video 配置渲染 5/10/15 + 自定义 4–15 错误文案。
+describe("DurationPicker 参数化复用（视频生成 [4,15]）", () => {
+  it("isValidDuration(sec,min,max)：视频区间 [4,15] 整数；默认不传仍电商 [5,120]", () => {
+    // 视频 [4,15]
+    expect(isValidDuration(4, 4, 15)).toBe(true);
+    expect(isValidDuration(15, 4, 15)).toBe(true);
+    expect(isValidDuration(3, 4, 15)).toBe(false);
+    expect(isValidDuration(16, 4, 15)).toBe(false);
+    expect(isValidDuration(8.5, 4, 15)).toBe(false); // 小数仍拒
+    // 默认零回归：4 在电商无效（min 5），16 有效（≤120）
+    expect(isValidDuration(4)).toBe(false);
+    expect(isValidDuration(16)).toBe(true);
+  });
+
+  it("video 配置渲染 5/10/15 档 + 自定义 4–15（越界红字随区间）", () => {
+    const onChange = vi.fn();
+    render(<DurationPicker value={5} onChange={onChange} presets={[5, 10, 15]} min={4} max={15} />);
+    for (const s of [5, 10, 15]) {
+      expect(screen.getByRole("button", { name: `${s} 秒` })).toBeInTheDocument();
+    }
+    // 电商的 30 秒档不出现（用的是视频 presets）。
+    expect(screen.queryByRole("button", { name: "30 秒" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "自定义" }));
+    const input = screen.getByLabelText("自定义时长（秒）");
+    expect(input).toHaveAttribute("placeholder", "4–15");
+    fireEvent.change(input, { target: { value: "20" } }); // 越界
+    expect(screen.getByText("请输入 4–15 的整数秒")).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: "8" } }); // 合法
+    expect(screen.queryByText("请输入 4–15 的整数秒")).not.toBeInTheDocument();
+  });
+});

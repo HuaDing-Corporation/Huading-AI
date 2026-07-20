@@ -41,6 +41,10 @@ export function errorText(err: unknown): string {
     if (videoErr) return videoErr;
     // 图片服务能力 422（IMAGE_PROVIDER_* · FIX1）：优先透 BE 动态友好中文，空则兜底——不落通用报错。
     if (err.code && IMAGE_PROVIDER_CAPABILITY_CODES.has(err.code)) return err.message || copy.errors.imageProviderCapability;
+    // 视频生成 2000 墙（VIDEO-GEN-PARAMS-UI-0001-FIX1 · #213 真联调）：BE friendly_video_gen_prompt_too_long →
+    // code=VIDEO_GEN_PROMPT_TOO_LONG，message=「提示词输入最大上限为 2000 字」（与前端红字一字不差）。前端拦为主，
+    // 此为 BE 权威分流兜底（如码点边界/绕过 UI 直调）——透 BE message，空则用同句红字文案，不落通用报错。
+    if (err.code === "VIDEO_GEN_PROMPT_TOO_LONG") return err.message || copy.workbench.vgPromptOverLimit;
     // 特定条：商品表批量(seedance_i2v)缺音色 → 后端英文「voice_id is required」映射为中文（通用映射不动）。
     if (/voice_id/i.test(err.message ?? "")) return copy.errors.voiceRequired;
     return err.message || copy.errors.generic;

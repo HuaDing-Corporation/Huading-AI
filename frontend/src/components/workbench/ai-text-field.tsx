@@ -21,6 +21,9 @@ export interface AiTextFieldProps {
   placeholder?: string;
   /** Footer line under the textarea (char count / hint). */
   footer?: ReactNode;
+  /** a11y（VIDEO-GEN-PARAMS-UI-0001 Code Review）：invalid 态 + 错误说明回连（footer 内元素带 id 供引用），可选不破既有调用者。 */
+  ariaInvalid?: boolean;
+  ariaDescribedby?: string;
 }
 
 const labelClass = "block text-[12.5px] tracking-[.5px] text-ink-soft";
@@ -42,7 +45,9 @@ export function AiTextField({
   loading = false,
   rows = 5,
   placeholder,
-  footer
+  footer,
+  ariaInvalid,
+  ariaDescribedby
 }: AiTextFieldProps) {
   const Icon = loading || actionIcon === "regenerate" ? RefreshCw : Sparkles;
   return (
@@ -66,6 +71,8 @@ export function AiTextField({
         onChange={(e) => onChange(e.target.value)}
         rows={rows}
         placeholder={placeholder}
+        aria-invalid={ariaInvalid}
+        aria-describedby={ariaDescribedby}
         className="w-full resize-y rounded-field border border-line-gold bg-glass-fill px-4 py-3 text-sm leading-relaxed text-ink outline-none transition-shadow placeholder:text-ink-faint focus:border-line-sel focus:shadow-focus-gold"
       />
 

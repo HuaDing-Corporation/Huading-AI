@@ -138,3 +138,81 @@ describe("createVideo · photo 提交校验（apiFetch 真走 MSW · IMAGE-GEN-O
     expect(res.status).toBe("queued");
   });
 });
+
+// VIDEO-GEN-PARAMS-UI-0001 §6：video_gen 提交 mock 校验（createVideo 真走 MSW）。mock 不比 BE 宽松：
+// 时长整数 4–15（3/16/20/5.5→422）、提示词 topic≤2000（2001→422）、画面比例 7 值（非法→422）、
+// generate_audio/negative_prompt 随请求传（extra=forbid 不误杀）。⚠️ 参考图 1–9 唯一、prompt 非空为既有门。
+describe("createVideo · video_gen 提交校验（apiFetch 真走 MSW · VIDEO-GEN-PARAMS-UI-0001）", () => {
+  const base = {
+    video_mode: "video_gen" as const,
+    prompt: "赛博夜景",
+    topic: "赛博夜景",
+    reference_image_asset_ids: ["a1"]
+  };
+
+  it("合法 video_gen（时长8 + 16:9 + 音频开 + 负面）→ 202 queued", async () => {
+    const res = await createVideo({
+      ...base,
+      duration_sec: 8,
+      aspect_ratio: "16:9",
+      generate_audio: true,
+      negative_prompt: "水印、变形"
+    });
+    expect(res.status).toBe("queued");
+  });
+
+  it("防假绿：时长越界/小数（3/16/20/5.5）→ 422（整数 4–15）", async () => {
+    for (const d of [3, 16, 20, 5.5]) {
+      await expect(createVideo({ ...base, duration_sec: d })).rejects.toThrow();
+    }
+  });
+
+  it("防假绿：预设边界 4 与 15 合法 → 202；且旧的仅 5/10/15 已放宽", async () => {
+    expect((await createVideo({ ...base, duration_sec: 4 })).status).toBe("queued");
+    expect((await createVideo({ ...base, duration_sec: 15 })).status).toBe("queued");
+  });
+
+  it("防假绿：提示词 topic 超 2000（2001）→ 422；恰 2000 → 202", async () => {
+    const s = (n: number) => "文".repeat(n);
+    await expect(createVideo({ ...base, prompt: s(2001), topic: s(2001), duration_sec: 8 })).rejects.toThrow();
+    expect((await createVideo({ ...base, prompt: s(2000), topic: s(2000), duration_sec: 8 })).status).toBe("queued");
+  });
+
+  it("防假绿：画面比例非法（8:1）→ 422；7 值任一（3:4）→ 202", async () => {
+    await expect(createVideo({ ...base, duration_sec: 8, aspect_ratio: "8:1" })).rejects.toThrow();
+    expect((await createVideo({ ...base, duration_sec: 8, aspect_ratio: "3:4" })).status).toBe("queued");
+  });
+});
+
+// Code Review（VIDEO-GEN-PARAMS-UI-0001）：estimate 与提交同门——video_gen 非法时长/比例在 estimate 阶段即 422
+// （此前 estimate 缺该分支 → estimate 200 而提交 422，estimate 比提交宽松=假绿口）。
+describe("estimateVideo · video_gen 同门校验（Code Review 补）", () => {
+  it("estimate video_gen 时长 20（越界）→ 422（不放到提交才红）", async () => {
+    await expect(
+      estimateVideo({ video_mode: "video_gen", duration_sec: 20, resolution: "720p" })
+    ).rejects.toThrow();
+  });
+
+  it("estimate video_gen 非法比例（2:3）→ 422；合法（8s + adaptive）→ 200", async () => {
+    await expect(
+      estimateVideo({ video_mode: "video_gen", duration_sec: 8, aspect_ratio: "2:3" })
+    ).rejects.toThrow();
+    const ok = await estimateVideo({ video_mode: "video_gen", duration_sec: 8, aspect_ratio: "auto" });
+    expect(ok.estimated_credits).toBeGreaterThan(0);
+  });
+});
+
+// Code Review：2000 墙按**码点**计数对齐 BE Python len()——1001 个增补面 emoji（UTF-16 长 2002）按码点是 1001 ≤ 2000，
+// 不得误杀；1001+1000 个普通字仍拦。
+describe("createVideo · 2000 墙码点计数（Code Review 补）", () => {
+  const vg = { video_mode: "video_gen" as const, reference_image_asset_ids: ["a1"], duration_sec: 8 };
+  it("1001 个 emoji（UTF-16 2002 码元 / 1001 码点）→ 202 不误杀", async () => {
+    const emoji = "😀".repeat(1001);
+    const res = await createVideo({ ...vg, prompt: emoji, topic: emoji });
+    expect(res.status).toBe("queued");
+  });
+  it("2001 码点（普通字符）→ 仍 422", async () => {
+    const s = "文".repeat(2001);
+    await expect(createVideo({ ...vg, prompt: s, topic: s })).rejects.toThrow();
+  });
+});

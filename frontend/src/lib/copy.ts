@@ -166,8 +166,9 @@ export const copy = {
     durationSeconds: (s: number) => `${s} 秒`,
     durationCustom: "自定义",
     durationCustomLabel: "自定义时长（秒）",
-    durationCustomPlaceholder: "5–120",
-    durationRange: "请输入 5–120 的整数秒", // FIX1：BE duration_sec 是 int，5.5/5.4 等小数不合法（friendly 提示含「整数」）
+    // VIDEO-GEN-PARAMS-UI-0001：随 per-call 区间（电商 5–120 / 视频生成 4–15）。FIX1：BE duration_sec 是 int，5.5/5.4 等小数不合法（friendly 提示含「整数」）
+    durationCustomPlaceholder: (min: number, max: number) => `${min}–${max}`,
+    durationRange: (min: number, max: number) => `请输入 ${min}–${max} 的整数秒`,
     durationHint: "时长越长，生成越慢、消耗额度越多",
     // 文案/画面解耦（电商带货）
     ecomScriptLabel: "AI 口播文案（仅配音）",
@@ -457,6 +458,21 @@ export const copy = {
     vgPromptLabel: "提示词",
     vgPromptPlaceholder: "描述你想要的画面、风格、运镜、氛围…（最大 2000 字）",
     vgPromptRequired: "请填写提示词",
+    // 提示词 2000 字墙（VIDEO-GEN-PARAMS-UI-0001 需求2/D4）：超限红字（用户原话措辞）；前端拦不发 + BE 422 兜底
+    vgPromptOverLimit: "提示词输入最大上限为 2000 字",
+    // 负面提示词（需求1，可选、不限字数——BE negative_prompt 无 max_length）
+    vgNegativeLabel: "负面提示词（可选）",
+    vgNegativePlaceholder: "不希望出现的元素，如：水印、多余文字、杂乱背景、人物变形（可留空）",
+    // 画面比例（需求3，7 值 + 自适应，默认自适应）
+    vgAspectLabel: "画面比例",
+    vgAspectAdaptive: "自适应",
+    vgAspectAdaptiveHint: "自适应：由模型按参考图与内容决定画面尺寸，不主动裁切",
+    // SPIKE：选显式比例会裁切/重构画面（同一竖图 adaptive 560×752 → 16:9 864×496，开头横向裁切、随后缩小加留白），要说清不是换外框
+    vgAspectCropHint: "选固定比例时，模型可能裁切或重构画面以贴合该比例（不只是换外框）",
+    // 音频生成（需求4，默认关；SPIKE：开启真出 AAC、同价不额外收费）。文案区分「模型生成音频」vs 下方 BGM 混音；不承诺配音/对白
+    vgAudioLabel: "音频生成",
+    vgAudioToggleAria: "音频生成开关",
+    vgAudioHint: "开启后由视频模型生成环境音 / 配乐（不额外收费）。与下方「背景音乐」不同——后者是你另配、生成后混音的 BGM。暂不保证人声对白或口型同步",
     vgDurationLabel: "时长",
     vgResolutionLabel: "分辨率",
     vgResolutionHint: "更高分辨率更清晰，生成更慢、消耗更多",

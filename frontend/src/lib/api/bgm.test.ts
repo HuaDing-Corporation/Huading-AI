@@ -26,17 +26,17 @@ describe("视频生成 配乐库 + video_gen 校验 ↔ MSW（mock 忠实）", (
     expect(typeof tracks[0].duration_sec).toBe("number");
   });
 
-  it("video_gen 合法（参考图1–9 + prompt + duration枚举 + resolution + 库BGM）→ 接受", async () => {
+  it("video_gen 合法（参考图1–9 + prompt + duration 4–15 + resolution + 库BGM）→ 接受", async () => {
     const res = await createVideo({ ...baseReq, bgm: { source: "library", track_id: "bgm-uplift" } });
     expect(res.id).toBeTruthy();
   });
 
-  it("video_gen 非法 → 422（空参考图 / 空prompt / 超9 / 非法duration / 非法resolution / 非法库track）", async () => {
+  it("video_gen 非法 → 422（空prompt / 超9 / 非法duration / 非法resolution / 非法库track）", async () => {
+    // FIX1 真联调（#213 合并源 schemas/videos.py:355）：参考图 **0–9**——空参考图=纯文生视频合法，已从非法组移出（见下条）。
     const bads: CreateVideoRequest[] = [
-      { ...baseReq, reference_image_asset_ids: [] },
       { ...baseReq, prompt: "" },
       { ...baseReq, reference_image_asset_ids: Array.from({ length: 10 }, (_, i) => `a${i}`) },
-      { ...baseReq, duration_sec: 7 },
+      { ...baseReq, duration_sec: 20 }, // VIDEO-GEN-PARAMS-UI-0001：时长改整数 4–15（7 现已合法）；20 越界仍 422
       { ...baseReq, resolution: "2160p" },
       { ...baseReq, bgm: { source: "library", track_id: "nope" } }
     ];
@@ -49,6 +49,13 @@ describe("视频生成 配乐库 + video_gen 校验 ↔ MSW（mock 忠实）", (
       }
       expect((caught as ApiError)?.status).toBe(422);
     }
+  });
+
+  // FIX1 真联调：BE 参考图 0–9（0 张=纯文生视频合法，schemas/videos.py:355）——mock 同步放开下限，不再比 BE 严。
+  // UI 的「参考图 ≥1」门是前端保守（纯文生视频属需求6 拆批范围），mock 层忠实 BE。
+  it("video_gen 参考图 0 张（纯文生视频）→ 接受（mock 对齐 BE 0–9，不比 BE 严）", async () => {
+    const res = await createVideo({ ...baseReq, reference_image_asset_ids: [] });
+    expect(res.id).toBeTruthy();
   });
 
   // FIX1 承重：参考图重复 → 422（对齐后端 schemas/videos.py:221 唯一性；mock 不得放宽）。
