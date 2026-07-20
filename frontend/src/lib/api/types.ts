@@ -472,10 +472,11 @@ export interface ModelRequest {
   model_asset_ids?: string[]; // 模特图 asset_id（0–N；不传=纯文生模特，D1）
   product_images_mode: ProductImagesMode; // 商品图组合语义（默认 multi_item，D2）
   gender: ModelGender;
-  style_id?: string; // 风格预设 id（改为可选；与 custom_style 互斥，D3）
-  custom_style?: string; // 自定义风格（不限字数；与 style_id 互斥，D3）
-  // 🔴 D4：自定义补充**不限字数**。此前注释「后端无长度限制」是错的——schema 无限制，但 route 层会**静默截断到 200**；
-  //   本期后端已移除该截断，前端也去掉 ≤200 门（订正见 §二.1）。
+  style_id?: string; // 风格预设 id（改为可选；与 custom_style 互斥，D3；未知 id → 422 ECOM_MODEL_STYLE_INVALID）
+  custom_style?: string; // 自定义风格（min 1、**≤20000** 反滥用上界；与 style_id 互斥，D3）
+  // 🔴 D4：自定义补充取消旧 200 静默截断。此前注释「后端无长度限制」是错的（route 层曾静默截断到 200，本期移除）。
+  //   FIX1 真联调订正：#210 合并源 schemas/ecom_images.py:12,69 给 extra_prompt/custom_style 各 **≤20000 字符**
+  //   反滥用上界（Field max_length + extra=forbid，超限 → 422 非静默截断）。前端不设 maxLength（正常远不及；此为诚实注释）。
   extra_prompt?: string;
   aspect_ratio?: string; // 画面比例（IMAGE-ASPECT-RATIO-UI-0001；默认 1:1）
   apply_visible_label?: boolean; // AI 显式标识开关（LABEL-TOGGLE-UI-0001，默认关）
