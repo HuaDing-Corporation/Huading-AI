@@ -197,7 +197,7 @@ describe("estimateVideo · video_gen 同门校验（Code Review 补）", () => {
     await expect(
       estimateVideo({ video_mode: "video_gen", duration_sec: 8, aspect_ratio: "2:3" })
     ).rejects.toThrow();
-    const ok = await estimateVideo({ video_mode: "video_gen", duration_sec: 8, aspect_ratio: "adaptive" });
+    const ok = await estimateVideo({ video_mode: "video_gen", duration_sec: 8, aspect_ratio: "auto" });
     expect(ok.estimated_credits).toBeGreaterThan(0);
   });
 });

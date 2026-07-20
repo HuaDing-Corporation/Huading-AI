@@ -1479,7 +1479,7 @@ export const handlers = [
       }
       if (
         body.aspect_ratio !== undefined &&
-        !["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "adaptive"].includes(body.aspect_ratio)
+        !["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "auto"].includes(body.aspect_ratio)
       ) {
         return err(422, "VIDEO_GEN_INVALID", "画面比例非法");
       }
@@ -1540,8 +1540,9 @@ export const handlers = [
     if (body.avatar_asset_id && body.avatar_video_asset_id) {
       return err(422, "AVATAR_SOURCE_CONFLICT", "照片与视频形象只能二选一");
     }
-    // 视频生成 video_gen 校验（对齐后端：参考图 1–9 且**唯一**、prompt 非空、duration 整数 4–15、画面比例 7 值、
-    // bgm 二选一可选）→ 非法 422，不伪造放行/不放宽（resolution 已在上方全模式把关；提示词 2000 墙已在上方非-photo 段拦）。
+    // 视频生成 video_gen 校验（FIX1 真联调对齐 #213 合并源 schemas/videos.py:349-366：参考图 **0–9** 且**唯一**
+    // （0 张合法=纯文生视频；UI 的 ≥1 门属前端保守、待需求6 拆批放开）、prompt 非空、duration 整数 4–15、画面比例
+    // 7 值、bgm 二选一可选）→ 非法 422，不伪造放行/不放宽（resolution 已在上方全模式把关；2000 墙在上方非-photo 段拦）。
     if (body.video_mode === "video_gen") {
       const refs = body.reference_image_asset_ids ?? [];
       const refsUnique = new Set(refs).size === refs.length; // 对齐后端唯一性校验（重复→422）
@@ -1549,13 +1550,12 @@ export const handlers = [
         body.bgm === undefined ||
         (body.bgm.source === "upload" && !!body.bgm.asset_id) ||
         (body.bgm.source === "library" && !!body.bgm.track_id && BGM_TRACK_IDS.includes(body.bgm.track_id));
-      // 时长（VIDEO-GEN-PARAMS-UI-0001 需求5）：预设 5/10/15 + 自定义**整数 4–15**（provider apimart.py:209 硬钳 4–15）。
-      // 3/16/20→422（越界），5.5 已由上方 badDuration 拦。mock 不比 BE 宽松、不放宽到旧的仅 5/10/15。
+      // 时长（VIDEO-GEN-PARAMS-UI-0001 需求5）：预设 5/10/15 + 自定义**整数 4–15**（BE _VIDEO_GEN_MIN/MAX_DURATION_SEC，
+      // None 也拒）。3/16/20→422（越界），5.5 已由上方 badDuration 拦。mock 不比 BE 宽松、不放宽到旧的仅 5/10/15。
       const durationOk =
         Number.isInteger(body.duration_sec) && (body.duration_sec as number) >= 4 && (body.duration_sec as number) <= 15;
       if (
         !Array.isArray(refs) ||
-        refs.length < 1 ||
         refs.length > 9 ||
         !refsUnique ||
         !body.prompt ||
@@ -1570,9 +1570,9 @@ export const handlers = [
       // 前端若单方面加值，此处 422 恰是护栏；仅当 BE 同步支持时才在此同步（4–15 时长同理，权威=apimart.py:209）。
       if (
         body.aspect_ratio !== undefined &&
-        !["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "adaptive"].includes(body.aspect_ratio)
+        !["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "auto"].includes(body.aspect_ratio)
       ) {
-        return err(422, "VIDEO_GEN_INVALID", "画面比例非法（须为 16:9/9:16/1:1/4:3/3:4/21:9/adaptive）");
+        return err(422, "VIDEO_GEN_INVALID", "画面比例非法（须为 16:9/9:16/1:1/4:3/3:4/21:9/auto）");
       }
     }
     // 电商带货 i2v 校验（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.3）：产品图下限=至少 1 张（决策2 保底；topic/script/

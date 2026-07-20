@@ -41,6 +41,20 @@ describe("errorText · AVATAR_VIDEO_* 后端校验码 → 友好中文", () => {
 
 // IMAGE-GEN-OPTIMIZE-UI-0001-FIX1：图片服务能力 422（BE providers/base.py fail-closed，落钱前拦）→ 优先透 BE 动态友好中文
 // （如 OpenAI provider 选 2K → 「当前图片服务不支持 2K，请选择 1K。」），不落通用「操作失败」；BE message 空时才兜底 curated。
+// VIDEO-GEN-PARAMS-UI-0001-FIX1（#213 真联调）：2000 墙 BE 权威分流——friendly_video_gen_prompt_too_long →
+// code=VIDEO_GEN_PROMPT_TOO_LONG，message 与前端红字一字不差；空 message 兜底同句文案，不落通用「操作失败」。
+describe("errorText · VIDEO_GEN_PROMPT_TOO_LONG（FIX1 真联调）", () => {
+  it("透 BE message（与前端红字同句）", () => {
+    const msg = "提示词输入最大上限为 2000 字";
+    expect(errorText(new ApiError(msg, "VIDEO_GEN_PROMPT_TOO_LONG", 422))).toBe(msg);
+  });
+  it("message 意外为空 → 兜底同句红字文案，不落通用报错", () => {
+    const out = errorText(new ApiError("", "VIDEO_GEN_PROMPT_TOO_LONG", 422));
+    expect(out).toBe(copy.workbench.vgPromptOverLimit);
+    expect(out).not.toBe(copy.errors.generic);
+  });
+});
+
 describe("errorText · IMAGE_PROVIDER_* 能力码（FIX1 真联调）", () => {
   const codes = [
     "IMAGE_PROVIDER_RESOLUTION_UNSUPPORTED",

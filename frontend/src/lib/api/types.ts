@@ -126,7 +126,7 @@ export interface CreateVideoRequest {
   image_size?: string; // @deprecated 照片旧「尺寸」（IMAGE-ASPECT-RATIO-UI-0001 起改用 aspect_ratio；BE 仅在 aspect_ratio 省略时回退翻译）；cover 通路仍可带
   image_quality?: string; // @deprecated 照片旧「质量」（IMAGE-ASPECT-RATIO-UI-0001 起去除；BE 已忽略）；cover 通路仍可带、不影响
   speed?: number; // 默认 1.0
-  aspect_ratio?: string; // 画面比例：照片 8 定比+auto 默认 1:1；口播/电商带货视频 9:16；**视频生成(video_gen) 7 值默认 adaptive**（见下方 video_gen 段注释）
+  aspect_ratio?: string; // 画面比例：照片 8 定比+auto 默认 1:1；口播/电商带货视频 9:16；**视频生成(video_gen) 7 值默认 auto**（见下方 video_gen 段注释）
   subtitle_enabled?: boolean; // 默认 true
   subtitle_style?: SubtitleStyle; // 数字人口播：字幕样式覆盖（ORAL-PROD-UI-0001）；缺省=与 0001 默认烧入一致（不回归）
   apply_visible_label?: boolean; // AI 生成显式标识开关（LABEL-TOGGLE-UI-0001）；默认关(false)，开=true。对齐后端 VideoGenerateRequest.apply_visible_label
@@ -152,7 +152,7 @@ export interface CreateVideoRequest {
   bgm?: VideoGenBgm; // 可选背景音乐：上传(asset_id) 或 配乐库(track_id)——生成后混音，与 generate_audio 不同
   // VIDEO-GEN-PARAMS-UI-0001（需求4）：音频生成开关，默认 false（零回归）。true=视频模型生成环境音/配乐（SPIKE 实测真出 AAC、同价）。BE 一行改传（provider 现硬编码 False）
   generate_audio?: boolean;
-  // aspect_ratio（需求3）复用上方 aspect_ratio 字段：视频侧 7 值 16:9/9:16/1:1/4:3/3:4/21:9/adaptive（默认 adaptive；映射 provider size）
+  // aspect_ratio（需求3）复用上方 aspect_ratio 字段：视频侧 7 值 16:9/9:16/1:1/4:3/3:4/21:9/auto（默认 auto；FIX1 真联调：BE API 值=auto，worker 翻译成 provider 的 adaptive）
 }
 
 // 视频生成 BGM（seam §2/§3）：上传(复用 /uploads/audio→asset_id) 或 配乐库(track_id) 二选一。

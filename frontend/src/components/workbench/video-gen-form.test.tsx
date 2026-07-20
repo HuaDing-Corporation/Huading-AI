@@ -79,7 +79,7 @@ describe("VideoGenForm (视频生成 编排)", () => {
       reference_image_asset_ids: ["a1", "a2"],
       duration_sec: 5,
       resolution: "720p",
-      aspect_ratio: "adaptive", // 需求3：默认自适应，总随请求传
+      aspect_ratio: "auto", // 需求3：默认自适应（BE API 值=auto，worker 翻译成 provider 的 adaptive），总随请求传
       generate_audio: false // 需求4：默认关，总随请求传（零回归）
     });
     expect(request.bgm).toBeUndefined();
