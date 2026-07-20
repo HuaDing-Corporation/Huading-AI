@@ -11,6 +11,7 @@ from app.db.models import (
     Asset,
     CreditRate,
     Plan,
+    ProviderConfig,
     Role,
     Subscription,
     TaskAsset,
@@ -20,6 +21,7 @@ from app.db.models import (
     Voice,
 )
 from app.main import app
+from app.providers.base import ImageProviderCapabilities
 from app.schemas.videos import ScenePromptRequest, VideoGenerateRequest
 
 
@@ -72,7 +74,12 @@ class _MemProgressStore:
         return self.data.get(task_id)
 
 
-def _seed_billing(db, tenant_id: str) -> Subscription:
+def _seed_billing(
+    db,
+    tenant_id: str,
+    *,
+    image_provider: str = "apimart",
+) -> Subscription:
     now = datetime.now(UTC)
     plan = Plan(
         code=f"plan-{tenant_id}",
@@ -96,6 +103,15 @@ def _seed_billing(db, tenant_id: str) -> Subscription:
         quota_credits_reserved=5,
     )
     db.add(subscription)
+    db.add(
+        ProviderConfig(
+            tenant_id=tenant_id,
+            capability="image",
+            provider=image_provider,
+            config={"api_key": f"test-{image_provider}-key"},
+            is_active=True,
+        )
+    )
     db.add_all(
         [
             CreditRate(
@@ -1173,6 +1189,7 @@ def test_photo_order_routes_before_avatar_when_voice_is_present(
     assert enqueued["args"][0]["image_key"] == "uploads/product.png"
     assert enqueued["args"][0]["aspect_ratio"] == "21:9"
     assert enqueued["args"][0]["requested_aspect_ratio"] == "21:9"
+    assert enqueued["args"][0]["image_provider"] == "apimart"
     assert enqueued["args"][0]["purpose"] == "cover"
     assert "image_size" not in enqueued["args"][0]
     assert "image_quality" not in enqueued["args"][0]
@@ -1184,6 +1201,7 @@ def test_photo_order_routes_before_avatar_when_voice_is_present(
         assert task.aspect_ratio == "21:9"
         assert task.params["image_key"] == "uploads/product.png"
         assert task.params["aspect_ratio"] == "21:9"
+        assert task.params["image_provider"] == "apimart"
         assert task.params["requested_aspect_ratio"] == "21:9"
         assert task.params["purpose"] == "cover"
         assert "image_size" not in task.params
@@ -1198,7 +1216,11 @@ def test_photo_order_routes_before_avatar_when_voice_is_present(
         assert reserved.credits == Decimal("10.00")
 
 
-def test_photo_accepts_six_reference_images_without_changing_flat_quota(
+@pytest.mark.parametrize("image_resolution", ["1k", "2k", "4k"])
+@pytest.mark.parametrize("image_count", range(1, 7))
+def test_photo_accepts_apimart_resolution_and_reference_image_matrix(
+    image_resolution,
+    image_count,
     monkeypatch,
     auth_context,
     auth_db,
@@ -1219,7 +1241,7 @@ def test_photo_accepts_six_reference_images_without_changing_flat_quota(
     from app.api.v1.routes import videos as videos_route
 
     monkeypatch.setattr(videos_route, "generate_image_task", _FakeImageTask())
-    image_keys = [f"uploads/reference-{index}.png" for index in range(6)]
+    image_keys = [f"uploads/reference-{index}.png" for index in range(image_count)]
 
     response = TestClient(app).post(
         "/api/v1/videos",
@@ -1227,6 +1249,7 @@ def test_photo_accepts_six_reference_images_without_changing_flat_quota(
             "topic": "combine all references into one premium product image",
             "video_mode": "photo",
             "image_keys": image_keys,
+            "image_resolution": image_resolution,
         },
         headers=auth_context["headers"],
     )
@@ -1236,14 +1259,14 @@ def test_photo_accepts_six_reference_images_without_changing_flat_quota(
     assert enqueued["task_id"] == task_id
     assert enqueued["queue"] == "image"
     assert enqueued["args"][0]["image_keys"] == image_keys
-    assert enqueued["args"][0]["image_resolution"] == "1k"
+    assert enqueued["args"][0]["image_resolution"] == image_resolution
     with auth_db() as db:
         task = db.get(VideoTask, task_id)
         subscription = db.get(Subscription, subscription_id)
         usage = db.query(UsageRecord).filter_by(video_task_id=task_id).one()
 
     assert task.params["image_keys"] == image_keys
-    assert task.params["image_resolution"] == "1k"
+    assert task.params["image_resolution"] == image_resolution
     assert subscription.quota_credits_reserved - reserved_before == 10
     assert usage.quantity == Decimal("1.000")
     assert usage.credits == Decimal("10.00")
@@ -1393,6 +1416,227 @@ def test_photo_rejects_removed_background_strength(
         and detail["loc"] == ["body", "background_strength"]
         for detail in error["details"]
     )
+    assert enqueued is False
+    with auth_db() as db:
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved == reserved_before
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == task_count_before
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == usage_count_before
+
+
+def test_photo_openai_reservation_records_selected_provider(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(
+            db,
+            auth_context["tenant_id"],
+            image_provider="openai",
+        )
+        subscription_id = subscription.id
+        reserved_before = subscription.quota_credits_reserved
+
+    enqueued: dict[str, object] = {}
+
+    class _FakeImageTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            enqueued.update({"args": args, "task_id": task_id, "queue": queue})
+            return type("Result", (), {"status": "PENDING"})()
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route, "generate_image_task", _FakeImageTask())
+    response = TestClient(app).post(
+        "/api/v1/videos",
+        json={
+            "topic": "premium product image",
+            "video_mode": "photo",
+            "image_resolution": "1k",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 202
+    task_id = response.json()["data"]["id"]
+    assert enqueued["task_id"] == task_id
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        subscription = db.get(Subscription, subscription_id)
+        usage = db.query(UsageRecord).filter_by(video_task_id=task_id).one()
+    assert task.params["image_provider"] == "openai"
+    assert usage.provider == "openai"
+    assert subscription.quota_credits_reserved - reserved_before == 10
+
+
+def test_photo_rejects_unsupported_openai_resolution_before_side_effects(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(
+            db,
+            auth_context["tenant_id"],
+            image_provider="openai",
+        )
+        subscription_id = subscription.id
+        reserved_before = subscription.quota_credits_reserved
+        task_count_before = db.scalar(select(func.count()).select_from(VideoTask))
+        usage_count_before = db.scalar(select(func.count()).select_from(UsageRecord))
+
+    enqueued = False
+
+    class _FakeImageTask:
+        def apply_async(self, **_kwargs):
+            nonlocal enqueued
+            enqueued = True
+            return type("Result", (), {"status": "PENDING"})()
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route, "generate_image_task", _FakeImageTask())
+    response = TestClient(app).post(
+        "/api/v1/videos",
+        json={
+            "topic": "premium product image",
+            "video_mode": "photo",
+            "image_resolution": "4k",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "IMAGE_PROVIDER_RESOLUTION_UNSUPPORTED"
+    assert error["message"] == "当前图片服务不支持 4K，请选择 1K。"
+    assert enqueued is False
+    with auth_db() as db:
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved == reserved_before
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == task_count_before
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == usage_count_before
+
+
+def test_photo_rejects_openai_reference_images_beyond_provider_limit(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(
+            db,
+            auth_context["tenant_id"],
+            image_provider="openai",
+        )
+        subscription_id = subscription.id
+        reserved_before = subscription.quota_credits_reserved
+        task_count_before = db.scalar(select(func.count()).select_from(VideoTask))
+        usage_count_before = db.scalar(select(func.count()).select_from(UsageRecord))
+
+    enqueued = False
+
+    class _FakeImageTask:
+        def apply_async(self, **_kwargs):
+            nonlocal enqueued
+            enqueued = True
+            return type("Result", (), {"status": "PENDING"})()
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route, "generate_image_task", _FakeImageTask())
+    response = TestClient(app).post(
+        "/api/v1/videos",
+        json={
+            "topic": "premium product image",
+            "video_mode": "photo",
+            "image_resolution": "1k",
+            "image_keys": [
+                "uploads/product-front.png",
+                "uploads/product-side.png",
+            ],
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "IMAGE_PROVIDER_REFERENCE_IMAGES_UNSUPPORTED"
+    assert error["message"] == "当前图片服务最多支持 1 张参考图。"
+    assert enqueued is False
+    with auth_db() as db:
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved == reserved_before
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == task_count_before
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == usage_count_before
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [
+        None,
+        ImageProviderCapabilities(
+            supported_resolutions="1k",  # type: ignore[arg-type]
+            max_reference_images=1,
+        ),
+    ],
+    ids=["missing", "malformed-resolution-container"],
+)
+def test_photo_rejects_image_provider_with_invalid_capability_declaration(
+    monkeypatch,
+    auth_context,
+    auth_db,
+    capabilities: ImageProviderCapabilities | None,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(db, auth_context["tenant_id"])
+        subscription_id = subscription.id
+        reserved_before = subscription.quota_credits_reserved
+        task_count_before = db.scalar(select(func.count()).select_from(VideoTask))
+        usage_count_before = db.scalar(select(func.count()).select_from(UsageRecord))
+
+    enqueued = False
+
+    class _UndeclaredImageProvider:
+        async def generate_image(self, _payload):
+            raise AssertionError("provider must not be invoked")
+
+    class _FakeImageTask:
+        def apply_async(self, **_kwargs):
+            nonlocal enqueued
+            enqueued = True
+            return type("Result", (), {"status": "PENDING"})()
+
+    from app.api.v1.routes import videos as videos_route
+    from app.providers.base import ResolvedProvider
+
+    provider = _UndeclaredImageProvider()
+    if capabilities is not None:
+        provider.capabilities = capabilities
+    monkeypatch.setattr(
+        videos_route,
+        "resolve_with_name",
+        lambda _db, *, tenant_id, capability: ResolvedProvider(
+            name="undeclared",
+            provider=provider,
+        ),
+    )
+    monkeypatch.setattr(videos_route, "generate_image_task", _FakeImageTask())
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/api/v1/videos",
+        json={
+            "topic": "premium product image",
+            "video_mode": "photo",
+            "image_resolution": "1k",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "IMAGE_PROVIDER_CAPABILITIES_UNDECLARED"
+    assert error["message"] == "当前图片服务能力配置不完整，暂时无法生成图片。"
     assert enqueued is False
     with auth_db() as db:
         subscription = db.get(Subscription, subscription_id)

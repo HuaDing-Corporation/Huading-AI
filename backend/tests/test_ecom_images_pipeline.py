@@ -3,7 +3,15 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from app.api.deps import get_object_storage
-from app.db.models import Asset, BatchJob, Subscription, Tenant, UsageRecord, VideoTask
+from app.db.models import (
+    Asset,
+    BatchJob,
+    ProviderConfig,
+    Subscription,
+    Tenant,
+    UsageRecord,
+    VideoTask,
+)
 from app.main import app
 from app.workers import image_gen
 
@@ -29,6 +37,21 @@ class _FakeStorage:
     ) -> str:
         suffix = "&download=1" if download_filename else ""
         return f"https://storage.test/{key}?ttl={expires_in}{suffix}"
+
+
+@pytest.fixture(autouse=True)
+def _seed_image_provider(auth_db) -> None:
+    with auth_db() as db:
+        db.add(
+            ProviderConfig(
+                tenant_id=None,
+                capability="image",
+                provider="apimart",
+                config={"api_key": "test-apimart-key"},
+                is_active=True,
+            )
+        )
+        db.commit()
 
 
 def _seed_source_asset(
@@ -307,6 +330,8 @@ def test_ecom_model_single_creates_photo_task_clamps_prompt_and_reserves_quota(
     assert payload["style_id"] == "studio_white"
     assert payload["source_asset_id"] == source["id"]
     assert payload["source_storage_key"] == source["storage_key"]
+    assert payload["image_provider"] == "apimart"
+    assert payload["image_resolution"] == "1k"
     assert payload["video_task_id"] == data["task_id"]
     assert payload["extra_prompt"] == long_extra[:200]
     assert payload["aspect_ratio"] == "21:9"
@@ -333,6 +358,8 @@ def test_ecom_model_single_creates_photo_task_clamps_prompt_and_reserves_quota(
     assert task.params["aspect_ratio"] == "21:9"
     assert task.params["requested_aspect_ratio"] == "21:9"
     assert task.params["source_storage_key"] == source["storage_key"]
+    assert task.params["image_provider"] == "apimart"
+    assert task.params["image_resolution"] == "1k"
     assert task.params["apply_visible_label"] is True
     assert usage.status == "reserved"
     assert usage.credits == 10
@@ -388,6 +415,8 @@ def test_ecom_model_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
     assert all(item["status"] == "queued" for item in data["tasks"])
     assert {call["args"][0]["batch_id"] for call in enqueued} == {data["batch_id"]}
     assert {call["args"][0]["kind"] for call in enqueued} == {"ecom_model"}
+    assert {call["args"][0]["image_provider"] for call in enqueued} == {"apimart"}
+    assert {call["args"][0]["image_resolution"] for call in enqueued} == {"1k"}
     assert {call["args"][0]["style_id"] for call in enqueued} == {"lifestyle", "street"}
     assert {call["args"][0]["aspect_ratio"] for call in enqueued} == {"4:3", "2:3"}
 
@@ -475,6 +504,63 @@ def test_ecom_model_rejects_cross_tenant_source_asset(
     assert enqueued == []
 
 
+def test_ecom_cutout_rejects_undeclared_image_provider_before_side_effects(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import ecom_images as route
+    from app.providers.base import ResolvedProvider
+
+    class _UndeclaredImageProvider:
+        async def generate_image(self, _payload):
+            raise AssertionError("provider must not be invoked")
+
+    with auth_db() as db:
+        source = _seed_source_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="undeclared-provider-cutout-source",
+        )
+        subscription = db.scalars(select(Subscription)).one()
+        subscription_id = subscription.id
+        reserved_before = subscription.quota_credits_reserved
+        task_count_before = db.scalar(select(func.count()).select_from(VideoTask))
+        usage_count_before = db.scalar(select(func.count()).select_from(UsageRecord))
+
+    enqueued = _stub_image_task(monkeypatch)
+    monkeypatch.setattr(
+        route,
+        "resolve_with_name",
+        lambda _db, *, tenant_id, capability: ResolvedProvider(
+            name="undeclared",
+            provider=_UndeclaredImageProvider(),
+        ),
+        raising=False,
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/ecom-images/cutout",
+        json={
+            "source_asset_id": source["id"],
+            "background": "white",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "IMAGE_PROVIDER_CAPABILITIES_UNDECLARED"
+    assert response.json()["error"]["message"] == (
+        "当前图片服务能力配置不完整，暂时无法生成图片。"
+    )
+    assert enqueued == []
+    with auth_db() as db:
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved == reserved_before
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == task_count_before
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == usage_count_before
+
+
 def test_ecom_cutout_single_creates_photo_task_and_reserves_quota(
     monkeypatch,
     auth_context,
@@ -517,6 +603,8 @@ def test_ecom_cutout_single_creates_photo_task_and_reserves_quota(
     assert payload["background"] == "transparent"
     assert payload["source_asset_id"] == source["id"]
     assert payload["source_storage_key"] == source["storage_key"]
+    assert payload["image_provider"] == "apimart"
+    assert payload["image_resolution"] == "1k"
     assert payload["video_task_id"] == data["task_id"]
     assert payload["aspect_ratio"] == "auto"
     assert payload["requested_aspect_ratio"] == "auto"
@@ -536,6 +624,8 @@ def test_ecom_cutout_single_creates_photo_task_and_reserves_quota(
     assert task.params["background"] == "transparent"
     assert task.params["source_asset_id"] == source["id"]
     assert task.params["source_storage_key"] == source["storage_key"]
+    assert task.params["image_provider"] == "apimart"
+    assert task.params["image_resolution"] == "1k"
     assert task.params["aspect_ratio"] == "auto"
     assert task.params["requested_aspect_ratio"] == "auto"
     assert task.params["apply_visible_label"] is True
@@ -591,6 +681,8 @@ def test_ecom_cutout_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
     assert all(item["status"] == "queued" for item in data["tasks"])
     assert {call["args"][0]["batch_id"] for call in enqueued} == {data["batch_id"]}
     assert {call["args"][0]["kind"] for call in enqueued} == {"ecom_cutout"}
+    assert {call["args"][0]["image_provider"] for call in enqueued} == {"apimart"}
+    assert {call["args"][0]["image_resolution"] for call in enqueued} == {"1k"}
     assert {call["args"][0]["aspect_ratio"] for call in enqueued} == {"16:9", "3:4"}
 
     with auth_db() as db:

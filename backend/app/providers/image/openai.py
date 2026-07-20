@@ -11,7 +11,7 @@ from openai import DefaultHttpxClient, OpenAI
 from app.core.config import settings
 from app.core.image_aspect_ratio import IMAGE_ASPECT_RATIOS, openai_image_size
 from app.db.models import ProviderConfig
-from app.providers.base import register_provider
+from app.providers.base import ImageProviderCapabilities, register_provider
 
 _DEFAULT_MODEL = "gpt-image-2"
 _DEFAULT_SIZE = "1024x1024"
@@ -24,6 +24,11 @@ class OpenAIImageProviderError(RuntimeError):
 
 
 class OpenAIImageProvider:
+    capabilities = ImageProviderCapabilities(
+        supported_resolutions=frozenset({"1k"}),
+        max_reference_images=1,
+    )
+
     def __init__(
         self,
         *,

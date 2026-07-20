@@ -10,7 +10,16 @@ import pytest
 from PIL import Image
 from sqlalchemy import func, select
 
-from app.db.models import Asset, Plan, Subscription, TaskAsset, UsageRecord, VideoTask
+from app.db.models import (
+    Asset,
+    Plan,
+    ProviderConfig,
+    Subscription,
+    TaskAsset,
+    UsageRecord,
+    VideoTask,
+)
+from app.providers.base import ImageProviderCapabilities, ResolvedProvider
 
 
 class _FakeStorage:
@@ -55,6 +64,11 @@ class _MemProgressStore:
 
 
 class _FakeProvider:
+    capabilities = ImageProviderCapabilities(
+        supported_resolutions=frozenset({"1k", "2k", "4k"}),
+        max_reference_images=6,
+    )
+
     def __init__(
         self,
         *,
@@ -294,10 +308,28 @@ def _seed_terminal_photo_history(
 def _patch_worker(monkeypatch, auth_db, storage: _FakeStorage, store: _MemProgressStore, provider):
     from app.workers import image_gen
 
+    fake_provider = provider
+
+    def fake_resolve_named(_db, *, tenant_id, capability, provider):
+        assert provider == fake_provider.provider_name
+        return fake_provider
+
     monkeypatch.setattr(image_gen, "SessionLocal", auth_db)
     monkeypatch.setattr(image_gen, "build_progress_store", lambda _redis_url: store)
     monkeypatch.setattr(image_gen, "create_object_storage", lambda _settings: storage)
-    monkeypatch.setattr(image_gen, "resolve", lambda _db, *, tenant_id, capability: provider)
+    monkeypatch.setattr(
+        image_gen,
+        "resolve_with_name",
+        lambda _db, *, tenant_id, capability: ResolvedProvider(
+            name=fake_provider.provider_name,
+            provider=fake_provider,
+        ),
+    )
+    monkeypatch.setattr(
+        image_gen,
+        "resolve_named_provider",
+        fake_resolve_named,
+    )
     monkeypatch.setattr(image_gen, "label_artifact_bytes", lambda content, **_kwargs: content)
     return image_gen
 
@@ -831,8 +863,13 @@ def test_image_worker_records_openai_fallback_without_mislabeling_requested_rati
     output_key = f"tenants/{auth_context['tenant_id']}/photos/{task_id}/output.png"
     with auth_db() as db:
         asset = db.scalars(select(Asset).where(Asset.storage_key == output_key)).one()
+        usage = db.scalars(
+            select(UsageRecord).where(UsageRecord.video_task_id == task_id)
+        ).one()
 
     assert asset.provider == "openai"
+    assert usage.provider == "openai"
+    assert usage.model == "gpt-image-2"
     assert asset.metadata_["requested_aspect_ratio"] == "21:9"
     assert asset.metadata_["resolved_aspect_ratio"] == "3:2"
     assert asset.metadata_["resolved_size"] == "1536x1024"
@@ -903,6 +940,311 @@ def test_image_worker_converts_all_source_storage_keys_to_data_uris(
     assert second_decoded == second_bytes
 
 
+def test_image_worker_uses_bound_apimart_when_default_changes_to_openai(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.providers import base as provider_base
+    from app.workers import image_gen
+
+    class _CapabilityTrackingProvider(_FakeProvider):
+        def __init__(self, *, capabilities: ImageProviderCapabilities, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self._capabilities = capabilities
+            self.capability_checks = 0
+
+        @property
+        def capabilities(self) -> ImageProviderCapabilities:
+            self.capability_checks += 1
+            return self._capabilities
+
+    task_id = "photo-bound-apimart-unit"
+    image_keys = ["uploads/product-front.png", "uploads/product-side.png"]
+    image_bytes = [b"product-front", b"product-side"]
+    worker_params = {
+        "tenant_id": auth_context["tenant_id"],
+        "video_task_id": task_id,
+        "topic": "combine both product references at full resolution",
+        "image_keys": image_keys,
+        "image_resolution": "4k",
+        "image_provider": "apimart",
+    }
+    with auth_db() as db:
+        _seed_reserved_photo(db, auth_context["tenant_id"], auth_context["user_id"], task_id)
+        task = db.get(VideoTask, task_id)
+        task.params = {**(task.params or {}), **worker_params}
+        db.add_all(
+            [
+                ProviderConfig(
+                    tenant_id=auth_context["tenant_id"],
+                    capability="image",
+                    provider="openai",
+                    config={"api_key": "test-openai-key"},
+                    is_active=True,
+                ),
+                ProviderConfig(
+                    tenant_id=None,
+                    capability="image",
+                    provider="apimart",
+                    config={"api_key": "test-apimart-key"},
+                    is_active=True,
+                ),
+            ]
+        )
+        db.commit()
+
+    storage = _FakeStorage()
+    for image_key, content in zip(image_keys, image_bytes, strict=True):
+        storage.saved[f"tenants/{auth_context['tenant_id']}/{image_key}"] = (
+            content,
+            "image/png",
+        )
+    store = _MemProgressStore()
+    default_openai = _CapabilityTrackingProvider(
+        capabilities=ImageProviderCapabilities(
+            supported_resolutions=frozenset({"1k"}),
+            max_reference_images=1,
+        ),
+        image_bytes=b"silently-downgraded-openai-1k",
+        expected_input_bytes=image_bytes[0],
+        provider_name="openai",
+        result_size="1024x1024",
+    )
+    bound_apimart = _CapabilityTrackingProvider(
+        capabilities=ImageProviderCapabilities(
+            supported_resolutions=frozenset({"1k", "2k", "4k"}),
+            max_reference_images=6,
+        ),
+        image_bytes=b"bound-apimart-4k",
+        expected_input_bytes=image_bytes[0],
+        provider_name="apimart",
+        result_size="1:1",
+    )
+    monkeypatch.setitem(
+        provider_base._REGISTRY,
+        ("image", "openai"),
+        lambda _config: default_openai,
+    )
+    monkeypatch.setitem(
+        provider_base._REGISTRY,
+        ("image", "apimart"),
+        lambda _config: bound_apimart,
+    )
+    monkeypatch.setattr(image_gen, "SessionLocal", auth_db)
+    monkeypatch.setattr(image_gen, "build_progress_store", lambda _redis_url: store)
+    monkeypatch.setattr(image_gen, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(image_gen, "label_artifact_bytes", lambda content, **_kwargs: content)
+
+    result = image_gen.run_image_generation(worker_params)
+
+    assert result["status"] == "SUCCESS"
+    output_key = f"tenants/{auth_context['tenant_id']}/photos/{task_id}/output.png"
+    with auth_db() as db:
+        asset = db.scalars(select(Asset).where(Asset.storage_key == output_key)).one()
+    assert asset.provider == "apimart"
+    assert storage.saved[output_key] == (b"bound-apimart-4k", "image/png")
+    assert default_openai.payloads == []
+    assert bound_apimart.capability_checks >= 1
+    assert bound_apimart.payloads[0]["resolution"] == "4k"
+    assert len(bound_apimart.payloads[0]["image_urls"]) == 2
+
+
+def test_image_worker_uses_durable_request_fields_when_queue_payload_drifts(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.providers import base as provider_base
+    from app.workers import image_gen
+
+    task_id = "photo-durable-provider-request-unit"
+    durable_image_key = "uploads/durable-product.png"
+    queue_only_image_key = "uploads/queue-only-product.png"
+    durable_params = {
+        "image_provider": "openai",
+        "image_resolution": "1k",
+        "image_keys": [durable_image_key],
+    }
+    with auth_db() as db:
+        _seed_reserved_photo(db, auth_context["tenant_id"], auth_context["user_id"], task_id)
+        task = db.get(VideoTask, task_id)
+        task.params = {**(task.params or {}), **durable_params}
+        db.add(
+            ProviderConfig(
+                tenant_id=auth_context["tenant_id"],
+                capability="image",
+                provider="openai",
+                config={"api_key": "test-openai-key"},
+                is_active=True,
+            )
+        )
+        db.commit()
+
+    storage = _FakeStorage()
+    storage.saved[f"tenants/{auth_context['tenant_id']}/{durable_image_key}"] = (
+        b"durable-product",
+        "image/png",
+    )
+    storage.saved[f"tenants/{auth_context['tenant_id']}/{queue_only_image_key}"] = (
+        b"queue-only-product",
+        "image/png",
+    )
+    store = _MemProgressStore()
+    provider = _FakeProvider(
+        image_bytes=b"openai-result",
+        expected_input_bytes=b"durable-product",
+        provider_name="openai",
+    )
+    provider.capabilities = ImageProviderCapabilities(
+        supported_resolutions=frozenset({"1k"}),
+        max_reference_images=1,
+    )
+    monkeypatch.setitem(
+        provider_base._REGISTRY,
+        ("image", "openai"),
+        lambda _config: provider,
+    )
+    monkeypatch.setattr(image_gen, "SessionLocal", auth_db)
+    monkeypatch.setattr(image_gen, "build_progress_store", lambda _redis_url: store)
+    monkeypatch.setattr(image_gen, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(image_gen, "label_artifact_bytes", lambda content, **_kwargs: content)
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": "preserve the durable product reference",
+            "image_provider": "openai",
+            "image_resolution": "4k",
+            "image_keys": [durable_image_key, queue_only_image_key],
+        }
+    )
+
+    assert result["status"] == "SUCCESS"
+    assert provider.payloads[0]["resolution"] == "1k"
+    assert len(provider.payloads[0]["image_urls"]) == 1
+    assert _decode_data_uri(provider.payloads[0]["image_urls"][0])[1] == b"durable-product"
+
+
+def test_image_worker_ignores_queue_only_poster_kind_for_bound_photo(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    task_id = "photo-queue-poster-injection-unit"
+    source_key = f"tenants/{auth_context['tenant_id']}/uploads/product.png"
+    source_bytes = _product_png_bytes()
+    with auth_db() as db:
+        subscription_id = _seed_reserved_photo(
+            db,
+            auth_context["tenant_id"],
+            auth_context["user_id"],
+            task_id,
+        )
+        task = db.get(VideoTask, task_id)
+        task.params = {
+            **(task.params or {}),
+            "image_provider": "apimart",
+            "image_resolution": "1k",
+            "source_storage_key": source_key,
+        }
+        db.commit()
+
+    storage = _FakeStorage()
+    storage.saved[source_key] = (source_bytes, "image/png")
+    store = _MemProgressStore()
+    provider = _FakeProvider(
+        image_bytes=_sized_png_bytes(32, 32),
+        expected_input_bytes=source_bytes,
+    )
+    image_gen = _patch_worker(monkeypatch, auth_db, storage, store, provider)
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": "premium product photo",
+            "kind": "ecom_poster",
+            "template_id": "promo_bold",
+            "title": "queue-only title",
+            "subtitle": "queue-only subtitle",
+            "source_storage_key": source_key,
+        }
+    )
+
+    assert result["status"] == "SUCCESS"
+    assert len(provider.payloads) == 1
+    with auth_db() as db:
+        usage = db.scalars(
+            select(UsageRecord).where(UsageRecord.video_task_id == task_id)
+        ).one()
+        subscription = db.get(Subscription, subscription_id)
+    assert usage.status == "settled"
+    assert subscription.quota_credits_reserved == 0
+    assert subscription.quota_credits_used == 30
+
+
+def test_image_worker_empty_source_list_cannot_hide_scalar_reference_from_capability_guard(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    task_id = "photo-empty-source-list-capability-unit"
+    image_key = "uploads/legacy-product.png"
+    with auth_db() as db:
+        subscription_id = _seed_reserved_photo(
+            db,
+            auth_context["tenant_id"],
+            auth_context["user_id"],
+            task_id,
+        )
+        task = db.get(VideoTask, task_id)
+        task.params = {
+            **(task.params or {}),
+            "image_provider": "future-no-reference",
+            "image_resolution": "1k",
+            "source_storage_keys": [],
+            "image_key": image_key,
+        }
+        db.commit()
+
+    storage = _FakeStorage()
+    storage.saved[f"tenants/{auth_context['tenant_id']}/{image_key}"] = (
+        b"legacy-product",
+        "image/png",
+    )
+    store = _MemProgressStore()
+    provider = _FakeProvider(
+        expected_input_bytes=b"legacy-product",
+        provider_name="future-no-reference",
+    )
+    provider.capabilities = ImageProviderCapabilities(
+        supported_resolutions=frozenset({"1k"}),
+        max_reference_images=0,
+    )
+    image_gen = _patch_worker(monkeypatch, auth_db, storage, store, provider)
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": "premium product photo",
+        }
+    )
+
+    assert result["status"] == "FAILURE"
+    assert result["error_code"] == "IMAGE_PROVIDER_REFERENCE_IMAGES_UNSUPPORTED"
+    assert provider.payloads == []
+    with auth_db() as db:
+        usage = db.scalars(
+            select(UsageRecord).where(UsageRecord.video_task_id == task_id)
+        ).one()
+        subscription = db.get(Subscription, subscription_id)
+    assert usage.status == "released"
+    assert subscription.quota_credits_reserved == 0
+
+
 @pytest.mark.parametrize("reference_count", [1, 6])
 def test_image_worker_prefers_photo_image_keys_over_scalar_fallback(
     monkeypatch,
@@ -935,6 +1277,7 @@ def test_image_worker_prefers_photo_image_keys_over_scalar_fallback(
             "tenant_id": auth_context["tenant_id"],
             "video_task_id": task_id,
             "topic": "combine all six product references",
+            "source_storage_keys": [],
             "image_keys": image_keys,
             "image_key": legacy_scalar_key,
         }

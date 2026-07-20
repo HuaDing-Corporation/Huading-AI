@@ -320,7 +320,6 @@ def _patch_replicate_providers(monkeypatch, *, reverse=None, image=None):
         raise AssertionError(f"unexpected capability {capability}")
 
     monkeypatch.setattr("app.services.ecom_replicate.resolve_named_provider", fake_resolve)
-    monkeypatch.setattr("app.workers.image_gen.resolve", fake_resolve)
     monkeypatch.setattr("app.workers.image_gen.resolve_named_provider", fake_resolve)
     return reverse, image
 

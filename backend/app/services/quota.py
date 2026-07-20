@@ -798,6 +798,7 @@ def reserve_image_generation_quota(
     tenant_id: str,
     video_task_id: str,
     n: int = 1,
+    provider: str = "apimart",
 ) -> Reservation:
     estimate = estimate_image_generation_quota(
         db,
@@ -819,8 +820,8 @@ def reserve_image_generation_quota(
         subscription_id=subscription.id,
         video_task_id=video_task_id,
         capability="image",
-        provider="apimart",
-        model=settings.engine_apimart_image_model,
+        provider=provider,
+        model=settings.engine_apimart_image_model if provider == "apimart" else None,
         unit="image",
         quantity=Decimal(estimate.estimated_seconds),
         credits=estimate.estimated_credits,

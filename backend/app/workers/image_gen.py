@@ -25,7 +25,14 @@ from app.core.image_aspect_ratio import (
 from app.core.logging import get_logger
 from app.db.models import Asset, EcomReplicateJob, EcomReplicateOutput, TaskAsset, VideoTask
 from app.db.session import SessionLocal
-from app.providers.base import invoke, resolve, resolve_named_provider
+from app.providers.base import (
+    ImageProviderCapabilitiesError,
+    ProviderResolutionError,
+    invoke,
+    resolve_named_provider,
+    resolve_with_name,
+    validate_image_provider_request,
+)
 from app.services.apimart_costs import apimart_cost_cents_from_result
 from app.services.ecom_replicate import record_analysis_cost, record_render_cost
 from app.services.history import prune_video_history_best_effort
@@ -183,6 +190,10 @@ def classify_image_error(exc: Exception) -> str:
         return _INVALID_REQUEST_ERROR_CODE
     if isinstance(exc, TransparentAlphaMissingError):
         return _ALPHA_MISSING_ERROR_CODE
+    if isinstance(exc, ImageProviderCapabilitiesError):
+        return exc.code
+    if isinstance(exc, ProviderResolutionError):
+        return "IMAGE_PROVIDER_NOT_CONFIGURED"
     return _ERROR_CODE
 
 
@@ -324,7 +335,8 @@ def _source_storage_keys(params: Mapping[str, Any], tenant_id: str) -> list[str]
     if raw_keys is not None:
         if not isinstance(raw_keys, list | tuple):
             raise ValueError("source_storage_keys must be a list.")
-        return [_validate_source_storage_key(tenant_id, str(key)) for key in raw_keys]
+        if raw_keys:
+            return [_validate_source_storage_key(tenant_id, str(key)) for key in raw_keys]
     image_keys = params.get("image_keys")
     if image_keys:
         if not isinstance(image_keys, list | tuple):
@@ -333,6 +345,35 @@ def _source_storage_keys(params: Mapping[str, Any], tenant_id: str) -> list[str]
     if params.get("source_storage_key"):
         return [_validate_source_storage_key(tenant_id, str(params["source_storage_key"]))]
     return []
+
+
+def _resolve_bound_image_provider(db, *, task: VideoTask, params: Mapping[str, Any]):
+    durable_params = dict(task.params or {})
+    if "image_provider" in durable_params:
+        raw_provider_name = durable_params["image_provider"]
+        if not isinstance(raw_provider_name, str) or not raw_provider_name.strip():
+            raise ProviderResolutionError("Image provider binding is invalid.")
+        provider_name = raw_provider_name.strip()
+        provider = resolve_named_provider(
+            db,
+            tenant_id=task.tenant_id,
+            capability="image",
+            provider=provider_name,
+        )
+    else:
+        selection = resolve_with_name(
+            db,
+            tenant_id=task.tenant_id,
+            capability="image",
+        )
+        provider_name = selection.name
+        provider = selection.provider
+
+    request_params = {**params, **durable_params}
+    validate_image_provider_request(provider, request_params)
+    if "image_provider" not in durable_params:
+        task.params = {**durable_params, "image_provider": provider_name}
+    return provider
 
 
 def _input_image_mime_type(storage_key: str, image_bytes: bytes) -> str:
@@ -709,29 +750,41 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
     temp_paths: list[Path] = []
 
     try:
-        ecom_poster = _is_ecom_poster_request(params)
-        prompt = str(params.get("script") or params.get("topic") or "").strip()
-        if not prompt and not ecom_poster:
-            raise ValueError("Image prompt is required.")
-        prompt = build_photo_prompt(
-            prompt,
-            master_prompt=params.get("master_prompt"),
-            master_negative_prompt=params.get("master_negative_prompt"),
-            negative_prompt=params.get("negative_prompt"),
-            similarity_strength=params.get("similarity_strength"),
-            creativity_strength=params.get("creativity_strength"),
-            subject_strength=params.get("subject_strength"),
-        )
-        ecom_cutout = _is_ecom_cutout_request(params)
-        ecom_model = _is_ecom_model_request(params)
-        ecom_background = _ecom_cutout_background(params)
-        if ecom_cutout:
-            prompt = _ecom_cutout_prompt(prompt, background=ecom_background)
-
         with SessionLocal() as db:
             task = db.get(VideoTask, task_id)
             if task is None or task.tenant_id != tenant_id:
                 raise ValueError("Video task not found for image generation.")
+            durable_params = {
+                key: value
+                for key, value in (task.params or {}).items()
+                if key not in {"image_size", "image_quality"}
+            }
+            params = {**params, **durable_params}
+            # Only the durable task may select the local, unbilled poster path.
+            # A queue-only kind must not bypass provider validation or quota settlement.
+            ecom_poster = _is_ecom_poster_request(durable_params)
+            prompt = str(params.get("script") or params.get("topic") or "").strip()
+            if not prompt and not ecom_poster:
+                raise ValueError("Image prompt is required.")
+            prompt = build_photo_prompt(
+                prompt,
+                master_prompt=params.get("master_prompt"),
+                master_negative_prompt=params.get("master_negative_prompt"),
+                negative_prompt=params.get("negative_prompt"),
+                similarity_strength=params.get("similarity_strength"),
+                creativity_strength=params.get("creativity_strength"),
+                subject_strength=params.get("subject_strength"),
+            )
+            ecom_cutout = _is_ecom_cutout_request(params)
+            ecom_model = _is_ecom_model_request(params)
+            ecom_background = _ecom_cutout_background(params)
+            if ecom_cutout:
+                prompt = _ecom_cutout_prompt(prompt, background=ecom_background)
+            provider = (
+                None
+                if ecom_poster
+                else _resolve_bound_image_provider(db, task=task, params=params)
+            )
             visible_label = bool(
                 (task.params or {}).get(
                     "apply_visible_label",
@@ -826,7 +879,7 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                     "mode": "compose",
                 }
             else:
-                provider = resolve(db, tenant_id=tenant_id, capability="image")
+                assert provider is not None
                 requested_aspect_ratio = _requested_image_aspect_ratio(params)
                 input_width, input_height = (
                     _image_dimensions(primary_input_bytes)
@@ -980,6 +1033,8 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                     video_task_id=task_id,
                     actual_seconds=1,
                     cost_cents=cost_cents,
+                    provider=str(result.get("provider") or "").strip() or None,
+                    model=str(result.get("model") or "").strip() or None,
                 )
             db.commit()
             prune_video_history_best_effort(

@@ -1,8 +1,10 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from io import BytesIO
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 from pydantic import ValidationError
 from sqlalchemy import select
 
@@ -12,6 +14,7 @@ from app.db.models import (
     Asset,
     CreditRate,
     Plan,
+    ProviderConfig,
     Subscription,
     TaskAsset,
     Tenant,
@@ -20,6 +23,7 @@ from app.db.models import (
     Voice,
 )
 from app.main import app
+from app.providers.base import ImageProviderCapabilities, ResolvedProvider
 from app.schemas.videos import VideoGenerateRequest
 from app.services.history import prune_video_history
 from app.services.storage.local import LocalObjectStorage
@@ -85,6 +89,15 @@ def _seed_billing(db, tenant_id: str) -> None:
             quota_credits_total=10000,
             quota_credits_used=0,
             quota_credits_reserved=0,
+        )
+    )
+    db.add(
+        ProviderConfig(
+            tenant_id=None,
+            capability="image",
+            provider="apimart",
+            config={"api_key": "test-apimart-key"},
+            is_active=True,
         )
     )
     db.add_all(
@@ -1155,10 +1168,18 @@ def test_prune_photo_history_after_create_keeps_newest_20(
             )
         db.commit()
 
+    generated_image = BytesIO()
+    Image.new("RGB", (1024, 1024), color="white").save(generated_image, format="PNG")
+
     class _ImmediatePhotoProvider:
+        capabilities = ImageProviderCapabilities(
+            supported_resolutions=frozenset({"1k", "2k", "4k"}),
+            max_reference_images=6,
+        )
+
         async def generate_image(self, _payload: dict) -> dict:
             return {
-                "image_bytes": b"new-photo",
+                "image_bytes": generated_image.getvalue(),
                 "mime_type": "image/png",
                 "model": "gpt-image-2",
             }
@@ -1171,10 +1192,20 @@ def test_prune_photo_history_after_create_keeps_newest_20(
         def apply_async(self, *, args, task_id, queue=None):
             assert queue == "image"
             assert task_id == args[0]["video_task_id"]
-            image_gen.run_image_generation(args[0])
+            worker_result = image_gen.run_image_generation(args[0])
+            assert worker_result["status"] == "SUCCESS"
             return type("Result", (), {"status": "SUCCESS"})()
 
     def resolve_photo_provider(_db, *, tenant_id, capability):
+        return ResolvedProvider(
+            name="apimart",
+            provider=_ImmediatePhotoProvider(),
+        )
+
+    def resolve_bound_photo_provider(_db, *, tenant_id, capability, provider):
+        assert tenant_id == auth_context["tenant_id"]
+        assert capability == "image"
+        assert provider == "apimart"
         return _ImmediatePhotoProvider()
 
     storage = _FakeStorage()
@@ -1182,7 +1213,8 @@ def test_prune_photo_history_after_create_keeps_newest_20(
     monkeypatch.setattr(image_gen, "SessionLocal", auth_db)
     monkeypatch.setattr(image_gen, "build_progress_store", lambda _redis_url: _ProgressSink())
     monkeypatch.setattr(image_gen, "create_object_storage", lambda _settings: storage)
-    monkeypatch.setattr(image_gen, "resolve", resolve_photo_provider)
+    monkeypatch.setattr(videos_route, "resolve_with_name", resolve_photo_provider)
+    monkeypatch.setattr(image_gen, "resolve_named_provider", resolve_bound_photo_provider)
     app.dependency_overrides[get_object_storage] = lambda: storage
     try:
         resp = TestClient(app).post(
@@ -1195,13 +1227,17 @@ def test_prune_photo_history_after_create_keeps_newest_20(
 
     assert resp.status_code == 202
     with auth_db() as db:
-        photo_ids = {
-            task.id for task in db.scalars(select(VideoTask).where(VideoTask.mode == "photo"))
-        }
+        photo_tasks = list(
+            db.scalars(select(VideoTask).where(VideoTask.mode == "photo"))
+        )
+        photo_ids = {task.id for task in photo_tasks}
+        created_photo = db.get(VideoTask, resp.json()["data"]["id"])
     assert len(photo_ids) == 20
     assert "old-photo-00" not in photo_ids
     assert "old-photo-01" not in photo_ids
     assert resp.json()["data"]["id"] in photo_ids
+    assert created_photo is not None
+    assert created_photo.status == "done"
     assert storage.deleted == [
         f"tenants/{auth_context['tenant_id']}/photos/old-00.png",
         f"tenants/{auth_context['tenant_id']}/photos/old-01.png",
