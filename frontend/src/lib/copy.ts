@@ -514,6 +514,9 @@ export const copy = {
     imageGeneric: "图片生成失败，请重试",
     // 抠图透明底专属（IMAGE_ALPHA_MISSING）：可操作文案，不落通用兜底
     imageAlphaMissing: "透明底生成失败：未返回透明像素，请重试或改用白底",
+    // 图片服务能力不匹配兜底（IMAGE_PROVIDER_* · FIX1）：BE 已按 provider 能力（如 OpenAI 仅 1K/1 张）在落钱前 422 且带
+    // 动态友好中文（含“请选择 1K”/“最多 N 张”），errorText 优先透出 BE message；仅当 message 意外为空时才落此兜底。
+    imageProviderCapability: "当前图片服务不支持所选清晰度或参考图数量，请调整后重试",
     // 视频失败友好映射（VIDEO-ERR-MAP-UI，与后端 VIDEO-ERR-MAP-BE 共用错误码）——绝不回落裸 error_message
     videoInsufficientBalance: "余额不足，无法生成，请充值后重试",
     videoTimeout: "生成超时，请稍后重试",

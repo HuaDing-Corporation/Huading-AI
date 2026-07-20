@@ -74,12 +74,16 @@ describe("generateScenePrompt · duration 透传（apiFetch 真走 MSW · SCENE-
 
 // IMAGE-GEN-OPTIMIZE-UI-0001 §四：photo 提交 mock 校验（createVideo 真走 MSW）。mock 不比 BE 宽松：image_keys 1–6、
 // 四强度 10..100 步10；未开启不出现。⚠️ 零回归：AI 封面(purpose:cover + image_size/image_quality，无 image_keys/强度)天然全过。
+// FIX1 真联调：image_keys 须为 BE 格式 uploads/<name>.{jpg,jpeg,png,webp}（POST /uploads 返回值），mock 已对齐收紧。
+const refKey = (i: number) => `uploads/ref-${i}.png`;
+const sixRefs = Array.from({ length: 6 }, (_, i) => refKey(i));
+
 describe("createVideo · photo 提交校验（apiFetch 真走 MSW · IMAGE-GEN-OPTIMIZE-UI-0001）", () => {
   it("合法 photo（6 张参考图 + 相似度 80）→ 202 accepted", async () => {
     const res = await createVideo({
       topic: "一只橘猫",
       video_mode: "photo",
-      image_keys: ["a", "b", "c", "d", "e", "f"],
+      image_keys: sixRefs,
       similarity_strength: 80,
       aspect_ratio: "1:1"
     });
@@ -88,8 +92,25 @@ describe("createVideo · photo 提交校验（apiFetch 真走 MSW · IMAGE-GEN-O
 
   it("防假绿：image_keys 7 张 → 422（1–6 上限）", async () => {
     await expect(
-      createVideo({ topic: "x", video_mode: "photo", image_keys: ["a", "b", "c", "d", "e", "f", "g"] })
+      createVideo({ topic: "x", video_mode: "photo", image_keys: [...sixRefs, refKey(6)] })
     ).rejects.toThrow();
+  });
+
+  // FIX1 真联调：逐字对齐 BE _IMAGE_KEY_RE——非 uploads/*.{jpg,jpeg,png,webp} 的假 key → 422（mock 此前放行「a」是假绿）。
+  it("防假绿：image_keys 格式非法（裸「a」非 uploads/*）→ 422", async () => {
+    await expect(createVideo({ topic: "x", video_mode: "photo", image_keys: ["a"] })).rejects.toThrow();
+    await expect(
+      createVideo({ topic: "x", video_mode: "photo", image_keys: ["uploads/x.gif"] })
+    ).rejects.toThrow(); // gif 不在 BE 白名单
+  });
+
+  // FIX1 真联调：四层提示词各 ≤20000（BE Field max_length + extra=forbid）。20001 → 422；20000 → 放行。
+  it("防假绿：提示词超 20000 → 422；恰 20000 → 202", async () => {
+    await expect(
+      createVideo({ topic: "x".repeat(20001), video_mode: "photo" })
+    ).rejects.toThrow();
+    const ok = await createVideo({ topic: "x".repeat(20000), video_mode: "photo", master_prompt: "y".repeat(20000) });
+    expect(ok.status).toBe("queued");
   });
 
   it("防假绿：强度非步长10（55）→ 422", async () => {

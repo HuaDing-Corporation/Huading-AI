@@ -19,6 +19,13 @@ const badDuration = (v: unknown): boolean => v !== undefined && v !== null && !N
 const badStrength = (v: unknown): boolean =>
   v !== undefined && v !== null && !(typeof v === "number" && Number.isInteger(v) && v >= 10 && v <= 100 && v % 10 === 0);
 
+// FIX1 真联调：逐字对齐 BE schemas/videos.py `_IMAGE_KEY_RE`——参考图 key 须为 POST /uploads 返回的 uploads/<name>.{jpg,jpeg,png,webp}。
+// mock 此前只卡数量不卡格式（比 BE 宽松 → 「a」这类假 key 假绿），本轮收紧防漂移。
+const PHOTO_IMAGE_KEY_RE = /^uploads\/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|webp)$/;
+// photo 四层提示词各 ≤20000（BE Field max_length + extra=forbid，超限 422，非静默截断）。
+const PHOTO_PROMPT_MAX = 20000;
+const overLen = (v: unknown): boolean => typeof v === "string" && v.length > PHOTO_PROMPT_MAX;
+
 // in-memory store so list/detail/SSE stay consistent within a session
 const videos = new Map<string, Record<string, unknown>>();
 // mock 种子（ECOM-FIXES-0001 ③ / cancelled 补 ECOM-HISTORY-CANCELLED-FIX-0001 ③）：预置电商(seedance_i2v)历史项，
@@ -1552,8 +1559,14 @@ export const handlers = [
     if (body.video_mode === "photo") {
       if (body.image_keys !== undefined) {
         const keys = body.image_keys;
-        if (!Array.isArray(keys) || keys.length < 1 || keys.length > 6) {
-          return err(422, "PHOTO_INVALID", "参考图 1–6 张");
+        // FIX1 真联调：数量 1–6 且每个 key 须匹配 BE 格式（uploads/<name>.{jpg,jpeg,png,webp}）——mock 此前只卡数量、放行「a」等假 key（比 BE 宽松）。
+        if (
+          !Array.isArray(keys) ||
+          keys.length < 1 ||
+          keys.length > 6 ||
+          keys.some((k) => typeof k !== "string" || !PHOTO_IMAGE_KEY_RE.test(k))
+        ) {
+          return err(422, "PHOTO_INVALID", "参考图 1–6 张，且 key 须为 uploads/<name>.{jpg,jpeg,png,webp}");
         }
       }
       if (
@@ -1562,6 +1575,10 @@ export const handlers = [
         badStrength(body.subject_strength)
       ) {
         return err(422, "PHOTO_INVALID", "强度取值须为 10..100 步长 10");
+      }
+      // FIX1 真联调：四层提示词各 ≤20000（BE Field max_length + extra=forbid，超限 422，非静默截断）。
+      if (overLen(body.topic) || overLen(body.master_prompt) || overLen(body.master_negative_prompt) || overLen(body.negative_prompt)) {
+        return err(422, "PHOTO_INVALID", "提示词最多 20000 字符");
       }
       // §3之二 清晰度档位：present 时须 1k/2k/4k（mock 不比 BE 宽松）。AI 封面不带 → 天然放过。
       if (body.image_resolution !== undefined && !["1k", "2k", "4k"].includes(body.image_resolution)) {
