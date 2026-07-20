@@ -1747,20 +1747,47 @@ export const handlers = [
   // ── 电商图扩展 Phase2 (ECOM-MODEL-UI-0001) — AI 模特(单张 + 批量) mock ──
   // 忠实后端：model-styles 返真列表；单张/批量塞真 photo VideoTask(kind=ecom_model, done)进
   // videos store，使现有 GET /videos/:id 轮询拿到 done + 模特图；批量 N clamp 1..20。非伪造(吸取教训)。
-  // 忠实后端 EcomModelStyle(仅 id+name)与真实预设列表(studio_white/lifestyle/street)，不伪造 thumbnail。
+  // 忠实后端 EcomModelStyle(仅 id+name)。ECOM-MODEL-OPTIMIZE-UI-0001 · D3：现有 3 个中文化(id 不变) + 新增 3 个，
+  // 名称随后端返回(前端不硬编码、拉取渲染)；风格改为可选(不选也能生成)。
   http.get(`${BASE}/api/v1/ecom-images/model-styles`, () =>
     ok({
       styles: [
-        { id: "studio_white", name: "Studio white" },
-        { id: "lifestyle", name: "Lifestyle" },
-        { id: "street", name: "Street style" }
+        { id: "studio_white", name: "棚拍白底" },
+        { id: "lifestyle", name: "生活场景" },
+        { id: "street", name: "街拍" },
+        { id: "commute", name: "通勤职场" },
+        { id: "vacation", name: "度假旅拍" },
+        { id: "editorial", name: "高级时尚大片" }
       ]
     })
   ),
+  // ECOM-MODEL-OPTIMIZE-UI-0001 · 单张 AI 模特 mock —— 逐条镜像 §四契约(不比 BE 宽松)：
+  //  商品图 1–N(0→422) + 模特图 0–N + 合计 ≤6(超→422) + product_images_mode 合法值(非法→422) +
+  //  style_id 与 custom_style 互斥(同时→422，以 BE 回执为准) + extra="forbid"(多余键→422，不误杀已知键)。
   http.post(`${BASE}/api/v1/ecom-images/model`, async ({ request }) => {
-    const body = (await request.json()) as { source_asset_id: string; gender: string; style_id: string; apply_visible_label?: boolean };
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown> & { apply_visible_label?: boolean };
+    const ALLOWED = [
+      "product_asset_ids", "model_asset_ids", "product_images_mode", "gender",
+      "style_id", "custom_style", "extra_prompt", "aspect_ratio", "apply_visible_label", "source_asset_id"
+    ];
+    // extra="forbid" 镜像（对齐本文件既有写法：列出多余键，报错信息可操作）。
+    const extra = Object.keys(body).filter((k) => !ALLOWED.includes(k));
+    if (extra.length) return err(422, "VALIDATION_ERROR", `Extra inputs are not permitted: ${extra.join(",")}`);
+    const productIds = Array.isArray(body.product_asset_ids) ? (body.product_asset_ids as unknown[]) : [];
+    if (productIds.length < 1) return err(422, "VALIDATION_ERROR", "至少 1 张商品图");
+    const modelIds = Array.isArray(body.model_asset_ids) ? (body.model_asset_ids as unknown[]) : [];
+    if (productIds.length + modelIds.length > 6) return err(422, "VALIDATION_ERROR", "商品图 + 模特图合计最多 6 张");
+    if (body.product_images_mode !== "multi_angle" && body.product_images_mode !== "multi_item")
+      return err(422, "VALIDATION_ERROR", "product_images_mode 非法（multi_angle / multi_item）");
+    const hasStyle = typeof body.style_id === "string" && body.style_id.length > 0;
+    const hasCustom = typeof body.custom_style === "string" && body.custom_style.trim().length > 0;
+    if (hasStyle && hasCustom) return err(422, "VALIDATION_ERROR", "style_id 与 custom_style 互斥");
     const id = `mock-${++videoSeq}`;
-    const url = `https://mock.local/model-${body.style_id || "studio"}.png`;
+    // 风格 key 用于 mock 产物 url：自定义 > 预设 > 默认（三档 top-down，避免嵌套三元）。
+    let styleKey = "studio";
+    if (hasCustom) styleKey = "custom";
+    else if (hasStyle) styleKey = body.style_id as string;
+    const url = `https://mock.local/model-${styleKey}.png`;
     videos.set(id, {
       id, status: "done", progress: 100, topic: "AI 模特图",
       mode: "photo", kind: "ecom_model", created_at: new Date(0).toISOString(),

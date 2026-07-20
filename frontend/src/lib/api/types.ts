@@ -460,29 +460,43 @@ export interface ModelStylesResponse {
   styles: ModelStyle[];
 }
 
+// 商品图组合语义（ECOM-MODEL-OPTIMIZE-UI-0001 · D2）：
+//  multi_angle=同一件商品的多角度；multi_item=同一模特上身多件商品（衣裤鞋饰等，默认）。
+export type ProductImagesMode = "multi_angle" | "multi_item";
+
 // POST /ecom-images/model（内部创建 photo VideoTask kind=ecom_model，返 task_id 供轮询）
 // 字段名对齐后端 EcomModelRequest(extra="forbid")：自定义补充 = extra_prompt（非 custom_prompt，否则 422）。
+// ECOM-MODEL-OPTIMIZE-UI-0001（D1–D4）：商品图转多张 + 新增模特图 + 组合语义 + 风格可选/自定义 + 取消补充字数限制。
 export interface ModelRequest {
-  source_asset_id: string;
+  product_asset_ids: string[]; // 商品图 asset_id（1–N；受「商品+模特合计 ≤6」约束，D1）
+  model_asset_ids?: string[]; // 模特图 asset_id（0–N；不传=纯文生模特，D1）
+  product_images_mode: ProductImagesMode; // 商品图组合语义（默认 multi_item，D2）
   gender: ModelGender;
-  style_id: string;
-  extra_prompt?: string; // 自定义补充。BE ≤20000 字符（EcomModelRequest.extra_prompt max_length=_ECOM_MODEL_TEXT_LIMIT + extra=forbid，#210 起超限 422、不再静默截断到 200）
+  style_id?: string; // 风格预设 id（改为可选；与 custom_style 互斥，D3）
+  custom_style?: string; // 自定义风格（不限字数；与 style_id 互斥，D3）
+  // 🔴 D4：自定义补充**不限字数**。此前注释「后端无长度限制」是错的——schema 无限制，但 route 层会**静默截断到 200**；
+  //   本期后端已移除该截断，前端也去掉 ≤200 门（订正见 §二.1）。
+  extra_prompt?: string;
   aspect_ratio?: string; // 画面比例（IMAGE-ASPECT-RATIO-UI-0001；默认 1:1）
   apply_visible_label?: boolean; // AI 显式标识开关（LABEL-TOGGLE-UI-0001，默认关）
+  source_asset_id?: string; // 兼容保留（批量端点 item / 既有标量调用方仍用；单张新表单不发）
 }
 export interface ModelResponse {
   task_id: string;
   status: string;
 }
 
-// POST /ecom-images/model/batch（fan-out N clamp 1..20）
+// POST /ecom-images/model/batch（fan-out N clamp 1..20）。
+// ⚠️ ECOM-MODEL-OPTIMIZE-UI-0001：单张 /model 已转多图新契约（product_asset_ids…），但**批量 item 刻意保留旧标量形态**
+//   （§四「标量保留兼容——批量端点 item 与既有调用方」）——每项仍是「1 商品图 → 1 任务」的 fan-out。本期新表单是
+//   单张 /model 的唯一调用方、不走批量；批量端点（含 useModelBatch）保留供兼容/未来（D5 批量换模特单独立项，不在本期）。
 export interface ModelBatchItem {
   source_asset_id: string;
   gender: ModelGender;
   style_id: string;
   extra_prompt?: string;
   aspect_ratio?: string; // 画面比例（每项独立）
-  apply_visible_label?: boolean; // 批量每项独立标识（后端 batch item = EcomModelRequest）
+  apply_visible_label?: boolean; // 批量每项独立标识
 }
 export interface ModelBatchRequest {
   items: ModelBatchItem[];

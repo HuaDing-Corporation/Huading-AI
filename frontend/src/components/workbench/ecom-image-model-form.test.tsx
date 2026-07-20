@@ -5,7 +5,6 @@ import { copy } from "@/lib/copy";
 
 const uploadMock = vi.hoisted(() => ({ mutateAsync: vi.fn(), isPending: false }));
 const modelMock = vi.hoisted(() => ({ mutateAsync: vi.fn(), isPending: false }));
-const modelBatchMock = vi.hoisted(() => ({ mutateAsync: vi.fn(), isPending: false }));
 const stylesMock = vi.hoisted(() => ({ data: [] as Array<{ id: string; name: string }>, isLoading: false, isError: false }));
 const trackExistingMock = vi.hoisted(() => vi.fn());
 const tasksMock = vi.hoisted(() => ({ tasks: [] as Array<Record<string, unknown>> }));
@@ -13,7 +12,6 @@ const tasksMock = vi.hoisted(() => ({ tasks: [] as Array<Record<string, unknown>
 vi.mock("@/lib/api/hooks", () => ({
   useUploadImage: () => ({ mutateAsync: uploadMock.mutateAsync, isPending: uploadMock.isPending }),
   useModelImage: () => ({ mutateAsync: modelMock.mutateAsync, isPending: modelMock.isPending }),
-  useModelBatch: () => ({ mutateAsync: modelBatchMock.mutateAsync, isPending: modelBatchMock.isPending }),
   useModelStyles: () => ({ data: stylesMock.data, isLoading: stylesMock.isLoading, isError: stylesMock.isError })
 }));
 vi.mock("@/lib/videos/tasks-context", () => ({
@@ -27,205 +25,197 @@ const doneTask = (id: string, url: string) => ({
   taskId: id, status: "done", progress: 100, statusLabel: "已完成",
   playbackUrl: url, downloadUrl: `${url}?dl=1`, topic: "x", mode: "photo", retryable: false
 });
-// 测试用风格无 thumbnail_url → 选项可读名仅为风格名（getByRole name 精确匹配）
+// 测试用风格：id 对齐真实预设，name 为中文展示名（getByRole name 精确匹配）
 const STYLES = [
-  { id: "studio", name: "简约棚拍" },
-  { id: "street", name: "街头实景" }
+  { id: "studio_white", name: "棚拍白底" },
+  { id: "street", name: "街拍" }
 ];
+
+let uploadSeq = 0;
+/**
+ * 向指定 picker 上传若干图片，等**缩略图渲染落地**——即 setItems→effect→父 onChange(setState) 整条链已 flush，
+ * 父组件的 product/model ids 已更新（比只等 mutateAsync 被调用可靠；预览 URL 都是 mock 的 "blob:mock"）。
+ */
+const uploadTo = async (inputId: string, files: File[]) => {
+  const count = () => document.querySelectorAll('img[src="blob:mock"]').length;
+  const before = count();
+  fireEvent.change(document.querySelector(`#${inputId}`)!, { target: { files } });
+  await waitFor(() => expect(count()).toBe(before + files.length));
+};
+const clickGenerate = () => fireEvent.click(screen.getByRole("button", { name: "生成" }));
+const lastBody = () => modelMock.mutateAsync.mock.calls[0][0];
 
 beforeEach(() => {
   window.localStorage.clear(); // 每用例干净起点：AI 标识开关默认关
   URL.createObjectURL = vi.fn(() => "blob:mock");
   URL.revokeObjectURL = vi.fn();
+  uploadSeq = 0;
   uploadMock.isPending = false;
   modelMock.isPending = false;
-  modelBatchMock.isPending = false;
   stylesMock.data = STYLES;
   stylesMock.isLoading = false;
   stylesMock.isError = false;
   tasksMock.tasks = [];
-  uploadMock.mutateAsync.mockResolvedValue({ asset_id: "asset-1" });
+  uploadMock.mutateAsync.mockImplementation(async () => ({ asset_id: `asset-${++uploadSeq}` })); // 每次唯一 asset_id
   modelMock.mutateAsync.mockResolvedValue({ task_id: "t-1", status: "queued" });
-  modelBatchMock.mutateAsync.mockResolvedValue({
-    batch_id: "b-1",
-    tasks: [
-      { task_id: "t-1", source_asset_id: "asset-1", status: "queued" },
-      { task_id: "t-2", source_asset_id: "asset-1", status: "queued" }
-    ]
-  });
 });
 afterEach(() => {
   vi.clearAllMocks();
-  window.localStorage.clear(); // 清 AI 标识开关记忆，隔离用例
+  window.localStorage.clear();
 });
 
-describe("EcomImageModelForm (电商图 · AI 模特)", () => {
-  it("风格必填门：上传后未选风格仍禁用生成", async () => {
+describe("EcomImageModelForm (电商图 · AI 模特优化)", () => {
+  it("🔴 商品图必填门(D1)：未传商品图 → 生成禁用", () => {
     render(<EcomImageModelForm />);
-    fireEvent.change(document.querySelector("#ecom-model-source")!, { target: { files: [png("p.png")] } });
-    await waitFor(() => expect(uploadMock.mutateAsync).toHaveBeenCalled());
     expect(screen.getByRole("button", { name: "生成" })).toBeDisabled();
   });
 
-  it("单张：上传 + 选风格 → 生成 → model 提交 {source_asset_id,gender,style_id} + trackExisting + 结果图", async () => {
-    tasksMock.tasks = [doneTask("t-1", "https://mock.local/model-studio.png")];
+  it("单张 happy path：1 商品图 → 生成 → 提交 product_asset_ids + 默认 multi_item + trackExisting + 结果图", async () => {
+    tasksMock.tasks = [doneTask("t-1", "https://mock.local/model-studio_white.png")];
     render(<EcomImageModelForm />);
-
-    fireEvent.change(document.querySelector("#ecom-model-source")!, { target: { files: [png("p.png")] } });
-    fireEvent.click(screen.getByRole("button", { name: "简约棚拍" }));
+    await uploadTo("ecom-model-product", [png("p.png")]);
     await waitFor(() => expect(screen.getByRole("button", { name: "生成" })).toBeEnabled());
 
-    fireEvent.click(screen.getByRole("button", { name: "生成" }));
+    clickGenerate();
     await waitFor(() =>
       expect(modelMock.mutateAsync).toHaveBeenCalledWith({
-        source_asset_id: "asset-1",
+        product_asset_ids: ["asset-1"],
+        model_asset_ids: undefined,
+        product_images_mode: "multi_item",
         gender: "female",
-        style_id: "studio",
-        aspect_ratio: "1:1",
+        style_id: undefined,
+        custom_style: undefined,
         extra_prompt: undefined,
+        aspect_ratio: "1:1",
         apply_visible_label: false
       })
     );
     expect(trackExistingMock).toHaveBeenCalledWith("t-1", expect.any(String), "photo", false);
     expect(await screen.findByRole("img", { name: copy.workbench.ecomResultsLabel })).toHaveAttribute(
       "src",
-      "https://mock.local/model-studio.png"
+      "https://mock.local/model-studio_white.png"
     );
   });
 
-  it("开启 AI 标识开关 → model 提交 apply_visible_label:true + trackExisting 第4参 true（承重）", async () => {
-    tasksMock.tasks = [doneTask("t-1", "https://mock.local/model-studio.png")];
+  it("🔴 承重·额度联动(D1)：上传 2 张商品图 → 模特图上限自动变 4 + 剩余额度更新（变异：解除联动 → 红）", async () => {
     render(<EcomImageModelForm />);
-    fireEvent.change(document.querySelector("#ecom-model-source")!, { target: { files: [png("p.png")] } });
-    fireEvent.click(screen.getByRole("button", { name: "简约棚拍" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "生成" })).toBeEnabled());
+    await uploadTo("ecom-model-product", [png("a.png"), png("b.png")]);
+    // 模特图 picker 上传按钮 max = 6 − 商品图 2 = 4（联动）
+    expect(await screen.findByRole("button", { name: /上传模特图（0\/4）/ })).toBeInTheDocument();
+    // 剩余额度：6 − 2 − 0 = 4
+    expect(screen.getByText(copy.workbench.ecomModelBudgetRemaining(4))).toBeInTheDocument();
+  });
+
+  it("模特图选填(D1)：1 商品图 + 1 模特图 → 提交 model_asset_ids", async () => {
+    render(<EcomImageModelForm />);
+    await uploadTo("ecom-model-product", [png("p.png")]); // asset-1
+    await uploadTo("ecom-model-model", [png("m.png")]); // asset-2
+    clickGenerate();
+    await waitFor(() => expect(modelMock.mutateAsync).toHaveBeenCalled());
+    expect(lastBody().product_asset_ids).toEqual(["asset-1"]);
+    expect(lastBody().model_asset_ids).toEqual(["asset-2"]);
+  });
+
+  it("承重·组合语义默认(D2)：1 商品图（开关隐藏）→ 仍提交 product_images_mode:multi_item", async () => {
+    render(<EcomImageModelForm />);
+    await uploadTo("ecom-model-product", [png("a.png")]);
+    // 单张商品图：组合方式开关不显示（渐进披露）
+    expect(screen.queryByRole("group", { name: copy.workbench.ecomProductModeLabel })).not.toBeInTheDocument();
+    clickGenerate();
+    await waitFor(() => expect(modelMock.mutateAsync).toHaveBeenCalled());
+    expect(lastBody()).toMatchObject({ product_images_mode: "multi_item" });
+  });
+
+  it("🔴 承重·组合语义(D2)：>1 商品图显示开关，选多角度 → 提交 product_images_mode:multi_angle（变异：写死/不传 → 红）", async () => {
+    render(<EcomImageModelForm />);
+    await uploadTo("ecom-model-product", [png("a.png"), png("b.png")]);
+    expect(await screen.findByRole("group", { name: copy.workbench.ecomProductModeLabel })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: copy.workbench.ecomProductModeMultiAngle }));
+    clickGenerate();
+    await waitFor(() => expect(modelMock.mutateAsync).toHaveBeenCalled());
+    expect(lastBody()).toMatchObject({ product_images_mode: "multi_angle" });
+  });
+
+  it("🔴 承重·风格互斥(D3)：选预设 → 自定义框禁用（变异：解除禁用 → 红）", () => {
+    render(<EcomImageModelForm />);
+    fireEvent.click(screen.getByRole("button", { name: "棚拍白底" }));
+    expect(screen.getByLabelText(copy.workbench.ecomCustomStyleLabel)).toBeDisabled();
+  });
+
+  it("🔴 承重·风格互斥(D3)：填自定义 → 预设禁用 + 提交带 custom_style 不带 style_id（变异：同送 → 红）", async () => {
+    render(<EcomImageModelForm />);
+    await uploadTo("ecom-model-product", [png("a.png")]);
+    fireEvent.change(screen.getByLabelText(copy.workbench.ecomCustomStyleLabel), { target: { value: "赛博朋克霓虹" } });
+    expect(screen.getByRole("button", { name: "棚拍白底" })).toBeDisabled(); // 预设禁用
+    clickGenerate();
+    await waitFor(() => expect(modelMock.mutateAsync).toHaveBeenCalled());
+    expect(lastBody().custom_style).toBe("赛博朋克霓虹");
+    expect(lastBody().style_id).toBeUndefined();
+  });
+
+  it("风格可选(D3)：不选风格、商品图已传 → 生成可用 + 提交无 style_id/custom_style", async () => {
+    render(<EcomImageModelForm />);
+    await uploadTo("ecom-model-product", [png("a.png")]);
+    expect(screen.getByRole("button", { name: "生成" })).toBeEnabled();
+    clickGenerate();
+    await waitFor(() => expect(modelMock.mutateAsync).toHaveBeenCalled());
+    expect(lastBody().style_id).toBeUndefined();
+    expect(lastBody().custom_style).toBeUndefined();
+  });
+
+  it("选风格预设 → 提交带 style_id", async () => {
+    render(<EcomImageModelForm />);
+    await uploadTo("ecom-model-product", [png("a.png")]);
+    fireEvent.click(screen.getByRole("button", { name: "街拍" }));
+    clickGenerate();
+    await waitFor(() => expect(modelMock.mutateAsync).toHaveBeenCalled());
+    expect(lastBody().style_id).toBe("street");
+  });
+
+  it("🔴 自定义补充取消 200 限制(D4)：输入 250 字 → 无 200 计数、提交 extra_prompt 全长 250（变异：改回 slice(0,200) → 红）", async () => {
+    render(<EcomImageModelForm />);
+    await uploadTo("ecom-model-product", [png("a.png")]);
+    fireEvent.change(screen.getByLabelText(/自定义补充/), { target: { value: "x".repeat(250) } });
+    expect(screen.queryByText("200/200")).not.toBeInTheDocument(); // 计数封顶已移除
+    clickGenerate();
+    await waitFor(() => expect(modelMock.mutateAsync).toHaveBeenCalled());
+    expect(lastBody().extra_prompt).toHaveLength(250);
+  });
+
+  it("性别：选男 → 提交 gender:male", async () => {
+    render(<EcomImageModelForm />);
+    await uploadTo("ecom-model-product", [png("p.png")]);
+    fireEvent.click(screen.getByRole("button", { name: "男" }));
+    clickGenerate();
+    await waitFor(() => expect(modelMock.mutateAsync).toHaveBeenCalled());
+    expect(lastBody().gender).toBe("male");
+  });
+
+  it("开启 AI 标识开关 → 提交 apply_visible_label:true + trackExisting 第 4 参 true（承重）", async () => {
+    tasksMock.tasks = [doneTask("t-1", "https://mock.local/model-studio_white.png")];
+    render(<EcomImageModelForm />);
+    await uploadTo("ecom-model-product", [png("p.png")]);
     fireEvent.click(screen.getByRole("switch")); // 开启 AI 生成标识
-    fireEvent.click(screen.getByRole("button", { name: "生成" }));
-    await waitFor(() =>
-      expect(modelMock.mutateAsync).toHaveBeenCalledWith({
-        source_asset_id: "asset-1",
-        gender: "female",
-        style_id: "studio",
-        aspect_ratio: "1:1",
-        extra_prompt: undefined,
-        apply_visible_label: true
-      })
-    );
+    clickGenerate();
+    await waitFor(() => expect(modelMock.mutateAsync).toHaveBeenCalled());
+    expect(lastBody().apply_visible_label).toBe(true);
     expect(trackExistingMock).toHaveBeenCalledWith("t-1", expect.any(String), "photo", true);
   });
 
-  it("性别 + 自定义补充：提交带 gender=male、extra_prompt(对齐后端字段名)", async () => {
-    tasksMock.tasks = [doneTask("t-1", "https://mock.local/model-studio.png")];
-    render(<EcomImageModelForm />);
-
-    fireEvent.change(document.querySelector("#ecom-model-source")!, { target: { files: [png("p.png")] } });
-    fireEvent.click(screen.getByRole("button", { name: "简约棚拍" }));
-    fireEvent.click(screen.getByRole("button", { name: "男" }));
-    fireEvent.change(screen.getByLabelText(/自定义补充/), { target: { value: "暖光街头微笑站姿" } });
-    await waitFor(() => expect(screen.getByRole("button", { name: "生成" })).toBeEnabled());
-
-    fireEvent.click(screen.getByRole("button", { name: "生成" }));
-    await waitFor(() =>
-      expect(modelMock.mutateAsync).toHaveBeenCalledWith({
-        source_asset_id: "asset-1",
-        gender: "male",
-        style_id: "studio",
-        aspect_ratio: "1:1",
-        extra_prompt: "暖光街头微笑站姿",
-        apply_visible_label: false
-      })
-    );
-  });
-
-  it("gender=不限(any)：提交带 gender=any", async () => {
-    tasksMock.tasks = [doneTask("t-1", "https://mock.local/model-studio.png")];
-    render(<EcomImageModelForm />);
-
-    fireEvent.change(document.querySelector("#ecom-model-source")!, { target: { files: [png("p.png")] } });
-    fireEvent.click(screen.getByRole("button", { name: "简约棚拍" }));
-    fireEvent.click(screen.getByRole("button", { name: "不限" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "生成" })).toBeEnabled());
-
-    fireEvent.click(screen.getByRole("button", { name: "生成" }));
-    await waitFor(() => expect(modelMock.mutateAsync).toHaveBeenCalled());
-    expect(modelMock.mutateAsync.mock.calls[0][0]).toMatchObject({ gender: "any", style_id: "studio" });
-  });
-
-  it("自定义补充 ≤200：超长输入被截断到 200，提交体 extra_prompt 长度封顶 200", async () => {
-    tasksMock.tasks = [doneTask("t-1", "https://mock.local/model-studio.png")];
-    render(<EcomImageModelForm />);
-
-    fireEvent.change(document.querySelector("#ecom-model-source")!, { target: { files: [png("p.png")] } });
-    fireEvent.click(screen.getByRole("button", { name: "简约棚拍" }));
-    fireEvent.change(screen.getByLabelText(/自定义补充/), { target: { value: "x".repeat(250) } });
-    // footer 计数封顶 200/200
-    expect(screen.getByText("200/200")).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("button", { name: "生成" })).toBeEnabled());
-
-    fireEvent.click(screen.getByRole("button", { name: "生成" }));
-    await waitFor(() => expect(modelMock.mutateAsync).toHaveBeenCalled());
-    expect(modelMock.mutateAsync.mock.calls[0][0].extra_prompt).toHaveLength(200);
-  });
-
-  it("批量：多图 + 选风格 → 生成 → modelBatch fan-out(items×N)+ trackExisting×N + 批量下载", async () => {
-    tasksMock.tasks = [doneTask("t-1", "https://mock.local/1.png"), doneTask("t-2", "https://mock.local/2.png")];
-    render(<EcomImageModelForm />);
-
-    fireEvent.click(screen.getByRole("button", { name: "批量" }));
-    fireEvent.change(document.querySelector("#ecom-model-batch")!, { target: { files: [png("a.png"), png("b.png")] } });
-    await waitFor(() => expect(uploadMock.mutateAsync).toHaveBeenCalledTimes(2));
-    fireEvent.click(screen.getByRole("button", { name: "简约棚拍" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "生成" })).toBeEnabled());
-
-    fireEvent.click(screen.getByRole("button", { name: "生成" }));
-    await waitFor(() => expect(modelBatchMock.mutateAsync).toHaveBeenCalledTimes(1));
-    expect(modelBatchMock.mutateAsync.mock.calls[0][0]).toEqual({
-      items: [
-        { source_asset_id: "asset-1", gender: "female", style_id: "studio", aspect_ratio: "1:1", extra_prompt: undefined, apply_visible_label: false },
-        { source_asset_id: "asset-1", gender: "female", style_id: "studio", aspect_ratio: "1:1", extra_prompt: undefined, apply_visible_label: false }
-      ]
-    });
-    expect(trackExistingMock).toHaveBeenCalledTimes(2);
-
-    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
-    fireEvent.click(await screen.findByRole("button", { name: /批量下载/ }));
-    expect(clickSpy).toHaveBeenCalledTimes(2);
-    clickSpy.mockRestore();
-  });
-
-  it("批量单失败隔离：1 done 出图、1 failed 出友好错误，互不连累", async () => {
-    tasksMock.tasks = [
-      doneTask("t-1", "https://mock.local/1.png"),
-      { taskId: "t-2", status: "failed", progress: 0, statusLabel: "失败", errorCode: "IMAGE_MODERATION_BLOCKED", topic: "x", mode: "photo", retryable: false }
-    ];
-    render(<EcomImageModelForm />);
-
-    fireEvent.click(screen.getByRole("button", { name: "批量" }));
-    fireEvent.change(document.querySelector("#ecom-model-batch")!, { target: { files: [png("a.png"), png("b.png")] } });
-    await waitFor(() => expect(uploadMock.mutateAsync).toHaveBeenCalledTimes(2));
-    fireEvent.click(screen.getByRole("button", { name: "简约棚拍" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "生成" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "生成" }));
-    await waitFor(() => expect(modelBatchMock.mutateAsync).toHaveBeenCalled());
-
-    expect(await screen.findByRole("img", { name: copy.workbench.ecomResultsLabel })).toHaveAttribute("src", "https://mock.local/1.png");
-    expect(screen.getByText(copy.errors.imageModeration)).toBeInTheDocument();
-  });
-
-  it("风格加载中：出加载态，生成禁用", () => {
+  it("风格加载中：出加载态；风格可选 → 商品图已传即可生成（不被风格阻断）", async () => {
     stylesMock.data = [];
     stylesMock.isLoading = true;
     render(<EcomImageModelForm />);
     expect(screen.getByText(copy.workbench.ecomStyleLoading)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "生成" })).toBeDisabled();
+    await uploadTo("ecom-model-product", [png("p.png")]);
+    expect(screen.getByRole("button", { name: "生成" })).toBeEnabled();
   });
 
-  it("风格加载失败：出风格错误态，生成禁用", () => {
+  it("风格加载失败：出风格错误态（可选，不阻断）", () => {
     stylesMock.data = [];
     stylesMock.isError = true;
     render(<EcomImageModelForm />);
     expect(screen.getByText(copy.workbench.ecomStyleError)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "生成" })).toBeDisabled();
   });
 
   it("合规提示：模特图为 AI 生成", () => {

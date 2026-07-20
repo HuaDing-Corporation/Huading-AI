@@ -38,8 +38,12 @@ export function triggerDownload(url: string) {
   a.remove();
 }
 
-/** 单个结果瓦片(单张 + 批量网格复用)：进度 / 失败友好 / 完成(可选装饰预览 + 下载)。 */
-function ResultTile({ task, decoration }: { task: TrackedTask; decoration?: CSSProperties }) {
+/**
+ * 单个结果瓦片(单张 + 批量网格复用)：进度 / 失败友好 / 完成(可选装饰预览 + 下载)。
+ * 导出供 AI 模特表单复用（ECOM-MODEL-OPTIMIZE-UI-0001：AI 模特改为多图单任务、不再走本外壳的单/批上传，
+ * 但结果瓦片机制照旧复用而非重造——纯导出、零行为改动，白底图不受影响）。
+ */
+export function ResultTile({ task, decoration }: { task: TrackedTask; decoration?: CSSProperties }) {
   if (task.status === "failed") {
     return (
       <div role="alert" className="flex flex-col items-center justify-center gap-1 rounded-field border border-line-gold bg-error-bg p-4 text-center">
