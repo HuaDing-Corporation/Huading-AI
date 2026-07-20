@@ -1292,6 +1292,87 @@ def test_image_worker_prefers_photo_image_keys_over_scalar_fallback(
     assert b"legacy-scalar" not in decoded
 
 
+def test_image_worker_auto_aspect_uses_product_before_model_reference(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    task_id = "photo-model-product-primary"
+    product_key = f"tenants/{auth_context['tenant_id']}/uploads/product-primary.png"
+    model_key = f"tenants/{auth_context['tenant_id']}/uploads/model-secondary.png"
+    product_bytes = _sized_png_bytes(80, 120)
+    model_bytes = _sized_png_bytes(160, 90)
+    with auth_db() as db:
+        _seed_reserved_photo(db, auth_context["tenant_id"], auth_context["user_id"], task_id)
+    storage = _FakeStorage()
+    storage.saved[product_key] = (product_bytes, "image/png")
+    storage.saved[model_key] = (model_bytes, "image/png")
+    provider = _FakeProvider(expected_input_bytes=product_bytes)
+    image_gen = _patch_worker(monkeypatch, auth_db, storage, _MemProgressStore(), provider)
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": "preserve product dimensions",
+            "aspect_ratio": "auto",
+            "source_storage_keys": [product_key, model_key],
+        }
+    )
+
+    assert result["status"] == "SUCCESS"
+    assert provider.payloads[0]["size"] == "2:3"
+    assert provider.payloads[0]["input_image_url"] == provider.payloads[0]["image_urls"][0]
+
+
+def test_image_worker_caps_aggregate_multi_image_data_uri_payload(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.workers import image_gen
+
+    task_id = "photo-multi-aggregate-budget"
+    total_budget = 48 * 1024
+    source_bytes = _noisy_png_bytes(size=512)
+    source_keys = [
+        f"tenants/{auth_context['tenant_id']}/uploads/aggregate-{index}.png"
+        for index in range(6)
+    ]
+    assert len(source_bytes) * len(source_keys) > total_budget
+    monkeypatch.setattr(image_gen, "_APIMART_INPUT_IMAGE_SAFE_BYTES", 32 * 1024)
+    monkeypatch.setattr(
+        image_gen,
+        "_APIMART_INPUT_IMAGES_TOTAL_SAFE_BYTES",
+        total_budget,
+        raising=False,
+    )
+    with auth_db() as db:
+        _seed_reserved_photo(db, auth_context["tenant_id"], auth_context["user_id"], task_id)
+    storage = _FakeStorage()
+    for source_key in source_keys:
+        storage.saved[source_key] = (source_bytes, "image/png")
+    provider = _FakeProvider(expected_input_bytes=source_bytes)
+    image_gen = _patch_worker(monkeypatch, auth_db, storage, _MemProgressStore(), provider)
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": "combine six product and model references",
+            "source_storage_keys": source_keys,
+        }
+    )
+
+    assert result["status"] == "SUCCESS"
+    image_urls = provider.payloads[0]["image_urls"]
+    decoded_images = [_decode_data_uri(image_url)[1] for image_url in image_urls]
+    assert len(decoded_images) == 6
+    assert sum(map(len, decoded_images)) <= total_budget
+    max_data_uri_chars = ((total_budget + 2) // 3) * 4 + len(image_urls) * 32
+    assert sum(map(len, image_urls)) <= max_data_uri_chars
+
+
 def test_image_worker_data_uri_size_guard_compresses_large_inputs(monkeypatch) -> None:
     from app.workers import image_gen
 

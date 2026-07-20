@@ -67,6 +67,7 @@ _ECOM_CUTOUT_KIND = "ecom_cutout"
 _ECOM_MODEL_KIND = "ecom_model"
 _ECOM_POSTER_KIND = "ecom_poster"
 _APIMART_INPUT_IMAGE_SAFE_BYTES = 14 * 1024 * 1024
+_APIMART_INPUT_IMAGES_TOTAL_SAFE_BYTES = 18 * 1024 * 1024
 _APIMART_INPUT_IMAGE_MAX_EDGE = 2048
 _SOURCE_IMAGE_STORAGE_KEY_RE = re.compile(
     r"^tenants/[A-Za-z0-9_-]+/[A-Za-z0-9_./-]+\.(?:jpg|jpeg|png|webp)$"
@@ -389,8 +390,14 @@ def _input_image_mime_type(storage_key: str, image_bytes: bytes) -> str:
 def _apimart_safe_input_image_bytes(
     image_bytes: bytes,
     mime_type: str,
+    *,
+    max_bytes: int | None = None,
 ) -> tuple[bytes, str]:
-    if len(image_bytes) <= _APIMART_INPUT_IMAGE_SAFE_BYTES:
+    safe_bytes_limit = min(
+        _APIMART_INPUT_IMAGE_SAFE_BYTES,
+        max_bytes if max_bytes is not None else _APIMART_INPUT_IMAGE_SAFE_BYTES,
+    )
+    if len(image_bytes) <= safe_bytes_limit:
         return image_bytes, mime_type
 
     try:
@@ -417,18 +424,40 @@ def _apimart_safe_input_image_bytes(
             buffer = BytesIO()
             candidate.save(buffer, format="JPEG", quality=quality, optimize=True)
             compressed = buffer.getvalue()
-            if len(compressed) <= _APIMART_INPUT_IMAGE_SAFE_BYTES:
+            if len(compressed) <= safe_bytes_limit:
                 return compressed, "image/jpeg"
         max_edge = int(max_edge * 0.75)
 
     raise ValueError("Input image is too large after compression.")
 
 
-def _input_image_data_uri(storage_key: str, image_bytes: bytes) -> str:
+def _input_image_data_uri(
+    storage_key: str,
+    image_bytes: bytes,
+    *,
+    max_bytes: int | None = None,
+) -> str:
     mime_type = _input_image_mime_type(storage_key, image_bytes)
-    safe_bytes, safe_mime_type = _apimart_safe_input_image_bytes(image_bytes, mime_type)
+    safe_bytes, safe_mime_type = _apimart_safe_input_image_bytes(
+        image_bytes,
+        mime_type,
+        max_bytes=max_bytes,
+    )
     encoded = base64.b64encode(safe_bytes).decode("ascii")
     return f"data:{safe_mime_type};base64,{encoded}"
+
+
+def _input_image_data_uris(input_images: list[tuple[str, bytes]]) -> list[str]:
+    if not input_images:
+        return []
+    per_image_budget = min(
+        _APIMART_INPUT_IMAGE_SAFE_BYTES,
+        _APIMART_INPUT_IMAGES_TOTAL_SAFE_BYTES // len(input_images),
+    )
+    return [
+        _input_image_data_uri(storage_key, image_bytes, max_bytes=per_image_budget)
+        for storage_key, image_bytes in input_images
+    ]
 
 
 def _requested_image_aspect_ratio(params: Mapping[str, Any]) -> str:
@@ -826,10 +855,7 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                         suffix=Path(input_storage_key).suffix or ".png",
                         temp_paths=temp_paths,
                     )
-                    input_image_urls = [
-                        _input_image_data_uri(storage_key, image_bytes)
-                        for storage_key, image_bytes in input_images
-                    ]
+                    input_image_urls = _input_image_data_uris(input_images)
                 elif params.get("image_key"):
                     input_storage_key = _tenant_upload_storage_key(
                         tenant_id,

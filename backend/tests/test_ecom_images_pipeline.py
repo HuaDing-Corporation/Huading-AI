@@ -54,6 +54,18 @@ def _seed_image_provider(auth_db) -> None:
         db.commit()
 
 
+def _set_image_provider(db, provider: str) -> None:
+    config = db.scalar(
+        select(ProviderConfig).where(
+            ProviderConfig.tenant_id.is_(None),
+            ProviderConfig.capability == "image",
+        )
+    )
+    assert config is not None
+    config.provider = provider
+    config.config = {"api_key": f"test-{provider}-key"}
+
+
 def _seed_source_asset(
     db,
     *,
@@ -277,21 +289,23 @@ def test_ecom_model_styles_returns_static_presets(auth_context) -> None:
 
     assert resp.status_code == 200
     styles = resp.json()["data"]["styles"]
-    assert 3 <= len(styles) <= 5
-    assert {style["id"] for style in styles} >= {
-        "studio_white",
-        "lifestyle",
-        "street",
-    }
-    assert all(style["name"] for style in styles)
+    assert styles == [
+        {"id": "studio_white", "name": "棚拍白底"},
+        {"id": "lifestyle", "name": "生活场景"},
+        {"id": "street", "name": "街拍"},
+        {"id": "office_commute", "name": "通勤职场"},
+        {"id": "resort_travel", "name": "度假旅拍"},
+        {"id": "high_fashion", "name": "高级时尚大片"},
+    ]
 
 
-def test_ecom_model_single_creates_photo_task_clamps_prompt_and_reserves_quota(
+def test_ecom_model_single_preserves_long_prompt_and_reserves_quota(
     monkeypatch,
     auth_context,
     auth_db,
 ) -> None:
-    long_extra = "clean catalog pose " * 20
+    long_extra = ("clean catalog pose with exact garment details; " * 120)[:5000]
+    assert len(long_extra) == 5000
     with auth_db() as db:
         source = _seed_source_asset(
             db,
@@ -333,13 +347,13 @@ def test_ecom_model_single_creates_photo_task_clamps_prompt_and_reserves_quota(
     assert payload["image_provider"] == "apimart"
     assert payload["image_resolution"] == "1k"
     assert payload["video_task_id"] == data["task_id"]
-    assert payload["extra_prompt"] == long_extra[:200]
+    assert payload["extra_prompt"] == long_extra
     assert payload["aspect_ratio"] == "21:9"
     assert payload["requested_aspect_ratio"] == "21:9"
     assert payload["apply_visible_label"] is True
     assert "female" not in payload["topic"].lower()
     assert "male" not in payload["topic"].lower()
-    assert "preserve the exact product shape" in payload["topic"].lower()
+    assert "preserve the exact shape" in payload["topic"].lower()
 
     with auth_db() as db:
         task = db.get(VideoTask, data["task_id"])
@@ -354,7 +368,7 @@ def test_ecom_model_single_creates_photo_task_clamps_prompt_and_reserves_quota(
     assert task.params["kind"] == "ecom_model"
     assert task.params["gender"] == "any"
     assert task.params["style_id"] == "studio_white"
-    assert task.params["extra_prompt"] == long_extra[:200]
+    assert task.params["extra_prompt"] == long_extra
     assert task.params["aspect_ratio"] == "21:9"
     assert task.params["requested_aspect_ratio"] == "21:9"
     assert task.params["source_storage_key"] == source["storage_key"]
@@ -364,6 +378,362 @@ def test_ecom_model_single_creates_photo_task_clamps_prompt_and_reserves_quota(
     assert usage.status == "reserved"
     assert usage.credits == 10
     assert subscription.quota_credits_reserved == 10
+
+
+@pytest.mark.parametrize("field_name", ["extra_prompt", "custom_style"])
+def test_ecom_model_rejects_prompt_fields_over_20000_characters_without_side_effects(
+    monkeypatch,
+    auth_context,
+    auth_db,
+    field_name: str,
+) -> None:
+    enqueued = _stub_image_task(monkeypatch)
+    response = TestClient(app).post(
+        "/api/v1/ecom-images/model",
+        json={
+            "source_asset_id": "unused-product",
+            "gender": "any",
+            field_name: "x" * 20_001,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert enqueued == []
+    with auth_db() as db:
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == 0
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == 0
+        subscription = db.scalars(select(Subscription)).one()
+        assert subscription.quota_credits_reserved == 0
+
+
+def test_ecom_model_product_asset_list_takes_precedence_over_legacy_scalar(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        legacy = _seed_source_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="model-product-legacy",
+        )
+        products = [
+            _seed_source_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                asset_id=f"model-product-{index}",
+            )
+            for index in range(2)
+        ]
+
+    enqueued = _stub_image_task(monkeypatch)
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app).post(
+            "/api/v1/ecom-images/model",
+            json={
+                "source_asset_id": legacy["id"],
+                "product_asset_ids": [product["id"] for product in products],
+                "gender": "any",
+                "style_id": "studio_white",
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 202
+    assert len(enqueued) == 1
+    worker_payload = enqueued[0]["args"][0]
+    assert worker_payload["product_asset_ids"] == [product["id"] for product in products]
+    assert worker_payload["source_asset_id"] == products[0]["id"]
+    assert worker_payload["source_storage_key"] == products[0]["storage_key"]
+    assert worker_payload["source_storage_keys"] == [
+        product["storage_key"] for product in products
+    ]
+
+
+def test_ecom_model_schema_accepts_product_list_or_legacy_scalar() -> None:
+    from app.schemas.ecom_images import EcomModelRequest
+
+    product_list = EcomModelRequest(
+        product_asset_ids=["product-from-list"],
+        model_asset_ids=[],
+        gender="any",
+        style_id="studio_white",
+    )
+    legacy_scalar = EcomModelRequest(
+        source_asset_id="product-from-scalar",
+        gender="any",
+        style_id="studio_white",
+    )
+
+    assert product_list.product_asset_ids == ["product-from-list"]
+    assert product_list.model_asset_ids == []
+    assert product_list.source_asset_id is None
+    assert legacy_scalar.source_asset_id == "product-from-scalar"
+    assert legacy_scalar.product_asset_ids is None
+
+
+def test_ecom_model_accepts_six_product_and_model_images_in_product_first_order(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        products = [
+            _seed_source_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                asset_id=f"ordered-product-{index}",
+            )
+            for index in range(2)
+        ]
+        models = [
+            _seed_source_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                asset_id=f"ordered-model-{index}",
+                asset_type="avatar_image",
+            )
+            for index in range(4)
+        ]
+
+    enqueued = _stub_image_task(monkeypatch)
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app).post(
+            "/api/v1/ecom-images/model",
+            json={
+                "product_asset_ids": [product["id"] for product in products],
+                "model_asset_ids": [model["id"] for model in models],
+                "gender": "female",
+                "style_id": "lifestyle",
+                "aspect_ratio": "auto",
+            },
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 202
+    worker_payload = enqueued[0]["args"][0]
+    assert worker_payload["product_asset_ids"] == [product["id"] for product in products]
+    assert worker_payload["model_asset_ids"] == [model["id"] for model in models]
+    assert worker_payload["source_asset_id"] == products[0]["id"]
+    assert worker_payload["source_storage_keys"] == [
+        *[product["storage_key"] for product in products],
+        *[model["storage_key"] for model in models],
+    ]
+    assert worker_payload["image_provider"] == "apimart"
+    assert worker_payload["image_resolution"] == "1k"
+    assert (
+        "product reference images come first, followed by model reference images"
+        in worker_payload["topic"]
+    )
+    assert (
+        "model references only for the model's identity and appearance"
+        in worker_payload["topic"]
+    )
+
+
+def test_ecom_model_rejects_two_references_for_openai_before_side_effects(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        _set_image_provider(db, "openai")
+        products = [
+            _seed_source_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                asset_id=f"openai-multi-product-{index}",
+            )
+            for index in range(2)
+        ]
+        subscription_id = db.scalars(select(Subscription.id)).one()
+
+    enqueued = _stub_image_task(monkeypatch)
+    response = TestClient(app).post(
+        "/api/v1/ecom-images/model",
+        json={
+            "product_asset_ids": [product["id"] for product in products],
+            "gender": "any",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == (
+        "IMAGE_PROVIDER_REFERENCE_IMAGES_UNSUPPORTED"
+    )
+    assert response.json()["error"]["message"] == "当前图片服务最多支持 1 张参考图。"
+    assert enqueued == []
+    with auth_db() as db:
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == 0
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == 0
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved == 0
+
+
+def test_ecom_model_batch_preflights_every_reference_group_before_side_effects(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        _set_image_provider(db, "openai")
+        products = [
+            _seed_source_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                asset_id=f"openai-batch-product-{index}",
+            )
+            for index in range(3)
+        ]
+        subscription_id = db.scalars(select(Subscription.id)).one()
+
+    enqueued = _stub_image_task(monkeypatch)
+    response = TestClient(app).post(
+        "/api/v1/ecom-images/model/batch",
+        json={
+            "items": [
+                {
+                    "product_asset_ids": [products[0]["id"]],
+                    "gender": "any",
+                },
+                {
+                    "product_asset_ids": [products[1]["id"], products[2]["id"]],
+                    "gender": "any",
+                },
+            ]
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == (
+        "IMAGE_PROVIDER_REFERENCE_IMAGES_UNSUPPORTED"
+    )
+    assert enqueued == []
+    with auth_db() as db:
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == 0
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == 0
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved == 0
+
+
+def test_ecom_model_rejects_more_than_six_images_without_side_effects(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        products = [
+            _seed_source_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                asset_id=f"over-limit-product-{index}",
+            )
+            for index in range(4)
+        ]
+        models = [
+            _seed_source_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                asset_id=f"over-limit-model-{index}",
+                asset_type="avatar_image",
+            )
+            for index in range(3)
+        ]
+        subscription_id = db.scalars(select(Subscription.id)).one()
+
+    enqueued = _stub_image_task(monkeypatch)
+    response = TestClient(app).post(
+        "/api/v1/ecom-images/model",
+        json={
+            "product_asset_ids": [product["id"] for product in products],
+            "model_asset_ids": [model["id"] for model in models],
+            "gender": "any",
+            "style_id": "studio_white",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert response.json()["error"]["message"] == "商品图与模特图合计最多 6 张"
+    assert enqueued == []
+    with auth_db() as db:
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == 0
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == 0
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved == 0
+
+
+@pytest.mark.parametrize(
+    ("product_images_mode", "mode_prompt"),
+    [
+        (
+            None,
+            "The product reference images show different products. "
+            "Put, wear, or coordinate every product on one model in the same image. "
+            "Do not merge products together and do not omit any product.",
+        ),
+        (
+            "multi_angle",
+            "The product reference images show different angles of the same product. "
+            "Reconstruct exactly one coherent product from all angles. "
+            "Do not duplicate the product.",
+        ),
+    ],
+)
+def test_ecom_model_product_image_modes_produce_distinct_final_prompts(
+    monkeypatch,
+    auth_context,
+    auth_db,
+    product_images_mode: str | None,
+    mode_prompt: str,
+) -> None:
+    with auth_db() as db:
+        products = [
+            _seed_source_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                asset_id=f"prompt-{product_images_mode or 'default'}-{index}",
+            )
+            for index in range(2)
+        ]
+
+    enqueued = _stub_image_task(monkeypatch)
+    request_payload = {
+        "product_asset_ids": [product["id"] for product in products],
+        "gender": "female",
+        "style_id": "studio_white",
+    }
+    if product_images_mode is not None:
+        request_payload["product_images_mode"] = product_images_mode
+    response = TestClient(app).post(
+        "/api/v1/ecom-images/model",
+        json=request_payload,
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 202
+    assert enqueued[0]["args"][0]["topic"] == (
+        "Create an e-commerce fashion image using the supplied reference images. "
+        "All supplied reference images are product references. "
+        f"{mode_prompt} "
+        "Use a female fashion model. "
+        "Apply this visual style: a clean studio white product catalog scene with controlled "
+        "lighting. Preserve the exact shape, logos, colors, materials, proportions, and visible "
+        "details of every product. Do not alter product designs, brand marks, text, or colorways."
+    )
 
 
 def test_ecom_model_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
@@ -477,6 +847,92 @@ def test_ecom_model_rejects_unknown_style_id(
     assert subscription.quota_credits_reserved == 0
 
 
+def test_ecom_model_rejects_preset_and_custom_style_together_without_side_effects(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    enqueued = _stub_image_task(monkeypatch)
+    response = TestClient(app).post(
+        "/api/v1/ecom-images/model",
+        json={
+            "source_asset_id": "unused-product",
+            "gender": "female",
+            "style_id": "street",
+            "custom_style": "soft window light with a minimalist gallery mood",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert response.json()["error"]["message"] == "预设风格与自定义风格不能同时选择"
+    assert enqueued == []
+    with auth_db() as db:
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == 0
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == 0
+        subscription = db.scalars(select(Subscription)).one()
+        assert subscription.quota_credits_reserved == 0
+
+
+def test_ecom_model_accepts_custom_style_without_preset(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    custom_style = "soft window light with a minimalist gallery mood"
+    with auth_db() as db:
+        source = _seed_source_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="custom-style-product",
+        )
+
+    enqueued = _stub_image_task(monkeypatch)
+    response = TestClient(app).post(
+        "/api/v1/ecom-images/model",
+        json={
+            "source_asset_id": source["id"],
+            "gender": "any",
+            "custom_style": custom_style,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 202
+    worker_payload = enqueued[0]["args"][0]
+    assert worker_payload["custom_style"] == custom_style
+    assert f"Apply this custom visual style: {custom_style}." in worker_payload["topic"]
+    assert "studio white" not in worker_payload["topic"]
+
+
+def test_ecom_model_accepts_no_style_without_adding_style_sentence(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        source = _seed_source_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="no-style-product",
+        )
+
+    enqueued = _stub_image_task(monkeypatch)
+    response = TestClient(app).post(
+        "/api/v1/ecom-images/model",
+        json={"source_asset_id": source["id"], "gender": "any"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 202
+    worker_payload = enqueued[0]["args"][0]
+    assert worker_payload["style_id"] is None
+    assert "custom_style" not in worker_payload
+    assert "Apply this visual style:" not in worker_payload["topic"]
+    assert "Apply this custom visual style:" not in worker_payload["topic"]
+
+
 def test_ecom_model_rejects_cross_tenant_source_asset(
     monkeypatch,
     auth_context,
@@ -559,6 +1015,53 @@ def test_ecom_cutout_rejects_undeclared_image_provider_before_side_effects(
         assert subscription.quota_credits_reserved == reserved_before
         assert db.scalar(select(func.count()).select_from(VideoTask)) == task_count_before
         assert db.scalar(select(func.count()).select_from(UsageRecord)) == usage_count_before
+
+
+def test_ecom_model_rejects_cross_tenant_model_reference_without_side_effects(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        product = _seed_source_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="local-product-with-foreign-model",
+        )
+        other_tenant = Tenant(
+            id="other-model-reference-tenant",
+            slug="other-model-reference",
+            name="Other Model Reference",
+        )
+        db.add(other_tenant)
+        db.flush()
+        foreign_model = _seed_source_asset(
+            db,
+            tenant_id=other_tenant.id,
+            asset_id="foreign-model-reference",
+            asset_type="avatar_image",
+        )
+        subscription_id = db.scalars(select(Subscription.id)).one()
+
+    enqueued = _stub_image_task(monkeypatch)
+    response = TestClient(app).post(
+        "/api/v1/ecom-images/model",
+        json={
+            "product_asset_ids": [product["id"]],
+            "model_asset_ids": [foreign_model["id"]],
+            "gender": "any",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "ECOM_SOURCE_ASSET_NOT_FOUND"
+    assert enqueued == []
+    with auth_db() as db:
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == 0
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == 0
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved == 0
 
 
 def test_ecom_cutout_single_creates_photo_task_and_reserves_quota(
