@@ -268,6 +268,13 @@ def _seed_console_read_fixture(auth_db, auth_context) -> dict[str, str]:
             config={"speaker_ids": ["S_beta_slot"]},
             is_active=True,
         )
+        image_config = ProviderConfig(
+            tenant_id=tenant.id,
+            capability="image",
+            provider="apimart",
+            config={"api_key": "test-apimart-key"},
+            is_active=True,
+        )
         voice = BrandVoice(
             tenant_id=tenant.id,
             name="Beta Voice",
@@ -287,7 +294,7 @@ def _seed_console_read_fixture(auth_db, auth_context) -> dict[str, str]:
             reason="fixture",
             created_at=now,
         )
-        db.add_all([usage, config, voice, audit])
+        db.add_all([usage, config, image_config, voice, audit])
         db.commit()
         return {
             "tenant_id": tenant.id,
@@ -895,6 +902,7 @@ def test_settled_video_task_retry_requeues_without_charging_again(
     assert enqueued["task_id"] == fixture["task_id"]
     assert enqueued["queue"] == "image"
     assert enqueued["args"][0]["topic"] == "fixture prompt"
+    assert enqueued["args"][0]["image_provider"] == "apimart"
 
     with auth_db() as db:
         task = db.get(VideoTask, fixture["task_id"])
@@ -909,6 +917,7 @@ def test_settled_video_task_retry_requeues_without_charging_again(
         assert task.progress == 0
         assert task.error_code is None
         assert task.error_message is None
+        assert task.params["image_provider"] == "apimart"
         assert usage_after == usage_before
         assert audit is not None
 
@@ -918,6 +927,122 @@ def test_settled_video_task_retry_requeues_without_charging_again(
     )
     assert second.status_code == 409
     assert second.json()["error"]["code"] == "TASK_NOT_RETRYABLE"
+
+
+@pytest.mark.parametrize(
+    "stale_queued",
+    [False, True],
+    ids=["failed", "stale-queued"],
+)
+def test_photo_retry_rejects_when_bound_image_provider_is_no_longer_available(
+    auth_context,
+    auth_db,
+    platform_acme,
+    monkeypatch,
+    stale_queued: bool,
+) -> None:
+    from app.api.v1.routes import admin_console as route
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    enqueued = False
+    reservation_attempted = False
+
+    def fake_apply_async(**_kwargs) -> None:
+        nonlocal enqueued
+        enqueued = True
+
+    original_reserve = route.admin_console.quota.reserve_released_video_task_quota
+
+    def track_reservation(*args, **kwargs):
+        nonlocal reservation_attempted
+        reservation_attempted = True
+        return original_reserve(*args, **kwargs)
+
+    monkeypatch.setattr(route.generate_image_task, "apply_async", fake_apply_async)
+    monkeypatch.setattr(
+        route.admin_console.quota,
+        "reserve_released_video_task_quota",
+        track_reservation,
+    )
+    with auth_db() as db:
+        task = db.get(VideoTask, fixture["task_id"])
+        usage = db.get(UsageRecord, fixture["usage_id"])
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        task.params = {**task.params, "image_provider": "apimart"}
+        if stale_queued:
+            task.status = "queued"
+            task.started_at = None
+            task.finished_at = None
+            task.updated_at = datetime.now(UTC) - timedelta(seconds=61)
+            usage.status = "reserved"
+        else:
+            usage.status = "released"
+        bound_config = db.scalar(
+            select(ProviderConfig).where(
+                ProviderConfig.tenant_id == fixture["tenant_id"],
+                ProviderConfig.capability == "image",
+                ProviderConfig.provider == "apimart",
+            )
+        )
+        assert bound_config is not None
+        bound_config.provider = "openai"
+        bound_config.config = {"api_key": "test-openai-key"}
+        db.commit()
+        reserved_before = subscription.quota_credits_reserved
+        usage_count_before = db.scalar(select(func.count()).select_from(UsageRecord))
+        audit_count_before = db.scalar(
+            select(func.count(AdminAuditLog.id)).where(
+                AdminAuditLog.action == "task_retry",
+                AdminAuditLog.target_id == fixture["task_id"],
+            )
+        )
+        params_before = dict(task.params)
+        task_state_before = {
+            "status": task.status,
+            "progress": task.progress,
+            "error_code": task.error_code,
+            "error_message": task.error_message,
+            "started_at": task.started_at,
+            "finished_at": task.finished_at,
+            "updated_at": task.updated_at,
+        }
+
+    response = TestClient(app).post(
+        f"/api/v1/admin/console/tasks/{fixture['task_id']}/retry",
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "IMAGE_PROVIDER_NOT_CONFIGURED"
+    assert response.json()["error"]["message"] == (
+        "原任务绑定的图片服务已不可用，请重新创建任务。"
+    )
+    assert enqueued is False
+    assert reservation_attempted is False
+    with auth_db() as db:
+        task = db.get(VideoTask, fixture["task_id"])
+        subscription = db.get(Subscription, fixture["subscription_id"])
+        assert {
+            "status": task.status,
+            "progress": task.progress,
+            "error_code": task.error_code,
+            "error_message": task.error_message,
+            "started_at": task.started_at,
+            "finished_at": task.finished_at,
+            "updated_at": task.updated_at,
+        } == task_state_before
+        assert task.params == params_before
+        assert subscription.quota_credits_reserved == reserved_before
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == usage_count_before
+        assert (
+            db.scalar(
+                select(func.count(AdminAuditLog.id)).where(
+                    AdminAuditLog.action == "task_retry",
+                    AdminAuditLog.target_id == fixture["task_id"],
+                )
+            )
+            == audit_count_before
+        )
 
 
 def test_released_video_task_retry_reserves_and_settles_exactly_ten_credits(

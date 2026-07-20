@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from app.db.models import Asset, Tenant, TenantLabelSettings, VideoTask, Voice
 from app.main import app
+from app.providers.base import ImageProviderCapabilities, ResolvedProvider
 from app.workers import avatar_talk, image_gen, video_tasks
 
 
@@ -47,6 +48,11 @@ class _Store:
 
 
 class _ImageProvider:
+    capabilities = ImageProviderCapabilities(
+        supported_resolutions=frozenset({"1k", "2k", "4k"}),
+        max_reference_images=6,
+    )
+
     def __init__(self, image_bytes: bytes) -> None:
         self.image_bytes = image_bytes
         self.payloads: list[dict[str, object]] = []
@@ -212,7 +218,14 @@ def _patch_image_worker(monkeypatch, auth_db, storage: _Storage, store: _Store, 
     monkeypatch.setattr(image_gen, "SessionLocal", auth_db)
     monkeypatch.setattr(image_gen, "build_progress_store", lambda _redis_url: store)
     monkeypatch.setattr(image_gen, "create_object_storage", lambda _settings: storage)
-    monkeypatch.setattr(image_gen, "resolve", lambda _db, *, tenant_id, capability: provider)
+    monkeypatch.setattr(
+        image_gen,
+        "resolve_with_name",
+        lambda _db, *, tenant_id, capability: ResolvedProvider(
+            name="apimart",
+            provider=provider,
+        ),
+    )
 
 
 def test_tenant_label_settings_default_update_false_is_ignored_and_isolated(

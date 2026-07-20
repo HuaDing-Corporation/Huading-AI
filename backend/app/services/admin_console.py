@@ -25,6 +25,13 @@ from app.db.models import (
     User,
     VideoTask,
 )
+from app.providers.base import (
+    ImageProviderCapabilitiesError,
+    ProviderResolutionError,
+    resolve_named_provider,
+    resolve_with_name,
+    validate_image_provider_request,
+)
 from app.schemas.admin_console import (
     AdminAuditLogItem,
     AdminCreditsAdjustResponse,
@@ -418,6 +425,61 @@ def _video_retry_is_estimate(task: VideoTask, *, charged: bool) -> bool:
     return charged and (task.video_mode or task.mode) == "avatar_talk"
 
 
+def _bind_and_validate_photo_retry_provider(db: Session, task: VideoTask) -> None:
+    if (task.video_mode or task.mode) != "photo":
+        return
+    params = dict(task.params or {})
+    if params.get("kind") == "ecom_poster":
+        return
+
+    has_binding = "image_provider" in params
+    try:
+        if has_binding:
+            raw_provider_name = params["image_provider"]
+            if not isinstance(raw_provider_name, str) or not raw_provider_name.strip():
+                raise AppError(
+                    "原任务的图片服务绑定无效，请重新创建任务。",
+                    code="IMAGE_PROVIDER_BINDING_INVALID",
+                    status_code=422,
+                )
+            provider_name = raw_provider_name.strip()
+            provider = resolve_named_provider(
+                db,
+                tenant_id=task.tenant_id,
+                capability="image",
+                provider=provider_name,
+            )
+        else:
+            selection = resolve_with_name(
+                db,
+                tenant_id=task.tenant_id,
+                capability="image",
+            )
+            provider_name = selection.name
+            provider = selection.provider
+        validate_image_provider_request(provider, params)
+    except ProviderResolutionError as exc:
+        message = (
+            "原任务绑定的图片服务已不可用，请重新创建任务。"
+            if has_binding
+            else "当前图片服务未配置，暂时无法重试。"
+        )
+        raise AppError(
+            message,
+            code="IMAGE_PROVIDER_NOT_CONFIGURED",
+            status_code=503,
+        ) from exc
+    except ImageProviderCapabilitiesError as exc:
+        raise AppError(
+            exc.user_message,
+            code=exc.code,
+            status_code=422,
+        ) from exc
+
+    if not has_binding:
+        task.params = {**params, "image_provider": provider_name}
+
+
 def prepare_task_retry(
     db: Session,
     *,
@@ -427,11 +489,19 @@ def prepare_task_retry(
     task = db.scalar(select(VideoTask).where(VideoTask.id == task_id).with_for_update())
     if task is None or task.deleted_at is not None:
         raise AppError("Task not found.", code="TASK_NOT_FOUND", status_code=404)
-    if (
+    stale_queued = (
         task.status == "queued"
         and task.started_at is None
         and _is_stale(task.updated_at)
-    ):
+    )
+    if not stale_queued and task.status != "failed":
+        raise AppError(
+            "Only failed tasks can be retried.",
+            code="TASK_NOT_RETRYABLE",
+            status_code=409,
+        )
+    _bind_and_validate_photo_retry_provider(db, task)
+    if stale_queued:
         charged, credits = _reserved_retry_charge(
             db,
             UsageRecord.video_task_id == task.id,
@@ -441,12 +511,6 @@ def prepare_task_retry(
             charged=charged,
             credits=credits,
             is_estimate=_video_retry_is_estimate(task, charged=charged),
-        )
-    if task.status != "failed":
-        raise AppError(
-            "Only failed tasks can be retried.",
-            code="TASK_NOT_RETRYABLE",
-            status_code=409,
         )
     before = {
         "status": task.status,

@@ -50,8 +50,16 @@ class VideoProvider(Protocol):
     async def generate_video(self, payload: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
 
+@dataclass(frozen=True)
+class ImageProviderCapabilities:
+    supported_resolutions: frozenset[str]
+    max_reference_images: int
+
+
 @runtime_checkable
 class ImageProvider(Protocol):
+    capabilities: ImageProviderCapabilities
+
     async def generate_image(self, payload: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
 
@@ -108,6 +116,14 @@ Provider = (
     | ScenePromptProvider
     | ChatProvider
 )
+
+
+@dataclass(frozen=True)
+class ResolvedProvider:
+    name: str
+    provider: Provider
+
+
 ProviderFactory = Callable[[ProviderConfig], Provider]
 Operation = Callable[[], T | Awaitable[T]]
 _REGISTRY: dict[tuple[str, str], ProviderFactory] = {}
@@ -122,6 +138,36 @@ class ProviderResolutionError(RuntimeError):
 
 class ProviderInvocationError(RuntimeError):
     pass
+
+
+class ImageProviderCapabilitiesError(RuntimeError):
+    code = "IMAGE_PROVIDER_CAPABILITIES_UNDECLARED"
+    user_message = "当前图片服务能力配置不完整，暂时无法生成图片。"
+
+
+class ImageProviderResolutionUnsupportedError(ImageProviderCapabilitiesError):
+    code = "IMAGE_PROVIDER_RESOLUTION_UNSUPPORTED"
+
+    def __init__(self, requested_resolution: str, supported_resolutions: frozenset[str]) -> None:
+        ordered = [
+            resolution
+            for resolution in ("1k", "2k", "4k")
+            if resolution in supported_resolutions
+        ]
+        ordered.extend(sorted(supported_resolutions.difference(ordered)))
+        supported = "/".join(resolution.upper() for resolution in ordered)
+        self.user_message = (
+            f"当前图片服务不支持 {requested_resolution.upper()}，请选择 {supported}。"
+        )
+        super().__init__(self.user_message)
+
+
+class ImageProviderReferenceImagesUnsupportedError(ImageProviderCapabilitiesError):
+    code = "IMAGE_PROVIDER_REFERENCE_IMAGES_UNSUPPORTED"
+
+    def __init__(self, max_reference_images: int) -> None:
+        self.user_message = f"当前图片服务最多支持 {max_reference_images} 张参考图。"
+        super().__init__(self.user_message)
 
 
 @dataclass(frozen=True)
@@ -145,6 +191,64 @@ def register_provider(
 
 def clear_provider_registry() -> None:
     _REGISTRY.clear()
+
+
+def require_image_provider_capabilities(provider: object) -> ImageProviderCapabilities:
+    capabilities = getattr(provider, "capabilities", None)
+    if (
+        not isinstance(capabilities, ImageProviderCapabilities)
+        or not isinstance(capabilities.supported_resolutions, frozenset)
+        or not capabilities.supported_resolutions
+        or any(
+            not isinstance(resolution, str)
+            or not resolution.strip()
+            or resolution != resolution.strip().lower()
+            for resolution in capabilities.supported_resolutions
+        )
+        or isinstance(capabilities.max_reference_images, bool)
+        or not isinstance(capabilities.max_reference_images, int)
+        or capabilities.max_reference_images < 0
+    ):
+        raise ImageProviderCapabilitiesError(
+            "Image provider must declare ImageProviderCapabilities."
+        )
+    return capabilities
+
+
+def image_provider_reference_count(params: Mapping[str, Any]) -> int:
+    source_storage_keys = params.get("source_storage_keys")
+    if source_storage_keys is not None:
+        if not isinstance(source_storage_keys, list | tuple):
+            raise ValueError("source_storage_keys must be a list.")
+        if source_storage_keys:
+            return len(source_storage_keys)
+    image_keys = params.get("image_keys")
+    if image_keys:
+        if not isinstance(image_keys, list | tuple):
+            raise ValueError("image_keys must be a list.")
+        return len(image_keys)
+    if params.get("source_storage_key") or params.get("image_key"):
+        return 1
+    return 0
+
+
+def validate_image_provider_request(
+    provider: object,
+    params: Mapping[str, Any],
+) -> ImageProviderCapabilities:
+    capabilities = require_image_provider_capabilities(provider)
+    requested_resolution = str(params.get("image_resolution") or "1k").strip().lower()
+    if requested_resolution not in capabilities.supported_resolutions:
+        raise ImageProviderResolutionUnsupportedError(
+            requested_resolution,
+            capabilities.supported_resolutions,
+        )
+    reference_image_count = image_provider_reference_count(params)
+    if reference_image_count > capabilities.max_reference_images:
+        raise ImageProviderReferenceImagesUnsupportedError(
+            capabilities.max_reference_images
+        )
+    return capabilities
 
 
 def _provider_config(
@@ -266,14 +370,31 @@ def _should_promote_doubao_tts(
     )
 
 
-def resolve(db: Session, *, tenant_id: str, capability: Capability | str) -> Provider:
-    config = _provider_config(db, tenant_id=tenant_id, capability=capability)
+def _resolved_provider(
+    config: ProviderConfig,
+    *,
+    capability: Capability | str,
+) -> ResolvedProvider:
     factory = _REGISTRY.get((capability, config.provider))
     if factory is None:
         raise ProviderResolutionError(
             f"Provider {config.provider!r} is not registered for {capability!r}."
         )
-    return factory(config)
+    return ResolvedProvider(name=config.provider, provider=factory(config))
+
+
+def resolve_with_name(
+    db: Session,
+    *,
+    tenant_id: str,
+    capability: Capability | str,
+) -> ResolvedProvider:
+    config = _provider_config(db, tenant_id=tenant_id, capability=capability)
+    return _resolved_provider(config, capability=capability)
+
+
+def resolve(db: Session, *, tenant_id: str, capability: Capability | str) -> Provider:
+    return resolve_with_name(db, tenant_id=tenant_id, capability=capability).provider
 
 
 def resolve_named_provider(
@@ -289,12 +410,7 @@ def resolve_named_provider(
         capability=capability,
         provider=provider,
     )
-    factory = _REGISTRY.get((capability, config.provider))
-    if factory is None:
-        raise ProviderResolutionError(
-            f"Provider {config.provider!r} is not registered for {capability!r}."
-        )
-    return factory(config)
+    return _resolved_provider(config, capability=capability).provider
 
 
 async def _await_operation(operation: Operation[T], timeout_seconds: float | None) -> T:

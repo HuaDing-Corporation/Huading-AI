@@ -473,6 +473,8 @@ def _photo_detail_meta(
     batch_id = str(params.get("batch_id") or "").strip()
     if batch_id:
         meta["batch_id"] = history_id
+    if params.get("image_resolution") in {"1k", "2k", "4k"}:
+        meta["image_resolution"] = params["image_resolution"]
     if category == "image_gen":
         meta["prompt"] = tasks[0].topic or ""
         for key in ("image_size", "image_quality"):

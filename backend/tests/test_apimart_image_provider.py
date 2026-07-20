@@ -74,6 +74,32 @@ def test_apimart_preserves_resolved_ratio_and_defaults_to_1k(aspect_ratio: str) 
     assert _normalize_size_and_resolution(aspect_ratio, None) == (aspect_ratio, "1k")
 
 
+@pytest.mark.parametrize("image_resolution", ["1k", "2k", "4k"])
+def test_apimart_request_body_preserves_explicit_resolution(image_resolution: str) -> None:
+    provider = APIMartImageProvider(api_key="test-apimart-key", model="gpt-image-2")
+    prompt = "Generate at 4K ultra HD, while the explicit field remains authoritative."
+
+    body, normalized = provider._request_body(
+        {
+            "prompt": prompt,
+            "size": "1:1",
+            "resolution": image_resolution,
+            "quality": "low",
+            "n": 1,
+        }
+    )
+
+    assert body == {
+        "model": "gpt-image-2",
+        "prompt": prompt,
+        "size": "1:1",
+        "resolution": image_resolution,
+        "quality": "high",
+        "n": 1,
+    }
+    assert normalized["resolution"] == image_resolution
+
+
 @pytest.mark.asyncio
 async def test_apimart_provider_submits_polls_downloads_and_maps_urls() -> None:
     sleep_calls: list[float] = []

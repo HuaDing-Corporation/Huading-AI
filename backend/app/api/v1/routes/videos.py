@@ -33,10 +33,14 @@ from app.db.models import (
     VideoTask,
 )
 from app.providers.base import (
+    ImageProviderCapabilitiesError,
     ProviderInvocationError,
     ProviderResolutionError,
+    ResolvedProvider,
     invoke,
     resolve,
+    resolve_with_name,
+    validate_image_provider_request,
 )
 from app.schemas.response import ApiResponse, ok
 from app.schemas.videos import (
@@ -585,6 +589,11 @@ def _video_read(
         script=task.script,
         voice_id=task.voice_id,
         aspect_ratio=task.aspect_ratio,
+        image_resolution=(
+            params.get("image_resolution")
+            if mode == "photo" and params.get("image_resolution") in {"1k", "2k", "4k"}
+            else None
+        ),
         requested_aspect_ratio=(
             params.get("requested_aspect_ratio") if mode == "photo" else None
         )
@@ -971,17 +980,30 @@ def _create_video_gen_video(
 def _create_photo_video(
     payload: VideoGenerateRequest,
     *,
+    image_provider: str,
     user: User,
     db: Session,
 ) -> str:
     task_id = str(uuid4())
     params = {
         "image_key": payload.image_key,
+        "image_keys": list(payload.image_keys),
         "aspect_ratio": payload.aspect_ratio,
         "requested_aspect_ratio": payload.aspect_ratio,
+        "image_resolution": payload.image_resolution or "1k",
+        "image_provider": image_provider,
         "estimated": True,
         "apply_visible_label": payload.apply_visible_label,
     }
+    prompt_controls = {
+        "master_prompt": payload.master_prompt,
+        "master_negative_prompt": payload.master_negative_prompt,
+        "negative_prompt": payload.negative_prompt,
+        "similarity_strength": payload.similarity_strength,
+        "creativity_strength": payload.creativity_strength,
+        "subject_strength": payload.subject_strength,
+    }
+    params.update({key: value for key, value in prompt_controls.items() if value is not None})
     if payload.purpose == "cover" or payload.kind == "cover":
         params["purpose"] = "cover"
         params["kind"] = "cover"
@@ -1005,10 +1027,42 @@ def _create_photo_video(
         tenant_id=user.tenant_id,
         video_task_id=task.id,
         n=1,
+        provider=image_provider,
     )
     db.commit()
     _video_task_tenants[task_id] = user.tenant_id
     return task_id
+
+
+def _validate_photo_provider_capabilities(
+    payload: VideoGenerateRequest,
+    *,
+    user: User,
+    db: Session,
+) -> ResolvedProvider:
+    try:
+        selection = resolve_with_name(db, tenant_id=user.tenant_id, capability="image")
+        validate_image_provider_request(
+            selection.provider,
+            {
+                "image_resolution": payload.image_resolution or "1k",
+                "image_keys": payload.image_keys,
+                "image_key": payload.image_key,
+            },
+        )
+    except ProviderResolutionError as exc:
+        raise AppError(
+            "当前图片服务未配置，暂时无法生成图片。",
+            code="IMAGE_PROVIDER_NOT_CONFIGURED",
+            status_code=503,
+        ) from exc
+    except ImageProviderCapabilitiesError as exc:
+        raise AppError(
+            exc.user_message,
+            code=exc.code,
+            status_code=422,
+        ) from exc
+    return selection
 
 
 def _prune_after_create(
@@ -1173,11 +1227,18 @@ def create_video(
     storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[VideoAccepted]:
     if payload.video_mode == "photo":
-        task_id = _create_photo_video(payload, user=user, db=db)
+        selection = _validate_photo_provider_capabilities(payload, user=user, db=db)
+        task_id = _create_photo_video(
+            payload,
+            image_provider=selection.name,
+            user=user,
+            db=db,
+        )
         _prune_after_create(db, tenant_id=user.tenant_id, mode="photo", storage=storage)
         params = _worker_params(payload)
         params["tenant_id"] = user.tenant_id
         params["video_task_id"] = task_id
+        params["image_provider"] = selection.name
         generate_image_task.apply_async(args=[params], task_id=task_id, queue="image")
         return ok(request, VideoAccepted(id=task_id, task_id=task_id, status="queued"))
 

@@ -9,6 +9,13 @@ from app.api.deps import DbSessionDependency, get_object_storage, require_permis
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
 from app.db.models import Asset, User, VideoTask
+from app.providers.base import (
+    ImageProviderCapabilitiesError,
+    ProviderResolutionError,
+    ResolvedProvider,
+    resolve_with_name,
+    validate_image_provider_request,
+)
 from app.schemas.ecom_images import (
     EcomCutoutAccepted,
     EcomCutoutBatchAccepted,
@@ -171,6 +178,7 @@ def _poster_template_or_raise(template_id: str) -> str:
 def _task_params(
     payload: EcomCutoutRequest,
     *,
+    image_provider: str,
     source: Asset,
     batch_id: str | None = None,
 ) -> dict[str, object]:
@@ -179,6 +187,8 @@ def _task_params(
         "background": payload.background,
         "source_asset_id": source.id,
         "source_storage_key": source.storage_key,
+        "image_provider": image_provider,
+        "image_resolution": "1k",
         "aspect_ratio": payload.aspect_ratio,
         "requested_aspect_ratio": payload.aspect_ratio,
         "estimated": True,
@@ -214,6 +224,7 @@ def _poster_task_params(
 def _model_task_params(
     payload: EcomModelRequest,
     *,
+    image_provider: str,
     source: Asset,
     extra_prompt: str | None,
     batch_id: str | None = None,
@@ -224,6 +235,8 @@ def _model_task_params(
         "style_id": payload.style_id,
         "source_asset_id": source.id,
         "source_storage_key": source.storage_key,
+        "image_provider": image_provider,
+        "image_resolution": "1k",
         "aspect_ratio": payload.aspect_ratio,
         "requested_aspect_ratio": payload.aspect_ratio,
         "estimated": True,
@@ -241,6 +254,7 @@ def _create_cutout_task(
     *,
     user: User,
     payload: EcomCutoutRequest,
+    image_provider: str,
     source: Asset,
     batch_id: str | None = None,
 ) -> VideoTask:
@@ -254,7 +268,12 @@ def _create_cutout_task(
         video_mode="photo",
         progress=0,
         aspect_ratio=payload.aspect_ratio,
-        params=_task_params(payload, source=source, batch_id=batch_id),
+        params=_task_params(
+            payload,
+            image_provider=image_provider,
+            source=source,
+            batch_id=batch_id,
+        ),
     )
     db.add(task)
     db.flush()
@@ -263,6 +282,7 @@ def _create_cutout_task(
         tenant_id=user.tenant_id,
         video_task_id=task.id,
         n=1,
+        provider=image_provider,
     )
     return task
 
@@ -305,6 +325,7 @@ def _create_model_task(
     *,
     user: User,
     payload: EcomModelRequest,
+    image_provider: str,
     source: Asset,
     batch_id: str | None = None,
 ) -> VideoTask:
@@ -325,6 +346,7 @@ def _create_model_task(
         aspect_ratio=payload.aspect_ratio,
         params=_model_task_params(
             payload,
+            image_provider=image_provider,
             source=source,
             extra_prompt=extra_prompt,
             batch_id=batch_id,
@@ -337,6 +359,7 @@ def _create_model_task(
         tenant_id=user.tenant_id,
         video_task_id=task.id,
         n=1,
+        provider=image_provider,
     )
     return task
 
@@ -347,6 +370,36 @@ def _worker_payload(task: VideoTask) -> dict[str, object]:
     params["video_task_id"] = task.id
     params["topic"] = task.topic or _cutout_prompt(str(params.get("background") or "white"))
     return params
+
+
+def _ecom_image_provider_or_raise(
+    db: Session,
+    *,
+    tenant_id: str,
+    source_storage_key: str,
+) -> ResolvedProvider:
+    try:
+        selection = resolve_with_name(db, tenant_id=tenant_id, capability="image")
+        validate_image_provider_request(
+            selection.provider,
+            {
+                "image_resolution": "1k",
+                "source_storage_key": source_storage_key,
+            },
+        )
+    except ProviderResolutionError as exc:
+        raise AppError(
+            "当前图片服务未配置，暂时无法生成图片。",
+            code="IMAGE_PROVIDER_NOT_CONFIGURED",
+            status_code=503,
+        ) from exc
+    except ImageProviderCapabilitiesError as exc:
+        raise AppError(
+            exc.user_message,
+            code=exc.code,
+            status_code=422,
+        ) from exc
+    return selection
 
 
 def _enqueue_image_task(task: VideoTask) -> None:
@@ -528,7 +581,18 @@ def create_model_image(
         tenant_id=user.tenant_id,
         source_asset_id=payload.source_asset_id,
     )
-    task = _create_model_task(db, user=user, payload=payload, source=source)
+    selection = _ecom_image_provider_or_raise(
+        db,
+        tenant_id=user.tenant_id,
+        source_storage_key=source.storage_key,
+    )
+    task = _create_model_task(
+        db,
+        user=user,
+        payload=payload,
+        image_provider=selection.name,
+        source=source,
+    )
     db.commit()
     _prune_photo_history_best_effort(db, tenant_id=user.tenant_id, storage=storage)
     _enqueue_image_task(task)
@@ -556,12 +620,18 @@ def create_model_image_batch(
         )
         for item in selected_items
     ]
+    selection = _ecom_image_provider_or_raise(
+        db,
+        tenant_id=user.tenant_id,
+        source_storage_key=sources[0].storage_key,
+    )
     batch_id = str(uuid4())
     tasks = [
         _create_model_task(
             db,
             user=user,
             payload=item,
+            image_provider=selection.name,
             source=source,
             batch_id=batch_id,
         )
@@ -599,7 +669,18 @@ def create_cutout(
         tenant_id=user.tenant_id,
         source_asset_id=payload.source_asset_id,
     )
-    task = _create_cutout_task(db, user=user, payload=payload, source=source)
+    selection = _ecom_image_provider_or_raise(
+        db,
+        tenant_id=user.tenant_id,
+        source_storage_key=source.storage_key,
+    )
+    task = _create_cutout_task(
+        db,
+        user=user,
+        payload=payload,
+        image_provider=selection.name,
+        source=source,
+    )
     db.commit()
     _prune_photo_history_best_effort(db, tenant_id=user.tenant_id, storage=storage)
     _enqueue_image_task(task)
@@ -627,12 +708,18 @@ def create_cutout_batch(
         )
         for item in selected_items
     ]
+    selection = _ecom_image_provider_or_raise(
+        db,
+        tenant_id=user.tenant_id,
+        source_storage_key=sources[0].storage_key,
+    )
     batch_id = str(uuid4())
     tasks = [
         _create_cutout_task(
             db,
             user=user,
             payload=item,
+            image_provider=selection.name,
             source=source,
             batch_id=batch_id,
         )

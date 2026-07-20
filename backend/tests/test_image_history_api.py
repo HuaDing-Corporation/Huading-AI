@@ -191,6 +191,7 @@ def test_image_history_detail_exposes_each_output_size_evidence(
         created_at=datetime.now(UTC),
         topic="宽幅商品图",
         params={
+            "image_resolution": "4k",
             "requested_aspect_ratio": "21:9",
             "resolved_aspect_ratio": "3:2",
             "resolved_size": "1536x1024",
@@ -229,7 +230,9 @@ def test_image_history_detail_exposes_each_output_size_evidence(
         app.dependency_overrides.pop(get_object_storage, None)
 
     assert response.status_code == 200
-    item = response.json()["data"]["items"][0]
+    data = response.json()["data"]
+    item = data["items"][0]
+    assert data["meta"]["image_resolution"] == "4k"
     assert item["requested_aspect_ratio"] == "21:9"
     assert item["resolved_aspect_ratio"] == "3:2"
     assert item["resolved_size"] == "1536x1024"
@@ -505,6 +508,7 @@ def test_image_history_lists_and_opens_cover_without_mixing_image_generation(
         params={
             "kind": "cover",
             "purpose": "cover",
+            "image_resolution": "2k",
             "source": "frame",
             "source_video_task_id": "source-video-task",
             "timestamp_sec": 2.5,
@@ -589,6 +593,7 @@ def test_image_history_lists_and_opens_cover_without_mixing_image_generation(
     )
     assert detail["meta"] == {
         "task_ids": ["cover-history-item"],
+        "image_resolution": "2k",
         "source": "frame",
         "source_video_task_id": "source-video-task",
         "timestamp_sec": 2.5,

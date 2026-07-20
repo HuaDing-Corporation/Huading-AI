@@ -24,6 +24,7 @@ _ALLOWED_VIDEO_MODES = {
 _MIN_DURATION_SEC = 5
 _MAX_DURATION_SEC = 120
 _VIDEO_GEN_DURATIONS = {5, 10, 15}
+_PHOTO_PROMPT_MAX_LENGTH = 20_000
 # e.g. "1080x1920/static_default.html" — size dir + html file, no path traversal.
 _TEMPLATE_RE = re.compile(r"^[A-Za-z0-9_]+x[A-Za-z0-9_]+/[A-Za-z0-9_.\-]+\.html$")
 # Tenant-relative upload key as returned by POST /api/v1/uploads.
@@ -97,8 +98,18 @@ class VideoGenerateRequest(BaseModel):
 
     topic: str | None = Field(
         default=None,
-        max_length=2000,
-        description="Theme/topic or fixed script",
+        max_length=_PHOTO_PROMPT_MAX_LENGTH,
+        description="Theme/topic or fixed script; photo accepts up to 20,000 characters.",
+    )
+    master_prompt: str | None = Field(
+        default=None,
+        max_length=_PHOTO_PROMPT_MAX_LENGTH,
+        description="Optional photo-wide style prefix encoded into the provider prompt.",
+    )
+    master_negative_prompt: str | None = Field(
+        default=None,
+        max_length=_PHOTO_PROMPT_MAX_LENGTH,
+        description="Optional soft photo-wide negative guidance encoded into the prompt.",
     )
     prompt: str | None = Field(
         default=None,
@@ -132,6 +143,33 @@ class VideoGenerateRequest(BaseModel):
         default=None,
         description="Tenant-relative upload key from POST /uploads (photo input)",
     )
+    image_keys: list[str] = Field(
+        default_factory=list,
+        min_length=1,
+        max_length=6,
+        description="Tenant-relative upload keys from POST /uploads (photo references).",
+    )
+    similarity_strength: int | None = Field(
+        default=None,
+        ge=10,
+        le=100,
+        multiple_of=10,
+        description="Optional photo reference-similarity guidance encoded into the prompt.",
+    )
+    creativity_strength: int | None = Field(
+        default=None,
+        ge=10,
+        le=100,
+        multiple_of=10,
+        description="Optional photo creativity guidance encoded into the prompt.",
+    )
+    subject_strength: int | None = Field(
+        default=None,
+        ge=10,
+        le=100,
+        multiple_of=10,
+        description="Optional photo subject-preservation guidance encoded into the prompt.",
+    )
     product_image_keys: list[str] = Field(
         default_factory=list,
         min_length=1,
@@ -145,6 +183,13 @@ class VideoGenerateRequest(BaseModel):
     image_quality: str = Field(
         default="medium",
         description="Deprecated photo quality; accepted for compatibility and ignored.",
+    )
+    image_resolution: Literal["1k", "2k", "4k"] | None = Field(
+        default="1k",
+        description=(
+            "Photo output resolution tier. Defaults to 1k; this field, not prompt text, "
+            "controls the provider resolution parameter."
+        ),
     )
     purpose: Literal["cover"] | None = Field(
         default=None,
@@ -160,7 +205,10 @@ class VideoGenerateRequest(BaseModel):
     )
     negative_prompt: str | None = Field(
         default=None,
-        description="Optional unrestricted negative prompt for seedance_i2v generation.",
+        description=(
+            "Optional negative guidance; photo encodes it as soft prompt guidance and caps "
+            "it at 20,000 characters, while existing video semantics remain unrestricted."
+        ),
     )
     duration_sec: int | None = Field(
         default=None,
@@ -219,6 +267,23 @@ class VideoGenerateRequest(BaseModel):
             raise ValueError("invalid image_key (use the key returned by POST /uploads)")
         return v
 
+    @field_validator("image_keys", mode="before")
+    @classmethod
+    def _check_image_key_count(cls, values):
+        if isinstance(values, list | tuple):
+            if len(values) > 6:
+                raise ValueError("参考图最多支持 6 张")
+            if not values:
+                raise ValueError("参考图至少需要 1 张")
+        return values
+
+    @field_validator("image_keys")
+    @classmethod
+    def _check_image_keys(cls, values: list[str]) -> list[str]:
+        if any(".." in value or not _IMAGE_KEY_RE.match(value) for value in values):
+            raise ValueError("invalid image_keys (use keys returned by POST /uploads)")
+        return values
+
     @field_validator("product_image_keys")
     @classmethod
     def _check_video_product_image_keys(cls, values: list[str]) -> list[str]:
@@ -239,7 +304,24 @@ class VideoGenerateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_i2v_has_image(self) -> "VideoGenerateRequest":
+        if (
+            self.video_mode != "photo"
+            and self.topic is not None
+            and len(self.topic) > 2000
+        ):
+            raise ValueError("non-photo topic must contain at most 2000 characters")
         if self.video_mode == "photo":
+            photo_prompt_values = (
+                self.topic,
+                self.master_prompt,
+                self.master_negative_prompt,
+                self.negative_prompt,
+            )
+            if any(
+                value is not None and len(value) > _PHOTO_PROMPT_MAX_LENGTH
+                for value in photo_prompt_values
+            ):
+                raise ValueError("photo prompt fields must contain at most 20000 characters")
             if "aspect_ratio" not in self.model_fields_set:
                 self.aspect_ratio = image_aspect_ratio_from_legacy_size(self.image_size)
         elif self.aspect_ratio not in VIDEO_ASPECT_RATIOS:
@@ -360,6 +442,7 @@ class VideoRead(BaseModel):
     script: str | None = None
     voice_id: str | None = None
     aspect_ratio: str | None = None
+    image_resolution: Literal["1k", "2k", "4k"] | None = None
     requested_aspect_ratio: str | None = None
     resolved_aspect_ratio: str | None = None
     resolved_size: str | None = None

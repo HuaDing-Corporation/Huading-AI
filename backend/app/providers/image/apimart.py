@@ -10,7 +10,7 @@ import requests
 
 from app.core.config import settings
 from app.db.models import ProviderConfig
-from app.providers.base import register_provider
+from app.providers.base import ImageProviderCapabilities, register_provider
 from app.services.apimart_costs import apimart_usage_metadata
 
 _DEFAULT_BASE_URL = "https://api.apimart.ai/v1"
@@ -46,6 +46,11 @@ class APIMartImageProviderError(RuntimeError):
 
 
 class APIMartImageProvider:
+    capabilities = ImageProviderCapabilities(
+        supported_resolutions=frozenset({"1k", "2k", "4k"}),
+        max_reference_images=6,
+    )
+
     def __init__(
         self,
         *,

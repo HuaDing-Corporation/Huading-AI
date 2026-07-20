@@ -121,7 +121,10 @@ def test_require_role_alias_exists() -> None:
     assert require_role is require_roles
 
 
-def test_provider_resolve_prefers_tenant_config_and_falls_back_to_platform() -> None:
+def test_provider_resolve_prefers_tenant_config_and_falls_back_to_platform(
+    monkeypatch,
+) -> None:
+    from app.providers import base as providers_base
     from app.providers.base import clear_provider_registry, register_provider, resolve
 
     engine = create_engine(
@@ -136,6 +139,7 @@ def test_provider_resolve_prefers_tenant_config_and_falls_back_to_platform() -> 
         def __init__(self, name: str) -> None:
             self.name = name
 
+    monkeypatch.setattr(providers_base, "_REGISTRY", {})
     clear_provider_registry()
     register_provider("llm", "platform-llm", lambda _config: FakeProvider("platform"))
     register_provider("llm", "tenant-llm", lambda _config: FakeProvider("tenant"))
@@ -167,7 +171,8 @@ def test_provider_resolve_prefers_tenant_config_and_falls_back_to_platform() -> 
         Base.metadata.drop_all(engine)
 
 
-def test_provider_resolve_named_provider_and_voice_clone_default() -> None:
+def test_provider_resolve_named_provider_and_voice_clone_default(monkeypatch) -> None:
+    from app.providers import base as providers_base
     from app.providers.base import (
         clear_provider_registry,
         register_provider,
@@ -187,6 +192,7 @@ def test_provider_resolve_named_provider_and_voice_clone_default() -> None:
         def __init__(self, name: str) -> None:
             self.name = name
 
+    monkeypatch.setattr(providers_base, "_REGISTRY", {})
     clear_provider_registry()
     register_provider("voice_clone", "doubao-voice-clone", lambda _config: FakeProvider("doubao"))
     register_provider(
