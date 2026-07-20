@@ -1747,20 +1747,60 @@ export const handlers = [
   // ── 电商图扩展 Phase2 (ECOM-MODEL-UI-0001) — AI 模特(单张 + 批量) mock ──
   // 忠实后端：model-styles 返真列表；单张/批量塞真 photo VideoTask(kind=ecom_model, done)进
   // videos store，使现有 GET /videos/:id 轮询拿到 done + 模特图；批量 N clamp 1..20。非伪造(吸取教训)。
-  // 忠实后端 EcomModelStyle(仅 id+name)与真实预设列表(studio_white/lifestyle/street)，不伪造 thumbnail。
+  // 忠实后端 EcomModelStyle(仅 id+name)。ECOM-MODEL-OPTIMIZE-UI-0001 · D3：6 档风格。
+  // 🔴 FIX1 真联调：id + name **逐字对齐 #210 合并源** routes/ecom_images.py:70-95 `_MODEL_STYLE_DEFINITIONS`
+  //   （新增 3 档 id 修正为 office_commute / resort_travel / high_fashion——此前 mock 的 commute/vacation/editorial
+  //   与 BE 对不上，真接口会 ECOM_MODEL_STYLE_INVALID）。名称随后端返回，前端拉取渲染不硬编码；风格可选。
   http.get(`${BASE}/api/v1/ecom-images/model-styles`, () =>
     ok({
       styles: [
-        { id: "studio_white", name: "Studio white" },
-        { id: "lifestyle", name: "Lifestyle" },
-        { id: "street", name: "Street style" }
+        { id: "studio_white", name: "棚拍白底" },
+        { id: "lifestyle", name: "生活场景" },
+        { id: "street", name: "街拍" },
+        { id: "office_commute", name: "通勤职场" },
+        { id: "resort_travel", name: "度假旅拍" },
+        { id: "high_fashion", name: "高级时尚大片" }
       ]
     })
   ),
+  // ECOM-MODEL-OPTIMIZE-UI-0001 · 单张 AI 模特 mock —— 🔴 FIX1 真联调：逐字段/逐错误码对齐 **#210 合并源**
+  //  （schemas/ecom_images.py:55-98 + routes/ecom_images.py:174-182）：extra=forbid → VALIDATION_ERROR；
+  //  商品图 1–N(0→422) + 模特图 0–N + 合计 ≤6(超→422) + product_images_mode 合法值 + style_id 与 custom_style 互斥
+  //  (**BE 是拒绝而非取其一**：validator raise) + extra_prompt/custom_style ≤20000(超→422) + 未知 style_id →
+  //  ECOM_MODEL_STYLE_INVALID(422，_model_style_prompt_or_raise)。友好消息文本逐字对齐 BE。
   http.post(`${BASE}/api/v1/ecom-images/model`, async ({ request }) => {
-    const body = (await request.json()) as { source_asset_id: string; gender: string; style_id: string; apply_visible_label?: boolean };
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown> & { apply_visible_label?: boolean };
+    const ALLOWED = [
+      "product_asset_ids", "model_asset_ids", "product_images_mode", "gender",
+      "style_id", "custom_style", "extra_prompt", "aspect_ratio", "apply_visible_label", "source_asset_id"
+    ];
+    // extra="forbid" 镜像（对齐本文件既有写法：列出多余键，报错信息可操作）。
+    const extra = Object.keys(body).filter((k) => !ALLOWED.includes(k));
+    if (extra.length) return err(422, "VALIDATION_ERROR", `Extra inputs are not permitted: ${extra.join(",")}`);
+    if (body.product_images_mode !== "multi_angle" && body.product_images_mode !== "multi_item")
+      return err(422, "VALIDATION_ERROR", "product_images_mode 非法（multi_angle / multi_item）");
+    const productIds = Array.isArray(body.product_asset_ids) ? (body.product_asset_ids as unknown[]) : [];
+    const modelIds = Array.isArray(body.model_asset_ids) ? (body.model_asset_ids as unknown[]) : [];
+    // extra_prompt / custom_style 反滥用上界 20000（BE _ECOM_MODEL_TEXT_LIMIT）→ 超限 422（非静默截断）。
+    const overText = (v: unknown) => typeof v === "string" && v.length > 20000;
+    if (overText(body.extra_prompt) || overText(body.custom_style))
+      return err(422, "VALIDATION_ERROR", "自定义补充/自定义风格最多 20000 字符");
+    const hasStyle = typeof body.style_id === "string" && body.style_id.length > 0;
+    const hasCustom = typeof body.custom_style === "string" && body.custom_style.trim().length > 0;
+    // 🔴 互斥：BE model_validator 是**拒绝**（非取其一），友好文案逐字对齐。
+    if (hasStyle && hasCustom) return err(422, "VALIDATION_ERROR", "预设风格与自定义风格不能同时选择");
+    if (productIds.length < 1) return err(422, "VALIDATION_ERROR", "请至少上传一张商品图");
+    if (productIds.length + modelIds.length > 6) return err(422, "VALIDATION_ERROR", "商品图与模特图合计最多 6 张");
+    // 未知 style_id → ECOM_MODEL_STYLE_INVALID（BE route 拼 prompt 时 _model_style_prompt_or_raise 抛）。
+    const VALID_STYLES = ["studio_white", "lifestyle", "street", "office_commute", "resort_travel", "high_fashion"];
+    if (hasStyle && !VALID_STYLES.includes(body.style_id as string))
+      return err(422, "ECOM_MODEL_STYLE_INVALID", "Unknown AI model style.");
     const id = `mock-${++videoSeq}`;
-    const url = `https://mock.local/model-${body.style_id || "studio"}.png`;
+    // 风格 key 用于 mock 产物 url：自定义 > 预设 > 默认（三档 top-down，避免嵌套三元）。
+    let styleKey = "studio";
+    if (hasCustom) styleKey = "custom";
+    else if (hasStyle) styleKey = body.style_id as string;
+    const url = `https://mock.local/model-${styleKey}.png`;
     videos.set(id, {
       id, status: "done", progress: 100, topic: "AI 模特图",
       mode: "photo", kind: "ecom_model", created_at: new Date(0).toISOString(),

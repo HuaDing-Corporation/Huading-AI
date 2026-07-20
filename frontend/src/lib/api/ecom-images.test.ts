@@ -69,8 +69,8 @@ describe("ecom-images model API ↔ MSW（mock 忠实，Phase2 AI 模特）", ()
     expect(styles[0]).toHaveProperty("name");
   });
 
-  it("单张 model：塞真 photo task(kind=ecom_model, done, 模特图 url)，GET /videos/:id 轮询拿到", async () => {
-    const res = await modelImage({ source_asset_id: "a1", gender: "female", style_id: "studio" });
+  it("单张 model：多商品图 + 组合语义 → 塞真 photo task(kind=ecom_model, done)，GET /videos/:id 轮询拿到", async () => {
+    const res = await modelImage({ product_asset_ids: ["a1", "a2"], product_images_mode: "multi_item", gender: "female", style_id: "studio_white" });
     expect(res.task_id).toBeTruthy();
     const v = await getVideo(res.task_id);
     expect(v.status).toBe("done");
@@ -78,8 +78,8 @@ describe("ecom-images model API ↔ MSW（mock 忠实，Phase2 AI 模特）", ()
     expect(v.playback_url).toContain("model-");
   });
 
-  it("SSE 轮询后模特图 URL 不被通用 v.mp4 覆盖(预 seeded 终态保留)", async () => {
-    const res = await modelImage({ source_asset_id: "a1", gender: "any", style_id: "street" });
+  it("单张 model：模特图 + 自定义风格 → done（custom 产物 url）", async () => {
+    const res = await modelImage({ product_asset_ids: ["a1"], model_asset_ids: ["m1"], product_images_mode: "multi_angle", gender: "any", custom_style: "赛博朋克霓虹" });
     await streamVideoEvents(res.task_id, () => undefined);
     const v = await getVideo(res.task_id);
     expect(v.playback_url).toContain("model-");
@@ -104,6 +104,86 @@ describe("ecom-images model API ↔ MSW（mock 忠实，Phase2 AI 模特）", ()
     const v0 = await getVideo(res.tasks[0].task_id);
     expect(v0.status).toBe("done");
     expect(v0.playback_url).toContain("model-");
+  });
+});
+
+// ECOM-MODEL-OPTIMIZE-UI-0001 · mock 契约校验（不比 BE 宽松）：合计 ≤6 / 商品图 ≥1 / mode 合法 / 风格互斥 / extra=forbid。
+type ModelBody = Parameters<typeof modelImage>[0];
+describe("ecom-images model 契约校验（ECOM-MODEL-OPTIMIZE · mock 不比 BE 宽松）", () => {
+  it("🔴 商品图 0 张 → 422", async () => {
+    await expect(
+      modelImage({ product_asset_ids: [], product_images_mode: "multi_item", gender: "female" })
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("🔴 商品图 + 模特图合计 > 6 → 422（商品4 + 模特3 = 7）", async () => {
+    await expect(
+      modelImage({ product_asset_ids: ["a1", "a2", "a3", "a4"], model_asset_ids: ["m1", "m2", "m3"], product_images_mode: "multi_item", gender: "female" })
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("合计正好 6（商品4 + 模特2）→ 通过", async () => {
+    const res = await modelImage({ product_asset_ids: ["a1", "a2", "a3", "a4"], model_asset_ids: ["m1", "m2"], product_images_mode: "multi_item", gender: "female" });
+    expect(res.task_id).toBeTruthy();
+  });
+
+  it("🔴 product_images_mode 非法 → 422", async () => {
+    await expect(
+      modelImage({ product_asset_ids: ["a1"], product_images_mode: "bogus", gender: "female" } as unknown as ModelBody)
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("🔴 style_id 与 custom_style 同时提供 → 422（互斥）", async () => {
+    await expect(
+      modelImage({ product_asset_ids: ["a1"], product_images_mode: "multi_item", gender: "female", style_id: "studio", custom_style: "赛博" })
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("🔴 多传字段（extra=forbid）→ 422", async () => {
+    await expect(
+      modelImage({ product_asset_ids: ["a1"], product_images_mode: "multi_item", gender: "female", bogus: 1 } as unknown as ModelBody)
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("风格可选：不带 style_id / custom_style 也能生成（D3）", async () => {
+    const res = await modelImage({ product_asset_ids: ["a1"], product_images_mode: "multi_item", gender: "female" });
+    expect(res.task_id).toBeTruthy();
+  });
+
+  // ── FIX1 真联调对齐 #210 合并源 ──────────────────────────────────
+  it("🔴 FIX1 六档风格 id 逐字对齐 #210（含新增 office_commute/resort_travel/high_fashion）", async () => {
+    const styles = await listModelStyles();
+    expect(styles.map((s) => s.id)).toEqual([
+      "studio_white", "lifestyle", "street", "office_commute", "resort_travel", "high_fashion"
+    ]);
+  });
+
+  it("🔴 FIX1 未知 style_id → 422 ECOM_MODEL_STYLE_INVALID（不比 BE 宽松）", async () => {
+    await expect(
+      modelImage({ product_asset_ids: ["a1"], product_images_mode: "multi_item", gender: "female", style_id: "editorial" })
+    ).rejects.toMatchObject({ status: 422, code: "ECOM_MODEL_STYLE_INVALID" });
+  });
+
+  it("真实新增风格 id（office_commute）可生成", async () => {
+    const res = await modelImage({ product_asset_ids: ["a1"], product_images_mode: "multi_item", gender: "female", style_id: "office_commute" });
+    expect(res.task_id).toBeTruthy();
+  });
+
+  it("🔴 FIX1 extra_prompt 超 20000 → 422（BE _ECOM_MODEL_TEXT_LIMIT，非静默截断）", async () => {
+    await expect(
+      modelImage({ product_asset_ids: ["a1"], product_images_mode: "multi_item", gender: "female", extra_prompt: "x".repeat(20001) })
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("🔴 FIX1 custom_style 超 20000 → 422", async () => {
+    await expect(
+      modelImage({ product_asset_ids: ["a1"], product_images_mode: "multi_item", gender: "female", custom_style: "自".repeat(20001) })
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("extra_prompt 正好 20000 → 通过（边界）", async () => {
+    const res = await modelImage({ product_asset_ids: ["a1"], product_images_mode: "multi_item", gender: "female", extra_prompt: "x".repeat(20000) });
+    expect(res.task_id).toBeTruthy();
   });
 });
 
