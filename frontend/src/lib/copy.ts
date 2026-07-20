@@ -352,7 +352,7 @@ export const copy = {
     ecomProductModeMultiAngle: "同一件商品的多角度",
     ecomProductModeHint: "多件搭配：同一模特同时上身多件商品（如衣服、裤子、鞋子、耳环、项链）；多角度：同一件商品的不同角度。",
     ecomCustomStyleLabel: "自定义风格",
-    ecomCustomStylePlaceholder: "描述你想要的风格（不限字数），如：赛博朋克霓虹夜景",
+    ecomCustomStylePlaceholder: "描述你想要的风格，如：赛博朋克霓虹夜景",
     ecomStylePresetDisabledHint: "已填自定义风格，清空后可选预设",
     ecomCustomStyleDisabledHint: "已选风格预设，取消后可自定义",
     // 电商图 · 营销海报 (ECOM-POSTER-UI-0001)

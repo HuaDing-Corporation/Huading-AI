@@ -35,7 +35,7 @@ const GENDER_OPTIONS: { id: ModelGender; label: string }[] = [
  * trackExisting、AiLabelToggle。
  *   D1 商品图 1–N + 模特图 0–N，合计 ≤6（剩余额度 live 播报，超限由 picker 明确阻断不静默）；
  *   D2 商品图组合语义 product_images_mode（默认 multi_item，>1 张才显开关）；
- *   D3 风格预设改可选 + 自定义风格（与预设 UI 互斥）；D4 自定义补充不限字数。
+ *   D3 风格预设改可选 + 自定义风格（与预设 UI 互斥）；D4 自定义补充取消旧 200 截断（BE ≤20000 反滥用上界，超限 422）。
  * 提交 POST /ecom-images/model（product_asset_ids/model_asset_ids/product_images_mode/style_id?/custom_style?），
  * 返回 photo task(kind=ecom_model)，由 tasks-context.trackExisting 轮询（产物进 TaskList + 图片历史）。
  */
@@ -53,7 +53,7 @@ export function EcomImageModelForm({
   const [customStyle, setCustomStyle] = useState(""); // 自定义风格（与 styleId 互斥）
   const [productImagesMode, setProductImagesMode] = useState<ProductImagesMode>("multi_item"); // D2 默认多件搭配
   const [aspectRatio, setAspectRatio] = useState<ImageAspectRatio>(DEFAULT_IMAGE_ASPECT_RATIO); // 画面比例，默认 1:1
-  const [custom, setCustom] = useState(initialCustom ?? ""); // 自定义补充（D4：不限字数，无 slice）
+  const [custom, setCustom] = useState(initialCustom ?? ""); // 自定义补充（D4：取消旧 200 截断、无 slice；BE ≤20000 上界，超限 422）
   const [productIds, setProductIds] = useState<string[]>([]);
   const [modelIds, setModelIds] = useState<string[]>([]);
   const [submittedId, setSubmittedId] = useState<string | null>(null);
@@ -225,7 +225,7 @@ export function EcomImageModelForm({
         {styleId !== null && <p className="mt-1.5 text-[12px] text-ink-faint">{copy.workbench.ecomCustomStyleDisabledHint}</p>}
       </div>
 
-      {/* 自定义补充（D4：不限字数，无计数、无截断） */}
+      {/* 自定义补充（D4：取消旧 200 截断、无计数；前端不设 maxLength，BE ≤20000 反滥用上界超限 422） */}
       <AiTextField
         id="ecom-model-custom"
         label={copy.workbench.ecomCustomLabel}
