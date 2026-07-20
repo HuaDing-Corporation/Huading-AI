@@ -19,7 +19,8 @@ _SEEDANCE_I2V_DEFAULT_SECONDS = 15
 _SEEDANCE_I2V_CLIP_SECONDS = 5
 _SEEDANCE_I2V_MIN_SECONDS = 5
 _SEEDANCE_I2V_MAX_SECONDS = 120
-_VIDEO_GEN_DURATIONS = {5, 10, 15}
+_VIDEO_GEN_MIN_DURATION_SEC = 4
+_VIDEO_GEN_MAX_DURATION_SEC = 15
 _VIDEO_GEN_RESOLUTION_MULTIPLIERS = {
     "480p": Decimal("1.0000"),
     "720p": Decimal("1.6250"),
@@ -346,7 +347,7 @@ def estimate_seedance_i2v_quota(
 
 def video_gen_billable_seconds(value: int | float | None) -> int:
     seconds = int(value or 5)
-    if seconds not in _VIDEO_GEN_DURATIONS:
+    if not (_VIDEO_GEN_MIN_DURATION_SEC <= seconds <= _VIDEO_GEN_MAX_DURATION_SEC):
         raise AppError("Invalid video_gen duration.", code="VALIDATION_ERROR", status_code=422)
     return seconds
 

@@ -34,6 +34,9 @@ IMAGE_ASPECT_RATIOS: tuple[ImageAspectRatio, ...] = (
     "9:16",
 )
 VIDEO_ASPECT_RATIOS = frozenset({"9:16", "16:9", "1:1"})
+VIDEO_GEN_ASPECT_RATIOS = frozenset(
+    {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "auto"}
+)
 LEGACY_IMAGE_SIZE_ASPECT_RATIOS: dict[str, ImageAspectRatio] = {
     "1024x1024": "1:1",
     "1536x1024": "3:2",

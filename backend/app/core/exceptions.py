@@ -90,6 +90,12 @@ def _validation_message(errors: list[dict[str, object]]) -> str:
     return "Request validation failed."
 
 
+def _validation_code(errors: list[dict[str, object]]) -> str:
+    if any(error.get("type") == "friendly_video_gen_prompt_too_long" for error in errors):
+        return "VIDEO_GEN_PROMPT_TOO_LONG"
+    return "VALIDATION_ERROR"
+
+
 async def validation_exception_handler(
     request: Request,
     exc: RequestValidationError,
@@ -100,7 +106,7 @@ async def validation_exception_handler(
     return _error_response(
         request,
         status_code=422,
-        code="VALIDATION_ERROR",
+        code=_validation_code(errors),
         message=_validation_message(errors),
         detail=errors,
     )

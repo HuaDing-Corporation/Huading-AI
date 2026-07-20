@@ -62,6 +62,19 @@ class _FakeSession:
         return self.task_responses.pop(0)
 
 
+@pytest.mark.parametrize(
+    "size",
+    ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "adaptive"],
+)
+def test_apimart_video_provider_preserves_all_supported_sizes(size: str) -> None:
+    provider = APIMartVideoProvider(api_key="test-apimart-key")
+
+    body, normalized = provider._request_body({"prompt": "product reveal", "size": size})
+
+    assert body["size"] == size
+    assert normalized["size"] == size
+
+
 @pytest.mark.asyncio
 async def test_apimart_video_provider_submits_polls_downloads_and_maps_i2v_payload() -> None:
     sleep_calls: list[float] = []
@@ -114,6 +127,7 @@ async def test_apimart_video_provider_submits_polls_downloads_and_maps_i2v_paylo
             "fps": 24,
             "image_urls": ["https://storage.test/huading-videos/ref-a.png?sig=ok"],
             "negative_prompt": "blurry, warped product",
+            "generate_audio": True,
         }
     )
 
@@ -138,7 +152,7 @@ async def test_apimart_video_provider_submits_polls_downloads_and_maps_i2v_paylo
                 "duration": 15,
                 "size": "adaptive",
                 "resolution": "720p",
-                "generate_audio": False,
+                "generate_audio": True,
                 "image_urls": ["https://storage.test/huading-videos/ref-a.png?sig=ok"],
                 "negative_prompt": "blurry, warped product",
             },

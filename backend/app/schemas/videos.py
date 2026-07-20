@@ -3,9 +3,11 @@ from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from app.core.image_aspect_ratio import (
     VIDEO_ASPECT_RATIOS,
+    VIDEO_GEN_ASPECT_RATIOS,
     RequestedImageAspectRatio,
     image_aspect_ratio_from_legacy_size,
 )
@@ -23,7 +25,8 @@ _ALLOWED_VIDEO_MODES = {
 }
 _MIN_DURATION_SEC = 5
 _MAX_DURATION_SEC = 120
-_VIDEO_GEN_DURATIONS = {5, 10, 15}
+_VIDEO_GEN_MIN_DURATION_SEC = 4
+_VIDEO_GEN_MAX_DURATION_SEC = 15
 _PHOTO_PROMPT_MAX_LENGTH = 20_000
 # e.g. "1080x1920/static_default.html" — size dir + html file, no path traversal.
 _TEMPLATE_RE = re.compile(r"^[A-Za-z0-9_]+x[A-Za-z0-9_]+/[A-Za-z0-9_.\-]+\.html$")
@@ -113,7 +116,7 @@ class VideoGenerateRequest(BaseModel):
     )
     prompt: str | None = Field(
         default=None,
-        description="Unlimited prompt for video_gen; stored as topic for history.",
+        description="Prompt for video_gen (maximum 2,000 characters); stored as topic for history.",
     )
     script: str | None = Field(default=None, max_length=5000)
     voice_id: str | None = None
@@ -214,11 +217,15 @@ class VideoGenerateRequest(BaseModel):
         default=None,
         description=(
             "Target duration in seconds; seedance_i2v clamps 5..120, "
-            "video_gen uses 5/10/15."
+            "video_gen accepts integer seconds from 4 through 15."
         ),
     )
     reference_image_asset_ids: list[str] = Field(default_factory=list)
     resolution: Literal["480p", "720p", "1080p"] = Field(default="720p")
+    generate_audio: bool = Field(
+        default=False,
+        description="Whether video_gen asks the provider to generate synchronized audio.",
+    )
     bgm: BgmSelectionRequest | None = None
     n_scenes: int = Field(default=3, ge=1, le=20)
     frame_template: str | None = Field(
@@ -304,6 +311,13 @@ class VideoGenerateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_i2v_has_image(self) -> "VideoGenerateRequest":
+        if self.video_mode == "video_gen":
+            video_gen_prompt = (self.prompt or self.topic or "").strip()
+            if len(video_gen_prompt) > 2000:
+                raise PydanticCustomError(
+                    "friendly_video_gen_prompt_too_long",
+                    "提示词输入最大上限为 2000 字",
+                )
         if (
             self.video_mode != "photo"
             and self.topic is not None
@@ -324,6 +338,11 @@ class VideoGenerateRequest(BaseModel):
                 raise ValueError("photo prompt fields must contain at most 20000 characters")
             if "aspect_ratio" not in self.model_fields_set:
                 self.aspect_ratio = image_aspect_ratio_from_legacy_size(self.image_size)
+        elif self.video_mode == "video_gen":
+            if self.aspect_ratio not in VIDEO_GEN_ASPECT_RATIOS:
+                raise ValueError(
+                    "video_gen supports only 16:9, 9:16, 1:1, 4:3, 3:4, 21:9, or auto"
+                )
         elif self.aspect_ratio not in VIDEO_ASPECT_RATIOS:
             raise ValueError("non-photo video modes support only 9:16, 16:9, or 1:1")
 
@@ -337,8 +356,14 @@ class VideoGenerateRequest(BaseModel):
                 raise ValueError("video_gen reference_image_asset_ids must contain at most 9 items")
             if len(set(self.reference_image_asset_ids)) != len(self.reference_image_asset_ids):
                 raise ValueError("video_gen reference_image_asset_ids must be unique")
-            if self.duration_sec not in _VIDEO_GEN_DURATIONS:
-                raise ValueError("video_gen duration_sec must be one of 5, 10, 15")
+            if "aspect_ratio" not in self.model_fields_set and self.reference_image_asset_ids:
+                self.aspect_ratio = "auto"
+            if self.duration_sec is None or not (
+                _VIDEO_GEN_MIN_DURATION_SEC
+                <= self.duration_sec
+                <= _VIDEO_GEN_MAX_DURATION_SEC
+            ):
+                raise ValueError("video_gen duration_sec must be between 4 and 15")
             return self
 
         if self.video_mode != "seedance_i2v" and not (self.topic or "").strip():

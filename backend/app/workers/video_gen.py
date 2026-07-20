@@ -85,6 +85,9 @@ class VideoGenContext:
     reference_assets: list[Asset]
     duration_sec: int
     resolution: str
+    aspect_ratio: str
+    generate_audio: bool
+    negative_prompt: str | None
     bgm: dict[str, Any] | None = None
     provider_cost_cents: int = 0
 
@@ -207,6 +210,14 @@ def _load_context(
 ) -> VideoGenContext:
     task = _task_or_raise(db, tenant_id=tenant_id, task_id=task_id)
     params = task.params or {}
+    reference_assets = _task_reference_assets(db, task)
+    raw_aspect_ratio = params.get("aspect_ratio")
+    aspect_ratio = (
+        raw_aspect_ratio.strip()
+        if isinstance(raw_aspect_ratio, str) and raw_aspect_ratio.strip()
+        else "auto" if reference_assets else "9:16"
+    )
+    raw_negative_prompt = params.get("negative_prompt")
     return VideoGenContext(
         task_id=task_id,
         tenant_id=tenant_id,
@@ -214,9 +225,14 @@ def _load_context(
         store=store,
         storage=storage,
         task=task,
-        reference_assets=_task_reference_assets(db, task),
+        reference_assets=reference_assets,
         duration_sec=int(params.get("duration_sec") or task.duration_sec or 5),
         resolution=str(params.get("resolution") or "720p"),
+        aspect_ratio=aspect_ratio,
+        generate_audio=params.get("generate_audio") is True,
+        negative_prompt=(
+            raw_negative_prompt if isinstance(raw_negative_prompt, str) else None
+        ),
         bgm=params.get("bgm") if isinstance(params.get("bgm"), dict) else None,
     )
 
@@ -242,11 +258,13 @@ def _provider_payload(ctx: VideoGenContext) -> dict[str, Any]:
         "prompt": ctx.task.topic or "",
         "duration": ctx.duration_sec,
         "resolution": ctx.resolution,
-        "size": "adaptive" if image_urls else "9:16",
-        "generate_audio": False,
+        "size": "adaptive" if ctx.aspect_ratio == "auto" else ctx.aspect_ratio,
+        "generate_audio": ctx.generate_audio,
     }
     if image_urls:
         payload["image_urls"] = image_urls
+    if ctx.negative_prompt:
+        payload["negative_prompt"] = ctx.negative_prompt
     return payload
 
 
