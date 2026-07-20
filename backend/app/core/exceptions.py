@@ -91,8 +91,22 @@ def _validation_message(errors: list[dict[str, object]]) -> str:
 
 
 def _validation_code(errors: list[dict[str, object]]) -> str:
-    if any(error.get("type") == "friendly_video_gen_prompt_too_long" for error in errors):
-        return "VIDEO_GEN_PROMPT_TOO_LONG"
+    friendly_codes = {
+        "friendly_video_gen_prompt_too_long": "VIDEO_GEN_PROMPT_TOO_LONG",
+        "friendly_video_gen_reference_media_conflict": (
+            "VIDEO_GEN_REFERENCE_MEDIA_CONFLICT"
+        ),
+        "friendly_video_gen_reference_video_count_invalid": (
+            "VIDEO_GEN_REFERENCE_VIDEO_COUNT_INVALID"
+        ),
+        "friendly_video_gen_reference_video_duplicate": (
+            "VIDEO_GEN_REFERENCE_VIDEO_DUPLICATE"
+        ),
+    }
+    for error in errors:
+        code = friendly_codes.get(str(error.get("type") or ""))
+        if code is not None:
+            return code
     return "VALIDATION_ERROR"
 
 

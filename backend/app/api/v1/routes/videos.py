@@ -87,6 +87,10 @@ from app.services.storage.keys import (
     presign_tenant_storage_key,
     tenant_storage_key_exists,
 )
+from app.services.video_reference import (
+    VIDEO_REFERENCE_MAX_DURATION_MS,
+    VIDEO_REFERENCE_MIN_DURATION_MS,
+)
 from app.services.voices import resolve_narration_voice
 from app.workers.avatar_talk import (
     build_seedance_scene_prompt_payload,
@@ -191,6 +195,8 @@ def _video_gen_worker_params(payload: VideoGenerateRequest) -> dict:
         "generate_audio": payload.generate_audio,
         "apply_visible_label": payload.apply_visible_label,
     }
+    if payload.reference_video_asset_ids:
+        params["reference_video_asset_ids"] = list(payload.reference_video_asset_ids)
     if payload.bgm is not None:
         params["bgm"] = payload.bgm.model_dump(exclude_none=True)
     return params
@@ -889,6 +895,56 @@ def _video_gen_reference_assets_or_404(
     return resolved
 
 
+def _video_gen_reference_video_assets_or_404(
+    db: Session,
+    *,
+    tenant_id: str,
+    asset_ids: list[str],
+) -> list[Asset]:
+    assets = list(
+        db.scalars(
+            select(Asset).where(
+                Asset.id.in_(asset_ids),
+                Asset.tenant_id == tenant_id,
+                Asset.status == "ready",
+                Asset.deleted_at.is_(None),
+            )
+        )
+    )
+    by_id = {asset.id: asset for asset in assets}
+    ordered = [by_id.get(asset_id) for asset_id in asset_ids]
+    if any(asset is None for asset in ordered):
+        raise AppError(
+            "Reference video not found.",
+            code="REFERENCE_VIDEO_NOT_FOUND",
+            status_code=404,
+        )
+    resolved = [asset for asset in ordered if asset is not None]
+    if any(
+        asset.type != "video"
+        or base_mime(asset.mime_type) != "video/mp4"
+        or (asset.metadata_ or {}).get("purpose") != "video_gen_reference"
+        for asset in resolved
+    ):
+        raise AppError(
+            "Reference video not found.",
+            code="REFERENCE_VIDEO_NOT_FOUND",
+            status_code=404,
+        )
+    total_duration_ms = sum(int(asset.duration_ms or 0) for asset in resolved)
+    if resolved and not (
+        VIDEO_REFERENCE_MIN_DURATION_MS
+        < total_duration_ms
+        < VIDEO_REFERENCE_MAX_DURATION_MS
+    ):
+        raise AppError(
+            "参考视频合计时长需大于 1.8 秒且小于 15.2 秒。",
+            code="VIDEO_GEN_REFERENCE_TOTAL_DURATION_INVALID",
+            status_code=422,
+        )
+    return resolved
+
+
 def _video_gen_bgm_upload_or_404(
     db: Session,
     *,
@@ -932,6 +988,11 @@ def _create_video_gen_video(
         tenant_id=user.tenant_id,
         asset_ids=list(payload.reference_image_asset_ids),
     )
+    reference_video_assets = _video_gen_reference_video_assets_or_404(
+        db,
+        tenant_id=user.tenant_id,
+        asset_ids=list(payload.reference_video_asset_ids),
+    )
     bgm_asset: Asset | None = None
     if payload.bgm is not None and payload.bgm.source == "upload":
         bgm_asset = _video_gen_bgm_upload_or_404(
@@ -966,6 +1027,8 @@ def _create_video_gen_video(
     db.flush()
     for asset in reference_assets:
         db.add(TaskAsset(video_task_id=task.id, asset_id=asset.id, role="input_reference_image"))
+    for asset in reference_video_assets:
+        db.add(TaskAsset(video_task_id=task.id, asset_id=asset.id, role="input_reference_video"))
     if bgm_asset is not None:
         db.add(TaskAsset(video_task_id=task.id, asset_id=bgm_asset.id, role="input_bgm"))
     reserve_video_gen_quota(

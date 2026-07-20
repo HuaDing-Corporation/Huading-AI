@@ -25,6 +25,10 @@ from app.schemas.response import ApiResponse, ok
 from app.schemas.uploads import UploadImageResponse, UploadResponse
 from app.services.storage.base import ObjectStorage
 from app.services.storage.keys import put_tenant_storage_bytes
+from app.services.video_reference import (
+    VIDEO_REFERENCE_MAX_BYTES,
+    normalize_video_reference,
+)
 
 router = APIRouter()
 ObjectStorageDependency = Depends(get_object_storage)
@@ -48,6 +52,13 @@ _ALLOWED_AUDIO_TYPES: dict[str, str] = {
 }
 _ALLOWED_AVATAR_VIDEO_TYPES: dict[str, str] = {
     "video/mp4": ".mp4",
+}
+_ALLOWED_VIDEO_REFERENCE_TYPES: dict[str, str] = {
+    "video/mp4": ".mp4",
+    "video/mov": ".mov",
+    "video/quicktime": ".mov",
+    "video/x-quicktime": ".mov",
+    "video/webm": ".webm",
 }
 _MAX_BYTES = settings.upload_max_bytes
 _UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
@@ -223,24 +234,80 @@ async def upload_avatar_image(
 async def upload_avatar_video(
     request: Request,
     file: UploadFile,
-    purpose: Literal["avatar_source", "reverse_prompt"] = "avatar_source",
+    purpose: Literal[
+        "avatar_source",
+        "reverse_prompt",
+        "video_gen_reference",
+    ] = "avatar_source",
     user: User = UploadPermissionDependency,
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[UploadImageResponse]:
     content_type = base_mime(file.content_type)
-    extension = _ALLOWED_AVATAR_VIDEO_TYPES.get(content_type)
+    allowed_types = (
+        _ALLOWED_VIDEO_REFERENCE_TYPES
+        if purpose == "video_gen_reference"
+        else _ALLOWED_AVATAR_VIDEO_TYPES
+    )
+    extension = allowed_types.get(content_type)
     if extension is None:
         raise AppError(
-            f"Unsupported avatar video type {content_type or 'unknown'!r}; "
-            f"allowed: {', '.join(sorted(_ALLOWED_AVATAR_VIDEO_TYPES))}.",
+            f"Unsupported video type {content_type or 'unknown'!r}; "
+            f"allowed: {', '.join(sorted(allowed_types))}.",
             code="UNSUPPORTED_MEDIA_TYPE",
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
         )
 
-    content = await _read_limited_upload(file, max_bytes=settings.upload_video_max_bytes)
+    max_bytes = (
+        VIDEO_REFERENCE_MAX_BYTES
+        if purpose == "video_gen_reference"
+        else settings.upload_video_max_bytes
+    )
+    content = await _read_limited_upload(file, max_bytes=max_bytes)
     if not content:
         raise AppError("Uploaded file is empty.", code="EMPTY_UPLOAD", status_code=400)
+
+    if purpose == "video_gen_reference":
+        normalized = normalize_video_reference(content, suffix=extension)
+        storage_key = tenant_storage_key(
+            user.tenant_id,
+            f"uploads/{uuid.uuid4().hex}.mp4",
+        )
+        put_tenant_storage_bytes(
+            storage,
+            tenant_id=user.tenant_id,
+            storage_key=storage_key,
+            content=normalized.content,
+            content_type="video/mp4",
+        )
+        asset = Asset(
+            tenant_id=user.tenant_id,
+            type="video",
+            source="upload",
+            storage_key=storage_key,
+            mime_type="video/mp4",
+            size_bytes=len(normalized.content),
+            duration_ms=normalized.duration_ms,
+            width=normalized.width,
+            height=normalized.height,
+            status="ready",
+            metadata_={
+                "purpose": purpose,
+                "container": normalized.container,
+                "video_codec": normalized.video_codec,
+                "audio_codec": normalized.audio_codec,
+                "original_mime_type": content_type,
+                "original_extension": extension,
+                "transcoded": normalized.transcoded,
+            },
+        )
+        db.add(asset)
+        db.commit()
+        db.refresh(asset)
+        return ok(
+            request,
+            UploadImageResponse(asset_id=asset.id, type=asset.type, status=asset.status),
+        )
 
     probe = _probe_avatar_video_bytes(content, suffix=extension)
     metadata = {

@@ -394,6 +394,110 @@ def test_upload_videos_creates_avatar_source_asset_under_tenant_scope(
         assert storage.saved[asset.storage_key] == (b"fake mp4 bytes", "video/mp4")
 
 
+def test_upload_video_generation_reference_normalizes_mov_before_storage(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import uploads
+    from app.services.video_reference import NormalizedVideoReference
+
+    storage = _FakeStorage()
+    monkeypatch.setattr(
+        uploads,
+        "normalize_video_reference",
+        lambda _content, *, suffix: NormalizedVideoReference(
+            content=b"normalized mp4 h264",
+            duration_ms=3_250,
+            width=720,
+            height=1280,
+            container="mov,mp4,m4a,3gp,3g2,mj2",
+            video_codec="h264",
+            audio_codec="aac",
+            transcoded=True,
+        ),
+    )
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = TestClient(app).post(
+            "/api/v1/uploads/videos?purpose=video_gen_reference",
+            files={"file": ("motion.mov", b"original mov bytes", "video/quicktime")},
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 201
+    asset_id = response.json()["data"]["asset_id"]
+    with auth_db() as db:
+        asset = db.get(Asset, asset_id)
+        assert asset is not None
+        assert asset.type == "video"
+        assert asset.mime_type == "video/mp4"
+        assert asset.size_bytes == len(b"normalized mp4 h264")
+        assert asset.duration_ms == 3_250
+        assert asset.width == 720
+        assert asset.height == 1280
+        assert asset.storage_key.endswith(".mp4")
+        assert asset.metadata_["purpose"] == "video_gen_reference"
+        assert asset.metadata_["original_mime_type"] == "video/quicktime"
+        assert asset.metadata_["transcoded"] is True
+        assert storage.saved[asset.storage_key] == (
+            b"normalized mp4 h264",
+            "video/mp4",
+        )
+
+
+def test_upload_video_generation_reference_size_and_transcode_failures_store_nothing(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import uploads
+    from app.core.exceptions import AppError
+
+    storage = _FakeStorage()
+    monkeypatch.setattr(uploads, "VIDEO_REFERENCE_MAX_BYTES", 5)
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        too_large = TestClient(app).post(
+            "/api/v1/uploads/videos?purpose=video_gen_reference",
+            files={"file": ("large.webm", b"123456", "video/webm")},
+            headers=auth_context["headers"],
+        )
+
+        def fail_transcode(_content: bytes, *, suffix: str):
+            raise AppError(
+                "参考视频转码失败，请更换视频后重试。",
+                code="VIDEO_GEN_REFERENCE_TRANSCODE_FAILED",
+                status_code=422,
+            )
+
+        monkeypatch.setattr(uploads, "VIDEO_REFERENCE_MAX_BYTES", 100)
+        monkeypatch.setattr(uploads, "normalize_video_reference", fail_transcode)
+        transcode_failed = TestClient(app).post(
+            "/api/v1/uploads/videos?purpose=video_gen_reference",
+            files={"file": ("broken.mov", b"broken", "video/quicktime")},
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert too_large.status_code == 413
+    assert transcode_failed.status_code == 422
+    assert transcode_failed.json()["error"]["code"] == (
+        "VIDEO_GEN_REFERENCE_TRANSCODE_FAILED"
+    )
+    assert storage.saved == {}
+    with auth_db() as db:
+        assert db.scalar(
+            select(Asset).where(
+                Asset.type == "video",
+                Asset.tenant_id == auth_context["tenant_id"],
+            )
+        ) is None
+
+
 def test_upload_videos_reverse_prompt_allows_optional_or_non_aac_audio_only_for_purpose(
     monkeypatch,
     auth_context,

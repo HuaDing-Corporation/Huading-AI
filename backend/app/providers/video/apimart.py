@@ -35,10 +35,12 @@ class APIMartVideoProviderError(RuntimeError):
         *,
         status_code: int | None = None,
         error_type: str | None = None,
+        usage_result: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.error_type = error_type
+        self.usage_result = dict(usage_result or {})
 
 
 class APIMartVideoProvider:
@@ -102,9 +104,17 @@ class APIMartVideoProvider:
             raise APIMartVideoProviderError("Video prompt is required.")
 
         image_urls = _image_urls(payload)
+        video_urls = _video_urls(payload)
+        if image_urls and video_urls:
+            raise APIMartVideoProviderError(
+                "image_urls and video_urls cannot be used together."
+            )
         duration = _duration(payload.get("duration", payload.get("duration_sec")))
         resolution = _resolution(payload.get("resolution"))
-        size = _size(payload.get("size"), has_image_urls=bool(image_urls))
+        size = _size(
+            payload.get("size"),
+            has_reference_urls=bool(image_urls or video_urls),
+        )
         body: dict[str, Any] = {
             "model": self.model,
             "prompt": prompt,
@@ -118,6 +128,8 @@ class APIMartVideoProvider:
             body["seed"] = int(seed)
         if image_urls:
             body["image_urls"] = image_urls
+        elif video_urls:
+            body["video_urls"] = video_urls
         negative_prompt = str(payload.get("negative_prompt") or "").strip()
         if negative_prompt:
             body["negative_prompt"] = negative_prompt
@@ -183,6 +195,7 @@ class APIMartVideoProvider:
                 raise APIMartVideoProviderError(
                     _payload_message(data, "APIMart video task failed."),
                     error_type="task_failed",
+                    usage_result=apimart_usage_metadata(data),
                 )
             poll_count += 1
             if progress_callback is not None:
@@ -221,11 +234,11 @@ def _resolution(raw_resolution: Any) -> str:
     return resolution if resolution in _VALID_RESOLUTIONS else _DEFAULT_RESOLUTION
 
 
-def _size(raw_size: Any, *, has_image_urls: bool) -> str:
+def _size(raw_size: Any, *, has_reference_urls: bool) -> str:
     size = str(raw_size or "").strip()
     if size in _CAPABILITIES.supported_sizes:
         return size
-    return _DEFAULT_I2V_SIZE if has_image_urls else _DEFAULT_T2V_SIZE
+    return _DEFAULT_I2V_SIZE if has_reference_urls else _DEFAULT_T2V_SIZE
 
 
 def _image_urls(payload: Mapping[str, Any]) -> list[str]:
@@ -236,6 +249,17 @@ def _image_urls(payload: Mapping[str, Any]) -> list[str]:
         raw_urls = [raw_urls]
     if not isinstance(raw_urls, list | tuple):
         raise APIMartVideoProviderError("image_urls must be a list of public URLs.")
+    return [str(item).strip() for item in raw_urls if str(item).strip()]
+
+
+def _video_urls(payload: Mapping[str, Any]) -> list[str]:
+    raw_urls = payload.get("video_urls")
+    if raw_urls is None:
+        return []
+    if isinstance(raw_urls, str):
+        raw_urls = [raw_urls]
+    if not isinstance(raw_urls, list | tuple):
+        raise APIMartVideoProviderError("video_urls must be a list of public URLs.")
     return [str(item).strip() for item in raw_urls if str(item).strip()]
 
 

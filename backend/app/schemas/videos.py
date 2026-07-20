@@ -221,6 +221,7 @@ class VideoGenerateRequest(BaseModel):
         ),
     )
     reference_image_asset_ids: list[str] = Field(default_factory=list)
+    reference_video_asset_ids: list[str] = Field(default_factory=list)
     resolution: Literal["480p", "720p", "1080p"] = Field(default="720p")
     generate_audio: bool = Field(
         default=False,
@@ -352,11 +353,31 @@ class VideoGenerateRequest(BaseModel):
                 raise ValueError("video_gen prompt must not be blank")
             self.prompt = prompt
             self.topic = prompt
+            if self.reference_image_asset_ids and self.reference_video_asset_ids:
+                raise PydanticCustomError(
+                    "friendly_video_gen_reference_media_conflict",
+                    "参考图与参考视频不能同时使用，请选择其中一种。",
+                )
             if not (0 <= len(self.reference_image_asset_ids) <= 9):
                 raise ValueError("video_gen reference_image_asset_ids must contain at most 9 items")
             if len(set(self.reference_image_asset_ids)) != len(self.reference_image_asset_ids):
                 raise ValueError("video_gen reference_image_asset_ids must be unique")
-            if "aspect_ratio" not in self.model_fields_set and self.reference_image_asset_ids:
+            if len(self.reference_video_asset_ids) > 3:
+                raise PydanticCustomError(
+                    "friendly_video_gen_reference_video_count_invalid",
+                    "参考视频最多支持 3 条。",
+                )
+            if len(set(self.reference_video_asset_ids)) != len(
+                self.reference_video_asset_ids
+            ):
+                raise PydanticCustomError(
+                    "friendly_video_gen_reference_video_duplicate",
+                    "参考视频不能重复选择。",
+                )
+            if (
+                "aspect_ratio" not in self.model_fields_set
+                and (self.reference_image_asset_ids or self.reference_video_asset_ids)
+            ):
                 self.aspect_ratio = "auto"
             if self.duration_sec is None or not (
                 _VIDEO_GEN_MIN_DURATION_SEC
