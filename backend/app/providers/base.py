@@ -45,8 +45,16 @@ class AvatarProvider(Protocol):
     async def generate_avatar(self, payload: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
 
+@dataclass(frozen=True)
+class VideoProviderCapabilities:
+    supported_sizes: frozenset[str]
+    automatic_size: str
+
+
 @runtime_checkable
 class VideoProvider(Protocol):
+    capabilities: VideoProviderCapabilities
+
     async def generate_video(self, payload: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
 
@@ -170,6 +178,22 @@ class ImageProviderReferenceImagesUnsupportedError(ImageProviderCapabilitiesErro
         super().__init__(self.user_message)
 
 
+class VideoProviderCapabilitiesError(RuntimeError):
+    code = "VIDEO_PROVIDER_CAPABILITIES_UNDECLARED"
+
+
+class VideoProviderSizeUnsupportedError(VideoProviderCapabilitiesError):
+    code = "VIDEO_PROVIDER_SIZE_UNSUPPORTED"
+
+    def __init__(self, requested_size: str, supported_sizes: frozenset[str]) -> None:
+        self.requested_size = requested_size
+        self.supported_sizes = supported_sizes
+        super().__init__(
+            f"Video provider does not support size {requested_size!r}; "
+            f"supported sizes: {sorted(supported_sizes)}."
+        )
+
+
 @dataclass(frozen=True)
 class ProviderUsage:
     unit: str = "call"
@@ -213,6 +237,43 @@ def require_image_provider_capabilities(provider: object) -> ImageProviderCapabi
             "Image provider must declare ImageProviderCapabilities."
         )
     return capabilities
+
+
+def require_video_provider_capabilities(provider: object) -> VideoProviderCapabilities:
+    capabilities = getattr(provider, "capabilities", None)
+    if (
+        not isinstance(capabilities, VideoProviderCapabilities)
+        or not isinstance(capabilities.supported_sizes, frozenset)
+        or not capabilities.supported_sizes
+        or any(
+            not isinstance(size, str)
+            or not size.strip()
+            or size != size.strip().lower()
+            for size in capabilities.supported_sizes
+        )
+        or not isinstance(capabilities.automatic_size, str)
+        or not capabilities.automatic_size.strip()
+        or capabilities.automatic_size != capabilities.automatic_size.strip().lower()
+        or capabilities.automatic_size not in capabilities.supported_sizes
+    ):
+        raise VideoProviderCapabilitiesError(
+            "Video provider must declare VideoProviderCapabilities."
+        )
+    return capabilities
+
+
+def video_provider_size(provider: object, requested_size: object) -> str:
+    capabilities = require_video_provider_capabilities(provider)
+    normalized_size = str(requested_size or "").strip().lower()
+    provider_size = (
+        capabilities.automatic_size if normalized_size == "auto" else normalized_size
+    )
+    if provider_size not in capabilities.supported_sizes:
+        raise VideoProviderSizeUnsupportedError(
+            provider_size,
+            capabilities.supported_sizes,
+        )
+    return provider_size
 
 
 def image_provider_reference_count(params: Mapping[str, Any]) -> int:

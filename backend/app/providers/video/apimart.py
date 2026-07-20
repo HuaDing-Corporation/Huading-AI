@@ -9,7 +9,7 @@ import requests
 
 from app.core.config import settings
 from app.db.models import ProviderConfig
-from app.providers.base import register_provider
+from app.providers.base import VideoProviderCapabilities, register_provider
 from app.services.apimart_costs import apimart_usage_metadata
 
 _DEFAULT_BASE_URL = "https://api.apimart.ai/v1"
@@ -17,7 +17,12 @@ _DEFAULT_MODEL = "doubao-seedance-2.0"
 _DEFAULT_T2V_SIZE = "9:16"
 _DEFAULT_I2V_SIZE = "adaptive"
 _DEFAULT_RESOLUTION = "720p"
-_VALID_SIZES = {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "adaptive"}
+_CAPABILITIES = VideoProviderCapabilities(
+    supported_sizes=frozenset(
+        {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "adaptive"}
+    ),
+    automatic_size=_DEFAULT_I2V_SIZE,
+)
 _VALID_RESOLUTIONS = {"480p", "720p", "1080p"}
 _COMPLETED_STATUSES = {"completed", "succeeded", "success"}
 _FAILED_STATUSES = {"failed", "error", "cancelled", "canceled"}
@@ -37,6 +42,8 @@ class APIMartVideoProviderError(RuntimeError):
 
 
 class APIMartVideoProvider:
+    capabilities = _CAPABILITIES
+
     def __init__(
         self,
         *,
@@ -216,7 +223,7 @@ def _resolution(raw_resolution: Any) -> str:
 
 def _size(raw_size: Any, *, has_image_urls: bool) -> str:
     size = str(raw_size or "").strip()
-    if size in _VALID_SIZES:
+    if size in _CAPABILITIES.supported_sizes:
         return size
     return _DEFAULT_I2V_SIZE if has_image_urls else _DEFAULT_T2V_SIZE
 
