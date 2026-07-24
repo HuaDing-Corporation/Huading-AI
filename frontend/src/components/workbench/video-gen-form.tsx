@@ -224,6 +224,8 @@ export function VideoGenForm({
       <Button variant="primary" size="lg" className="mt-2 w-full" onClick={onGenerate} disabled={generateDisabled}>
         <Clapperboard size={18} strokeWidth={1.8} /> {copy.workbench.generate}
       </Button>
+      {/* 出片慢预期管理（FIX1 §4：SPIKE 实测 233–329s）——常驻小字，用户知道等几分钟是正常的 */}
+      <p className="mt-2 text-center text-[12px] text-ink-faint">{copy.workbench.vgSlowHint}</p>
 
       <ConfirmGenerateDialog
         open={confirm.open}

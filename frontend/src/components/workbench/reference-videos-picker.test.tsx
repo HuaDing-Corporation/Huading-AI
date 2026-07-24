@@ -67,8 +67,9 @@ describe("ReferenceVideosPicker (V2V · D5/D9/D10)", () => {
     expect(uploadMock.mutateAsync).toHaveBeenCalledTimes(1); // b.mp4 未发上传请求
   });
 
-  it("合计不足 1.8s（单条 1.0s）→ low 提示（可再补，不阻断上传）", async () => {
-    inspectByName = { "a.mp4": passing(1.0) };
+  // FIX1：合计开区间——单条恰 1.8s 合法（闭区间）但合计恰 1.8 不满足 BE `MIN < total` → low 提示（可再补，不阻断上传）。
+  it("合计恰 1.8s（单条 1.8s 合法）→ low 提示（开区间对齐 BE）", async () => {
+    inspectByName = { "a.mp4": passing(1.8) };
     render(<ReferenceVideosPicker inspect={inspect} />);
     pickFiles("a.mp4");
     await waitFor(() => expect(screen.getByText(new RegExp(copy.workbench.vgRefVideoTotalLow))).toBeInTheDocument());

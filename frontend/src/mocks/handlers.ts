@@ -1489,9 +1489,9 @@ export const handlers = [
       const estRefs = body.reference_image_asset_ids ?? [];
       const estVideos = body.reference_video_asset_ids ?? [];
       if (estRefs.length > 0 && estVideos.length > 0) {
-        return err(422, "VIDEO_GEN_MEDIA_CONFLICT", "参考图与参考视频只能二选一");
+        return err(422, "VIDEO_GEN_REFERENCE_MEDIA_CONFLICT", "参考图与参考视频只能二选一");
       }
-      if (estVideos.length > 3) return err(422, "VIDEO_GEN_INVALID", "参考视频最多 3 条");
+      if (estVideos.length > 3) return err(422, "VIDEO_GEN_REFERENCE_VIDEO_COUNT_INVALID", "参考视频最多 3 条");
     }
     // estimated_credits 是后端按配额/时长算出的整数；mock 取时长派生一个正整数（默认 30s→12），仅需形状忠实（值非契约）。
     const estimatedCredits = typeof body.duration_sec === "number" && body.duration_sec > 0
@@ -1563,10 +1563,13 @@ export const handlers = [
       const refVideos = body.reference_video_asset_ids ?? [];
       const refVideosUnique = new Set(refVideos).size === refVideos.length;
       if (refs.length > 0 && refVideos.length > 0) {
-        return err(422, "VIDEO_GEN_MEDIA_CONFLICT", "参考图与参考视频只能二选一");
+        return err(422, "VIDEO_GEN_REFERENCE_MEDIA_CONFLICT", "参考图与参考视频只能二选一");
       }
-      if (!Array.isArray(refVideos) || refVideos.length > 3 || !refVideosUnique) {
-        return err(422, "VIDEO_GEN_INVALID", "参考视频最多 3 条且不可重复");
+      if (!Array.isArray(refVideos) || refVideos.length > 3) {
+        return err(422, "VIDEO_GEN_REFERENCE_VIDEO_COUNT_INVALID", "参考视频最多 3 条");
+      }
+      if (!refVideosUnique) {
+        return err(422, "VIDEO_GEN_REFERENCE_VIDEO_DUPLICATE", "参考视频不可重复");
       }
       const bgmOk =
         body.bgm === undefined ||

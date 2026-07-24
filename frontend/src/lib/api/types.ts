@@ -149,9 +149,11 @@ export interface CreateVideoRequest {
   prompt?: string; // 提示词（seam 字段，最大 2000 字）；提交时同时复用作 topic，非-photo topic 超 2000 → BE 422（走口播/电商/数字人共用的那道 2000 墙）
   // #214 注释债订正：BE 允许 **0–9**（schemas/videos.py:355，0 张=纯文生视频合法）；V2V-UI-0001 起 UI 参考图也已放开为可选（「参考图或视频（可选）」）。
   reference_image_asset_ids?: string[]; // 参考图 0–9 张（POST /uploads/images → asset_id）；与 reference_video_asset_ids 严格二选一（D8）
-  // 视频生视频（VIDEO-GEN-V2V-UI-0001 需求6 · D8–D10，mock 先行、字段名以 BE 包为准）：参考视频 ≤3 条、合计时长
-  // 1.8–15.2s（provider 硬限）、不得含真人（内容审核）；与 reference_image_asset_ids 互斥（provider image_with_roles
-  // 与 video_urls 不能同用，BE 兜底 422）。经 POST /uploads/videos?purpose=video_gen_reference → asset_id。
+  // 视频生视频（VIDEO-GEN-V2V-UI-0001 · FIX1 已逐字对齐 #216 合并源）：参考视频 ≤3 条且唯一（schemas/videos.py:365-374）、
+  // **合计时长开区间 (1.8,15.2)s**（routes/videos.py:936-943，BE 整数 ms 相加、恰 1.8/15.2 也 422）、单条闭区间
+  // [1.8,15.2]s + 短边 ≥480（services/video_reference.py:128-145）、不得含真人（执行期审核拒 VIDEO_REFERENCE_CONTENT_REJECTED
+  // 且不扣积分）；与 reference_image_asset_ids 互斥（VIDEO_GEN_REFERENCE_MEDIA_CONFLICT）。经
+  // POST /uploads/videos?purpose=video_gen_reference（uploads.py:240）→ asset_id。
   reference_video_asset_ids?: string[];
   resolution?: string; // 视频分辨率 "480p" | "720p" | "1080p"（默认 720p）
   bgm?: VideoGenBgm; // 可选背景音乐：上传(asset_id) 或 配乐库(track_id)——生成后混音，与 generate_audio 不同

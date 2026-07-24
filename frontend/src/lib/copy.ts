@@ -484,18 +484,22 @@ export const copy = {
     vgRefVideoType: "仅支持 MP4 / MOV / WEBM 格式的视频",
     vgRefVideoTooLarge: "视频超过 100MB，请压缩后再上传",
     vgRefVideoTooLong: "请上传 15 秒以内的视频（超长请自行剪辑，系统不代剪）",
+    vgRefVideoTooShort: "参考视频过短（需大于 1.8 秒），请更换更长的素材", // FIX1：BE 单条下限 1.8s（video_reference.py:128-137）
     vgRefVideoResolutionLow: "视频分辨率过低（短边不足 480p），请更换更清晰的素材",
     vgRefVideoOverCount: "最多 3 条参考视频，超出部分未添加",
     // D9 转码/降码告知（服务端自动处理，不静默）
     vgRefVideoWillTranscode: "将自动转为 MP4",
     vgRefVideoWillDownscale: "将自动压缩至 720p",
-    // D10 合计时长联动（1.8–15.2s；接近/超出明确提示，不让用户传完 3 条才被告知）
-    vgRefVideoTotal: (total: string) => `已传视频合计 ${total} 秒（须在 1.8–15.2 秒内）`,
+    // D10 合计时长联动（BE 开区间：需大于 1.8 秒且小于 15.2 秒——对齐 routes/videos.py:940 的权威 message；不让用户传完 3 条才被告知）
+    vgRefVideoTotal: (total: string) => `已传视频合计 ${total} 秒（需大于 1.8 秒且小于 15.2 秒）`,
     vgRefVideoTotalLow: "合计时长不足 1.8 秒，请补充或更换更长的素材",
     vgRefVideoTotalOver: "合计时长已超 15.2 秒上限，请移除或更换素材后再生成",
     vgRefVideoSeconds: (sec: string) => `${sec} 秒`,
-    // 审核拒（任务执行期异步失败；BE error_code 定稿后接入失败映射，先备文案）
-    vgVideoModerationRejected: "参考视频未通过内容审核（不能包含真人）。本次未扣除积分，请更换素材重试",
+    // 审核拒（任务执行期异步失败）：FIX1 已接入 friendlyVideoError 映射（码=VIDEO_REFERENCE_CONTENT_REJECTED，
+    // workers/video_gen.py:56-58）；curated 文案比 BE message 多「未扣积分」说明（SPIKE 实测 credits_cost=0）。
+    vgVideoModerationRejected: "参考视频未通过内容审核（不能包含真人或违规内容）。本次未扣除积分，请更换素材重试",
+    // 出片慢预期管理（SPIKE 实测 233–329s；看门狗 27 分钟不误杀）——用户要知道等几分钟是正常的
+    vgSlowHint: "视频生成约需 3–5 分钟，提交后可在下方任务卡查看进度",
     vgDurationLabel: "时长",
     vgResolutionLabel: "分辨率",
     vgResolutionHint: "更高分辨率更清晰，生成更慢、消耗更多",

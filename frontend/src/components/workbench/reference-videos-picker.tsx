@@ -93,9 +93,10 @@ export function ReferenceVideosPicker({
           setError(inspection.error ?? copy.errors.videoUnreadable);
           continue; // 单条拒绝：明确提示，继续处理后续文件
         }
-        // D10 联动前置闸：这条加上会让合计超 15.2s → 不上传、直接告知（**不让用户传完才被告知**）。
+        // D10 联动前置闸：这条加上会让合计达到/超过 15.2s → 不上传、直接告知（**不让用户传完才被告知**）。
+        // FIX1：>= 对齐 BE 开区间（合计恰 15.2 也 422，routes/videos.py:936-943）。
         const nextTotal = itemsRef.current.reduce((s, it) => s + it.duration, 0) + inspection.meta.duration;
-        if (nextTotal > MAX_TOTAL_REFERENCE_SEC) {
+        if (nextTotal >= MAX_TOTAL_REFERENCE_SEC) {
           setError(copy.workbench.vgRefVideoTotalOver);
           continue;
         }

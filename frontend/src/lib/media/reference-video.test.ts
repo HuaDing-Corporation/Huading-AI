@@ -29,10 +29,16 @@ describe("reference-video 预检（V2V D9/D10）", () => {
     expect(validateReferenceVideoFile(file("video/mp4", 101))).toBe(copy.workbench.vgRefVideoTooLarge);
   });
 
-  it("单条时长：15.2s 通过；15.5s 拒（D9 不代剪，提示自行剪辑）", () => {
+  // FIX1（#216 真联调）：单条=闭区间 [1.8,15.2]（video_reference.py:128-137 `< MIN or > MAX`）——过短也拦
+  // （原前端无下限+上限 0.2 容差 → 1.0s/15.3s 都「前端放过、BE 422」，已改硬边界）。
+  it("单条时长闭区间：恰 1.8/15.2 通过；1.0s 拒（过短）；15.3s 拒（无容差，D9 不代剪）", () => {
     const mp4 = file("video/mp4");
+    expect(inspectReferenceVideoMetadata(mp4, { duration: 1.8, width: 640, height: 480 }).error).toBeNull();
     expect(inspectReferenceVideoMetadata(mp4, { duration: 15.2, width: 640, height: 480 }).error).toBeNull();
-    expect(inspectReferenceVideoMetadata(mp4, { duration: 15.5, width: 640, height: 480 }).error).toBe(
+    expect(inspectReferenceVideoMetadata(mp4, { duration: 1.0, width: 640, height: 480 }).error).toBe(
+      copy.workbench.vgRefVideoTooShort
+    );
+    expect(inspectReferenceVideoMetadata(mp4, { duration: 15.3, width: 640, height: 480 }).error).toBe(
       copy.workbench.vgRefVideoTooLong
     );
   });
@@ -65,11 +71,14 @@ describe("reference-video 预检（V2V D9/D10）", () => {
     );
   });
 
-  it("合计三态（D10 联动）：0 条=ok；<1.8=low；1.8–15.2=ok；>15.2=over", () => {
+  // FIX1（#216 真联调）：合计=**开区间** (1.8,15.2)（routes/videos.py:936-943 `MIN < total < MAX`）——恰 1.8/15.2 也不合法。
+  it("合计三态开区间（D10 联动）：0 条=ok；≤1.8=low（含恰 1.8）；(1.8,15.2)=ok；≥15.2=over（含恰 15.2）", () => {
     expect(totalDurationStatus(0, 0)).toBe("ok"); // 无视频=可选
     expect(totalDurationStatus(1.5, 1)).toBe("low");
-    expect(totalDurationStatus(1.8, 1)).toBe("ok");
-    expect(totalDurationStatus(15.2, 3)).toBe("ok");
+    expect(totalDurationStatus(1.8, 1)).toBe("low"); // 开区间：恰 1.8 不合法（BE 1800ms 不满足 MIN < total）
+    expect(totalDurationStatus(1.9, 1)).toBe("ok");
+    expect(totalDurationStatus(15.1, 3)).toBe("ok");
+    expect(totalDurationStatus(15.2, 3)).toBe("over"); // 开区间：恰 15.2 不合法
     expect(totalDurationStatus(15.3, 2)).toBe("over");
   });
 });
