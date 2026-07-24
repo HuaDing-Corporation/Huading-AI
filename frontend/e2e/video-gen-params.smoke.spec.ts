@@ -95,9 +95,18 @@ test("视频生成优化：新控件 + 2000 墙 + 画面比例/音频/自定义�
   await expect(vg.getByRole("switch", { name: "音频生成开关" })).toBeVisible();
   await expect(vg.getByRole("button", { name: "自定义" })).toBeVisible(); // 时长自定义档
 
-  // ② 上传 1 张参考图（video_gen 参考图必填）。
+  // ①b V2V（VIDEO-GEN-V2V-UI-0001）：「参考图或视频（可选）」组 + 参考视频区 + D5「不能包含真人」显著明示。
+  await expect(vg.getByText("参考图或视频（可选）")).toBeVisible();
+  await expect(vg.getByText(/参考视频不能包含真人/)).toBeVisible();
+  await expect(vg.getByRole("button", { name: /添加参考视频/ })).toBeVisible();
+
+  // ② 上传 1 张参考图（参考图现可选；此处走图片路径）。
   await vg.locator('input[type="file"]#vg-ref-images').setInputFiles(PNG);
   await expect(vg.getByRole("button", { name: /添加参考图（1\/9）/ })).toBeVisible({ timeout: 15_000 });
+
+  // ②b D8 严格二选一：已传参考图 → 参考视频上传禁用 + 互斥原因可见（UI 直接互斥，不落 422）。
+  await expect(vg.getByRole("button", { name: /添加参考视频/ })).toBeDisabled();
+  await expect(vg.getByText(/移除全部参考图后才能改传参考视频/)).toBeVisible();
 
   // ③ 2000 墙：2001 → 红字 + 生成禁用（前端拦）。
   const promptBox = vg.getByPlaceholder(/描述你想要的画面/);

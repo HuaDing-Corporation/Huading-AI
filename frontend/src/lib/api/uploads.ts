@@ -57,3 +57,12 @@ export function uploadAvatarVideo(file: File): Promise<AvatarVideoUploadResponse
 export function uploadReverseVideo(file: File): Promise<AvatarVideoUploadResponse> {
   return postImageUpload<AvatarVideoUploadResponse>("/api/v1/uploads/videos?purpose=reverse_prompt", file);
 }
+
+/**
+ * Upload a 视频生成·参考视频 → `asset_id`. 复用 POST /uploads/videos，带 purpose=video_gen_reference（第三个
+ * purpose——现有 avatar_source 3–10s / reverse_prompt 1–60s 的时长约束都不适用，冻结文档·需求6 实现要点④）。
+ * VIDEO-GEN-V2V-UI-0001；端点/purpose 命名以 BE 包为准，mock 先行，BE 合并后真联调对齐。
+ */
+export function uploadVideoGenReference(file: File): Promise<AvatarVideoUploadResponse> {
+  return postImageUpload<AvatarVideoUploadResponse>("/api/v1/uploads/videos?purpose=video_gen_reference", file);
+}

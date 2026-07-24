@@ -28,6 +28,7 @@ vi.mock("@/lib/api/hooks", () => ({
   useScriptGenerate: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useUploadImage: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useUploadAvatarVideo: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useUploadVideoGenReference: () => ({ mutateAsync: vi.fn(), isPending: false }), // V2V 参考视频上传（VIDEO-GEN-V2V-UI-0001）
   useUploadProductImage: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useUploadAudio: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useScenePromptGenerate: () => ({ mutateAsync: vi.fn(), isPending: false }),

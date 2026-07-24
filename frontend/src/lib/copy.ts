@@ -451,7 +451,6 @@ export const copy = {
     vgSubtitle: "多张参考图 + 提示词，生成创意短视频；可加背景音乐",
     vgRefImagesLabel: "参考图（最多 9 张）",
     vgRefImagesUpload: "添加参考图",
-    vgRefImagesRequired: "请至少上传 1 张参考图",
     vgRefOverLimit: "最多 9 张参考图，超出部分未添加",
     // 名词中性 + 随上限动态（供复用 picker 如电商详情图·商品图 max=4，避免误显「参考图」「9 张」）
     refImagesOverLimit: (max: number) => `最多 ${max} 张，超出部分未添加`,
@@ -473,6 +472,30 @@ export const copy = {
     vgAudioLabel: "音频生成",
     vgAudioToggleAria: "音频生成开关",
     vgAudioHint: "开启后由视频模型生成环境音 / 配乐（不额外收费）。与下方「背景音乐」不同——后者是你另配、生成后混音的 BGM。暂不保证人声对白或口型同步",
+    // ── 视频生视频（VIDEO-GEN-V2V-UI-0001 需求6 · D8–D10）──
+    vgRefMediaLabel: "参考图或视频（可选）",
+    // D8 严格二选一：UI 直接互斥，别让用户传完才 422（provider image_with_roles 与 video_urls 不能同用，BE 也兜底）
+    vgRefMediaExclusiveImages: "已上传参考图——移除全部参考图后才能改传参考视频（二选一）",
+    vgRefMediaExclusiveVideos: "已上传参考视频——移除全部参考视频后才能改传参考图（二选一）",
+    vgRefVideosLabel: "参考视频（最多 3 条）",
+    vgRefVideosUpload: "添加参考视频",
+    // D5 真人限制（provider 内容审核硬限，显著明示；被拒不扣积分——SPIKE 实测 credits_cost=0）
+    vgRefVideoNoHuman: "参考视频不能包含真人（平台内容审核限制）；若被审核拒绝，不会扣除积分",
+    vgRefVideoType: "仅支持 MP4 / MOV / WEBM 格式的视频",
+    vgRefVideoTooLarge: "视频超过 100MB，请压缩后再上传",
+    vgRefVideoTooLong: "请上传 15 秒以内的视频（超长请自行剪辑，系统不代剪）",
+    vgRefVideoResolutionLow: "视频分辨率过低（短边不足 480p），请更换更清晰的素材",
+    vgRefVideoOverCount: "最多 3 条参考视频，超出部分未添加",
+    // D9 转码/降码告知（服务端自动处理，不静默）
+    vgRefVideoWillTranscode: "将自动转为 MP4",
+    vgRefVideoWillDownscale: "将自动压缩至 720p",
+    // D10 合计时长联动（1.8–15.2s；接近/超出明确提示，不让用户传完 3 条才被告知）
+    vgRefVideoTotal: (total: string) => `已传视频合计 ${total} 秒（须在 1.8–15.2 秒内）`,
+    vgRefVideoTotalLow: "合计时长不足 1.8 秒，请补充或更换更长的素材",
+    vgRefVideoTotalOver: "合计时长已超 15.2 秒上限，请移除或更换素材后再生成",
+    vgRefVideoSeconds: (sec: string) => `${sec} 秒`,
+    // 审核拒（任务执行期异步失败；BE error_code 定稿后接入失败映射，先备文案）
+    vgVideoModerationRejected: "参考视频未通过内容审核（不能包含真人）。本次未扣除积分，请更换素材重试",
     vgDurationLabel: "时长",
     vgResolutionLabel: "分辨率",
     vgResolutionHint: "更高分辨率更清晰，生成更慢、消耗更多",
@@ -491,7 +514,9 @@ export const copy = {
     vgBgmSelect: "选用",
     vgBgmSelected: "已选用",
     vgBgmPreviewLabel: (name: string) => `试听 ${name}`,
-    vgGenerating: "生成中…",
+    // V2V Code Review：该键只被两个 picker 的**上传态**消费（真·生成按钮用 generate），原值「生成中…」语义错配
+    // ——用户传 100MB 视频时误以为已扣积分开始生成。改为如实的「上传中…」（一键两 picker 同修）。
+    vgGenerating: "上传中…",
     // BGM 波形播放器 (BGM-WAVEFORM-UI-0001)
     wfPlay: "播放",
     wfPause: "暂停",

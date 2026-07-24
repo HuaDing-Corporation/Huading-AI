@@ -147,7 +147,12 @@ export interface CreateVideoRequest {
   // 注：图片负面提示词复用上方 negative_prompt 字段（视频链路已有；photo 分支此前不读，本期起读）。
   // ── 视频生成 video_gen (VIDEOGEN-UI-0001, seam §2) ──
   prompt?: string; // 提示词（seam 字段，最大 2000 字）；提交时同时复用作 topic，非-photo topic 超 2000 → BE 422（走口播/电商/数字人共用的那道 2000 墙）
-  reference_image_asset_ids?: string[]; // 参考图 1–9 张（POST /uploads/images → asset_id）
+  // #214 注释债订正：BE 允许 **0–9**（schemas/videos.py:355，0 张=纯文生视频合法）；V2V-UI-0001 起 UI 参考图也已放开为可选（「参考图或视频（可选）」）。
+  reference_image_asset_ids?: string[]; // 参考图 0–9 张（POST /uploads/images → asset_id）；与 reference_video_asset_ids 严格二选一（D8）
+  // 视频生视频（VIDEO-GEN-V2V-UI-0001 需求6 · D8–D10，mock 先行、字段名以 BE 包为准）：参考视频 ≤3 条、合计时长
+  // 1.8–15.2s（provider 硬限）、不得含真人（内容审核）；与 reference_image_asset_ids 互斥（provider image_with_roles
+  // 与 video_urls 不能同用，BE 兜底 422）。经 POST /uploads/videos?purpose=video_gen_reference → asset_id。
+  reference_video_asset_ids?: string[];
   resolution?: string; // 视频分辨率 "480p" | "720p" | "1080p"（默认 720p）
   bgm?: VideoGenBgm; // 可选背景音乐：上传(asset_id) 或 配乐库(track_id)——生成后混音，与 generate_audio 不同
   // VIDEO-GEN-PARAMS-UI-0001（需求4）：音频生成开关，默认 false（零回归）。true=视频模型生成环境音/配乐（SPIKE 实测真出 AAC、同价）。BE 一行改传（provider 现硬编码 False）

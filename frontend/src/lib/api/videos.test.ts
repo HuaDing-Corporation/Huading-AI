@@ -216,3 +216,17 @@ describe("createVideo · 2000 墙码点计数（Code Review 补）", () => {
     await expect(createVideo({ ...vg, prompt: s, topic: s })).rejects.toThrow();
   });
 });
+
+// V2V（Code Review 自查·同「estimate 比提交宽松」教训）：estimate 与提交同门——互斥/条数在 estimate 阶段即 422。
+describe("estimateVideo · V2V 同门校验（互斥/条数）", () => {
+  it("estimate 图+视频同传 → 422；视频 4 条 → 422；合法 2 条 → 200", async () => {
+    await expect(
+      estimateVideo({ video_mode: "video_gen", duration_sec: 8, reference_image_asset_ids: ["a1"], reference_video_asset_ids: ["v1"] })
+    ).rejects.toThrow();
+    await expect(
+      estimateVideo({ video_mode: "video_gen", duration_sec: 8, reference_video_asset_ids: ["v1", "v2", "v3", "v4"] })
+    ).rejects.toThrow();
+    const ok = await estimateVideo({ video_mode: "video_gen", duration_sec: 8, reference_video_asset_ids: ["v1", "v2"] });
+    expect(ok.estimated_credits).toBeGreaterThan(0);
+  });
+});

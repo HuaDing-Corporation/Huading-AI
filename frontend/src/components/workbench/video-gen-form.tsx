@@ -15,11 +15,13 @@ import { AiTextField } from "@/components/workbench/ai-text-field";
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
 import { DurationPicker, isValidDuration } from "@/components/workbench/duration-picker";
 import { ReferenceImagesPicker } from "@/components/workbench/reference-images-picker";
+import { ReferenceVideosPicker, type ReferenceVideoItem } from "@/components/workbench/reference-videos-picker";
 import { ResolutionPicker } from "@/components/workbench/resolution-picker";
 import { VideoAspectRatioSelect, DEFAULT_VIDEO_ASPECT_RATIO, type VideoAspectRatio } from "@/components/workbench/video-aspect-ratio-select";
 import { BgmPicker } from "@/components/workbench/bgm-picker";
 import { AiLabelToggle } from "@/components/label/ai-label-toggle";
 import { useLabelTogglePreference } from "@/lib/preferences/label-toggle";
+import { totalDurationStatus } from "@/lib/media/reference-video";
 import { copy } from "@/lib/copy";
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
@@ -28,11 +30,12 @@ const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 const PROMPT_MAX = 2000;
 
 /**
- * 视频生成 第6模式（VIDEOGEN-UI-0001 + VIDEO-GEN-PARAMS-UI-0001）：多参考图(≤9) + prompt(≤2000，复用作 topic 走 2000 墙) +
- * 负面提示词(可选、不限字数) + 画面比例(7 值，默认 adaptive) + 音频生成开关(默认关) + 时长(预设 5/10/15 + 自定义 4–15) +
- * 分辨率(480p/720p/1080p) + BGM(无/上传/库) → POST /videos {video_mode:"video_gen"}，SSE 进度(复用 createAndTrack)。
- * 复用 useGenerateConfirm/ConfirmGenerateDialog(积分预估随时长 + 防连点)。video_gen 用 prompt(同时作 topic 标题)。
- * ⚠️ 需求6（参考图或视频上传）按 D7 单独拆批，不在本包；ReferenceImagesPicker 默认 max=9 不动（同时服务 batch）。
+ * 视频生成 第6模式（VIDEOGEN-UI-0001 + PARAMS-UI-0001 + V2V-UI-0001）：**参考图或视频（可选，D8 严格二选一互斥）**
+ * ——参考图 0–9（BE 0–9，UI 已随需求6 放开可选）/ 参考视频 ≤3 条·合计 1.8–15.2s 联动（D10）+ prompt(≤2000，复用作
+ * topic 走 2000 墙) + 负面提示词(可选、不限字数) + 画面比例(7 值，默认自适应——**API 值 `auto`，worker 转为 provider
+ * 的 `adaptive`**，#214 P3 订正) + 音频生成开关(默认关) + 时长(预设 5/10/15 + 自定义 4–15) + 分辨率 + BGM(无/上传/库)
+ * → POST /videos {video_mode:"video_gen"}，SSE 进度(复用 createAndTrack)。复用 useGenerateConfirm(积分预估随时长 +
+ * 防连点)。video_gen 用 prompt(同时作 topic 标题)。ReferenceImagesPicker 默认 max=9 不动（同时服务 batch）。
  */
 export function VideoGenForm({
   initialPrompt,
@@ -40,6 +43,8 @@ export function VideoGenForm({
 }: { initialPrompt?: string; onPrefillConsumed?: () => void } = {}) {
   const { createAndTrack } = useVideoTasks();
   const [refAssetIds, setRefAssetIds] = useState<string[]>([]);
+  // 参考视频（V2V-UI-0001，D8 与参考图严格二选一；D10 合计时长联动数据源）。
+  const [refVideos, setRefVideos] = useState<ReferenceVideoItem[]>([]);
   // 提示词反推「带入」注入 prompt（同时作 topic）；惰性消费，mount 后回调 page 清空。参考图仍需用户自行上传。
   const [prompt, setPrompt] = useState(() => initialPrompt ?? "");
   useEffect(() => {
@@ -72,8 +77,15 @@ export function VideoGenForm({
   const promptCharCount = [...promptTrimmed].length;
   const promptOverLimit = promptCharCount > PROMPT_MAX; // 需求2：超 2000 → 红字 + 拦住
   const durationValid = isValidDuration(durationSec, VIDEO_GEN_DURATION_MIN, VIDEO_GEN_DURATION_MAX); // 需求5：整数 4–15
+  // D10 合计时长门：有参考视频时合计须 1.8–15.2s（picker 已前置阻断"传了才超"，此为提交侧同源判据兜底）。
+  // Code Review：保留三态 status 直接分流（不压平成 bool 再用 15.2 字面量反推——上限只留在 MAX_TOTAL_REFERENCE_SEC 一处）。
+  const refVideoTotalSec = refVideos.reduce((s, it) => s + it.duration, 0);
+  const refVideoTotalStatus = totalDurationStatus(refVideoTotalSec, refVideos.length);
+  // D8 竞态兜底：互斥靠 picker disabled（基于**已完成** items），两侧同时在途上传均落成可绕过 → 提交侧同源兜底拦住。
+  const mediaConflict = refAssetIds.length > 0 && refVideos.length > 0;
+  // 需求6：参考图/视频均可选（BE refs 0–9；纯文生视频合法）——不再要求 refAssetIds ≥1。
   // onGenerate 守卫 与 generateDisabled 共用同一判据，杜绝漂移。
-  const inputInvalid = refAssetIds.length < 1 || !promptTrimmed || promptOverLimit || !durationValid;
+  const inputInvalid = !promptTrimmed || promptOverLimit || !durationValid || refVideoTotalStatus !== "ok" || mediaConflict;
 
   const onGenerate = () => {
     if (inputInvalid) return;
@@ -82,10 +94,12 @@ export function VideoGenForm({
       topic: promptTrimmed, // video_gen 用 prompt 文本作标题/展示
       prompt: promptTrimmed,
       video_mode: "video_gen",
-      reference_image_asset_ids: refAssetIds,
+      // D8 二选一：图与视频互斥，仅带有值的一侧（都空=纯文生视频，两字段均省略）。
+      ...(refAssetIds.length > 0 ? { reference_image_asset_ids: refAssetIds } : {}),
+      ...(refVideos.length > 0 ? { reference_video_asset_ids: refVideos.map((it) => it.assetId) } : {}),
       duration_sec: durationSec,
       resolution,
-      aspect_ratio: aspectRatio, // 需求3：界面选择总随请求传（默认 adaptive）
+      aspect_ratio: aspectRatio, // 需求3：界面选择总随请求传（默认自适应——API 值 `auto`，worker 转 provider 的 `adaptive`，#214 P3）
       generate_audio: generateAudio, // 需求4：布尔总随请求传（默认 false）
       ...(negativePrompt.trim() ? { negative_prompt: negativePrompt.trim() } : {}), // 需求1：可选，空则不带
       bgm, // undefined 时 JSON 序列化自动省略（bgm 可选）
@@ -96,15 +110,31 @@ export function VideoGenForm({
   const generateDisabled = inputInvalid;
 
   let hint: string | null = null;
-  if (refAssetIds.length < 1) hint = copy.workbench.vgRefImagesRequired;
-  else if (!promptTrimmed) hint = copy.workbench.vgPromptRequired;
+  if (!promptTrimmed) hint = copy.workbench.vgPromptRequired;
+  else if (mediaConflict) hint = copy.workbench.vgRefMediaExclusiveImages; // 竞态兜底：移除一侧后可生成
+  else if (refVideoTotalStatus === "over") hint = copy.workbench.vgRefVideoTotalOver;
+  else if (refVideoTotalStatus === "low") hint = copy.workbench.vgRefVideoTotalLow;
 
   return (
     <Card animateIn>
       <CardTitle>{copy.workbench.vgTitle}</CardTitle>
       <CardSubtitle className="mb-[18px] mt-1">{copy.workbench.vgSubtitle}</CardSubtitle>
 
-      <ReferenceImagesPicker onChange={setRefAssetIds} />
+      {/* 需求6「参考图或视频（可选）」：D8 严格二选一——传了视频→图片上传禁用（带原因），反之亦然，UI 直接互斥
+          （provider image_with_roles 与 video_urls 不能同用，BE 兜底 422——两道都在）。 */}
+      <div className="mb-[15px]">
+        <p className={labelClass}>{copy.workbench.vgRefMediaLabel}</p>
+        <ReferenceImagesPicker
+          onChange={setRefAssetIds}
+          disabled={refVideos.length > 0}
+          disabledHint={copy.workbench.vgRefMediaExclusiveVideos}
+        />
+        <ReferenceVideosPicker
+          onItemsChange={setRefVideos}
+          disabled={refAssetIds.length > 0}
+          disabledHint={copy.workbench.vgRefMediaExclusiveImages}
+        />
+      </div>
 
       {/* Code Review a11y：计数不进 live region（免读屏冗余播报）；超限用 role=alert 出现即播报一次 + 持久存在，
           经 aria-describedby 回连 textarea（聚焦可复述原因）+ aria-invalid（invalid 态）。超限文案=用户原话 + 括号附实际计数

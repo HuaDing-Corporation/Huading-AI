@@ -20,6 +20,12 @@ export interface VideoMetadata {
   height: number;
 }
 
+/** 元数据是否可读（duration/宽高齐备且有限）。V2V Code Review 抽取：原逐字重复于本文件与 reference-video.ts——
+ * 新浏览器边界（如 WebM 流式 duration=Infinity）只需在此一处加判，两条链路同步。 */
+export function isReadableVideoMetadata(meta: VideoMetadata): boolean {
+  return !!meta.duration && Number.isFinite(meta.duration) && !!meta.width && !!meta.height;
+}
+
 /** MIME + 大小同步预检（不信文件名，按 file.type）。返回友好中文错误，合规返回 null。 */
 export function validateAvatarVideoFile(file: File): string | null {
   if (!ALLOWED_AVATAR_VIDEO_TYPES.includes(file.type)) return copy.errors.videoType;
@@ -29,7 +35,7 @@ export function validateAvatarVideoFile(file: File): string | null {
 
 /** 时长 + 分辨率预检（纯函数）。读取不到有效元数据→不可读；时长越界(3–10s)/分辨率越界→对应友好错误。 */
 export function validateAvatarVideoMetadata(meta: VideoMetadata): string | null {
-  if (!meta.duration || !Number.isFinite(meta.duration) || !meta.width || !meta.height) {
+  if (!isReadableVideoMetadata(meta)) {
     return copy.errors.videoUnreadable;
   }
   // 时长 3–10s（含容差）；短于 3s 与长于 10s 均越界，对齐 BE。
