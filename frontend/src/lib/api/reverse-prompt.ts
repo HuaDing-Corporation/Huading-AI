@@ -10,13 +10,46 @@ import { copy } from "@/lib/copy";
 //   成功 status="succeeded"（含 result）；失败经 AppError 抛出（apiFetch throws），非返回 result:null。
 // P1 只图片；只收 source_asset_id（走现有图片上传拿 asset_id）。target_format 固定 seedance_2_0，类型未写死留 P2 槽。
 
-/** BE fill_targets 6 键，内层字段一字不差（backend services/reverse_prompt.py::fill_targets）。 */
+/**
+ * BE fill_targets 6 键，内层字段一字不差（backend services/reverse_prompt.py::fill_targets）。
+ *
+ * REVERSE-DEEP-UI-0001 · 冻结契约 §4.2「破坏性最小」升级：**既有键全部保留、只新增键**，且新增键
+ * **一律 optional** —— BE 没给的字段，前端不许拿空串去覆盖用户已填的控件（消费侧纪律见 page.tsx:57）。
+ *  - `duration_sec` 由 BE 按目标模块合法区间 clamp（video_gen 4–15 整数 / seedance_i2v 5–120），
+ *    并附 `duration_clamped: bool` 供前端显示 D8 那行「已按上限带入」提示（**不许静默改数**）。
+ *  - `aspect_ratio` 由 **BE** 按 D7 映射成目标模块各自的合法枚举（图片 8 档+auto / 视频 7 档+auto 两套不同），
+ *    映射不出来给 null（不冒充）。前端不猜；各目标表单消费时再按**自己那份枚举常量**兜一道（单一真源在表单侧，
+ *    此处不重复一份枚举以免漂移）。
+ * ⚠️ `video_gen.topic`：§4.2 的键列表里没写 topic，但同节抬头写着「既有键全部保留」——两处措辞冲突。
+ *    故此处声明为 **optional**（BE 留着也吃、去掉也吃），前端本就不消费它（video_gen 用 prompt 兼作 topic）。
+ *    已在回执中作为证伪点提出，待 BE 合并后按真实源码复核。
+ */
 export interface ReversePromptFillTargets {
   avatar_talk: { topic: string; script: string };
-  seedance_i2v: { topic: string; scene_prompt: string };
-  video_gen: { topic: string; prompt: string };
-  photo: { topic: string };
-  ecom_model: { extra_prompt: string };
+  seedance_i2v: {
+    topic: string;
+    script?: string;
+    scene_prompt: string;
+    negative_prompt?: string;
+    duration_sec?: number;
+    duration_clamped?: boolean;
+  };
+  video_gen: {
+    topic?: string; // 见上方 ⚠️：§4.2 键列表未列、抬头称保留 → optional，前端不消费
+    prompt: string;
+    negative_prompt?: string;
+    aspect_ratio?: string | null;
+    duration_sec?: number;
+    duration_clamped?: boolean;
+    generate_audio?: boolean;
+  };
+  photo: {
+    topic: string;
+    master_prompt?: string;
+    negative_prompt?: string;
+    aspect_ratio?: string | null;
+  };
+  ecom_model: { extra_prompt: string; aspect_ratio?: string | null };
   ecom_poster: { title: string; subtitle: string };
 }
 
@@ -45,8 +78,37 @@ export interface ReverseVideoAnalysis {
   duration_sec: number; // 时长秒（>0）
   pacing: ReverseVideoPacing; // 节奏枚举（前端映射中文显示，不显裸英文）
   shot_list: ReverseVideoShot[];
-  audio_transcript?: string | null; // 一期空
-  bgm_style?: string | null; // 一期空
+  audio_transcript?: string | null; // D4 SPIKE 通过才非 null；未通过 → 恒 null，界面如实标注不做假入口
+  bgm_style?: string | null; // 同上
+  /**
+   * REVERSE-DEEP-UI-0001 §4.1：把 shot_list 压成一段**可直接进提示词**的分镜描述文本。
+   * optional —— 老结构结果（历史里大量存量）没有这个键，前端必须回落、不许显示 undefined。
+   */
+  shot_summary?: string | null;
+}
+
+/**
+ * REVERSE-DEEP-UI-0001 §4.1 新增 —— 原素材的**客观事实**，null 表示测不到（不许冒充）。
+ * `aspect_ratio_raw` 仅供展示（例 "9:16" 的约分结果），**不直接进控件**：进控件的是 BE 按 D7 映射好的
+ * 目标模块合法枚举值（见 fill_targets.*.aspect_ratio）。
+ */
+export interface ReverseSourceMedia {
+  kind: "image" | "video";
+  width: number | null;
+  height: number | null;
+  duration_sec: number | null; // 图片恒 null
+  aspect_ratio_raw: string | null;
+}
+
+/**
+ * REVERSE-DEEP-UI-0001 §4.1/§4.3 新增 —— 结构化主提示词。
+ * `en` 分行标注版（Subject:/Scene:/Composition:/Camera:/Lighting:/Motion:/Style:，视频末尾追加 Shots:）供 provider 消费；
+ * `zh` 同结构中文版仅供界面展示与用户理解。
+ * ⚠️ optional：老数据/历史记录没有本字段 → 展示与带入**回落** prompt_zh / prompt_en（必测，不许白屏/undefined）。
+ */
+export interface ReverseStructuredPrompt {
+  en: string;
+  zh: string;
 }
 
 /** 扁平反推结果（镜像 BE ReversePromptResult）。negative_prompt/disclaimer 默认空串，数组默认空。 */
@@ -69,6 +131,9 @@ export interface ReversePromptResult {
   fill_targets: ReversePromptFillTargets;
   // FIX1：视频源反推的 video_analysis **内嵌于 result**（job.result.video_analysis），非 job 顶层；图片源为空。
   video_analysis?: ReverseVideoAnalysis | null;
+  // REVERSE-DEEP-UI-0001 §4.1 新增，均 optional（老结构结果没有 → 回落既有字段展示，见 result-view）。
+  structured_prompt?: ReverseStructuredPrompt | null;
+  source_media?: ReverseSourceMedia | null;
 }
 
 /** 镜像 BE ReversePromptJobRead（前端主要读 id/status/result/error_*，其余字段照收）。 */
@@ -208,12 +273,62 @@ export function deleteReversePromptJob(id: string): Promise<ReversePromptDeleted
 // ── 「带入生成」落点 ──────────────────────────────────────────────────────────
 // 工作台一次性 prefill 的富载荷（口播/电商带货 也复用于文案仿写「用此文案」的 script-only 变体）。
 // target 与 WorkbenchMode 同名（page.tsx 直接 setMode(target)）：avatar_talk/seedance_i2v/video_gen/photo/ecom_image。
+/**
+ * REVERSE-DEEP-UI-0001：载荷从「一个提示词」扩到**逐字段直落**（D3-①）。
+ * 🔴 每个字段都 optional，且**语义是「本次带入真正带来的字段」**：
+ *    key 缺席 = 该控件保持用户当前值不动（目标表单 `if (x !== undefined)` 跳过），**不是清空**。
+ *    带入确认弹窗取消勾选某项 = 直接不下发该 key（而非下发空串）——这正是承重门 2。
+ * `durationClamped` 是**展示用元数据**（D8 那行提示），目标表单不消费。
+ */
 export type WorkbenchPrefill =
   | { target: "avatar_talk"; topic?: string; script?: string }
-  | { target: "seedance_i2v"; topic?: string; scenePrompt?: string; script?: string }
-  | { target: "video_gen"; prompt?: string }
-  | { target: "photo"; prompt?: string }
-  | { target: "ecom_image"; tool: "model"; custom?: string };
+  | {
+      target: "seedance_i2v";
+      topic?: string;
+      scenePrompt?: string;
+      script?: string;
+      negativePrompt?: string;
+      durationSec?: number;
+      durationClamped?: boolean;
+    }
+  | {
+      target: "video_gen";
+      prompt?: string;
+      negativePrompt?: string;
+      aspectRatio?: string;
+      durationSec?: number;
+      durationClamped?: boolean;
+      generateAudio?: boolean;
+    }
+  | { target: "photo"; prompt?: string; masterPrompt?: string; negativePrompt?: string; aspectRatio?: string }
+  | { target: "ecom_image"; tool: "model"; custom?: string; aspectRatio?: string };
+
+/** 结构化提示词里的分镜段标记（§4.3：视频反推在 en 末尾追加 `Shots:` 段；中文版用「分镜」）。 */
+const SHOT_SECTION_RE = /\n\s*(?:Shots?|分镜表?)\s*[:：]\s*/;
+
+/**
+ * 把结构化提示词拆成「正文」与「分镜段」（REVERSE-DEEP-UI-0001 · 范围4）。
+ *
+ * 为什么要拆：§4.3 规定 BE **已经**把 `shot_summary` 作为 `Shots:` 段追加进 `structured_prompt.en` 末尾，
+ * 而范围3 要求「分镜表」是一个**可单独取消勾选**的项。若不拆：
+ *   - 直接把 shot_summary 另作一项再拼 → 与正文里已有的那段**重复**；
+ *   - 不给分镜项 → 违反「分镜表参与勾选带入」；
+ *   - 给了却取消也无效 → 违反「不许显示一个点了没用的开关」。
+ * 故此处按标记拆开，勾选时**原样拼回**（与 BE 给的串等价），取消时正文里那段一并不带走。
+ * 无标记（老结构/图片反推）→ shots 为空串，调用方据此不渲染分镜项（不造死开关）。
+ * ⚠️ 依赖 §4.3 约定的段标记；BE 合并后按真实产出复核（FIX 包真联调项，已在回执列出）。
+ */
+export function splitShotSection(text: string): { body: string; shots: string } {
+  if (!text) return { body: "", shots: "" };
+  const m = SHOT_SECTION_RE.exec(text);
+  if (!m || m.index < 0) return { body: text, shots: "" };
+  return { body: text.slice(0, m.index).trimEnd(), shots: text.slice(m.index + m[0].length).trim() };
+}
+
+/** 勾选分镜表时把分镜段拼回正文（与 BE 原串等价的重组，标记逐字对齐 §4.3）。 */
+export function joinShotSection(body: string, shots: string): string {
+  return shots.trim() ? `${body.trimEnd()}\n\nShots: ${shots.trim()}` : body;
+}
 
 /**
  * BE fill_target 键 → WorkbenchPrefill 落点映射（核心）。BE 载荷直落对应表单字段，缺键即 null（置灰）。
@@ -236,19 +351,58 @@ export function fillTargetToPrefill(
     }
     case "seedance_i2v": {
       const t = fillTargets.seedance_i2v;
-      return t ? { target: "seedance_i2v", topic: t.topic, scenePrompt: t.scene_prompt } : null;
+      // 🔴 只挂 BE **真给了**的键：undefined 的字段整体不出现在载荷里（展开语法条件挂），
+      //    这样目标表单的 `if (x !== undefined)` 才会跳过 → 该控件保持原样（不被空串覆盖）。
+      return t
+        ? {
+            target: "seedance_i2v",
+            topic: t.topic,
+            scenePrompt: t.scene_prompt,
+            ...(t.script !== undefined ? { script: t.script } : {}),
+            ...(t.negative_prompt !== undefined ? { negativePrompt: t.negative_prompt } : {}),
+            ...(t.duration_sec !== undefined ? { durationSec: t.duration_sec } : {}),
+            ...(t.duration_clamped !== undefined ? { durationClamped: t.duration_clamped } : {})
+          }
+        : null;
     }
     case "video_gen": {
       const t = fillTargets.video_gen;
-      return t ? { target: "video_gen", prompt: t.prompt } : null;
+      // aspect_ratio：BE 按 D7 已映射为**视频那套枚举**；映射不出来给 null → 此处不挂（表单侧再按自己的枚举兜一道）。
+      return t
+        ? {
+            target: "video_gen",
+            prompt: t.prompt,
+            ...(t.negative_prompt !== undefined ? { negativePrompt: t.negative_prompt } : {}),
+            ...(t.aspect_ratio ? { aspectRatio: t.aspect_ratio } : {}),
+            ...(t.duration_sec !== undefined ? { durationSec: t.duration_sec } : {}),
+            ...(t.duration_clamped !== undefined ? { durationClamped: t.duration_clamped } : {}),
+            ...(t.generate_audio !== undefined ? { generateAudio: t.generate_audio } : {})
+          }
+        : null;
     }
     case "photo": {
       const t = fillTargets.photo;
-      return t ? { target: "photo", prompt: t.topic } : null;
+      // aspect_ratio：BE 按 D7 已映射为**图片那套枚举**（与视频两套不同）；null → 不挂。
+      return t
+        ? {
+            target: "photo",
+            prompt: t.topic,
+            ...(t.master_prompt !== undefined ? { masterPrompt: t.master_prompt } : {}),
+            ...(t.negative_prompt !== undefined ? { negativePrompt: t.negative_prompt } : {}),
+            ...(t.aspect_ratio ? { aspectRatio: t.aspect_ratio } : {})
+          }
+        : null;
     }
     case "ecom_model": {
       const t = fillTargets.ecom_model;
-      return t ? { target: "ecom_image", tool: "model", custom: t.extra_prompt } : null;
+      return t
+        ? {
+            target: "ecom_image",
+            tool: "model",
+            custom: t.extra_prompt,
+            ...(t.aspect_ratio ? { aspectRatio: t.aspect_ratio } : {})
+          }
+        : null;
     }
     case "ecom_poster":
       // 营销海报已下线（ECOM-REPLICATE-UI-0001）→ 无落点，返 null（「带入·营销海报」按钮已移除）。

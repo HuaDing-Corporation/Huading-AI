@@ -25,6 +25,8 @@ vi.mock("@/lib/api/hooks", () => ({
 }));
 
 import { ReverseHistoryList } from "./reverse-history-list";
+// 承重门5 需要在同一条用例里对照「另一个入口」的产物 → 直接渲染结果视图本体。
+import { ReversePromptResultView } from "@/components/workbench/reverse-prompt-result-view";
 
 /** 列表项形状 = BE ReversePromptHistoryItem 的 6 字段（手写，不 import 被测代码的类型）。 */
 interface Item {
@@ -210,7 +212,10 @@ describe("ReverseHistoryList (提示词反推历史)", () => {
     render(<ReverseHistoryList onApplyPrefill={onApplyPrefill} />);
 
     fireEvent.click(screen.getByRole("button", { name: copy.tasks.open }));
+    // REVERSE-DEEP-UI-0001 · D3-④：历史入口与结果视图入口**共用同一个 ReversePromptResultView**，
+    // 故这里也走「带入 → 确认带入」两步（两入口行为一致是结构性的）。
     fireEvent.click(await screen.findByRole("button", { name: copy.reverse.applyAvatar }));
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyConfirmSubmit }));
 
     expect(onApplyPrefill).toHaveBeenCalledTimes(1);
     expect(onApplyPrefill).toHaveBeenCalledWith({ target: "avatar_talk", topic: "保温杯种草", script: "大家好……" });
@@ -225,7 +230,44 @@ describe("ReverseHistoryList (提示词反推历史)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: copy.tasks.open }));
     fireEvent.click(await screen.findByRole("button", { name: copy.reverse.applyEcomModel }));
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyConfirmSubmit }));
     expect(onApplyPrefill).toHaveBeenCalledWith({ target: "ecom_image", tool: "model", custom: "工作室柔光" });
+  });
+
+  /**
+   * 🔴 REVERSE-DEEP-UI-0001 · **承重门5 两入口一致**。
+   * 带入闭环只有两个入口（全仓 grep 穷举）：① 工作台反推结果视图 ② 历史「提示词反推」详情弹窗。
+   * 同一份反推结果 → 两入口各走一遍「带入 → 逐项确认 → 落值」，**载荷必须逐字相同**。
+   * 一致性的来源是结构性的：历史弹窗内嵌的就是 ReversePromptResultView 本体（同一份代码、同一个确认弹窗），
+   * 本条把这件事钉死 —— 哪天有人给某一侧另写一套带入逻辑，这条就红。
+   */
+  it("🔴 承重门5 两入口一致：结果视图入口 与 历史详情入口 → 同结果产出**逐字相同**的载荷", async () => {
+    // 入口②：历史详情弹窗
+    const fromHistory = vi.fn();
+    mocks.jobs.mockReturnValue(listOf(IMG_ITEM));
+    mocks.job.mockReturnValue(jobOf());
+    const history = render(<ReverseHistoryList onApplyPrefill={fromHistory} />);
+    fireEvent.click(screen.getByRole("button", { name: copy.tasks.open }));
+    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.applyVideoGen }));
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyConfirmSubmit }));
+    history.unmount();
+
+    // 入口①：工作台反推结果视图（同一份 RESULT）
+    const fromResultView = vi.fn();
+    render(
+      <ReversePromptResultView
+        result={RESULT as never}
+        onApply={fromResultView}
+        onRegenerate={() => undefined}
+        onSave={() => undefined}
+      />
+    );
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyVideoGen }));
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyConfirmSubmit }));
+
+    expect(fromHistory).toHaveBeenCalledTimes(1);
+    expect(fromResultView).toHaveBeenCalledTimes(1);
+    expect(fromResultView.mock.calls[0][0]).toEqual(fromHistory.mock.calls[0][0]);
   });
 
   // 🔴 防二次扣费：视频「重新反推」100 积分/次且历史场景无计费门 → 详情弹窗必须隐藏该入口。

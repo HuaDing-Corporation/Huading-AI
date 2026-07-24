@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { AlertTriangle, RefreshCw, Save, Sparkles } from "lucide-react";
 
 import {
@@ -11,6 +12,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { CopyableBlock } from "@/components/ui/copyable-block";
 import { Card, CardTitle } from "@/components/ui/card";
+import { PrefillConfirmDialog } from "@/components/workbench/prefill-confirm-dialog";
 import { copy } from "@/lib/copy";
 
 const labelClass = "mb-1 block text-[12px] tracking-[.5px] text-ink-soft";
@@ -90,6 +92,14 @@ export function ReversePromptResultView({
 }: ReversePromptResultViewProps) {
   const confidencePct = Math.round((result.confidence ?? 0) * 100);
   const disclaimer = result.disclaimer?.trim() || copy.reverse.disclaimer;
+  // 带入前确认（D3-④）：点「带入 · X」不再直接落值，先把载荷挂到待确认态、开弹窗。
+  const [pending, setPending] = useState<{ prefill: WorkbenchPrefill; label: string } | null>(null);
+  // 🔴 范围4 老结构回落：BE 未给 structured_prompt（历史里大量存量结果）→ 回落既有 prompt_zh / prompt_en 展示。
+  //    不许因为读了 undefined 就白屏或把 "undefined" 印到界面上（必测项）。
+  const structured = result.structured_prompt;
+  const shotSummary = result.video_analysis?.shot_summary?.trim();
+  // clamp 提示要的「原视频 N 秒」：优先 source_media（§4.1 客观事实），回落 video_analysis.duration_sec。
+  const sourceDurationSec = result.source_media?.duration_sec ?? result.video_analysis?.duration_sec ?? null;
 
   return (
     <Card animateIn>
@@ -109,9 +119,23 @@ export function ReversePromptResultView({
         {disclaimer}
       </p>
 
-      <CopyableBlock label={copy.reverse.blockPromptZh} text={result.prompt_zh} />
-      <CopyableBlock label={copy.reverse.blockPromptEn} text={result.prompt_en} />
+      {/* 主提示词（§4.3 结构化）：中文供人理解、英文供 provider 消费 → **两个复制按钮各给一份**，
+          不替用户猜他要拷哪一份（拿去别的工具用的是 en，核对语义看的是 zh）。
+          老结构结果无 structured_prompt → 回落既有中/英提示词块（不白屏、不 undefined）。 */}
+      {structured ? (
+        <>
+          <CopyableBlock label={copy.reverse.blockStructuredZh} text={structured.zh} />
+          <CopyableBlock label={copy.reverse.blockStructuredEn} text={structured.en} />
+        </>
+      ) : (
+        <>
+          <CopyableBlock label={copy.reverse.blockPromptZh} text={result.prompt_zh} />
+          <CopyableBlock label={copy.reverse.blockPromptEn} text={result.prompt_en} />
+        </>
+      )}
       <CopyableBlock label={copy.reverse.blockNegative} text={result.negative_prompt} />
+      {/* 视频反推分镜表（§4.1 shot_summary）：有值才渲染；无值（图片/老结构）整块不出现 */}
+      {shotSummary ? <CopyableBlock label={copy.reverse.blockShotSummary} text={shotSummary} /> : null}
 
       <div className="mb-3 grid grid-cols-2 gap-x-4 gap-y-2">
         <Field label={copy.reverse.blockSubject} value={result.subject} />
@@ -159,7 +183,8 @@ export function ReversePromptResultView({
                 className="justify-start"
                 disabled={!prefill}
                 title={prefill ? undefined : copy.reverse.applyUnavailable}
-                onClick={() => prefill && onApply(prefill)}
+                // D3-④：先开确认弹窗（可逐项取消/编辑），确认后才真正落值。
+                onClick={() => prefill && setPending({ prefill, label })}
               >
                 {label}
               </Button>
@@ -167,6 +192,20 @@ export function ReversePromptResultView({
           })}
         </div>
       </div>
+
+      {/* 带入前确认 —— 本组件是**两个带入入口共用**的同一份代码（工作台反推页 + 历史详情弹窗），
+          故两入口都走这同一个弹窗，行为一致是结构性的，不是靠两处各写一遍。 */}
+      <PrefillConfirmDialog
+        open={pending !== null}
+        prefill={pending?.prefill ?? null}
+        moduleLabel={pending?.label ?? ""}
+        sourceDurationSec={sourceDurationSec}
+        onCancel={() => setPending(null)}
+        onConfirm={(next) => {
+          setPending(null);
+          onApply(next);
+        }}
+      />
     </Card>
   );
 }

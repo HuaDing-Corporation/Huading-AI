@@ -40,11 +40,17 @@ export function EcomVideoForm({
   initialTopic,
   initialScenePrompt,
   initialScript,
+  initialNegativePrompt,
+  initialDurationSec,
   onPrefillConsumed
 }: {
   initialTopic?: string;
   initialScenePrompt?: string;
   initialScript?: string;
+  /** 反推带入 · 负面提示词（fill_targets.seedance_i2v.negative_prompt）——REVERSE-DEEP-UI-0001 范围2 */
+  initialNegativePrompt?: string;
+  /** 反推带入 · 时长（BE 已按本模块区间 5–120 clamp 并附 duration_clamped 供弹窗提示；此处仍按 isValidDuration 兜一道） */
+  initialDurationSec?: number;
   onPrefillConsumed?: () => void;
 } = {}) {
   const { createAndTrack } = useVideoTasks();
@@ -75,13 +81,31 @@ export function EcomVideoForm({
   // WORKBENCH-KEEPALIVE-UI-0001 · prefill 消费时机重设计（详见 new-video-form.tsx 同处注释）：面板常驻后本表单
   // 不再重挂 → 改为同步 props；只写 prefill 带来的字段，用户已填的其它输入原样保留；消费后回调 clearPrefill →
   // props 回落 undefined → 下次 early-return，不重复注入（原 prefillConsumed ref 闩锁已删，它永不复位）。
+  // REVERSE-DEEP-UI-0001 范围2：本表单再多接**负面提示词 / 时长**两项（D3-① 逐字段直落）。
+  // 纪律不变：每个 `!== undefined` 各自成门，只写 prefill 真正带来的字段；时长按本模块合法区间兜一道（非法不落）。
   useEffect(() => {
-    if (initialTopic === undefined && initialScenePrompt === undefined && initialScript === undefined) return;
+    if (
+      initialTopic === undefined &&
+      initialScenePrompt === undefined &&
+      initialScript === undefined &&
+      initialNegativePrompt === undefined &&
+      initialDurationSec === undefined
+    )
+      return;
     if (initialTopic !== undefined) setTopic(initialTopic);
     if (initialScenePrompt !== undefined) setScenePrompt(initialScenePrompt);
     if (initialScript !== undefined) setScript(initialScript);
+    if (initialNegativePrompt !== undefined) setNegativePrompt(initialNegativePrompt);
+    if (initialDurationSec !== undefined && isValidDuration(initialDurationSec)) setDurationSec(initialDurationSec);
     onPrefillConsumed?.();
-  }, [initialTopic, initialScenePrompt, initialScript, onPrefillConsumed]);
+  }, [
+    initialTopic,
+    initialScenePrompt,
+    initialScript,
+    initialNegativePrompt,
+    initialDurationSec,
+    onPrefillConsumed
+  ]);
 
   // Actual submit — runs only after the 确定生成 confirmation; owns its own errors.
   const submit = async (req: CreateVideoRequest) => {

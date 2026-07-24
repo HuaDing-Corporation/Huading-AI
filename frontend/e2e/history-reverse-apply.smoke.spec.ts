@@ -70,8 +70,10 @@ test("历史反推记录 → 带入 · AI 模特 → 电商图面板被激活且
 
   // 🔴 带入 —— 本条的核心：跨四层的那条链在此通电。
   await dialog.getByRole("button", { name: "带入 · AI 模特" }).click();
+  // REVERSE-DEEP-UI-0001 · D3-④：确认弹窗在**另一个 portal**（不在历史 dialog 作用域内）→ 用 page 取。
+  await page.getByRole("button", { name: "确认带入" }).click();
 
-  // 弹窗关闭（带入后让用户看见被预填的表单）。
+  // 两层弹窗都关闭（确认窗自身 + 历史详情窗；带入后让用户看见被预填的表单）。
   await expect(page.getByRole("dialog")).toHaveCount(0);
 
   // 🔴 断言一：activate 首挂 —— 电商图面板此刻才被挂载**并激活**（首屏还 toHaveCount(0)）。

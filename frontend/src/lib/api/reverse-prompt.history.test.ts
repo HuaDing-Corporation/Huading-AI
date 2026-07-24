@@ -28,17 +28,27 @@ beforeEach(() => {
 afterEach(() => localStorage.clear());
 
 describe("反推历史列表 GET /reverse-prompt/jobs", () => {
-  it("省略 source_kind = 全部：6 条（image 3 + video 3），按 created_at 倒序；分页默认 page=1/page_size=20", async () => {
+  // REVERSE-DEEP-UI-0001：mock 新增第 7 条 `rh-img-legacy`（形态②**老结构结果**，供「回落」路径真测），
+  // 故「全部」7 条、image 4 条；它 created_at 最早 → 倒序排最后。video 侧不受影响（仍 3 条）。
+  it("省略 source_kind = 全部：7 条（image 4 + video 3），按 created_at 倒序；分页默认 page=1/page_size=20", async () => {
     const r = await listReversePromptJobs();
-    expect(r.total).toBe(6);
+    expect(r.total).toBe(7);
     expect(r.page).toBe(1);
     expect(r.page_size).toBe(20); // BE routes:75 默认 20
-    expect(r.items.map((i) => i.id)).toEqual(["rh-img-1", "rh-img-2", "rh-img-3", "rh-vid-1", "rh-vid-2", "rh-vid-3"]);
+    expect(r.items.map((i) => i.id)).toEqual([
+      "rh-img-1",
+      "rh-img-2",
+      "rh-img-3",
+      "rh-vid-1",
+      "rh-vid-2",
+      "rh-vid-3",
+      "rh-img-legacy"
+    ]);
   });
 
-  it("source_kind=image：恰 3 条，且都有 source_thumbnail_url", async () => {
+  it("source_kind=image：恰 4 条，且都有 source_thumbnail_url", async () => {
     const r = await listReversePromptJobs({ source_kind: "image" });
-    expect(r.total).toBe(3);
+    expect(r.total).toBe(4);
     expect(r.items.every((i) => i.source_kind === "image")).toBe(true);
     expect(r.items.every((i) => typeof i.source_thumbnail_url === "string" && i.source_thumbnail_url.length > 0)).toBe(
       true
@@ -69,7 +79,16 @@ describe("反推历史列表 GET /reverse-prompt/jobs", () => {
 
   it("状态如实透出 5 值（DB CheckConstraint models.py:471）：succeeded/saved/failed/running/queued 都能看到", async () => {
     const r = await listReversePromptJobs();
-    expect(r.items.map((i) => i.status)).toEqual(["succeeded", "saved", "failed", "succeeded", "running", "queued"]);
+    // 末位是新增的老结构 seed（succeeded）——见上方「全部 7 条」注释。
+    expect(r.items.map((i) => i.status)).toEqual([
+      "succeeded",
+      "saved",
+      "failed",
+      "succeeded",
+      "running",
+      "queued",
+      "succeeded"
+    ]);
   });
 
   it("未完成/失败的记录 summary 为 null（BE 无 result 即无 summary）", async () => {
@@ -100,7 +119,7 @@ describe("反推历史列表 GET /reverse-prompt/jobs", () => {
   it("分页边界内合法：page_size=100（BE le=100 的上界，属合法）", async () => {
     const r = await listReversePromptJobs({ page_size: 100 });
     expect(r.page_size).toBe(100);
-    expect(r.total).toBe(6);
+    expect(r.total).toBe(7); // 含新增的老结构 seed（见上方注释）
   });
 });
 

@@ -62,6 +62,7 @@ test("提示词反推·视频：切视频→上传→计费门→轮询→视频
 
   // 「带入·数字人口播」→ 切数字人口播 + 预填 topic（video fill_targets 沿用）。
   await page.getByRole("button", { name: "带入 · 数字人口播" }).click();
+  await page.getByRole("button", { name: "确认带入" }).click(); // REVERSE-DEEP-UI-0001 · D3-④ 带入前确认
   await expect(page.locator("#video-topic")).toHaveValue("便携保温杯种草", { timeout: 15_000 });
 
   // WORKBENCH-KEEPALIVE-UI-0001：切回提示词反推 → 面板常驻，**来源选择（视频）被保留**

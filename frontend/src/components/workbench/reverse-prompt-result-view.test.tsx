@@ -33,6 +33,15 @@ const FULL: ReversePromptResult = {
 
 afterEach(() => vi.unstubAllGlobals());
 
+/**
+ * REVERSE-DEEP-UI-0001 · D3-④：点「带入 · X」不再直接落值，先弹**带入前确认**弹窗（可逐项取消/编辑），
+ * 确认后才真正 apply。故所有既有带入断言改为「点带入 → 点确认带入」两步。
+ */
+const applyVia = (label: string) => {
+  fireEvent.click(screen.getByRole("button", { name: label }));
+  fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyConfirmSubmit }));
+};
+
 describe("ReversePromptResultView（反推结果 + 带入 4 模块）", () => {
   const noop = () => undefined;
 
@@ -80,29 +89,81 @@ describe("ReversePromptResultView（反推结果 + 带入 4 模块）", () => {
     }
     // 营销海报入口已移除 → 无「带入·营销海报」按钮
     expect(screen.queryByRole("button", { name: copy.reverse.applyEcomPoster })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyAvatar }));
+    applyVia(copy.reverse.applyAvatar);
     expect(onApply).toHaveBeenCalledWith({ target: "avatar_talk", topic: "保温杯种草", script: "大家好……" });
   });
 
   it("点「带入·电商带货」→ scene_prompt 落 scenePrompt", () => {
     const onApply = vi.fn();
     render(<ReversePromptResultView result={FULL} onApply={onApply} onRegenerate={noop} onSave={noop} />);
-    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyEcomVideo }));
+    applyVia(copy.reverse.applyEcomVideo);
     expect(onApply).toHaveBeenCalledWith({ target: "seedance_i2v", topic: "保温杯卖点", scenePrompt: "暖光特写" });
   });
 
   it("点「带入·图片生成」→ photo.topic 落 prompt", () => {
     const onApply = vi.fn();
     render(<ReversePromptResultView result={FULL} onApply={onApply} onRegenerate={noop} onSave={noop} />);
-    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyPhoto }));
+    applyVia(copy.reverse.applyPhoto);
     expect(onApply).toHaveBeenCalledWith({ target: "photo", prompt: "白底保温杯特写" });
   });
 
   it("点「带入·AI 模特」→ ecom_model.extra_prompt 落 custom（tool=model）", () => {
     const onApply = vi.fn();
     render(<ReversePromptResultView result={FULL} onApply={onApply} onRegenerate={noop} onSave={noop} />);
-    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyEcomModel }));
+    applyVia(copy.reverse.applyEcomModel);
     expect(onApply).toHaveBeenCalledWith({ target: "ecom_image", tool: "model", custom: "白底柔光" });
+  });
+
+  // ── REVERSE-DEEP-UI-0001 · 范围4 结构化展示 + 老结构回落（承重门4）────────────────────
+  it("🔴 承重门4 老结构回落：无 structured_prompt（历史存量）→ 回落中/英提示词块，页面无 undefined、带入照常可用", () => {
+    const onApply = vi.fn();
+    // FULL 本身就是老结构（无 structured_prompt / source_media）——即历史里的存量形态
+    const { container } = render(
+      <ReversePromptResultView result={FULL} onApply={onApply} onRegenerate={noop} onSave={noop} />
+    );
+    // 回落展示：既有中/英提示词块在，结构化块不在
+    expect(screen.getByText("中文提示词内容ZH")).toBeInTheDocument();
+    expect(screen.getByText("english prompt EN")).toBeInTheDocument();
+    expect(screen.queryByText(copy.reverse.blockStructuredZh)).not.toBeInTheDocument();
+    // 🔴 不许把 undefined 印到界面上（读了不存在的字段就会长这样）
+    expect(container.textContent).not.toContain("undefined");
+    // 带入照常工作（老结构的 fill_targets 只有旧键，弹窗只列这些项）
+    applyVia(copy.reverse.applyPhoto);
+    expect(onApply).toHaveBeenCalledWith({ target: "photo", prompt: "白底保温杯特写" });
+  });
+
+  it("🔴 新结构：有 structured_prompt → 展示结构化中/英两块（各自可复制），不再展示旧的中英提示词块", () => {
+    const structured = {
+      ...FULL,
+      structured_prompt: { en: "Subject: bottle.\nStyle: product ad", zh: "主体：保温杯。\n风格：产品广告" }
+    } as ReversePromptResult;
+    render(<ReversePromptResultView result={structured} onApply={noop} onRegenerate={noop} onSave={noop} />);
+    expect(screen.getByText(copy.reverse.blockStructuredZh)).toBeInTheDocument();
+    expect(screen.getByText(copy.reverse.blockStructuredEn)).toBeInTheDocument();
+    expect(screen.getByText("主体：保温杯。 风格：产品广告")).toBeInTheDocument();
+    // 中/英各一个复制按钮：zh 供理解、en 供 provider 消费，不替用户猜要拷哪份
+    expect(screen.getAllByRole("button", { name: copy.common.copy }).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("🔴 视频结果：shot_summary 有值 → 渲染分镜表块；无值（图片/老结构）→ 整块不出现", () => {
+    const { rerender } = render(
+      <ReversePromptResultView result={FULL} onApply={noop} onRegenerate={noop} onSave={noop} />
+    );
+    expect(screen.queryByText(copy.reverse.blockShotSummary)).not.toBeInTheDocument();
+    const withShots = {
+      ...FULL,
+      video_analysis: {
+        duration_sec: 18,
+        pacing: "fast" as const,
+        shot_list: [],
+        audio_transcript: null,
+        bgm_style: null,
+        shot_summary: "0-4s 特写；4-10s 使用场景。"
+      }
+    } as ReversePromptResult;
+    rerender(<ReversePromptResultView result={withShots} onApply={noop} onRegenerate={noop} onSave={noop} />);
+    expect(screen.getByText(copy.reverse.blockShotSummary)).toBeInTheDocument();
+    expect(screen.getByText("0-4s 特写；4-10s 使用场景。")).toBeInTheDocument();
   });
 
   it("承重：缺某 fill_target 键 → 该模块「带入」置灰不可点，且不触发 apply", () => {

@@ -11,7 +11,12 @@ import { useVideoTasks } from "@/lib/videos/tasks-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
 import { AiTextField } from "@/components/workbench/ai-text-field";
-import { AspectRatioSelect, DEFAULT_IMAGE_ASPECT_RATIO, type ImageAspectRatio } from "@/components/workbench/aspect-ratio-select";
+import {
+  AspectRatioSelect,
+  DEFAULT_IMAGE_ASPECT_RATIO,
+  IMAGE_ASPECT_RATIOS,
+  type ImageAspectRatio
+} from "@/components/workbench/aspect-ratio-select";
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
 import { DEFAULT_IMAGE_RESOLUTION, ImageResolutionPicker, type ImageResolutionTier } from "@/components/workbench/image-resolution-picker";
 import { isValidImageCount, ProductImageCountPicker } from "@/components/workbench/product-image-count-picker";
@@ -59,18 +64,25 @@ function CollapsibleSection({ label, bodyClassName, children }: { label: string;
  */
 export function PhotoImageForm({
   initialPrompt,
+  initialMasterPrompt,
+  initialNegativePrompt,
+  initialAspectRatio,
   onPrefillConsumed
-}: { initialPrompt?: string; onPrefillConsumed?: () => void } = {}) {
+}: {
+  initialPrompt?: string;
+  /** 反推带入 · 总控前缀（fill_targets.photo.master_prompt）——REVERSE-DEEP-UI-0001 范围2 */
+  initialMasterPrompt?: string;
+  /** 反推带入 · 图片负面提示词（fill_targets.photo.negative_prompt → 本表单第 3 层 imageNegative，非 masterNegative） */
+  initialNegativePrompt?: string;
+  /** 反推带入 · 画面比例（BE 按 D7 已映射为**图片那套**枚举；本表单按自己的枚举常量再兜一道，非法值不落） */
+  initialAspectRatio?: string;
+  onPrefillConsumed?: () => void;
+} = {}) {
   const { createAndTrack } = useVideoTasks();
   const uploadRef = useUploadProductImage();
 
   // 提示词反推「带入 · 图片生成」注入 prompt(=fill_targets.photo.topic)；惰性消费，mount 后回调 page 清空。
   const [prompt, setPrompt] = useState(() => initialPrompt ?? "");
-  useEffect(() => {
-    if (initialPrompt === undefined) return;
-    setPrompt(initialPrompt);
-    onPrefillConsumed?.();
-  }, [initialPrompt, onPrefillConsumed]);
 
   // 参考图多图（可选）：张数选择器定上限（默认 1，最多 6），multi picker 上传 → image_keys。
   const [refKeys, setRefKeys] = useState<string[]>([]);
@@ -92,6 +104,28 @@ export function PhotoImageForm({
   const [imageResolution, setImageResolution] = useState<ImageResolutionTier>(DEFAULT_IMAGE_RESOLUTION); // §3之二：清晰度档位，默认 1k
   const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）
   const [error, setError] = useState<string | null>(null);
+
+  /**
+   * 提示词反推「带入 · 图片生成」逐字段直落（REVERSE-DEEP-UI-0001 · D3-①）。
+   * 🔴 纪律（沿用 page.tsx:57 那段）：**只写 prefill 真正带来的字段** —— 每个 `!== undefined` 各自成门，
+   *    BE/弹窗没给的项直接跳过，用户已填的该控件原样保留（**不许用空串覆盖**，那是承重门 2 要钉死的）。
+   *    画面比例再按本表单自己的枚举常量兜一道：BE 若给了非图片枚举的值（D7 违约）**宁可不落**，不塞非法值进控件。
+   */
+  useEffect(() => {
+    if (
+      initialPrompt === undefined &&
+      initialMasterPrompt === undefined &&
+      initialNegativePrompt === undefined &&
+      initialAspectRatio === undefined
+    )
+      return;
+    if (initialPrompt !== undefined) setPrompt(initialPrompt);
+    if (initialMasterPrompt !== undefined) setMasterPrompt(initialMasterPrompt);
+    if (initialNegativePrompt !== undefined) setImageNegative(initialNegativePrompt);
+    if (initialAspectRatio !== undefined && (IMAGE_ASPECT_RATIOS as readonly string[]).includes(initialAspectRatio))
+      setAspectRatio(initialAspectRatio as ImageAspectRatio);
+    onPrefillConsumed?.();
+  }, [initialPrompt, initialMasterPrompt, initialNegativePrompt, initialAspectRatio, onPrefillConsumed]);
 
   // Actual submit — runs only after the 确定生成 confirmation; owns its own errors.
   const submit = async (req: CreateVideoRequest) => {

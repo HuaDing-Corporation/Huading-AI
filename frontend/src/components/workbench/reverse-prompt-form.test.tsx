@@ -123,7 +123,9 @@ describe("ReversePromptForm 状态机（上传→反推→带入）", () => {
     await waitFor(() => expect(analyzeBtn).toBeEnabled());
     fireEvent.click(analyzeBtn);
     await screen.findByText("中文提示词ZZZ");
+    // REVERSE-DEEP-UI-0001 · D3-④：带入前先弹确认窗（可逐项取消/编辑）→ 点「确认带入」才真正落值。
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyAvatar }));
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyConfirmSubmit }));
     expect(onApplyPrefill).toHaveBeenCalledWith({ target: "avatar_talk", topic: "保温杯种草", script: "大家好" });
   });
 

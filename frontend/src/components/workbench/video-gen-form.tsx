@@ -17,7 +17,12 @@ import { DurationPicker, isValidDuration } from "@/components/workbench/duration
 import { ReferenceImagesPicker } from "@/components/workbench/reference-images-picker";
 import { ReferenceVideosPicker, type ReferenceVideoItem } from "@/components/workbench/reference-videos-picker";
 import { ResolutionPicker } from "@/components/workbench/resolution-picker";
-import { VideoAspectRatioSelect, DEFAULT_VIDEO_ASPECT_RATIO, type VideoAspectRatio } from "@/components/workbench/video-aspect-ratio-select";
+import {
+  VideoAspectRatioSelect,
+  DEFAULT_VIDEO_ASPECT_RATIO,
+  VIDEO_ASPECT_RATIOS,
+  type VideoAspectRatio
+} from "@/components/workbench/video-aspect-ratio-select";
 import { BgmPicker } from "@/components/workbench/bgm-picker";
 import { AiLabelToggle } from "@/components/label/ai-label-toggle";
 import { useLabelTogglePreference } from "@/lib/preferences/label-toggle";
@@ -39,24 +44,68 @@ const PROMPT_MAX = 2000;
  */
 export function VideoGenForm({
   initialPrompt,
+  initialNegativePrompt,
+  initialAspectRatio,
+  initialDurationSec,
+  initialGenerateAudio,
   onPrefillConsumed
-}: { initialPrompt?: string; onPrefillConsumed?: () => void } = {}) {
+}: {
+  initialPrompt?: string;
+  /** 反推带入 · 负面提示词（fill_targets.video_gen.negative_prompt）——REVERSE-DEEP-UI-0001 范围2 */
+  initialNegativePrompt?: string;
+  /** 反推带入 · 画面比例（BE 按 D7 已映射为**视频那套**枚举；本表单按自己的枚举常量再兜一道，非法值不落） */
+  initialAspectRatio?: string;
+  /** 反推带入 · 时长（BE 已按本模块区间 4–15 clamp 并附 duration_clamped 供弹窗提示；此处仍按 isValidDuration 兜一道） */
+  initialDurationSec?: number;
+  /** 反推带入 · 音频生成开关 */
+  initialGenerateAudio?: boolean;
+  onPrefillConsumed?: () => void;
+} = {}) {
   const { createAndTrack } = useVideoTasks();
   const [refAssetIds, setRefAssetIds] = useState<string[]>([]);
   // 参考视频（V2V-UI-0001，D8 与参考图严格二选一；D10 合计时长联动数据源）。
   const [refVideos, setRefVideos] = useState<ReferenceVideoItem[]>([]);
   // 提示词反推「带入」注入 prompt（同时作 topic）；惰性消费，mount 后回调 page 清空。参考图仍需用户自行上传。
   const [prompt, setPrompt] = useState(() => initialPrompt ?? "");
-  useEffect(() => {
-    if (initialPrompt === undefined) return;
-    setPrompt(initialPrompt);
-    onPrefillConsumed?.();
-  }, [initialPrompt, onPrefillConsumed]);
   const [negativePrompt, setNegativePrompt] = useState(""); // 需求1：负面提示词（可选、不限字数）
   const [durationSec, setDurationSec] = useState<number>(5); // 预设 5/10/15 + 自定义 4–15
   const [resolution, setResolution] = useState<VideoGenResolution>("720p");
   const [aspectRatio, setAspectRatio] = useState<VideoAspectRatio>(DEFAULT_VIDEO_ASPECT_RATIO); // 需求3：默认自适应
   const [generateAudio, setGenerateAudio] = useState(false); // 需求4：音频生成，默认关（零回归）
+
+  /**
+   * 提示词反推「带入 · 视频生成」逐字段直落（REVERSE-DEEP-UI-0001 · D3-①）。
+   * 🔴 只写 prefill 真正带来的字段（每个 `!== undefined` 各自成门）；没带来的控件**原样保留、不空串覆盖**
+   *    （承重门 2 钉的就是这条）。比例/时长再按本表单自己的合法集合兜一道 —— BE 违约给了非法值时**宁可不落**。
+   */
+  useEffect(() => {
+    if (
+      initialPrompt === undefined &&
+      initialNegativePrompt === undefined &&
+      initialAspectRatio === undefined &&
+      initialDurationSec === undefined &&
+      initialGenerateAudio === undefined
+    )
+      return;
+    if (initialPrompt !== undefined) setPrompt(initialPrompt);
+    if (initialNegativePrompt !== undefined) setNegativePrompt(initialNegativePrompt);
+    if (initialAspectRatio !== undefined && (VIDEO_ASPECT_RATIOS as readonly string[]).includes(initialAspectRatio))
+      setAspectRatio(initialAspectRatio as VideoAspectRatio);
+    if (
+      initialDurationSec !== undefined &&
+      isValidDuration(initialDurationSec, VIDEO_GEN_DURATION_MIN, VIDEO_GEN_DURATION_MAX)
+    )
+      setDurationSec(initialDurationSec);
+    if (initialGenerateAudio !== undefined) setGenerateAudio(initialGenerateAudio);
+    onPrefillConsumed?.();
+  }, [
+    initialPrompt,
+    initialNegativePrompt,
+    initialAspectRatio,
+    initialDurationSec,
+    initialGenerateAudio,
+    onPrefillConsumed
+  ]);
   const [bgm, setBgm] = useState<VideoGenBgm | undefined>(undefined);
   const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）
   const [error, setError] = useState<string | null>(null);

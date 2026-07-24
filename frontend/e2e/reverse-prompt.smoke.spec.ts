@@ -46,7 +46,10 @@ async function gotoReverseResult(page: Page): Promise<{ errors: () => string[]; 
   await analyze.click();
   // 结果块 + 近似重建红线（BE 下发 disclaimer）。
   await expect(page.getByText("不保证完全复刻原素材").first()).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText(/浅景深特写/)).toBeVisible();
+  // REVERSE-DEEP-UI-0001 · 范围4：BE 给了 structured_prompt → 主提示词展示的是**结构化中文版**
+  //（分行标注：主体/场景/构图/…），不再是逗号糊成一行的 prompt_zh。
+  await expect(page.getByText("结构化提示词（中文）")).toBeVisible();
+  await expect(page.getByText(/主体：.*保温杯/)).toBeVisible();
 
   return { errors: () => pageErrors, doublePrefix: () => doublePrefix };
 }
@@ -62,6 +65,8 @@ test("带入·数字人口播 → 预填 topic + script，无 #130 白屏", asyn
   await expect(page.getByRole("button", { name: "带入 · 营销海报" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "带入 · 数字人口播" }).click();
+  // REVERSE-DEEP-UI-0001 · D3-④：先弹「带入前确认」窗（默认全勾、可逐项取消/编辑）→ 确认后才落值。
+  await page.getByRole("button", { name: "确认带入" }).click();
   // avatar_talk 落点：topic→#video-topic、script→#video-script（mock fill_targets.avatar_talk）。
   await expect(page.locator("#video-topic")).toHaveValue("便携保温杯种草", { timeout: 15_000 });
   await expect(page.locator("#video-script")).toHaveValue(/大家好，今天给大家安利这款便携保温杯/);
@@ -75,6 +80,7 @@ test("带入·AI 模特 → 切电商图·AI 模特子工具并预填自定义�
 
   // ecom_model 落点：切到电商图 mode + AI 模特子工具，extra_prompt→#ecom-model-custom（mock ecom_model.extra_prompt）。
   await page.getByRole("button", { name: "带入 · AI 模特" }).click();
+  await page.getByRole("button", { name: "确认带入" }).click(); // D3-④ 带入前确认
   // ECOM-SUBTOOL-KEEPALIVE-UI-0001：子工具改为常驻后，#ecom-model-custom 在隐藏态也留在 DOM，而 toHaveValue
   // **不校验可见性** → 单靠它已不能证明「确实切到了 AI 模特子工具」。补一条可见性断言把落点锁死。
   const custom = page.getByTestId("panel-ecom_image").locator("#ecom-model-custom");

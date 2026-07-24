@@ -31,10 +31,13 @@ const DEFAULT_SUBTOOL: SubTool = "cutout";
 export function EcomImageWorkbench({
   initialTool,
   initialCustom,
+  initialAspectRatio,
   onPrefillConsumed
 }: {
   initialTool?: "model";
   initialCustom?: string;
+  /** 反推带入 · 画面比例（REVERSE-DEEP-UI-0001 范围2）——本容器只透传给 AI 模特子表单，由它消费并上报。 */
+  initialAspectRatio?: string;
   onPrefillConsumed?: () => void;
 } = {}) {
   const [tool, setTool] = useState<SubTool>(() => initialTool ?? DEFAULT_SUBTOOL);
@@ -55,18 +58,27 @@ export function EcomImageWorkbench({
   // 🔴 ECOM-SUBTOOL-KEEPALIVE：这里必须走 activate 而非裸 setTool —— 子工具改按 mounted 列表渲染后，「只切 tool
   // 不入列」= 目标子工具永不挂载 → 永不消费 initialCustom、永不上报 → clearPrefill 永不调用 → 父级缓冲永久滞留
   // （本 effect 的 deps 此后不再变化，无法自愈），且面板会空白（无任何子工具命中）。
+  // REVERSE-DEEP-UI-0001：载荷多了 aspectRatio，「谁来结清缓冲」的判据必须同步扩 —— 只要本次 prefill 带了
+  // **任何一个由子表单消费的字段**（custom / aspectRatio），就交给子表单上报；否则父级在此直接结清。
+  // 若漏掉 aspectRatio，父级会在子表单挂载前抢先 clearPrefill → props 回落 undefined → 比例值静默丢失（同 custom 那个坑）。
   useEffect(() => {
     if (initialTool === undefined) return;
     activate(initialTool);
-    if (initialCustom === undefined) onPrefillConsumed?.();
-  }, [initialTool, initialCustom, onPrefillConsumed, activate]);
+    if (initialCustom === undefined && initialAspectRatio === undefined) onPrefillConsumed?.();
+  }, [initialTool, initialCustom, initialAspectRatio, onPrefillConsumed, activate]);
 
   const renderSubTool = (m: SubTool) => {
     switch (m) {
       case "cutout":
         return <EcomImageCutoutForm />;
       case "model":
-        return <EcomImageModelForm initialCustom={initialCustom} onPrefillConsumed={onPrefillConsumed} />;
+        return (
+          <EcomImageModelForm
+            initialCustom={initialCustom}
+            initialAspectRatio={initialAspectRatio}
+            onPrefillConsumed={onPrefillConsumed}
+          />
+        );
       case "detail":
         return <EcomDetailWizard />;
     }

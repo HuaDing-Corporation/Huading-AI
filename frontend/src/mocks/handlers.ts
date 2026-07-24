@@ -94,6 +94,77 @@ const REVERSE_RESULT = {
   text_in_media: ["24H"],
   disclaimer: "AI 依据画面近似重建提示词，仅供二次创作参考，不保证完全复刻原素材。",
   confidence: 0.82,
+  // ── REVERSE-DEEP-UI-0001 §4.1 新增顶层字段 ──────────────────────────────────
+  // 原素材客观事实（null=测不到，不冒充）。图片 duration_sec 恒 null；aspect_ratio_raw 仅展示、不进控件。
+  source_media: {
+    kind: "image" as const,
+    width: 1024,
+    height: 1024,
+    duration_sec: null,
+    aspect_ratio_raw: "1:1"
+  },
+  // 结构化主提示词（§4.3 分行标注版）：en 供 provider 消费，zh 同结构中文供界面理解。
+  structured_prompt: {
+    en: "Subject: A portable insulated stainless-steel bottle with a matte white finish and brushed metal lid.\nScene: A white marble countertop by a window, warm morning light, minimal props.\nComposition: Centered close-up, vertical framing, shallow depth of field.\nCamera: 35mm prime, slight high angle, slow orbiting move.\nLighting: Soft warm key from upper right, gentle falloff, no harsh speculars.\nMotion: Gentle rising steam, slow orbit.\nStyle: product advertising, minimal, premium texture",
+    zh: "主体：哑光白漆面便携不锈钢保温杯，拉丝金属杯盖。\n场景：窗边白色大理石台面，暖色晨光，道具极简。\n构图：居中特写，竖幅取景，浅景深。\n镜头：35mm 定焦，微俯角，缓慢环绕。\n光线：右上柔和暖调主光，过渡柔和，无硬高光。\n运动：蒸汽轻升，缓慢环绕。\n风格：产品广告、极简、高级质感"
+  },
+  // ── §4.2 fill_targets 升级：既有键全保留，只新增键；新增键一律 optional ────────────
+  fill_targets: {
+    avatar_talk: { topic: "便携保温杯种草", script: "大家好，今天给大家安利这款便携保温杯，24 小时保温，出门必备……" },
+    seedance_i2v: {
+      topic: "便携保温杯卖点",
+      scene_prompt: "白色大理石台面暖光特写，蒸汽轻升，缓慢环绕运镜",
+      negative_prompt: "低分辨率, 变形, 多余文字, 水印, 杂乱背景",
+      duration_sec: 30, // 本模块合法区间 5–120 内 → 未 clamp
+      duration_clamped: false
+    },
+    video_gen: {
+      topic: "便携保温杯",
+      // §4.2-2：不再是 prompt_en 裸串，改用 structured_prompt.en（≤2000 按段裁）
+      prompt:
+        "Subject: A portable insulated stainless-steel bottle with a matte white finish and brushed metal lid.\nScene: A white marble countertop by a window, warm morning light, minimal props.\nComposition: Centered close-up, vertical framing, shallow depth of field.\nCamera: 35mm prime, slight high angle, slow orbiting move.\nLighting: Soft warm key from upper right, gentle falloff, no harsh speculars.\nMotion: Gentle rising steam, slow orbit.\nStyle: product advertising, minimal, premium texture",
+      negative_prompt: "低分辨率, 变形, 多余文字, 水印, 杂乱背景",
+      aspect_ratio: "1:1", // D7：BE 已映射为**视频那套**枚举的合法值
+      // 图片源没有时长可 clamp → 给模块默认值且 clamped=false（clamp 的真形态在下面的视频变体里）
+      duration_sec: 5,
+      duration_clamped: false,
+      generate_audio: false
+    },
+    photo: {
+      // §4.2-3：photo.topic 用 structured_prompt.en（上限 20000，基本不触顶）
+      topic:
+        "Subject: A portable insulated stainless-steel bottle with a matte white finish and brushed metal lid.\nScene: A white marble countertop by a window, warm morning light, minimal props.\nComposition: Centered close-up, vertical framing, shallow depth of field.\nCamera: 35mm prime, slight high angle, slow orbiting move.\nLighting: Soft warm key from upper right, gentle falloff, no harsh speculars.\nMotion: Gentle rising steam, slow orbit.\nStyle: product advertising, minimal, premium texture",
+      master_prompt: "统一走高级产品广告质感，干净背景，真实材质表现",
+      negative_prompt: "低分辨率, 变形, 多余文字, 水印, 杂乱背景",
+      aspect_ratio: "1:1" // D7：BE 已映射为**图片那套**枚举的合法值
+    },
+    ecom_model: { extra_prompt: "工作室柔光、简洁白底、突出质感", aspect_ratio: "3:4" },
+    ecom_poster: { title: "年中大促", subtitle: "限时 5 折 错过再等一年" }
+  }
+};
+
+/**
+ * mock 形态 ②：**老结构结果**（深度化上线前的存量，历史里大量存在）。
+ * 没有 structured_prompt / source_media，fill_targets 只有旧键（无 negative_prompt / aspect_ratio / duration_sec）。
+ * 🔴 这是范围4「回落」的真测底座：前端必须回落 prompt_zh/prompt_en 展示、带入照常工作、**不许白屏或印 undefined**。
+ * ⚠️ mock 不许比 BE 严：这些键 BE 侧本就是 optional/可缺省，故此处**整键不出现**（而不是给 null 再让前端猜）。
+ */
+const REVERSE_RESULT_LEGACY = {
+  target_format: REVERSE_RESULT.target_format,
+  prompt_zh: REVERSE_RESULT.prompt_zh,
+  prompt_en: REVERSE_RESULT.prompt_en,
+  negative_prompt: REVERSE_RESULT.negative_prompt,
+  style_tags: REVERSE_RESULT.style_tags,
+  camera: REVERSE_RESULT.camera,
+  lighting: REVERSE_RESULT.lighting,
+  composition: REVERSE_RESULT.composition,
+  subject: REVERSE_RESULT.subject,
+  scene: REVERSE_RESULT.scene,
+  motion_hint: REVERSE_RESULT.motion_hint,
+  selling_points: REVERSE_RESULT.selling_points,
+  text_in_media: REVERSE_RESULT.text_in_media,
+  disclaimer: REVERSE_RESULT.disclaimer,
+  confidence: REVERSE_RESULT.confidence,
   fill_targets: {
     avatar_talk: { topic: "便携保温杯种草", script: "大家好，今天给大家安利这款便携保温杯，24 小时保温，出门必备……" },
     seedance_i2v: { topic: "便携保温杯卖点", scene_prompt: "白色大理石台面暖光特写，蒸汽轻升，缓慢环绕运镜" },
@@ -122,10 +193,46 @@ const REVERSE_VIDEO_ANALYSIS = {
     { index: 2, start_sec: 10, end_sec: 15, visual: "卖点字幕叠加：24 小时保温，便携轻巧", camera: "固定机位", motion: "字幕入场", transition: "淡出" },
     { index: 3, start_sec: 15, end_sec: 18, visual: "收尾定格：品牌 logo + 行动号召", camera: "环绕收尾", motion: "logo 定格", transition: "定格" }
   ],
-  audio_transcript: null, // 一期未启用
-  bgm_style: null // 一期未启用
+  audio_transcript: null, // D4 SPIKE 未出结论前恒 null（不做假入口）
+  bgm_style: null, // 同上
+  // REVERSE-DEEP-UI-0001 §4.1：shot_list 压成一段可直接进提示词的分镜描述（前端展示 + 作为「分镜表」项参与勾选带入）
+  shot_summary:
+    "0-4s 产品特写：保温杯置于大理石台面，暖光扫过，缓慢推近；4-10s 使用场景：手部拧开杯盖，蒸汽升腾，手持跟拍；10-15s 卖点字幕叠加：24 小时保温、便携轻巧，固定机位；15-18s 收尾定格：品牌 logo 与行动号召，环绕收尾。"
 };
-// （视频 job 不再有独立 Map —— 见下方「单一权威 job 存储」。）
+/**
+ * mock 形态 ③：**视频反推结果**（REVERSE-DEEP-UI-0001）。在图片结果基础上：
+ *  - 内嵌 video_analysis（含 shot_summary）；source_media.kind="video" 且有真时长；
+ *  - §4.3：结构化提示词末尾**追加 `Shots:` 段**，且 video_gen.prompt / photo.topic 同样带这段
+ *    （前端据此把「分镜表」拆成可单独取消的一项 —— splitShotSection）；
+ *  - D8：原视频 18s 超出 video_gen 的 4–15s 上限 → duration_sec=15 且 duration_clamped=true，
+ *    前端必须显示「原视频 18 秒，…上限 15 秒，已按上限带入」（**不许静默改数**）。
+ *    seedance_i2v 区间 5–120 装得下 18s → 不 clamp（同一份结果里两个模块结论不同，正是 clamp 是按模块算的证据）。
+ */
+const REVERSE_RESULT_VIDEO = {
+  ...REVERSE_RESULT,
+  source_media: { kind: "video" as const, width: 1080, height: 1920, duration_sec: 18, aspect_ratio_raw: "9:16" },
+  structured_prompt: {
+    en: `${REVERSE_RESULT.structured_prompt.en}\nShots: ${REVERSE_VIDEO_ANALYSIS.shot_summary}`,
+    zh: `${REVERSE_RESULT.structured_prompt.zh}\n分镜：${REVERSE_VIDEO_ANALYSIS.shot_summary}`
+  },
+  video_analysis: REVERSE_VIDEO_ANALYSIS,
+  fill_targets: {
+    ...REVERSE_RESULT.fill_targets,
+    seedance_i2v: { ...REVERSE_RESULT.fill_targets.seedance_i2v, duration_sec: 18, duration_clamped: false },
+    video_gen: {
+      ...REVERSE_RESULT.fill_targets.video_gen,
+      prompt: `${REVERSE_RESULT.fill_targets.video_gen.prompt}\nShots: ${REVERSE_VIDEO_ANALYSIS.shot_summary}`,
+      aspect_ratio: "9:16", // 竖屏源 → 映射到视频枚举的 9:16
+      duration_sec: 15,
+      duration_clamped: true
+    },
+    photo: {
+      ...REVERSE_RESULT.fill_targets.photo,
+      topic: `${REVERSE_RESULT.fill_targets.photo.topic}\nShots: ${REVERSE_VIDEO_ANALYSIS.shot_summary}`,
+      aspect_ratio: "9:16" // 图片枚举里也有 9:16
+    }
+  }
+};
 
 // ── 反推历史 (HISTORY-VIDEO-REVERSE-UI-0001) mock ──
 // **镜像已合入 develop 的真 BE**（逐字段核对 backend/app/schemas/reverse_prompt.py:92-110 与
@@ -176,6 +283,12 @@ interface MockReverseJob {
   error_message: string | null;
   /** 视频异步轮询模拟：详情第 2 次读起 queued → succeeded。 */
   polls: number;
+  /**
+   * REVERSE-DEEP-UI-0001 · mock 形态 ②「**老结构结果**」：反推历史里存着大量深度化之前的结果，
+   * 它们**没有** structured_prompt / source_media / shot_summary，fill_targets 也只有旧的那几个键。
+   * true → 读模型返回 REVERSE_RESULT_LEGACY，用来真测前端的回落路径（不许白屏 / 不许显示 undefined）。
+   */
+  legacy?: boolean;
 }
 const revTs = (i: number) => new Date(Date.UTC(2026, 6, 16, 12, 0, 0) - i * 60_000).toISOString(); // 递减 → 倒序稳定
 
@@ -259,6 +372,17 @@ const REVERSE_SEEDS: (Pick<MockReverseJob, "id" | "source_kind"> & Partial<MockR
     created_at: revTs(5),
     source_thumbnail_url: null,
     summary: null,
+  },
+  {
+    // REVERSE-DEEP-UI-0001 形态②：深度化上线**之前**产出的老结果（历史里的存量）——无 structured_prompt /
+    // source_media / shot_summary，fill_targets 只有旧键。前端必须能正常展示与带入（回落路径的真测底座）。
+    id: "rh-img-legacy",
+    source_kind: "image",
+    status: "succeeded",
+    created_at: revTs(6),
+    source_thumbnail_url: "https://mock.local/reverse/src-legacy.png",
+    summary: "（老结构）白色大理石台面上的便携保温杯，暖色晨光，浅景深特写。",
+    legacy: true
   }
 ];
 REVERSE_SEEDS.forEach((seed) => reverseJobs.set(seed.id, mkReverseJob(seed)));
@@ -295,11 +419,14 @@ const reverseJobRead = (j: MockReverseJob) => ({
   source_kind: j.source_kind,
   source_asset_id: j.source_kind === "video" ? "video-asset-1" : "upload-1",
   target_format: "seedance_2_0",
+  // REVERSE-DEEP-UI-0001 三形态：老结构(legacy) → 视频(含 video_analysis/shot_summary/clamp) → 图片新结构。
   result:
     j.status === "succeeded" || j.status === "saved"
-      ? j.source_kind === "video"
-        ? { ...REVERSE_RESULT, video_analysis: REVERSE_VIDEO_ANALYSIS }
-        : REVERSE_RESULT
+      ? j.legacy
+        ? REVERSE_RESULT_LEGACY
+        : j.source_kind === "video"
+          ? REVERSE_RESULT_VIDEO
+          : REVERSE_RESULT
       : null,
   error_code: j.error_code,
   error_message: j.error_message,

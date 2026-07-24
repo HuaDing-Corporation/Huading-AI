@@ -638,6 +638,39 @@ export const copy = {
     applyEcomModel: "带入 · AI 模特",
     applyEcomPoster: "带入 · 营销海报",
     applyUnavailable: "该模块暂无可带入内容",
+    // ── 带入前确认弹窗（REVERSE-DEEP-UI-0001 · D3-④：可编辑 / 可取消个别要素）──────────────
+    // 🔴 「取消勾选 = 保持原样、不是清空」必须写在界面上：用户看不到载荷，只能靠这句话理解取消的后果。
+    applyConfirmDesc: "默认全部带入。取消勾选的项不会带入，目标表单的该项**保持原样**（不会被清空）。",
+    applyConfirmSubmit: "确认带入",
+    applyConfirmCancel: "取消",
+    applyItemSkipped: "不带入（保持原样）",
+    // 同一行里勾选框与可编辑文本框**不能同名**（读屏会读到两个同名控件、测试也取不准）→ 文本框名加限定词。
+    applyItemEditAria: (label: string) => `${label}（可编辑内容）`,
+    applyItemsEmpty: "该模块本次没有可带入的内容",
+    // 逐项标签（只渲染目标模块**接得住**的项；接不住的不显示，不造点了没用的开关）
+    applyItemPrompt: "主提示词",
+    applyItemTopic: "主题",
+    applyItemScript: "口播文案",
+    applyItemScenePrompt: "画面提示词",
+    applyItemNegative: "负面提示词",
+    applyItemMasterPrompt: "总控前缀",
+    applyItemCustom: "自定义补充",
+    applyItemShots: "分镜表",
+    applyItemAspect: "画面比例",
+    applyItemDuration: "时长",
+    applyItemGenerateAudio: "音频生成",
+    applyValueOn: "开启",
+    applyValueOff: "关闭",
+    applyDurationSec: (sec: number) => `${sec} 秒`,
+    // D8 clamp 明示（**不许静默改数**）：原素材时长已知 → 说清「原多少 / 上限多少 / 已按上限带入」
+    applyClampNote: (originSec: number, moduleLabel: string, maxSec: number) =>
+      `原视频 ${originSec} 秒，${moduleLabel}单条上限 ${maxSec} 秒，已按上限带入`,
+    applyClampNoteNoOrigin: (moduleLabel: string, maxSec: number) =>
+      `原素材时长超出${moduleLabel}单条上限 ${maxSec} 秒，已按上限带入`,
+    // 结构化主提示词（§4.3）——中文供理解、英文供 provider 消费，故给中/英两个复制按钮
+    blockStructuredZh: "结构化提示词（中文）",
+    blockStructuredEn: "结构化提示词（英文）",
+    blockShotSummary: "分镜表",
     // 视频反推（VIDEO-REVERSE-PROMPT-UI-0001）—— 一个入口两模式（图片同步 / 视频异步 + 计费门）
     sourceLabel: "反推来源",
     sourceImage: "图片",

@@ -10,7 +10,12 @@ import { errorText } from "@/lib/api/error-text";
 import type { ModelGender, ProductImagesMode } from "@/lib/api/types";
 import { AiTextField } from "@/components/workbench/ai-text-field";
 import { SelectableOption } from "@/components/ui/selectable-option";
-import { AspectRatioSelect, DEFAULT_IMAGE_ASPECT_RATIO, type ImageAspectRatio } from "@/components/workbench/aspect-ratio-select";
+import {
+  AspectRatioSelect,
+  DEFAULT_IMAGE_ASPECT_RATIO,
+  IMAGE_ASPECT_RATIOS,
+  type ImageAspectRatio
+} from "@/components/workbench/aspect-ratio-select";
 import { ReferenceImagesPicker } from "@/components/workbench/reference-images-picker";
 import { ResultTile } from "@/components/workbench/ecom-image-tool";
 import { AiLabelToggle } from "@/components/label/ai-label-toggle";
@@ -41,8 +46,14 @@ const GENDER_OPTIONS: { id: ModelGender; label: string }[] = [
  */
 export function EcomImageModelForm({
   initialCustom,
+  initialAspectRatio,
   onPrefillConsumed
-}: { initialCustom?: string; onPrefillConsumed?: () => void } = {}) {
+}: {
+  initialCustom?: string;
+  /** 反推带入 · 画面比例（fill_targets.ecom_model.aspect_ratio）——REVERSE-DEEP-UI-0001 范围2；按图片枚举兜一道 */
+  initialAspectRatio?: string;
+  onPrefillConsumed?: () => void;
+} = {}) {
   const model = useModelImage();
   const styles = useModelStyles();
   const { tasks, trackExisting } = useVideoTasks();
@@ -59,12 +70,16 @@ export function EcomImageModelForm({
   const [submittedId, setSubmittedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // 提示词反推「带入 · 电商图(AI 模特)」注入自定义补充（= extra_prompt）。D4：取消 200 截断，直接注入全文。
+  // 提示词反推「带入 · 电商图(AI 模特)」：注入自定义补充（= extra_prompt）+ 画面比例（REVERSE-DEEP-UI-0001 范围2）。
+  // D4：取消 200 截断，直接注入全文。纪律：每个 `!== undefined` 各自成门，只写 prefill 真带来的字段；
+  // 比例按本表单自己的图片枚举兜一道（BE 违约给了非法值宁可不落）。
   useEffect(() => {
-    if (initialCustom === undefined) return;
-    setCustom(initialCustom);
+    if (initialCustom === undefined && initialAspectRatio === undefined) return;
+    if (initialCustom !== undefined) setCustom(initialCustom);
+    if (initialAspectRatio !== undefined && (IMAGE_ASPECT_RATIOS as readonly string[]).includes(initialAspectRatio))
+      setAspectRatio(initialAspectRatio as ImageAspectRatio);
     onPrefillConsumed?.();
-  }, [initialCustom, onPrefillConsumed]);
+  }, [initialCustom, initialAspectRatio, onPrefillConsumed]);
 
   const styleList = styles.data ?? [];
   const productCount = productIds.length;
