@@ -17,6 +17,7 @@ from app.api.deps import get_object_storage, get_progress_store
 from app.core.image_aspect_ratio import VIDEO_GEN_ASPECT_RATIOS
 from app.db.models import (
     Asset,
+    BatchJob,
     BgmLibraryTrack,
     Subscription,
     TaskAsset,
@@ -100,6 +101,31 @@ def _seed_audio_asset(db, *, tenant_id: str, asset_id: str) -> Asset:
         size_bytes=8,
         duration_ms=12_000,
         status="ready",
+    )
+    db.add(asset)
+    return asset
+
+
+def _seed_video_reference_asset(
+    db,
+    *,
+    tenant_id: str,
+    asset_id: str,
+    duration_ms: int,
+) -> Asset:
+    asset = Asset(
+        id=asset_id,
+        tenant_id=tenant_id,
+        type="video",
+        source="upload",
+        storage_key=f"tenants/{tenant_id}/uploads/{asset_id}.mp4",
+        mime_type="video/mp4",
+        size_bytes=16,
+        duration_ms=duration_ms,
+        width=720,
+        height=1280,
+        status="ready",
+        metadata_={"purpose": "video_gen_reference"},
     )
     db.add(asset)
     return asset
@@ -314,6 +340,62 @@ def test_video_gen_schema_accepts_custom_duration_inside_four_to_fifteen() -> No
     )
 
     assert request.duration_sec == 7
+
+
+def test_video_gen_schema_enforces_video_reference_count_uniqueness_and_media_exclusivity(
+    auth_context,
+) -> None:
+    valid = VideoGenerateRequest.model_validate(
+        {
+            "video_mode": "video_gen",
+            "prompt": "A product inherits motion from the references",
+            "duration_sec": 5,
+            "reference_video_asset_ids": ["video-a", "video-b", "video-c"],
+        }
+    )
+    assert valid.reference_video_asset_ids == ["video-a", "video-b", "video-c"]
+    assert valid.aspect_ratio == "auto"
+
+    client = TestClient(app)
+    conflict = client.post(
+        "/api/v1/videos",
+        json={
+            "video_mode": "video_gen",
+            "prompt": "conflicting references",
+            "duration_sec": 5,
+            "reference_image_asset_ids": ["image-a"],
+            "reference_video_asset_ids": ["video-a"],
+        },
+        headers=auth_context["headers"],
+    )
+    too_many = client.post(
+        "/api/v1/videos",
+        json={
+            "video_mode": "video_gen",
+            "prompt": "too many references",
+            "duration_sec": 5,
+            "reference_video_asset_ids": ["a", "b", "c", "d"],
+        },
+        headers=auth_context["headers"],
+    )
+    duplicate = client.post(
+        "/api/v1/videos",
+        json={
+            "video_mode": "video_gen",
+            "prompt": "duplicate references",
+            "duration_sec": 5,
+            "reference_video_asset_ids": ["a", "a"],
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert conflict.status_code == 422
+    assert conflict.json()["error"]["code"] == "VIDEO_GEN_REFERENCE_MEDIA_CONFLICT"
+    assert conflict.json()["error"]["message"] == (
+        "参考图与参考视频不能同时使用，请选择其中一种。"
+    )
+    assert too_many.status_code == 422
+    assert duplicate.status_code == 422
 
 
 @pytest.mark.parametrize(
@@ -760,6 +842,221 @@ def test_create_video_gen_hides_cross_tenant_reference_and_bgm_assets(
     assert cross_bgm.json()["error"]["code"] == "BGM_ASSET_NOT_FOUND"
 
 
+def test_create_video_gen_links_video_references_and_validates_database_total_duration(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    enqueued: list[dict[str, Any]] = []
+
+    class _Task:
+        @staticmethod
+        def apply_async(*, args: list[dict[str, Any]], task_id: str, queue: str):
+            enqueued.append({"args": args, "task_id": task_id, "queue": queue})
+
+    monkeypatch.setattr(videos_route, "generate_video_gen_task", _Task, raising=False)
+    with auth_db() as db:
+        _reset_subscription_quota(db, auth_context["tenant_id"])
+        for index, duration_ms in enumerate((2_000, 3_000, 4_000), start=1):
+            _seed_video_reference_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                asset_id=f"video-ref-{index}",
+                duration_ms=duration_ms,
+            )
+        _seed_video_reference_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="video-too-short",
+            duration_ms=1_800,
+        )
+        for index in range(1, 4):
+            _seed_video_reference_asset(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                asset_id=f"video-total-too-long-{index}",
+                duration_ms=5_200,
+            )
+        db.commit()
+
+    valid = TestClient(app).post(
+        "/api/v1/videos",
+        json={
+            "video_mode": "video_gen",
+            "prompt": "Use three motion references",
+            "duration_sec": 5,
+            "reference_video_asset_ids": [
+                "video-ref-1",
+                "video-ref-2",
+                "video-ref-3",
+            ],
+        },
+        headers=auth_context["headers"],
+    )
+    invalid = TestClient(app).post(
+        "/api/v1/videos",
+        json={
+            "video_mode": "video_gen",
+            "prompt": "Reference is not strictly over the lower bound",
+            "duration_sec": 5,
+            "reference_video_asset_ids": ["video-too-short"],
+        },
+        headers=auth_context["headers"],
+    )
+    invalid_total_too_long = TestClient(app).post(
+        "/api/v1/videos",
+        json={
+            "video_mode": "video_gen",
+            "prompt": "Combined references exceed the upper bound",
+            "duration_sec": 5,
+            "reference_video_asset_ids": [
+                "video-total-too-long-1",
+                "video-total-too-long-2",
+                "video-total-too-long-3",
+            ],
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert valid.status_code == 202
+    task_id = valid.json()["data"]["task_id"]
+    assert enqueued[0]["args"][0]["reference_video_asset_ids"] == [
+        "video-ref-1",
+        "video-ref-2",
+        "video-ref-3",
+    ]
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        assert task is not None
+        assert task.params["reference_video_asset_ids"] == [
+            "video-ref-1",
+            "video-ref-2",
+            "video-ref-3",
+        ]
+        roles = list(
+            db.scalars(select(TaskAsset.role).where(TaskAsset.video_task_id == task_id))
+        )
+        assert roles == [
+            "input_reference_video",
+            "input_reference_video",
+            "input_reference_video",
+        ]
+
+    assert invalid.status_code == 422
+    assert invalid.json()["error"]["code"] == "VIDEO_GEN_REFERENCE_TOTAL_DURATION_INVALID"
+    assert invalid.json()["error"]["message"] == (
+        "参考视频合计时长需大于 1.8 秒且小于 15.2 秒。"
+    )
+    assert invalid_total_too_long.status_code == 422
+    assert invalid_total_too_long.json()["error"]["code"] == (
+        "VIDEO_GEN_REFERENCE_TOTAL_DURATION_INVALID"
+    )
+
+
+def test_video_gen_video_reference_is_tenant_safe_and_invalid_request_has_no_side_effects(
+    auth_context,
+    auth_db,
+) -> None:
+    client = TestClient(app)
+    other_resp = client.post(
+        "/api/v1/auth/register-tenant",
+        json={
+            "tenant_slug": "video-ref-other",
+            "tenant_name": "Video Ref Other",
+            "email": "video-ref-other@example.com",
+            "password": "unit-pass-123",
+        },
+    )
+    other_tenant_id = other_resp.json()["data"]["tenant"]["id"]
+    with auth_db() as db:
+        _reset_subscription_quota(db, auth_context["tenant_id"])
+        _seed_video_reference_asset(
+            db,
+            tenant_id=other_tenant_id,
+            asset_id="cross-tenant-video-ref",
+            duration_ms=3_000,
+        )
+        wrong_purpose = _seed_video_reference_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="wrong-purpose-video-ref",
+            duration_ms=3_000,
+        )
+        wrong_purpose.metadata_ = {"purpose": "avatar_source"}
+        initial_tasks = set(db.scalars(select(VideoTask.id)))
+        initial_usage = set(db.scalars(select(UsageRecord.id)))
+        db.commit()
+
+    response = client.post(
+        "/api/v1/videos",
+        json={
+            "video_mode": "video_gen",
+            "prompt": "Cross tenant references are hidden",
+            "duration_sec": 5,
+            "reference_video_asset_ids": ["cross-tenant-video-ref"],
+        },
+        headers=auth_context["headers"],
+    )
+    wrong_purpose_response = client.post(
+        "/api/v1/videos",
+        json={
+            "video_mode": "video_gen",
+            "prompt": "Wrong-purpose assets are hidden",
+            "duration_sec": 5,
+            "reference_video_asset_ids": ["wrong-purpose-video-ref"],
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "REFERENCE_VIDEO_NOT_FOUND"
+    assert wrong_purpose_response.status_code == 404
+    assert wrong_purpose_response.json()["error"]["code"] == "REFERENCE_VIDEO_NOT_FOUND"
+    with auth_db() as db:
+        assert set(db.scalars(select(VideoTask.id))) == initial_tasks
+        assert set(db.scalars(select(UsageRecord.id))) == initial_usage
+        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 0
+
+
+def test_video_gen_provider_payload_uses_public_video_urls_exclusively(monkeypatch) -> None:
+    from app.providers.video.apimart import APIMartVideoProvider
+    from app.workers import video_gen
+
+    storage = _Storage()
+    video_asset = SimpleNamespace(
+        storage_key="tenants/tenant-v2v/uploads/ref.mp4",
+    )
+    ctx = video_gen.VideoGenContext(
+        task_id="v2v-payload",
+        tenant_id="tenant-v2v",
+        db=None,
+        store=None,
+        storage=storage,
+        task=SimpleNamespace(topic="A product follows reference motion"),
+        reference_assets=[SimpleNamespace(storage_key="should-not-be-used.png")],
+        reference_video_assets=[video_asset],
+        duration_sec=5,
+        resolution="720p",
+        aspect_ratio="auto",
+        generate_audio=False,
+        negative_prompt=None,
+    )
+    monkeypatch.setattr(video_gen.settings, "engine_s3_presign_ttl", 60)
+    monkeypatch.setattr(video_gen.settings, "engine_apimart_video_timeout_seconds", 300)
+
+    payload = video_gen._provider_payload(
+        ctx,
+        APIMartVideoProvider(api_key="test-apimart-key"),
+    )
+
+    assert payload["video_urls"] == [
+        "https://storage.test/tenants/tenant-v2v/uploads/ref.mp4?ttl=7200"
+    ]
+    assert "image_urls" not in payload
+
+
 def test_video_gen_pipeline_settles_quota_stores_labeled_output_and_history(
     monkeypatch,
     auth_context,
@@ -933,6 +1230,135 @@ def test_video_gen_pipeline_setup_failure_marks_failed_and_releases_reserved(
         assert subscription.quota_credits_used == 0
 
 
+def test_video_gen_compensation_commit_failure_is_eventually_recovered(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.services.task_recovery import recover_orphaned_image_queue_tasks
+    from app.workers import video_gen
+
+    storage = _Storage()
+    task_id = "video-gen-compensation-commit-failure"
+    batch_id = "video-gen-recovery-batch"
+    with auth_db() as db:
+        subscription = _reset_subscription_quota(db, auth_context["tenant_id"])
+        batch = BatchJob(
+            id=batch_id,
+            tenant_id=auth_context["tenant_id"],
+            user_id=auth_context["user_id"],
+            kind="prompt_set",
+            status="running",
+            total=2,
+            common_params={},
+        )
+        db.add(batch)
+        task = _add_video_gen_task(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            user_id=auth_context["user_id"],
+            task_id=task_id,
+            params={"duration_sec": 5, "resolution": "720p"},
+        )
+        task.batch_id = batch.id
+        db.add(
+            VideoTask(
+                id="video-gen-recovery-batch-done",
+                tenant_id=auth_context["tenant_id"],
+                created_by_user_id=auth_context["user_id"],
+                batch_id=batch.id,
+                status="done",
+                mode="video_gen",
+                video_mode="video_gen",
+                params={"batch_row_index": 1},
+            )
+        )
+        _add_reserved_video_gen_usage(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            subscription=subscription,
+            task_id=task_id,
+        )
+        db.commit()
+
+    worker_db = auth_db()
+    real_commit = worker_db.commit
+    commit_calls = 0
+
+    def fail_compensation_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls == 2:
+            raise RuntimeError("injected compensation commit failure")
+        real_commit()
+
+    def fail_provider(_ctx) -> bytes:
+        raise RuntimeError("provider generation failed")
+
+    monkeypatch.setattr(worker_db, "commit", fail_compensation_commit)
+    monkeypatch.setattr(video_gen, "SessionLocal", lambda: worker_db)
+    monkeypatch.setattr(video_gen, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(video_gen, "build_progress_store", lambda _url: _MemProgressStore())
+    monkeypatch.setattr(video_gen, "_generate_seedance_mini_video", fail_provider)
+
+    with pytest.raises(RuntimeError, match="injected compensation commit failure"):
+        video_gen.run_video_gen_pipeline(
+            tenant_id=auth_context["tenant_id"],
+            task_id=task_id,
+        )
+
+    assert commit_calls == 2
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
+        subscription = _subscription(db, auth_context["tenant_id"])
+        assert task is not None
+        assert task.status == "running"
+        assert usage is not None
+        assert usage.status == "reserved"
+        assert subscription.quota_credits_reserved == 10
+
+    recovery_store = _MemProgressStore()
+    result = recover_orphaned_image_queue_tasks(
+        session_factory=auth_db,
+        now=datetime.now(UTC) + timedelta(seconds=1901),
+        stale_after_seconds=1800,
+        progress_store=recovery_store,
+    )
+    repeated = recover_orphaned_image_queue_tasks(
+        session_factory=auth_db,
+        now=datetime.now(UTC) + timedelta(seconds=1901),
+        stale_after_seconds=1800,
+    )
+
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
+        subscription = _subscription(db, auth_context["tenant_id"])
+        batch = db.get(BatchJob, batch_id)
+
+    assert task is not None
+    assert task.status == "failed"
+    assert task.error_code == "VIDEO_GEN_FAILED"
+    assert task.error_message == "Video generation worker stopped before completion."
+    assert usage is not None
+    assert usage.status == "released"
+    assert subscription.quota_credits_reserved == 0
+    assert batch is not None
+    assert batch.status == "partial_failed"
+    assert batch.succeeded == 1
+    assert batch.failed == 1
+    assert result.video_gen_tasks == 1
+    assert repeated.video_gen_tasks == 0
+    assert recovery_store.snapshots[f'{auth_context["tenant_id"]}:{task_id}'] == {
+        "status": "failed",
+        "stage": "failed",
+        "error": "Video generation worker stopped before completion.",
+        "error_code": "VIDEO_GEN_FAILED",
+        "error_message": "Video generation worker stopped before completion.",
+    }
+
+
 def test_classify_video_error_uses_provider_and_connection_signals() -> None:
     from app.providers.video.apimart import APIMartVideoProviderError
     from app.workers.video_gen import classify_video_error
@@ -954,6 +1380,24 @@ def test_classify_video_error_uses_provider_and_connection_signals() -> None:
         == "VIDEO_CONNECTION_ERROR"
     )
     assert classify_video_error(RuntimeError("unexpected provider failure")) == "VIDEO_GEN_FAILED"
+
+
+def test_classify_video_error_maps_real_apimart_reference_moderation_message_only_for_v2v(
+) -> None:
+    from app.providers.video.apimart import APIMartVideoProviderError
+    from app.workers.video_gen import classify_video_error
+
+    error = APIMartVideoProviderError(
+        "Your current call may be flagged as containing prohibited words or images.",
+        error_type="task_failed",
+        usage_result={"credits": Decimal("0"), "cost_cents": 0},
+    )
+
+    assert classify_video_error(error) == "VIDEO_GEN_FAILED"
+    assert (
+        classify_video_error(error, has_reference_video=True)
+        == "VIDEO_REFERENCE_CONTENT_REJECTED"
+    )
 
 
 def test_classify_video_error_checks_wrapped_causes() -> None:
@@ -1049,6 +1493,72 @@ def test_video_gen_pipeline_failure_persists_classified_provider_error_code(
     assert store.snapshots[scoped_id]["status"] == "failed"
     assert store.snapshots[scoped_id]["error_code"] == "VIDEO_INSUFFICIENT_BALANCE"
     assert store.snapshots[scoped_id]["error_message"] == "payment required"
+
+
+def test_video_gen_moderation_rejection_is_friendly_and_releases_reserved_quota(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.providers.video.apimart import APIMartVideoProviderError
+    from app.workers import video_gen
+
+    storage = _Storage()
+    store = _MemProgressStore()
+    task_id = "video-gen-v2v-moderation"
+    with auth_db() as db:
+        subscription = _reset_subscription_quota(db, auth_context["tenant_id"])
+        _add_video_gen_task(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            user_id=auth_context["user_id"],
+            task_id=task_id,
+            params={
+                "reference_video_asset_ids": ["video-ref-person"],
+                "duration_sec": 5,
+                "resolution": "720p",
+            },
+        )
+        _add_reserved_video_gen_usage(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            subscription=subscription,
+            task_id=task_id,
+        )
+        db.commit()
+
+    def reject_reference(_ctx):
+        raise APIMartVideoProviderError(
+            "reference video rejected by content moderation",
+            error_type="task_failed",
+            usage_result={"credits": Decimal("0"), "cost_cents": 0},
+        )
+
+    monkeypatch.setattr(video_gen, "SessionLocal", auth_db)
+    monkeypatch.setattr(video_gen, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(video_gen, "build_progress_store", lambda _url: store)
+    monkeypatch.setattr(video_gen, "_generate_seedance_mini_video", reject_reference)
+
+    with pytest.raises(APIMartVideoProviderError):
+        video_gen.run_video_gen_pipeline(
+            tenant_id=auth_context["tenant_id"],
+            task_id=task_id,
+        )
+
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
+        subscription = _subscription(db, auth_context["tenant_id"])
+
+    assert task is not None
+    assert task.status == "failed"
+    assert task.error_code == "VIDEO_REFERENCE_CONTENT_REJECTED"
+    assert task.error_message == "参考视频未通过内容审核，请确认视频不含真人或违规内容后重试。"
+    assert usage is not None
+    assert usage.status == "released"
+    assert usage.cost_cents == 0
+    assert subscription.quota_credits_reserved == 0
+    assert subscription.quota_credits_used == 0
 
 
 def test_video_gen_pipeline_mixes_library_bgm_from_track_storage(

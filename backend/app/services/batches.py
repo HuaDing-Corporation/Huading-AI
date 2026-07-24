@@ -378,17 +378,28 @@ def _close_response(response: requests.Response) -> None:
         close()
 
 
-def refresh_batch_job(db: Session, *, batch_id: str | None) -> BatchJob | None:
+def refresh_batch_job(
+    db: Session,
+    *,
+    batch_id: str | None,
+    tenant_id: str | None = None,
+) -> BatchJob | None:
     if not batch_id:
         return None
     db.flush()
-    batch = db.scalar(select(BatchJob).where(BatchJob.id == batch_id).with_for_update())
+    batch_query = select(BatchJob).where(BatchJob.id == batch_id)
+    if tenant_id is not None:
+        batch_query = batch_query.where(BatchJob.tenant_id == tenant_id)
+    batch = db.scalar(batch_query.with_for_update())
     if batch is None:
         return None
     rows = list(
         db.execute(
             select(VideoTask.status, func.count())
-            .where(VideoTask.batch_id == batch_id)
+            .where(
+                VideoTask.batch_id == batch_id,
+                VideoTask.tenant_id == batch.tenant_id,
+            )
             .group_by(VideoTask.status)
         )
     )

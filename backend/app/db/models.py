@@ -686,7 +686,7 @@ class TaskAsset(Base):
         ),
         CheckConstraint(
             "role IN ('input_avatar', 'output_audio', 'output_subtitle', 'output_video', "
-            "'output_image', 'input_reference_image', 'input_bgm')",
+            "'output_image', 'input_reference_image', 'input_reference_video', 'input_bgm')",
             name="ck_task_assets_role",
         ),
         Index("ix_task_assets_video_task_id", "video_task_id"),

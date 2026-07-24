@@ -6,7 +6,7 @@ import math
 import os
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -53,6 +53,10 @@ _VIDEO_GEN_FAILED_ERROR_CODE = "VIDEO_GEN_FAILED"
 _VIDEO_INSUFFICIENT_BALANCE_ERROR_CODE = "VIDEO_INSUFFICIENT_BALANCE"
 _VIDEO_TIMEOUT_ERROR_CODE = "VIDEO_TIMEOUT"
 _VIDEO_CONNECTION_ERROR_CODE = "VIDEO_CONNECTION_ERROR"
+_VIDEO_REFERENCE_CONTENT_REJECTED_ERROR_CODE = "VIDEO_REFERENCE_CONTENT_REJECTED"
+_VIDEO_REFERENCE_CONTENT_REJECTED_MESSAGE = (
+    "参考视频未通过内容审核，请确认视频不含真人或违规内容后重试。"
+)
 _BALANCE_ERROR_TYPES = {
     "insufficient_balance",
     "insufficient_quota",
@@ -72,6 +76,19 @@ _BALANCE_ERROR_TEXT_MARKERS = (
     "余额不足",
     "额度不足",
 )
+_MODERATION_ERROR_TEXT_MARKERS = (
+    "moderation",
+    "content review",
+    "content safety",
+    "content policy",
+    "safety system",
+    "prohibited words or images",
+    "prohibited words",
+    "prohibited images",
+    "real person",
+    "真人",
+    "内容审核",
+)
 
 
 @dataclass
@@ -88,6 +105,7 @@ class VideoGenContext:
     aspect_ratio: str
     generate_audio: bool
     negative_prompt: str | None
+    reference_video_assets: list[Asset] = field(default_factory=list)
     bgm: dict[str, Any] | None = None
     provider_cost_cents: int = 0
 
@@ -121,6 +139,8 @@ def _classify_single_video_error(exc: Exception) -> str:
             return _VIDEO_INSUFFICIENT_BALANCE_ERROR_CODE
         if any(marker in error_text for marker in _BALANCE_ERROR_TEXT_MARKERS):
             return _VIDEO_INSUFFICIENT_BALANCE_ERROR_CODE
+        if any(marker in error_text for marker in _MODERATION_ERROR_TEXT_MARKERS):
+            return _VIDEO_REFERENCE_CONTENT_REJECTED_ERROR_CODE
         if error_type == "timeout":
             return _VIDEO_TIMEOUT_ERROR_CODE
         return _VIDEO_GEN_FAILED_ERROR_CODE
@@ -135,7 +155,11 @@ def _classify_single_video_error(exc: Exception) -> str:
     return _VIDEO_GEN_FAILED_ERROR_CODE
 
 
-def classify_video_error(exc: Exception) -> str:
+def classify_video_error(
+    exc: Exception,
+    *,
+    has_reference_video: bool = False,
+) -> str:
     seen: set[int] = set()
     chain: list[Exception] = []
     current: Exception | None = exc
@@ -152,9 +176,17 @@ def classify_video_error(exc: Exception) -> str:
 
     for item in reversed(chain):
         code = _classify_single_video_error(item)
+        if code == _VIDEO_REFERENCE_CONTENT_REJECTED_ERROR_CODE:
+            return code if has_reference_video else _VIDEO_GEN_FAILED_ERROR_CODE
         if code != _VIDEO_GEN_FAILED_ERROR_CODE:
             return code
     return _VIDEO_GEN_FAILED_ERROR_CODE
+
+
+def _friendly_video_error_message(exc: Exception, *, error_code: str) -> str:
+    if error_code == _VIDEO_REFERENCE_CONTENT_REJECTED_ERROR_CODE:
+        return _VIDEO_REFERENCE_CONTENT_REJECTED_MESSAGE
+    return str(exc)
 
 
 def _task_or_raise(db: Session, *, tenant_id: str, task_id: str) -> VideoTask:
@@ -183,13 +215,19 @@ def _store_progress(store: ProgressStore, task_id: str, **fields: Any) -> None:
         logger.warning("video_gen.progress_update_failed", error=str(exc))
 
 
-def _task_reference_assets(db: Session, task: VideoTask) -> list[Asset]:
-    ids = list((task.params or {}).get("reference_image_asset_ids") or [])
+def _task_reference_assets(
+    db: Session,
+    task: VideoTask,
+    *,
+    ids_key: str,
+    role: str,
+) -> list[Asset]:
+    ids = list((task.params or {}).get(ids_key) or [])
     links = list(
         db.scalars(
             select(TaskAsset).where(
                 TaskAsset.video_task_id == task.id,
-                TaskAsset.role == "input_reference_image",
+                TaskAsset.role == role,
             )
         )
     )
@@ -210,12 +248,23 @@ def _load_context(
 ) -> VideoGenContext:
     task = _task_or_raise(db, tenant_id=tenant_id, task_id=task_id)
     params = task.params or {}
-    reference_assets = _task_reference_assets(db, task)
+    reference_assets = _task_reference_assets(
+        db,
+        task,
+        ids_key="reference_image_asset_ids",
+        role="input_reference_image",
+    )
+    reference_video_assets = _task_reference_assets(
+        db,
+        task,
+        ids_key="reference_video_asset_ids",
+        role="input_reference_video",
+    )
     raw_aspect_ratio = params.get("aspect_ratio")
     aspect_ratio = (
         raw_aspect_ratio.strip()
         if isinstance(raw_aspect_ratio, str) and raw_aspect_ratio.strip()
-        else "auto" if reference_assets else "9:16"
+        else "auto" if (reference_assets or reference_video_assets) else "9:16"
     )
     raw_negative_prompt = params.get("negative_prompt")
     return VideoGenContext(
@@ -233,26 +282,17 @@ def _load_context(
         negative_prompt=(
             raw_negative_prompt if isinstance(raw_negative_prompt, str) else None
         ),
+        reference_video_assets=reference_video_assets,
         bgm=params.get("bgm") if isinstance(params.get("bgm"), dict) else None,
     )
 
 
 def _provider_payload(ctx: VideoGenContext, provider: object) -> dict[str, Any]:
-    image_urls = []
     presign_ttl = max(
         int(settings.engine_s3_presign_ttl),
         math.ceil(float(settings.engine_apimart_video_timeout_seconds)),
         _APIMART_VIDEO_MIN_PRESIGN_TTL_SECONDS,
     )
-    for asset in ctx.reference_assets:
-        image_urls.append(
-            presign_tenant_storage_key(
-                ctx.storage,
-                tenant_id=ctx.tenant_id,
-                storage_key=asset.storage_key,
-                expires_in=presign_ttl,
-            )
-        )
     payload: dict[str, Any] = {
         "model": settings.engine_apimart_video_model,
         "prompt": ctx.task.topic or "",
@@ -261,8 +301,26 @@ def _provider_payload(ctx: VideoGenContext, provider: object) -> dict[str, Any]:
         "size": video_provider_size(provider, ctx.aspect_ratio),
         "generate_audio": ctx.generate_audio,
     }
-    if image_urls:
-        payload["image_urls"] = image_urls
+    if ctx.reference_video_assets:
+        payload["video_urls"] = [
+            presign_tenant_storage_key(
+                ctx.storage,
+                tenant_id=ctx.tenant_id,
+                storage_key=asset.storage_key,
+                expires_in=presign_ttl,
+            )
+            for asset in ctx.reference_video_assets
+        ]
+    elif ctx.reference_assets:
+        payload["image_urls"] = [
+            presign_tenant_storage_key(
+                ctx.storage,
+                tenant_id=ctx.tenant_id,
+                storage_key=asset.storage_key,
+                expires_in=presign_ttl,
+            )
+            for asset in ctx.reference_assets
+        ]
     if ctx.negative_prompt:
         payload["negative_prompt"] = ctx.negative_prompt
     return payload
@@ -501,7 +559,7 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                     duration_sec=ctx.duration_sec,
                 ),
             )
-            refresh_batch_job(db, batch_id=task.batch_id)
+            refresh_batch_job(db, batch_id=task.batch_id, tenant_id=tenant_id)
             db.commit()
             _store_progress(
                 store,
@@ -538,9 +596,16 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
         except Exception as exc:
             logger.exception("video_gen.failed", task_id=task_id, tenant_id=tenant_id)
             db.rollback()
-            error_message = str(exc)
-            error_code = classify_video_error(exc)
             failed_task = db.get(VideoTask, task_id)
+            has_reference_video = bool(
+                failed_task is not None
+                and (failed_task.params or {}).get("reference_video_asset_ids")
+            )
+            error_code = classify_video_error(
+                exc,
+                has_reference_video=has_reference_video,
+            )
+            error_message = _friendly_video_error_message(exc, error_code=error_code)
             batch_id = (
                 failed_task.batch_id
                 if failed_task is not None and failed_task.tenant_id == tenant_id
@@ -554,7 +619,7 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 error_code=error_code,
             )
             release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
-            refresh_batch_job(db, batch_id=batch_id)
+            refresh_batch_job(db, batch_id=batch_id, tenant_id=tenant_id)
             db.commit()
             if storage is not None:
                 prune_video_history_best_effort(

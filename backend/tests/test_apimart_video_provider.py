@@ -93,6 +93,69 @@ def test_apimart_video_provider_preserves_all_supported_sizes(size: str) -> None
     assert normalized["size"] == size
 
 
+def test_apimart_video_provider_maps_video_urls_and_rejects_mixed_reference_media() -> None:
+    provider = APIMartVideoProvider(api_key="test-apimart-key")
+
+    body, normalized = provider._request_body(
+        {
+            "prompt": "follow the reference motion",
+            "video_urls": ["https://storage.test/ref-a.mp4", "https://storage.test/ref-b.mp4"],
+        }
+    )
+
+    assert body["video_urls"] == [
+        "https://storage.test/ref-a.mp4",
+        "https://storage.test/ref-b.mp4",
+    ]
+    assert body["size"] == "adaptive"
+    assert normalized["size"] == "adaptive"
+
+    with pytest.raises(APIMartVideoProviderError, match="cannot be used together"):
+        provider._request_body(
+            {
+                "prompt": "invalid mixed reference media",
+                "image_urls": ["https://storage.test/ref.png"],
+                "video_urls": ["https://storage.test/ref.mp4"],
+            }
+        )
+
+
+def test_apimart_video_provider_failed_poll_preserves_zero_cost_usage() -> None:
+    session = _FakeSession(
+        post_response=_FakeResponse(
+            payload={"code": 200, "data": [{"task_id": "moderated-v2v"}]}
+        ),
+        task_responses=[
+            _FakeResponse(
+                payload={
+                    "code": 200,
+                    "data": {
+                        "status": "failed",
+                        "message": "reference video rejected by content moderation",
+                        "credits_cost": 0,
+                    },
+                }
+            )
+        ],
+        download_response=_FakeResponse(),
+    )
+    provider = APIMartVideoProvider(
+        api_key="test-apimart-key",
+        session=session,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    with pytest.raises(APIMartVideoProviderError) as exc_info:
+        provider._generate_video_sync(
+            {
+                "prompt": "reference video with a person",
+                "video_urls": ["https://storage.test/ref.mp4"],
+            }
+        )
+
+    assert exc_info.value.usage_result == {"credits": Decimal("0"), "cost_cents": 0}
+
+
 @pytest.mark.parametrize(
     "capabilities",
     [

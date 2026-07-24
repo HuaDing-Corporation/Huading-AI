@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.db.models import (
+    BatchJob,
     ChatConversation,
     ChatMessage,
     EcomReplicateJob,
@@ -16,6 +17,7 @@ from app.db.models import (
     ReasoningWallet,
     ReversePromptJob,
     Subscription,
+    Tenant,
     UsageRecord,
     VideoTask,
 )
@@ -438,7 +440,7 @@ def test_stale_replicate_with_all_outputs_succeeded_finishes_completed(
     assert job.error_message is None
 
 
-def test_recovery_leaves_fresh_and_non_image_work_untouched(
+def test_recovery_leaves_fresh_and_non_recoverable_work_untouched(
     auth_db,
     auth_context,
 ) -> None:
@@ -448,6 +450,7 @@ def test_recovery_leaves_fresh_and_non_image_work_untouched(
     stale_at = now - timedelta(seconds=1901)
     fresh_at = now - timedelta(seconds=30)
     photo_id = "fresh-photo-001"
+    video_gen_id = "fresh-video-gen-001"
     avatar_id = "stale-avatar-001"
     reverse_job_id = "fresh-reverse-video-001"
     replicate_job_id = "active-replicate-001"
@@ -459,6 +462,14 @@ def test_recovery_leaves_fresh_and_non_image_work_untouched(
             status="running",
             mode="photo",
             video_mode="photo",
+            updated_at=fresh_at,
+        )
+        video_gen = VideoTask(
+            id=video_gen_id,
+            tenant_id=auth_context["tenant_id"],
+            status="running",
+            mode="video_gen",
+            video_mode="video_gen",
             updated_at=fresh_at,
         )
         avatar = VideoTask(
@@ -489,7 +500,7 @@ def test_recovery_leaves_fresh_and_non_image_work_untouched(
             started_at=stale_at,
             updated_at=stale_at,
         )
-        db.add_all([photo, avatar, reverse_job, replicate_job])
+        db.add_all([photo, video_gen, avatar, reverse_job, replicate_job])
         db.flush()
         output = EcomReplicateOutput(
             id=output_id,
@@ -513,14 +524,110 @@ def test_recovery_leaves_fresh_and_non_image_work_untouched(
 
     with auth_db() as db:
         assert db.get(VideoTask, photo_id).status == "running"
+        assert db.get(VideoTask, video_gen_id).status == "running"
         assert db.get(VideoTask, avatar_id).status == "running"
         assert db.get(ReversePromptJob, reverse_job_id).status == "running"
         assert db.get(EcomReplicateJob, replicate_job_id).status == "generating"
         assert db.get(EcomReplicateOutput, output_id).status == "generating"
 
     assert result.photo_tasks == 0
+    assert result.video_gen_tasks == 0
     assert result.reverse_prompt_jobs == 0
     assert result.ecom_replicate_jobs == 0
+
+
+def test_video_gen_recovery_does_not_refresh_another_tenants_batch(
+    auth_db,
+    auth_context,
+) -> None:
+    from app.services.task_recovery import recover_orphaned_image_queue_tasks
+
+    now = datetime(2026, 7, 25, 8, 0, tzinfo=UTC)
+    stale_at = now - timedelta(seconds=1901)
+    batch_id = "tenant-boundary-batch"
+    other_tenant_id = "recovery-other-tenant"
+    task_id = "cross-tenant-video-gen"
+    with auth_db() as db:
+        db.add(Tenant(id=other_tenant_id, slug="recovery-other", name="Recovery Other"))
+        db.add(
+            BatchJob(
+                id=batch_id,
+                tenant_id=auth_context["tenant_id"],
+                user_id=auth_context["user_id"],
+                kind="prompt_set",
+                status="running",
+                total=1,
+                succeeded=0,
+                failed=0,
+                common_params={},
+            )
+        )
+        db.add(
+            VideoTask(
+                id=task_id,
+                tenant_id=other_tenant_id,
+                batch_id=batch_id,
+                status="running",
+                mode="video_gen",
+                video_mode="video_gen",
+                updated_at=stale_at,
+            )
+        )
+        db.commit()
+
+    result = recover_orphaned_image_queue_tasks(
+        session_factory=auth_db,
+        now=now,
+        stale_after_seconds=1800,
+    )
+
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        batch = db.get(BatchJob, batch_id)
+
+    assert result.video_gen_tasks == 1
+    assert task is not None
+    assert task.status == "failed"
+    assert batch is not None
+    assert batch.status == "running"
+    assert batch.succeeded == 0
+    assert batch.failed == 0
+
+
+def test_video_gen_recovery_keeps_single_task_without_batch_supported(
+    auth_db,
+    auth_context,
+) -> None:
+    from app.services.task_recovery import recover_orphaned_image_queue_tasks
+
+    now = datetime(2026, 7, 25, 8, 0, tzinfo=UTC)
+    task_id = "video-gen-without-batch"
+    with auth_db() as db:
+        db.add(
+            VideoTask(
+                id=task_id,
+                tenant_id=auth_context["tenant_id"],
+                status="running",
+                mode="video_gen",
+                video_mode="video_gen",
+                updated_at=now - timedelta(seconds=1901),
+            )
+        )
+        db.commit()
+
+    result = recover_orphaned_image_queue_tasks(
+        session_factory=auth_db,
+        now=now,
+        stale_after_seconds=1800,
+    )
+
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+
+    assert result.video_gen_tasks == 1
+    assert task is not None
+    assert task.batch_id is None
+    assert task.status == "failed"
 
 
 def test_lifespan_periodically_runs_orphan_recovery(monkeypatch) -> None:

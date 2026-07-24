@@ -16,6 +16,7 @@ from app.db.models import (
 )
 from app.db.session import SessionLocal
 from app.services.aibrain import recover_stale_reasoning_reservations
+from app.services.batches import refresh_batch_job
 from app.services.quota import (
     release_reserved_quota,
     release_reverse_prompt_video_quota,
@@ -24,15 +25,21 @@ from app.services.quota import (
 logger = get_logger(__name__)
 
 _IMAGE_WORKER_LOST_MESSAGE = "Image generation worker stopped before completion."
+_VIDEO_GEN_WORKER_LOST_MESSAGE = "Video generation worker stopped before completion."
 _REVERSE_WORKER_LOST_MESSAGE = "Video reverse-prompt worker stopped before completion."
 _REPLICATE_WORKER_LOST_MESSAGE = (
     "E-commerce replicate worker stopped before completion."
 )
+_VIDEO_TASK_RECOVERY_ERRORS = {
+    "photo": ("IMAGE_GEN_FAILED", _IMAGE_WORKER_LOST_MESSAGE),
+    "video_gen": ("VIDEO_GEN_FAILED", _VIDEO_GEN_WORKER_LOST_MESSAGE),
+}
 
 
 @dataclass(frozen=True)
 class ImageQueueRecoveryResult:
     photo_tasks: int = 0
+    video_gen_tasks: int = 0
     reverse_prompt_jobs: int = 0
     ecom_replicate_jobs: int = 0
     aibrain_reservations: int = 0
@@ -59,14 +66,17 @@ def recover_orphaned_image_queue_tasks(
         else aibrain_stale_after_seconds
     )
     aibrain_cutoff = recovered_at - timedelta(seconds=aibrain_stale_seconds)
-    recovered_progress: list[tuple[str, str]] = []
+    recovered_progress: list[tuple[str, str, str, str]] = []
+    recovered_video_gen_batches: set[tuple[str, str]] = set()
+    photo_task_count = 0
+    video_gen_task_count = 0
 
     with session_factory() as db:
-        photo_tasks = list(
+        video_tasks = list(
             db.scalars(
                 select(VideoTask)
                 .where(
-                    VideoTask.video_mode == "photo",
+                    VideoTask.video_mode.in_(_VIDEO_TASK_RECOVERY_ERRORS),
                     VideoTask.status == "running",
                     VideoTask.deleted_at.is_(None),
                     VideoTask.updated_at <= cutoff,
@@ -74,19 +84,30 @@ def recover_orphaned_image_queue_tasks(
                 .with_for_update(skip_locked=True)
             )
         )
-        for task in photo_tasks:
+        for task in video_tasks:
+            error_code, error_message = _VIDEO_TASK_RECOVERY_ERRORS[task.video_mode]
+            if task.video_mode == "photo":
+                photo_task_count += 1
+            else:
+                video_gen_task_count += 1
+                if task.batch_id:
+                    recovered_video_gen_batches.add((task.tenant_id, task.batch_id))
             release_reserved_quota(
                 db,
                 tenant_id=task.tenant_id,
                 video_task_id=task.id,
             )
             task.status = "failed"
-            task.error = _IMAGE_WORKER_LOST_MESSAGE
-            task.error_code = "IMAGE_GEN_FAILED"
-            task.error_message = _IMAGE_WORKER_LOST_MESSAGE
+            task.error = error_message
+            task.error_code = error_code
+            task.error_message = error_message
             task.finished_at = recovered_at
             task.updated_at = recovered_at
-            recovered_progress.append((task.tenant_id, task.id))
+            recovered_progress.append(
+                (task.tenant_id, task.id, error_code, error_message)
+            )
+        for tenant_id, batch_id in sorted(recovered_video_gen_batches):
+            refresh_batch_job(db, batch_id=batch_id, tenant_id=tenant_id)
 
         reverse_prompt_jobs = list(
             db.scalars(
@@ -166,15 +187,15 @@ def recover_orphaned_image_queue_tasks(
         db.commit()
 
     if progress_store is not None:
-        for tenant_id, task_id in recovered_progress:
+        for tenant_id, task_id, error_code, error_message in recovered_progress:
             try:
                 progress_store.update(
                     f"{tenant_id}:{task_id}",
                     status="failed",
                     stage="failed",
-                    error=_IMAGE_WORKER_LOST_MESSAGE,
-                    error_code="IMAGE_GEN_FAILED",
-                    error_message=_IMAGE_WORKER_LOST_MESSAGE,
+                    error=error_message,
+                    error_code=error_code,
+                    error_message=error_message,
                 )
             except Exception as exc:  # pragma: no cover - Redis is best effort
                 logger.warning(
@@ -184,7 +205,8 @@ def recover_orphaned_image_queue_tasks(
                 )
 
     return ImageQueueRecoveryResult(
-        photo_tasks=len(photo_tasks),
+        photo_tasks=photo_task_count,
+        video_gen_tasks=video_gen_task_count,
         reverse_prompt_jobs=len(reverse_prompt_jobs),
         ecom_replicate_jobs=len(replicate_jobs),
         aibrain_reservations=aibrain_reservations,
