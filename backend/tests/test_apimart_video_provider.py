@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
+from app.core.image_aspect_ratio import VIDEO_GEN_ASPECT_RATIOS
 from app.db.models import ProviderConfig
+from app.providers.base import (
+    VideoProviderCapabilities,
+    VideoProviderCapabilitiesError,
+    video_provider_size,
+)
 from app.providers.video.apimart import APIMartVideoProvider, APIMartVideoProviderError
 
 
@@ -62,9 +68,21 @@ class _FakeSession:
         return self.task_responses.pop(0)
 
 
+def test_video_gen_product_aspect_ratios_fit_apimart_capabilities() -> None:
+    provider = APIMartVideoProvider(api_key="test-apimart-key")
+
+    provider_sizes = {
+        video_provider_size(provider, aspect_ratio)
+        for aspect_ratio in VIDEO_GEN_ASPECT_RATIOS
+    }
+
+    assert provider_sizes <= provider.capabilities.supported_sizes
+    assert video_provider_size(provider, "auto") == "adaptive"
+
+
 @pytest.mark.parametrize(
     "size",
-    ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "adaptive"],
+    sorted(APIMartVideoProvider.capabilities.supported_sizes),
 )
 def test_apimart_video_provider_preserves_all_supported_sizes(size: str) -> None:
     provider = APIMartVideoProvider(api_key="test-apimart-key")
@@ -73,6 +91,35 @@ def test_apimart_video_provider_preserves_all_supported_sizes(size: str) -> None
 
     assert body["size"] == size
     assert normalized["size"] == size
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [
+        None,
+        VideoProviderCapabilities(
+            supported_sizes={"adaptive"},  # type: ignore[arg-type]
+            automatic_size="adaptive",
+        ),
+        VideoProviderCapabilities(
+            supported_sizes=frozenset({"9:16"}),
+            automatic_size="adaptive",
+        ),
+    ],
+    ids=["missing", "malformed-size-container", "automatic-size-not-supported"],
+)
+def test_video_provider_capabilities_fail_closed_when_invalid(
+    capabilities: VideoProviderCapabilities | None,
+) -> None:
+    class _Provider:
+        pass
+
+    provider = _Provider()
+    if capabilities is not None:
+        provider.capabilities = capabilities
+
+    with pytest.raises(VideoProviderCapabilitiesError):
+        video_provider_size(provider, "auto")
 
 
 @pytest.mark.asyncio

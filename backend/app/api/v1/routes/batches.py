@@ -221,6 +221,7 @@ def _create_prompt_set_tasks(
             "reference_image_asset_ids": reference_asset_ids,
             "duration_sec": int(common.duration_sec or 5),
             "resolution": common.resolution,
+            "aspect_ratio": common.aspect_ratio,
             "apply_visible_label": common.apply_visible_label,
             "batch_id": batch.id,
             "batch_row_index": index,

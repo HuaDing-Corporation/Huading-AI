@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.api.deps import get_object_storage, get_progress_store
+from app.core.image_aspect_ratio import VIDEO_GEN_ASPECT_RATIOS
 from app.db.models import (
     Asset,
     BgmLibraryTrack,
@@ -316,21 +317,13 @@ def test_video_gen_schema_accepts_custom_duration_inside_four_to_fifteen() -> No
 
 
 @pytest.mark.parametrize(
-    ("aspect_ratio", "provider_size"),
-    [
-        ("16:9", "16:9"),
-        ("9:16", "9:16"),
-        ("1:1", "1:1"),
-        ("4:3", "4:3"),
-        ("3:4", "3:4"),
-        ("21:9", "21:9"),
-        ("auto", "adaptive"),
-    ],
+    "aspect_ratio",
+    sorted(VIDEO_GEN_ASPECT_RATIOS),
 )
 def test_video_gen_all_seven_aspect_ratios_reach_provider(
     aspect_ratio: str,
-    provider_size: str,
 ) -> None:
+    from app.providers.video.apimart import APIMartVideoProvider
     from app.workers import video_gen
 
     request = VideoGenerateRequest.model_validate(
@@ -356,7 +349,40 @@ def test_video_gen_all_seven_aspect_ratios_reach_provider(
         negative_prompt=None,
     )
 
-    assert video_gen._provider_payload(ctx)["size"] == provider_size
+    provider = APIMartVideoProvider(api_key="test-apimart-key")
+    provider_size = video_gen._provider_payload(ctx, provider)["size"]
+    assert provider_size in provider.capabilities.supported_sizes
+    assert provider_size == (
+        provider.capabilities.automatic_size if aspect_ratio == "auto" else aspect_ratio
+    )
+
+
+def test_video_gen_provider_payload_uses_declared_automatic_size() -> None:
+    from app.providers.base import VideoProviderCapabilities
+    from app.workers import video_gen
+
+    class _Provider:
+        capabilities = VideoProviderCapabilities(
+            supported_sizes=frozenset({"9:16", "provider-auto"}),
+            automatic_size="provider-auto",
+        )
+
+    ctx = video_gen.VideoGenContext(
+        task_id="automatic-size-contract",
+        tenant_id="tenant-automatic-size",
+        db=None,
+        store=None,
+        storage=_Storage(),
+        task=SimpleNamespace(topic="A product reveal"),
+        reference_assets=[],
+        duration_sec=5,
+        resolution="720p",
+        aspect_ratio="auto",
+        generate_audio=False,
+        negative_prompt=None,
+    )
+
+    assert video_gen._provider_payload(ctx, _Provider())["size"] == "provider-auto"
 
 
 def test_video_gen_schema_resolutions_all_have_quota_multipliers() -> None:
@@ -776,7 +802,10 @@ def test_video_gen_pipeline_settles_quota_stores_labeled_output_and_history(
     label_calls: list[dict[str, Any]] = []
 
     def fake_generate(ctx: video_gen.VideoGenContext) -> bytes:
-        provider_payloads.append(video_gen._provider_payload(ctx))
+        from app.providers.video.apimart import APIMartVideoProvider
+
+        provider = APIMartVideoProvider(api_key="test-apimart-key")
+        provider_payloads.append(video_gen._provider_payload(ctx, provider))
         ctx.provider_cost_cents = 511
         return b"MP4"
 

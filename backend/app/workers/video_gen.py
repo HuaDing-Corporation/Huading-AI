@@ -20,7 +20,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.models import Asset, BgmLibraryTrack, TaskAsset, VideoTask
 from app.db.session import SessionLocal
-from app.providers.base import resolve
+from app.providers.base import resolve, video_provider_size
 from app.providers.video.apimart import APIMartVideoProviderError
 from app.services.apimart_costs import (
     apimart_cost_cents_from_price_table,
@@ -237,7 +237,7 @@ def _load_context(
     )
 
 
-def _provider_payload(ctx: VideoGenContext) -> dict[str, Any]:
+def _provider_payload(ctx: VideoGenContext, provider: object) -> dict[str, Any]:
     image_urls = []
     presign_ttl = max(
         int(settings.engine_s3_presign_ttl),
@@ -258,7 +258,7 @@ def _provider_payload(ctx: VideoGenContext) -> dict[str, Any]:
         "prompt": ctx.task.topic or "",
         "duration": ctx.duration_sec,
         "resolution": ctx.resolution,
-        "size": "adaptive" if ctx.aspect_ratio == "auto" else ctx.aspect_ratio,
+        "size": video_provider_size(provider, ctx.aspect_ratio),
         "generate_audio": ctx.generate_audio,
     }
     if image_urls:
@@ -270,7 +270,7 @@ def _provider_payload(ctx: VideoGenContext) -> dict[str, Any]:
 
 def _generate_seedance_mini_video(ctx: VideoGenContext) -> bytes:
     provider = resolve(ctx.db, tenant_id=ctx.tenant_id, capability="video")
-    result = asyncio.run(provider.generate_video(_provider_payload(ctx)))
+    result = asyncio.run(provider.generate_video(_provider_payload(ctx, provider)))
     video_bytes = result.get("video_bytes") if isinstance(result, dict) else None
     if not isinstance(video_bytes, bytes) or not video_bytes:
         raise RuntimeError("Video provider returned no video bytes.")

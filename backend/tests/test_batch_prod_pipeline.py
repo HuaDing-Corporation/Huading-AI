@@ -75,6 +75,16 @@ class _FakeStorage:
         return f"https://storage.test/{key}?ttl={expires_in}{suffix}"
 
 
+class _MemProgressStore:
+    def __init__(self) -> None:
+        self.snapshots: dict[str, dict[str, Any]] = {}
+
+    def update(self, task_id: str, **fields: Any) -> None:
+        current = dict(self.snapshots.get(task_id, {}))
+        current.update(fields)
+        self.snapshots[task_id] = current
+
+
 def _subscription(db, tenant_id: str) -> Subscription:
     subscription = db.scalar(select(Subscription).where(Subscription.tenant_id == tenant_id))
     assert subscription is not None
@@ -513,6 +523,72 @@ def test_batch_create_prompt_set_fans_out_video_gen_tasks_on_video_queue(
             )
         }
         assert roles == {"input_reference_image", "input_bgm"}
+
+
+def test_batch_create_aspect_ratio_reaches_worker_and_provider_body(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.providers.video.apimart import APIMartVideoProvider
+    from app.workers import video_gen
+
+    _seedance_calls, video_calls = _stub_batch_tasks(monkeypatch)
+    with auth_db() as db:
+        _set_quota(db, auth_context["tenant_id"], total=5000)
+        db.commit()
+
+    response = TestClient(app).post(
+        "/api/v1/batches",
+        json={
+            "kind": "prompt_set",
+            "rows": [{"prompt": "cinematic widescreen batch reveal"}],
+            "common": {
+                "video_mode": "video_gen",
+                "duration_sec": 5,
+                "resolution": "720p",
+                "aspect_ratio": "16:9",
+            },
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 202
+    task_id = response.json()["data"]["task_ids"][0]
+    storage = _FakeStorage()
+    apimart = APIMartVideoProvider(api_key="test-apimart-key")
+    provider_bodies: list[dict[str, Any]] = []
+
+    class _RecordingProvider:
+        capabilities = apimart.capabilities
+
+        async def generate_video(self, payload: dict[str, Any]) -> dict[str, Any]:
+            body, _normalized = apimart._request_body(payload)
+            provider_bodies.append(body)
+            return {"video_bytes": b"MP4"}
+
+    monkeypatch.setattr(video_gen, "SessionLocal", auth_db)
+    monkeypatch.setattr(video_gen, "get_object_storage", lambda: storage)
+    monkeypatch.setattr(video_gen, "build_progress_store", lambda _url: _MemProgressStore())
+    monkeypatch.setattr(
+        video_gen,
+        "resolve",
+        lambda _db, *, tenant_id, capability: _RecordingProvider(),
+    )
+    monkeypatch.setattr(
+        video_gen,
+        "_apply_synthetic_video_label",
+        lambda _ctx, video_bytes: video_bytes,
+    )
+
+    result = video_gen.run_video_gen_pipeline(
+        tenant_id=auth_context["tenant_id"],
+        task_id=task_id,
+    )
+
+    assert result["status"] == "done"
+    assert video_calls[0]["args"][0]["aspect_ratio"] == "16:9"
+    assert provider_bodies[0]["size"] == "16:9"
 
 
 def test_batch_prompt_set_pairs_row_image_and_falls_back_to_common_reference(
