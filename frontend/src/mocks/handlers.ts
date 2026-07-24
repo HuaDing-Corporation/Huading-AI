@@ -1459,6 +1459,8 @@ export const handlers = [
       duration_sec?: number;
       resolution?: string;
       aspect_ratio?: string; // VIDEO-GEN-PARAMS-UI-0001：estimate 与提交同校验（视频生成 7 值）
+      reference_image_asset_ids?: string[]; // V2V：estimate 与提交同门（互斥/条数），别重演「estimate 比提交宽松」
+      reference_video_asset_ids?: string[];
     };
     if (body.resolution !== undefined && !VIDEO_GEN_RESOLUTIONS.includes(body.resolution)) {
       return err(422, "VALIDATION_ERROR", "resolution 非法");
@@ -1483,6 +1485,13 @@ export const handlers = [
       ) {
         return err(422, "VIDEO_GEN_INVALID", "画面比例非法");
       }
+      // V2V（Code Review 自查·同上轮教训）：estimate 与提交同门——图+视频互斥、视频 ≤3 条也在 estimate 阶段拦。
+      const estRefs = body.reference_image_asset_ids ?? [];
+      const estVideos = body.reference_video_asset_ids ?? [];
+      if (estRefs.length > 0 && estVideos.length > 0) {
+        return err(422, "VIDEO_GEN_REFERENCE_MEDIA_CONFLICT", "参考图与参考视频只能二选一");
+      }
+      if (estVideos.length > 3) return err(422, "VIDEO_GEN_REFERENCE_VIDEO_COUNT_INVALID", "参考视频最多 3 条");
     }
     // estimated_credits 是后端按配额/时长算出的整数；mock 取时长派生一个正整数（默认 30s→12），仅需形状忠实（值非契约）。
     const estimatedCredits = typeof body.duration_sec === "number" && body.duration_sec > 0
@@ -1501,6 +1510,7 @@ export const handlers = [
       purpose?: string;
       prompt?: string;
       reference_image_asset_ids?: string[];
+      reference_video_asset_ids?: string[]; // 视频生视频（V2V-UI-0001，≤3、与参考图互斥 D8；mock 先行）
       product_image_keys?: string[]; // 电商带货 i2v 产品图（ECOM-VIDEO-OPTIMIZE-UI-0001 §4.3）
       negative_prompt?: string; // 电商带货 i2v 负面 / 图片负面（photo 复用，IMAGE-GEN-OPTIMIZE-UI-0001 §四）
       voice_id?: string; // 电商带货/数字人口播必填
@@ -1546,6 +1556,21 @@ export const handlers = [
     if (body.video_mode === "video_gen") {
       const refs = body.reference_image_asset_ids ?? [];
       const refsUnique = new Set(refs).size === refs.length; // 对齐后端唯一性校验（重复→422）
+      // 视频生视频（V2V-UI-0001 D8/D10，mock 先行·不比 BE 宽松也不比 BE 严）：
+      //  · 图与视频**严格二选一**（provider image_with_roles 与 video_urls 不能同用）→ 同传 422；
+      //  · 参考视频 ≤3 条（provider 上限）、唯一 → 4 条/重复 422。合计时长 1.8–15.2s 由前端预检把关
+      //    （mock 收 asset_id 无时长可验；BE 权威校验在上传/提交侧，真联调对齐）。
+      const refVideos = body.reference_video_asset_ids ?? [];
+      const refVideosUnique = new Set(refVideos).size === refVideos.length;
+      if (refs.length > 0 && refVideos.length > 0) {
+        return err(422, "VIDEO_GEN_REFERENCE_MEDIA_CONFLICT", "参考图与参考视频只能二选一");
+      }
+      if (!Array.isArray(refVideos) || refVideos.length > 3) {
+        return err(422, "VIDEO_GEN_REFERENCE_VIDEO_COUNT_INVALID", "参考视频最多 3 条");
+      }
+      if (!refVideosUnique) {
+        return err(422, "VIDEO_GEN_REFERENCE_VIDEO_DUPLICATE", "参考视频不可重复");
+      }
       const bgmOk =
         body.bgm === undefined ||
         (body.bgm.source === "upload" && !!body.bgm.asset_id) ||

@@ -32,7 +32,9 @@ export function ReferenceImagesPicker({
   uploadLabel = copy.workbench.vgRefImagesUpload,
   overLimitError = copy.workbench.vgRefOverLimit,
   max = MAX_REFERENCE_IMAGES,
-  uploadFile
+  uploadFile,
+  disabled = false,
+  disabledHint
 }: {
   onChange?: (assetIds: string[]) => void;
   /** 逐行配对（BATCH-PROD-UI-0002）需按序缩略图 → 上抛有序 {assetId,preview} 供父级渲染配对预览。 */
@@ -51,6 +53,9 @@ export function ReferenceImagesPicker({
    * 避免第 N 份多图上传拷贝。上抛的 item.assetId 字段即存储 id/key（产品图场景装 image_key）。
    */
   uploadFile?: (file: File) => Promise<string>;
+  /** D8 互斥（VIDEO-GEN-V2V-UI-0001）：已传参考视频时禁用图片上传（hint 说明原因）。默认不传=其余 4 处共用零回归。 */
+  disabled?: boolean;
+  disabledHint?: string;
 }) {
   const uploadImg = useUploadImage();
   const [items, setItems] = useState<RefItem[]>([]);
@@ -164,12 +169,13 @@ export function ReferenceImagesPicker({
       <button
         type="button"
         onClick={() => inputRef.current?.click()}
-        disabled={pending || full}
+        disabled={disabled || pending || full}
         className="flex w-full items-center justify-center gap-2 rounded-field border border-dashed border-line-gold bg-glass-fill py-5 text-[13px] text-ink-soft transition-colors hover:bg-glass-hover disabled:pointer-events-none disabled:opacity-50"
       >
         <ImagePlus size={18} strokeWidth={1.8} />{" "}
         {pending ? copy.workbench.vgGenerating : `${uploadLabel}（${items.length}/${max}）`}
       </button>
+      {disabled && disabledHint && <p className="mt-2 text-[12px] text-ink-faint">{disabledHint}</p>}
       {error && (
         <p role="alert" className="mt-2 rounded-field bg-error-bg px-3 py-2 text-[12.5px] text-error-fg">
           {error}

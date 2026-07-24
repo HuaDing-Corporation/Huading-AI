@@ -5,12 +5,62 @@ import { copy } from "@/lib/copy";
 
 const taskMocks = vi.hoisted(() => ({ createAndTrack: vi.fn() }));
 vi.mock("@/lib/videos/tasks-context", () => ({ useVideoTasks: () => taskMocks }));
-// 子组件占位为标记，隔离测表单编排（参考图/BGM 各有专测）。
+// 子组件占位为标记，隔离测表单编排（参考图/参考视频/BGM 各有专测）。透出 disabled/disabledHint 供 D8 互斥承重断言。
 vi.mock("@/components/workbench/reference-images-picker", () => ({
-  ReferenceImagesPicker: ({ onChange }: { onChange: (ids: string[]) => void }) => (
-    <button type="button" onClick={() => onChange(["a1", "a2"])}>
-      set-refs
-    </button>
+  ReferenceImagesPicker: ({ onChange, disabled, disabledHint }: { onChange: (ids: string[]) => void; disabled?: boolean; disabledHint?: string }) => (
+    <>
+      <button type="button" disabled={disabled} onClick={() => onChange(["a1", "a2"])}>
+        set-refs
+      </button>
+      <button type="button" onClick={() => onChange([])}>
+        clear-refs
+      </button>
+      {disabled && disabledHint ? <p>{disabledHint}</p> : null}
+    </>
+  )
+}));
+// 参考视频占位（V2V）：set-videos=合计 5s 合法；set-videos-over=合计 20s 超限；clear-videos 清空。
+vi.mock("@/components/workbench/reference-videos-picker", () => ({
+  ReferenceVideosPicker: ({
+    onItemsChange,
+    disabled,
+    disabledHint
+  }: {
+    onItemsChange: (items: { assetId: string; preview: string; duration: number; willTranscode: boolean; willDownscale: boolean }[]) => void;
+    disabled?: boolean;
+    disabledHint?: string;
+  }) => (
+    <>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => onItemsChange([{ assetId: "v1", preview: "blob:v1", duration: 5, willTranscode: false, willDownscale: false }])}
+      >
+        set-videos
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          onItemsChange([
+            { assetId: "v1", preview: "blob:v1", duration: 12, willTranscode: false, willDownscale: false },
+            { assetId: "v2", preview: "blob:v2", duration: 8, willTranscode: false, willDownscale: false }
+          ])
+        }
+      >
+        set-videos-over
+      </button>
+      <button type="button" onClick={() => onItemsChange([])}>
+        clear-videos
+      </button>
+      {/* 模拟 D8 竞态：两侧同时在途上传均落成（绕过 disabled）——无 disabled 属性，可在图片已传后仍触发 */}
+      <button
+        type="button"
+        onClick={() => onItemsChange([{ assetId: "v9", preview: "blob:v9", duration: 5, willTranscode: false, willDownscale: false }])}
+      >
+        force-set-videos
+      </button>
+      {disabled && disabledHint ? <p>{disabledHint}</p> : null}
+    </>
   )
 }));
 vi.mock("@/components/workbench/bgm-picker", () => ({
@@ -50,17 +100,67 @@ afterEach(() => {
 });
 
 describe("VideoGenForm (视频生成 编排)", () => {
-  it("生成禁用直到 参考图 + prompt 齐全（带分步提示）", () => {
+  // V2V-UI-0001：参考图/视频均**可选**（BE refs 0–9，纯文生视频合法）——生成只需 prompt。
+  it("生成禁用直到 prompt 填写；参考图/视频可选（纯文生视频可生成）", () => {
     render(<VideoGenForm />);
     expect(generateBtn()).toBeDisabled();
-    expect(screen.getByText(copy.workbench.vgRefImagesRequired)).toBeInTheDocument();
-
-    fireEvent.click(screen.getByText("set-refs"));
-    expect(generateBtn()).toBeDisabled();
     expect(screen.getByText(copy.workbench.vgPromptRequired)).toBeInTheDocument();
-
     setPrompt("赛博城市夜景，霓虹运镜");
+    expect(generateBtn()).toBeEnabled(); // 无参考图/视频亦可生成
+  });
+
+  // 🔴 V2V 承重（D8 严格二选一）：传图→视频上传禁用（带原因）；传视频→图片上传禁用；清空一侧解锁另一侧。
+  // 变异：解除 form 的互斥接线（disabled 不传）→ 本条红。
+  it("D8 互斥：set-refs → 视频侧禁用+原因；clear-refs → 解锁；set-videos → 图片侧禁用+原因", () => {
+    render(<VideoGenForm />);
+    fireEvent.click(screen.getByText("set-refs"));
+    expect(screen.getByText("set-videos")).toBeDisabled();
+    expect(screen.getByText(copy.workbench.vgRefMediaExclusiveImages)).toBeInTheDocument();
+    fireEvent.click(screen.getByText("clear-refs"));
+    expect(screen.getByText("set-videos")).toBeEnabled();
+    fireEvent.click(screen.getByText("set-videos"));
+    expect(screen.getByText("set-refs")).toBeDisabled();
+    expect(screen.getByText(copy.workbench.vgRefMediaExclusiveVideos)).toBeInTheDocument();
+  });
+
+  // 🔴 V2V 承重（D10 合计门）：合计 20s（超 15.2）→ 生成禁用 + 提示；恢复合法 → 可生成。
+  // 变异：去掉 form 的 refVideoTotalOk 判据 → 本条红。
+  it("D10 合计门：视频合计 20s → 生成禁用+超限提示；改 5s → 可生成，提交体带 reference_video_asset_ids", async () => {
+    render(<VideoGenForm />);
+    setPrompt("p");
+    fireEvent.click(screen.getByText("set-videos-over")); // 合计 20s
+    expect(generateBtn()).toBeDisabled();
+    expect(screen.getByText(copy.workbench.vgRefVideoTotalOver)).toBeInTheDocument();
+    fireEvent.click(screen.getByText("set-videos")); // 合计 5s 合法
     expect(generateBtn()).toBeEnabled();
+    fireEvent.click(generateBtn());
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    const [request] = taskMocks.createAndTrack.mock.calls[0];
+    expect(request.reference_video_asset_ids).toEqual(["v1"]);
+    expect(request).not.toHaveProperty("reference_image_asset_ids"); // 二选一：图侧空则省略
+  });
+
+  // D8 竞态兜底（Code Review 自查）：两侧同时在途上传均落成（绕过 picker disabled）→ 提交侧拦：生成禁用 + 互斥提示。
+  // 变异：去掉 form 的 mediaConflict 判据 → 本条红（双有仍可生成）。
+  it("D8 竞态兜底：图与视频同时落成 → 生成禁用 + 互斥提示（提交侧同源拦截）", () => {
+    render(<VideoGenForm />);
+    setPrompt("p");
+    fireEvent.click(screen.getByText("set-refs"));
+    fireEvent.click(screen.getByText("force-set-videos")); // 模拟在途竞态绕过 disabled
+    expect(generateBtn()).toBeDisabled();
+    expect(screen.getAllByText(copy.workbench.vgRefMediaExclusiveImages).length).toBeGreaterThan(0);
+  });
+
+  it("纯文生视频（无参考图/视频）→ 提交体两字段均省略", async () => {
+    render(<VideoGenForm />);
+    setPrompt("纯文生视频");
+    fireEvent.click(generateBtn());
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    const [request] = taskMocks.createAndTrack.mock.calls[0];
+    expect(request).not.toHaveProperty("reference_image_asset_ids");
+    expect(request).not.toHaveProperty("reference_video_asset_ids");
   });
 
   it("提交体：video_mode=video_gen + prompt + 参考图 + 默认时长5/分辨率720p；topic=prompt；无 BGM", async () => {

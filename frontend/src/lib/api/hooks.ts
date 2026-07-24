@@ -38,7 +38,7 @@ import {
   type ReverseFromAssetInput,
   type ReverseSourceKind
 } from "@/lib/api/reverse-prompt";
-import { uploadAvatarVideo, uploadImage, uploadProductImage, uploadReverseVideo } from "@/lib/api/uploads";
+import { uploadAvatarVideo, uploadImage, uploadProductImage, uploadReverseVideo, uploadVideoGenReference } from "@/lib/api/uploads";
 import { listBgmLibrary } from "@/lib/api/bgm";
 import { uploadAudio } from "@/lib/api/brand-voices";
 import { listVoices } from "@/lib/api/voices";
@@ -158,6 +158,10 @@ export function useUploadProductImage() {
 // 数字人·本人出镜视频源上传（AVATAR-VIDEO-SOURCE-UI-0001）→ asset_id（作 avatar_video_asset_id）。
 export function useUploadAvatarVideo() {
   return useMutation({ mutationFn: (file: File) => uploadAvatarVideo(file) });
+}
+// 视频生成·参考视频上传（VIDEO-GEN-V2V-UI-0001，purpose=video_gen_reference）→ asset_id（作 reference_video_asset_ids 元素）。
+export function useUploadVideoGenReference() {
+  return useMutation({ mutationFn: (file: File) => uploadVideoGenReference(file) });
 }
 // 视频生成 BGM 上传（VIDEOGEN-UI-0001）：复用 /uploads/audio（声音克隆已建）→ asset_id。
 export function useUploadAudio() {

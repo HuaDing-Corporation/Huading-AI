@@ -12,6 +12,15 @@ describe("friendlyVideoError (视频失败友好映射)", () => {
     expect(friendlyVideoError("VIDEO_GEN_FAILED")).toBe(copy.errors.videoGeneric);
   });
 
+  // V2V-FIX1（#216 真联调）：审核拒（含真人）是任务执行期异步失败 → 走本映射；curated 文案含「未扣积分」说明
+  // （SPIKE 实测 credits_cost=0），比 BE message 更完整。变异：从映射表删该码 → 本条红（落 videoGeneric 丢未扣费信息）。
+  it("VIDEO_REFERENCE_CONTENT_REJECTED → 审核拒文案（含不扣积分说明），不落通用兜底", () => {
+    const out = friendlyVideoError("VIDEO_REFERENCE_CONTENT_REJECTED");
+    expect(out).toBe(copy.workbench.vgVideoModerationRejected);
+    expect(out).toContain("未扣除积分");
+    expect(out).not.toBe(copy.errors.videoGeneric);
+  });
+
   it("未知码 → 通用中文兜底（不返回码本身）", () => {
     expect(friendlyVideoError("SOME_UNKNOWN_CODE")).toBe(copy.errors.videoGeneric);
   });
