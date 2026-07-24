@@ -86,6 +86,10 @@ export function ReferenceVideosPicker({
     if (all.length > room) setError(copy.workbench.vgRefVideoOverCount);
     const toProcess = all.slice(0, Math.max(0, room));
     setBusy(true);
+    // FIX2（CB P1 · 闭包时序）：itemsRef 只在 render 后由 effect 更新——同批多选时每轮重读 ref 都是旧值
+    // （两个 8s 都按 0+8 过闸 → 双双上传，违反 D10「上传前拦」）。改为**本次调用内的局部累计**：初值取一次
+    // ref，此后每接受一条就地累加——同批第 N 条的闸能看到前 N-1 条，不依赖 ref/state 的异步更新。
+    let batchTotal = itemsRef.current.reduce((s, it) => s + it.duration, 0);
     try {
       for (const file of toProcess) {
         const inspection = await inspect(file);
@@ -95,7 +99,7 @@ export function ReferenceVideosPicker({
         }
         // D10 联动前置闸：这条加上会让合计达到/超过 15.2s → 不上传、直接告知（**不让用户传完才被告知**）。
         // FIX1：>= 对齐 BE 开区间（合计恰 15.2 也 422，routes/videos.py:936-943）。
-        const nextTotal = itemsRef.current.reduce((s, it) => s + it.duration, 0) + inspection.meta.duration;
+        const nextTotal = batchTotal + inspection.meta.duration;
         if (nextTotal >= MAX_TOTAL_REFERENCE_SEC) {
           setError(copy.workbench.vgRefVideoTotalOver);
           continue;
@@ -104,6 +108,7 @@ export function ReferenceVideosPicker({
         pendingPreviews.current.add(preview);
         try {
           const { asset_id } = await upload.mutateAsync(file);
+          batchTotal = nextTotal; // FIX2：接受即累加到本批局部值（上传失败走 catch 不累加），供同批下一条的闸使用
           setItems((prev) => {
             if (prev.length >= MAX_REFERENCE_VIDEOS) {
               URL.revokeObjectURL(preview);

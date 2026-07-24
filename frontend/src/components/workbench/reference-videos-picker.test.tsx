@@ -67,6 +67,26 @@ describe("ReferenceVideosPicker (V2V · D5/D9/D10)", () => {
     expect(uploadMock.mutateAsync).toHaveBeenCalledTimes(1); // b.mp4 未发上传请求
   });
 
+  // 🔴 FIX2 承重（CB P1 · 闭包时序）：**同一个 FileList** 里 8s+8s——itemsRef 在 render 前不更新，若每轮重读 ref
+  // 两条都按 0+8 过闸双双上传（D10 失效）。局部累计修复后：第二条的闸看到第一条的 8s → 只上传一次。
+  // 变异：把闸改回每轮重读 itemsRef.current → 本条红（mutateAsync 被调 2 次）。
+  it("FIX2 同批多选 8s+8s → 只上传一次（本批累计闸拦第二条）+ 超限提示", async () => {
+    inspectByName = { "a.mp4": passing(8), "b.mp4": passing(8) };
+    render(<ReferenceVideosPicker inspect={inspect} />);
+    pickFiles("a.mp4", "b.mp4"); // 同一个 FileList
+    await waitFor(() => expect(screen.getByText(copy.workbench.vgRefVideoTotalOver)).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /（1\/3）/ })).toBeInTheDocument();
+    expect(uploadMock.mutateAsync).toHaveBeenCalledTimes(1); // 第二条在上传前被本批累计闸拦下
+  });
+
+  it("FIX2 同批 5s+5s+5s（合计 15 < 15.2 合法）→ 三条全上传", async () => {
+    inspectByName = { "a.mp4": passing(5), "b.mp4": passing(5), "c.mp4": passing(5) };
+    render(<ReferenceVideosPicker inspect={inspect} />);
+    pickFiles("a.mp4", "b.mp4", "c.mp4");
+    await waitFor(() => expect(screen.getByRole("button", { name: /（3\/3）/ })).toBeInTheDocument());
+    expect(uploadMock.mutateAsync).toHaveBeenCalledTimes(3);
+  });
+
   // FIX1：合计开区间——单条恰 1.8s 合法（闭区间）但合计恰 1.8 不满足 BE `MIN < total` → low 提示（可再补，不阻断上传）。
   it("合计恰 1.8s（单条 1.8s 合法）→ low 提示（开区间对齐 BE）", async () => {
     inspectByName = { "a.mp4": passing(1.8) };
