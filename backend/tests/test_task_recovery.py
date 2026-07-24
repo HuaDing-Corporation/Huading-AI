@@ -438,7 +438,7 @@ def test_stale_replicate_with_all_outputs_succeeded_finishes_completed(
     assert job.error_message is None
 
 
-def test_recovery_leaves_fresh_and_non_image_work_untouched(
+def test_recovery_leaves_fresh_and_non_recoverable_work_untouched(
     auth_db,
     auth_context,
 ) -> None:
@@ -448,6 +448,7 @@ def test_recovery_leaves_fresh_and_non_image_work_untouched(
     stale_at = now - timedelta(seconds=1901)
     fresh_at = now - timedelta(seconds=30)
     photo_id = "fresh-photo-001"
+    video_gen_id = "fresh-video-gen-001"
     avatar_id = "stale-avatar-001"
     reverse_job_id = "fresh-reverse-video-001"
     replicate_job_id = "active-replicate-001"
@@ -459,6 +460,14 @@ def test_recovery_leaves_fresh_and_non_image_work_untouched(
             status="running",
             mode="photo",
             video_mode="photo",
+            updated_at=fresh_at,
+        )
+        video_gen = VideoTask(
+            id=video_gen_id,
+            tenant_id=auth_context["tenant_id"],
+            status="running",
+            mode="video_gen",
+            video_mode="video_gen",
             updated_at=fresh_at,
         )
         avatar = VideoTask(
@@ -489,7 +498,7 @@ def test_recovery_leaves_fresh_and_non_image_work_untouched(
             started_at=stale_at,
             updated_at=stale_at,
         )
-        db.add_all([photo, avatar, reverse_job, replicate_job])
+        db.add_all([photo, video_gen, avatar, reverse_job, replicate_job])
         db.flush()
         output = EcomReplicateOutput(
             id=output_id,
@@ -513,12 +522,14 @@ def test_recovery_leaves_fresh_and_non_image_work_untouched(
 
     with auth_db() as db:
         assert db.get(VideoTask, photo_id).status == "running"
+        assert db.get(VideoTask, video_gen_id).status == "running"
         assert db.get(VideoTask, avatar_id).status == "running"
         assert db.get(ReversePromptJob, reverse_job_id).status == "running"
         assert db.get(EcomReplicateJob, replicate_job_id).status == "generating"
         assert db.get(EcomReplicateOutput, output_id).status == "generating"
 
     assert result.photo_tasks == 0
+    assert result.video_gen_tasks == 0
     assert result.reverse_prompt_jobs == 0
     assert result.ecom_replicate_jobs == 0
 

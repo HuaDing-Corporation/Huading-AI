@@ -1229,6 +1229,106 @@ def test_video_gen_pipeline_setup_failure_marks_failed_and_releases_reserved(
         assert subscription.quota_credits_used == 0
 
 
+def test_video_gen_compensation_commit_failure_is_eventually_recovered(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.services.task_recovery import recover_orphaned_image_queue_tasks
+    from app.workers import video_gen
+
+    storage = _Storage()
+    task_id = "video-gen-compensation-commit-failure"
+    with auth_db() as db:
+        subscription = _reset_subscription_quota(db, auth_context["tenant_id"])
+        _add_video_gen_task(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            user_id=auth_context["user_id"],
+            task_id=task_id,
+            params={"duration_sec": 5, "resolution": "720p"},
+        )
+        _add_reserved_video_gen_usage(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            subscription=subscription,
+            task_id=task_id,
+        )
+        db.commit()
+
+    worker_db = auth_db()
+    real_commit = worker_db.commit
+    commit_calls = 0
+
+    def fail_compensation_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls == 2:
+            raise RuntimeError("injected compensation commit failure")
+        real_commit()
+
+    def fail_provider(_ctx) -> bytes:
+        raise RuntimeError("provider generation failed")
+
+    monkeypatch.setattr(worker_db, "commit", fail_compensation_commit)
+    monkeypatch.setattr(video_gen, "SessionLocal", lambda: worker_db)
+    monkeypatch.setattr(video_gen, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(video_gen, "build_progress_store", lambda _url: _MemProgressStore())
+    monkeypatch.setattr(video_gen, "_generate_seedance_mini_video", fail_provider)
+
+    with pytest.raises(RuntimeError, match="injected compensation commit failure"):
+        video_gen.run_video_gen_pipeline(
+            tenant_id=auth_context["tenant_id"],
+            task_id=task_id,
+        )
+
+    assert commit_calls == 2
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
+        subscription = _subscription(db, auth_context["tenant_id"])
+        assert task is not None
+        assert task.status == "running"
+        assert usage is not None
+        assert usage.status == "reserved"
+        assert subscription.quota_credits_reserved == 10
+
+    recovery_store = _MemProgressStore()
+    result = recover_orphaned_image_queue_tasks(
+        session_factory=auth_db,
+        now=datetime.now(UTC) + timedelta(seconds=1901),
+        stale_after_seconds=1800,
+        progress_store=recovery_store,
+    )
+    repeated = recover_orphaned_image_queue_tasks(
+        session_factory=auth_db,
+        now=datetime.now(UTC) + timedelta(seconds=1901),
+        stale_after_seconds=1800,
+    )
+
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
+        subscription = _subscription(db, auth_context["tenant_id"])
+
+    assert task is not None
+    assert task.status == "failed"
+    assert task.error_code == "VIDEO_GEN_FAILED"
+    assert task.error_message == "Video generation worker stopped before completion."
+    assert usage is not None
+    assert usage.status == "released"
+    assert subscription.quota_credits_reserved == 0
+    assert result.video_gen_tasks == 1
+    assert repeated.video_gen_tasks == 0
+    assert recovery_store.snapshots[f'{auth_context["tenant_id"]}:{task_id}'] == {
+        "status": "failed",
+        "stage": "failed",
+        "error": "Video generation worker stopped before completion.",
+        "error_code": "VIDEO_GEN_FAILED",
+        "error_message": "Video generation worker stopped before completion.",
+    }
+
+
 def test_classify_video_error_uses_provider_and_connection_signals() -> None:
     from app.providers.video.apimart import APIMartVideoProviderError
     from app.workers.video_gen import classify_video_error
