@@ -8,13 +8,20 @@ import { expect, test, type Page } from "@playwright/test";
  * 需以 NEXT_PUBLIC_USE_MOCK=1 构建后 next start 运行（webServer 已配）。
  */
 
-async function gotoReverseResult(page: Page): Promise<{ errors: () => string[]; doublePrefix: () => string[] }> {
+async function gotoReverseResult(
+  page: Page
+): Promise<{ errors: () => string[]; doublePrefix: () => string[]; consoleErrors: () => string[] }> {
   const pageErrors: string[] = [];
   const doublePrefix: string[] = [];
+  // REVERSE-DEEP-UI-0001：补一道**真 Console 0 error 门**（原先只收 pageerror 与 #130 白屏特征串）。
+  // 新增的带入确认弹窗会在这条链上渲染，React 的 key/受控组件/a11y 类问题多半只以 console.error 现身，
+  // 不抛 pageerror —— 不收就等于没测。过滤资源加载噪音（mock 环境里的占位 URL 必然 net::ERR）。
+  const consoleErrors: string[] = [];
   page.on("pageerror", (err) => pageErrors.push(String(err?.message ?? err)));
   page.on("console", (msg) => {
     const t = msg.text();
     if (/Minified React error #130|error #130|client-side exception/.test(t)) pageErrors.push(t);
+    if (msg.type() === "error" && !/Failed to load resource|net::ERR_/i.test(t)) consoleErrors.push(t);
   });
   page.on("request", (req) => {
     if (req.url().includes("/api/api")) doublePrefix.push(`${req.method()} ${req.url()}`);
@@ -51,7 +58,7 @@ async function gotoReverseResult(page: Page): Promise<{ errors: () => string[]; 
   await expect(page.getByText("结构化提示词（中文）")).toBeVisible();
   await expect(page.getByText(/主体：.*保温杯/)).toBeVisible();
 
-  return { errors: () => pageErrors, doublePrefix: () => doublePrefix };
+  return { errors: () => pageErrors, doublePrefix: () => doublePrefix, consoleErrors: () => consoleErrors };
 }
 
 test("带入·数字人口播 → 预填 topic + script，无 #130 白屏", async ({ page }) => {
@@ -73,6 +80,8 @@ test("带入·数字人口播 → 预填 topic + script，无 #130 白屏", asyn
 
   expect(g.errors(), `page errors：\n${g.errors().join("\n")}`).toEqual([]);
   expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);
+  // Console 0：带入确认弹窗也在这条链上渲染过，React 受控/key/a11y 类问题只会以 console.error 现身。
+  expect(g.consoleErrors(), `真 console 错误：\n${g.consoleErrors().join("\n")}`).toEqual([]);
 });
 
 test("带入·AI 模特 → 切电商图·AI 模特子工具并预填自定义补充（电商图档落点）", async ({ page }) => {
@@ -89,4 +98,6 @@ test("带入·AI 模特 → 切电商图·AI 模特子工具并预填自定义�
 
   expect(g.errors(), `page errors：\n${g.errors().join("\n")}`).toEqual([]);
   expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);
+  // Console 0：带入确认弹窗也在这条链上渲染过，React 受控/key/a11y 类问题只会以 console.error 现身。
+  expect(g.consoleErrors(), `真 console 错误：\n${g.consoleErrors().join("\n")}`).toEqual([]);
 });

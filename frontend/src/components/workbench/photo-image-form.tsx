@@ -14,7 +14,7 @@ import { AiTextField } from "@/components/workbench/ai-text-field";
 import {
   AspectRatioSelect,
   DEFAULT_IMAGE_ASPECT_RATIO,
-  IMAGE_ASPECT_RATIOS,
+  isImageAspectRatio,
   type ImageAspectRatio
 } from "@/components/workbench/aspect-ratio-select";
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
@@ -122,8 +122,7 @@ export function PhotoImageForm({
     if (initialPrompt !== undefined) setPrompt(initialPrompt);
     if (initialMasterPrompt !== undefined) setMasterPrompt(initialMasterPrompt);
     if (initialNegativePrompt !== undefined) setImageNegative(initialNegativePrompt);
-    if (initialAspectRatio !== undefined && (IMAGE_ASPECT_RATIOS as readonly string[]).includes(initialAspectRatio))
-      setAspectRatio(initialAspectRatio as ImageAspectRatio);
+    if (initialAspectRatio !== undefined && isImageAspectRatio(initialAspectRatio)) setAspectRatio(initialAspectRatio);
     onPrefillConsumed?.();
   }, [initialPrompt, initialMasterPrompt, initialNegativePrompt, initialAspectRatio, onPrefillConsumed]);
 

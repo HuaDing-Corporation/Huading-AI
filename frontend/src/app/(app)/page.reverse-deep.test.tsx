@@ -232,7 +232,7 @@ describe("REVERSE-DEEP · 承重门3 clamp 提示（不许静默改数）", () =
 
     // 提示逐字：原视频 18 秒，带入 · 视频生成单条上限 15 秒，已按上限带入
     expect(
-      screen.getByText(copy.reverse.applyClampNote(18, copy.reverse.applyVideoGen, 15))
+      screen.getByText(copy.reverse.applyClampNote(18, "视频生成", 15))
     ).toBeInTheDocument();
 
     confirmApply();
@@ -246,5 +246,28 @@ describe("REVERSE-DEEP · 承重门3 clamp 提示（不许静默改数）", () =
     await produceResult();
     openApplyDialog(copy.reverse.applyEcomVideo);
     expect(screen.queryByText(/已按上限带入/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * 🔴 Code Review P1-3：上一条只证明「新挂载的时长控件显示 15」——把 duration-picker 的同步 effect 整个删掉，
+   *    它照样绿（新挂载时 custom 本就是 false）。真正会坏的是**用户先进过自定义档**的情形：
+   *    界面停在自定义 7，state 却被带入改成 15 → 用户看到 7、提交 15，正是 D8 禁止的「静默改数」。
+   */
+  it("🔴 用户先手输自定义时长 7 → 带入 clamp 后的 15（预设档）→ 控件**回到 15 秒档**，不再显示 7", async () => {
+    render(<Home />);
+    fireEvent.click(screen.getByRole("button", { name: "视频生成" }));
+    const vg0 = panel("video_gen");
+    fireEvent.click(vg0.getByRole("button", { name: copy.workbench.durationCustom }));
+    fireEvent.change(vg0.getByLabelText(copy.workbench.durationCustomLabel), { target: { value: "7" } });
+    expect((vg0.getByLabelText(copy.workbench.durationCustomLabel) as HTMLInputElement).value).toBe("7");
+
+    await produceResult();
+    openApplyDialog(copy.reverse.applyVideoGen);
+    confirmApply();
+
+    const vg = panel("video_gen");
+    // 15 秒预设档被选中，且自定义输入框已收起（界面与将要提交的值一致）
+    await waitFor(() => expect(vg.getByRole("button", { name: /15\s*秒/ })).toHaveAttribute("aria-pressed", "true"));
+    expect(vg.queryByLabelText(copy.workbench.durationCustomLabel)).not.toBeInTheDocument();
   });
 });

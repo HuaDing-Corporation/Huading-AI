@@ -111,12 +111,13 @@ const REVERSE_RESULT = {
   // ── §4.2 fill_targets 升级：既有键全保留，只新增键；新增键一律 optional ────────────
   fill_targets: {
     avatar_talk: { topic: "便携保温杯种草", script: "大家好，今天给大家安利这款便携保温杯，24 小时保温，出门必备……" },
+    // 🔴 图片源**没有时长可言** → duration_sec / duration_clamped **整键不出现**（不是给个模块默认值）。
+    //    「absent = 保持用户当前值」是本包的核心语义：mock 若替 BE 编一个 30s，带入任何图片反推都会把用户
+    //    自己设的时长悄悄改掉，而那正是承重门2 要防的事。时长的真形态在下面的视频变体里。
     seedance_i2v: {
       topic: "便携保温杯卖点",
       scene_prompt: "白色大理石台面暖光特写，蒸汽轻升，缓慢环绕运镜",
-      negative_prompt: "低分辨率, 变形, 多余文字, 水印, 杂乱背景",
-      duration_sec: 30, // 本模块合法区间 5–120 内 → 未 clamp
-      duration_clamped: false
+      negative_prompt: "低分辨率, 变形, 多余文字, 水印, 杂乱背景"
     },
     video_gen: {
       topic: "便携保温杯",
@@ -124,11 +125,9 @@ const REVERSE_RESULT = {
       prompt:
         "Subject: A portable insulated stainless-steel bottle with a matte white finish and brushed metal lid.\nScene: A white marble countertop by a window, warm morning light, minimal props.\nComposition: Centered close-up, vertical framing, shallow depth of field.\nCamera: 35mm prime, slight high angle, slow orbiting move.\nLighting: Soft warm key from upper right, gentle falloff, no harsh speculars.\nMotion: Gentle rising steam, slow orbit.\nStyle: product advertising, minimal, premium texture",
       negative_prompt: "低分辨率, 变形, 多余文字, 水印, 杂乱背景",
-      aspect_ratio: "1:1", // D7：BE 已映射为**视频那套**枚举的合法值
-      // 图片源没有时长可 clamp → 给模块默认值且 clamped=false（clamp 的真形态在下面的视频变体里）
-      duration_sec: 5,
-      duration_clamped: false,
-      generate_audio: false
+      aspect_ratio: "1:1" // D7：BE 已映射为**视频那套**枚举的合法值（1:1 源 → 1:1）
+      // 图片源无时长、也无从判断要不要生成音频 → duration_sec / duration_clamped / generate_audio **整键不出现**
+      //（同上：编一个默认值就会在带入时悄悄改掉用户已设的时长与音频开关）。
     },
     photo: {
       // §4.2-3：photo.topic 用 structured_prompt.en（上限 20000，基本不触顶）
@@ -138,7 +137,10 @@ const REVERSE_RESULT = {
       negative_prompt: "低分辨率, 变形, 多余文字, 水印, 杂乱背景",
       aspect_ratio: "1:1" // D7：BE 已映射为**图片那套**枚举的合法值
     },
-    ecom_model: { extra_prompt: "工作室柔光、简洁白底、突出质感", aspect_ratio: "3:4" },
+    // D7 一致性：本结果的源是 1024×1024（aspect_ratio_raw "1:1"）→ 各模块映射出来的都该是 1:1。
+    // 原先这里写 3:4，与同一份结果里 photo 的 1:1 自相矛盾 —— 那样的 fixture 会让「FE 压根没读 ecom_model.aspect_ratio」
+    // 这类 bug 看起来也正常（Code Review P2）。
+    ecom_model: { extra_prompt: "工作室柔光、简洁白底、突出质感", aspect_ratio: "1:1" },
     ecom_poster: { title: "年中大促", subtitle: "限时 5 折 错过再等一年" }
   }
 };
@@ -230,7 +232,9 @@ const REVERSE_RESULT_VIDEO = {
       ...REVERSE_RESULT.fill_targets.photo,
       topic: `${REVERSE_RESULT.fill_targets.photo.topic}\nShots: ${REVERSE_VIDEO_ANALYSIS.shot_summary}`,
       aspect_ratio: "9:16" // 图片枚举里也有 9:16
-    }
+    },
+    // 竖屏视频源 → AI 模特（图片枚举）同样映射到 9:16，与 photo 保持一致（D7 是按源算的，不是按模块随便给）。
+    ecom_model: { ...REVERSE_RESULT.fill_targets.ecom_model, aspect_ratio: "9:16" }
   }
 };
 

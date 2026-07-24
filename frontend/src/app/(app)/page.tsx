@@ -88,55 +88,65 @@ export default function Home() {
             onPrefillConsumed={clearPrefill}
           />
         );
-      case "seedance_i2v":
+      case "seedance_i2v": {
+        // 判别式**收窄一次**：target 不匹配 → p 为 undefined → 每个 initialX 都是 undefined（表单逐项跳过，语义不变）。
+        // 载荷字段变多后，逐字段重复同一个判别式既冗长又容易漏改（漏一个 = 那个字段永远注不进去）。
+        const p = pendingPrefill?.target === "seedance_i2v" ? pendingPrefill : undefined;
         return (
           <EcomVideoForm
-            initialTopic={pendingPrefill?.target === "seedance_i2v" ? pendingPrefill.topic : undefined}
-            initialScenePrompt={pendingPrefill?.target === "seedance_i2v" ? pendingPrefill.scenePrompt : undefined}
-            initialScript={pendingPrefill?.target === "seedance_i2v" ? pendingPrefill.script : undefined}
-            // REVERSE-DEEP-UI-0001 范围2：负面提示词 / 时长逐字段直落（判别式收窄同上，缺席即 undefined→表单跳过）
-            initialNegativePrompt={pendingPrefill?.target === "seedance_i2v" ? pendingPrefill.negativePrompt : undefined}
-            initialDurationSec={pendingPrefill?.target === "seedance_i2v" ? pendingPrefill.durationSec : undefined}
+            initialTopic={p?.topic}
+            initialScenePrompt={p?.scenePrompt}
+            initialScript={p?.script}
+            // REVERSE-DEEP-UI-0001 范围2：负面提示词 / 时长逐字段直落
+            initialNegativePrompt={p?.negativePrompt}
+            initialDurationSec={p?.durationSec}
             onPrefillConsumed={clearPrefill}
           />
         );
-      case "video_gen":
+      }
+      case "video_gen": {
+        const p = pendingPrefill?.target === "video_gen" ? pendingPrefill : undefined;
         return (
           <VideoGenForm
-            initialPrompt={pendingPrefill?.target === "video_gen" ? pendingPrefill.prompt : undefined}
+            initialPrompt={p?.prompt}
             // REVERSE-DEEP-UI-0001 范围2：负面提示词 / 画面比例 / 时长 / 音频生成
-            initialNegativePrompt={pendingPrefill?.target === "video_gen" ? pendingPrefill.negativePrompt : undefined}
-            initialAspectRatio={pendingPrefill?.target === "video_gen" ? pendingPrefill.aspectRatio : undefined}
-            initialDurationSec={pendingPrefill?.target === "video_gen" ? pendingPrefill.durationSec : undefined}
-            initialGenerateAudio={pendingPrefill?.target === "video_gen" ? pendingPrefill.generateAudio : undefined}
+            initialNegativePrompt={p?.negativePrompt}
+            initialAspectRatio={p?.aspectRatio}
+            initialDurationSec={p?.durationSec}
+            initialGenerateAudio={p?.generateAudio}
             onPrefillConsumed={clearPrefill}
           />
         );
+      }
       case "reverse_prompt":
         return <ReversePromptForm onApplyPrefill={applyPrefill} />;
       case "copywriting":
         return <CopywritingForm onUseInVideo={useCopyInVideo} />;
-      case "ecom_image":
+      case "ecom_image": {
+        const p = pendingPrefill?.target === "ecom_image" ? pendingPrefill : undefined;
         return (
           <EcomImageWorkbench
-            initialTool={pendingPrefill?.target === "ecom_image" ? pendingPrefill.tool : undefined}
-            initialCustom={pendingPrefill?.target === "ecom_image" ? pendingPrefill.custom : undefined}
+            initialTool={p?.tool}
+            initialCustom={p?.custom}
             // REVERSE-DEEP-UI-0001 范围2：画面比例（容器只透传，由 AI 模特子表单消费并上报 clearPrefill）
-            initialAspectRatio={pendingPrefill?.target === "ecom_image" ? pendingPrefill.aspectRatio : undefined}
+            initialAspectRatio={p?.aspectRatio}
             onPrefillConsumed={clearPrefill}
           />
         );
-      case "photo":
+      }
+      case "photo": {
+        const p = pendingPrefill?.target === "photo" ? pendingPrefill : undefined;
         return (
           <PhotoImageForm
-            initialPrompt={pendingPrefill?.target === "photo" ? pendingPrefill.prompt : undefined}
+            initialPrompt={p?.prompt}
             // REVERSE-DEEP-UI-0001 范围2：总控前缀 / 图片负面提示词 / 画面比例
-            initialMasterPrompt={pendingPrefill?.target === "photo" ? pendingPrefill.masterPrompt : undefined}
-            initialNegativePrompt={pendingPrefill?.target === "photo" ? pendingPrefill.negativePrompt : undefined}
-            initialAspectRatio={pendingPrefill?.target === "photo" ? pendingPrefill.aspectRatio : undefined}
+            initialMasterPrompt={p?.masterPrompt}
+            initialNegativePrompt={p?.negativePrompt}
+            initialAspectRatio={p?.aspectRatio}
             onPrefillConsumed={clearPrefill}
           />
         );
+      }
     }
   };
 

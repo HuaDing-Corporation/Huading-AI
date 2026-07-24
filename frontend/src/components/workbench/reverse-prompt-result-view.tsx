@@ -5,6 +5,7 @@ import { AlertTriangle, RefreshCw, Save, Sparkles } from "lucide-react";
 
 import {
   fillTargetToPrefill,
+  splitShotSection,
   type ReversePromptFillTargetKey,
   type ReversePromptResult,
   type WorkbenchPrefill
@@ -96,8 +97,15 @@ export function ReversePromptResultView({
   const [pending, setPending] = useState<{ prefill: WorkbenchPrefill; label: string } | null>(null);
   // 🔴 范围4 老结构回落：BE 未给 structured_prompt（历史里大量存量结果）→ 回落既有 prompt_zh / prompt_en 展示。
   //    不许因为读了 undefined 就白屏或把 "undefined" 印到界面上（必测项）。
-  const structured = result.structured_prompt;
+  //    ⚠️ 判据是**有内容**而非「键存在」：`{en:"",zh:""}` 是真值，按存在处理会渲染两个空块，还把能用的
+  //    prompt_zh/prompt_en 藏起来（Code Review nit）。
+  const sp = result.structured_prompt;
+  const structured = sp && (sp.zh?.trim() || sp.en?.trim()) ? sp : undefined;
   const shotSummary = result.video_analysis?.shot_summary?.trim();
+  // 结构化串末尾按 §4.3 已含 `Shots:` 段；下面另有独立的「分镜表」块 → 展示时把段剥掉，避免同一段文字出现两次。
+  const structuredDisplay = structured
+    ? { zh: splitShotSection(structured.zh).body, en: splitShotSection(structured.en).body }
+    : undefined;
   // clamp 提示要的「原视频 N 秒」：优先 source_media（§4.1 客观事实），回落 video_analysis.duration_sec。
   const sourceDurationSec = result.source_media?.duration_sec ?? result.video_analysis?.duration_sec ?? null;
 
@@ -122,10 +130,10 @@ export function ReversePromptResultView({
       {/* 主提示词（§4.3 结构化）：中文供人理解、英文供 provider 消费 → **两个复制按钮各给一份**，
           不替用户猜他要拷哪一份（拿去别的工具用的是 en，核对语义看的是 zh）。
           老结构结果无 structured_prompt → 回落既有中/英提示词块（不白屏、不 undefined）。 */}
-      {structured ? (
+      {structuredDisplay ? (
         <>
-          <CopyableBlock label={copy.reverse.blockStructuredZh} text={structured.zh} />
-          <CopyableBlock label={copy.reverse.blockStructuredEn} text={structured.en} />
+          <CopyableBlock label={copy.reverse.blockStructuredZh} text={structuredDisplay.zh} />
+          <CopyableBlock label={copy.reverse.blockStructuredEn} text={structuredDisplay.en} />
         </>
       ) : (
         <>

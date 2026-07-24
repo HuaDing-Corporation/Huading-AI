@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { SelectableOption } from "@/components/ui/selectable-option";
 import { copy } from "@/lib/copy";
@@ -53,37 +53,53 @@ export function DurationPicker({
   const isPreset = (presets as readonly number[]).includes(value);
   const [custom, setCustom] = useState(!isPreset);
   const [customText, setCustomText] = useState(isPreset ? "" : String(value));
+  /** 本组件自己最后一次 onChange 出去的值 —— 用来把「用户在操作」与「外部推值」区分开（见下方 effect）。 */
+  const lastEmitted = useRef(value);
 
   /**
-   * 受控值变成**非预设档**时切到自定义档并回显（REVERSE-DEEP-UI-0001 发现）。
-   * 原因：`custom` 只在 mount 时由 `useState(!isPreset)` 决定一次。面板「挂载后常驻」+ 反推带入是
-   * **挂载之后**才把时长推进来的（如原视频 18s）——旧行为下 value=18 但 custom 仍为 false，
-   * 于是既没有档位被选中、也不显示自定义输入框：**值进了 state 却在界面上看不见**（用户无从确认带入了什么，
-   * 也改不了）。这与 D3-①「逐字段直落到对应控件」相悖，故在此把「值」与「档位形态」对齐。
-   * 不覆盖用户正在输入的文本：value 与当前文本数值一致时原样保留（"07" 这类写法不被改写）；
-   * value 为 NaN（自定义框被清空/填了非数字）时直接返回，避免把 "NaN" 写回输入框。
+   * **外部**推来的受控值 → 把「档位形态」同步过去（REVERSE-DEEP-UI-0001 发现，Code Review 补全成双向）。
+   *
+   * 原因：`custom` 只在 mount 时由 `useState(!isPreset)` 决定一次。面板「挂载后常驻」，而反推带入是
+   * **挂载之后**才把时长推进来的 —— 旧行为下：
+   *   - 推来非预设值（如 18s）：value=18 但 custom 仍 false → 没有档位被选中、也不显示自定义框，
+   *     **值进了 state 却在界面上看不见**；
+   *   - 推来预设值（如 clamp 后的 15s，而 15 正是 video_gen 的预设档）而用户此前手输过自定义 7：
+   *     custom 仍 true、框里还是 7，**界面显示 7、实际会提交 15** —— D8 明令禁止的「静默改数」就发生在这里。
+   * 故两个方向都要同步。
+   *
+   * 🔴 只对「不是自己发出去的值」动形态：用 lastEmitted 记下本组件每次 onChange 的值；相等 = 回声（用户正在
+   *    输入/点档），此时**绝不**改形态，否则用户在自定义框里敲到 "15" 会被当场踢回预设档。
+   *    value 为 NaN（自定义框清空/非数字）同样直接返回，避免把 "NaN" 写回输入框。
    */
   useEffect(() => {
-    if (isPreset || Number.isNaN(value)) return;
-    setCustom(true);
-    setCustomText((prev) => (Number(prev) === value ? prev : String(value)));
+    if (value === lastEmitted.current) return; // 自己发出去的回声 → 不动形态
+    lastEmitted.current = value;
+    if (Number.isNaN(value)) return;
+    setCustom(!isPreset);
+    setCustomText(isPreset ? "" : String(value));
   }, [isPreset, value]);
+
+  /** 所有本组件发起的值变更都经这里 —— 记账后再上报，effect 据此识别「回声」不去动形态。 */
+  const emit = (sec: number) => {
+    lastEmitted.current = sec;
+    onChange(sec);
+  };
 
   const selectPreset = (sec: number) => {
     setCustom(false);
-    onChange(sec);
+    emit(sec);
   };
 
   const enterCustom = () => {
     setCustom(true);
     const seed = customText || String(value);
     setCustomText(seed);
-    onChange(Number(seed));
+    emit(Number(seed));
   };
 
   const onCustomInput = (raw: string) => {
     setCustomText(raw);
-    onChange(Number(raw)); // NaN when empty/non-numeric → parent gates submit + error shows
+    emit(Number(raw)); // NaN when empty/non-numeric → parent gates submit + error shows
   };
 
   const showError = custom && !isValidDuration(Number(customText), min, max);

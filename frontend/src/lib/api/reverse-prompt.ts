@@ -319,15 +319,21 @@ const SHOT_SECTION_RE = /\n\s*(?:Shots?|分镜表?)\s*[:：]\s*/;
  * ⚠️ 依赖 §4.3 约定的段标记；BE 合并后按真实产出复核（FIX 包真联调项，已在回执列出）。
  */
 export function splitShotSection(text: string): { body: string; shots: string } {
-  if (!text) return { body: "", shots: "" };
+  // 正则要求段前有换行 → 空串/无标记都落到 exec===null 这一支（无需额外空串判空）。无 g 标志，exec 无 lastIndex 状态。
   const m = SHOT_SECTION_RE.exec(text);
-  if (!m || m.index < 0) return { body: text, shots: "" };
+  if (!m) return { body: text, shots: "" };
   return { body: text.slice(0, m.index).trimEnd(), shots: text.slice(m.index + m[0].length).trim() };
 }
 
-/** 勾选分镜表时把分镜段拼回正文（与 BE 原串等价的重组，标记逐字对齐 §4.3）。 */
+/**
+ * 勾选分镜表时把分镜段拼回正文（与 BE 原串等价的重组，标记逐字对齐 §4.3）。
+ * ⚠️ 始终重新发出**英文** `Shots:` 段头。当前无影响：进本函数的只有 `prefill.prompt`，而 §4.2 规定
+ *    video_gen.prompt / photo.topic 用的都是 `structured_prompt.**en**`（英文段头）。
+ *    若 BE 日后把中文结构化串塞进这些字段，则「中文正文 + 英文段头」会不一致 —— 已列入真联调复核项。
+ */
 export function joinShotSection(body: string, shots: string): string {
-  return shots.trim() ? `${body.trimEnd()}\n\nShots: ${shots.trim()}` : body;
+  const tail = shots.trim();
+  return tail ? `${body.trimEnd()}\n\nShots: ${tail}` : body;
 }
 
 /**
@@ -351,15 +357,20 @@ export function fillTargetToPrefill(
     }
     case "seedance_i2v": {
       const t = fillTargets.seedance_i2v;
-      // 🔴 只挂 BE **真给了**的键：undefined 的字段整体不出现在载荷里（展开语法条件挂），
-      //    这样目标表单的 `if (x !== undefined)` 才会跳过 → 该控件保持原样（不被空串覆盖）。
+      // 🔴 只挂 BE **真给了内容**的键：没内容的字段整体不出现在载荷里（展开语法条件挂），
+      //    这样目标表单的 `if (x !== undefined)` 才会跳过 → 该控件保持原样。
+      // 🔴 **空串按「没给」处理**（Code Review P1）：BE 这套 schema 的惯例是**缺省空串而非省略键**
+      //    （见本文件顶部 ReversePromptResult 的 negative_prompt/disclaimer 注释）。若把 "" 当「给了」，
+      //    「原素材没有负面提示词」就会变成「把用户已写的负面词清空」——正是承重门2 要防的事，
+      //    而且弹窗里只会显示一个空文本框（看着像「没内容可带」，实则会抹掉）。aspect_ratio 本就用真值判据，
+      //    此处把同一判据推广到全部可选文本键，去掉这处不一致。
       return t
         ? {
             target: "seedance_i2v",
             topic: t.topic,
             scenePrompt: t.scene_prompt,
-            ...(t.script !== undefined ? { script: t.script } : {}),
-            ...(t.negative_prompt !== undefined ? { negativePrompt: t.negative_prompt } : {}),
+            ...(t.script ? { script: t.script } : {}),
+            ...(t.negative_prompt ? { negativePrompt: t.negative_prompt } : {}),
             ...(t.duration_sec !== undefined ? { durationSec: t.duration_sec } : {}),
             ...(t.duration_clamped !== undefined ? { durationClamped: t.duration_clamped } : {})
           }
@@ -372,7 +383,8 @@ export function fillTargetToPrefill(
         ? {
             target: "video_gen",
             prompt: t.prompt,
-            ...(t.negative_prompt !== undefined ? { negativePrompt: t.negative_prompt } : {}),
+            // 空串按「没给」处理（同上 seedance 分支的说明：否则会把用户已填的负面词清空）
+            ...(t.negative_prompt ? { negativePrompt: t.negative_prompt } : {}),
             ...(t.aspect_ratio ? { aspectRatio: t.aspect_ratio } : {}),
             ...(t.duration_sec !== undefined ? { durationSec: t.duration_sec } : {}),
             ...(t.duration_clamped !== undefined ? { durationClamped: t.duration_clamped } : {}),
@@ -387,8 +399,9 @@ export function fillTargetToPrefill(
         ? {
             target: "photo",
             prompt: t.topic,
-            ...(t.master_prompt !== undefined ? { masterPrompt: t.master_prompt } : {}),
-            ...(t.negative_prompt !== undefined ? { negativePrompt: t.negative_prompt } : {}),
+            // 空串按「没给」处理（同上：否则「原图没有总控/负面」会变成「清空用户已填的那两栏」）
+            ...(t.master_prompt ? { masterPrompt: t.master_prompt } : {}),
+            ...(t.negative_prompt ? { negativePrompt: t.negative_prompt } : {}),
             ...(t.aspect_ratio ? { aspectRatio: t.aspect_ratio } : {})
           }
         : null;

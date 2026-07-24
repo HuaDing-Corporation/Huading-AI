@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -32,60 +32,60 @@ interface PrefillItem {
  *    拆不出分镜段（图片反推 / 老结构）→ 不产生分镜项，不造死开关。
  * 顺序：正文内容 → 修饰项（负面/总控）→ 参数项（比例/时长/音频），由重到轻。
  */
+/** 秒数 → 展示串；undefined 原样传下去（= 不产生该项）。 */
+function durationDisplay(sec: number | undefined): string | undefined {
+  return sec === undefined ? undefined : copy.reverse.applyDurationSec(sec);
+}
+/** 布尔 → 开启/关闭；undefined = 不产生该项。⚠️ false 要给「关闭」而非 undefined —— 它仍是一条可勾选的项。 */
+function onOffDisplay(flag: boolean | undefined): string | undefined {
+  if (flag === undefined) return undefined;
+  return flag ? copy.reverse.applyValueOn : copy.reverse.applyValueOff;
+}
+
 function buildItems(prefill: WorkbenchPrefill): PrefillItem[] {
   const items: PrefillItem[] = [];
-  const text = (key: string, label: string, v: string | undefined) => {
+  const pushText = (key: string, label: string, v: string | undefined) => {
     if (v !== undefined) items.push({ key, label, kind: "text", text: v });
   };
-  const value = (key: string, label: string, display: string | undefined) => {
+  const pushValue = (key: string, label: string, display: string | undefined) => {
     if (display !== undefined) items.push({ key, label, kind: "value", text: "", display });
   };
   /** 主提示词 + 可选分镜段（两个 target 共用）。 */
-  const promptWithShots = (prompt: string | undefined) => {
+  const pushPromptWithShots = (prompt: string | undefined) => {
     if (prompt === undefined) return;
     const { body, shots } = splitShotSection(prompt);
     items.push({ key: "prompt", label: copy.reverse.applyItemPrompt, kind: "text", text: body });
     if (shots) items.push({ key: "shots", label: copy.reverse.applyItemShots, kind: "text", text: shots });
   };
-  const durationDisplay = (sec: number | undefined) =>
-    sec === undefined ? undefined : copy.reverse.applyDurationSec(sec);
 
   switch (prefill.target) {
     case "avatar_talk":
-      text("topic", copy.reverse.applyItemTopic, prefill.topic);
-      text("script", copy.reverse.applyItemScript, prefill.script);
+      pushText("topic", copy.reverse.applyItemTopic, prefill.topic);
+      pushText("script", copy.reverse.applyItemScript, prefill.script);
       break;
     case "seedance_i2v":
-      text("topic", copy.reverse.applyItemTopic, prefill.topic);
-      text("scenePrompt", copy.reverse.applyItemScenePrompt, prefill.scenePrompt);
-      text("script", copy.reverse.applyItemScript, prefill.script);
-      text("negativePrompt", copy.reverse.applyItemNegative, prefill.negativePrompt);
-      value("durationSec", copy.reverse.applyItemDuration, durationDisplay(prefill.durationSec));
+      pushText("topic", copy.reverse.applyItemTopic, prefill.topic);
+      pushText("scenePrompt", copy.reverse.applyItemScenePrompt, prefill.scenePrompt);
+      pushText("script", copy.reverse.applyItemScript, prefill.script);
+      pushText("negativePrompt", copy.reverse.applyItemNegative, prefill.negativePrompt);
+      pushValue("durationSec", copy.reverse.applyItemDuration, durationDisplay(prefill.durationSec));
       break;
     case "video_gen":
-      promptWithShots(prefill.prompt);
-      text("negativePrompt", copy.reverse.applyItemNegative, prefill.negativePrompt);
-      value("aspectRatio", copy.reverse.applyItemAspect, prefill.aspectRatio);
-      value("durationSec", copy.reverse.applyItemDuration, durationDisplay(prefill.durationSec));
-      value(
-        "generateAudio",
-        copy.reverse.applyItemGenerateAudio,
-        prefill.generateAudio === undefined
-          ? undefined
-          : prefill.generateAudio
-            ? copy.reverse.applyValueOn
-            : copy.reverse.applyValueOff
-      );
+      pushPromptWithShots(prefill.prompt);
+      pushText("negativePrompt", copy.reverse.applyItemNegative, prefill.negativePrompt);
+      pushValue("aspectRatio", copy.reverse.applyItemAspect, prefill.aspectRatio);
+      pushValue("durationSec", copy.reverse.applyItemDuration, durationDisplay(prefill.durationSec));
+      pushValue("generateAudio", copy.reverse.applyItemGenerateAudio, onOffDisplay(prefill.generateAudio));
       break;
     case "photo":
-      promptWithShots(prefill.prompt);
-      text("masterPrompt", copy.reverse.applyItemMasterPrompt, prefill.masterPrompt);
-      text("negativePrompt", copy.reverse.applyItemNegative, prefill.negativePrompt);
-      value("aspectRatio", copy.reverse.applyItemAspect, prefill.aspectRatio);
+      pushPromptWithShots(prefill.prompt);
+      pushText("masterPrompt", copy.reverse.applyItemMasterPrompt, prefill.masterPrompt);
+      pushText("negativePrompt", copy.reverse.applyItemNegative, prefill.negativePrompt);
+      pushValue("aspectRatio", copy.reverse.applyItemAspect, prefill.aspectRatio);
       break;
     case "ecom_image":
-      text("custom", copy.reverse.applyItemCustom, prefill.custom);
-      value("aspectRatio", copy.reverse.applyItemAspect, prefill.aspectRatio);
+      pushText("custom", copy.reverse.applyItemCustom, prefill.custom);
+      pushValue("aspectRatio", copy.reverse.applyItemAspect, prefill.aspectRatio);
       break;
   }
   return items;
@@ -105,23 +105,28 @@ function composePrefill(
 ): WorkbenchPrefill {
   const out: Record<string, unknown> = { target: prefill.target };
   if (prefill.target === "ecom_image") out.tool = prefill.tool;
-  const textOf = (key: string) => edits[key] ?? items.find((i) => i.key === key)?.text ?? "";
+  // 编辑过就用编辑值，否则用初值。⚠️ 用 `??` 而非 `||`：清空成 "" 是**用户的意思**，必须压过初值
+  //（这正是「编辑结果即实际带入值」的边界情形）。
+  const textOf = (i: PrefillItem) => edits[i.key] ?? i.text;
+  const shotsItem = items.find((i) => i.key === "shots");
   const source = prefill as unknown as Record<string, unknown>;
+  // 🔴 与渲染侧同一判据：`checked` 只记录**用户的覆盖**，未记录 = 默认勾选。写成 `!checked[key]` 会把
+  //    「用户什么都没动」当成「全部取消」→ 一项都带不进去。
+  const on = (key: string) => checked[key] ?? true;
 
   for (const item of items) {
-    if (!checked[item.key]) continue;
+    if (!on(item.key)) continue;
     if (item.key === "shots") continue; // 伪项：由下面的 prompt 分支合回，自身不是独立字段
     if (item.kind === "value") {
       out[item.key] = source[item.key]; // 短值不可编辑 → 原值直取
       continue;
     }
     if (item.key === "prompt") {
-      const hasShots = items.some((i) => i.key === "shots");
       // 分镜段勾选 → 原样拼回（与 BE 给的串等价）；取消 → 正文里那段一并不带走。
-      out.prompt = hasShots && checked.shots ? joinShotSection(textOf("prompt"), textOf("shots")) : textOf("prompt");
+      out.prompt = shotsItem && on("shots") ? joinShotSection(textOf(item), textOf(shotsItem)) : textOf(item);
       continue;
     }
-    out[item.key] = textOf(item.key);
+    out[item.key] = textOf(item);
   }
   return out as unknown as WorkbenchPrefill;
 }
@@ -156,25 +161,33 @@ export function PrefillConfirmDialog({
   onConfirm,
   onCancel
 }: PrefillConfirmDialogProps) {
-  const [items, setItems] = useState<PrefillItem[]>([]);
+  // 条目由载荷**派生**（useMemo），不进 state：放 state 会让「换了载荷」的重建晚一帧 —— 重开另一个模块时
+  // 首帧先画上一个模块的条目再跳变（Code Review P2）。派生后天然同帧正确。
+  const items = useMemo(() => (prefill ? buildItems(prefill) : []), [prefill]);
+  // 只把「用户的覆盖」放 state；未记录的键默认勾选（读取处 `?? true`），故首帧也无需等 effect 补默认值。
   const [checked, setChecked] = useState<Record<string, boolean>>({});
   const [edits, setEdits] = useState<Record<string, string>>({});
 
-  // 每次打开（或换了载荷）重建条目并回到「全部勾选、未编辑」的初态——不残留上一次的取消/编辑。
+  // 每次打开（或换了载荷）清掉上一次的取消/编辑，回到「全部勾选、未编辑」的初态。
   useEffect(() => {
     if (!open || !prefill) return;
-    const next = buildItems(prefill);
-    setItems(next);
-    setChecked(Object.fromEntries(next.map((i) => [i.key, true])));
+    setChecked({});
     setEdits({});
   }, [open, prefill]);
 
-  const durationClamped =
-    prefill && (prefill.target === "video_gen" || prefill.target === "seedance_i2v")
-      ? prefill.durationClamped === true
-      : false;
-  const clampedSec =
-    prefill && (prefill.target === "video_gen" || prefill.target === "seedance_i2v") ? prefill.durationSec : undefined;
+  const uid = useId();
+  // clamp 提示里的模块名用**去掉「带入 · 」前缀**的裸名，否则读成「…带入 · 视频生成单条上限 15 秒」（Code Review nit）。
+  const moduleName = moduleLabel.replace(/^带入\s*·\s*/, "");
+  const isOn = (key: string) => checked[key] ?? true;
+  // 🔴 分镜表依附于主提示词（Code Review P1）：分镜段最终是**拼回主提示词**才带走的，主提示词一旦不带，
+  //    分镜表就无处可去。此时若仍让它可勾选，就成了「点了没用的开关」（规范明令禁止）→ 随主提示词一并置灰。
+  const shotsDisabled = (key: string) => key === "shots" && !isOn("prompt");
+
+  // 「哪些 target 带时长」只列一次 —— 列两遍的话，将来多一个带时长的 target 只改了一处，clamp 提示会**静默不再渲染**。
+  const durational =
+    prefill && (prefill.target === "video_gen" || prefill.target === "seedance_i2v") ? prefill : null;
+  const durationClamped = durational?.durationClamped === true;
+  const clampedSec = durational?.durationSec;
 
   return (
     <Dialog
@@ -196,8 +209,18 @@ export function PrefillConfirmDialog({
             <legend className="sr-only">{moduleLabel}</legend>
             <ul className="flex list-none flex-col gap-2.5 p-0">
               {items.map((item) => {
-                const on = checked[item.key] ?? true;
-                const inputId = `prefill-item-${item.key}`;
+                const disabled = shotsDisabled(item.key);
+                const on = isOn(item.key) && !disabled;
+                // useId 前缀：两个结果视图可能同时挂载（工作台 + 历史详情，皆常驻）→ 写死 id 会重复。
+                const inputId = `${uid}-${item.key}`;
+                const valueId = `${inputId}-value`;
+                const noteId = `${inputId}-note`;
+                const showClamp = item.key === "durationSec" && durationClamped && clampedSec !== undefined;
+                // 短值的**值本身**与 clamp 提示都要挂到勾选框上：否则读屏用户被要求确认一个自己听不到的值，
+                // 而 D8 那行「已按上限带入」也不会随控件播报（正是最不该漏掉的一句）。
+                const describedBy =
+                  [item.kind === "value" ? valueId : null, showClamp ? noteId : null].filter(Boolean).join(" ") ||
+                  undefined;
                 return (
                   <li
                     key={item.key}
@@ -210,6 +233,8 @@ export function PrefillConfirmDialog({
                           id={inputId}
                           type="checkbox"
                           checked={on}
+                          disabled={disabled}
+                          aria-describedby={describedBy}
                           onChange={(e) => setChecked((c) => ({ ...c, [item.key]: e.target.checked }))}
                           className="h-4 w-4 flex-none accent-gold-deep"
                         />
@@ -225,26 +250,32 @@ export function PrefillConfirmDialog({
                         // 与同行勾选框区分可及名：否则读屏会读到两个同名控件（勾选框叫「主提示词」，这里叫「主提示词（可编辑内容）」）
                         aria-label={copy.reverse.applyItemEditAria(item.label)}
                         value={edits[item.key] ?? item.text}
-                        disabled={!on}
+                        // 🔴 readOnly 而非 disabled：不带入 ≠ 不可读。disabled 会让内容对读屏/键盘**彻底消失**，
+                        //    用户就无从确认「我取消掉的到底是什么」。语义用 aria-disabled 表达（与下方短值只读同一原则）。
+                        readOnly={!on}
+                        aria-disabled={!on}
                         onChange={(e) => setEdits((s) => ({ ...s, [item.key]: e.target.value }))}
                         rows={item.key === "prompt" || item.key === "shots" ? 4 : 2}
-                        className="mt-2 w-full resize-y rounded-field border border-line-gold bg-glass-soft px-3 py-2 text-[12.5px] leading-relaxed text-ink outline-none transition-shadow placeholder:text-ink-faint focus:border-line-sel focus:shadow-focus-gold disabled:cursor-not-allowed disabled:opacity-60"
+                        className={`mt-2 w-full resize-y rounded-field border border-line-gold bg-glass-soft px-3 py-2 text-[12.5px] leading-relaxed text-ink outline-none transition-shadow placeholder:text-ink-faint focus:border-line-sel focus:shadow-focus-gold ${on ? "" : "cursor-not-allowed opacity-60"}`}
                       />
                     ) : (
                       // 短值只读：用文本而非 disabled input（只读 ≠ 禁用，语义与视觉都要分清）
-                      <p className="mt-1.5 pl-[26px] text-[12.5px] text-ink-soft">{item.display}</p>
+                      <p id={valueId} className="mt-1.5 pl-[26px] text-[12.5px] text-ink-soft">
+                        {item.display}
+                      </p>
                     )}
 
                     {/* D8：时长被 clamp 时**就近**给明确提示（不许静默改数） */}
-                    {item.key === "durationSec" && durationClamped && clampedSec !== undefined && (
+                    {showClamp && (
                       <p
+                        id={noteId}
                         role="note"
                         className="mt-2 flex items-start gap-1.5 rounded-field bg-error-bg px-2.5 py-1.5 text-[12px] leading-relaxed text-error-fg"
                       >
                         <AlertTriangle size={13} strokeWidth={2} className="mt-0.5 shrink-0" />
                         {sourceDurationSec
-                          ? copy.reverse.applyClampNote(Math.round(sourceDurationSec), moduleLabel, clampedSec)
-                          : copy.reverse.applyClampNoteNoOrigin(moduleLabel, clampedSec)}
+                          ? copy.reverse.applyClampNote(Math.round(sourceDurationSec), moduleName, clampedSec as number)
+                          : copy.reverse.applyClampNoteNoOrigin(moduleName, clampedSec as number)}
                       </p>
                     )}
                   </li>
@@ -261,7 +292,9 @@ export function PrefillConfirmDialog({
           <Button
             variant="primary"
             size="sm"
-            disabled={!prefill || items.length === 0}
+            // 一项都没勾 → 确认等于什么都不做（载荷只剩 target，目标表单全跳过、缓冲还结不掉）→ 直接禁用，
+            // 不给「点了没反应」的按钮（Code Review P2）。
+            disabled={!prefill || items.length === 0 || !items.some((i) => isOn(i.key) && !shotsDisabled(i.key))}
             onClick={() => prefill && onConfirm(composePrefill(prefill, items, checked, edits))}
           >
             {copy.reverse.applyConfirmSubmit}

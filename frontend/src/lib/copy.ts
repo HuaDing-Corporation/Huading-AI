@@ -640,7 +640,8 @@ export const copy = {
     applyUnavailable: "该模块暂无可带入内容",
     // ── 带入前确认弹窗（REVERSE-DEEP-UI-0001 · D3-④：可编辑 / 可取消个别要素）──────────────
     // 🔴 「取消勾选 = 保持原样、不是清空」必须写在界面上：用户看不到载荷，只能靠这句话理解取消的后果。
-    applyConfirmDesc: "默认全部带入。取消勾选的项不会带入，目标表单的该项**保持原样**（不会被清空）。",
+    // ⚠️ 这是**用户可见文案**，不是注释：不要写 markdown 星号（界面无 md 渲染，会原样显示成 `**保持原样**`）。
+    applyConfirmDesc: "默认全部带入。取消勾选的项不会带入，目标表单的该项保持原样（不会被清空）。",
     applyConfirmSubmit: "确认带入",
     applyConfirmCancel: "取消",
     applyItemSkipped: "不带入（保持原样）",

@@ -20,7 +20,7 @@ import { ResolutionPicker } from "@/components/workbench/resolution-picker";
 import {
   VideoAspectRatioSelect,
   DEFAULT_VIDEO_ASPECT_RATIO,
-  VIDEO_ASPECT_RATIOS,
+  isVideoAspectRatio,
   type VideoAspectRatio
 } from "@/components/workbench/video-aspect-ratio-select";
 import { BgmPicker } from "@/components/workbench/bgm-picker";
@@ -89,8 +89,7 @@ export function VideoGenForm({
       return;
     if (initialPrompt !== undefined) setPrompt(initialPrompt);
     if (initialNegativePrompt !== undefined) setNegativePrompt(initialNegativePrompt);
-    if (initialAspectRatio !== undefined && (VIDEO_ASPECT_RATIOS as readonly string[]).includes(initialAspectRatio))
-      setAspectRatio(initialAspectRatio as VideoAspectRatio);
+    if (initialAspectRatio !== undefined && isVideoAspectRatio(initialAspectRatio)) setAspectRatio(initialAspectRatio);
     if (
       initialDurationSec !== undefined &&
       isValidDuration(initialDurationSec, VIDEO_GEN_DURATION_MIN, VIDEO_GEN_DURATION_MAX)

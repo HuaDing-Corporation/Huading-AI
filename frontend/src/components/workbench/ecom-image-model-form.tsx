@@ -13,7 +13,7 @@ import { SelectableOption } from "@/components/ui/selectable-option";
 import {
   AspectRatioSelect,
   DEFAULT_IMAGE_ASPECT_RATIO,
-  IMAGE_ASPECT_RATIOS,
+  isImageAspectRatio,
   type ImageAspectRatio
 } from "@/components/workbench/aspect-ratio-select";
 import { ReferenceImagesPicker } from "@/components/workbench/reference-images-picker";
@@ -76,8 +76,7 @@ export function EcomImageModelForm({
   useEffect(() => {
     if (initialCustom === undefined && initialAspectRatio === undefined) return;
     if (initialCustom !== undefined) setCustom(initialCustom);
-    if (initialAspectRatio !== undefined && (IMAGE_ASPECT_RATIOS as readonly string[]).includes(initialAspectRatio))
-      setAspectRatio(initialAspectRatio as ImageAspectRatio);
+    if (initialAspectRatio !== undefined && isImageAspectRatio(initialAspectRatio)) setAspectRatio(initialAspectRatio);
     onPrefillConsumed?.();
   }, [initialCustom, initialAspectRatio, onPrefillConsumed]);
 
