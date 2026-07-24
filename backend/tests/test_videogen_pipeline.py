@@ -17,6 +17,7 @@ from app.api.deps import get_object_storage, get_progress_store
 from app.core.image_aspect_ratio import VIDEO_GEN_ASPECT_RATIOS
 from app.db.models import (
     Asset,
+    BatchJob,
     BgmLibraryTrack,
     Subscription,
     TaskAsset,
@@ -1239,14 +1240,38 @@ def test_video_gen_compensation_commit_failure_is_eventually_recovered(
 
     storage = _Storage()
     task_id = "video-gen-compensation-commit-failure"
+    batch_id = "video-gen-recovery-batch"
     with auth_db() as db:
         subscription = _reset_subscription_quota(db, auth_context["tenant_id"])
-        _add_video_gen_task(
+        batch = BatchJob(
+            id=batch_id,
+            tenant_id=auth_context["tenant_id"],
+            user_id=auth_context["user_id"],
+            kind="prompt_set",
+            status="running",
+            total=2,
+            common_params={},
+        )
+        db.add(batch)
+        task = _add_video_gen_task(
             db,
             tenant_id=auth_context["tenant_id"],
             user_id=auth_context["user_id"],
             task_id=task_id,
             params={"duration_sec": 5, "resolution": "720p"},
+        )
+        task.batch_id = batch.id
+        db.add(
+            VideoTask(
+                id="video-gen-recovery-batch-done",
+                tenant_id=auth_context["tenant_id"],
+                created_by_user_id=auth_context["user_id"],
+                batch_id=batch.id,
+                status="done",
+                mode="video_gen",
+                video_mode="video_gen",
+                params={"batch_row_index": 1},
+            )
         )
         _add_reserved_video_gen_usage(
             db,
@@ -1310,6 +1335,7 @@ def test_video_gen_compensation_commit_failure_is_eventually_recovered(
         task = db.get(VideoTask, task_id)
         usage = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
         subscription = _subscription(db, auth_context["tenant_id"])
+        batch = db.get(BatchJob, batch_id)
 
     assert task is not None
     assert task.status == "failed"
@@ -1318,6 +1344,10 @@ def test_video_gen_compensation_commit_failure_is_eventually_recovered(
     assert usage is not None
     assert usage.status == "released"
     assert subscription.quota_credits_reserved == 0
+    assert batch is not None
+    assert batch.status == "partial_failed"
+    assert batch.succeeded == 1
+    assert batch.failed == 1
     assert result.video_gen_tasks == 1
     assert repeated.video_gen_tasks == 0
     assert recovery_store.snapshots[f'{auth_context["tenant_id"]}:{task_id}'] == {

@@ -559,7 +559,7 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                     duration_sec=ctx.duration_sec,
                 ),
             )
-            refresh_batch_job(db, batch_id=task.batch_id)
+            refresh_batch_job(db, batch_id=task.batch_id, tenant_id=tenant_id)
             db.commit()
             _store_progress(
                 store,
@@ -619,7 +619,7 @@ def run_video_gen_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 error_code=error_code,
             )
             release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
-            refresh_batch_job(db, batch_id=batch_id)
+            refresh_batch_job(db, batch_id=batch_id, tenant_id=tenant_id)
             db.commit()
             if storage is not None:
                 prune_video_history_best_effort(

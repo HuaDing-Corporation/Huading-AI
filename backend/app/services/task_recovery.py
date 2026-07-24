@@ -16,6 +16,7 @@ from app.db.models import (
 )
 from app.db.session import SessionLocal
 from app.services.aibrain import recover_stale_reasoning_reservations
+from app.services.batches import refresh_batch_job
 from app.services.quota import (
     release_reserved_quota,
     release_reverse_prompt_video_quota,
@@ -66,6 +67,7 @@ def recover_orphaned_image_queue_tasks(
     )
     aibrain_cutoff = recovered_at - timedelta(seconds=aibrain_stale_seconds)
     recovered_progress: list[tuple[str, str, str, str]] = []
+    recovered_video_gen_batches: set[tuple[str, str]] = set()
     photo_task_count = 0
     video_gen_task_count = 0
 
@@ -88,6 +90,8 @@ def recover_orphaned_image_queue_tasks(
                 photo_task_count += 1
             else:
                 video_gen_task_count += 1
+                if task.batch_id:
+                    recovered_video_gen_batches.add((task.tenant_id, task.batch_id))
             release_reserved_quota(
                 db,
                 tenant_id=task.tenant_id,
@@ -102,6 +106,8 @@ def recover_orphaned_image_queue_tasks(
             recovered_progress.append(
                 (task.tenant_id, task.id, error_code, error_message)
             )
+        for tenant_id, batch_id in sorted(recovered_video_gen_batches):
+            refresh_batch_job(db, batch_id=batch_id, tenant_id=tenant_id)
 
         reverse_prompt_jobs = list(
             db.scalars(
