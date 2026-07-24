@@ -171,25 +171,28 @@ export function ReferenceVideosPicker({
             <div key={item.assetId} className="relative overflow-hidden rounded-mark border border-line-gold">
               {/* 视频预览：muted + playsInline 首帧展示（非 <img>，冻结文档·上传侧障碍③） */}
               <video src={item.preview} muted playsInline preload="metadata" className="aspect-video w-full object-cover" />
-              <span className="absolute bottom-0.5 left-0.5 rounded-mark bg-ink/60 px-1.5 py-0.5 text-[11px] text-white">
-                {copy.workbench.vgRefVideoSeconds(fmt(item.duration))}
-              </span>
+              {/* BADGE-OVERLAP-FIX（生产实拍）：原告知徽标在左上、DOM 又在删除按钮之后——长文案（「将自动压缩至 720p」）
+                  横跨窄缩略图盖住右上删除按钮 → 有徽标的视频删不掉。结构性修复：告知并入**底部条**与时长同行
+                  （pointer-events-none 纯展示不抢点击），顶部只剩删除按钮一个元素（再加 z-10 双保险）——
+                  两者共存且都可用（徽标不删=用户要知道会被压缩，删除必可点）。 */}
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-wrap items-center gap-x-1.5 bg-ink/60 px-1.5 py-0.5">
+                <span className="text-[11px] text-white">{copy.workbench.vgRefVideoSeconds(fmt(item.duration))}</span>
+                {(item.willTranscode || item.willDownscale) && (
+                  <span className="text-[10.5px] text-white/90">
+                    {[item.willTranscode ? copy.workbench.vgRefVideoWillTranscode : null, item.willDownscale ? copy.workbench.vgRefVideoWillDownscale : null]
+                      .filter(Boolean)
+                      .join("·")}
+                  </span>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={() => removeItem(i)}
                 aria-label={copy.workbench.removeVideo}
-                className="absolute right-0.5 top-0.5 flex h-6 w-6 items-center justify-center rounded-mark bg-ink/50 text-white hover:bg-ink/70"
+                className="absolute right-0.5 top-0.5 z-10 flex h-6 w-6 items-center justify-center rounded-mark bg-ink/50 text-white hover:bg-ink/70"
               >
                 <X size={13} strokeWidth={2} />
               </button>
-              {/* D9 告知：转码/降码不静默 */}
-              {(item.willTranscode || item.willDownscale) && (
-                <span className="absolute left-0.5 top-0.5 rounded-mark bg-ink/60 px-1.5 py-0.5 text-[10.5px] text-white">
-                  {[item.willTranscode ? copy.workbench.vgRefVideoWillTranscode : null, item.willDownscale ? copy.workbench.vgRefVideoWillDownscale : null]
-                    .filter(Boolean)
-                    .join("·")}
-                </span>
-              )}
             </div>
           ))}
         </div>
