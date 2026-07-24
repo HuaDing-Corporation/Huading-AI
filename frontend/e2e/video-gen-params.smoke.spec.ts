@@ -81,6 +81,32 @@ async function login(page: Page): Promise<{
   };
 }
 
+// BADGE-OVERLAP-FIX（生产实拍）：压缩徽标曾盖住删除按钮 → 有徽标的视频删不掉。真视频 fixture（1080p/2s，短边
+// 1080>720 触发「将自动压缩至 720p」徽标）+ **真实 hit-testing**：Playwright click 被遮挡会报 intercepts pointer
+// events——单测（jsdom 无布局）抓不到的层叠回归，这条 e2e 能抓。
+test("V2V 压缩徽标与删除按钮共存：徽标可见 + 删除按钮可点、点击后视频被移除（Console 0）", async ({ page }) => {
+  const g = await login(page);
+  await page.getByRole("button", { name: /视频生成/ }).click();
+  const vg = page.getByTestId("panel-video_gen");
+
+  // 上传真实 1080p 视频（chromium 可解码元数据 → 预检通过 + willDownscale 徽标）。
+  await vg.locator('input[type="file"]#vg-ref-videos').setInputFiles("e2e/fixtures/v2v-1080p-2s.mp4");
+  await expect(vg.getByRole("button", { name: /添加参考视频（1\/3）/ })).toBeVisible({ timeout: 15_000 });
+  // 徽标可见（不能为了不遮挡砍掉它）。
+  await expect(vg.getByText(/将自动压缩至 720p/)).toBeVisible();
+  // 删除按钮可见且**可真实点击**（遮挡时此 click 会因 pointer interception 失败）→ 视频被移除。
+  const del = vg.getByRole("button", { name: "移除视频" });
+  await expect(del).toBeVisible();
+  await del.click();
+  await expect(vg.getByRole("button", { name: /添加参考视频（0\/3）/ })).toBeVisible();
+
+  expect(g.pageErrors(), `page errors：\n${g.pageErrors().join("\n")}`).toEqual([]);
+  expect(g.apiFailures(), `/api 网络失败：\n${g.apiFailures().join("\n")}`).toEqual([]);
+  expect(g.apiHttpErrors(), `/api HTTP 4xx/5xx：\n${g.apiHttpErrors().join("\n")}`).toEqual([]);
+  expect(g.realConsoleErrors(), `真 console 错误：\n${g.realConsoleErrors().join("\n")}`).toEqual([]);
+  expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);
+});
+
 test("视频生成优化：新控件 + 2000 墙 + 画面比例/音频/自定义时长/负面 端到端提交（Console 0）", async ({ page }) => {
   const g = await login(page);
 

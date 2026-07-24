@@ -124,6 +124,29 @@ describe("ReferenceVideosPicker (V2V · D5/D9/D10)", () => {
     expect(screen.getByText(new RegExp(copy.workbench.vgRefVideoWillDownscale))).toBeInTheDocument();
   });
 
+  // 🔴 BADGE-OVERLAP-FIX 承重（生产实拍：压缩徽标盖住删除按钮 → 有徽标的视频删不掉）：
+  // ① 交互语义：**有徽标时**点删除 → 条目真被移除（当初承重没覆盖「有徽标 + 删除」组合，本条补上）。
+  // ② 结构钉（jsdom 无 hit-testing，用结构断言对抗层叠回归；变异：告知移回 top / 去 z-10 / 底部条去
+  //    pointer-events-none → 本条红）：删除按钮 z-10；告知在 pointer-events-none 的底部条内（非顶部角）。
+  it("有压缩/转码徽标时删除按钮仍可点且能删除；徽标在底部条、按钮 z-10（结构互不遮挡）", async () => {
+    inspectByName = { "a.mp4": passing(5, { willTranscode: true, willDownscale: true }) };
+    render(<ReferenceVideosPicker inspect={inspect} />);
+    pickFiles("a.mp4");
+    await waitFor(() => expect(screen.getByRole("button", { name: /（1\/3）/ })).toBeInTheDocument());
+    // ② 结构：按钮提层；告知徽标位于 pointer-events-none 底部条（不在顶部角与按钮抢位）。
+    const del = screen.getByRole("button", { name: copy.workbench.removeVideo });
+    expect(del.className).toContain("z-10");
+    const badge = screen.getByText(new RegExp(copy.workbench.vgRefVideoWillDownscale));
+    const bottomBar = badge.parentElement as HTMLElement;
+    expect(bottomBar.className).toContain("pointer-events-none");
+    expect(bottomBar.className).toContain("bottom-0");
+    expect(bottomBar.className).not.toContain("top-");
+    // ① 交互：点删除 → 条目移除（回到 0/3）、预览 URL 释放。
+    fireEvent.click(del);
+    expect(screen.getByRole("button", { name: /（0\/3）/ })).toBeInTheDocument();
+    expect(URL.revokeObjectURL).toHaveBeenCalled();
+  });
+
   // D8：互斥禁用（父级传 disabled）→ 上传按钮禁用 + 原因说明。
   it("disabled（已传参考图）→ 按钮禁用 + 互斥原因可见", () => {
     render(<ReferenceVideosPicker inspect={inspect} disabled disabledHint={copy.workbench.vgRefMediaExclusiveImages} />);
