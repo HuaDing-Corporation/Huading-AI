@@ -62,7 +62,7 @@ def test_generation_wait_defaults_allow_1500_seconds(monkeypatch) -> None:
     # Polling endpoints should fail fast per request while the overall task waits.
     assert s.engine_seedance_request_timeout_seconds == 120
     assert s.engine_omnihuman_request_timeout_seconds == 120
-    assert s.engine_apimart_request_timeout_seconds == 60
+    assert s.engine_apimart_request_timeout_seconds == 120
 
 
 def test_generation_wait_settings_remain_env_overridable(monkeypatch) -> None:

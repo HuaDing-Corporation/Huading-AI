@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -13,9 +14,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.exceptions import AppError
+from app.core.image_aspect_ratio import IMAGE_ASPECT_RATIOS
 from app.db.models import Asset, ReversePromptJob, User
 from app.providers.base import resolve
 from app.schemas.reverse_prompt import (
+    ReversePromptEstimateResponse,
     ReversePromptHistoryItem,
     ReversePromptHistoryListResponse,
     ReversePromptResult,
@@ -32,6 +35,12 @@ _TARGET_FORMAT = "seedance_2_0"
 _SOURCE_IMAGE_TYPES = {"avatar_image", "product_image", "generated_image", "cover"}
 _SOURCE_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 _EMPTY_TEXT_PLACEHOLDERS = {"none", "n/a", "na", "null", "nil"}
+_SEEDANCE_I2V_ASPECT_RATIOS = ("9:16", "16:9", "1:1")
+_VIDEO_GEN_ASPECT_RATIOS = ("16:9", "9:16", "1:1", "4:3", "3:4", "21:9")
+_VIDEO_GEN_PROMPT_LIMIT = 2_000
+_PHOTO_PROMPT_LIMIT = 20_000
+_ECOM_MODEL_PROMPT_LIMIT = 20_000
+_JOB_PROGRESS_KEY = "_job_progress"
 
 
 def live_reverse_prompt_job_condition():
@@ -124,6 +133,38 @@ def create_reverse_prompt_job(
     db.commit()
     db.refresh(job)
     return job
+
+
+def estimate_reverse_prompt(
+    db: Session,
+    *,
+    tenant_id: str,
+    source_asset_id: str,
+) -> ReversePromptEstimateResponse:
+    source_kind, source = source_asset_or_raise(
+        db,
+        tenant_id=tenant_id,
+        asset_id=source_asset_id,
+    )
+    if source_kind == "image":
+        estimate = quota.estimate_reverse_prompt_quota(db, tenant_id=tenant_id)
+        return ReversePromptEstimateResponse(
+            credits=estimate.reservation_units,
+            duration_sec=None,
+            tier="image",
+        )
+    duration_ms = int(source.duration_ms or 0)
+    tier = quota.reverse_prompt_video_tier(duration_ms)
+    estimate = quota.estimate_reverse_prompt_video_quota(
+        db,
+        tenant_id=tenant_id,
+        duration_ms=duration_ms,
+    )
+    return ReversePromptEstimateResponse(
+        credits=estimate.reservation_units,
+        duration_sec=round(duration_ms / 1000.0, 3),
+        tier=tier,
+    )
 
 
 def regenerate_reverse_prompt_job(
@@ -433,7 +474,7 @@ def source_asset_or_raise(
         and mime_type == "video/mp4"
         and (source.metadata_ or {}).get("purpose") == "reverse_prompt"
         and source.duration_ms is not None
-        and 1_000 <= source.duration_ms <= 60_000
+        and 1_000 <= source.duration_ms <= 180_000
     ):
         source_kind = "video"
     else:
@@ -482,6 +523,7 @@ def fail_reverse_prompt_video_dispatch(
 
 
 def job_to_read(job: ReversePromptJob) -> dict[str, Any]:
+    progress = _job_progress(job)
     return {
         "id": job.id,
         "status": job.status,
@@ -497,6 +539,8 @@ def job_to_read(job: ReversePromptJob) -> dict[str, Any]:
         "completion_tokens": int(job.completion_tokens or 0),
         "credits": float(job.credits or 0),
         "cost_cents": int(job.cost_cents or 0),
+        "segments_total": progress.get("segments_total") if progress else None,
+        "segments_done": progress.get("segments_done") if progress else None,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
         "saved_at": job.saved_at,
@@ -517,10 +561,21 @@ def mark_reverse_prompt_job_succeeded(
     job: ReversePromptJob,
     result: Mapping[str, Any],
 ) -> None:
-    result_json = _result_payload(result)
+    source = db.get(Asset, job.source_asset_id) if job.source_asset_id else None
+    if source is not None and source.tenant_id != job.tenant_id:
+        source = None
+    result_json = _result_payload(
+        result,
+        source=source,
+        source_kind=job.source_kind,
+    )
     job.status = "succeeded"
     job.result_json = result_json
-    job.raw_model_json = _dict_or_empty(result.get("raw_model_json"))
+    raw_model_json = _dict_or_empty(result.get("raw_model_json"))
+    progress = _job_progress(job)
+    if progress is not None:
+        raw_model_json[_JOB_PROGRESS_KEY] = progress
+    job.raw_model_json = raw_model_json
     job.provider = str(result.get("provider") or "apimart")
     job.model = str(result.get("model") or settings.engine_apimart_reverse_prompt_model)
     job.prompt_tokens = nonnegative_int(result.get("prompt_tokens"))
@@ -529,6 +584,41 @@ def mark_reverse_prompt_job_succeeded(
     job.cost_cents = nonnegative_int(result.get("cost_cents"))
     job.updated_at = datetime.now(UTC)
     db.flush()
+
+
+def set_reverse_prompt_segment_progress(
+    db: Session,
+    *,
+    job: ReversePromptJob,
+    segments_total: int,
+    segments_done: int,
+) -> None:
+    raw_model_json = _dict_or_empty(job.raw_model_json)
+    raw_model_json[_JOB_PROGRESS_KEY] = {
+        "segments_total": max(1, int(segments_total)),
+        "segments_done": max(0, min(int(segments_done), int(segments_total))),
+    }
+    job.raw_model_json = raw_model_json
+    job.updated_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(job)
+
+
+def _job_progress(job: ReversePromptJob) -> dict[str, int] | None:
+    raw_model_json = job.raw_model_json
+    if not isinstance(raw_model_json, Mapping):
+        return None
+    raw_progress = raw_model_json.get(_JOB_PROGRESS_KEY)
+    if not isinstance(raw_progress, Mapping):
+        return None
+    total = nonnegative_int(raw_progress.get("segments_total"))
+    done = nonnegative_int(raw_progress.get("segments_done"))
+    if total <= 0:
+        return None
+    return {
+        "segments_total": total,
+        "segments_done": min(done, total),
+    }
 
 
 def mark_reverse_prompt_job_failed(
@@ -566,7 +656,12 @@ def _record_usage(
     )
 
 
-def _result_payload(result: Mapping[str, Any]) -> dict[str, Any]:
+def _result_payload(
+    result: Mapping[str, Any],
+    *,
+    source: Asset | None,
+    source_kind: str,
+) -> dict[str, Any]:
     payload = {
         "target_format": "seedance_2_0",
         "prompt_zh": _clean_text(result.get("prompt_zh")),
@@ -589,42 +684,230 @@ def _result_payload(result: Mapping[str, Any]) -> dict[str, Any]:
             else None
         ),
     }
+    payload["source_media"] = _source_media_payload(source, source_kind=source_kind)
+    payload["structured_prompt"] = structured_prompt(payload)
     payload["fill_targets"] = fill_targets(payload)
     # Normalize nested models before storing so provider-only fields never leak to the API.
     validated = ReversePromptResult.model_validate(payload)
     return validated.model_dump(mode="json")
 
 
-def fill_targets(result: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+def fill_targets(result: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     prompt_zh = _clean_text(result.get("prompt_zh"))
     prompt_en = _clean_text(result.get("prompt_en")) or prompt_zh
-    seedance_prompt = _seedance_prompt(result)
+    structured = result.get("structured_prompt")
+    structured_en = (
+        _clean_multiline_text(structured.get("en"))
+        if isinstance(structured, Mapping)
+        else structured_prompt(result)["en"]
+    )
     topic = _short_text(prompt_zh or prompt_en, 80)
-    selling = "; ".join(_clean_list(result.get("selling_points")))
-    poster_title = _short_text(topic, 30)
-    poster_subtitle = _short_text(selling or _clean_text(result.get("scene")), 40)
+    source_media = result.get("source_media")
+    width = _positive_int(source_media.get("width")) if isinstance(source_media, Mapping) else None
+    height = (
+        _positive_int(source_media.get("height")) if isinstance(source_media, Mapping) else None
+    )
+    duration_sec = (
+        _positive_float(source_media.get("duration_sec"))
+        if isinstance(source_media, Mapping)
+        else None
+    )
+    seedance_duration, seedance_clamped = _clamped_duration(
+        duration_sec,
+        minimum=5,
+        maximum=120,
+    )
+    video_gen_duration, video_gen_clamped = _clamped_duration(
+        duration_sec,
+        minimum=4,
+        maximum=15,
+    )
+    video_analysis = result.get("video_analysis")
+    transcript = (
+        _clean_text(video_analysis.get("audio_transcript"))
+        if isinstance(video_analysis, Mapping)
+        else ""
+    )
+    shot_section = _shot_section(video_analysis)
     return {
         "avatar_talk": {"topic": topic, "script": _short_text(prompt_zh or prompt_en, 500)},
-        "seedance_i2v": {"topic": topic, "scene_prompt": seedance_prompt},
-        "video_gen": {"topic": topic, "prompt": prompt_en},
-        "photo": {"topic": seedance_prompt},
-        "ecom_model": {"extra_prompt": _short_text(seedance_prompt, 200)},
-        "ecom_poster": {"title": poster_title, "subtitle": poster_subtitle},
+        "seedance_i2v": {
+            "topic": topic,
+            "script": transcript or None,
+            "scene_prompt": _whole_sections_within_limit(
+                structured_en,
+                _PHOTO_PROMPT_LIMIT,
+            ),
+            "negative_prompt": _clean_text(result.get("negative_prompt")),
+            "aspect_ratio": _closest_supported_aspect_ratio(
+                width,
+                height,
+                _SEEDANCE_I2V_ASPECT_RATIOS,
+            ),
+            "duration_sec": seedance_duration,
+            "duration_clamped": seedance_clamped,
+            "shot_section": shot_section,
+        },
+        "video_gen": {
+            "topic": topic,
+            "prompt": _whole_sections_within_limit(
+                structured_en,
+                _VIDEO_GEN_PROMPT_LIMIT,
+            ),
+            "negative_prompt": _clean_text(result.get("negative_prompt")),
+            "aspect_ratio": _closest_supported_aspect_ratio(
+                width,
+                height,
+                _VIDEO_GEN_ASPECT_RATIOS,
+            ),
+            "duration_sec": video_gen_duration,
+            "duration_clamped": video_gen_clamped,
+            "generate_audio": bool(transcript),
+            "shot_section": shot_section,
+        },
+        "photo": {
+            "topic": _whole_sections_within_limit(structured_en, _PHOTO_PROMPT_LIMIT),
+            "master_prompt": None,
+            "negative_prompt": _clean_text(result.get("negative_prompt")),
+            "aspect_ratio": _closest_supported_aspect_ratio(
+                width,
+                height,
+                IMAGE_ASPECT_RATIOS,
+            ),
+        },
+        "ecom_model": {
+            "extra_prompt": _whole_sections_within_limit(
+                structured_en,
+                _ECOM_MODEL_PROMPT_LIMIT,
+            ),
+            "aspect_ratio": _closest_supported_aspect_ratio(
+                width,
+                height,
+                IMAGE_ASPECT_RATIOS,
+            ),
+        },
     }
 
 
-def _seedance_prompt(result: Mapping[str, Any]) -> str:
-    parts = [
-        result.get("subject"),
-        result.get("scene"),
-        result.get("composition"),
-        result.get("camera"),
-        result.get("lighting"),
-        result.get("motion_hint"),
-        ", ".join(_clean_list(result.get("style_tags"))),
+def structured_prompt(result: Mapping[str, Any]) -> dict[str, str]:
+    style = ", ".join(_clean_list(result.get("style_tags")))
+    sections = [
+        ("Subject", "主体", _clean_text(result.get("subject"))),
+        ("Scene", "场景", _clean_text(result.get("scene"))),
+        ("Composition", "构图", _clean_text(result.get("composition"))),
+        ("Camera", "镜头", _clean_text(result.get("camera"))),
+        ("Lighting", "光线", _clean_text(result.get("lighting"))),
+        ("Motion", "运动", _clean_text(result.get("motion_hint"))),
+        ("Style", "风格", style),
     ]
-    text = ", ".join(_clean_text(part) for part in parts if _clean_text(part))
-    return text or _clean_text(result.get("prompt_en")) or _clean_text(result.get("prompt_zh"))
+    return {
+        "en": "\n".join(f"{label}: {value}" for label, _, value in sections),
+        "zh": "\n".join(f"{label}: {value}" for _, label, value in sections),
+    }
+
+
+def _source_media_payload(source: Asset | None, *, source_kind: str) -> dict[str, Any]:
+    width = _positive_int(source.width) if source is not None else None
+    height = _positive_int(source.height) if source is not None else None
+    duration_sec = (
+        round(float(source.duration_ms) / 1000.0, 3)
+        if source_kind == "video" and source is not None and source.duration_ms
+        else None
+    )
+    return {
+        "kind": source_kind,
+        "width": width,
+        "height": height,
+        "duration_sec": duration_sec,
+        "aspect_ratio_raw": _raw_aspect_ratio(width, height),
+    }
+
+
+def _raw_aspect_ratio(width: int | None, height: int | None) -> str | None:
+    if width is None or height is None:
+        return None
+    divisor = math.gcd(width, height)
+    return f"{width // divisor}:{height // divisor}"
+
+
+def _closest_supported_aspect_ratio(
+    width: int | None,
+    height: int | None,
+    allowed: tuple[str, ...],
+) -> str | None:
+    if width is None or height is None:
+        return None
+    actual = width / height
+    return min(
+        allowed,
+        key=lambda ratio: abs(
+            math.log(
+                actual
+                / (
+                    int(ratio.split(":", 1)[0])
+                    / int(ratio.split(":", 1)[1])
+                )
+            )
+        ),
+    )
+
+
+def _clamped_duration(
+    duration_sec: float | None,
+    *,
+    minimum: int,
+    maximum: int,
+) -> tuple[int | None, bool]:
+    if duration_sec is None:
+        return None, False
+    rounded = int(round(duration_sec))
+    clamped = max(minimum, min(maximum, rounded))
+    return clamped, not math.isclose(float(clamped), duration_sec)
+
+
+def _shot_section(video_analysis: Any) -> str | None:
+    if not isinstance(video_analysis, Mapping):
+        return None
+    summary = _clean_text(video_analysis.get("shot_summary"))
+    return f"Shots:\n{summary}" if summary else None
+
+
+def _whole_sections_within_limit(value: str, limit: int) -> str:
+    text = _clean_multiline_text(value)
+    if len(text) <= limit:
+        return text
+    selected: list[str] = []
+    length = 0
+    for section in text.splitlines():
+        added = len(section) + (1 if selected else 0)
+        if length + added <= limit:
+            selected.append(section)
+            length += added
+    return "\n".join(selected)
+
+
+def _clean_multiline_text(value: Any) -> str:
+    return "\n".join(
+        cleaned
+        for line in str(value or "").strip().splitlines()
+        if (cleaned := " ".join(line.split()))
+    )
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _positive_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 def _dict_or_empty(value: Any) -> dict[str, object]:
