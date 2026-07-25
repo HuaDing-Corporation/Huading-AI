@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     engine_admin_retry_stale_seconds: int = Field(default=60, ge=0)
     engine_orphan_task_stale_seconds: float = Field(default=1800.0, gt=0)
     engine_orphan_recovery_interval_seconds: float = Field(default=60.0, ge=0)
+    engine_gen_heartbeat_interval_seconds: float = Field(
+        default=15.0,
+        ge=1.0,
+        le=300.0,
+        allow_inf_nan=False,
+    )
 
     jwt_secret_key: str = Field(min_length=32)
     jwt_algorithm: str = "HS256"

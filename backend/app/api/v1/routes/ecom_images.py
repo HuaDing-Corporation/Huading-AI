@@ -3,10 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import uuid4
 
+import redis
 from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import DbSessionDependency, get_object_storage, require_permission
+from app.api.deps import (
+    DbSessionDependency,
+    get_object_storage,
+    get_progress_store,
+    require_permission,
+    scoped_task_id,
+)
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
 from app.db.models import Asset, User, VideoTask
@@ -44,6 +51,7 @@ from app.schemas.ecom_images import (
 from app.schemas.response import ApiResponse, ok
 from app.services import ecom_replicate
 from app.services.history import prune_video_history
+from app.services.progress import ProgressStore
 from app.services.quota import reserve_image_generation_quota
 from app.services.storage.base import ObjectStorage
 from app.workers.image_gen import generate_ecom_replicate_task, generate_image_task
@@ -52,6 +60,7 @@ router = APIRouter()
 logger = get_logger(__name__)
 CreateEcomImagePermissionDependency = Depends(require_permission("video:create"))
 ObjectStorageDependency = Depends(get_object_storage)
+ProgressStoreDependency = Depends(get_progress_store)
 
 _ECOM_CUTOUT_KIND = "ecom_cutout"
 _ECOM_MODEL_KIND = "ecom_model"
@@ -546,9 +555,26 @@ def get_replicate_job(
     user: User = CreateEcomImagePermissionDependency,
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
+    store: ProgressStore = ProgressStoreDependency,
 ) -> ApiResponse[EcomReplicateAccepted]:
     job = ecom_replicate.job_or_404(db, tenant_id=user.tenant_id, job_id=job_id)
-    return ok(request, ecom_replicate.response_for_job(db, job, storage=storage))
+    response = ecom_replicate.response_for_job(db, job, storage=storage)
+    try:
+        snapshot = store.read(scoped_task_id(user.tenant_id, job.id))
+    except redis.RedisError as exc:
+        logger.warning(
+            "ecom_replicate_heartbeat_read_failed",
+            tenant_id=user.tenant_id,
+            job_id=job.id,
+            error=str(exc),
+        )
+        snapshot = None
+    return ok(
+        request,
+        response.model_copy(
+            update={"heartbeat_at": snapshot.get("heartbeat_at") if snapshot else None}
+        ),
+    )
 
 
 @router.post(

@@ -3257,6 +3257,28 @@ def test_video_sse_payload_preserves_fractional_progress_for_watchdog() -> None:
     assert payload["progress"] == 25.125
 
 
+def test_video_sse_payload_passes_through_generation_heartbeat() -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    payload = videos_route._sse_payload(
+        "image-heartbeat-task",
+        {
+            "status": "running",
+            "progress": 30,
+            "stage": "generating",
+            "heartbeat_at": "2026-07-25T08:00:00+00:00",
+        },
+    )
+
+    assert payload == {
+        "task_id": "image-heartbeat-task",
+        "status": "running",
+        "progress": 30,
+        "step": "generating",
+        "heartbeat_at": "2026-07-25T08:00:00+00:00",
+    }
+
+
 def test_video_sse_emits_new_enum_terminal_frame(auth_context, auth_db) -> None:
     store = _MemProgressStore()
     storage = _FakeStorage()
