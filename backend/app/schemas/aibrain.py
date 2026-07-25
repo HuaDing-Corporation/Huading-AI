@@ -62,6 +62,14 @@ class ConversationListResponse(BaseModel):
     total: int
 
 
+class ConversationDeletedResponse(BaseModel):
+    deleted: bool
+
+
+class ConversationClearResponse(BaseModel):
+    deleted_count: int
+
+
 class ChatMessageCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

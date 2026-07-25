@@ -75,6 +75,17 @@ _DETAIL_THEMES = (
 _ALLOWED_SIZES = {"768x1024", "1024x1024", "1024x1536"}
 
 
+def live_ecom_replicate_job_condition():
+    return EcomReplicateJob.deleted_at.is_(None)
+
+
+def select_live_ecom_replicate_jobs(*conditions):
+    return select(EcomReplicateJob).where(
+        live_ecom_replicate_job_condition(),
+        *conditions,
+    )
+
+
 def source_asset_or_raise(db: Session, *, tenant_id: str, asset_id: str) -> Asset:
     asset = db.get(Asset, asset_id)
     if asset is None or asset.tenant_id != tenant_id:
@@ -246,9 +257,10 @@ def confirm_replicate_job(
     job_id: str,
 ) -> tuple[EcomReplicateJob, bool]:
     job = db.scalar(
-        select(EcomReplicateJob)
-        .where(EcomReplicateJob.id == job_id, EcomReplicateJob.tenant_id == tenant_id)
-        .with_for_update()
+        select_live_ecom_replicate_jobs(
+            EcomReplicateJob.id == job_id,
+            EcomReplicateJob.tenant_id == tenant_id,
+        ).with_for_update()
     )
     if job is None:
         raise AppError(
@@ -294,8 +306,13 @@ def confirm_replicate_job(
 
 
 def job_or_404(db: Session, *, tenant_id: str, job_id: str) -> EcomReplicateJob:
-    job = db.get(EcomReplicateJob, job_id)
-    if job is None or job.tenant_id != tenant_id:
+    job = db.scalar(
+        select_live_ecom_replicate_jobs(
+            EcomReplicateJob.id == job_id,
+            EcomReplicateJob.tenant_id == tenant_id,
+        )
+    )
+    if job is None:
         raise AppError(
             "Replicate job not found.",
             code="ECOM_REPLICATE_JOB_NOT_FOUND",
@@ -377,9 +394,10 @@ def prepare_output_retry(
     output_index: int,
 ) -> tuple[EcomReplicateJob, EcomReplicateOutput]:
     job = db.scalar(
-        select(EcomReplicateJob)
-        .where(EcomReplicateJob.id == job_id, EcomReplicateJob.tenant_id == tenant_id)
-        .with_for_update()
+        select_live_ecom_replicate_jobs(
+            EcomReplicateJob.id == job_id,
+            EcomReplicateJob.tenant_id == tenant_id,
+        ).with_for_update()
     )
     if job is None:
         raise AppError(
@@ -419,9 +437,10 @@ def prepare_failed_outputs_retry(
     job_id: str,
 ) -> tuple[EcomReplicateJob, list[EcomReplicateOutput]]:
     job = db.scalar(
-        select(EcomReplicateJob)
-        .where(EcomReplicateJob.id == job_id, EcomReplicateJob.tenant_id == tenant_id)
-        .with_for_update()
+        select_live_ecom_replicate_jobs(
+            EcomReplicateJob.id == job_id,
+            EcomReplicateJob.tenant_id == tenant_id,
+        ).with_for_update()
     )
     if job is None:
         raise AppError(

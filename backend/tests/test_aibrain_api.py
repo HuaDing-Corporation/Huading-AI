@@ -10,6 +10,7 @@ from sqlalchemy import select
 from app.api.deps import get_object_storage
 from app.db.models import (
     Asset,
+    ChatConversation,
     ChatMessage,
     ReasoningLedgerEntry,
     ReasoningWallet,
@@ -119,6 +120,250 @@ def test_user_can_create_list_and_read_an_aibrain_conversation(
     )
     assert detail.status_code == 200
     assert detail.json()["data"] == conversation
+
+
+def test_delete_aibrain_conversation_soft_deletes_only_the_conversation(
+    auth_context,
+    auth_db,
+) -> None:
+    client = TestClient(app)
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={"title": "Delete only the conversation"},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    message_id = str(uuid4())
+    with auth_db() as db:
+        db.add(
+            ChatMessage(
+                id=message_id,
+                tenant_id=auth_context["tenant_id"],
+                conversation_id=conversation_id,
+                role="user",
+                content="Preserve this message",
+                attachments=[],
+                status="completed",
+            )
+        )
+        db.commit()
+
+    deleted = client.delete(
+        f"/api/v1/aibrain/conversations/{conversation_id}",
+        headers=auth_context["headers"],
+    )
+    listed = client.get(
+        "/api/v1/aibrain/conversations",
+        headers=auth_context["headers"],
+    )
+    detail = client.get(
+        f"/api/v1/aibrain/conversations/{conversation_id}",
+        headers=auth_context["headers"],
+    )
+    deleted_again = client.delete(
+        f"/api/v1/aibrain/conversations/{conversation_id}",
+        headers=auth_context["headers"],
+    )
+
+    assert deleted.status_code == 200
+    assert deleted.json()["data"] == {"deleted": True}
+    assert listed.status_code == 200
+    assert listed.json()["data"]["total"] == 0
+    assert detail.status_code == 404
+    assert deleted_again.status_code == 404
+    with auth_db() as db:
+        conversation = db.get(ChatConversation, conversation_id)
+        assert conversation is not None
+        assert conversation.deleted_at is not None
+        assert db.get(ChatMessage, message_id) is not None
+
+
+def test_delete_aibrain_conversation_hides_cross_tenant_existence(
+    auth_context,
+    auth_db,
+) -> None:
+    other_tenant_id = "aibrain-delete-other-tenant"
+    conversation_id = "aibrain-delete-foreign-conversation"
+    with auth_db() as db:
+        db.add(
+            Tenant(
+                id=other_tenant_id,
+                slug="aibrain-delete-other",
+                name="AIBrain Delete Other",
+            )
+        )
+        db.flush()
+        db.add(
+            ChatConversation(
+                id=conversation_id,
+                tenant_id=other_tenant_id,
+                title="Foreign conversation",
+            )
+        )
+        db.commit()
+
+    response = TestClient(app).delete(
+        f"/api/v1/aibrain/conversations/{conversation_id}",
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "AIBRAIN_CONVERSATION_NOT_FOUND"
+    with auth_db() as db:
+        assert db.get(ChatConversation, conversation_id).deleted_at is None
+
+
+def test_clear_aibrain_conversations_preserves_messages_ledger_and_wallet_exactly(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    assert (
+        client.post(
+            "/api/v1/aibrain/wallet/topup",
+            json=_topup_payload(500),
+            headers=auth_context["headers"],
+        ).status_code
+        == 200
+    )
+    first_conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={"title": "Ledger-bearing conversation"},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    second_conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={"title": "Second conversation"},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    foreign_tenant_id = "aibrain-clear-foreign-tenant"
+    foreign_conversation_id = "aibrain-clear-foreign-conversation"
+    with auth_db() as db:
+        db.add(
+            Tenant(
+                id=foreign_tenant_id,
+                slug="aibrain-clear-foreign",
+                name="AIBrain Clear Foreign",
+            )
+        )
+        db.flush()
+        db.add(
+            ChatConversation(
+                id=foreign_conversation_id,
+                tenant_id=foreign_tenant_id,
+                title="Foreign conversation must remain live",
+            )
+        )
+        db.commit()
+    provider = _FakeChatProvider(
+        {
+            "content": "A preserved assistant answer.",
+            "model": "gpt-5.6-terra",
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "total_tokens": 1500,
+        }
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    sent = client.post(
+        f"/api/v1/aibrain/conversations/{first_conversation_id}/messages",
+        json={"content": "Preserve the whole audit chain", "tier": "mid"},
+        headers=auth_context["headers"],
+    )
+    assert sent.status_code == 200
+
+    with auth_db() as db:
+        messages_before = [
+            (
+                row.id,
+                row.conversation_id,
+                row.role,
+                row.content,
+                row.status,
+                row.reserved_credits,
+                row.charged_credits,
+            )
+            for row in db.scalars(
+                select(ChatMessage).order_by(ChatMessage.id.asc())
+            )
+        ]
+        ledger_before = [
+            (
+                row.id,
+                row.chat_message_id,
+                row.entry_type,
+                row.amount_credits,
+                row.available_delta,
+                row.reserved_delta,
+                row.available_after,
+                row.reserved_after,
+            )
+            for row in db.scalars(
+                select(ReasoningLedgerEntry).order_by(ReasoningLedgerEntry.id.asc())
+            )
+        ]
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        wallet_before = (
+            wallet.available_credits,
+            wallet.reserved_credits,
+            wallet.total_topup_credits,
+            wallet.total_spent_credits,
+        )
+
+    cleared = client.delete(
+        "/api/v1/aibrain/conversations",
+        headers=auth_context["headers"],
+    )
+
+    assert cleared.status_code == 200
+    assert cleared.json()["data"] == {"deleted_count": 2}
+    with auth_db() as db:
+        conversations = [
+            db.get(ChatConversation, first_conversation_id),
+            db.get(ChatConversation, second_conversation_id),
+        ]
+        assert all(item is not None and item.deleted_at is not None for item in conversations)
+        assert db.get(ChatConversation, foreign_conversation_id).deleted_at is None
+        messages_after = [
+            (
+                row.id,
+                row.conversation_id,
+                row.role,
+                row.content,
+                row.status,
+                row.reserved_credits,
+                row.charged_credits,
+            )
+            for row in db.scalars(
+                select(ChatMessage).order_by(ChatMessage.id.asc())
+            )
+        ]
+        ledger_after = [
+            (
+                row.id,
+                row.chat_message_id,
+                row.entry_type,
+                row.amount_credits,
+                row.available_delta,
+                row.reserved_delta,
+                row.available_after,
+                row.reserved_after,
+            )
+            for row in db.scalars(
+                select(ReasoningLedgerEntry).order_by(ReasoningLedgerEntry.id.asc())
+            )
+        ]
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        wallet_after = (
+            wallet.available_credits,
+            wallet.reserved_credits,
+            wallet.total_topup_credits,
+            wallet.total_spent_credits,
+        )
+
+    assert messages_after == messages_before
+    assert ledger_after == ledger_before
+    assert wallet_after == wallet_before
 
 
 def test_user_can_top_up_the_reasoning_wallet_from_primary_quota(

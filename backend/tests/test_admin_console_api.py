@@ -609,6 +609,33 @@ def test_admin_task_monitor_excludes_soft_deleted_reverse_prompt_jobs(
     assert deleted_job_id not in response.text
 
 
+def test_admin_task_monitor_excludes_soft_deleted_ecom_replicate_jobs(
+    auth_context,
+    auth_db,
+    platform_acme,
+) -> None:
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    jobs = _seed_non_video_task_families(auth_db, fixture)
+    with auth_db() as db:
+        job = db.get(EcomReplicateJob, jobs["replicate_job_id"])
+        job.deleted_at = datetime.now(UTC)
+        db.commit()
+
+    response = TestClient(app).get(
+        "/api/v1/admin/console/tasks",
+        params={
+            "tenant_id": fixture["tenant_id"],
+            "task_family": "ecom_replicate",
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["total"] == 0
+    assert response.json()["data"]["items"] == []
+    assert jobs["replicate_job_id"] not in response.text
+
+
 def test_admin_task_family_does_not_resolve_soft_deleted_reverse_prompt_job(
     auth_context,
     auth_db,
@@ -668,6 +695,50 @@ def test_admin_retry_rejects_soft_deleted_stale_reverse_prompt_job(
         assert job is not None
         assert job.status == "queued"
         assert job.deleted_at is not None
+
+
+def test_admin_retry_rejects_soft_deleted_ecom_replicate_job(
+    auth_context,
+    auth_db,
+    platform_acme,
+    monkeypatch,
+) -> None:
+    from app.api.v1.routes import admin_console as route
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    jobs = _seed_non_video_task_families(auth_db, fixture)
+    with auth_db() as db:
+        job = db.get(EcomReplicateJob, jobs["replicate_job_id"])
+        job.deleted_at = datetime.now(UTC)
+        db.commit()
+    dispatched: list[str] = []
+    monkeypatch.setattr(
+        route.generate_ecom_replicate_task,
+        "apply_async",
+        lambda *args, **kwargs: dispatched.append(jobs["replicate_job_id"]),
+    )
+
+    response = TestClient(app).post(
+        f"/api/v1/admin/console/tasks/{jobs['replicate_job_id']}/retry",
+        params={"task_family": "ecom_replicate"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "TASK_NOT_FOUND"
+    assert dispatched == []
+    with auth_db() as db:
+        job = db.get(EcomReplicateJob, jobs["replicate_job_id"])
+        outputs = list(
+            db.scalars(
+                select(EcomReplicateOutput).where(
+                    EcomReplicateOutput.job_id == jobs["replicate_job_id"]
+                )
+            )
+        )
+        assert job.status == "partial_failed"
+        assert job.deleted_at is not None
+        assert all(output.status == "failed" for output in outputs)
 
 
 def test_admin_console_tenant_mutations_are_transactional_and_audited(
@@ -2243,6 +2314,42 @@ def test_ecom_replicate_worker_entry_claims_job_once_before_rendering(
     assert first["status"] == "executed"
     assert duplicate["status"] == "generating"
     assert calls == [(jobs["replicate_job_id"], None)]
+
+
+def test_ecom_replicate_worker_does_not_claim_soft_deleted_job(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    from app.workers import image_gen
+
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+    jobs = _seed_non_video_task_families(auth_db, fixture)
+    with auth_db() as db:
+        job = db.get(EcomReplicateJob, jobs["replicate_job_id"])
+        job.status = "generating"
+        job.started_at = None
+        job.deleted_at = datetime.now(UTC)
+        db.commit()
+
+    calls: list[str] = []
+    monkeypatch.setattr(image_gen, "SessionLocal", auth_db)
+    monkeypatch.setattr(
+        image_gen,
+        "run_ecom_replicate_generation",
+        lambda job_id, output_index=None: calls.append(job_id)
+        or {"status": "executed"},
+    )
+
+    result = image_gen.generate_ecom_replicate_task.run(jobs["replicate_job_id"])
+
+    assert result == {"job_id": jobs["replicate_job_id"], "status": "missing"}
+    assert calls == []
+    with auth_db() as db:
+        job = db.get(EcomReplicateJob, jobs["replicate_job_id"])
+        assert job.status == "generating"
+        assert job.started_at is None
+        assert job.deleted_at is not None
 
 
 def test_plan_change_updates_target_auth_entitlements_immediately(

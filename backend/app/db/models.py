@@ -557,6 +557,7 @@ class EcomReplicateJob(TenantScopedMixin, Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     error_code: Mapped[str | None] = mapped_column(String(40), default=None)
     error_message: Mapped[str | None] = mapped_column(Text, default=None)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 

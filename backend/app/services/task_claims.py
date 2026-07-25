@@ -8,6 +8,7 @@ from sqlalchemy import select, update
 
 from app.db.models import EcomReplicateJob, VideoTask
 from app.db.session import SessionLocal
+from app.services import ecom_replicate
 
 
 @dataclass(frozen=True)
@@ -58,12 +59,16 @@ def claim_ecom_replicate_job_for_worker(
                 EcomReplicateJob.id == job_id,
                 EcomReplicateJob.status == "generating",
                 EcomReplicateJob.started_at.is_(None),
+                ecom_replicate.live_ecom_replicate_job_condition(),
             )
             .values(started_at=now, updated_at=now)
         )
         claimed = result.rowcount == 1
         status = "generating" if claimed else db.scalar(
-            select(EcomReplicateJob.status).where(EcomReplicateJob.id == job_id)
+            select(EcomReplicateJob.status).where(
+                EcomReplicateJob.id == job_id,
+                ecom_replicate.live_ecom_replicate_job_condition(),
+            )
         )
         db.commit()
     return TaskClaim(claimed=claimed, status=str(status or "missing"))

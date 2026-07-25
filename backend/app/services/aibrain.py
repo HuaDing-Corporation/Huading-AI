@@ -7,7 +7,7 @@ from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from typing import Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -30,6 +30,8 @@ from app.schemas.aibrain import (
     AIBrainTier,
     ChatMessageCreateResponse,
     ChatMessageRead,
+    ConversationClearResponse,
+    ConversationDeletedResponse,
     ConversationListResponse,
     ConversationRead,
     ConversationSummary,
@@ -1029,6 +1031,40 @@ def list_conversations(
         items=[conversation_to_summary(item) for item in conversations],
         total=total,
     )
+
+
+def delete_conversation(
+    db: Session,
+    *,
+    tenant_id: str,
+    conversation_id: str,
+) -> ConversationDeletedResponse:
+    conversation = conversation_or_404(
+        db,
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+    )
+    conversation.deleted_at = datetime.now(UTC)
+    db.commit()
+    return ConversationDeletedResponse(deleted=True)
+
+
+def clear_conversations(
+    db: Session,
+    *,
+    tenant_id: str,
+) -> ConversationClearResponse:
+    result = db.execute(
+        update(ChatConversation)
+        .where(
+            ChatConversation.tenant_id == tenant_id,
+            ChatConversation.deleted_at.is_(None),
+        )
+        .values(deleted_at=datetime.now(UTC))
+    )
+    deleted_count = int(result.rowcount or 0)
+    db.commit()
+    return ConversationClearResponse(deleted_count=deleted_count)
 
 
 def get_conversation(

@@ -170,6 +170,7 @@ def delete_video_task(
         select(VideoTask).where(
             VideoTask.id == task_id,
             VideoTask.tenant_id == tenant_id,
+            VideoTask.deleted_at.is_(None),
         )
     )
     if task is None:
@@ -193,6 +194,7 @@ def clear_video_history(
                 VideoTask.tenant_id == tenant_id,
                 video_mode_filter(mode),
                 terminal_history_filter(),
+                VideoTask.deleted_at.is_(None),
             )
         )
     )
@@ -214,6 +216,7 @@ def prune_video_history(
                 VideoTask.tenant_id == tenant_id,
                 video_mode_filter(mode),
                 terminal_history_filter(),
+                VideoTask.deleted_at.is_(None),
             )
             .order_by(VideoTask.created_at.desc(), VideoTask.id.desc())
         )
