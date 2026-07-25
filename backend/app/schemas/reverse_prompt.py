@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 ReversePromptTargetFormat = Literal["seedance_2_0"]
 ReversePromptSourceKind = Literal["image", "video"]
+ReversePromptClearScope = Literal["all", "image", "video"]
 ReversePromptImageAspectRatio = Literal[
     "1:1",
     "4:3",

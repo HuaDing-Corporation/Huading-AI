@@ -1,14 +1,23 @@
 import importlib.util
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from fastapi.testclient import TestClient
-from sqlalchemy import Column, MetaData, String, Table, create_engine, inspect, text
+from sqlalchemy import Column, MetaData, String, Table, create_engine, inspect, select, text
 
-from app.db.models import Asset, ReversePromptJob, TaskAsset, Tenant, VideoTask
+from app.db.models import (
+    Asset,
+    ReversePromptJob,
+    Subscription,
+    TaskAsset,
+    Tenant,
+    UsageRecord,
+    VideoTask,
+)
 from app.main import app
 
 
@@ -54,6 +63,25 @@ def _reverse_job(
         created_at=created_at,
         updated_at=created_at,
     )
+
+
+def _mapped_snapshot(value: object) -> dict[str, object]:
+    return {
+        attribute.key: getattr(value, attribute.key)
+        for attribute in inspect(value).mapper.column_attrs
+    }
+
+
+def _usage_snapshot(record: UsageRecord) -> dict[str, object]:
+    snapshot = _mapped_snapshot(record)
+    for key in ("quantity", "credits", "provider_cost_usd"):
+        if snapshot[key] is not None:
+            snapshot[key] = str(snapshot[key])
+    for key in ("created_at", "settled_at"):
+        value = snapshot[key]
+        if isinstance(value, datetime):
+            snapshot[key] = value.replace(tzinfo=UTC).isoformat()
+    return snapshot
 
 
 def test_reverse_prompt_history_lists_all_statuses_with_tenant_safe_sources(
@@ -315,7 +343,91 @@ def test_reverse_prompt_delete_soft_hides_job_everywhere_and_keeps_source(
     assert storage.deleted_keys == []
 
 
-def test_reverse_prompt_clear_history_soft_deletes_current_tenant_only_and_keeps_media(
+def test_reverse_prompt_clear_history_requires_explicit_valid_scope(
+    auth_context,
+) -> None:
+    client = TestClient(app)
+    missing = client.delete(
+        "/api/v1/reverse-prompt/jobs",
+        headers=auth_context["headers"],
+    )
+    invalid = client.delete(
+        "/api/v1/reverse-prompt/jobs",
+        params={"scope": "audio"},
+        headers=auth_context["headers"],
+    )
+
+    assert missing.status_code == 422
+    assert invalid.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("scope", "deleted_ids", "remaining_ids"),
+    [
+        ("all", {"reverse-clear-scope-image", "reverse-clear-scope-video"}, set()),
+        ("image", {"reverse-clear-scope-image"}, {"reverse-clear-scope-video"}),
+        ("video", {"reverse-clear-scope-video"}, {"reverse-clear-scope-image"}),
+    ],
+)
+def test_reverse_prompt_clear_history_respects_explicit_scope(
+    auth_context,
+    auth_db,
+    scope: str,
+    deleted_ids: set[str],
+    remaining_ids: set[str],
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    now = datetime.now(UTC)
+    with auth_db() as db:
+        db.add_all(
+            [
+                _reverse_job(
+                    job_id="reverse-clear-scope-image",
+                    tenant_id=tenant_id,
+                    source_kind="image",
+                    status="succeeded",
+                    created_at=now,
+                    source_storage_key=(
+                        f"tenants/{tenant_id}/uploads/reverse-clear-scope.png"
+                    ),
+                ),
+                _reverse_job(
+                    job_id="reverse-clear-scope-video",
+                    tenant_id=tenant_id,
+                    source_kind="video",
+                    status="failed",
+                    created_at=now - timedelta(seconds=1),
+                    source_storage_key=(
+                        f"tenants/{tenant_id}/uploads/reverse-clear-scope.mp4"
+                    ),
+                ),
+            ]
+        )
+        db.commit()
+
+    client = TestClient(app)
+    response = client.delete(
+        "/api/v1/reverse-prompt/jobs",
+        params={"scope": scope},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {"deleted_count": len(deleted_ids)}
+    with auth_db() as db:
+        assert {
+            job_id
+            for job_id in deleted_ids
+            if db.get(ReversePromptJob, job_id).deleted_at is not None
+        } == deleted_ids
+        assert {
+            job_id
+            for job_id in remaining_ids
+            if db.get(ReversePromptJob, job_id).deleted_at is None
+        } == remaining_ids
+
+
+def test_reverse_prompt_clear_history_keeps_linked_media_and_billing_unchanged(
     auth_context,
     auth_db,
     monkeypatch,
@@ -323,10 +435,15 @@ def test_reverse_prompt_clear_history_soft_deletes_current_tenant_only_and_keeps
     tenant_id = auth_context["tenant_id"]
     other_tenant_id = "reverse-clear-other"
     now = datetime.now(UTC)
+    usage_created_at = datetime(2026, 7, 26, 1, 0, tzinfo=UTC)
+    usage_settled_at = usage_created_at + timedelta(seconds=8)
     source_asset_id = "reverse-clear-source"
     source_key = f"tenants/{tenant_id}/uploads/clear-source.png"
     source_task_id = "reverse-clear-source-task"
+    source_video_key = f"tenants/{tenant_id}/videos/clear-source.mp4"
     task_asset_id = "reverse-clear-task-asset"
+    image_job_id = "reverse-clear-image"
+    video_job_id = "reverse-clear-video"
     source_asset = Asset(
         id=source_asset_id,
         tenant_id=tenant_id,
@@ -334,7 +451,11 @@ def test_reverse_prompt_clear_history_soft_deletes_current_tenant_only_and_keeps
         source="upload",
         storage_key=source_key,
         mime_type="image/png",
+        size_bytes=2048,
+        width=1024,
+        height=1024,
         status="ready",
+        metadata_={"purpose": "reverse-clear-history-bearing-test"},
     )
     source_task = VideoTask(
         id=source_task_id,
@@ -342,6 +463,11 @@ def test_reverse_prompt_clear_history_soft_deletes_current_tenant_only_and_keeps
         status="done",
         mode="photo",
         video_mode="photo",
+        storage_bucket="huading-videos",
+        storage_key=source_video_key,
+        content_type="video/mp4",
+        size_bytes=4096,
+        duration_sec=8.5,
     )
     task_asset = TaskAsset(
         id=task_asset_id,
@@ -349,6 +475,24 @@ def test_reverse_prompt_clear_history_soft_deletes_current_tenant_only_and_keeps
         asset_id=source_asset.id,
         role="input_reference_image",
     )
+    image_job = _reverse_job(
+        job_id=image_job_id,
+        tenant_id=tenant_id,
+        source_kind="image",
+        status="succeeded",
+        created_at=now,
+        source_storage_key=source_key,
+    )
+    image_job.source_asset_id = source_asset_id
+    video_job = _reverse_job(
+        job_id=video_job_id,
+        tenant_id=tenant_id,
+        source_kind="video",
+        status="failed",
+        created_at=now - timedelta(minutes=1),
+        source_storage_key=source_video_key,
+    )
+    video_job.source_video_task_id = source_task_id
     already_deleted_at = now - timedelta(days=1)
     already_deleted_job = _reverse_job(
         job_id="reverse-clear-already-deleted",
@@ -364,25 +508,18 @@ def test_reverse_prompt_clear_history_soft_deletes_current_tenant_only_and_keeps
         db.add(Tenant(id=other_tenant_id, slug=other_tenant_id, name="Other"))
         db.add_all([source_asset, source_task])
         db.flush()
+        subscription = db.scalar(
+            select(Subscription).where(Subscription.tenant_id == tenant_id)
+        )
+        assert subscription is not None
+        subscription_id = subscription.id
+        subscription.quota_credits_used = 321
+        subscription.quota_credits_reserved = 45
         db.add(task_asset)
         db.add_all(
             [
-                _reverse_job(
-                    job_id="reverse-clear-image",
-                    tenant_id=tenant_id,
-                    source_kind="image",
-                    status="succeeded",
-                    created_at=now,
-                    source_storage_key=source_key,
-                ),
-                _reverse_job(
-                    job_id="reverse-clear-video",
-                    tenant_id=tenant_id,
-                    source_kind="video",
-                    status="failed",
-                    created_at=now - timedelta(minutes=1),
-                    source_storage_key=f"tenants/{tenant_id}/uploads/clear-source.mp4",
-                ),
+                image_job,
+                video_job,
                 already_deleted_job,
                 _reverse_job(
                     job_id="reverse-clear-foreign",
@@ -396,7 +533,106 @@ def test_reverse_prompt_clear_history_soft_deletes_current_tenant_only_and_keeps
                 ),
             ]
         )
+        db.add_all(
+            [
+                UsageRecord(
+                    id="reverse-clear-usage-1-settled",
+                    tenant_id=tenant_id,
+                    subscription_id=subscription_id,
+                    reverse_prompt_job_id=image_job_id,
+                    capability="reverse_prompt",
+                    provider="apimart",
+                    model="gemini-3.1-pro-preview",
+                    unit="call",
+                    quantity=Decimal("1.000"),
+                    credits=Decimal("30.000000"),
+                    cost_cents=14,
+                    provider_cost_usd=Decimal("0.01930240"),
+                    currency="CNY",
+                    status="settled",
+                    created_at=usage_created_at,
+                    settled_at=usage_settled_at,
+                ),
+                UsageRecord(
+                    id="reverse-clear-usage-2-reserved",
+                    tenant_id=tenant_id,
+                    subscription_id=subscription_id,
+                    reverse_prompt_job_id=video_job_id,
+                    capability="reverse_prompt_video",
+                    provider="apimart",
+                    model="gemini-3.1-pro-preview",
+                    unit="call",
+                    quantity=Decimal("1.000"),
+                    credits=Decimal("180.000000"),
+                    cost_cents=0,
+                    provider_cost_usd=None,
+                    currency="CNY",
+                    status="reserved",
+                    created_at=usage_created_at + timedelta(seconds=1),
+                    settled_at=None,
+                ),
+            ]
+        )
         db.commit()
+
+    expected_usage = [
+        {
+            "id": "reverse-clear-usage-1-settled",
+            "tenant_id": tenant_id,
+            "subscription_id": subscription_id,
+            "video_task_id": None,
+            "reverse_prompt_job_id": image_job_id,
+            "chat_message_id": None,
+            "capability": "reverse_prompt",
+            "provider": "apimart",
+            "model": "gemini-3.1-pro-preview",
+            "unit": "call",
+            "quantity": "1.000",
+            "credits": "30.000000",
+            "cost_cents": 14,
+            "provider_cost_usd": "0.01930240",
+            "currency": "CNY",
+            "status": "settled",
+            "created_at": usage_created_at.isoformat(),
+            "settled_at": usage_settled_at.isoformat(),
+        },
+        {
+            "id": "reverse-clear-usage-2-reserved",
+            "tenant_id": tenant_id,
+            "subscription_id": subscription_id,
+            "video_task_id": None,
+            "reverse_prompt_job_id": video_job_id,
+            "chat_message_id": None,
+            "capability": "reverse_prompt_video",
+            "provider": "apimart",
+            "model": "gemini-3.1-pro-preview",
+            "unit": "call",
+            "quantity": "1.000",
+            "credits": "180.000000",
+            "cost_cents": 0,
+            "provider_cost_usd": None,
+            "currency": "CNY",
+            "status": "reserved",
+            "created_at": (usage_created_at + timedelta(seconds=1)).isoformat(),
+            "settled_at": None,
+        },
+    ]
+    with auth_db() as db:
+        asset_before = _mapped_snapshot(db.get(Asset, source_asset_id))
+        task_before = _mapped_snapshot(db.get(VideoTask, source_task_id))
+        task_asset_before = _mapped_snapshot(db.get(TaskAsset, task_asset_id))
+        subscription_before = _mapped_snapshot(db.get(Subscription, subscription_id))
+        usage_before = [
+            _usage_snapshot(record)
+            for record in db.scalars(
+                select(UsageRecord)
+                .where(UsageRecord.tenant_id == tenant_id)
+                .order_by(UsageRecord.id)
+            )
+        ]
+    assert usage_before == expected_usage
+    assert subscription_before["quota_credits_used"] == 321
+    assert subscription_before["quota_credits_reserved"] == 45
 
     storage = _HistoryStorage()
     monkeypatch.setattr(
@@ -406,6 +642,7 @@ def test_reverse_prompt_clear_history_soft_deletes_current_tenant_only_and_keeps
     client = TestClient(app)
     response = client.delete(
         "/api/v1/reverse-prompt/jobs",
+        params={"scope": "all"},
         headers=auth_context["headers"],
     )
 
@@ -429,10 +666,24 @@ def test_reverse_prompt_clear_history_soft_deletes_current_tenant_only_and_keeps
         assert persisted_deleted_at is not None
         assert persisted_deleted_at.replace(tzinfo=UTC) == already_deleted_at
         assert db.get(ReversePromptJob, "reverse-clear-foreign").deleted_at is None
-        assert db.get(Asset, source_asset_id).deleted_at is None
-        assert db.get(Asset, source_asset_id).storage_key == source_key
-        assert db.get(VideoTask, source_task_id) is not None
-        assert db.get(TaskAsset, task_asset_id) is not None
+        assert _mapped_snapshot(db.get(Asset, source_asset_id)) == asset_before
+        assert _mapped_snapshot(db.get(VideoTask, source_task_id)) == task_before
+        assert _mapped_snapshot(db.get(TaskAsset, task_asset_id)) == task_asset_before
+        subscription_after = _mapped_snapshot(db.get(Subscription, subscription_id))
+        usage_after = [
+            _usage_snapshot(record)
+            for record in db.scalars(
+                select(UsageRecord)
+                .where(UsageRecord.tenant_id == tenant_id)
+                .order_by(UsageRecord.id)
+            )
+        ]
+    assert subscription_after == subscription_before
+    assert subscription_after["quota_credits_used"] == 321
+    assert subscription_after["quota_credits_reserved"] == 45
+    assert usage_after == expected_usage
+    assert usage_after == usage_before
+    assert storage.presigned_keys == []
     assert storage.deleted_keys == []
 
 
@@ -476,6 +727,7 @@ def test_reverse_prompt_clear_history_rolls_back_every_row_when_third_update_fai
     client = TestClient(app, raise_server_exceptions=False)
     response = client.delete(
         "/api/v1/reverse-prompt/jobs",
+        params={"scope": "all"},
         headers=auth_context["headers"],
     )
 

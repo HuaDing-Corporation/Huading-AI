@@ -11,6 +11,7 @@ from app.db.models import ReversePromptJob, User
 from app.schemas.response import ApiResponse, ok
 from app.schemas.reverse_prompt import (
     ReversePromptClearResponse,
+    ReversePromptClearScope,
     ReversePromptCreateRequest,
     ReversePromptDeletedResponse,
     ReversePromptEstimateRequest,
@@ -177,12 +178,17 @@ def get_reverse_prompt_job(
 )
 def clear_reverse_prompt_history(
     request: Request,
+    scope: Annotated[ReversePromptClearScope, Query()],
     user: User = ReversePromptPermissionDependency,
     db: Session = DbSessionDependency,
 ) -> ApiResponse[ReversePromptClearResponse]:
     return ok(
         request,
-        clear_reverse_prompt_jobs(db, tenant_id=user.tenant_id),
+        clear_reverse_prompt_jobs(
+            db,
+            tenant_id=user.tenant_id,
+            scope=scope,
+        ),
     )
 
 

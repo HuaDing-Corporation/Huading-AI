@@ -19,6 +19,7 @@ from app.db.models import Asset, ReversePromptJob, User
 from app.providers.base import resolve
 from app.schemas.reverse_prompt import (
     ReversePromptClearResponse,
+    ReversePromptClearScope,
     ReversePromptEstimateResponse,
     ReversePromptHistoryItem,
     ReversePromptHistoryListResponse,
@@ -415,13 +416,19 @@ def clear_reverse_prompt_jobs(
     db: Session,
     *,
     tenant_id: str,
+    scope: ReversePromptClearScope,
 ) -> ReversePromptClearResponse:
+    """Clear the explicit scope; `all` always includes both image and video jobs."""
+    filters = [
+        ReversePromptJob.tenant_id == tenant_id,
+        live_reverse_prompt_job_condition(),
+    ]
+    if scope != "all":
+        filters.append(ReversePromptJob.source_kind == scope)
+
     result = db.execute(
         update(ReversePromptJob)
-        .where(
-            ReversePromptJob.tenant_id == tenant_id,
-            live_reverse_prompt_job_condition(),
-        )
+        .where(*filters)
         .values(deleted_at=datetime.now(UTC))
     )
     deleted_count = int(result.rowcount or 0)
