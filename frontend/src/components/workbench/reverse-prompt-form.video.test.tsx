@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 
@@ -163,6 +163,9 @@ describe("ReversePromptForm · 视频反推路径", () => {
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
     expect(await screen.findByText(copy.reverse.videoChargeMessage(100))).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: copy.common.cancel }));
+    // 🔴 NEGATIVE-ASSERT-SWEEP-UI-0001：推进到静止点再断言（资金路径）。裸同步断言只看得见点击当下那一帧 ——
+    //    「取消时仍在微任务后把反推发出去」这种实现会溜过去（实测：变异后本条照样绿）。
+    await act(async () => {});
     expect(reverseMut).not.toHaveBeenCalled();
   });
 

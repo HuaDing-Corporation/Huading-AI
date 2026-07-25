@@ -1,5 +1,12 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// 🔴 NEGATIVE-ASSERT-SWEEP-UI-0001（第 1 包 · 资金/删除路径）：本文件四条「点了先弹确认、不直接删」
+// 的负向断言原先是**裸同步断言** —— 只看得见「点击当下那一帧」。实测：把危险调用放进
+// `Promise.resolve().then(...)`（= 点了就删，只是跨了一条异步边界）后，四条**全部照样绿**。
+// 判据（本项目已采纳）：`not.toHaveBeenCalled` 是否假绿，取决于**从触发到被断言的 spy 之间有没有跨过
+// 异步边界**——不取决于有没有 await，也不取决于 spy 是不是 mutation。
+// 故四处统一在断言前 `await act(async () => {})` 推进到静止点。
 
 const historyMock = vi.hoisted(() => ({ fn: vi.fn() }));
 const kindMock = vi.hoisted(() => ({ fn: vi.fn() }));
@@ -105,6 +112,7 @@ describe("GenerationHistory (历史 tabs + 删除/清空/仅封面)", () => {
     render(<HistoryList mode="avatar_talk" />);
     // 点 trash → 仅弹确认，未直接删（确认弹窗拦截破坏性操作）
     fireEvent.click(screen.getByLabelText("删除"));
+    await act(async () => {}); // 推进到静止点（见文件抬头）
     expect(deleteVideoMock.mutateAsync).not.toHaveBeenCalled();
     expect(screen.getByText("删除这条记录？")).toBeInTheDocument();
     expect(screen.getByText("将永久删除，不可恢复。")).toBeInTheDocument(); // 视频=硬删文案
@@ -116,6 +124,7 @@ describe("GenerationHistory (历史 tabs + 删除/清空/仅封面)", () => {
   it("清空：点清空 → 确认(硬删文案) → 调 DELETE /videos?mode=", async () => {
     render(<HistoryList mode="seedance_i2v" />);
     fireEvent.click(screen.getByRole("button", { name: /清空/ }));
+    await act(async () => {}); // 推进到静止点（见文件抬头）
     expect(clearVideosMock.mutateAsync).not.toHaveBeenCalled();
     expect(screen.getByText("清空该历史？")).toBeInTheDocument();
     // 视频/图片=硬删文案
@@ -163,6 +172,7 @@ describe("GenerationHistory (历史 tabs + 删除/清空/仅封面)", () => {
     render(<CopyDraftList />);
     expect(screen.getByText("草稿文案A")).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("删除"));
+    await act(async () => {}); // 推进到静止点（见文件抬头）
     expect(deleteDraftMock.mutateAsync).not.toHaveBeenCalled(); // 确认门：不直接删
 
     expect(screen.getByText("将从历史移除，无法撤销。")).toBeInTheDocument();
@@ -177,6 +187,7 @@ describe("GenerationHistory (历史 tabs + 删除/清空/仅封面)", () => {
   it("文案清空：确认门 → 恰调一次 DELETE /copy/drafts；文案同样不说「可恢复」", async () => {
     render(<CopyDraftList />);
     fireEvent.click(screen.getByRole("button", { name: /清空/ }));
+    await act(async () => {}); // 推进到静止点（见文件抬头）
     expect(clearDraftsMock.mutateAsync).not.toHaveBeenCalled();
 
     expect(screen.getByText("将清空此模块全部草稿，无法撤销。")).toBeInTheDocument();

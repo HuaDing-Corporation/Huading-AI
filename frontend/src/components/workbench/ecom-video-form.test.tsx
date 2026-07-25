@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const taskMocks = vi.hoisted(() => ({ createAndTrack: vi.fn() }));
@@ -245,6 +245,9 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     expect(screen.getByText("确定生成即会消耗积分，生成过程中无法取消！")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    // 🔴 NEGATIVE-ASSERT-SWEEP-UI-0001：推进到静止点再断言（资金路径）。裸同步断言只看得见点击当下那一帧 ——
+    //    「取消时仍在微任务后把生成提交出去」这种实现会溜过去（实测：变异后本条照样绿）。
+    await act(async () => {});
     expect(taskMocks.createAndTrack).not.toHaveBeenCalled();
   });
 
