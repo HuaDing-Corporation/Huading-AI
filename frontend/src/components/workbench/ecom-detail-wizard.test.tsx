@@ -72,6 +72,9 @@ function mainPlanJob(over?: Partial<EcomReplicateJob>): EcomReplicateJob {
   return {
     job_id: "job-1",
     status: "plan_ready",
+    // GEN-HEARTBEAT-UI-0001 · FIX3：BE 详情图响应**键恒在**（schema `str | None` 默认 None）→
+    // 夹具必须带上它，否则就是在构造一个真实 BE 发不出的形状。plan_ready 尚未开始生成 → null。
+    heartbeat_at: null,
     output_mode: "main",
     output_count: 5,
     total_credits: 75,
@@ -92,6 +95,7 @@ function detailPlanJob(): EcomReplicateJob {
   return {
     job_id: "job-2",
     status: "plan_ready",
+    heartbeat_at: null, // 同上：键恒在
     output_mode: "detail",
     output_count: 12,
     total_credits: 180,

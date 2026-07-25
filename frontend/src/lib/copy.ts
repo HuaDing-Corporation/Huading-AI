@@ -739,7 +739,10 @@ export const copy = {
     retry: "重试",
     retryUnavailable: "请到工作台重新发起",
     open: "查看详情",
-    moreInHistory: "更多任务见下方「历史生成」"
+    moreInHistory: "更多任务见下方「历史生成」",
+    // GEN-HEARTBEAT-UI-0001：收到心跳期间的诚实等待反馈。措辞只承诺「还在生成」+「已经等了多久」，
+    // **不承诺任何进度**（不写「即将完成」「还需 X 分钟」这类前端猜不到、也无权承诺的话）。
+    stillGenerating: (elapsed: string) => `仍在生成（已 ${elapsed}）`
   },
   history: {
     title: "历史生成",

@@ -286,6 +286,17 @@ export interface VideoEvent {
   thumbnail_url?: string | null;
   error_code?: string | null;
   error_message?: string | null;
+  /**
+   * 心跳帧（GEN-HEARTBEAT-UI-0001 · FIX2 真联调坐实）：生成期间周期推送，
+   * **`progress` 与 `stage`/`step` 保持不变**，只证明"链路还活着"。
+   * 前端必须显式识别它来重置 stall 时钟——否则会被 applyEvent「只认真实前进」的判据直接忽略。
+   *
+   * 🔴 真形状（BE #222 实测，非契约转述）：**ISO8601 字符串**，Python `datetime.now(UTC).isoformat()`
+   * 产出 `"2026-07-25T13:16:56.439672+00:00"`（6 位微秒 + `+00:00` 偏移，**不是** `Z` 结尾、
+   * **更不是** epoch 毫秒——冻结 §四 写的"ISO8601 或 epoch ms"二选一，实际只有前者）。
+   * 🔴 无心跳时 **整个键不出现**（`videos.py:1489` 只在 `is not None` 时才写入），故此处是可选而非可空。
+   */
+  heartbeat_at?: string;
   // 旧帧兜底
   task_id?: string;
   stage?: string | null;

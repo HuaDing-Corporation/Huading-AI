@@ -25,6 +25,18 @@ export interface TrackedTask {
   retryable?: boolean;
   /** 该任务是否带 AI 显式标识（LABEL-TOGGLE-UI-0001）→ 历史卡片徽标数据源。 */
   applyVisibleLabel?: boolean;
+  /**
+   * 任务开始时刻（epoch ms）——诚实计时的**基准**（GEN-HEARTBEAT-UI-0001 冻结 §四：
+   * 「计时基准用任务开始时间，不是收到第一个心跳」）。会话内新建任务 = 提交时刻；
+   * 从列表水合的任务 = BE `created_at`（更真，跨刷新仍准）。
+   */
+  startedAt?: number;
+  /**
+   * 最近一次**心跳**的本地接收时刻（epoch ms）；`null`/缺省 = 本任务从没收到过心跳。
+   * 只作两件事：① 门控"仍在生成"计时的显示（冻结 §四：生成中**且收到过心跳**才显示）；
+   * ② 供排查用。**绝不参与百分比计算**——心跳不是进度。
+   */
+  heartbeatAt?: number | null;
 }
 
 export const TERMINAL: UiStatus[] = ["done", "failed", "cancelled"];
@@ -106,6 +118,9 @@ export function eventToProgress(event: VideoEvent): ProgressSnapshot | null {
 
 export function fromVideoRead(read: VideoDetail | VideoListItem): TrackedTask {
   const pct = read.progress ?? 0;
+  // 计时基准（GEN-HEARTBEAT-UI-0001）：BE created_at 是**真正的任务开始时间**，跨刷新/水合仍准。
+  // 解析失败（字段缺失或格式怪）→ NaN → 下面**不写这个键**，以免用 undefined 覆盖掉会话内已有的正确值。
+  const startedAt = Date.parse(read.created_at);
   // 🔴 FIX1：原本这里有一行 `const detail = read as Partial<VideoDetail>`，用来读 VideoListItem 上
   // **没声明但实际存在**的 playback_url / download_url / duration_ms / error_message。那行强转把类型检查
   // 变成了摆设：fixture 把 duration_ms 写成 duration_sec 也照样编译过。四个字段已在 VideoListItem 补齐
@@ -123,6 +138,7 @@ export function fromVideoRead(read: VideoDetail | VideoListItem): TrackedTask {
     durationSec: read.duration_ms != null ? read.duration_ms / 1000 : null,
     error: read.error_message ?? null,
     errorCode: read.error_code ?? null,
-    applyVisibleLabel: read.apply_visible_label ?? false
+    applyVisibleLabel: read.apply_visible_label ?? false,
+    ...(Number.isFinite(startedAt) ? { startedAt } : {})
   };
 }

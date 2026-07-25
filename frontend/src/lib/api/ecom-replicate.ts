@@ -57,6 +57,23 @@ export interface EcomReplicateJob {
   requested_size: string;
   requested_aspect: string;
   plan: EcomReplicatePlanPayload;
+  /**
+   * 心跳（GEN-HEARTBEAT-UI-0001 · FIX1 · **通道②**）：详情图**没有 Redis/SSE 通道**（它只有逐张 DB 状态），
+   * 所以心跳走**本轮询响应**而不是 SSE——与图片生成那条是两条独立的路，各按各的形态做。
+   *
+   * 🔴 真形状（BE #222 实测）：schema `str | None`、默认 `None`（`schemas/ecom_images.py:230`）→ 与通道①
+   * 相反，这里 **键恒存在**；Redis 不可用时 BE 降级为 `{"heartbeat_at": null}`（HTTP 仍 200，业务轮询不受影响）。
+   * 值的字面同通道①：`"2026-07-25T13:16:56.439672+00:00"`（6 位微秒 + `+00:00`）。
+   *
+   * 前端只把它当"还活着"的**布尔证据**（`!= null`）用来门控计时的显示，**从不解析它的值**——
+   * 这样 null / 怪格式在结构上就不可能变成「已 NaN 秒」「Invalid Date」，也绝不因此判失败。
+   *
+   * 🔴 **没有 `?`**（FIX3）：这是"键恒在、值可空"，不是"可选"。留着 `?` 等于允许 TS 构造一个**真实 BE
+   * 永远发不出**的夹具（整键缺失）——#220 那两个用户可见缺陷正是这么来的。把编译器当门用：
+   * 谁漏写这个键，tsc 当场报错。⚠️ 与通道①（SSE）**故意不同**：那边是 `heartbeat_at?: string`
+   * （可选、无 null，BE 无心跳时整键不出现）。两条通道本来就该长得不一样，别顺手对齐。
+   */
+  heartbeat_at: string | null;
 }
 
 /** POST /confirm 的响应（BE EcomReplicateConfirmAccepted，**不含 plan/outputs**）。 */

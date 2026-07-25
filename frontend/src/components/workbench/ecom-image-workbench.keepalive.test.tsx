@@ -78,6 +78,7 @@ function mainPlanJob(): EcomReplicateJob {
   return {
     job_id: "job-1",
     status: "plan_ready",
+    heartbeat_at: null, // GEN-HEARTBEAT-UI-0001 · FIX3：BE 详情图响应键恒在（plan_ready → null）
     output_mode: "main",
     output_count: 5,
     total_credits: 75,
