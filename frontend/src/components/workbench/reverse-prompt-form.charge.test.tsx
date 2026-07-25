@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // ── REVERSE-CHARGE-GATE-UI-0001 范围1 · **图片反推计费门**承重 ────────────────────────────────
@@ -68,6 +68,12 @@ describe("图片反推计费门（范围1）", () => {
     await waitFor(() => expect(analyzeBtn()).toBeEnabled());
 
     fireEvent.click(analyzeBtn());
+    // 🔴 NEGATIVE-ASSERT-SWEEP-UI-0001：断言前**推进到静止点**。
+    //    裸同步断言只能看见「点击当下这一帧」——「点了先发请求、走一个 await 之后才开门」这种实现
+    //    （`onClick={async () => { … }}`，真实世界里最常见的写法）会整个溜过去。
+    //    实测：把 `void reverse.mutateAsync(...)` 放进 `Promise.resolve().then(...)` 再开门 → 本条**照样绿**；
+    //    加上这行 act 之后同一变异**必红**（回执有前后对照）。
+    await act(async () => {});
     // 开门 = 取价，且**一次反推都没发起**（此前的缺陷正是这里直接扣钱）。
     expect(hooks.estimateMutate).toHaveBeenCalledWith({ source_asset_id: "aid-1" });
     expect(hooks.reverseMutateAsync).not.toHaveBeenCalled();
