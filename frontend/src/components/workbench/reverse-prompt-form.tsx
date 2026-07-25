@@ -6,6 +6,7 @@ import { ImageUp, Loader2, Sparkles, Video, X } from "lucide-react";
 import { ApiError } from "@/lib/api/client";
 import { errorText } from "@/lib/api/error-text";
 import {
+  useEstimateReversePrompt,
   useRegenerateReversePrompt,
   useReverseFromAsset,
   useSaveReversePrompt,
@@ -19,7 +20,7 @@ import {
   friendlyReverseError,
   getReversePromptJob,
   isReverseSettled,
-  REVERSE_VIDEO_CREDITS,
+  type ReversePromptEstimate,
   type ReversePromptJobRead,
   type WorkbenchPrefill
 } from "@/lib/api/reverse-prompt";
@@ -35,11 +36,25 @@ const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 type SourceType = "image" | "video";
 
 /**
+ * 计费门正文（§八 M4）。三种状态一一对应，**顺序即优先级**：拿到报价 → 显示 BE 给的金额；
+ * 在途 → 只说在取数；未取到/失败 → 说明为什么不能提交。
+ * 🔴 后两支**一个数字都不出现** —— 不许猜一个数兜底（宁可挡住也不能报错价）。
+ */
+function chargeGateMessage(estimate: ReversePromptEstimate | undefined, estimating: boolean): string {
+  if (estimate) return copy.reverse.videoChargeMessage(estimate.credits);
+  if (estimating) return copy.reverse.videoChargeEstimating;
+  return copy.reverse.videoChargeEstimateBlocked;
+}
+
+/**
  * 提示词反推 (REVERSE-PROMPT-UI / VIDEO-REVERSE-PROMPT-UI-0001) 工作台容器 —— 唯一 hooks 调用方。一个入口两模式：
  *  - 图片：完全维持现状（同步 /reverse-prompt → succeeded+result；零回归）。
- *  - 视频（一期只上传文件、无链接入口）：上传视频(/uploads/videos?purpose=reverse_prompt，客户端预检 MP4/≤200MB/1–60s)
- *    → 计费门 ConfirmDialog(100 积分/次，确认一次扣/取消不扣) → 提交(202 queued) → 轮询 GET /jobs/{id} 到终态
- *    （瞬时失败软提示、不误跳结果页）→ 结果先展示视频分析(video_analysis) 再展示 Seedance 提示词；「带入」沿用现有 fill_targets。
+ *  - 视频（一期只上传文件、无链接入口）：上传视频(/uploads/videos?purpose=reverse_prompt，客户端预检 MP4/≤200MB/1–180s)
+ *    → 计费门 ConfirmDialog(**金额由 POST /reverse-prompt/estimate 返回**，确认一次扣/取消不扣) → 提交(202 queued)
+ *    → 轮询 GET /jobs/{id} 到终态（瞬时失败软提示、不误跳结果页；长视频按 segments_done/total 显示分段进度）
+ *    → 结果先展示视频分析(video_analysis) 再展示 Seedance 提示词；「带入」沿用现有 fill_targets。
+ *    ⚠️ 时长上限 180s 与「金额不写死」两条都是 §八 v2 修订（D2 / M4+D9）；本注释此前写的 60s 与「100 积分/次」
+ *    已随契约作废——本项目栽过四连注释债（#209→#212），改数值类文案先核 BE 源码。
  * 请求体仅 { source_asset_id }（BE 据资产推 source_kind）。带入落点由结果视图据 BE 载荷直落，冒泡至 page 切模式并预填。
  */
 export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefill: WorkbenchPrefill) => void } = {}) {
@@ -62,6 +77,22 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
   const [pollError, setPollError] = useState(false);
   const [pollTick, setPollTick] = useState(0);
   const [videoJobId, setVideoJobId] = useState<string | null>(null);
+  // §八 M5 分段进度：轮询到的最近一次 segments 快照；null = 本次没有分段进度可显示（图片 / ≤60s 短视频）。
+  // 🔴 仍是「如实转述」：不补齐、不推算、不按时间自增；只是把「两字段同生同灭」这条不变量收进类型里，
+  //    让「有 total 没 done」这种半截状态**不可表示** —— 渲染处因此也不需要任何非空断言。
+  const [segments, setSegments] = useState<{ total: number; done: number } | null>(null);
+  // 计费预估（§八 M4）：金额来自 BE，前端不判档、不兜底。
+  const estimate = useEstimateReversePrompt();
+  /**
+   * 🔴 本次可用的报价 —— 判据是「这份报价就是给**当前这条资产**的」，而不是「有 data」。
+   *
+   * 起因（Code Review 自审 P1）：TanStack Query v5 的 mutation **重新执行时不会清掉上一次的 `data`**
+   *（pending 分支只重置 error / failureCount / isPaused）。于是「短视频报价 100 → 换成长视频 → 打开计费门」
+   * 这条路径上，新报价还在途时弹窗会先显示上一条的 100，而实扣是 250 —— 正是本包存在的那类事故。
+   * openChargeGate / onSelectVideo 里的 `estimate.reset()` 是生命周期侧的修法，但它依赖「每条新增路径都记得
+   * reset」；此处再用**资产比对**兜一道结构性的：对不上就当没有报价（挡住提交、不显示任何金额）。
+   */
+  const quote = estimate.data && estimate.variables?.source_asset_id === videoAssetId ? estimate.data : undefined;
 
   // ── 共享 ──
   const reverse = useReverseFromAsset();
@@ -97,6 +128,12 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
         const res = await getReversePromptJob(videoJobId);
         if (cancelled) return;
         setPollError(false);
+        // §八 M5：如实记录 BE 给的分段进度。两字段必须都是数字才算数（BE 对图片/≤60s 短视频恒给 null）；
+        // total>0 是防呆：真出现 0 就是 BE 出了问题，此时宁可不显示，也不印一句「第 3/0 段」。
+        const { segments_total: total, segments_done: done } = res;
+        setSegments(
+          typeof total === "number" && typeof done === "number" && total > 0 ? { total, done } : null
+        );
         if (isReverseSettled(res.status)) {
           setPolling(false);
           if (res.status === "failed" || !res.result) {
@@ -131,6 +168,7 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
     setSourceType(next);
     setPolling(false); // 切来源即停任何在途轮询，避免异步落一个陈旧结果到另一模式
     setVideoJobId(null);
+    setSegments(null); // 陈旧进度不许跨来源留在界面上
     resetResult();
   };
 
@@ -189,6 +227,7 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
     if (videoPreviewRef.current) URL.revokeObjectURL(videoPreviewRef.current);
     setVideoPreview(URL.createObjectURL(file));
     setVideoName(file.name);
+    estimate.reset(); // 换视频 = 换档位，上一条的报价立即作废（另有 quote 的资产比对兜底，见下）
     try {
       const r = await uploadVid.mutateAsync(file);
       setVideoAssetId(r.asset_id);
@@ -204,14 +243,30 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
     setVideoAssetId(null);
     setVideoJobId(null);
     setPolling(false);
+    setSegments(null);
+    estimate.reset(); // 🔴 换视频 = 换档位：上一条视频的报价绝不许留到下一条（250 的视频显示 100 就是错价）
     resetResult();
   };
 
+  /**
+   * 打开计费门：**同时**去 BE 取本次的档位金额（§八 M4）。
+   * 🔴 每次打开都重新估，不缓存上一次的结果 —— 时长变了档位就变，缓存 = 错价。
+   */
+  const openChargeGate = () => {
+    if (!videoAssetId) return;
+    setChargeOpen(true);
+    estimate.reset(); // 先清掉上一次的报价，再重新取（否则新报价回来之前会先显示旧金额）
+    estimate.mutate({ source_asset_id: videoAssetId });
+  };
+
   const onConfirmVideoCharge = async () => {
-    if (!videoAssetId || submitting) return;
+    // 🔴 `!quote` 这一条是**第二道闸**：按钮已按同一判据禁用，但「没拿到（本条资产的）报价就不许发起扣费」
+    //    是资金红线，不能只靠一个 disabled 属性守（承重门10）。判据与弹窗显示的完全同源，不会一个挡一个放。
+    if (!videoAssetId || submitting || !quote) return;
     setSubmitting(true);
     setLocalError(null);
     setSaved(false);
+    setSegments(null); // 新任务从「无进度」起步，不承接上一次的段数
     try {
       const res = await reverse.mutateAsync({ source_asset_id: videoAssetId });
       setChargeOpen(false);
@@ -282,7 +337,7 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
             <SelectableOption selected={isVideo} onSelect={() => switchSource("video")} className="justify-center">
               <Video size={15} strokeWidth={1.8} /> {copy.reverse.sourceVideo}
               <span className="ml-1 rounded-pill bg-chip-sel px-1.5 py-0.5 text-[10px] text-gold-deep">
-                {copy.reverse.videoChargeBadge(REVERSE_VIDEO_CREDITS)}
+                {copy.reverse.videoChargeBadge}
               </span>
             </SelectableOption>
           </div>
@@ -369,7 +424,7 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
         </div>
 
         {isVideo ? (
-          <Button variant="primary" size="lg" className="w-full" onClick={() => setChargeOpen(true)} disabled={analyzeVideoDisabled}>
+          <Button variant="primary" size="lg" className="w-full" onClick={openChargeGate} disabled={analyzeVideoDisabled}>
             {videoBusy ? (
               <>
                 <Loader2 size={18} className="animate-spin" /> {copy.reverse.videoAnalyzing}
@@ -394,17 +449,37 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
           </Button>
         )}
 
+        {/* 分段进度（§八 M5 + D10）—— 🔴 **两字段齐备才渲染**：图片/短视频 BE 恒给 null，此处整块消失，
+            形态与改动前一致。没有任何按时间自增的假进度，进度只跟着 segments_done 走。
+            🔴 FIX2 真联调修正：`segments_done` 是**已完成段数**，不是「正在分析的第几段」——BE 在进入第 N 段前
+            写的是 `segments_done = N-1`（证据 backend/tests/test_reverse_prompt_pipeline.py:1860）。
+            直接把它填进「正在分析第 X/Y 段」，长视频第一段期间必然显示「正在分析第 0/6 段」。
+            故序号 = 已完成数 + 1，并夹在 total 内：末段跑完到整片汇总那段时间 done 已等于 total，
+            此时显示「第 6/6 段」是诚实的（确实还在跑最后一步），显示「第 7/6 段」则是胡说。 */}
+        {isVideo && polling && segments && (
+          <div className="mt-2 text-center" aria-live="polite">
+            <p className="text-[12.5px] text-ink">
+              {copy.reverse.videoSegmentProgress(Math.min(segments.done + 1, segments.total), segments.total)}
+            </p>
+            <p className="mt-0.5 text-[12px] text-ink-faint">{copy.reverse.videoSegmentEta}</p>
+          </div>
+        )}
         {/* 视频轮询软提示（瞬时失败/生成中，不误跳结果页） */}
         {isVideo && polling && pollError && (
           <p className="mt-2 text-center text-[12px] text-error-fg">{copy.reverse.videoPollRetrying}</p>
         )}
 
+        {/* 计费门（§八 M4）：金额一律取 BE estimate 的返回值。
+            估算中 → 只说在取数，不显示任何数字；
+            估算失败 → 走 error 显示友好文案 + 禁用确认（**不猜一个数兜底**，宁可挡住也不能报错价）。 */}
         <ConfirmDialog
           open={chargeOpen}
           title={copy.reverse.videoChargeTitle}
-          message={copy.reverse.videoChargeMessage(REVERSE_VIDEO_CREDITS)}
+          message={chargeGateMessage(quote, estimate.isPending)}
           confirmLabel={copy.reverse.videoChargeConfirm}
           submitting={submitting}
+          confirmDisabled={!quote}
+          error={estimate.isError ? copy.errors.reverseEstimateFailed : null}
           onConfirm={() => void onConfirmVideoCharge()}
           onCancel={() => setChargeOpen(false)}
         />

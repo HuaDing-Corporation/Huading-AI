@@ -11,6 +11,15 @@ export const IMAGE_ASPECT_RATIOS = ["1:1", "4:3", "3:2", "16:9", "21:9", "3:4", 
 export type ImageAspectRatio = (typeof IMAGE_ASPECT_RATIOS)[number];
 export const DEFAULT_IMAGE_ASPECT_RATIO: ImageAspectRatio = "1:1";
 
+/**
+ * 是否为合法**图片**画面比例（REVERSE-DEEP-UI-0001）——外部来的值（如反推带入的 aspect_ratio）进控件前兜一道。
+ * ⚠️ 图片这套（8 档 + auto）与视频那套（7 档 + auto）**不是同一组**，别互相套用。
+ * 判据与枚举常量同处 → 不会漂移；用法对齐同仓 `isValidDuration`（与其档位常量一起导出）。
+ */
+export function isImageAspectRatio(v: string): v is ImageAspectRatio {
+  return (IMAGE_ASPECT_RATIOS as readonly string[]).includes(v);
+}
+
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 
 function aspectLabel(ratio: ImageAspectRatio): string {

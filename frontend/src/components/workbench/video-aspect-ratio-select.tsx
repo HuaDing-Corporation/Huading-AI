@@ -15,6 +15,14 @@ export const VIDEO_ASPECT_RATIOS = ["auto", "16:9", "9:16", "1:1", "4:3", "3:4",
 export type VideoAspectRatio = (typeof VIDEO_ASPECT_RATIOS)[number];
 export const DEFAULT_VIDEO_ASPECT_RATIO: VideoAspectRatio = "auto";
 
+/**
+ * 是否为合法**视频**画面比例（REVERSE-DEEP-UI-0001）——外部来的值（如反推带入的 aspect_ratio）进控件前兜一道。
+ * ⚠️ 与上面那条注释同理：视频这套 7 值与图片那套 8+auto **不是同一组**，判据必须各用各的。
+ */
+export function isVideoAspectRatio(v: string): v is VideoAspectRatio {
+  return (VIDEO_ASPECT_RATIOS as readonly string[]).includes(v);
+}
+
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 
 function aspectLabel(ratio: VideoAspectRatio): string {

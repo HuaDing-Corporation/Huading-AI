@@ -30,6 +30,7 @@ import { clearCopyDrafts, deleteCopyDraft, generateTitles, generateTopics, listC
 import { generateScript } from "@/lib/api/scripts";
 import {
   deleteReversePromptJob,
+  estimateReversePrompt,
   getReversePromptJob,
   listReversePromptJobs,
   regenerateReversePrompt,
@@ -173,7 +174,15 @@ export function useScriptGenerate() {
 export function useScenePromptGenerate() {
   return useMutation({ mutationFn: (params: ScenePromptRequest) => generateScenePrompt(params) });
 }
-// ── 提示词反推 (REVERSE-PROMPT-UI-0001) — 反推 / 重推 / 保存 ──
+// ── 提示词反推 (REVERSE-PROMPT-UI-0001) — 预估 / 反推 / 重推 / 保存 ──
+/**
+ * 计费预估（§八 M4）——计费门弹窗打开时调，展示 BE 返回的档位金额。
+ * 用 mutation 而非 query：它是「打开弹窗」这个动作触发的一次性取数，且**失败必须显式可见**
+ *（query 的缓存/重试会让「这次到底估没估到」变得含糊，而这里估不到就不许提交）。
+ */
+export function useEstimateReversePrompt() {
+  return useMutation({ mutationFn: (input: ReverseFromAssetInput) => estimateReversePrompt(input) });
+}
 export function useReverseFromAsset() {
   return useMutation({ mutationFn: (input: ReverseFromAssetInput) => reverseFromAsset(input) });
 }

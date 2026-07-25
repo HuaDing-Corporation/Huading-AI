@@ -8,13 +8,20 @@ import { expect, test, type Page } from "@playwright/test";
  * 需以 NEXT_PUBLIC_USE_MOCK=1 构建后 next start 运行（webServer 已配）。
  */
 
-async function gotoReverseResult(page: Page): Promise<{ errors: () => string[]; doublePrefix: () => string[] }> {
+async function gotoReverseResult(
+  page: Page
+): Promise<{ errors: () => string[]; doublePrefix: () => string[]; consoleErrors: () => string[] }> {
   const pageErrors: string[] = [];
   const doublePrefix: string[] = [];
+  // REVERSE-DEEP-UI-0001：补一道**真 Console 0 error 门**（原先只收 pageerror 与 #130 白屏特征串）。
+  // 新增的带入确认弹窗会在这条链上渲染，React 的 key/受控组件/a11y 类问题多半只以 console.error 现身，
+  // 不抛 pageerror —— 不收就等于没测。过滤资源加载噪音（mock 环境里的占位 URL 必然 net::ERR）。
+  const consoleErrors: string[] = [];
   page.on("pageerror", (err) => pageErrors.push(String(err?.message ?? err)));
   page.on("console", (msg) => {
     const t = msg.text();
     if (/Minified React error #130|error #130|client-side exception/.test(t)) pageErrors.push(t);
+    if (msg.type() === "error" && !/Failed to load resource|net::ERR_/i.test(t)) consoleErrors.push(t);
   });
   page.on("request", (req) => {
     if (req.url().includes("/api/api")) doublePrefix.push(`${req.method()} ${req.url()}`);
@@ -46,9 +53,18 @@ async function gotoReverseResult(page: Page): Promise<{ errors: () => string[]; 
   await analyze.click();
   // 结果块 + 近似重建红线（BE 下发 disclaimer）。
   await expect(page.getByText("不保证完全复刻原素材").first()).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText(/浅景深特写/)).toBeVisible();
+  // REVERSE-DEEP-UI-0001 · 范围4：BE 给了 structured_prompt → 主提示词展示的是**结构化中文版**
+  //（分行标注：主体/场景/构图/…），不再是逗号糊成一行的 prompt_zh。
+  await expect(page.getByText("结构化提示词（中文）")).toBeVisible();
+  // 🔴 FIX2 真联调订正断言形态：BE 的 `structured_prompt()`（services/reverse_prompt.py:792-806）
+  //    对 en/zh 用的是**同一组 value**、只换标签，分隔符是 **ASCII 冒号 + 一个空格**：
+  //      zh = "\n".join(f"{中文标签}: {value}")
+  //    所以真机是「中文标签 + 与英文块相同的正文」，**不是**「全角冒号 + 中文译文」。
+  //    上一版这条断言 `/主体：.*保温杯/`（全角冒号 + 中文正文）钉的是 BE 产不出的形状，
+  //    只因当时 mock 也被写成了那样才绿 —— mock 改回真形状后它立刻红，正说明这条断言此前是假绿。
+  await expect(page.getByText(/主体: .*insulated/)).toBeVisible();
 
-  return { errors: () => pageErrors, doublePrefix: () => doublePrefix };
+  return { errors: () => pageErrors, doublePrefix: () => doublePrefix, consoleErrors: () => consoleErrors };
 }
 
 test("带入·数字人口播 → 预填 topic + script，无 #130 白屏", async ({ page }) => {
@@ -62,12 +78,16 @@ test("带入·数字人口播 → 预填 topic + script，无 #130 白屏", asyn
   await expect(page.getByRole("button", { name: "带入 · 营销海报" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "带入 · 数字人口播" }).click();
+  // REVERSE-DEEP-UI-0001 · D3-④：先弹「带入前确认」窗（默认全勾、可逐项取消/编辑）→ 确认后才落值。
+  await page.getByRole("button", { name: "确认带入" }).click();
   // avatar_talk 落点：topic→#video-topic、script→#video-script（mock fill_targets.avatar_talk）。
   await expect(page.locator("#video-topic")).toHaveValue("便携保温杯种草", { timeout: 15_000 });
   await expect(page.locator("#video-script")).toHaveValue(/大家好，今天给大家安利这款便携保温杯/);
 
   expect(g.errors(), `page errors：\n${g.errors().join("\n")}`).toEqual([]);
   expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);
+  // Console 0：带入确认弹窗也在这条链上渲染过，React 受控/key/a11y 类问题只会以 console.error 现身。
+  expect(g.consoleErrors(), `真 console 错误：\n${g.consoleErrors().join("\n")}`).toEqual([]);
 });
 
 test("带入·AI 模特 → 切电商图·AI 模特子工具并预填自定义补充（电商图档落点）", async ({ page }) => {
@@ -75,12 +95,20 @@ test("带入·AI 模特 → 切电商图·AI 模特子工具并预填自定义�
 
   // ecom_model 落点：切到电商图 mode + AI 模特子工具，extra_prompt→#ecom-model-custom（mock ecom_model.extra_prompt）。
   await page.getByRole("button", { name: "带入 · AI 模特" }).click();
+  await page.getByRole("button", { name: "确认带入" }).click(); // D3-④ 带入前确认
   // ECOM-SUBTOOL-KEEPALIVE-UI-0001：子工具改为常驻后，#ecom-model-custom 在隐藏态也留在 DOM，而 toHaveValue
   // **不校验可见性** → 单靠它已不能证明「确实切到了 AI 模特子工具」。补一条可见性断言把落点锁死。
   const custom = page.getByTestId("panel-ecom_image").locator("#ecom-model-custom");
   await expect(custom).toBeVisible({ timeout: 15_000 });
-  await expect(custom).toHaveValue("工作室柔光、简洁白底、突出质感");
+  // 🔴 FIX2 真联调订正期望值：BE 的 `ecom_model.extra_prompt` 是
+  //    `_whole_sections_within_limit(structured_en, 20000)`（services/reverse_prompt.py:779-782）——
+  //    未触顶时**逐字等于 structured_prompt.en**（BE 自测 tests:2710 以整字典相等钉死），
+  //    不是一句自编的中文短句。上一版期望值是 mock 自己编的，BE 从不产出那种形态。
+  //（正则用 [\s\S] 而非 `.` + /s：tsconfig target 是 ES2017，dotAll 标志会触发 TS1501。升 target 影响面大、不在本包范围。）
+  await expect(custom).toHaveValue(/^Subject: [\s\S]*\nStyle: product advertising/);
 
   expect(g.errors(), `page errors：\n${g.errors().join("\n")}`).toEqual([]);
   expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);
+  // Console 0：带入确认弹窗也在这条链上渲染过，React 受控/key/a11y 类问题只会以 console.error 现身。
+  expect(g.consoleErrors(), `真 console 错误：\n${g.consoleErrors().join("\n")}`).toEqual([]);
 });

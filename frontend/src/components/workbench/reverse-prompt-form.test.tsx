@@ -6,7 +6,10 @@ vi.mock("@/lib/api/hooks", () => ({
   useUploadReverseVideo: vi.fn(),
   useReverseFromAsset: vi.fn(),
   useRegenerateReversePrompt: vi.fn(),
-  useSaveReversePrompt: vi.fn()
+  useSaveReversePrompt: vi.fn(),
+  // §八 M4：本文件走**图片**路径（图片无计费门，estimate 不会被调）→ 常态桩即可；
+  // 计费门本身的承重在 reverse-prompt-form.video.test.tsx。
+  useEstimateReversePrompt: () => ({ mutate: vi.fn(), reset: vi.fn(), data: undefined, isPending: false, isError: false })
 }));
 
 import {
@@ -43,8 +46,7 @@ const RESULT: ReversePromptResult = {
     seedance_i2v: { topic: "卖点", scene_prompt: "暖光" },
     video_gen: { topic: "杯", prompt: "运镜" },
     photo: { topic: "白底杯" },
-    ecom_model: { extra_prompt: "白底" },
-    ecom_poster: { title: "大促", subtitle: "5 折" }
+    ecom_model: { extra_prompt: "白底" }
   }
 };
 
@@ -123,7 +125,9 @@ describe("ReversePromptForm 状态机（上传→反推→带入）", () => {
     await waitFor(() => expect(analyzeBtn).toBeEnabled());
     fireEvent.click(analyzeBtn);
     await screen.findByText("中文提示词ZZZ");
+    // REVERSE-DEEP-UI-0001 · D3-④：带入前先弹确认窗（可逐项取消/编辑）→ 点「确认带入」才真正落值。
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyAvatar }));
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyConfirmSubmit }));
     expect(onApplyPrefill).toHaveBeenCalledWith({ target: "avatar_talk", topic: "保温杯种草", script: "大家好" });
   });
 

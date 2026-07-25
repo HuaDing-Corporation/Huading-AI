@@ -20,6 +20,11 @@ export interface ConfirmDialogProps {
   danger?: boolean;
   /** 防连点：请求中禁用确认+取消。 */
   submitting?: boolean;
+  /**
+   * 前置条件未满足 → 只禁用「确认」，**取消仍可用**（与 submitting 的区别所在：那是在途、这是不该提交）。
+   * 用例：计费预估未取到时不许提交（REVERSE-DEEP-UI-0001-FIX1 · 承重门10「宁可挡住也不能报错价」）。
+   */
+  confirmDisabled?: boolean;
   /** 操作失败原因(弹窗内显示，避免被模态遮罩盖住列表横幅)。 */
   error?: string | null;
   onConfirm: () => void;
@@ -38,10 +43,12 @@ export function ConfirmDialog({
   confirmLabel,
   danger,
   submitting,
+  confirmDisabled,
   error,
   onConfirm,
   onCancel
 }: ConfirmDialogProps) {
+  const cannotConfirm = submitting || confirmDisabled;
   return (
     <Dialog
       open={open}
@@ -67,13 +74,13 @@ export function ConfirmDialog({
             <button
               type="button"
               onClick={onConfirm}
-              disabled={submitting}
+              disabled={cannotConfirm}
               className="inline-flex h-9 items-center justify-center rounded-field bg-error-bg px-3.5 text-[13px] font-medium text-error-fg transition-colors hover:bg-error-bg/70 focus-visible:shadow-focus-gold disabled:pointer-events-none disabled:opacity-50"
             >
               {submitting ? copy.common.processing : confirmLabel}
             </button>
           ) : (
-            <Button variant="primary" size="sm" onClick={onConfirm} disabled={submitting}>
+            <Button variant="primary" size="sm" onClick={onConfirm} disabled={cannotConfirm}>
               {submitting ? copy.common.processing : confirmLabel}
             </Button>
           )}
