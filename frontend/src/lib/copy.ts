@@ -703,10 +703,18 @@ export const copy = {
     // ── 计费门（§八 M4 + D9：视频反推按时长分档，金额一律由 BE estimate 返回）──────────
     videoChargeTitle: "确认扣费反推视频？",
     videoChargeMessage: (credits: number) => `视频反推将一次性扣除 ${credits} 积分（分析分镜 + 生成提示词）；确认后开始，取消不扣费。`,
-    videoChargeEstimating: "正在获取本次反推的积分消耗…",
+    // ── 图片档计费门（REVERSE-CHARGE-GATE-UI-0001 范围1）─────────────────────────
+    // 🔴 文案决策：**不复用 videoChargeMessage / videoChargeTitle**。正文写死「视频反推…分析分镜」是视频档的真话，
+    // 硬塞给图片就是名字与内容双重说谎（本项目在 deleteConfirmSoft / reverseDeleteConfirmMsg 上栽过两次）；
+    // 泛化成通用句又会丢掉「分析分镜」这类各档专属信息。故两档各说各的真话、共用下面三条纯态度性文案
+    // （estimating / blocked / confirm 与档位无关，去掉 video 前缀后由两路共用，不造同义 key）。
+    // ⚠️ 金额一律取 BE estimate 返回值，**不写死 30**——分档/费率是租户可覆写的 CreditRate（#220 栽过「照抄默认值 1、真值 30」）。
+    imageChargeTitle: "确认扣费反推图片？",
+    imageChargeMessage: (credits: number) => `图片反推将一次性扣除 ${credits} 积分（识别画面 + 生成提示词）；确认后开始，取消不扣费。`,
+    chargeEstimating: "正在获取本次反推的积分消耗…",
     // 取不到金额时弹窗正文：解释「为什么这里没有数字、也不让点确认」。**一个数字都不许出现。**
-    videoChargeEstimateBlocked: "为避免显示金额与实际扣费不符，未取到本次金额前不能提交。",
-    videoChargeConfirm: "确认扣费反推",
+    chargeEstimateBlocked: "为避免显示金额与实际扣费不符，未取到本次金额前不能提交。",
+    chargeConfirm: "确认扣费反推",
     // 🔴 徽标不再写死数字：D9 之后金额取决于视频时长（≤60s / 61–180s 两档），而此处在**上传之前**就要显示，
     //    根本无从得知档位。写死「100 积分 / 次」= 长视频用户看到 100、实扣 250 的错价。改为定性说明，
     //    具体金额由计费门弹窗显示 BE estimate 的返回值。

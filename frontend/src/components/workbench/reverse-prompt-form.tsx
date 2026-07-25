@@ -40,10 +40,19 @@ type SourceType = "image" | "video";
  * 在途 → 只说在取数；未取到/失败 → 说明为什么不能提交。
  * 🔴 后两支**一个数字都不出现** —— 不许猜一个数兜底（宁可挡住也不能报错价）。
  */
-function chargeGateMessage(estimate: ReversePromptEstimate | undefined, estimating: boolean): string {
-  if (estimate) return copy.reverse.videoChargeMessage(estimate.credits);
-  if (estimating) return copy.reverse.videoChargeEstimating;
-  return copy.reverse.videoChargeEstimateBlocked;
+function chargeGateMessage(
+  estimate: ReversePromptEstimate | undefined,
+  estimating: boolean,
+  kind: SourceType
+): string {
+  // 有报价才出数字，且**两档各说各的真话**（图片=识别画面 / 视频=分析分镜）；后两支一个数字都不出现。
+  if (estimate) {
+    return kind === "video"
+      ? copy.reverse.videoChargeMessage(estimate.credits)
+      : copy.reverse.imageChargeMessage(estimate.credits);
+  }
+  if (estimating) return copy.reverse.chargeEstimating;
+  return copy.reverse.chargeEstimateBlocked;
 }
 
 /**
@@ -92,7 +101,11 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
    * openChargeGate / onSelectVideo 里的 `estimate.reset()` 是生命周期侧的修法，但它依赖「每条新增路径都记得
    * reset」；此处再用**资产比对**兜一道结构性的：对不上就当没有报价（挡住提交、不显示任何金额）。
    */
-  const quote = estimate.data && estimate.variables?.source_asset_id === videoAssetId ? estimate.data : undefined;
+  // 🔴 REVERSE-CHARGE-GATE-UI-0001 范围1：图片路也走计费门 → 比对基准改成**当前计费门针对的那条资产**
+  // （视频路=videoAssetId、图片路=imgSource.value）。判据不变：报价必须是给这条资产的，否则当作没有报价
+  // （挡住提交、不显示任何金额）——换素材后先显示上一条旧报价，正是 #220 抓到的那类 P1。
+  const chargeAssetId = sourceType === "video" ? videoAssetId : imgSource.value;
+  const quote = estimate.data && estimate.variables?.source_asset_id === chargeAssetId ? estimate.data : undefined;
 
   // ── 共享 ──
   const reverse = useReverseFromAsset();
@@ -183,6 +196,7 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
       return;
     }
     resetResult();
+    estimate.reset(); // 换图 = 换素材：上一张的报价立即作废（另有 quote 的资产比对兜底，承重门2）
     if (imgPreviewRef.current) URL.revokeObjectURL(imgPreviewRef.current);
     setImgPreview(URL.createObjectURL(file));
     void imgSource.onUpload(file);
@@ -192,21 +206,36 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
     if (imgPreviewRef.current) URL.revokeObjectURL(imgPreviewRef.current);
     setImgPreview(null);
     imgSource.setValue(null);
+    estimate.reset(); // 清图后不留悬空报价
     resetResult();
   };
 
+  /**
+   * 图片计费门（范围1）：与视频路同一套闭环——每次打开都 reset 后重估（不缓存上一次结果），
+   * 金额一律取 BE estimate 返回值（**不硬编码 30**：分档/费率是租户可覆写的 CreditRate）。
+   */
+  const openImageChargeGate = () => {
+    if (!imgSource.value) return;
+    setChargeOpen(true);
+    estimate.reset(); // 先清掉上一次报价，再重新取（否则新报价回来前会先显示旧金额）
+    estimate.mutate({ source_asset_id: imgSource.value });
+  };
+
   const onAnalyzeImage = async () => {
-    if (!imgSource.value || reverse.isPending) return;
+    // 🔴 第二道闸（资金红线）：没拿到**本条资产**的报价就不许发起扣费——判据与弹窗显示同源，不会一个挡一个放。
+    if (!imgSource.value || reverse.isPending || !quote) return;
     setLocalError(null);
     setSaved(false);
     try {
       const res = await reverse.mutateAsync({ source_asset_id: imgSource.value });
+      setChargeOpen(false);
       if (!res.result) {
         setLocalError(friendlyReverseError(res.error_code));
         return;
       }
       setJob(res);
     } catch (err) {
+      setChargeOpen(false); // 失败也关门（与视频路一致）：错误显示在表单区，不把用户困在弹窗里
       setLocalError(friendlyReverseError(err instanceof ApiError ? err.code : null));
     }
   };
@@ -436,7 +465,7 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
             )}
           </Button>
         ) : (
-          <Button variant="primary" size="lg" className="w-full" onClick={() => void onAnalyzeImage()} disabled={analyzeImageDisabled}>
+          <Button variant="primary" size="lg" className="w-full" onClick={openImageChargeGate} disabled={analyzeImageDisabled}>
             {reverse.isPending ? (
               <>
                 <Loader2 size={18} className="animate-spin" /> {copy.reverse.analyzing}
@@ -469,18 +498,19 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
           <p className="mt-2 text-center text-[12px] text-error-fg">{copy.reverse.videoPollRetrying}</p>
         )}
 
-        {/* 计费门（§八 M4）：金额一律取 BE estimate 的返回值。
-            估算中 → 只说在取数，不显示任何数字；
-            估算失败 → 走 error 显示友好文案 + 禁用确认（**不猜一个数兜底**，宁可挡住也不能报错价）。 */}
+        {/* 计费门（§八 M4 + REVERSE-CHARGE-GATE-UI-0001 范围1：**图片路也走这道门**）。
+            金额一律取 BE estimate 的返回值（不硬编码任何档位价）；估算中 → 只说在取数、不显示任何数字；
+            估算失败 → error 显示友好文案 + 禁用确认（**不猜一个数兜底**，宁可挡住也不能报错价），取消仍可用。
+            两路共用同一个弹窗/同一份 estimate：标题与正文按当前档位分流（各说各的真话），其余判据完全同源。 */}
         <ConfirmDialog
           open={chargeOpen}
-          title={copy.reverse.videoChargeTitle}
-          message={chargeGateMessage(quote, estimate.isPending)}
-          confirmLabel={copy.reverse.videoChargeConfirm}
-          submitting={submitting}
+          title={isVideo ? copy.reverse.videoChargeTitle : copy.reverse.imageChargeTitle}
+          message={chargeGateMessage(quote, estimate.isPending, sourceType)}
+          confirmLabel={copy.reverse.chargeConfirm}
+          submitting={submitting || (!isVideo && reverse.isPending)}
           confirmDisabled={!quote}
           error={estimate.isError ? copy.errors.reverseEstimateFailed : null}
-          onConfirm={() => void onConfirmVideoCharge()}
+          onConfirm={() => void (isVideo ? onConfirmVideoCharge() : onAnalyzeImage())}
           onCancel={() => setChargeOpen(false)}
         />
       </Card>

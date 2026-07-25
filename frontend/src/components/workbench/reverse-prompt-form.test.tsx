@@ -7,9 +7,17 @@ vi.mock("@/lib/api/hooks", () => ({
   useReverseFromAsset: vi.fn(),
   useRegenerateReversePrompt: vi.fn(),
   useSaveReversePrompt: vi.fn(),
-  // §八 M4：本文件走**图片**路径（图片无计费门，estimate 不会被调）→ 常态桩即可；
-  // 计费门本身的承重在 reverse-prompt-form.video.test.tsx。
-  useEstimateReversePrompt: () => ({ mutate: vi.fn(), reset: vi.fn(), data: undefined, isPending: false, isError: false })
+  // REVERSE-CHARGE-GATE-UI-0001 范围1：**图片路现在也有计费门**（原注释「图片无计费门」已失效）。
+  // 本文件测的是上传→反推→带入的状态机，故桩一个「已拿到本条资产报价」的常态（variables 与被测资产对得上），
+  // 让流程能走到提交；计费门自身的承重（金额取值 / 换素材作废 / 估算失败挡住）在 reverse-prompt-form.charge.test.tsx。
+  useEstimateReversePrompt: () => ({
+    mutate: vi.fn(),
+    reset: vi.fn(),
+    data: { credits: 30 },
+    variables: { source_asset_id: "aid-1" },
+    isPending: false,
+    isError: false
+  })
 }));
 
 import {
@@ -108,6 +116,8 @@ describe("ReversePromptForm 状态机（上传→反推→带入）", () => {
     const analyzeBtn = screen.getByRole("button", { name: copy.reverse.analyze });
     await waitFor(() => expect(analyzeBtn).toBeEnabled());
     fireEvent.click(analyzeBtn);
+    // 范围1：图片路现在也过计费门 → 点按钮只是开门，真正提交在「确认扣费反推」。
+    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.chargeConfirm }));
     // FIX1：请求体只发 source_asset_id（无 output_language/detail_level，BE forbid 否则 422）
     await waitFor(() => expect(reverse).toHaveBeenCalledWith({ source_asset_id: "aid-1" }));
     expect(await screen.findByText("中文提示词ZZZ")).toBeInTheDocument();
@@ -124,6 +134,8 @@ describe("ReversePromptForm 状态机（上传→反推→带入）", () => {
     const analyzeBtn = screen.getByRole("button", { name: copy.reverse.analyze });
     await waitFor(() => expect(analyzeBtn).toBeEnabled());
     fireEvent.click(analyzeBtn);
+    // 范围1：图片路现在也过计费门 → 点按钮只是开门，真正提交在「确认扣费反推」。
+    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.chargeConfirm }));
     await screen.findByText("中文提示词ZZZ");
     // REVERSE-DEEP-UI-0001 · D3-④：带入前先弹确认窗（可逐项取消/编辑）→ 点「确认带入」才真正落值。
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyAvatar }));
@@ -139,6 +151,8 @@ describe("ReversePromptForm 状态机（上传→反推→带入）", () => {
     const analyzeBtn = screen.getByRole("button", { name: copy.reverse.analyze });
     await waitFor(() => expect(analyzeBtn).toBeEnabled());
     fireEvent.click(analyzeBtn);
+    // 范围1：图片路现在也过计费门 → 点按钮只是开门，真正提交在「确认扣费反推」。
+    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.chargeConfirm }));
     expect(await screen.findByText(copy.errors.reverseFailed)).toBeInTheDocument();
     expect(screen.queryByText("Reverse prompt failed.")).not.toBeInTheDocument();
     expect(screen.queryByText("中文提示词ZZZ")).not.toBeInTheDocument();

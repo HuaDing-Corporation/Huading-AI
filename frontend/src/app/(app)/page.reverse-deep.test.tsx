@@ -30,11 +30,13 @@ vi.mock("@/lib/api/hooks", () => ({
   useReverseFromAsset: () => ({ mutateAsync: reverseMock.mutateAsync, isPending: false }),
   useRegenerateReversePrompt: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useSaveReversePrompt: () => ({ mutateAsync: vi.fn(), isPending: false }),
-  // §八 M4 计费预估（本文件只走图片路径、不开计费门，给个短档常态桩即可）
+  // REVERSE-CHARGE-GATE-UI-0001 范围1：图片路**现在也开计费门**（原注释「不开计费门」已失效）。
+  // 本文件测的是带入闭环，故桩「已拿到本条资产(aid-1)报价」的常态，让流程能走到结果页。
   useEstimateReversePrompt: () => ({
     mutate: vi.fn(),
     reset: vi.fn(),
-    data: { credits: 100, duration_sec: 3, tier: "video_short" },
+    data: { credits: 30 },
+    variables: { source_asset_id: "aid-1" },
     isPending: false,
     isError: false
   }),
@@ -151,6 +153,8 @@ async function produceResult() {
   const analyze = within(rp).getByRole("button", { name: copy.reverse.analyze });
   await waitFor(() => expect(analyze).toBeEnabled());
   fireEvent.click(analyze);
+  // 范围1：图片路先过计费门 → 点按钮只是开门，确认后才真正反推。
+  fireEvent.click(await screen.findByRole("button", { name: copy.reverse.chargeConfirm }));
   // 结果落地判据：有 structured_prompt 时结果视图展示的是**结构化中文版**（范围4），不再是 prompt_zh。
   await screen.findByText(RESULT.structured_prompt!.zh);
 }
