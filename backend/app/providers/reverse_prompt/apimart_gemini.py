@@ -19,6 +19,15 @@ _DEFAULT_MODEL = "gemini-3.1-pro-preview"
 _DEFAULT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 _TARGET_FORMAT = "seedance_2_0"
 _MAX_CHAT_IMAGES = 16
+_STRUCTURED_ZH_KEYS = (
+    "subject",
+    "scene",
+    "composition",
+    "camera",
+    "lighting",
+    "motion",
+    "style",
+)
 _FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
 
 
@@ -479,10 +488,17 @@ def normalize_reverse_prompt_payload(payload: Mapping[str, Any]) -> dict[str, An
         "text_in_media": _clean_list(payload.get("text_in_media")),
         "disclaimer": _clean_text(payload.get("disclaimer")),
         "confidence": _confidence(payload.get("confidence")),
+        "structured_fields_zh": _normalize_structured_fields_zh(payload),
     }
     if not result["prompt_zh"] and not result["prompt_en"]:
         raise APIMartGeminiReversePromptError("Reverse prompt result must include prompt text.")
     return result
+
+
+def _normalize_structured_fields_zh(payload: Mapping[str, Any]) -> dict[str, str]:
+    raw_fields = payload.get("structured_fields_zh")
+    fields = raw_fields if isinstance(raw_fields, Mapping) else {}
+    return {key: _clean_text(fields.get(key)) for key in _STRUCTURED_ZH_KEYS}
 
 
 def normalize_product_identity_payload(payload: Mapping[str, Any]) -> dict[str, str]:
@@ -646,12 +662,20 @@ Reconstruct only visible evidence. Write concrete, production-usable detail;
 do not abbreviate fields to tags or a few generic words."""
 
 
+def _structured_fields_zh_rules() -> str:
+    return """- structured_fields_zh must be an object with exactly these string keys:
+  subject, scene, composition, camera, lighting, motion, style.
+- Every structured_fields_zh value must be detailed Simplified Chinese that
+  preserves the same visible facts as its English counterpart. Never copy an
+  English value into this object. Localize style_tags into the style string."""
+
+
 def _reverse_prompt_instruction() -> str:
-    return """Analyze this single source image for faithful reconstruction with Seedance 2.0
+    return f"""Analyze this single source image for faithful reconstruction with Seedance 2.0
 and image generation models. Return one JSON object with these top-level keys:
 target_format, prompt_zh, prompt_en, negative_prompt, style_tags, camera,
 lighting, composition, subject, scene, motion_hint, selling_points,
-text_in_media, disclaimer, confidence, structured_prompt.
+text_in_media, disclaimer, confidence, structured_fields_zh.
 
 Rules:
 - target_format must be "seedance_2_0".
@@ -676,10 +700,7 @@ Rules:
   Transcribe visible text exactly when legible; otherwise use an empty array.
 - disclaimer is an empty string unless a factual disclosure is visibly needed.
 - confidence is a number from 0 to 1.
-- structured_prompt must be {"en": string, "zh": string}. The English value
-  must contain separate newline-delimited sections in this exact order:
-  Subject, Scene, Composition, Camera, Lighting, Motion, Style. The Chinese
-  value must mirror them as: 主体, 场景, 构图, 镜头, 光线, 运动, 风格.
+{_structured_fields_zh_rules()}
 - Each structured section must be a complete, detailed sentence or paragraph,
   not a comma-only keyword dump."""
 
@@ -698,7 +719,7 @@ visual timeline.
 Return one JSON object with these top-level keys: target_format, prompt_zh,
 prompt_en, negative_prompt, style_tags, camera, lighting, composition,
 subject, scene, motion_hint, selling_points, text_in_media, disclaimer,
-confidence, video_analysis.
+confidence, structured_fields_zh, video_analysis.
 
 Rules for the reconstruction fields:
 - target_format must be "seedance_2_0".
@@ -717,6 +738,7 @@ Rules for the reconstruction fields:
   in chronological order; use "static" only when no movement is visible.
 - prompt_zh and prompt_en must each preserve the same detailed facts in
   production-usable prose, not a short tag list.
+{_structured_fields_zh_rules()}
 - negative_prompt must target likely reconstruction failures without negating
   visible defining features.
 - style_tags, selling_points, and text_in_media must be JSON arrays of strings.
@@ -787,12 +809,14 @@ not invent evidence absent from segment analyses.
 Return one JSON object with the existing reverse-prompt keys:
 target_format, prompt_zh, prompt_en, negative_prompt, style_tags, camera,
 lighting, composition, subject, scene, motion_hint, selling_points,
-text_in_media, disclaimer, confidence; plus video_analysis.
+text_in_media, disclaimer, confidence, structured_fields_zh; plus
+video_analysis.
 
 Requirements:
 - target_format is "seedance_2_0".
 - subject, scene, camera, lighting, composition, motion_hint, prompt_zh,
   prompt_en, negative_prompt, and disclaimer are strings, never arrays.
+{_structured_fields_zh_rules()}
 - Every visual field reconstructs the full video, not only its opening.
 - video_analysis contains duration_sec, pacing, shot_list, audio_transcript,
   bgm_style, and shot_summary.
