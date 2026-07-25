@@ -1420,10 +1420,45 @@ export const handlers = [
     // FIX2：非法 category → 422（BE 对 Literal path 参数先校验，先于 404）。
     if (!VALID_HISTORY_CATEGORIES.has(String(params.category))) return err(422, "VALIDATION_ERROR", "无效的图片分类");
     const rec = historyImageRecords.find((r) => r.category === String(params.category) && r.id === String(params.id));
-    if (!rec) return err(404, "HISTORY_NOT_FOUND", "记录不存在或无权访问");
+    if (!rec) return err(404, "IMAGE_HISTORY_NOT_FOUND", "记录不存在或无权访问");
     return ok({ id: rec.id, category: rec.category, created_at: rec.created_at, status: rec.status, items: rec.items, meta: rec.meta ?? {} });
   }),
-  // FIX1（HISTORY-IMAGE-TAB-UI-0001）：图片删除端点被摘（用户「三拆」改 GC 方案）→ 此处不再 mock 图片删除端点（不留死代码）。
+  // ── 删除 / 清空当前分类（HISTORY-CHAT-DELETE-UI-0001，契约 §5.1；**FIX1 已按 #221 真实响应逐字对齐**）──
+  // 真联调证据（BE TestClient 实打，非读源码推断）：
+  //   DELETE /history/images/{cat}/{id}  → **200** `{data:{deleted:true}}`（不是 204 无 body）
+  //   已删再删 / 不存在 / 跨租户       → **404** code=**IMAGE_HISTORY_NOT_FOUND**（原 mock 写 HISTORY_NOT_FOUND，已改）
+  //   非法分类                          → 422 VALIDATION_ERROR（FastAPI Literal 校验，5 值逐字：image_gen/ecom_white/ecom_model/ecom_detail/cover）
+  //   DELETE /history/images?category=X → **200** `{data:{deleted_count:int}}`；**缺 category → 422**（Query 必填，非"默认清全部"）
+  // FIX1 曾摘掉（#175 同步删媒体的 P1 群 → 用户三拆）；本包按冻结 §二复活为**纯记录软删**：不碰 Asset、
+  // 不碰 storage、不碰 task_assets。🔴 mock 纪律：**真的从 historyImageRecords 里去掉**（不是返 200 列表照旧），
+  // 否则「删除后列表刷新」永远测不出来；清空**只清当前分类**（比 BE 宽松 = 假绿）。
+  // ⚠️ 集合级 DELETE 注册在 `/:category/:id` **之前**（msw 按注册序匹配，避免被 :category/:id 影子覆盖）。
+  http.delete(`${BASE}/api/v1/history/images`, ({ request }) => {
+    const category = new URL(request.url).searchParams.get("category");
+    // category 必传且合法：BE 对 Literal query 校验 422；缺失 → 422（**不默认清全部**，那是最危险的宽松）。
+    if (category === null) return err(422, "VALIDATION_ERROR", "category 必传");
+    if (!VALID_HISTORY_CATEGORIES.has(category)) return err(422, "VALIDATION_ERROR", "无效的图片分类");
+    // 失败注入口（承重门 5）：清空同样可失败——不移除任何记录。
+    if (category === "__FAIL__") return err(500, "INTERNAL_ERROR", "清空失败");
+    const before = historyImageRecords.length;
+    // 只清该分类：其余分类**一条不少**（承重门 2 断言）。原地 splice 保持数组引用（其它闭包持有同一引用）。
+    for (let i = historyImageRecords.length - 1; i >= 0; i--) {
+      if (historyImageRecords[i].category === category) historyImageRecords.splice(i, 1);
+    }
+    return ok({ deleted_count: before - historyImageRecords.length });
+  }),
+  http.delete(`${BASE}/api/v1/history/images/:category/:id`, ({ params }) => {
+    const category = String(params.category);
+    const id = String(params.id);
+    if (!VALID_HISTORY_CATEGORIES.has(category)) return err(422, "VALIDATION_ERROR", "无效的图片分类");
+    // 失败注入口（承重门 5：友好错误 + **不移除**，绝不留"看起来删了其实没删"的界面）。
+    if (id.includes("__FAIL__")) return err(500, "INTERNAL_ERROR", "删除失败");
+    const idx = historyImageRecords.findIndex((r) => r.category === category && r.id === id);
+    // 跨租户/不存在 → 404（BE 租户过滤后即"不存在"）。
+    if (idx < 0) return err(404, "IMAGE_HISTORY_NOT_FOUND", "记录不存在或无权访问");
+    historyImageRecords.splice(idx, 1);
+    return ok({ deleted: true });
+  }),
   // Auth = M2 shapes (unchanged). Mocked so the (app) client auth-gate can be
   // passed during the MSW parallel period without a real backend.
   http.post(`${BASE}/api/v1/auth/login`, () =>

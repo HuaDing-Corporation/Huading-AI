@@ -22,7 +22,13 @@ import {
 } from "@/lib/api/admin-console";
 import { listAvatarPresets } from "@/lib/api/avatars";
 import { analyticsKeys, avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, historyImageKeys, labelSettingsKey, meKey, publishKeys, quotaKey, reversePromptKeys, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
-import { getHistoryImageSet, listHistoryImages, type HistoryCategory } from "@/lib/api/history-images";
+import {
+  clearHistoryImages,
+  deleteHistoryImageSet,
+  getHistoryImageSet,
+  listHistoryImages,
+  type HistoryCategory
+} from "@/lib/api/history-images";
 import { fetchAnalyticsByProvider, fetchAnalyticsByTenant, fetchAnalyticsOverview, fetchAnalyticsTimeseries, type AnalyticsRange } from "@/lib/api/analytics";
 import { cancelBatch, createBatch, estimateBatch, getBatch, listBatches } from "@/lib/api/batches";
 import { getQuota } from "@/lib/api/quota";
@@ -120,7 +126,27 @@ export function useHistoryImageSet(category: HistoryCategory | string, id: strin
     enabled: !!session && !!id
   });
 }
-// FIX1：图片删除端点被摘（用户「三拆」，改 GC 方案）→ 图片删除钩子一并摘除，不留孤儿。
+// ── 图片历史删除（HISTORY-CHAT-DELETE-UI-0001）──────────────────────────────
+// FIX1 曾摘掉（#175 同步删媒体的 P1 群）；本包按冻结 §二复活为**纯记录软删**（不碰媒体/Asset）。
+// 成功后失效 historyImageKeys.all（列表 + 详情前缀）：**不做乐观移除**——承重门 5 要求「绝不留一个
+// 看起来删了其实没删的界面」，失败即保持原样 + 弹窗内报错，成功才由 refetch 让它消失。
+export function useDeleteHistoryImageSet() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ category, id }: { category: HistoryCategory | string; id: string }) =>
+      deleteHistoryImageSet(category, id),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: historyImageKeys.all })
+  });
+}
+// 清空**当前分类**（E3，单事务批量软删）。同样失效全部图片历史键：其余分类的计数由 BE 保证不变，
+// 前端只需重取（承重门 2 断言其余分类一条不少）。
+export function useClearHistoryImages() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (category: HistoryCategory | string) => clearHistoryImages(category),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: historyImageKeys.all })
+  });
+}
 export function useCreateVideo() {
   const qc = useQueryClient();
   return useMutation({

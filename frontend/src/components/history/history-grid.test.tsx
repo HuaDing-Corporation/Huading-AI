@@ -4,13 +4,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { copy } from "@/lib/copy";
 import type { HistoryItem } from "@/lib/api/history-images";
 
-const hooks = vi.hoisted(() => ({ useHistoryImages: vi.fn(), useHistoryImageSet: vi.fn() }));
+// HISTORY-CHAT-DELETE-UI-0001：网格新增删除/清空 mutation → mock 模块必须补齐这两个导出（否则整块 mock 缺 export）。
+const hooks = vi.hoisted(() => ({
+  useHistoryImages: vi.fn(),
+  useHistoryImageSet: vi.fn(),
+  useDeleteHistoryImageSet: vi.fn(),
+  useClearHistoryImages: vi.fn()
+}));
 vi.mock("@/lib/api/hooks", () => hooks);
 
 import { HistoryGrid } from "./history-grid";
 
 beforeEach(() => {
   hooks.useHistoryImageSet.mockReturnValue({ data: undefined, isLoading: false, isError: false, refetch: vi.fn() });
+  hooks.useDeleteHistoryImageSet.mockReturnValue({ mutateAsync: vi.fn().mockResolvedValue({ deleted: true }), isPending: false });
+  hooks.useClearHistoryImages.mockReturnValue({ mutateAsync: vi.fn().mockResolvedValue({ deleted_count: 0 }), isPending: false });
 });
 afterEach(() => vi.clearAllMocks());
 

@@ -152,6 +152,27 @@ export function aibrainHandlers() {
       return ok({ ...metaOf(conv), messages: [] }, 201);
     }),
 
+    // ── 删除 / 清空（HISTORY-CHAT-DELETE-UI-0001，契约 §5.2；mock 先行——BE aibrain 路由本无 DELETE）──
+    // 🔴 mock 纪律：**真的从会话表里去掉**（不是返 200 而列表照旧）——否则「删除后列表刷新」永远测不出来。
+    // 语义镜像 BE 软删：这里直接从内存 Map 移除 = 用户侧「列表已过滤掉」的等效可观察结果（mock 不建 deleted_at
+    // 影子表，因为**没有任何前端路径能观察到软删记录**；如此不会比 BE 宽松）。⚠️ 集合级 DELETE 必须注册在
+    // `/:id` **之前**，否则会被 `:id` 影子覆盖（msw 按注册序匹配，":id" 会吃掉集合路径）。
+    // ⚠️ 不碰 wallet/账本：available/totalTopup 一分不动（验收 4）。
+    http.delete(`${BASE}/api/v1/aibrain/conversations`, () => {
+      const deleted_count = conversations.size;
+      conversations.clear();
+      return ok({ deleted_count });
+    }),
+    http.delete(`${BASE}/api/v1/aibrain/conversations/:id`, ({ params }) => {
+      const id = String(params.id);
+      // 跨租户/不存在 → 404（与详情同码，BE 租户过滤后即"不存在"）。
+      if (!conversations.has(id)) return err(404, AIBRAIN_ERROR.CONVERSATION_NOT_FOUND, "会话不存在或无权访问");
+      // 失败注入口（承重门 5：删除失败 → 友好错误 + 列表不乐观移除）：id 含 __FAIL__ → 500，且**不移除**。
+      if (id.includes("__FAIL__")) return err(500, "INTERNAL_ERROR", "删除失败");
+      conversations.delete(id);
+      return ok({ deleted: true });
+    }),
+
     // ── 会话详情 ─────────────────────────────────────────────────────
     http.get(`${BASE}/api/v1/aibrain/conversations/:id`, ({ params }) => {
       const conv = conversations.get(String(params.id));

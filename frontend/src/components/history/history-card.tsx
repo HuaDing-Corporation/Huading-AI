@@ -1,5 +1,7 @@
 "use client";
 
+import { Trash2 } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import { HistoryStatusBadge } from "@/components/history/history-status-badge";
 import { copy } from "@/lib/copy";
@@ -14,18 +16,24 @@ function formatCreatedAt(iso: string): string {
 /**
  * 历史网格卡片（HISTORY-IMAGE-TAB-UI-0001）——封面缩略 + 张数角标 + 标题 + 时间 + 状态徽标；
  * 交互（统一交互语言，供包 2 视频 tab 复用同款）：点**图片** → 大图弹窗（onOpenImage）；「查看详情」→ 详情弹窗（onDetail）。
- * FIX1：归一 API 的图片删除端点被摘掉（用户「三拆」，改 GC 方案将来补）→ 本卡**不渲染删除入口**（点了没反应的按钮
- * 比没有更糟）。视频/文案 tab 的删除各走自己旧路径、不受影响；反推删除在包 2。
+ *
+ * 删除入口（HISTORY-CHAT-DELETE-UI-0001，FIX1 曾摘掉、本包按冻结 §二复活为纯记录软删）：
+ * 🔴 **放底部操作行、不放缩略图角**——缩略图右上已被张数角标占着（:56），#218 的教训正是「徽标与删除按钮
+ * 抢同一个角 → 有徽标的条目删不掉」，那次的结论是「结构上不可能再同角竞争」。这里让删除与「查看详情」
+ * 同处底部一行（各自独立命中区，图标按钮 h-8 w-8 ≥ 触控下限），缩略图区域**只有**一个角标、零竞争。
  */
 export function HistoryCard({
   item,
   onOpenImage,
   onDetail,
+  onDelete,
   refresh
 }: {
   item: HistoryItem;
   onOpenImage: () => void;
   onDetail: () => void;
+  /** 删除入口；父级（HistoryGrid）持确认弹窗与 mutation。 */
+  onDelete: () => void;
   /**
    * presign 失效重取的**作用域**，由持有 query 的 HistoryGrid 创建并下发（FIX1）。
    *
@@ -66,9 +74,21 @@ export function HistoryCard({
         </div>
         <HistoryStatusBadge status={item.status} />
       </div>
-      <Button variant="soft" size="sm" className="w-full" onClick={onDetail}>
-        {copy.historyImages.viewDetail}
-      </Button>
+      {/* 底部操作行：详情占主宽、删除是独立图标按钮（与缩略图角标物理隔离——见组件头注释的 #218 教训）。 */}
+      <div className="flex items-center gap-2">
+        <Button variant="soft" size="sm" className="flex-1" onClick={onDetail}>
+          {copy.historyImages.viewDetail}
+        </Button>
+        <button
+          type="button"
+          onClick={onDelete}
+          aria-label={copy.history.deleteItem}
+          title={copy.history.deleteItem}
+          className="flex h-8 w-8 flex-none items-center justify-center rounded-field border border-line-gold text-ink-soft outline-none transition-colors hover:bg-error-bg hover:text-error-fg focus-visible:shadow-focus-gold"
+        >
+          <Trash2 size={14} strokeWidth={1.8} />
+        </button>
+      </div>
     </div>
   );
 }
