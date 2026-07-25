@@ -6,6 +6,7 @@ URL, and a JSON array. These tests go through the real env source.
 """
 
 import pytest
+from pydantic import ValidationError
 
 from app.core.config import Settings
 
@@ -87,6 +88,17 @@ def test_generation_heartbeat_interval_defaults_and_is_env_overridable(monkeypat
         Settings(_env_file=None, jwt_secret_key=_JWT).engine_gen_heartbeat_interval_seconds
         == 7.5
     )
+
+
+@pytest.mark.parametrize("raw", ["1e-12", "1e300", "inf", "NaN", "0", "-1"])
+def test_generation_heartbeat_interval_rejects_unsafe_values(
+    monkeypatch,
+    raw: str,
+) -> None:
+    monkeypatch.setenv("ENGINE_GEN_HEARTBEAT_INTERVAL_SECONDS", raw)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, jwt_secret_key=_JWT)
 
 
 def test_engine_cors_origins_override_legacy_cors_env(monkeypatch) -> None:

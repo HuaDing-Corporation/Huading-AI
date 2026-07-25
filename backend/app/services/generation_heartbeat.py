@@ -4,6 +4,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from math import isfinite
 from typing import Protocol
 
 from app.core.config import settings
@@ -50,8 +51,8 @@ def generation_heartbeat(
         if interval_seconds is None
         else interval_seconds
     )
-    if interval <= 0:
-        raise ValueError("Generation heartbeat interval must be positive.")
+    if not isfinite(interval) or interval <= 0:
+        raise ValueError("Generation heartbeat interval must be finite and positive.")
 
     stopped = threading.Event()
     thread = threading.Thread(

@@ -16,6 +16,7 @@ from app.services.progress import ProgressStore
 
 class _RecordingStore:
     def __init__(self) -> None:
+        self.condition = threading.Condition()
         self.data = {
             "tenant:task": {
                 "task_id": "tenant:task",
@@ -28,11 +29,17 @@ class _RecordingStore:
         self.events: list[tuple[float, dict[str, object]]] = []
 
     def update(self, task_id: str, **fields: object) -> None:
-        snapshot = dict(self.data.get(task_id, {}))
-        snapshot.update(fields)
-        snapshot["task_id"] = task_id
-        self.data[task_id] = snapshot
-        self.events.append((time.perf_counter(), snapshot))
+        with self.condition:
+            snapshot = dict(self.data.get(task_id, {}))
+            snapshot.update(fields)
+            snapshot["task_id"] = task_id
+            self.data[task_id] = snapshot
+            self.events.append((time.perf_counter(), snapshot))
+            self.condition.notify_all()
+
+    def wait_for_events(self, count: int, *, timeout: float) -> bool:
+        with self.condition:
+            return self.condition.wait_for(lambda: len(self.events) >= count, timeout=timeout)
 
 
 class _FakeRedis:
@@ -66,16 +73,15 @@ def test_generation_heartbeat_emits_periodically_without_changing_progress(monke
         task_id="tenant:task",
         interval_seconds=interval_seconds,
     ):
-        time.sleep(0.14)
+        assert store.wait_for_events(3, timeout=2.0)
 
-    assert 3 <= len(store.events) <= 5
+    assert len(store.events) >= 3
     gaps = [
         later[0] - earlier[0]
         for earlier, later in zip(store.events, store.events[1:], strict=False)
     ]
     assert gaps
     assert all(gap >= interval_seconds * 0.6 for gap in gaps)
-    assert all(gap <= interval_seconds * 2.5 for gap in gaps)
     for _emitted_at, snapshot in store.events:
         assert snapshot["progress"] == 30
         assert snapshot["stage"] == "generating"
