@@ -41,6 +41,7 @@ _VIDEO_GEN_PROMPT_LIMIT = 2_000
 _PHOTO_PROMPT_LIMIT = 20_000
 _ECOM_MODEL_PROMPT_LIMIT = 20_000
 _JOB_PROGRESS_KEY = "_job_progress"
+_STRUCTURED_ZH_FALLBACK_PREFIX = "[中文缺失，以下为英文原文]"
 
 
 def live_reverse_prompt_job_condition():
@@ -685,7 +686,11 @@ def _result_payload(
         ),
     }
     payload["source_media"] = _source_media_payload(source, source_kind=source_kind)
-    payload["structured_prompt"] = structured_prompt(payload)
+    structured_source = {
+        **payload,
+        "structured_fields_zh": result.get("structured_fields_zh"),
+    }
+    payload["structured_prompt"] = structured_prompt(structured_source)
     payload["fill_targets"] = fill_targets(payload)
     # Normalize nested models before storing so provider-only fields never leak to the API.
     validated = ReversePromptResult.model_validate(payload)
@@ -791,19 +796,47 @@ def fill_targets(result: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
 
 def structured_prompt(result: Mapping[str, Any]) -> dict[str, str]:
     style = ", ".join(_clean_list(result.get("style_tags")))
+    raw_zh_fields = result.get("structured_fields_zh")
+    zh_fields = raw_zh_fields if isinstance(raw_zh_fields, Mapping) else {}
     sections = [
-        ("Subject", "主体", _clean_text(result.get("subject"))),
-        ("Scene", "场景", _clean_text(result.get("scene"))),
-        ("Composition", "构图", _clean_text(result.get("composition"))),
-        ("Camera", "镜头", _clean_text(result.get("camera"))),
-        ("Lighting", "光线", _clean_text(result.get("lighting"))),
-        ("Motion", "运动", _clean_text(result.get("motion_hint"))),
-        ("Style", "风格", style),
+        ("Subject", "主体", "subject", _clean_text(result.get("subject"))),
+        ("Scene", "场景", "scene", _clean_text(result.get("scene"))),
+        (
+            "Composition",
+            "构图",
+            "composition",
+            _clean_text(result.get("composition")),
+        ),
+        ("Camera", "镜头", "camera", _clean_text(result.get("camera"))),
+        ("Lighting", "光线", "lighting", _clean_text(result.get("lighting"))),
+        ("Motion", "运动", "motion", _clean_text(result.get("motion_hint"))),
+        ("Style", "风格", "style", style),
     ]
     return {
-        "en": "\n".join(f"{label}: {value}" for label, _, value in sections),
-        "zh": "\n".join(f"{label}: {value}" for _, label, value in sections),
+        "en": "\n".join(
+            f"{label}: {english_value}"
+            for label, _, _, english_value in sections
+        ),
+        "zh": "\n".join(
+            f"{label}: {_structured_zh_value(zh_fields.get(key), english_value)}"
+            for _, label, key, english_value in sections
+        ),
     }
+
+
+def _structured_zh_value(value: Any, english_value: str) -> str:
+    localized = _clean_text(value)
+    if localized and _contains_han(localized):
+        return localized
+    return f"{_STRUCTURED_ZH_FALLBACK_PREFIX} {english_value}".rstrip()
+
+
+def _contains_han(value: str) -> bool:
+    return any(
+        "\u3400" <= character <= "\u4dbf"
+        or "\u4e00" <= character <= "\u9fff"
+        for character in value
+    )
 
 
 def _source_media_payload(source: Asset | None, *, source_kind: str) -> dict[str, Any]:
