@@ -57,6 +57,15 @@ export interface EcomReplicateJob {
   requested_size: string;
   requested_aspect: string;
   plan: EcomReplicatePlanPayload;
+  /**
+   * 心跳（GEN-HEARTBEAT-UI-0001 · FIX1 · **通道②**）：详情图**没有 Redis/SSE 通道**（它只有逐张 DB 状态），
+   * 所以心跳走**本轮询响应**而不是 SSE——与图片生成那条是两条独立的路，各按各的形态做。
+   *
+   * 🔴 **可能是 `null`**：Redis 不可用时 BE 降级为 `heartbeat_at: null`，**业务轮询不受影响**。
+   * 故前端只把它当"还活着"的**布尔证据**（`!= null`）用来门控计时的显示，**从不解析它的值**——
+   * 这样 null / 怪格式在结构上就不可能变成「已 NaN 秒」「Invalid Date」，也绝不因此判失败。
+   */
+  heartbeat_at?: string | number | null;
 }
 
 /** POST /confirm 的响应（BE EcomReplicateConfirmAccepted，**不含 plan/outputs**）。 */

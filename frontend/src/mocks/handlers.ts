@@ -376,10 +376,25 @@ function sseStream(id: string, fail = false): Response {
   // v.mp4 覆盖其 URL，否则轮询 reconcile 会拿到错图(mock 忠实，吸取教训)。
   const seeded = videos.get(id);
   const preseeded = !fail && seeded?.status === "done" && Boolean(seeded.playback_url);
+  // GEN-HEARTBEAT-UI-0001 · 冻结 §四：心跳帧 = **progress/step 逐字照抄上一帧**，只多一个 heartbeat_at
+  // （mock 不比 BE 宽松、也不比 BE 严：既不改百分比，也不新开通道）。
+  // 🔴 **默认关**：口播 / 视频生成 / 电商带货三条链路 BE 不发心跳，它们的既有进度体验必须逐帧不变（零回归）。
+  // 打开（`localStorage.setItem("hd_mock_heartbeat","1")`）= **心跳演示态**：走完第一帧后**只发心跳、
+  // 百分比一动不动**，复刻本包要解决的那个真实场景（长时间死寂但链路还活着）——供联调与交互冒烟
+  // 观察「仍在生成（已 X）」，也正是"看门狗不该在此误杀"的现场。
+  // `!fail`：失败流不进心跳演示态，否则开关一开就永远走不到 failed 帧，失败路径没法手测。
+  const beatMode = !fail && readLS("hd_mock_heartbeat") === "1";
   const stream = new ReadableStream({
     start(controller) {
       let i = 0;
       const push = () => {
+        if (beatMode && i >= 1) {
+          // 只发心跳：progress/step 逐字照抄第一帧，只多 heartbeat_at；**不写 videos**
+          // （BE 侧 progress store 同样不变；写了会让 heartbeat_at 从 GET /videos/{id} 漏出去 = mock 比 BE 宽松）。
+          controller.enqueue(enc.encode(`data: ${JSON.stringify({ ...frames[0], heartbeat_at: new Date().toISOString() })}\n\n`));
+          setTimeout(push, 500);
+          return;
+        }
         if (i >= frames.length) return controller.close();
         const f = frames[i++];
         controller.enqueue(enc.encode(`data: ${JSON.stringify(f)}\n\n`));
@@ -1066,6 +1081,12 @@ function ecomAcceptedResponse(j: MockEcomJob) {
   return {
     job_id: j.job_id, status: j.status, output_mode: j.output_mode, output_count: j.output_count,
     total_credits: j.total_credits, credit_rate: j.credit_rate, requested_size: j.requested_size, requested_aspect: j.requested_aspect,
+    // GEN-HEARTBEAT-UI-0001 · FIX1 通道②：详情图**没有 SSE**，心跳走本轮询响应。
+    // 只在**生成中**给心跳（终态没有"还活着"这回事）。
+    // 🔴 Redis 不可用时 BE 降级为 `heartbeat_at: null`、**业务轮询不受影响** —— mock 忠实提供这条降级路径
+    // 供承重：localStorage.setItem("hd_mock_heartbeat_null", "1")。
+    heartbeat_at:
+      j.status === "generating" && readLS("hd_mock_heartbeat_null") !== "1" ? new Date().toISOString() : null,
     plan: {
       outputs: j.outputs.map((o) => ({
         id: o.id, index: o.index, theme: o.theme, reference_asset_id: o.reference_asset_id, product_asset_id: o.product_asset_id,

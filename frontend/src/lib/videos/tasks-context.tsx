@@ -130,15 +130,24 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
       // percent or a step change. Repeated identical frames keep the clock
       // ticking toward STALL_MS so a wedged task still trips the watchdog.
       const m = meta.current.get(taskId);
+      const beat = event.heartbeat_at != null;
+      const now = Date.now();
       if (m) {
         const step = event.step ?? null;
-        if (next.progress > m.lastPct || step !== m.lastStep) {
-          m.lastProgressAt = Date.now();
+        const advanced = next.progress > m.lastPct || step !== m.lastStep;
+        // 🔴 只有"真实前进"能动 lastPct/lastStep —— 心跳**碰不到这两个字段**。拆成两段（而不是 if/else）
+        // 是为了让这条不变量从**结构**上看得见，而不是只写在注释里：让心跳推进 lastPct 等于把假进度写进
+        // 状态，且之后真实前进帧会被误判成"没前进"、失去重置能力。
+        if (advanced) {
           m.lastPct = Math.max(m.lastPct, next.progress);
           m.lastStep = step;
         }
+        // GEN-HEARTBEAT-UI-0001：心跳是与"真实前进"**并列的第二条**重置条件。
+        // BE 的心跳不改 progress、不改 step（冻结 §四），只认上面那条判据会把它整帧忽略 → 27 分钟死寂照旧。
+        // 看门狗并没被废：心跳一停，时钟照常走向 STALL_MS。
+        if (advanced || beat) m.lastProgressAt = now;
       }
-      patch(taskId, next);
+      patch(taskId, beat ? { ...next, heartbeatAt: now } : next);
     },
     [patch]
   );
@@ -221,6 +230,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
           progress: 0,
           statusLabel: "排队中",
           applyVisibleLabel: req.apply_visible_label ?? false, // session 卡即时徽标（LABEL-TOGGLE-UI-0001）
+          startedAt: Date.now(), // 诚实计时基准（GEN-HEARTBEAT-UI-0001）；随后 reconcile 会用 BE created_at 校准
           retryable: true // we hold this request → retry can re-submit it (P2-1)
         },
         ...prev
@@ -247,6 +257,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
                 progress: 0,
                 statusLabel: "排队中",
                 applyVisibleLabel: applyVisibleLabel ?? false, // ecom session 卡即时徽标（LABEL-TOGGLE-UI-0001）
+                startedAt: Date.now(), // 同上：诚实计时基准（GEN-HEARTBEAT-UI-0001）
                 retryable: false // 无 stored request；重试由各工具自行重新提交
               },
               ...prev

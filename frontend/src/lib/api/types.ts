@@ -286,6 +286,12 @@ export interface VideoEvent {
   thumbnail_url?: string | null;
   error_code?: string | null;
   error_message?: string | null;
+  /**
+   * 心跳帧（GEN-HEARTBEAT-UI-0001，冻结契约 §四）：生成期间周期推送（默认 15s），
+   * **`progress` 与 `stage`/`step` 保持不变**，只证明"链路还活着"。ISO8601 或 epoch ms。
+   * 前端必须显式识别它来重置 stall 时钟——否则会被 applyEvent「只认真实前进」的判据直接忽略。
+   */
+  heartbeat_at?: string | number | null;
   // 旧帧兜底
   task_id?: string;
   stage?: string | null;

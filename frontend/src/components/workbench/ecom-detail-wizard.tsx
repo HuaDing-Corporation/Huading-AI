@@ -19,6 +19,7 @@ import {
   type EcomReplicatePlanOutput
 } from "@/lib/api/ecom-replicate";
 import { Button } from "@/components/ui/button";
+import { ElapsedSince } from "@/components/common/elapsed-since";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
@@ -138,6 +139,18 @@ export function EcomDetailWizard() {
   const [retryingIndex, setRetryingIndex] = useState<number | null>(null);
   const [pollError, setPollError] = useState(false); // 轮询瞬时失败 → 软提示（不放弃整套）
   const [pollTick, setPollTick] = useState(0); // 失败后自增以重排下一次轮询（job 未变，靠此触发 effect 重跑）
+  // 诚实计时的基准（GEN-HEARTBEAT-UI-0001 · FIX1 通道②）：本链路**不走 tasks-context 看门狗**（它是独立轮询），
+  // 故自己记「进入生成态的时刻」= 用户按下确认扣费、任务真正开始的那一刻。
+  const [generatingSince, setGeneratingSince] = useState<number | null>(null);
+
+  // 计时基准起算：**每次进入生成态**都重新起算（确认扣费进来是第一轮；单张重试再进来是新一轮 →
+  // 报"本轮已等多久"，不累加上一轮，否则重试刚开始 5 秒却显示"已 20 分钟"）。
+  // 用 effect 而不是在两个 handler 里各写一次：onConfirmCharge 与 onRetry 都会置 generating，
+  // effect 是它们唯一的汇合点（少一处要人去同步的地方）。附带一提，本仓 eslint 的 react-hooks/purity
+  // 实测会拦下直接写在 onRetry 里的 `Date.now()`（同样的调用在 useCallback 里则不拦）。
+  useEffect(() => {
+    if (step === "generating") setGeneratingSince(Date.now());
+  }, [step]);
 
   // 生成中轮询 GET /replicate/{id}：job 更新驱动重跑；settled 才切结果（**全部完成才一次性展示**，生成阶段只显进度）。
   // 红线：轮询瞬时失败（500/离线）**绝不**跳结果页把未完成输出当成品展示（用户已扣费、后端仍在生成）——保持生成中、
@@ -446,6 +459,10 @@ export function EcomDetailWizard() {
           <Loader2 size={28} className="animate-spin text-gold-deep" />
           <p className="text-[13px] text-ink">{copy.workbench.ecomGenProgress(done, total)}</p>
           <p className="text-[12px] text-ink-faint">{copy.workbench.ecomGenWait}</p>
+          {/* GEN-HEARTBEAT-UI-0001 · FIX1 通道②：轮询响应带 heartbeat_at → 补一行诚实计时（与图片生成同一份实现）。
+              🔴 heartbeat_at 只当**布尔证据**用（BE 在 Redis 不可用时降级为 null，业务轮询不受影响）：
+              null / 缺省 → 这一行不渲染，**其余等待态原样保留**，不出 NaN、不出 Invalid Date、更不判失败。 */}
+          {job.heartbeat_at != null && generatingSince != null ? <ElapsedSince startedAt={generatingSince} /> : null}
           <div className="h-1.5 w-full max-w-xs overflow-hidden rounded-pill bg-track">
             <div className="h-full rounded-pill bg-grad-gold transition-[width]" style={{ width: `${total ? Math.round((done / total) * 100) : 0}%` }} />
           </div>
