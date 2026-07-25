@@ -2,8 +2,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
-from app.api.deps import get_object_storage
+from app.api.deps import get_object_storage, get_progress_store
 from app.db.models import (
     Asset,
     EcomReplicateJob,
@@ -21,6 +22,7 @@ class _FakeStorage:
 
     def __init__(self) -> None:
         self.presigned_keys: list[str] = []
+        self.deleted_keys: list[str] = []
 
     def presign_get_url(
         self,
@@ -32,6 +34,14 @@ class _FakeStorage:
         self.presigned_keys.append(key)
         suffix = "&download=1" if download_filename else ""
         return f"https://storage.test/{key}?ttl={expires_in}{suffix}"
+
+    def delete_object(self, key: str) -> None:
+        self.deleted_keys.append(key)
+
+
+class _FakeProgressStore:
+    def read(self, _task_id: str) -> None:
+        return None
 
 
 def _photo_task(
@@ -179,6 +189,620 @@ def _link_photo_output(
     db.flush()
     db.add(TaskAsset(video_task_id=task.id, asset_id=asset.id, role="output_image"))
     return asset
+
+
+def test_delete_image_history_soft_deletes_record_without_touching_asset_or_storage(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    task_id = "delete-image-history-soft"
+    task = _photo_task(
+        task_id=task_id,
+        tenant_id=tenant_id,
+        created_at=datetime.now(UTC),
+        topic="Soft delete only",
+    )
+    with auth_db() as db:
+        db.add(task)
+        db.flush()
+        asset = _link_photo_output(
+            db,
+            task=task,
+            asset_id="delete-image-history-asset",
+            width=1024,
+            height=1024,
+        )
+        asset_id = asset.id
+        db.commit()
+
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        deleted = TestClient(app).delete(
+            f"/api/v1/history/images/image_gen/{task_id}",
+            headers=auth_context["headers"],
+        )
+        listed = TestClient(app).get(
+            "/api/v1/history/images",
+            params={"category": "image_gen"},
+            headers=auth_context["headers"],
+        )
+        detail = TestClient(app).get(
+            f"/api/v1/history/images/image_gen/{task_id}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert deleted.status_code == 200
+    assert deleted.json()["data"] == {"deleted": True}
+    assert listed.status_code == 200
+    assert listed.json()["data"]["total"] == 0
+    assert detail.status_code == 404
+    with auth_db() as db:
+        persisted_task = db.get(VideoTask, task_id)
+        persisted_asset = db.get(Asset, asset_id)
+        persisted_link = db.scalar(
+            select(TaskAsset).where(
+                TaskAsset.video_task_id == task_id,
+                TaskAsset.asset_id == asset_id,
+            )
+        )
+        assert persisted_task is not None
+        assert persisted_task.deleted_at is not None
+        assert persisted_asset is not None
+        assert persisted_asset.deleted_at is None
+        assert persisted_link is not None
+    assert storage.deleted_keys == []
+
+
+def test_delete_grouped_image_history_is_tenant_scoped_and_idempotently_missing(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    other_tenant_id = "image-delete-other-tenant"
+    now = datetime.now(UTC)
+    params = {"kind": "ecom_model", "batch_id": "delete-model-batch"}
+    own_tasks = [
+        _photo_task(
+            task_id=f"delete-model-{index}",
+            tenant_id=tenant_id,
+            created_at=now + timedelta(seconds=index),
+            topic="Own model",
+            params=params,
+        )
+        for index in range(2)
+    ]
+    own_task_ids = [task.id for task in own_tasks]
+    foreign_task = _photo_task(
+        task_id="delete-model-foreign",
+        tenant_id=other_tenant_id,
+        created_at=now,
+        topic="Foreign model",
+        params=params,
+    )
+    with auth_db() as db:
+        db.add(
+            Tenant(
+                id=other_tenant_id,
+                slug="image-delete-other",
+                name="Image Delete Other",
+            )
+        )
+        db.add_all([*own_tasks, foreign_task])
+        db.commit()
+
+    client = TestClient(app)
+    deleted = client.delete(
+        "/api/v1/history/images/ecom_model/delete-model-batch",
+        headers=auth_context["headers"],
+    )
+    deleted_again = client.delete(
+        "/api/v1/history/images/ecom_model/delete-model-batch",
+        headers=auth_context["headers"],
+    )
+    foreign = client.delete(
+        "/api/v1/history/images/ecom_model/delete-model-foreign",
+        headers=auth_context["headers"],
+    )
+
+    assert deleted.status_code == 200
+    assert deleted.json()["data"] == {"deleted": True}
+    assert deleted_again.status_code == 404
+    assert foreign.status_code == 404
+    with auth_db() as db:
+        assert all(db.get(VideoTask, task_id).deleted_at is not None for task_id in own_task_ids)
+        assert db.get(VideoTask, "delete-model-foreign").deleted_at is None
+
+
+def test_clear_image_history_only_soft_deletes_the_selected_category(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    other_tenant_id = "image-clear-other-tenant"
+    now = datetime.now(UTC)
+    tasks = [
+        _photo_task(
+            task_id="clear-model-one",
+            tenant_id=tenant_id,
+            created_at=now,
+            topic="Model one",
+            params={"kind": "ecom_model", "batch_id": "clear-model-batch"},
+        ),
+        _photo_task(
+            task_id="clear-model-two",
+            tenant_id=tenant_id,
+            created_at=now + timedelta(seconds=1),
+            topic="Model two",
+            params={"kind": "ecom_model", "batch_id": "clear-model-batch"},
+        ),
+        _photo_task(
+            task_id="clear-plain-preserved",
+            tenant_id=tenant_id,
+            created_at=now,
+            topic="Plain preserved",
+        ),
+        _photo_task(
+            task_id="clear-white-preserved",
+            tenant_id=tenant_id,
+            created_at=now,
+            topic="White preserved",
+            params={"kind": "ecom_cutout"},
+        ),
+        _photo_task(
+            task_id="clear-cover-preserved",
+            tenant_id=tenant_id,
+            created_at=now,
+            topic="Cover preserved",
+            params={"kind": "cover"},
+        ),
+    ]
+    foreign_model = _photo_task(
+        task_id="clear-model-foreign-preserved",
+        tenant_id=other_tenant_id,
+        created_at=now,
+        topic="Foreign model preserved",
+        params={"kind": "ecom_model", "batch_id": "clear-model-foreign-batch"},
+    )
+    with auth_db() as db:
+        db.add(
+            Tenant(
+                id=other_tenant_id,
+                slug="image-clear-other",
+                name="Image Clear Other",
+            )
+        )
+        db.add_all([*tasks, foreign_model])
+        db.commit()
+
+    response = TestClient(app).delete(
+        "/api/v1/history/images",
+        params={"category": "ecom_model"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {"deleted_count": 2}
+    with auth_db() as db:
+        assert db.get(VideoTask, "clear-model-one").deleted_at is not None
+        assert db.get(VideoTask, "clear-model-two").deleted_at is not None
+        for task_id in (
+            "clear-plain-preserved",
+            "clear-white-preserved",
+            "clear-cover-preserved",
+            "clear-model-foreign-preserved",
+        ):
+            assert db.get(VideoTask, task_id).deleted_at is None
+
+
+def test_clear_image_history_is_atomic_when_the_third_row_update_fails(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    now = datetime.now(UTC)
+    task_ids = [f"atomic-model-{index}" for index in range(4)]
+    with auth_db() as db:
+        db.add_all(
+            [
+                _photo_task(
+                    task_id=task_id,
+                    tenant_id=tenant_id,
+                    created_at=now + timedelta(seconds=index),
+                    topic="Atomic model",
+                    params={"kind": "ecom_model", "batch_id": task_id},
+                )
+                for index, task_id in enumerate(task_ids)
+            ]
+        )
+        db.commit()
+
+    engine = auth_db.kw["bind"]
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE image_delete_trigger_counter (value INTEGER NOT NULL)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO image_delete_trigger_counter (value) VALUES (0)"
+        )
+        connection.exec_driver_sql(
+            """
+            CREATE TRIGGER fail_third_image_history_delete
+            BEFORE UPDATE OF deleted_at ON video_tasks
+            WHEN NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL
+            BEGIN
+                UPDATE image_delete_trigger_counter SET value = value + 1;
+                SELECT CASE
+                    WHEN (SELECT value FROM image_delete_trigger_counter) = 3
+                    THEN RAISE(ABORT, 'third image history update failed')
+                END;
+            END
+            """
+        )
+
+    response = TestClient(app, raise_server_exceptions=False).delete(
+        "/api/v1/history/images",
+        params={"category": "ecom_model"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 500
+    with auth_db() as db:
+        assert all(db.get(VideoTask, task_id).deleted_at is None for task_id in task_ids)
+
+
+def test_delete_and_clear_ecom_detail_history_soft_delete_only_jobs(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    now = datetime.now(UTC)
+    jobs = [
+        _replicate_job(
+            job_id=f"delete-detail-{index}",
+            tenant_id=tenant_id,
+            status="completed",
+            created_at=now + timedelta(seconds=index),
+            name=f"Detail {index}",
+            product_asset_id=f"unused-product-{index}",
+            output_count=0,
+        )
+        for index in range(3)
+    ]
+    job_ids = [job.id for job in jobs]
+    with auth_db() as db:
+        db.add_all(jobs)
+        db.flush()
+        db.add(
+            _replicate_output(
+                output_id="delete-detail-output-preserved",
+                job_id=job_ids[0],
+                tenant_id=tenant_id,
+                index=0,
+                status="succeeded",
+                storage_key=f"tenants/{tenant_id}/ecom-replicate/preserved.png",
+            )
+        )
+        db.commit()
+
+    client = TestClient(app)
+    single = client.delete(
+        f"/api/v1/history/images/ecom_detail/{job_ids[0]}",
+        headers=auth_context["headers"],
+    )
+    cleared = client.delete(
+        "/api/v1/history/images",
+        params={"category": "ecom_detail"},
+        headers=auth_context["headers"],
+    )
+    listed = client.get(
+        "/api/v1/history/images",
+        params={"category": "ecom_detail"},
+        headers=auth_context["headers"],
+    )
+
+    assert single.status_code == 200
+    assert single.json()["data"] == {"deleted": True}
+    assert cleared.status_code == 200
+    assert cleared.json()["data"] == {"deleted_count": 2}
+    assert listed.status_code == 200
+    assert listed.json()["data"]["total"] == 0
+    with auth_db() as db:
+        assert all(db.get(EcomReplicateJob, job_id).deleted_at is not None for job_id in job_ids)
+        assert db.get(EcomReplicateOutput, "delete-detail-output-preserved") is not None
+
+
+def test_clear_ecom_detail_history_is_atomic_when_the_third_update_fails(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    now = datetime.now(UTC)
+    job_ids = [f"atomic-detail-{index}" for index in range(4)]
+    with auth_db() as db:
+        db.add_all(
+            [
+                _replicate_job(
+                    job_id=job_id,
+                    tenant_id=tenant_id,
+                    status="completed",
+                    created_at=now + timedelta(seconds=index),
+                    name="Atomic detail",
+                    product_asset_id=f"unused-atomic-product-{index}",
+                    output_count=0,
+                )
+                for index, job_id in enumerate(job_ids)
+            ]
+        )
+        db.commit()
+
+    engine = auth_db.kw["bind"]
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE detail_delete_trigger_counter (value INTEGER NOT NULL)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO detail_delete_trigger_counter (value) VALUES (0)"
+        )
+        connection.exec_driver_sql(
+            """
+            CREATE TRIGGER fail_third_detail_history_delete
+            BEFORE UPDATE OF deleted_at ON ecom_replicate_jobs
+            WHEN NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL
+            BEGIN
+                UPDATE detail_delete_trigger_counter SET value = value + 1;
+                SELECT CASE
+                    WHEN (SELECT value FROM detail_delete_trigger_counter) = 3
+                    THEN RAISE(ABORT, 'third detail history update failed')
+                END;
+            END
+            """
+        )
+
+    response = TestClient(app, raise_server_exceptions=False).delete(
+        "/api/v1/history/images",
+        params={"category": "ecom_detail"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 500
+    with auth_db() as db:
+        assert all(
+            db.get(EcomReplicateJob, job_id).deleted_at is None for job_id in job_ids
+        )
+
+
+@pytest.mark.parametrize(
+    ("category", "params"),
+    [
+        ("image_gen", {}),
+        ("ecom_white", {"kind": "ecom_cutout"}),
+        ("ecom_model", {"kind": "ecom_model"}),
+        ("cover", {"kind": "cover"}),
+    ],
+)
+def test_each_photo_category_supports_single_delete_and_clear(
+    auth_context,
+    auth_db,
+    category,
+    params,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    now = datetime.now(UTC)
+    first_task_id = f"{category}-single-delete"
+    first_history_id = first_task_id
+    first_params = dict(params)
+    if category != "image_gen":
+        first_history_id = f"{category}-single-batch"
+        first_params["batch_id"] = first_history_id
+
+    with auth_db() as db:
+        db.add(
+            _photo_task(
+                task_id=first_task_id,
+                tenant_id=tenant_id,
+                created_at=now,
+                topic=category,
+                params=first_params,
+            )
+        )
+        db.commit()
+
+    client = TestClient(app)
+    single = client.delete(
+        f"/api/v1/history/images/{category}/{first_history_id}",
+        headers=auth_context["headers"],
+    )
+    assert single.status_code == 200
+
+    second_task_id = f"{category}-clear-delete"
+    second_params = dict(params)
+    if category != "image_gen":
+        second_params["batch_id"] = f"{category}-clear-batch"
+    with auth_db() as db:
+        db.add(
+            _photo_task(
+                task_id=second_task_id,
+                tenant_id=tenant_id,
+                created_at=now + timedelta(seconds=1),
+                topic=category,
+                params=second_params,
+            )
+        )
+        db.commit()
+
+    cleared = client.delete(
+        "/api/v1/history/images",
+        params={"category": category},
+        headers=auth_context["headers"],
+    )
+
+    assert cleared.status_code == 200
+    assert cleared.json()["data"] == {"deleted_count": 1}
+    with auth_db() as db:
+        assert db.get(VideoTask, first_task_id).deleted_at is not None
+        assert db.get(VideoTask, second_task_id).deleted_at is not None
+
+
+def test_soft_deleted_image_is_hidden_from_video_history_and_detail(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    task_id = "soft-image-hidden-from-video-history"
+    with auth_db() as db:
+        db.add(
+            _photo_task(
+                task_id=task_id,
+                tenant_id=tenant_id,
+                created_at=datetime.now(UTC),
+                topic="Soft image",
+            )
+        )
+        db.commit()
+
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    app.dependency_overrides[get_progress_store] = lambda: _FakeProgressStore()
+    try:
+        deleted = TestClient(app).delete(
+            f"/api/v1/history/images/image_gen/{task_id}",
+            headers=auth_context["headers"],
+        )
+        listed = TestClient(app).get(
+            "/api/v1/videos",
+            params={"mode": "photo"},
+            headers=auth_context["headers"],
+        )
+        detail = TestClient(app).get(
+            f"/api/v1/videos/{task_id}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+        app.dependency_overrides.pop(get_progress_store, None)
+
+    assert deleted.status_code == 200
+    assert listed.status_code == 200
+    assert listed.json()["data"] == {"items": [], "total": 0}
+    assert detail.status_code == 404
+
+
+def test_video_single_delete_does_not_hard_delete_a_soft_deleted_image(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    task_id = "soft-image-preserved-by-video-delete"
+    with auth_db() as db:
+        task = _photo_task(
+            task_id=task_id,
+            tenant_id=tenant_id,
+            created_at=datetime.now(UTC),
+            topic="Soft image",
+        )
+        db.add(task)
+        db.flush()
+        asset = _link_photo_output(
+            db,
+            task=task,
+            asset_id="soft-image-video-delete-asset",
+            width=1024,
+            height=1024,
+        )
+        asset_id = asset.id
+        db.commit()
+
+    client = TestClient(app)
+    assert (
+        client.delete(
+            f"/api/v1/history/images/image_gen/{task_id}",
+            headers=auth_context["headers"],
+        ).status_code
+        == 200
+    )
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = client.delete(
+            f"/api/v1/videos/{task_id}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 404
+    with auth_db() as db:
+        assert db.get(VideoTask, task_id) is not None
+        assert db.get(Asset, asset_id) is not None
+        assert db.scalar(
+            select(TaskAsset).where(
+                TaskAsset.video_task_id == task_id,
+                TaskAsset.asset_id == asset_id,
+            )
+        ) is not None
+    assert storage.deleted_keys == []
+
+
+def test_video_clear_does_not_hard_delete_a_soft_deleted_image(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    task_id = "soft-image-preserved-by-video-clear"
+    with auth_db() as db:
+        task = _photo_task(
+            task_id=task_id,
+            tenant_id=tenant_id,
+            created_at=datetime.now(UTC),
+            topic="Soft image",
+        )
+        db.add(task)
+        db.flush()
+        asset = _link_photo_output(
+            db,
+            task=task,
+            asset_id="soft-image-video-clear-asset",
+            width=1024,
+            height=1024,
+        )
+        asset_id = asset.id
+        db.commit()
+
+    client = TestClient(app)
+    assert (
+        client.delete(
+            f"/api/v1/history/images/image_gen/{task_id}",
+            headers=auth_context["headers"],
+        ).status_code
+        == 200
+    )
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        response = client.delete(
+            "/api/v1/videos",
+            params={"mode": "photo"},
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {"deleted_count": 0}
+    with auth_db() as db:
+        assert db.get(VideoTask, task_id) is not None
+        assert db.get(Asset, asset_id) is not None
+        assert db.scalar(
+            select(TaskAsset).where(
+                TaskAsset.video_task_id == task_id,
+                TaskAsset.asset_id == asset_id,
+            )
+        ) is not None
+    assert storage.deleted_keys == []
 
 
 def test_image_history_detail_exposes_each_output_size_evidence(

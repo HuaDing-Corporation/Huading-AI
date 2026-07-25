@@ -6,7 +6,9 @@ from app.db.models import User
 from app.schemas.aibrain import (
     ChatMessageCreateRequest,
     ChatMessageCreateResponse,
+    ConversationClearResponse,
     ConversationCreateRequest,
+    ConversationDeletedResponse,
     ConversationListResponse,
     ConversationRead,
     ReasoningWalletRead,
@@ -14,7 +16,9 @@ from app.schemas.aibrain import (
 )
 from app.schemas.response import ApiResponse, ok
 from app.services.aibrain import (
+    clear_conversations,
     create_conversation,
+    delete_conversation,
     get_conversation,
     list_conversations,
     read_reasoning_wallet,
@@ -72,6 +76,18 @@ def create_aibrain_conversation(
     )
 
 
+@router.delete(
+    "/conversations",
+    response_model=ApiResponse[ConversationClearResponse],
+)
+def clear_aibrain_conversations(
+    request: Request,
+    user: User = AIBrainPermissionDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[ConversationClearResponse]:
+    return ok(request, clear_conversations(db, tenant_id=user.tenant_id))
+
+
 @router.get(
     "/conversations",
     response_model=ApiResponse[ConversationListResponse],
@@ -82,6 +98,26 @@ def list_aibrain_conversations(
     db: Session = DbSessionDependency,
 ) -> ApiResponse[ConversationListResponse]:
     return ok(request, list_conversations(db, tenant_id=user.tenant_id))
+
+
+@router.delete(
+    "/conversations/{conversation_id}",
+    response_model=ApiResponse[ConversationDeletedResponse],
+)
+def delete_aibrain_conversation(
+    request: Request,
+    conversation_id: str,
+    user: User = AIBrainPermissionDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[ConversationDeletedResponse]:
+    return ok(
+        request,
+        delete_conversation(
+            db,
+            tenant_id=user.tenant_id,
+            conversation_id=conversation_id,
+        ),
+    )
 
 
 @router.get(

@@ -1,7 +1,8 @@
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-from sqlalchemy import func, literal, or_, select, union_all
+from sqlalchemy import func, literal, or_, select, union_all, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -9,6 +10,8 @@ from app.core.exceptions import AppError
 from app.db.models import Asset, EcomReplicateJob, EcomReplicateOutput, TaskAsset, VideoTask
 from app.schemas.history import (
     ImageHistoryCategory,
+    ImageHistoryClearResponse,
+    ImageHistoryDeletedResponse,
     ImageHistoryDetailItem,
     ImageHistoryDetailResponse,
     ImageHistoryItem,
@@ -134,6 +137,7 @@ def _replicate_source_query(tenant_id: str):
     ).where(
         EcomReplicateJob.tenant_id == tenant_id,
         EcomReplicateJob.status.in_(_REPLICATE_HISTORY_STATUSES),
+        EcomReplicateJob.deleted_at.is_(None),
     )
 
 
@@ -315,6 +319,7 @@ def _replicate_history_item(
         select(EcomReplicateJob).where(
             EcomReplicateJob.id == str(row["id"]),
             EcomReplicateJob.tenant_id == tenant_id,
+            EcomReplicateJob.deleted_at.is_(None),
         )
     )
     if job is None:  # pragma: no cover - source row and hydration share one transaction
@@ -573,6 +578,7 @@ def _replicate_history_detail(
             EcomReplicateJob.id == history_id,
             EcomReplicateJob.tenant_id == tenant_id,
             EcomReplicateJob.status.in_(_REPLICATE_HISTORY_STATUSES),
+            EcomReplicateJob.deleted_at.is_(None),
         )
     )
     if job is None:
@@ -659,6 +665,80 @@ def get_image_history(
         category=cast(PhotoHistoryCategory, category),
         history_id=history_id,
     )
+
+
+def delete_image_history(
+    db: Session,
+    *,
+    tenant_id: str,
+    category: ImageHistoryCategory,
+    history_id: str,
+) -> ImageHistoryDeletedResponse:
+    if category == "ecom_detail":
+        job = db.scalar(
+            select(EcomReplicateJob).where(
+                EcomReplicateJob.id == history_id,
+                EcomReplicateJob.tenant_id == tenant_id,
+                EcomReplicateJob.status.in_(_REPLICATE_HISTORY_STATUSES),
+                EcomReplicateJob.deleted_at.is_(None),
+            )
+        )
+        if job is not None:
+            job.deleted_at = datetime.now(UTC)
+            db.commit()
+            return ImageHistoryDeletedResponse(deleted=True)
+    else:
+        tasks = _photo_tasks_for_history(
+            db,
+            tenant_id=tenant_id,
+            category=cast(PhotoHistoryCategory, category),
+            history_id=history_id,
+        )
+        if tasks:
+            deleted_at = datetime.now(UTC)
+            for task in tasks:
+                task.deleted_at = deleted_at
+            db.commit()
+            return ImageHistoryDeletedResponse(deleted=True)
+
+    raise AppError(
+        "Image history item not found.",
+        code="IMAGE_HISTORY_NOT_FOUND",
+        status_code=404,
+    )
+
+
+def clear_image_history(
+    db: Session,
+    *,
+    tenant_id: str,
+    category: ImageHistoryCategory,
+) -> ImageHistoryClearResponse:
+    deleted_at = datetime.now(UTC)
+    if category == "ecom_detail":
+        statement = (
+            update(EcomReplicateJob)
+            .where(
+                EcomReplicateJob.tenant_id == tenant_id,
+                EcomReplicateJob.status.in_(_REPLICATE_HISTORY_STATUSES),
+                EcomReplicateJob.deleted_at.is_(None),
+            )
+            .values(deleted_at=deleted_at)
+        )
+    else:
+        statement = (
+            update(VideoTask)
+            .where(
+                *_successful_photo_filters(tenant_id),
+                *_photo_category_filters(cast(PhotoHistoryCategory, category)),
+            )
+            .values(deleted_at=deleted_at)
+        )
+
+    result = db.execute(statement)
+    deleted_count = int(result.rowcount or 0)
+    db.commit()
+    return ImageHistoryClearResponse(deleted_count=deleted_count)
 
 
 def list_image_history(

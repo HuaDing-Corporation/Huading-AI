@@ -29,6 +29,14 @@ class ImageHistoryListResponse(BaseModel):
     page_size: int
 
 
+class ImageHistoryDeletedResponse(BaseModel):
+    deleted: bool
+
+
+class ImageHistoryClearResponse(BaseModel):
+    deleted_count: int
+
+
 class ImageHistoryDetailItem(BaseModel):
     index: int
     download_url: str

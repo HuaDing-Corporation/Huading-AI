@@ -643,7 +643,10 @@ def list_videos(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> ApiResponse[VideoListResponse]:
-    query = select(VideoTask).where(VideoTask.tenant_id == user.tenant_id)
+    query = select(VideoTask).where(
+        VideoTask.tenant_id == user.tenant_id,
+        VideoTask.deleted_at.is_(None),
+    )
     query = query.where(
         or_(
             VideoTask.params["kind"].as_string().is_(None),
@@ -1402,7 +1405,7 @@ def get_video_status(
     storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[VideoRead]:
     task = db.get(VideoTask, task_id)
-    if task is None or task.tenant_id != user.tenant_id:
+    if task is None or task.tenant_id != user.tenant_id or task.deleted_at is not None:
         raise AppError("Video task not found.", code="VIDEO_TASK_NOT_FOUND", status_code=404)
 
     snapshot = _snapshot_for(store, user.tenant_id, task_id)
