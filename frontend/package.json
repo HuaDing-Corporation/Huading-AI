@@ -6,10 +6,13 @@
     "dev": "next dev",
     "build": "next build --webpack",
     "start": "next start",
-    "lint": "eslint src",
+    "lint": "eslint src e2e",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "verify": "pnpm lint && pnpm typecheck && pnpm test",
+    "verify:full": "pnpm verify && pnpm build && pnpm build:mock && pnpm test:e2e",
+    "build:mock": "node scripts/build-mock.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.4",

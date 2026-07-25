@@ -104,7 +104,8 @@ test("带入·AI 模特 → 切电商图·AI 模特子工具并预填自定义�
   //    `_whole_sections_within_limit(structured_en, 20000)`（services/reverse_prompt.py:779-782）——
   //    未触顶时**逐字等于 structured_prompt.en**（BE 自测 tests:2710 以整字典相等钉死），
   //    不是一句自编的中文短句。上一版期望值是 mock 自己编的，BE 从不产出那种形态。
-  await expect(custom).toHaveValue(/^Subject: .*\nStyle: product advertising/s);
+  //（正则用 [\s\S] 而非 `.` + /s：tsconfig target 是 ES2017，dotAll 标志会触发 TS1501。升 target 影响面大、不在本包范围。）
+  await expect(custom).toHaveValue(/^Subject: [\s\S]*\nStyle: product advertising/);
 
   expect(g.errors(), `page errors：\n${g.errors().join("\n")}`).toEqual([]);
   expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);

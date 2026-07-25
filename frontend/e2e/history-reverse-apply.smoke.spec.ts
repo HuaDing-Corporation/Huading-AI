@@ -86,7 +86,8 @@ test("历史反推记录 → 带入 · AI 模特 → 电商图面板被激活且
   await expect(custom).toBeVisible();
   // 🔴 FIX2 真联调订正期望值：BE 的 ecom_model.extra_prompt 逐字等于 structured_prompt.en
   //（services/reverse_prompt.py:779-782，BE 自测 tests:2710）——不是 mock 自编的中文短句。
-  await expect(custom).toHaveValue(/^Subject: .*\nStyle: product advertising/s);
+  //（正则用 [\s\S] 而非 `.` + /s：tsconfig target 是 ES2017，dotAll 标志会触发 TS1501。）
+  await expect(custom).toHaveValue(/^Subject: [\s\S]*\nStyle: product advertising/);
 
   expect(g.errors(), `page errors：\n${g.errors().join("\n")}`).toEqual([]);
   expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);

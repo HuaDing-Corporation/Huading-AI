@@ -39,16 +39,49 @@ describe("estimateReversePrompt · POST /reverse-prompt/estimate（§八 M4，�
     expect(res.credits).toBeGreaterThan(0);
   });
 
-  // ── 🔴 FIX2 真联调新增：承重门16「mock 不比 BE 宽松」───────────────────────────────
+  // ── 🔴 承重门16「mock 不比 BE 宽松」：存在性由**唯一资产注册表**说了算 ─────────────────
   // BE 的 estimate 第一步是 `source_asset_or_raise`：资产不存在/跨租户 → **404
   // REVERSE_PROMPT_SOURCE_NOT_FOUND**（TestClient 实测响应体；BE 自测 tests:1326-1327 亦断言）。
-  // 上一版 mock 对**任意非空字符串**恒 200 报价 —— 本地拿到金额、生产拿到 404 的典型假绿。
-  // 变异：把 handlers.ts estimate handler 里的 `mockAssetExists` 判据删掉 → 本条必红。
-  it("🔴 承重门16 · 资产不存在 → 404 REVERSE_PROMPT_SOURCE_NOT_FOUND（不是 200 报个价）", async () => {
+  //
+  // 🔴 FIX3（CB P1-1）：下面第二条才是真正的承重。上一版只有「非法形状」那条 ——
+  //    它锁住的是**格式校验**，而当时 mock 判存在性用的正是正则，于是这条测试与被测实现是同义反复：
+  //    `upload-999`（合法形状、从未上传）照样 200/30，真 BE 会 404，**测试对此完全无感**。
+  //    CB 实测抓到了这一点。现在 mock 改查注册表，这两条才分别锁住「格式」与「真实存在性」。
+  // 变异：把 handlers.ts estimate handler 里的 `getMockAssetForTenant(...)` 换回正则判存在性 →
+  //       下面两条（合法形状不存在 / 跨租户）必红。
+  it("承重门16 · 非法形状的 id → 404（格式面）", async () => {
     await expect(estimateReversePrompt({ source_asset_id: "no-such-asset" })).rejects.toMatchObject({
       status: 404,
       code: "REVERSE_PROMPT_SOURCE_NOT_FOUND"
     });
+  });
+
+  it("🔴 承重门16 · **合法形状但从未上传**的资产 → 404（真实存在性，正则判据下会假绿 200）", async () => {
+    // `upload-999` 完全符合 mock 的 id 形状（uploads handler 就是发 `upload-N`），
+    // 只是**注册表里没有** —— 真 BE 对它 404。这条是 CB P1-1 指出的那个缺口。
+    await expect(estimateReversePrompt({ source_asset_id: "upload-999" })).rejects.toMatchObject({
+      status: 404,
+      code: "REVERSE_PROMPT_SOURCE_NOT_FOUND"
+    });
+    await expect(estimateReversePrompt({ source_asset_id: "video-asset-999" })).rejects.toMatchObject({
+      status: 404
+    });
+  });
+
+  it("🔴 承重门16 · **跨租户**资产 → 404（存在但不属于我，BE 不泄露存在性、同码同状态）", async () => {
+    // `upload-other-tenant-1` 在注册表里**真实存在**（所以走不到「查不到」那条路径），
+    // 但 tenant_id 是别人的 → 必须与「不存在」给出完全相同的 404 + 同一个 error_code。
+    await expect(estimateReversePrompt({ source_asset_id: "upload-other-tenant-1" })).rejects.toMatchObject({
+      status: 404,
+      code: "REVERSE_PROMPT_SOURCE_NOT_FOUND"
+    });
+  });
+
+  it("对照组：注册表里属于本租户的资产 → 200（防「一刀切全 404」式的假通过）", async () => {
+    // 🔴 前三条都是「该 404」。没有这条对照，把 handler 改成无条件 404 也能让上面全绿 ——
+    //    那是比 BE **更严**（误杀合法请求），与「不比 BE 宽松」同等违规。
+    const res = await estimateReversePrompt({ source_asset_id: "upload-1" });
+    expect(res.tier).toBe("image");
   });
 
   it("🔴 承重门16 · source_asset_id 超长（>36）→ 422（BE Field(max_length=36)，不是静默截断）", async () => {

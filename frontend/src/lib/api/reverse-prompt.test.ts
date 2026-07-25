@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { copy } from "@/lib/copy";
 import { resetReverseJobs } from "@/mocks/handlers";
+import { uploadImage } from "@/lib/api/uploads";
 import { apiUrl } from "./client";
 import {
   fillTargetToPrefill,
@@ -256,11 +257,26 @@ describe("视频反推异步（VIDEO-REVERSE-PROMPT-UI-0001）↔ MSW", () => {
     expect(ft.video_gen.generate_audio).toBe(true);
   });
 
+  // 🔴 FIX3：这条原先用的是 `upload-9` —— 一个**从没上传过**的 id。它当时能绿，是因为 mock 只判 id 前缀；
+  //    现在 POST /reverse-prompt 与 estimate 同走唯一资产注册表，编造的 id 会正确地 404（真 BE 就是这样）。
+  //    改为先真的走一次上传拿 asset_id：既保住本条的原意（图片源走同步路径），
+  //    又顺带把「上传 → 登记 → 可反推」这条链真的跑通，而不是绕过上传直接喂一个自造 id。
   it("图片源仍同步 succeeded（视频异步不回归图片路径）", async () => {
-    const job = await reverseFromAsset({ source_asset_id: "upload-9" });
+    const uploaded = await uploadImage(new File(["x"], "a.png", { type: "image/png" }));
+    const job = await reverseFromAsset({ source_asset_id: uploaded.asset_id });
     expect(job.status).toBe("succeeded");
     expect(job.source_kind).toBe("image");
     expect(job.result).toBeTruthy();
+  });
+
+  // 🔴 FIX3 承重门16 的第三面（创建端点侧）：estimate 与 POST /reverse-prompt **必须同源**。
+  //    只给 estimate 加守卫、创建端点仍放行，就会出现「报价说 404、真提交却成功」的自相矛盾。
+  //    变异：把 POST /reverse-prompt 的 `getMockAssetForTenant` 换回 `startsWith("video-")` → 本条红。
+  it("🔴 创建端点与 estimate 同源：从未上传的资产 → 404（不会「报价 404、提交却成功」）", async () => {
+    await expect(reverseFromAsset({ source_asset_id: "upload-999" })).rejects.toMatchObject({
+      status: 404,
+      code: "REVERSE_PROMPT_SOURCE_NOT_FOUND"
+    });
   });
 
   it("isReverseSettled：succeeded/failed 终态；queued/running/processing 未终态", () => {

@@ -1,7 +1,8 @@
 import { http, HttpResponse } from "msw";
 
 import { aibrainHandlers } from "./aibrain-handlers"; // 华鼎AI智脑（AIBRAIN-UI-0001）——独立段落，追加在数组末尾
-import { registerMockAsset } from "./asset-registry"; // FIX4：上传登记资产，智脑发消息查表（唯一资产来源）
+// FIX4：上传登记资产，智脑发消息查表（唯一资产来源）；FIX3 起反推 estimate 也查这张表（存在性 + 租户 + 时长）。
+import { getMockAssetForTenant, registerMockAsset } from "./asset-registry";
 
 // Mirror client.ts's trailing-slash normalization so handler URLs always match
 // what apiFetch requests (avoids a latent "mock silently bypassed" footgun).
@@ -423,30 +424,20 @@ const REVERSE_ASSET_ID_MAX_LEN = 36;
 /** BE 长视频切段步长 `_LONG_VIDEO_SEGMENT_SEC = 30.0`（services/reverse_prompt_video.py:36）→ 段数 = ceil(时长/30)。 */
 const MOCK_SEGMENT_SEC = 30;
 /**
- * mock-only：从 asset_id 认时长。BE 是查**上传时已落库的 `duration_ms`**（D9 明确「不由客户端传参决定」），
- * mock 没有真媒体可查，故用 id 约定：`video-...long...` = 180s 长视频，其余视频 = 3s（e2e fixture 的真时长）。
- * 图片资产 → null（对应 tier="image"，`duration_sec` 为 null）。
+ * 反推分档报价 —— 输入是**注册表里那条资产的 duration_ms**，不是 id 字符串。
+ *
+ * 🔴 FIX3 修正（CB P1-1）：上一版这里做了两件都错的事 ——
+ *   ① 用**正则**判存在性：`upload-999` 这种「合法形状但从未上传」的 id 照样拿到 200/30，真 BE 会 404。
+ *      更糟的是当时的测试用的是**非法形状** `no-such-asset`，只锁住了格式校验，真实缺口一条都没锁住。
+ *   ② 在 estimate 里**按 id 现场猜时长**：把「时长」这个生产端事实挪到消费端去猜，
+ *      与 D9「档位由上传时已落库的 duration_ms 判定」正好反着来。
+ * 现在两件事都回到 BE 的形状：存在性与租户由**唯一资产注册表**（asset-registry.ts，#164/#207 的既有先例，
+ * 也是本仓智脑 FIX4 已经用过的那一套）说了算；时长在**上传时**登记，此处只读。
  */
-const mockAssetDurationSec = (assetId: string): number | null => {
-  if (!assetId.startsWith("video-")) return null; // 图片资产 → tier="image"，没有时长可言
-  return assetId.includes("long") ? 180 : 3; // 约定：id 含 long = 180s 长档；其余 = 3s（e2e fixture 的真时长）
-};
-
-/**
- * 🔴 FIX2 真联调新增：**资产存在性守卫**。
- * BE 的 `estimate_reverse_prompt` 第一步就是 `source_asset_or_raise(...)`：资产不存在或跨租户 →
- * **404 `REVERSE_PROMPT_SOURCE_NOT_FOUND`**（TestClient 实测响应体如此，BE 自测 tests:1326-1327 亦断言）。
- * 上一版 mock 对**任意非空字符串**都恒 200 报价 —— 比 BE 宽松，属典型假绿：前端把一个失效/别人的
- * asset_id 送上去，本地拿到金额、生产拿到 404。
- * mock 没有真资产表，故守「id 必须是本 mock 发得出来的形状」（uploads handler 只会发 `upload-N` / `video-asset-N`，
- * 历史 seed 用 `upload-1`），这已足够把「随便编一个 id」挡在门外。
- */
-const mockAssetExists = (assetId: string): boolean =>
-  /^(upload|video-asset)(-[a-z0-9]+)*-\d+$/.test(assetId);
-
-const mockReverseEstimate = (assetId: string) => {
-  const duration = mockAssetDurationSec(assetId);
-  if (duration === null) return { credits: REVERSE_ESTIMATE_IMAGE_CREDITS, duration_sec: null, tier: "image" };
+const mockReverseEstimate = (asset: { duration_ms?: number | null }) => {
+  const durationMs = asset.duration_ms;
+  if (durationMs == null) return { credits: REVERSE_ESTIMATE_IMAGE_CREDITS, duration_sec: null, tier: "image" };
+  const duration = Math.round((durationMs / 1000) * 1000) / 1000; // BE: round(duration_ms/1000, 3)
   return duration <= REVERSE_SHORT_TIER_MAX_SEC
     ? { credits: REVERSE_ESTIMATE_VIDEO_SHORT_CREDITS, duration_sec: duration, tier: "video_short" }
     : { credits: REVERSE_ESTIMATE_VIDEO_LONG_CREDITS, duration_sec: duration, tier: "video_long" };
@@ -1560,7 +1551,15 @@ export const handlers = [
     const n = ++imageUploadSeq;
     const asset_id = `upload-${n}`;
     // AIBRAIN-UI-0001 · FIX4：登记到唯一资产注册表 → 智脑发消息时才查得到（不再凭空伪造，见 asset-registry.ts）。
-    registerMockAsset({ asset_id, asset_type: "avatar_image", mime_type: "image/png", status: "ready", download_url: `https://mock.local/u${n}.jpg` });
+    // 图片无时长 → duration_ms 显式 null（反推 estimate 据此判 tier="image"）。
+    registerMockAsset({
+      asset_id,
+      asset_type: "avatar_image",
+      mime_type: "image/png",
+      status: "ready",
+      download_url: `https://mock.local/u${n}.jpg`,
+      duration_ms: null
+    });
     return HttpResponse.json(
       { data: { asset_id, type: "avatar_image", status: "ready", thumbnail_url: `https://mock.local/u${n}.jpg` }, error: null, request_id: "mock-req" },
       { status: 201 }
@@ -1570,8 +1569,22 @@ export const handlers = [
   // 端点/形状以 BE 包(AVATAR-VIDEO-SOURCE-BE-0001)为准，mock 先行。
   http.post(`${BASE}/api/v1/uploads/videos`, () => {
     const n = ++imageUploadSeq;
+    const asset_id = `video-asset-${n}`;
+    // 🔴 FIX3：视频上传同样登记进唯一注册表，并**在上传时落时长** —— 与 BE 同构
+    //（D9：档位由「上传时已落库的 duration_ms」判定）。上一版是在 estimate 里按 id 现场猜时长，
+    //    把生产端的事实挪到了消费端去猜；现在 estimate 只查表，不猜。
+    //    ⚠️ mock 收到的是 multipart，读不到真实时长 → 统一按 e2e fixture 的 3s 登记；
+    //    长视频档由基线资产 `video-asset-long-1` 提供（见 asset-registry.ts）。
+    registerMockAsset({
+      asset_id,
+      asset_type: "video",
+      mime_type: "video/mp4",
+      status: "ready",
+      download_url: `https://mock.local/v${n}.mp4`,
+      duration_ms: 3_000
+    });
     return HttpResponse.json(
-      { data: { asset_id: `video-asset-${n}`, type: "avatar_video", status: "ready" }, error: null, request_id: "mock-req" },
+      { data: { asset_id, type: "avatar_video", status: "ready" }, error: null, request_id: "mock-req" },
       { status: 201 }
     );
   }),
@@ -1593,10 +1606,14 @@ export const handlers = [
     // 镜像 BE extra="forbid"：多余键即 422（守住「请求体只发 source_asset_id」）。
     const extra = Object.keys(body).filter((k) => k !== "source_asset_id" && k !== "target_format");
     if (extra.length) return err(422, "VALIDATION_ERROR", `Extra inputs are not permitted: ${extra.join(",")}`);
-    // 后端据资产推 source_kind：视频源（video-asset-*）→ 异步 202 queued（无 result），前端轮询 GET 到终态。
-    // 🔴 FIX3：两个分支都**写进同一个 store** —— 原先图片分支只是现编一份 read 就返回、job 根本没落地，
-    // 这才是「rp-* 只能放行」的根因。
-    if (typeof sourceAssetId === "string" && sourceAssetId.startsWith("video-")) {
+    // 🔴 FIX3：source_kind 与时长都改**查唯一资产注册表**（与 estimate 同源），不再靠 id 前缀猜。
+    //    BE 侧同样是先 `source_asset_or_raise` 拿到资产、再据资产推 source_kind；不存在/跨租户 → 404。
+    //    两个端点走同一张表，才不会出现「estimate 说 404、创建却成功」这种自相矛盾。
+    const asset = typeof sourceAssetId === "string" ? getMockAssetForTenant(sourceAssetId) : undefined;
+    if (!asset) return err(404, "REVERSE_PROMPT_SOURCE_NOT_FOUND", "Reverse prompt source asset not found.");
+    // 原先图片分支只是现编一份 read 就返回、job 根本没落地，这才是「rp-* 只能放行」的根因 →
+    // 两个分支现在都**写进同一个 job store**。
+    if (asset.duration_ms != null) {
       const id = `rpv-${++reverseSeq}`;
       // §八 M5：长视频（61–180s）走分段；短视频恒 null（不伪造进度）。
       // 🔴 FIX2 真联调订正两处：
@@ -1606,7 +1623,7 @@ export const handlers = [
       //     180s 恰好 6 段只是巧合，写死会在任何别的时长上失真。
       //  ② **queued 阶段两字段恒 null**：BE 是任务真正跑起来（切完段）才写进度，202 刚返回时读到的是 null。
       //     上一版在 202 就给出 6/0，等于让前端在「排队中」阶段就看到分段进度 —— 真机没有那一帧。
-      const durationSec = mockAssetDurationSec(sourceAssetId) ?? 0;
+      const durationSec = asset.duration_ms / 1000;
       const isLong = durationSec > REVERSE_SHORT_TIER_MAX_SEC;
       const job = mkReverseJob({
         id,
@@ -1725,11 +1742,13 @@ export const handlers = [
       return err(422, "VALIDATION_ERROR", "source_asset_id 长度超出上限");
     const extra = Object.keys(body).filter((k) => k !== "source_asset_id");
     if (extra.length) return err(422, "VALIDATION_ERROR", `Extra inputs are not permitted: ${extra.join(",")}`);
-    // 🔴 FIX2：资产不存在 / 跨租户 → 404（BE `source_asset_or_raise`，TestClient 实测码为下者）。
-    //    上一版对任意字符串恒 200 报价，是「mock 比 BE 宽松」的典型：本地拿到金额、生产拿到 404。
-    if (!mockAssetExists(sourceAssetId))
-      return err(404, "REVERSE_PROMPT_SOURCE_NOT_FOUND", "Reverse prompt source asset not found.");
-    return ok(mockReverseEstimate(sourceAssetId));
+    // 🔴 FIX3（CB P1-1）：存在性与租户归属一律走**唯一资产注册表**，不再自己判格式。
+    //    BE `estimate_reverse_prompt` 第一步就是 `source_asset_or_raise(db, tenant_id=..., asset_id=...)`：
+    //    不存在**或**属于别的租户 → 同一个 404 `REVERSE_PROMPT_SOURCE_NOT_FOUND`（不泄露存在性）。
+    //    TestClient 实测响应体与 BE 自测 tests:1326-1327 均如此。
+    const asset = getMockAssetForTenant(sourceAssetId);
+    if (!asset) return err(404, "REVERSE_PROMPT_SOURCE_NOT_FOUND", "Reverse prompt source asset not found.");
+    return ok(mockReverseEstimate(asset));
   }),
   /**
    * regenerate —— 🔴 FIX3 逐条对齐 BE（读的是源码，不是转述）：
