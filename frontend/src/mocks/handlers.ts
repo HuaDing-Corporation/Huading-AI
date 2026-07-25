@@ -81,15 +81,38 @@ let imageUploadSeq = 0;
 let reverseSeq = 0;
 
 /**
- * BE `structured_prompt()`（services/reverse_prompt.py:792-806）的真实产物形状：
- * 7 个固定小节、**ASCII 冒号 + 一个空格**、换行分隔；en 与 zh **共用同一组 value**，只有标签语言不同。
- * 这两个常量同时被 structured_prompt 与 fill_targets 的四个键复用 —— 因为 BE 那边就是同一个 `structured_en`
- * 喂给 video_gen.prompt / photo.topic / seedance_i2v.scene_prompt / ecom_model.extra_prompt（services:737/754/769/780）。
+ * BE `structured_prompt()`（services/reverse_prompt.py:797-824）的真实产物形状：
+ * 7 个固定小节（主体/场景/构图/镜头/光线/运动/风格）、**ASCII 冒号 + 一个空格**、换行分隔。
+ *
+ * 🔴 REVERSE-ZH-MOCK-SYNC-UI-0001（BE #225 之后）：`.en` 与 `.zh` **不再共用同一组 value**。
+ *    · `.en` = 英文标签 + 英文值（一字未变，仍是 fill_targets 四个键的取值来源）。
+ *    · `.zh` = 中文标签 + **模型原生返回的中文值**（`result["structured_fields_zh"][key]`，services:799-823）。
+ *    上一轮（#220 FIX2）我把 `.zh` 校准成「与 .en 共用同一组 value」—— **当时是对的**，BE 确实那么产出；
+ *    BE #225 改掉之后，那份 mock 反而成了「BE 已经不会再发的形状」。这正是本轮要同步的东西。
+ *
+ * ⚠️ 只有**值**变了：标签分隔符仍是 **ASCII 冒号 + 一个空格**（`f"{label}: {…}"`，services:817/821），
+ *    不是全角「：」。真实响应体见回执取证段。
  */
 const STRUCTURED_EN =
   "Subject: A portable insulated stainless-steel bottle with a matte white finish and brushed metal lid.\nScene: A white marble countertop by a window, warm morning light, minimal props.\nComposition: Centered close-up, vertical framing, shallow depth of field.\nCamera: 35mm prime, slight high angle, slow orbiting move.\nLighting: Soft warm key from upper right, gentle falloff, no harsh speculars.\nMotion: Gentle rising steam, slow orbit.\nStyle: product advertising, minimal, premium texture";
+/** 正常形态：模型给足了中文 → 值是真中文，与 `.en` 的英文值一一对应但**不是同一组串**。 */
 const STRUCTURED_ZH =
-  "主体: A portable insulated stainless-steel bottle with a matte white finish and brushed metal lid.\n场景: A white marble countertop by a window, warm morning light, minimal props.\n构图: Centered close-up, vertical framing, shallow depth of field.\n镜头: 35mm prime, slight high angle, slow orbiting move.\n光线: Soft warm key from upper right, gentle falloff, no harsh speculars.\n运动: Gentle rising steam, slow orbit.\n风格: product advertising, minimal, premium texture";
+  "主体: 哑光白漆面便携不锈钢保温杯，拉丝金属杯盖。\n场景: 窗边白色大理石台面，暖色晨光，道具极简。\n构图: 居中特写，竖幅取景，浅景深。\n镜头: 35mm 定焦，微俯角，缓慢环绕。\n光线: 右上柔和暖调主光，过渡柔和，无硬高光。\n运动: 蒸汽轻升，缓慢环绕。\n风格: 产品广告、极简、高级质感";
+
+/**
+ * BE 的中文缺失降级前缀 —— **逐字**取自 `_STRUCTURED_ZH_FALLBACK_PREFIX`
+ *（backend/app/services/reverse_prompt.py:44）。半角方括号 + 中文 + 全角逗号，别自造措辞。
+ */
+const STRUCTURED_ZH_FALLBACK_PREFIX = "[中文缺失，以下为英文原文]";
+/**
+ * 降级形态：模型给了英文冒充中文（或整个字段缺失）→ BE 用 CJK 码位真检测（`_contains_han`，services:834-841），
+ * 判不含汉字就换成 `f"{前缀} {英文值}"`（services:827-831，前缀与英文值之间**一个半角空格**）。
+ *
+ * 🔴 **逐字段降级，不是整串降级** —— 下面这个样本刻意混合：主体/场景/镜头 降级，构图/光线/运动/风格 正常。
+ *    只准备「全降级」样本会漏掉真实里最常见的那种半降级形态。
+ */
+const STRUCTURED_ZH_DEGRADED =
+  "主体: [中文缺失，以下为英文原文] A portable insulated stainless-steel bottle with a matte white finish and brushed metal lid.\n场景: [中文缺失，以下为英文原文] A white marble countertop by a window, warm morning light, minimal props.\n构图: 居中特写，竖幅取景，浅景深。\n镜头: [中文缺失，以下为英文原文] 35mm prime, slight high angle, slow orbiting move.\n光线: 右上柔和暖调主光，过渡柔和，无硬高光。\n运动: 蒸汽轻升，缓慢环绕。\n风格: 产品广告、极简、高级质感";
 const REVERSE_RESULT = {
   target_format: "seedance_2_0",
   prompt_zh: "白色大理石台面上的便携保温杯，暖色晨光，浅景深特写，产品广告风格，缓慢环绕运镜，蒸汽轻升。",
@@ -116,13 +139,8 @@ const REVERSE_RESULT = {
     duration_sec: null,
     aspect_ratio_raw: "1:1"
   },
-  // 结构化主提示词（§4.3 分行标注版 + §八 M1 由 BE service 确定性拼装）：en 供 provider 消费，zh 供界面理解。
-  // 🔴 FIX2 真联调订正：BE 的 `structured_prompt()`（services:792-806）用的是**同一组 value**，
-  //    en 与 zh **只有标签语言不同、正文逐字相同**，且分隔符是 **ASCII 冒号 + 一个空格**：
-  //      en: "\n".join(f"{英文标签}: {value}")   zh: "\n".join(f"{中文标签}: {value}")
-  //    BE 自测逐字钉死：tests:2672-2680 断言 zh == "主体: perfume bottle\n场景: marble surface\n…"。
-  //    上一版这里把 zh 写成了「完整中文译文 + 全角冒号」——那是 BE 任何输入都产不出的形状，
-  //    等于用一份美化过的 fixture 遮住了「中英两块正文其实一模一样」这个真实观感问题（属 BE 侧语义，已记 backlog）。
+  // 结构化主提示词（§4.3 分行标注版 + §八 M1 由 BE service 确定性拼装 + §九 v3 中文本地化）：
+  // en 供 provider 消费与带入取值，zh 供界面理解 —— **BE #225 起两者的值不同**，详见上方常量注释。
   structured_prompt: { en: STRUCTURED_EN, zh: STRUCTURED_ZH },
   // ── fill_targets（FIX2 真联调：逐字对齐 backend/app/services/reverse_prompt.py:732-789）──────
   // 🔴 **形状纪律大改**：BE 是 pydantic **恒发键**模型 —— "没有" 表示为 `null`，**不是省略键**。
@@ -176,6 +194,21 @@ const REVERSE_RESULT = {
     // 🔴 **没有 ecom_poster**：BE fill_targets 只有 5 键，自测显式 `assert "ecom_poster" not in fill_targets`
     //    （tests:2713）。上一版这里照给，属 mock 比 BE 宽松（前端自造契约面）。
   }
+};
+
+/**
+ * mock 形态 ④：**中文降级结果**（REVERSE-ZH-MOCK-SYNC-UI-0001 · BE #225 §九 v3）。
+ *
+ * 除 `structured_prompt.zh` 换成逐字段降级串外，与形态 ① **完全相同** —— 尤其：
+ * 🔴 `.en` 与整个 `fill_targets` **一字不动**。BE 的降级只发生在 `_structured_zh_value` 里
+ *（services:827-831），它只参与 `.zh` 的拼装；`.en` 由同一组 `english_value` 独立拼出，
+ *    而 fill_targets 取的一直是 `structured_en`（services:737/754/769/780）。
+ *    取证已确认：正常态与降级态的 `.en` **逐字相同**（回执有对照）。
+ *    换句话说——**中文降级不会影响任何带入行为**，这正是本形态要钉住的事。
+ */
+const REVERSE_RESULT_ZH_DEGRADED = {
+  ...REVERSE_RESULT,
+  structured_prompt: { en: STRUCTURED_EN, zh: STRUCTURED_ZH_DEGRADED }
 };
 
 /**
@@ -370,6 +403,12 @@ interface MockReverseJob {
    * true → 读模型返回 REVERSE_RESULT_LEGACY，用来真测前端的回落路径（不许白屏 / 不许显示 undefined）。
    */
   legacy?: boolean;
+  /**
+   * REVERSE-ZH-MOCK-SYNC-UI-0001 · mock 形态 ④「**中文降级结果**」：模型没给足中文，
+   * BE 逐字段降级成 `[中文缺失，以下为英文原文] <英文原文>`（services:827-831）。
+   * true → 读模型返回 REVERSE_RESULT_ZH_DEGRADED（**只有 `.zh` 不同**，`.en` 与 fill_targets 一字不动）。
+   */
+  zhDegraded?: boolean;
 }
 const revTs = (i: number) => new Date(Date.UTC(2026, 6, 16, 12, 0, 0) - i * 60_000).toISOString(); // 递减 → 倒序稳定
 
@@ -516,6 +555,17 @@ const REVERSE_SEEDS: (Pick<MockReverseJob, "id" | "source_kind"> & Partial<MockR
     source_thumbnail_url: "https://mock.local/reverse/src-legacy.png",
     summary: "（老结构）白色大理石台面上的便携保温杯，暖色晨光，浅景深特写。",
     legacy: true
+  },
+  {
+    // REVERSE-ZH-MOCK-SYNC-UI-0001 形态④：模型没给足中文 → BE 逐字段降级（`[中文缺失，以下为英文原文] …`）。
+    // 单列一条 seed 而不是改造既有形态：既有三形态的行为一字不动，降级支也才能被单独测到。
+    id: "rh-img-zh-degraded",
+    source_kind: "image",
+    status: "succeeded",
+    created_at: revTs(7),
+    source_thumbnail_url: "https://mock.local/reverse/src-zh-degraded.png",
+    summary: "（中文降级）白色大理石台面上的便携保温杯，暖色晨光，浅景深特写。",
+    zhDegraded: true
   }
 ];
 REVERSE_SEEDS.forEach((seed) => reverseJobs.set(seed.id, mkReverseJob(seed)));
@@ -552,14 +602,16 @@ const reverseJobRead = (j: MockReverseJob) => ({
   source_kind: j.source_kind,
   source_asset_id: j.source_kind === "video" ? "video-asset-1" : "upload-1",
   target_format: "seedance_2_0",
-  // REVERSE-DEEP-UI-0001 三形态：老结构(legacy) → 视频(含 video_analysis/shot_summary/clamp) → 图片新结构。
+  // 四形态：老结构(legacy) → 中文降级(zhDegraded) → 视频(含 video_analysis/shot_summary/clamp) → 图片新结构。
   result:
     j.status === "succeeded" || j.status === "saved"
       ? j.legacy
         ? REVERSE_RESULT_LEGACY
-        : j.source_kind === "video"
-          ? REVERSE_RESULT_VIDEO
-          : REVERSE_RESULT
+        : j.zhDegraded
+          ? REVERSE_RESULT_ZH_DEGRADED
+          : j.source_kind === "video"
+            ? REVERSE_RESULT_VIDEO
+            : REVERSE_RESULT
       : null,
   error_code: j.error_code,
   error_message: j.error_message,

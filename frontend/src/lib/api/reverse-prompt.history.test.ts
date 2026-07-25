@@ -28,11 +28,13 @@ beforeEach(() => {
 afterEach(() => localStorage.clear());
 
 describe("反推历史列表 GET /reverse-prompt/jobs", () => {
-  // REVERSE-DEEP-UI-0001：mock 新增第 7 条 `rh-img-legacy`（形态②**老结构结果**，供「回落」路径真测），
-  // 故「全部」7 条、image 4 条；它 created_at 最早 → 倒序排最后。video 侧不受影响（仍 3 条）。
-  it("省略 source_kind = 全部：7 条（image 4 + video 3），按 created_at 倒序；分页默认 page=1/page_size=20", async () => {
+  // REVERSE-DEEP-UI-0001：mock 新增第 7 条 `rh-img-legacy`（形态②**老结构结果**，供「回落」路径真测）。
+  // REVERSE-ZH-MOCK-SYNC-UI-0001：再新增第 8 条 `rh-img-zh-degraded`（形态④**中文降级结果**，
+  //   供 BE #225 的 `[中文缺失，以下为英文原文]` 降级支真测）。
+  // 故「全部」8 条、image 5 条；两条新 seed 的 created_at 最早 → 倒序排最后。video 侧不受影响（仍 3 条）。
+  it("省略 source_kind = 全部：8 条（image 5 + video 3），按 created_at 倒序；分页默认 page=1/page_size=20", async () => {
     const r = await listReversePromptJobs();
-    expect(r.total).toBe(7);
+    expect(r.total).toBe(8);
     expect(r.page).toBe(1);
     expect(r.page_size).toBe(20); // BE routes:75 默认 20
     expect(r.items.map((i) => i.id)).toEqual([
@@ -42,13 +44,14 @@ describe("反推历史列表 GET /reverse-prompt/jobs", () => {
       "rh-vid-1",
       "rh-vid-2",
       "rh-vid-3",
-      "rh-img-legacy"
+      "rh-img-legacy",
+      "rh-img-zh-degraded"
     ]);
   });
 
-  it("source_kind=image：恰 4 条，且都有 source_thumbnail_url", async () => {
+  it("source_kind=image：恰 5 条，且都有 source_thumbnail_url", async () => {
     const r = await listReversePromptJobs({ source_kind: "image" });
-    expect(r.total).toBe(4);
+    expect(r.total).toBe(5);
     expect(r.items.every((i) => i.source_kind === "image")).toBe(true);
     expect(r.items.every((i) => typeof i.source_thumbnail_url === "string" && i.source_thumbnail_url.length > 0)).toBe(
       true
@@ -79,7 +82,7 @@ describe("反推历史列表 GET /reverse-prompt/jobs", () => {
 
   it("状态如实透出 5 值（DB CheckConstraint models.py:471）：succeeded/saved/failed/running/queued 都能看到", async () => {
     const r = await listReversePromptJobs();
-    // 末位是新增的老结构 seed（succeeded）——见上方「全部 7 条」注释。
+    // 末两位是新增的老结构 seed 与中文降级 seed（都是 succeeded）——见上方「全部 8 条」注释。
     expect(r.items.map((i) => i.status)).toEqual([
       "succeeded",
       "saved",
@@ -87,6 +90,7 @@ describe("反推历史列表 GET /reverse-prompt/jobs", () => {
       "succeeded",
       "running",
       "queued",
+      "succeeded",
       "succeeded"
     ]);
   });
@@ -119,7 +123,7 @@ describe("反推历史列表 GET /reverse-prompt/jobs", () => {
   it("分页边界内合法：page_size=100（BE le=100 的上界，属合法）", async () => {
     const r = await listReversePromptJobs({ page_size: 100 });
     expect(r.page_size).toBe(100);
-    expect(r.total).toBe(7); // 含新增的老结构 seed（见上方注释）
+    expect(r.total).toBe(8); // 含新增的老结构 seed + 中文降级 seed（见上方注释）
   });
 });
 
@@ -141,6 +145,97 @@ describe("反推详情 GET /reverse-prompt/jobs/{id}", () => {
       "video_gen"
     ]);
     expect(job.result?.video_analysis ?? null).toBeNull();
+  });
+
+  // ══ REVERSE-ZH-MOCK-SYNC-UI-0001 · 承重门 1–3（BE #225 §九 v3：structured_prompt.zh 改真中文）══
+  //
+  // 背景：#220 FIX2 时我把 mock 的 `.zh` 校准成「与 `.en` 共用同一组 value、只换中文标签」——
+  // 那时 BE 确实那么产出。#225 之后 `.zh` 的**值**由模型原生返回中文，mock 反而不忠实了。
+
+  /**
+   * 承重门1：`.zh` 的值是**中文**，且与 `.en` 的对应值**不同**。
+   * 🔴 判据用 CJK 码位（与 BE 的 `_contains_han` 同一判据，services:834-841），不是「含某个特定词」——
+   *    后者换个 fixture 就失效，前者钉的是「这一栏必须是中文」这条契约本身。
+   * 变异：把 handlers.ts 的 STRUCTURED_ZH 改回英文值（即 FIX2 那版）→ 本条必红。
+   */
+  it("🔴 承重门1 · structured_prompt.zh 的值是中文，且不等于 .en 的值", async () => {
+    const sp = (await getReversePromptJob("rh-img-1")).result!.structured_prompt!;
+    const HAN = /[㐀-䶿一-鿿]/;
+
+    // 逐行拆开断言：整串含汉字太松（中文标签本身就是汉字，值全英文也能过）。
+    const zhLines = sp.zh.split("\n");
+    const enLines = sp.en.split("\n");
+    expect(zhLines).toHaveLength(7); // 7 个固定小节（services:801-814）
+    expect(enLines).toHaveLength(7);
+
+    for (const [i, line] of zhLines.entries()) {
+      // 标签仍是 **ASCII 冒号 + 一个空格**（f"{label}: {…}"，services:821）——不是全角「：」
+      const [label, ...rest] = line.split(": ");
+      const value = rest.join(": ");
+      expect(label).toMatch(HAN); // 中文标签
+      expect(value, `第 ${i + 1} 行的值应为中文：${line}`).toMatch(HAN); // 🔴 **值**也必须是中文
+      // 与 .en 同位置的值逐行比对：必须不同（#225 前它们是同一组串）
+      expect(value).not.toBe(enLines[i].split(": ").slice(1).join(": "));
+    }
+    expect(sp.zh).not.toBe(sp.en);
+  });
+
+  /**
+   * 承重门2：降级形态的前缀**逐字**等于 BE 的 `_STRUCTURED_ZH_FALLBACK_PREFIX`
+   *（backend/app/services/reverse_prompt.py:44）。
+   * 🔴 前缀与英文原文之间是**一个半角空格**（`f"{PREFIX} {english_value}"`，services:831）。
+   * 🔴 降级是**逐字段**的：同一份结果里可以有的行降级、有的行正常 —— 只准备「全降级」样本会漏掉
+   *    真实里最常见的半降级形态。
+   * 变异：改动前缀任一个字（含标点/空格）→ 本条必红。
+   */
+  it("🔴 承重门2 · 中文缺失降级：前缀逐字为「[中文缺失，以下为英文原文] 」且逐字段生效", async () => {
+    const sp = (await getReversePromptJob("rh-img-zh-degraded")).result!.structured_prompt!;
+    const PREFIX = "[中文缺失，以下为英文原文]";
+    const zhLines = sp.zh.split("\n");
+    const enLines = sp.en.split("\n");
+
+    const degraded = zhLines.filter((l) => l.includes(PREFIX));
+    const normal = zhLines.filter((l) => !l.includes(PREFIX));
+    // 逐字段降级：两种行都得有（全降级或全不降级都说明样本没覆盖到这个语义）
+    expect(degraded.length).toBeGreaterThan(0);
+    expect(normal.length).toBeGreaterThan(0);
+
+    for (const line of degraded) {
+      const [label, ...rest] = line.split(": ");
+      const value = rest.join(": ");
+      // 前缀 + 一个半角空格 + 英文原文；且英文原文逐字等于 .en 同标签行的值
+      expect(value.startsWith(`${PREFIX} `)).toBe(true);
+      const englishInZh = value.slice(PREFIX.length + 1);
+      const idx = zhLines.indexOf(line);
+      expect(englishInZh, `降级行「${label}」的英文原文应与 .en 同位置逐字相同`).toBe(
+        enLines[idx].split(": ").slice(1).join(": ")
+      );
+    }
+  });
+
+  /**
+   * 承重门3：`.en` 与带入取值**零变化** —— 中文降级绝不能影响带入。
+   * BE 侧的根据：降级只发生在 `_structured_zh_value`（services:827-831），它只参与 `.zh` 的拼装；
+   * fill_targets 取的一直是 `structured_en`（services:737/754/769/780）。
+   * 取证已确认：正常态与降级态的 `.en` 逐字相同。
+   */
+  it("🔴 承重门3 · 中文降级不影响 .en 与带入：三处取值仍逐字等于 structured_prompt.en", async () => {
+    const normal = (await getReversePromptJob("rh-img-1")).result!;
+    const degraded = (await getReversePromptJob("rh-img-zh-degraded")).result!;
+
+    // .en 在两种形态下逐字相同（降级只碰 .zh）
+    expect(degraded.structured_prompt!.en).toBe(normal.structured_prompt!.en);
+
+    // 带入取值仍是 .en（BE services:737/754/769/780）——降级态下也一样
+    for (const r of [normal, degraded]) {
+      const en = r.structured_prompt!.en;
+      expect(r.fill_targets.video_gen.prompt).toBe(en);
+      expect(r.fill_targets.photo.topic).toBe(en);
+      expect(r.fill_targets.seedance_i2v.scene_prompt).toBe(en);
+      expect(r.fill_targets.ecom_model.extra_prompt).toBe(en);
+    }
+    // 整个 fill_targets 在两形态间逐字相同 —— 「降级不改带入」的最强表述
+    expect(degraded.fill_targets).toEqual(normal.fill_targets);
   });
 
   it("succeeded(video)：result.video_analysis 内嵌（duration_sec>0 + pacing 枚举 + shot_list）", async () => {
