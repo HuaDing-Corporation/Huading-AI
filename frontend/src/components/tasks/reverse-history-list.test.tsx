@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   jobs: vi.fn(),
   job: vi.fn(),
   del: { mutateAsync: vi.fn(), isPending: false, variables: undefined as string | undefined },
+  // FIX1 范围2：列表新增「清空」→ mock 必须补这个导出（清空自身的承重在 reverse-history-list.clear.test.tsx）。
+  clear: { mutateAsync: vi.fn(), isPending: false },
   save: { mutateAsync: vi.fn(), isPending: false }
 }));
 
@@ -21,6 +23,7 @@ vi.mock("@/lib/api/hooks", () => ({
   useReversePromptJobs: (kind?: string) => mocks.jobs(kind),
   useReversePromptJob: (id?: string) => mocks.job(id),
   useDeleteReversePromptJob: () => mocks.del,
+  useClearReversePromptJobs: () => mocks.clear,
   useSaveReversePrompt: () => mocks.save
 }));
 

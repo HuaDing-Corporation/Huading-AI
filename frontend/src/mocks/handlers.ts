@@ -1799,6 +1799,28 @@ export const handlers = [
       page_size: pageSize
     });
   }),
+  // ── 清空反推历史（REVERSE-CHARGE-GATE-UI-0001 FIX1 范围2）─────────────────────────────────
+  // **形状逐字照抄真实响应**（BE 分支 feature/reverse-clear-history-be，TestClient 实打取回；
+  // 本项目已为「mock 形状与 BE 不同」付过四次学费）：
+  //   DELETE /reverse-prompt/jobs?scope=all|image|video → **200** `{data:{deleted_count:int}}`
+  //   scope 缺失 → 422 VALIDATION_ERROR（loc=["query","scope"], type=missing）
+  //   scope 非法 → 422 VALIDATION_ERROR（type=literal_error, "Input should be 'all', 'image' or 'video'"）
+  // ⚠️ 必须注册在 `/:id` **之前**（msw 按注册序匹配，否则集合路径会被 ":id" 吃掉）。
+  // 🔴 **scope 必传、不默认 all**：默认清全部是误删的温床（CB 打回 BE 的第一条 P1 同源）。
+  http.delete(`${BASE}/api/v1/reverse-prompt/jobs`, ({ request }) => {
+    const scope = new URL(request.url).searchParams.get("scope");
+    if (scope === null) return err(422, "VALIDATION_ERROR", "scope 必传");
+    if (!["all", "image", "video"].includes(scope)) return err(422, "VALIDATION_ERROR", "scope 须为 all/image/video");
+    // 只清 live（未软删）且匹配 scope 的：all 含图片+视频，其余按 source_kind 过滤（镜像 BE services:415-435）。
+    let deleted_count = 0;
+    for (const job of reverseJobs.values()) {
+      if (job.deleted_at) continue;
+      if (scope !== "all" && job.source_kind !== scope) continue;
+      job.deleted_at = new Date(0).toISOString();
+      deleted_count += 1;
+    }
+    return ok({ deleted_count });
+  }),
   // 软删一条（BE 只置 deleted_at、不碰媒体/Asset）。不存在 / 已删 → 404。
   // 🔴 FIX3：走统一守卫 liveJob；错误码统一为 REVERSE_PROMPT_JOB_NOT_FOUND —— 此处原先自己编了个
   // `REVERSE_JOB_NOT_FOUND`，与 GET 详情的码不一致（同一个 BE 错误、两个 handler 两个码）。

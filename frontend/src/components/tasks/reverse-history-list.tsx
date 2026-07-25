@@ -9,6 +9,7 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { ReversePromptResultView } from "@/components/workbench/reverse-prompt-result-view";
 import {
+  useClearReversePromptJobs,
   useDeleteReversePromptJob,
   useReversePromptJob,
   useReversePromptJobs,
@@ -171,8 +172,10 @@ export function ReverseHistoryList({ onApplyPrefill }: { onApplyPrefill?: (prefi
   const [kind, setKind] = useState<ReverseSourceKind | "all">("all");
   const query = useReversePromptJobs(kind === "all" ? undefined : kind);
   const del = useDeleteReversePromptJob();
+  const clear = useClearReversePromptJobs();
   const [detail, setDetail] = useState<ReversePromptHistoryItem | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const items = query.data?.pages.flatMap((page) => page.items) ?? [];
@@ -188,20 +191,51 @@ export function ReverseHistoryList({ onApplyPrefill }: { onApplyPrefill?: (prefi
     }
   };
 
+  /**
+   * 清空（FIX1 范围2）：**scope 跟随当前筛选**（chip 的 all/image/video 与 BE Literal 同构，直接透传）。
+   * 🔴 绝不写死 "all"——那正是 CB 打回 BE 的第一条 P1（图片筛选下清空误删看不见的视频历史），
+   * 而 E1 不给恢复入口 → 删错没法后悔。失败不关弹窗、列表原样（不乐观移除，与 #221/#223 同一范式）。
+   */
+  const onConfirmClear = async () => {
+    setActionError(null);
+    try {
+      await clear.mutateAsync(kind);
+      setConfirmClear(false);
+    } catch {
+      setActionError(copy.history.reverseClearFailed);
+    }
+  };
+
   return (
     <div>
-      {/* 二级分类（tab 内再分）：chip + group/aria-pressed，与图片历史 tab 同一交互语言。 */}
-      <div role="group" aria-label={copy.history.reverseKindLabel} className="mb-3 flex flex-wrap gap-1.5">
-        {KIND_CHIPS.map((c) => (
-          <Chip
-            key={c.key}
-            selected={kind === c.key}
-            onClick={() => setKind(c.key)}
-            className="px-3 py-1.5 text-[12.5px]"
+      {/* 二级分类（tab 内再分）：chip + group/aria-pressed，与图片历史 tab 同一交互语言。
+          右侧「清空」：scope 跟随当前筛选（FIX1 范围2）——只在有记录时渲染（无可清则不给死按钮）。 */}
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div role="group" aria-label={copy.history.reverseKindLabel} className="flex flex-wrap gap-1.5">
+          {KIND_CHIPS.map((c) => (
+            <Chip
+              key={c.key}
+              selected={kind === c.key}
+              onClick={() => setKind(c.key)}
+              className="px-3 py-1.5 text-[12.5px]"
+            >
+              {c.label}
+            </Chip>
+          ))}
+        </div>
+        {items.length > 0 ? (
+          <Button
+            variant="soft"
+            size="sm"
+            onClick={() => {
+              setActionError(null); // 两弹窗共享 actionError → 打开前清，避免上次删除失败的错串台
+              setConfirmClear(true);
+            }}
+            disabled={clear.isPending}
           >
-            {c.label}
-          </Chip>
-        ))}
+            <Trash2 size={14} strokeWidth={1.8} /> {copy.history.reverseClear}
+          </Button>
+        ) : null}
       </div>
 
       {/* 删除错误只在确认弹窗内呈现（见下方 ConfirmDialog 的 error）——本列表的 actionError 只由删除产生，
@@ -283,6 +317,24 @@ export function ReverseHistoryList({ onApplyPrefill }: { onApplyPrefill?: (prefi
         onConfirm={() => void onConfirmDelete()}
         onCancel={() => {
           setConfirmDelete(null);
+          setActionError(null);
+        }}
+      />
+
+      {/* 清空确认（FIX1 范围2）：正文**随 scope 变**，把「这次删的是哪一类」写死在句子里
+          （CB 打回 BE 的第一条 P1 + E1 无恢复入口 → 含糊文案会让用户真的丢东西）。
+          danger：软删但用户侧无恢复入口 = 不可撤销的删除（DANGER-SEMANTICS-SIGNPOSTS-0001 方案 A ①支）。 */}
+      <ConfirmDialog
+        open={confirmClear}
+        title={copy.history.reverseClearConfirmTitle}
+        message={copy.history.reverseClearConfirmMsg(kind)}
+        confirmLabel={copy.history.clearConfirmBtn}
+        danger
+        submitting={clear.isPending}
+        error={actionError}
+        onConfirm={() => void onConfirmClear()}
+        onCancel={() => {
+          setConfirmClear(false);
           setActionError(null);
         }}
       />

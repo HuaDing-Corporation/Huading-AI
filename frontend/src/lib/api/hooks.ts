@@ -35,6 +35,7 @@ import { getQuota } from "@/lib/api/quota";
 import { clearCopyDrafts, deleteCopyDraft, generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
 import { generateScript } from "@/lib/api/scripts";
 import {
+  clearReversePromptJobs,
   deleteReversePromptJob,
   estimateReversePrompt,
   getReversePromptJob,
@@ -42,6 +43,7 @@ import {
   regenerateReversePrompt,
   reverseFromAsset,
   saveReversePrompt,
+  type ReverseClearScope,
   type ReverseFromAssetInput,
   type ReverseSourceKind
 } from "@/lib/api/reverse-prompt";
@@ -249,6 +251,17 @@ export function useDeleteReversePromptJob() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (jobId: string) => deleteReversePromptJob(jobId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: reversePromptKeys.all });
+    }
+  });
+}
+// 清空反推历史（FIX1 范围2）：scope 必传、跟随当前筛选。同样只失效反推键——不做乐观移除
+// （失败即保持原样 + 弹窗内报错，成功由 refetch 让它消失；与 #221/#223 同一套范式）。
+export function useClearReversePromptJobs() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (scope: ReverseClearScope) => clearReversePromptJobs(scope),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: reversePromptKeys.all });
     }
