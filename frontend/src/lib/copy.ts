@@ -726,7 +726,12 @@ export const copy = {
     vaShotTransition: "转场",
     vaAudioTranscript: "音频转写",
     vaBgmStyle: "背景音乐风格",
-    vaNotEnabled: "未启用（一期）"
+    // 🔴 FIX2 真联调：ASR 已随 BE #219 落地（§八 M6，BE 真调 gpt-4o-mini-transcribe）→ 空值的含义变了，
+    //    两个字段不能再共用一句「未启用（一期）」：台词为空 = 这段素材没识别出台词；BGM 为空 = BE 判不了、不许编。
+    vaNoTranscript: "未识别到台词（无音轨或语音不清晰）",
+    vaBgmUnsupported: "暂不支持识别音乐风格",
+    // 仅剩「时长读不到」这类真·未知场景在用（vaDurationValue 的兜底），已不再用于台词/BGM
+    vaNotEnabled: "未知"
   },
   tasks: {
     title: "生成任务",

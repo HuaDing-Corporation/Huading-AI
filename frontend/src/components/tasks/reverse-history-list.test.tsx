@@ -93,8 +93,7 @@ const RESULT = {
     seedance_i2v: { topic: "保温杯卖点", scene_prompt: "暖光特写" },
     video_gen: { topic: "保温杯", prompt: "暖光特写，环绕运镜" },
     photo: { topic: "白色大理石台面上的保温杯" },
-    ecom_model: { extra_prompt: "工作室柔光" },
-    ecom_poster: { title: "大促", subtitle: "限时" }
+    ecom_model: { extra_prompt: "工作室柔光" }
   },
   video_analysis: null
 };

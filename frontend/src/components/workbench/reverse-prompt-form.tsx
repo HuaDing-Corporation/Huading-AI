@@ -450,10 +450,17 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
         )}
 
         {/* 分段进度（§八 M5 + D10）—— 🔴 **两字段齐备才渲染**：图片/短视频 BE 恒给 null，此处整块消失，
-            形态与改动前一致。没有任何按时间自增的假进度，进度只跟着 segments_done 走。 */}
+            形态与改动前一致。没有任何按时间自增的假进度，进度只跟着 segments_done 走。
+            🔴 FIX2 真联调修正：`segments_done` 是**已完成段数**，不是「正在分析的第几段」——BE 在进入第 N 段前
+            写的是 `segments_done = N-1`（证据 backend/tests/test_reverse_prompt_pipeline.py:1860）。
+            直接把它填进「正在分析第 X/Y 段」，长视频第一段期间必然显示「正在分析第 0/6 段」。
+            故序号 = 已完成数 + 1，并夹在 total 内：末段跑完到整片汇总那段时间 done 已等于 total，
+            此时显示「第 6/6 段」是诚实的（确实还在跑最后一步），显示「第 7/6 段」则是胡说。 */}
         {isVideo && polling && segments && (
           <div className="mt-2 text-center" aria-live="polite">
-            <p className="text-[12.5px] text-ink">{copy.reverse.videoSegmentProgress(segments.done, segments.total)}</p>
+            <p className="text-[12.5px] text-ink">
+              {copy.reverse.videoSegmentProgress(Math.min(segments.done + 1, segments.total), segments.total)}
+            </p>
             <p className="mt-0.5 text-[12px] text-ink-faint">{copy.reverse.videoSegmentEta}</p>
           </div>
         )}

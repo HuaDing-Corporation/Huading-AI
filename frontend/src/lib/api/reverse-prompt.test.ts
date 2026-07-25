@@ -19,19 +19,20 @@ import {
 //  FIX3 已改为先建再用返回 id；重置让这个前提变成**确定**的，而不是碰巧成立。）
 beforeEach(() => resetReverseJobs());
 
-// REVERSE-PROMPT-UI · FIX1：对齐 BE 真契约。核心是「带入 6 键」的落点映射——BE 已给预填载荷，FE 直接
-// apply、不猜字段。此处逐一锁死 6 个 BE fill_target 键 → WorkbenchPrefill 的落点，缺键 → null（置灰）。
+// REVERSE-PROMPT-UI：对齐 BE 真契约。核心是「带入 5 键」的落点映射——BE 已给预填载荷，FE 直接
+// apply、不猜字段。此处逐一锁死 5 个 BE fill_target 键 → WorkbenchPrefill 的落点，缺键 → null（置灰）。
+// 🔴 FIX2 真联调：删掉了第 6 个键 ecom_poster —— BE fill_targets 只有 5 键，自测显式
+//    `assert "ecom_poster" not in fill_targets`（backend/tests/test_reverse_prompt_pipeline.py:2713）。
 
 const FULL_FILL: ReversePromptFillTargets = {
   avatar_talk: { topic: "便携保温杯", script: "大家好，这款保温杯……" },
   seedance_i2v: { topic: "保温杯卖点", scene_prompt: "桌面暖光特写，蒸汽升腾" },
   video_gen: { topic: "保温杯", prompt: "极简产品广告，缓慢环绕运镜" },
   photo: { topic: "白底保温杯特写" },
-  ecom_model: { extra_prompt: "工作室柔光、白底" },
-  ecom_poster: { title: "年中大促", subtitle: "限时 5 折" }
+  ecom_model: { extra_prompt: "工作室柔光、白底" }
 };
 
-describe("fillTargetToPrefill · 带入 6 键落点（BE 载荷直落，不猜字段）", () => {
+describe("fillTargetToPrefill · 带入 5 键落点（BE 载荷直落，不猜字段）", () => {
   it("avatar_talk → 数字人口播 topic+script", () => {
     expect(fillTargetToPrefill("avatar_talk", FULL_FILL)).toEqual({
       target: "avatar_talk",
@@ -70,16 +71,55 @@ describe("fillTargetToPrefill · 带入 6 键落点（BE 载荷直落，不猜�
     });
   });
 
-  it("ecom_poster → null（营销海报已下线 ECOM-REPLICATE-UI-0001，无落点、按钮已移除）", () => {
-    expect(fillTargetToPrefill("ecom_poster", FULL_FILL)).toBeNull();
-  });
-
   it("缺某 fill_target 键 → null（结果页据此置灰该模块「带入」）", () => {
     const only = { avatar_talk: { topic: "x", script: "y" } } as unknown as ReversePromptFillTargets;
     expect(fillTargetToPrefill("seedance_i2v", only)).toBeNull();
     expect(fillTargetToPrefill("photo", only)).toBeNull();
-    expect(fillTargetToPrefill("ecom_poster", only)).toBeNull();
+    expect(fillTargetToPrefill("ecom_model", only)).toBeNull();
     expect(fillTargetToPrefill("avatar_talk", only)).not.toBeNull();
+  });
+
+  // 🔴 FIX2 承重门14「BE 恒发键、缺失表示为 null」：BE 是 pydantic 模型，图片源下 duration_sec 实发 **null**
+  //    而不是省略键（运行时证据 backend/tests/test_reverse_prompt_pipeline.py:2688/2699 的整字典相等断言）。
+  //    映射层若用 `!== undefined` 判「给没给」，null 会穿过闸门 → 弹窗渲染「时长 null 秒」、null 落进控件。
+  //    变异：把 reverse-prompt.ts 的 `t.duration_sec != null` 改回 `t.duration_sec !== undefined` → 本条必红。
+  it("🔴 承重门14 · BE 恒发的 null 不算「给了」：duration_sec/shot_section 为 null → 整键不下发", () => {
+    const beImageShape: ReversePromptFillTargets = {
+      ...FULL_FILL,
+      // 逐字照抄 BE 图片源的真实形状（tests:2684-2700）
+      video_gen: {
+        topic: "杯",
+        prompt: "p",
+        negative_prompt: "n",
+        aspect_ratio: "3:4",
+        duration_sec: null,
+        duration_clamped: false,
+        generate_audio: false,
+        shot_section: null
+      },
+      seedance_i2v: {
+        topic: "杯",
+        script: null,
+        scene_prompt: "s",
+        negative_prompt: "n",
+        aspect_ratio: "9:16",
+        duration_sec: null,
+        duration_clamped: false,
+        shot_section: null
+      }
+    };
+    const vg = fillTargetToPrefill("video_gen", beImageShape) as Record<string, unknown>;
+    expect("durationSec" in vg).toBe(false);
+    expect("durationClamped" in vg).toBe(false);
+    expect("shotSection" in vg).toBe(false);
+    // generate_audio: false 是**真实观测**（这段素材没台词），且弹窗里是可取消的可见项 → 照常下发
+    expect(vg.generateAudio).toBe(false);
+
+    const ec = fillTargetToPrefill("seedance_i2v", beImageShape) as Record<string, unknown>;
+    expect("durationSec" in ec).toBe(false);
+    expect("durationClamped" in ec).toBe(false);
+    expect("shotSection" in ec).toBe(false);
+    expect("script" in ec).toBe(false); // BE 无台词时发 null
   });
 });
 
@@ -115,8 +155,8 @@ describe("apiUrl · reverse-prompt 路径单前缀 + /jobs/{id}/（坑②真守�
   }
 });
 
-describe("reverse-prompt API ↔ MSW（mock 镜像 BE 真形状：ReversePromptJobRead + 6 键）", () => {
-  it("reverseFromAsset：请求体仅 source_asset_id → succeeded + 完整扁平 result + 6 fill_targets", async () => {
+describe("reverse-prompt API ↔ MSW（mock 镜像 BE 真形状：ReversePromptJobRead + 5 键）", () => {
+  it("reverseFromAsset：请求体仅 source_asset_id → succeeded + 完整扁平 result + 5 fill_targets", async () => {
     const job = await reverseFromAsset({ source_asset_id: "upload-1" });
     expect(job.status).toBe("succeeded"); // 非自造 "completed"
     expect(job.id).toBeTruthy(); // 读 .id（非 jobId）
@@ -128,13 +168,18 @@ describe("reverse-prompt API ↔ MSW（mock 镜像 BE 真形状：ReversePromptJ
     expect(r.subject).toBeTruthy();
     expect(Array.isArray(r.style_tags)).toBe(true);
     expect(typeof r.confidence).toBe("number");
-    // 6 键 fill_targets 齐备，供「带入」六路全亮
-    expect(r.fill_targets.avatar_talk).toBeTruthy();
-    expect(r.fill_targets.seedance_i2v).toBeTruthy();
-    expect(r.fill_targets.video_gen).toBeTruthy();
-    expect(r.fill_targets.photo).toBeTruthy();
-    expect(r.fill_targets.ecom_model).toBeTruthy();
-    expect(r.fill_targets.ecom_poster).toBeTruthy();
+    // 🔴 FIX2 承重门15「mock 的 fill_targets 键集合 == BE 的 5 键，一个不多一个不少」。
+    //    断**键集合严格相等**而不是逐个 toBeTruthy：后者对「mock 多造一个 BE 不发的键」完全无感，
+    //    而那正是 ecom_poster 混进来两年没被发现的原因。BE 侧同款断言见
+    //    backend/tests/test_reverse_prompt_pipeline.py:2713 `assert "ecom_poster" not in fill_targets`。
+    //    变异：往 handlers.ts 的 fill_targets 里加回 ecom_poster → 本条必红。
+    expect(Object.keys(r.fill_targets).sort()).toEqual([
+      "avatar_talk",
+      "ecom_model",
+      "photo",
+      "seedance_i2v",
+      "video_gen"
+    ]);
   });
 
   // 🔴 FIX3：这两条原本硬编码 `rp-1`。它们能绿是**碰巧的** —— 同文件前面有个 POST 图片反推，
@@ -185,8 +230,30 @@ describe("视频反推异步（VIDEO-REVERSE-PROMPT-UI-0001）↔ MSW", () => {
     expect(shot0.start_sec).toBe(0);
     expect(shot0.end_sec).toBeGreaterThan(0);
     expect(typeof shot0.camera).toBe("string"); // BE 默认 ""，恒 string
-    expect(va.audio_transcript).toBeNull();
+    // 🔴 FIX2 真联调订正：**ASR 已落地**（§八 M6 / BE #219）。上一版这里断言 audio_transcript 恒 null，
+    //    钉的是「D4 SPIKE 未出结论、功能未启用」那个已经作废的状态 —— 属于典型的「测试把过期契约锁死」。
+    //    BE 现在真调转写（services/reverse_prompt_video.py:497-528），有台词就给串；
+    //    BE 自测里 24s 视频拿到的是 "这是一段完整台词。"（tests:1765）。
+    expect(typeof va.audio_transcript).toBe("string");
+    expect(va.audio_transcript).toBeTruthy();
+    // bgm_style 仍恒 null，但理由变了：不是「一期没做」，而是 §八 M6「ASR 判不了音乐风格 → 不许编」，
+    // BE 写死 None（reverse_prompt_video.py:375/461）。这条继续钉住，防止哪天有人拿模型幻觉去填它。
     expect(va.bgm_style).toBeNull();
+
+    // 🔴 FIX2 承重门17「mock 的段头与 BE 逐字一致」：BE 是 `f"Shots:\n{summary}"`
+    //    （backend/app/services/reverse_prompt.py:872）—— 冒号后是**换行、不是空格**，真机串恒为两行。
+    //    BE 自测同款判据：tests:1996-1997 `startswith("Shots:")`。
+    //    这条钉在 mock 上：谁把它改回 `Shots: `（空格）就红，防止 fixture 悄悄漂回去。
+    const ft = poll2.result!.fill_targets;
+    expect(ft.video_gen.shot_section).toMatch(/^Shots:\n/);
+    expect(ft.seedance_i2v.shot_section).toMatch(/^Shots:\n/);
+    // 两个模块共用 BE 同一个变量（services:731 算一次 → :749/:766 挂两处）→ 必须逐字相同
+    expect(ft.seedance_i2v.shot_section).toBe(ft.video_gen.shot_section);
+    // photo 不给 shot_section（§八 M2 只列 video_gen / seedance_i2v）
+    expect("shot_section" in ft.photo).toBe(false);
+    // ASR 联动：BE `script = transcript or None`、`generate_audio = bool(transcript)`（services:736/767）
+    expect(ft.seedance_i2v.script).toBe(va.audio_transcript);
+    expect(ft.video_gen.generate_audio).toBe(true);
   });
 
   it("图片源仍同步 succeeded（视频异步不回归图片路径）", async () => {

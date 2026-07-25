@@ -77,21 +77,28 @@ export function ReverseVideoAnalysisView({ analysis }: { analysis: ReverseVideoA
         </div>
       )}
 
-      {/* 音频转写 / BGM 风格：一期空 → 明确标「未启用」 */}
+      {/* 音频转写 / BGM 风格 —— 🔴 FIX2 真联调：两者的「为空」含义**不再相同**，故不能再共用一句「未启用（一期）」：
+          · audio_transcript：ASR 已落地（§八 M6，BE 走 _best_effort_audio_transcript 真调转写）→
+            空的含义是「**这段素材没识别出台词**」（无音轨 / 转写降级），不是功能没开。
+          · bgm_style：BE **写死 None** 且写明原因（apimart_gemini.py:806「ASR cannot classify music」）→
+            空的含义是「判不了，不许编」。 */}
       <div className="grid grid-cols-2 gap-x-4 gap-y-2">
         <div className="min-w-0">
           <span className={labelClass}>
             <Type size={12} className="mr-1 inline" />
             {copy.reverse.vaAudioTranscript}
           </span>
-          <p className="text-[12.5px] text-ink-faint">{analysis.audio_transcript || copy.reverse.vaNotEnabled}</p>
+          {/* 台词可能较长（真机是整段转写）→ 允许换行，不截断 */}
+          <p className="whitespace-pre-wrap text-[12.5px] leading-relaxed text-ink-faint">
+            {analysis.audio_transcript || copy.reverse.vaNoTranscript}
+          </p>
         </div>
         <div className="min-w-0">
           <span className={labelClass}>
             <Music size={12} className="mr-1 inline" />
             {copy.reverse.vaBgmStyle}
           </span>
-          <p className="text-[12.5px] text-ink-faint">{analysis.bgm_style || copy.reverse.vaNotEnabled}</p>
+          <p className="text-[12.5px] text-ink-faint">{analysis.bgm_style || copy.reverse.vaBgmUnsupported}</p>
         </div>
       </div>
     </Card>

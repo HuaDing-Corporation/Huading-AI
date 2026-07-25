@@ -56,7 +56,13 @@ async function gotoReverseResult(
   // REVERSE-DEEP-UI-0001 · 范围4：BE 给了 structured_prompt → 主提示词展示的是**结构化中文版**
   //（分行标注：主体/场景/构图/…），不再是逗号糊成一行的 prompt_zh。
   await expect(page.getByText("结构化提示词（中文）")).toBeVisible();
-  await expect(page.getByText(/主体：.*保温杯/)).toBeVisible();
+  // 🔴 FIX2 真联调订正断言形态：BE 的 `structured_prompt()`（services/reverse_prompt.py:792-806）
+  //    对 en/zh 用的是**同一组 value**、只换标签，分隔符是 **ASCII 冒号 + 一个空格**：
+  //      zh = "\n".join(f"{中文标签}: {value}")
+  //    所以真机是「中文标签 + 与英文块相同的正文」，**不是**「全角冒号 + 中文译文」。
+  //    上一版这条断言 `/主体：.*保温杯/`（全角冒号 + 中文正文）钉的是 BE 产不出的形状，
+  //    只因当时 mock 也被写成了那样才绿 —— mock 改回真形状后它立刻红，正说明这条断言此前是假绿。
+  await expect(page.getByText(/主体: .*insulated/)).toBeVisible();
 
   return { errors: () => pageErrors, doublePrefix: () => doublePrefix, consoleErrors: () => consoleErrors };
 }
@@ -94,7 +100,11 @@ test("带入·AI 模特 → 切电商图·AI 模特子工具并预填自定义�
   // **不校验可见性** → 单靠它已不能证明「确实切到了 AI 模特子工具」。补一条可见性断言把落点锁死。
   const custom = page.getByTestId("panel-ecom_image").locator("#ecom-model-custom");
   await expect(custom).toBeVisible({ timeout: 15_000 });
-  await expect(custom).toHaveValue("工作室柔光、简洁白底、突出质感");
+  // 🔴 FIX2 真联调订正期望值：BE 的 `ecom_model.extra_prompt` 是
+  //    `_whole_sections_within_limit(structured_en, 20000)`（services/reverse_prompt.py:779-782）——
+  //    未触顶时**逐字等于 structured_prompt.en**（BE 自测 tests:2710 以整字典相等钉死），
+  //    不是一句自编的中文短句。上一版期望值是 mock 自己编的，BE 从不产出那种形态。
+  await expect(custom).toHaveValue(/^Subject: .*\nStyle: product advertising/s);
 
   expect(g.errors(), `page errors：\n${g.errors().join("\n")}`).toEqual([]);
   expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);

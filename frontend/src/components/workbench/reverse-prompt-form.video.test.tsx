@@ -61,8 +61,7 @@ const RESULT = {
     seedance_i2v: { topic: "杯", scene_prompt: "暖光" },
     video_gen: { topic: "杯", prompt: "运镜" },
     photo: { topic: "白底杯" },
-    ecom_model: { extra_prompt: "白底" },
-    ecom_poster: { title: "促", subtitle: "5 折" }
+    ecom_model: { extra_prompt: "白底" }
   }
 };
 // FIX1③：初始 queued（BE 202 queued，非 running）；④ credits=provider 引擎成本（非租户 100 扣费）。
@@ -241,18 +240,42 @@ describe("ReversePromptForm · 视频反推路径", () => {
   });
 
   // 承重门11「分段进度」：文案跟着 segments_done 走。
-  it("承重门11 · 分段进度：segments_done 从 2 变 4，文案跟着变", async () => {
+  // 🔴 FIX2 真联调订正语义：BE 的 `segments_done` 是**已完成段数**，进入第 N 段前写的是 N-1
+  //    （证据 backend/tests/test_reverse_prompt_pipeline.py:1860）。上一版这条断言 done=2 → 显示「第 2/6 段」，
+  //    钉的其实是**错的**语义 —— 真机第一段进行中 done=0，界面会显示「正在分析第 0/6 段」。
+  //    改后：序号 = done + 1（封顶 total）。
+  it("承重门11 · 分段进度：序号 = 已完成数 + 1，随 segments_done 推进而变", async () => {
     reverseMut.mockResolvedValue({ ...queuedJob(), segments_total: 6, segments_done: 0 });
     api.getReversePromptJob
+      .mockResolvedValueOnce({ ...queuedJob(), status: "running", segments_total: 6, segments_done: 0 })
       .mockResolvedValueOnce({ ...queuedJob(), status: "running", segments_total: 6, segments_done: 2 })
-      .mockResolvedValueOnce({ ...queuedJob(), status: "running", segments_total: 6, segments_done: 4 })
       .mockResolvedValue(succeededJob());
     await switchToVideoAndUpload();
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
     fireEvent.click(await screen.findByRole("button", { name: copy.reverse.videoChargeConfirm }));
-    expect(await screen.findByText(copy.reverse.videoSegmentProgress(2, 6), {}, { timeout: 3000 })).toBeInTheDocument();
+    // 🔴 done=0（第一段进行中）→ 必须是「第 1/6 段」，**绝不能是「第 0/6 段」**
+    expect(await screen.findByText(copy.reverse.videoSegmentProgress(1, 6), {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(screen.queryByText(/第 0\/6 段/)).not.toBeInTheDocument();
     expect(screen.getByText(copy.reverse.videoSegmentEta)).toBeInTheDocument();
-    expect(await screen.findByText(copy.reverse.videoSegmentProgress(4, 6), {}, { timeout: 3000 })).toBeInTheDocument();
+    // done=2 → 第 3/6 段（跟着推进）
+    expect(await screen.findByText(copy.reverse.videoSegmentProgress(3, 6), {}, { timeout: 3000 })).toBeInTheDocument();
+  });
+
+  // 承重门11 的第三面：末段跑完（done == total）后 BE 还要走一次整片汇总，此时序号必须**封顶**在 total，
+  // 不能显示「第 7/6 段」。变异：把 Math.min(done + 1, total) 改成 done + 1 → 本条必红。
+  it("承重门11 · done == total（整片汇总中）→ 显示第 6/6 段，不越界成 7/6", async () => {
+    reverseMut.mockResolvedValue({ ...queuedJob(), segments_total: 6, segments_done: 0 });
+    api.getReversePromptJob.mockResolvedValue({
+      ...queuedJob(),
+      status: "running",
+      segments_total: 6,
+      segments_done: 6
+    });
+    await switchToVideoAndUpload();
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
+    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.videoChargeConfirm }));
+    expect(await screen.findByText(copy.reverse.videoSegmentProgress(6, 6), {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(screen.queryByText(/第 7\/6 段/)).not.toBeInTheDocument();
   });
 
   // 承重门11 的另一半：两字段为 null（图片 / ≤60s 短视频）→ **整块不渲染**，形态与改动前一致。

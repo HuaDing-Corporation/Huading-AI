@@ -11,7 +11,14 @@ import { copy } from "@/lib/copy";
 // P1 只图片；只收 source_asset_id（走现有图片上传拿 asset_id）。target_format 固定 seedance_2_0，类型未写死留 P2 槽。
 
 /**
- * BE fill_targets 6 键，内层字段一字不差（backend services/reverse_prompt.py::fill_targets）。
+ * BE fill_targets **5 键**，内层字段一字不差（backend/app/services/reverse_prompt.py:732-789 `fill_targets`）。
+ *
+ * 🔴 FIX2 真联调订正：**没有 `ecom_poster`**。上一版把它声明成**必填**键，是营销海报下线前的遗留 ——
+ *    BE 侧三重钉死：schema 只有 5 字段（schemas/reverse_prompt.py:91-96）、`fill_targets()` 返回的 dict
+ *    只有 5 键、BE 自测写着 `assert "ecom_poster" not in fill_targets`（tests:2713）。
+ *    留着它的代价不是「多一个没用的键」，而是**前端自造了一个契约面**：类型说必填 → mock 必须跟着造 →
+ *    「BE 到底发不发」这件事被 mock 遮住；`reverse-prompt.history.test.ts` 里那条键集合严格相等断言
+ *    还把 6 键钉成了「正确答案」，对真 BE 必红。
  *
  * REVERSE-DEEP-UI-0001 · 冻结契约 §4.2「破坏性最小」升级：**既有键全部保留、只新增键**，且新增键
  * **一律 optional** —— BE 没给的字段，前端不许拿空串去覆盖用户已填的控件（消费侧纪律见 page.tsx:57）。
@@ -31,34 +38,50 @@ export interface ReversePromptFillTargets {
   avatar_talk: { topic: string; script: string };
   seedance_i2v: {
     topic: string;
-    script?: string;
+    /** BE = `audio_transcript or None`（ASR 已落地，见 services:727-731/736）——无台词/识别失败即 null */
+    script?: string | null;
     scene_prompt: string;
     negative_prompt?: string;
-    shot_section?: string | null; // §八 M2：完整分镜段（含段头），拼在 scene_prompt 末尾
-    duration_sec?: number;
-    duration_clamped?: boolean;
+    /**
+     * §八 M2：完整分镜段（含段头），拼在 scene_prompt 末尾。
+     * ⚠️ BE **恒发此键**，无分镜时发 `null`（不是省略）——消费处一律用 `!= null` / 真值判据。
+     */
+    shot_section?: string | null;
+    /**
+     * BE 是 `Literal["9:16","16:9","1:1"]`（schemas:62），按源素材比例映射。
+     * 🔴 **前端刻意不消费**：电商带货表单没有比例控件，提交时写死 `aspect_ratio: "9:16"`
+     *（ecom-video-form.tsx:190）。映射过来也无处可落，只会变成「点了没用的开关」——违反本包纪律。
+     *    此处仅**如实声明** BE 给了这个键；「让电商带货支持非竖屏」是产品决策，已记 backlog（见回执）。
+     */
+    aspect_ratio?: string | null;
+    /** 🔴 BE 恒发；图片源发 `null`（tests:2699）。判据必须 `!= null`，`!== undefined` 会放 null 过闸。 */
+    duration_sec?: number | null;
+    duration_clamped?: boolean | null;
   };
   video_gen: {
     topic?: string; // §八 M3 明确保留（现状即有，back-compat）；前端不消费
     prompt: string;
     negative_prompt?: string;
-    shot_section?: string | null; // §八 M2：完整分镜段（含段头），拼在 prompt 末尾
+    /** 同 seedance：BE 恒发，无分镜时 `null`。 */
+    shot_section?: string | null;
     aspect_ratio?: string | null;
-    duration_sec?: number;
-    duration_clamped?: boolean;
-    generate_audio?: boolean;
+    /** 🔴 BE 恒发；图片源发 `null`（tests:2688）。 */
+    duration_sec?: number | null;
+    duration_clamped?: boolean | null;
+    /** BE = `bool(audio_transcript)`；恒发布尔，图片源为 false。 */
+    generate_audio?: boolean | null;
   };
   photo: {
     topic: string;
-    master_prompt?: string;
+    /** 🔴 BE **硬编码 None**（services:770，且自测以整字典相等钉死 tests:2705）→ 真机恒 null。 */
+    master_prompt?: string | null;
     negative_prompt?: string;
     aspect_ratio?: string | null;
   };
   ecom_model: { extra_prompt: string; aspect_ratio?: string | null };
-  ecom_poster: { title: string; subtitle: string };
 }
 
-/** BE fill_targets 的 6 个键（「带入」按键即此）。 */
+/** BE fill_targets 的 **5** 个键（「带入」按键即此）。 */
 export type ReversePromptFillTargetKey = keyof ReversePromptFillTargets;
 
 /**
@@ -362,13 +385,16 @@ export function joinShotSection(body: string, shotSection: string): string {
 
 /**
  * BE fill_target 键 → WorkbenchPrefill 落点映射（核心）。BE 载荷直落对应表单字段，缺键即 null（置灰）。
- * 落点（6 键 → 5 个工作台模式）：
+ * 落点（**5 键** → 5 个工作台模式，一一对应）：
  *  - avatar_talk  → 数字人口播 new-video-form: topic→topic, script→script
  *  - seedance_i2v → 电商带货 ecom-video-form: topic→topic, scene_prompt→scenePrompt
  *  - video_gen    → 视频生成 video-gen-form: prompt→prompt(同时作 topic)
  *  - photo        → 图片生成 photo-image-form: topic→prompt(提示词即主题)
  *  - ecom_model   → 电商图·AI 模特 (ecom_image tool=model): extra_prompt→自定义补充
- *  - ecom_poster  → 电商图·营销海报 (ecom_image tool=poster): title→标题, subtitle→自定义一行
+ * （ecom_poster 已随营销海报下线从 BE 契约里消失，FIX2 真联调时一并删除，不再留 case。）
+ *
+ * 🔴 判据统一为 `!= null` / 真值：BE 是 pydantic **恒发键**模型，"没有" 表示为 `null` 而不是省略键。
+ *    用 `!== undefined` 判「给没给」会让 null 穿过闸门落进控件（FIX2 修的正是这个）。
  */
 export function fillTargetToPrefill(
   key: ReversePromptFillTargetKey,
@@ -397,8 +423,16 @@ export function fillTargetToPrefill(
             ...(t.negative_prompt ? { negativePrompt: t.negative_prompt } : {}),
             // §八 M2：BE 给 null（图片/无分镜）或空串 → 不挂 → 确认弹窗不产生分镜项（不造死开关）
             ...(t.shot_section ? { shotSection: t.shot_section } : {}),
-            ...(t.duration_sec !== undefined ? { durationSec: t.duration_sec } : {}),
-            ...(t.duration_clamped !== undefined ? { durationClamped: t.duration_clamped } : {})
+            // 🔴 FIX2 真联调修正：判据必须是 `!= null`（同时挡 null 与 undefined），**不能是 `!== undefined`**。
+            //    BE 的 pydantic 模型是**恒发键**的：图片源下 `duration_sec` 实发 `null`（不是省略）——
+            //    运行时证据见 backend/tests/test_reverse_prompt_pipeline.py:2688/2699 的整字典相等断言。
+            //    用 `!== undefined` 会让 null 穿过闸门 → 弹窗渲染「时长 null 秒」、并把 null 写进时长控件。
+            //    这个洞此前被 mock 结构性遮住：mock 对图片源是「整键不出现」，与 BE 的「恒发 null」形状不同。
+            ...(t.duration_sec != null ? { durationSec: t.duration_sec } : {}),
+            // durationClamped 是 durationSec 的展示元数据，随宿主一起挂/一起不挂（单独挂没有意义）
+            ...(t.duration_sec != null && t.duration_clamped != null
+              ? { durationClamped: t.duration_clamped }
+              : {})
           }
         : null;
     }
@@ -413,9 +447,15 @@ export function fillTargetToPrefill(
             ...(t.negative_prompt ? { negativePrompt: t.negative_prompt } : {}),
             ...(t.shot_section ? { shotSection: t.shot_section } : {}), // §八 M2，同 seedance 分支
             ...(t.aspect_ratio ? { aspectRatio: t.aspect_ratio } : {}),
-            ...(t.duration_sec !== undefined ? { durationSec: t.duration_sec } : {}),
-            ...(t.duration_clamped !== undefined ? { durationClamped: t.duration_clamped } : {}),
-            ...(t.generate_audio !== undefined ? { generateAudio: t.generate_audio } : {})
+            // 同 seedance 分支：`!= null` 挡住 BE 图片源恒发的 `duration_sec: null`（见上方长注释）
+            ...(t.duration_sec != null ? { durationSec: t.duration_sec } : {}),
+            ...(t.duration_sec != null && t.duration_clamped != null
+              ? { durationClamped: t.duration_clamped }
+              : {}),
+            // ⚠️ generate_audio 保持「false 也算给了」：BE 发的是 `bool(audio_transcript)`，
+            //    false = **「这段素材里没有台词」这个真实观测**，不是缺省占位。它在确认弹窗里是一条
+            //    可见、可取消的项（「音频生成：关闭」），用户能自己决定要不要带 → 不构成静默改设置。
+            ...(t.generate_audio != null ? { generateAudio: t.generate_audio } : {})
           }
         : null;
     }
@@ -444,10 +484,8 @@ export function fillTargetToPrefill(
           }
         : null;
     }
-    case "ecom_poster":
-      // 营销海报已下线（ECOM-REPLICATE-UI-0001）→ 无落点，返 null（「带入·营销海报」按钮已移除）。
-      return null;
     default:
+      // 5 个 case 已穷举 ReversePromptFillTargetKey；此分支只兜「BE 日后新增键、前端还没跟上」。
       return null;
   }
 }

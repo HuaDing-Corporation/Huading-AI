@@ -73,10 +73,22 @@ let audioAssetSeq = 0;
 // 图片资产上传序号：每次 /uploads/images 返唯一 asset_id（贴近真后端 uuid），避免多图碰撞同 id。
 let imageUploadSeq = 0;
 
-// ── 提示词反推 (REVERSE-PROMPT-UI) mock ── FIX1：**镜像 BE 真形状**（backend schemas/reverse_prompt.py：
-// ReversePromptJobRead + 真 ReversePromptResult + fill_targets 6 键内层字段一字不差）。成功 status="succeeded"、
-// 含 result；6 键齐备 → 结果页「带入」六路全亮，交互冒烟可逐一验证落点。⚠️ 不再自造 jobId/ecom_image（Codex B P1）。
+// ── 提示词反推 (REVERSE-PROMPT-UI) mock ── **镜像 BE 真形状**（backend/app/schemas/reverse_prompt.py：
+// ReversePromptJobRead + 真 ReversePromptResult + fill_targets **5 键**内层字段一字不差）。成功 status="succeeded"、
+// 含 result；5 键齐备 → 结果页「带入」五路全亮，交互冒烟可逐一验证落点。
+// ⚠️ FIX2 真联调（BE #219 合入 develop 后）逐字段核对过一遍，订正见下方各处 🔴 注释。
 let reverseSeq = 0;
+
+/**
+ * BE `structured_prompt()`（services/reverse_prompt.py:792-806）的真实产物形状：
+ * 7 个固定小节、**ASCII 冒号 + 一个空格**、换行分隔；en 与 zh **共用同一组 value**，只有标签语言不同。
+ * 这两个常量同时被 structured_prompt 与 fill_targets 的四个键复用 —— 因为 BE 那边就是同一个 `structured_en`
+ * 喂给 video_gen.prompt / photo.topic / seedance_i2v.scene_prompt / ecom_model.extra_prompt（services:737/754/769/780）。
+ */
+const STRUCTURED_EN =
+  "Subject: A portable insulated stainless-steel bottle with a matte white finish and brushed metal lid.\nScene: A white marble countertop by a window, warm morning light, minimal props.\nComposition: Centered close-up, vertical framing, shallow depth of field.\nCamera: 35mm prime, slight high angle, slow orbiting move.\nLighting: Soft warm key from upper right, gentle falloff, no harsh speculars.\nMotion: Gentle rising steam, slow orbit.\nStyle: product advertising, minimal, premium texture";
+const STRUCTURED_ZH =
+  "主体: A portable insulated stainless-steel bottle with a matte white finish and brushed metal lid.\n场景: A white marble countertop by a window, warm morning light, minimal props.\n构图: Centered close-up, vertical framing, shallow depth of field.\n镜头: 35mm prime, slight high angle, slow orbiting move.\n光线: Soft warm key from upper right, gentle falloff, no harsh speculars.\n运动: Gentle rising steam, slow orbit.\n风格: product advertising, minimal, premium texture";
 const REVERSE_RESULT = {
   target_format: "seedance_2_0",
   prompt_zh: "白色大理石台面上的便携保温杯，暖色晨光，浅景深特写，产品广告风格，缓慢环绕运镜，蒸汽轻升。",
@@ -103,45 +115,65 @@ const REVERSE_RESULT = {
     duration_sec: null,
     aspect_ratio_raw: "1:1"
   },
-  // 结构化主提示词（§4.3 分行标注版）：en 供 provider 消费，zh 同结构中文供界面理解。
-  structured_prompt: {
-    en: "Subject: A portable insulated stainless-steel bottle with a matte white finish and brushed metal lid.\nScene: A white marble countertop by a window, warm morning light, minimal props.\nComposition: Centered close-up, vertical framing, shallow depth of field.\nCamera: 35mm prime, slight high angle, slow orbiting move.\nLighting: Soft warm key from upper right, gentle falloff, no harsh speculars.\nMotion: Gentle rising steam, slow orbit.\nStyle: product advertising, minimal, premium texture",
-    zh: "主体：哑光白漆面便携不锈钢保温杯，拉丝金属杯盖。\n场景：窗边白色大理石台面，暖色晨光，道具极简。\n构图：居中特写，竖幅取景，浅景深。\n镜头：35mm 定焦，微俯角，缓慢环绕。\n光线：右上柔和暖调主光，过渡柔和，无硬高光。\n运动：蒸汽轻升，缓慢环绕。\n风格：产品广告、极简、高级质感"
-  },
-  // ── §4.2 fill_targets 升级：既有键全保留，只新增键；新增键一律 optional ────────────
+  // 结构化主提示词（§4.3 分行标注版 + §八 M1 由 BE service 确定性拼装）：en 供 provider 消费，zh 供界面理解。
+  // 🔴 FIX2 真联调订正：BE 的 `structured_prompt()`（services:792-806）用的是**同一组 value**，
+  //    en 与 zh **只有标签语言不同、正文逐字相同**，且分隔符是 **ASCII 冒号 + 一个空格**：
+  //      en: "\n".join(f"{英文标签}: {value}")   zh: "\n".join(f"{中文标签}: {value}")
+  //    BE 自测逐字钉死：tests:2672-2680 断言 zh == "主体: perfume bottle\n场景: marble surface\n…"。
+  //    上一版这里把 zh 写成了「完整中文译文 + 全角冒号」——那是 BE 任何输入都产不出的形状，
+  //    等于用一份美化过的 fixture 遮住了「中英两块正文其实一模一样」这个真实观感问题（属 BE 侧语义，已记 backlog）。
+  structured_prompt: { en: STRUCTURED_EN, zh: STRUCTURED_ZH },
+  // ── fill_targets（FIX2 真联调：逐字对齐 backend/app/services/reverse_prompt.py:732-789）──────
+  // 🔴 **形状纪律大改**：BE 是 pydantic **恒发键**模型 —— "没有" 表示为 `null`，**不是省略键**。
+  //    上一版这里对图片源采用「整键不出现」，与 BE 的「恒发 null」形状不同，于是把一个真实缺陷
+  //    结构性地遮住了：前端映射层当时用 `!== undefined` 判「给没给」，真机的 `duration_sec: null`
+  //    会穿过闸门 → 确认弹窗渲染「时长 null 秒」、并把 null 写进时长控件。mock 下永远复现不出来。
+  //    运行时证据：backend/tests/test_reverse_prompt_pipeline.py:2684-2711 对图片源的 fill_targets
+  //    做**整字典相等**断言，其中 video_gen 含 `"duration_sec": None, "duration_clamped": False,
+  //    "generate_audio": False, "shot_section": None`。本 mock 自此照抄这个形状。
   fill_targets: {
     avatar_talk: { topic: "便携保温杯种草", script: "大家好，今天给大家安利这款便携保温杯，24 小时保温，出门必备……" },
-    // 🔴 图片源**没有时长可言** → duration_sec / duration_clamped **整键不出现**（不是给个模块默认值）。
-    //    「absent = 保持用户当前值」是本包的核心语义：mock 若替 BE 编一个 30s，带入任何图片反推都会把用户
-    //    自己设的时长悄悄改掉，而那正是承重门2 要防的事。时长的真形态在下面的视频变体里。
     seedance_i2v: {
       topic: "便携保温杯卖点",
-      scene_prompt: "白色大理石台面暖光特写，蒸汽轻升，缓慢环绕运镜",
-      negative_prompt: "低分辨率, 变形, 多余文字, 水印, 杂乱背景"
+      // BE = `audio_transcript or None`（services:736）；图片源无音轨 → null
+      script: null,
+      // 🔴 BE = `_whole_sections_within_limit(structured_en, 20000)` → 未触顶时**逐字等于 structured_prompt.en**
+      //    （BE 自测以整字典相等钉死：tests:2696 `"scene_prompt": ...["structured_prompt"]["en"]`）。
+      //    上一版这里编了一句中文短句，而同一份 mock 的 video_gen.prompt / photo.topic 却用了 structured_en
+      //    —— 自相矛盾，且「scene_prompt == structured_en」这条契约在前端零覆盖。
+      scene_prompt: STRUCTURED_EN,
+      negative_prompt: "低分辨率, 变形, 多余文字, 水印, 杂乱背景",
+      aspect_ratio: "1:1", // BE Literal["9:16","16:9","1:1"]；前端刻意不消费（电商带货无比例控件，见契约注释）
+      shot_section: null, // 图片源无分镜 → BE 发 null（不是省略）
+      duration_sec: null, // 🔴 恒发 null，正是上面说的那个闸门
+      duration_clamped: false
     },
     video_gen: {
       topic: "便携保温杯",
-      // §4.2-2：不再是 prompt_en 裸串，改用 structured_prompt.en（≤2000 按段裁）
-      prompt:
-        "Subject: A portable insulated stainless-steel bottle with a matte white finish and brushed metal lid.\nScene: A white marble countertop by a window, warm morning light, minimal props.\nComposition: Centered close-up, vertical framing, shallow depth of field.\nCamera: 35mm prime, slight high angle, slow orbiting move.\nLighting: Soft warm key from upper right, gentle falloff, no harsh speculars.\nMotion: Gentle rising steam, slow orbit.\nStyle: product advertising, minimal, premium texture",
+      // BE = `_whole_sections_within_limit(structured_en, 2000)`
+      prompt: STRUCTURED_EN,
       negative_prompt: "低分辨率, 变形, 多余文字, 水印, 杂乱背景",
-      aspect_ratio: "1:1" // D7：BE 已映射为**视频那套**枚举的合法值（1:1 源 → 1:1）
-      // 图片源无时长、也无从判断要不要生成音频 → duration_sec / duration_clamped / generate_audio **整键不出现**
-      //（同上：编一个默认值就会在带入时悄悄改掉用户已设的时长与音频开关）。
+      aspect_ratio: "1:1", // D7：BE 已映射为**视频那套**枚举的合法值（1:1 源 → 1:1）
+      shot_section: null,
+      duration_sec: null,
+      duration_clamped: false,
+      generate_audio: false // BE = bool(audio_transcript)
     },
     photo: {
-      // §4.2-3：photo.topic 用 structured_prompt.en（上限 20000，基本不触顶）
-      topic:
-        "Subject: A portable insulated stainless-steel bottle with a matte white finish and brushed metal lid.\nScene: A white marble countertop by a window, warm morning light, minimal props.\nComposition: Centered close-up, vertical framing, shallow depth of field.\nCamera: 35mm prime, slight high angle, slow orbiting move.\nLighting: Soft warm key from upper right, gentle falloff, no harsh speculars.\nMotion: Gentle rising steam, slow orbit.\nStyle: product advertising, minimal, premium texture",
-      master_prompt: "统一走高级产品广告质感，干净背景，真实材质表现",
+      // BE = `_whole_sections_within_limit(structured_en, 20000)`（基本不触顶）
+      topic: STRUCTURED_EN,
+      // 🔴 BE **硬编码 None**（services:770，自测整字典相等 tests:2705）→ 真机恒 null。
+      //    上一版这里编了一串「统一走高级产品广告质感…」，导致 reverse-prompt.ts 的 masterPrompt 分支
+      //    在真机是死分支、而在 mock 下一直亮着（假绿）。改回 BE 真形态。
+      master_prompt: null,
       negative_prompt: "低分辨率, 变形, 多余文字, 水印, 杂乱背景",
       aspect_ratio: "1:1" // D7：BE 已映射为**图片那套**枚举的合法值
     },
     // D7 一致性：本结果的源是 1024×1024（aspect_ratio_raw "1:1"）→ 各模块映射出来的都该是 1:1。
-    // 原先这里写 3:4，与同一份结果里 photo 的 1:1 自相矛盾 —— 那样的 fixture 会让「FE 压根没读 ecom_model.aspect_ratio」
-    // 这类 bug 看起来也正常（Code Review P2）。
-    ecom_model: { extra_prompt: "工作室柔光、简洁白底、突出质感", aspect_ratio: "1:1" },
-    ecom_poster: { title: "年中大促", subtitle: "限时 5 折 错过再等一年" }
+    // extra_prompt 同 scene_prompt：BE 给的是 structured_en 整串（tests:2710），不是一句中文短句。
+    ecom_model: { extra_prompt: STRUCTURED_EN, aspect_ratio: "1:1" }
+    // 🔴 **没有 ecom_poster**：BE fill_targets 只有 5 键，自测显式 `assert "ecom_poster" not in fill_targets`
+    //    （tests:2713）。上一版这里照给，属 mock 比 BE 宽松（前端自造契约面）。
   }
 };
 
@@ -172,8 +204,8 @@ const REVERSE_RESULT_LEGACY = {
     seedance_i2v: { topic: "便携保温杯卖点", scene_prompt: "白色大理石台面暖光特写，蒸汽轻升，缓慢环绕运镜" },
     video_gen: { topic: "便携保温杯", prompt: "白色大理石台面上的保温杯，暖色晨光，缓慢环绕运镜，产品广告风格" },
     photo: { topic: "白色大理石台面上的保温杯，暖色晨光，浅景深特写" },
-    ecom_model: { extra_prompt: "工作室柔光、简洁白底、突出质感" },
-    ecom_poster: { title: "年中大促", subtitle: "限时 5 折 错过再等一年" }
+    ecom_model: { extra_prompt: "工作室柔光、简洁白底、突出质感" }
+    // 老结构同样没有 ecom_poster —— 它从来不是 BE 的键（FIX2 真联调核实）。
   }
 };
 // ReversePromptJobRead 全字段（前端只读 id/status/result/error_*，其余照给真形状）。
@@ -195,18 +227,32 @@ const REVERSE_VIDEO_ANALYSIS = {
     { index: 2, start_sec: 10, end_sec: 15, visual: "卖点字幕叠加：24 小时保温，便携轻巧", camera: "固定机位", motion: "字幕入场", transition: "淡出" },
     { index: 3, start_sec: 15, end_sec: 18, visual: "收尾定格：品牌 logo + 行动号召", camera: "环绕收尾", motion: "logo 定格", transition: "定格" }
   ],
-  audio_transcript: null, // D4 SPIKE 未出结论前恒 null（不做假入口）
-  bgm_style: null, // 同上
+  // 🔴 FIX2 真联调：**ASR 已落地**（§八 M6，BE #219）。BE 走 `_best_effort_audio_transcript`
+  //    （services/reverse_prompt_video.py:497-528）真调 gpt-4o-mini-transcribe；null 的含义从
+  //    「功能未启用」变成了「**这段素材没识别出台词**」（无音轨 / provider 无能力 / 转写异常都降级为 null）。
+  //    上一版 mock 恒 null，导致「有台词」这条真机主路径在前端**零覆盖**——视频分析块里那行台词展示、
+  //    以及 seedance_i2v.script 与 generate_audio 的联动，全都没被跑过。故此处给真台词。
+  audio_transcript: "这款保温杯能装 500 毫升，24 小时保温，出门带一杯全天都够喝。",
+  // bgm_style 仍恒 null，但**理由变了**：不是「一期没做」，而是 §八 M6 明确「ASR 判不了音乐风格 → 不许编」，
+  // BE 在 services/reverse_prompt_video.py:375/461 写死 None（apimart_gemini.py:806 注明 "ASR cannot classify music"）。
+  bgm_style: null,
   // REVERSE-DEEP-UI-0001 §4.1：shot_list 压成一段可直接进提示词的分镜描述（前端展示 + 作为「分镜表」项参与勾选带入）
   shot_summary:
     "0-4s 产品特写：保温杯置于大理石台面，暖光扫过，缓慢推近；4-10s 使用场景：手部拧开杯盖，蒸汽升腾，手持跟拍；10-15s 卖点字幕叠加：24 小时保温、便携轻巧，固定机位；15-18s 收尾定格：品牌 logo 与行动号召，环绕收尾。"
 };
 /**
  * BE 拼好的**完整分镜段（含段头）** —— §八 M2 的 `fill_targets.*.shot_section`。
- * 🔴 段头由 BE 给、前端只拼不拆，故这里必须**带着段头**存在于串里（前端不再自造 `Shots: ` 前缀）。
- * ⚠️ 真联调项：BE 合并后按 services/reverse_prompt.py 的实际产出核对段头字面（本包 mock 先行，BE 未合入 develop）。
+ * 🔴 段头由 BE 给、前端只拼不拆，故这里必须**带着段头**存在于串里（前端不再自造前缀）。
+ *
+ * ✅ FIX2 真联调**已核**（上一版这里挂的就是这条待办）：BE 逐字是
+ *    `return f"Shots:\n{summary}" if summary else None`（backend/app/services/reverse_prompt.py:872）——
+ *    段头是 **`Shots:` 紧跟换行，冒号后没有空格**，全后端仅此一处生成、无中文段头分支，
+ *    video_gen 与 seedance_i2v 共用同一个变量（services:731 算一次 → :749/:766 挂两处）→ 两模块逐字相同。
+ *    上一版 mock 写的是 `Shots: `（冒号+空格），差 1 个字符。差异不会让前端失灵（只拼不拆，全程不解析段头），
+ *    但会让 mock 下看到的分镜框内容形态与真机不同（真机是两行：首行孤立的 `Shots:`、次行整段 summary）。
+ *    另：`_clean_text` 会把 summary 里的空白压成单空格（services:924-926）→ 真机恒为**恰好两行**。
  */
-const REVERSE_SHOT_SECTION = `Shots: ${REVERSE_VIDEO_ANALYSIS.shot_summary}`;
+const REVERSE_SHOT_SECTION = `Shots:\n${REVERSE_VIDEO_ANALYSIS.shot_summary}`;
 
 /**
  * mock 形态 ③：**视频反推结果**（REVERSE-DEEP-UI-0001）。在图片结果基础上：
@@ -229,6 +275,10 @@ const REVERSE_RESULT_VIDEO = {
     ...REVERSE_RESULT.fill_targets,
     seedance_i2v: {
       ...REVERSE_RESULT.fill_targets.seedance_i2v,
+      // 🔴 FIX2：BE 是 `"script": transcript or None`（services:736）——**台词直接落进电商带货的口播文案框**。
+      //    mock 上一版恒 null，这条真机联动从未被跑过。
+      script: REVERSE_VIDEO_ANALYSIS.audio_transcript,
+      aspect_ratio: "9:16", // BE 按源比例映射到 Literal["9:16","16:9","1:1"]；前端刻意不消费（见契约注释）
       shot_section: REVERSE_SHOT_SECTION,
       duration_sec: 18,
       duration_clamped: false
@@ -238,7 +288,9 @@ const REVERSE_RESULT_VIDEO = {
       shot_section: REVERSE_SHOT_SECTION,
       aspect_ratio: "9:16", // 竖屏源 → 映射到视频枚举的 9:16
       duration_sec: 15,
-      duration_clamped: true
+      duration_clamped: true,
+      // 🔴 BE = `bool(transcript)`（services:767）→ 有台词即 true（BE 自测 tests:1768 断言 is True）
+      generate_audio: true
     },
     photo: {
       ...REVERSE_RESULT.fill_targets.photo,
@@ -306,6 +358,12 @@ interface MockReverseJob {
   segments_total: number | null;
   segments_done: number | null;
   /**
+   * mock-only：长视频**切完段之后**才会写进 segments_total 的那个值。
+   * 🔴 BE 在 202 queued 时两字段恒 null（任务还没跑），第一次真推进时才落库 → 这里也照这个时序：
+   *    queued 阶段 segments_total 保持 null，第一次被轮询（= 任务开跑）时才从本字段搬过去。
+   */
+  pendingSegmentsTotal?: number;
+  /**
    * REVERSE-DEEP-UI-0001 · mock 形态 ②「**老结构结果**」：反推历史里存着大量深度化之前的结果，
    * 它们**没有** structured_prompt / source_media / shot_summary，fill_targets 也只有旧的那几个键。
    * true → 读模型返回 REVERSE_RESULT_LEGACY，用来真测前端的回落路径（不许白屏 / 不许显示 undefined）。
@@ -336,19 +394,34 @@ const mkReverseJob = (
 
 // ── 计费预估 (§八 M4 + D9) ────────────────────────────────────────────────────
 /**
- * 🔴 **三档金额与 BE 同源，逐条给出坐标**（mock 不比 BE 宽松、也不比 BE 严）：
- *  · image        → `backend/app/services/quota.py:465` `_rate(capability="reverse_prompt", default=Decimal("1.0000"))`
- *  · video_short  → `backend/app/core/config.py:205` `engine_reverse_prompt_video_credits = 100.0`（D9「现价一字不动」）
- *  · video_long   → §八 8.3 D9 新增 `ENGINE_REVERSE_PROMPT_VIDEO_LONG_CREDITS=250`
- * ⚠️ 真联调项：`REVERSE-DEEP-BE-0001` 尚未合入 develop（本包按契约 mock 先行），BE 合并后须逐字复核这三个数
- *    与 tier 字面量；两处对不上以 BE 为准。
- * ⚠️ 注意 image 档的 1 积分是 CreditRate 表的**默认**费率，租户可被改写 —— 这正是「前端不许硬编码金额」的由来。
+ * ✅ FIX2 真联调**已核**（BE #219 已合入 develop）——三档金额取自 TestClient 真实响应体：
+ *   POST /api/v1/reverse-prompt/estimate
+ *     图片资产            → {"credits": 30,  "duration_sec": null,   "tier": "image"}
+ *     视频 duration=60_000ms → {"credits": 100, "duration_sec": 60.0,   "tier": "video_short"}
+ *     视频 duration=60_001ms → {"credits": 250, "duration_sec": 60.001, "tier": "video_long"}
+ *（BE 自测同样逐字钉死：backend/tests/test_reverse_prompt_pipeline.py:1311-1323）
+ *
+ * 🔴 **image 档订正 1 → 30**：上一版按 `quota.py:474` 的函数默认值 `Decimal("1.0000")` 写了 1，
+ *    但那个默认只在**查不到费率行**时生效；实际迁移已给全局播种了 `reverse-prompt-call-rate`（30），
+ *    真机走的是 CreditRate 表 → 30。差 30 倍。这正是任务包提醒的那点：**它是租户可覆写的费率，
+ *    不是常量** —— 所以前端只能照抄后端返回值，测试也不许把它当常量断言进业务逻辑。
+ * 🔴 取整口径：`credits = estimate.reservation_units`（services/reverse_prompt.py:152/164），
+ *    而 `_credit_units` 是 **ROUND_CEILING 取整**（quota.py:273-274）→ 响应里恒为 int（schema `credits: int`）。
+ * ⚠️ 短档可被租户 CreditRate 覆盖（quota.py:494-500 走 `_rate`），**长档不能**（:502-504 直接读 settings）——
+ *    上一版注释把短档说成 config 常量，方向反了，一并订正。
  */
-const REVERSE_ESTIMATE_IMAGE_CREDITS = 1;
+const REVERSE_ESTIMATE_IMAGE_CREDITS = 30;
 const REVERSE_ESTIMATE_VIDEO_SHORT_CREDITS = 100;
 const REVERSE_ESTIMATE_VIDEO_LONG_CREDITS = 250;
-/** D9 档位阈值：≤60s 短档，61–180s 长档。**只存在于 mock/BE，前端一个都没有。** */
+/**
+ * D9 档位阈值：`duration_ms <= 60_000` → 短档，其上 → 长档（quota.py:38 `_REVERSE_PROMPT_VIDEO_SHORT_MAX_DURATION_MS`
+ * 与 :519 的 `<=`；60_000ms 实测归 short、60_001ms 归 long）。**只存在于 mock/BE，前端一个都没有。**
+ */
 const REVERSE_SHORT_TIER_MAX_SEC = 60;
+/** BE `ReversePromptEstimateRequest.source_asset_id = Field(min_length=1, max_length=36)`（schemas:43）。 */
+const REVERSE_ASSET_ID_MAX_LEN = 36;
+/** BE 长视频切段步长 `_LONG_VIDEO_SEGMENT_SEC = 30.0`（services/reverse_prompt_video.py:36）→ 段数 = ceil(时长/30)。 */
+const MOCK_SEGMENT_SEC = 30;
 /**
  * mock-only：从 asset_id 认时长。BE 是查**上传时已落库的 `duration_ms`**（D9 明确「不由客户端传参决定」），
  * mock 没有真媒体可查，故用 id 约定：`video-...long...` = 180s 长视频，其余视频 = 3s（e2e fixture 的真时长）。
@@ -358,6 +431,18 @@ const mockAssetDurationSec = (assetId: string): number | null => {
   if (!assetId.startsWith("video-")) return null; // 图片资产 → tier="image"，没有时长可言
   return assetId.includes("long") ? 180 : 3; // 约定：id 含 long = 180s 长档；其余 = 3s（e2e fixture 的真时长）
 };
+
+/**
+ * 🔴 FIX2 真联调新增：**资产存在性守卫**。
+ * BE 的 `estimate_reverse_prompt` 第一步就是 `source_asset_or_raise(...)`：资产不存在或跨租户 →
+ * **404 `REVERSE_PROMPT_SOURCE_NOT_FOUND`**（TestClient 实测响应体如此，BE 自测 tests:1326-1327 亦断言）。
+ * 上一版 mock 对**任意非空字符串**都恒 200 报价 —— 比 BE 宽松，属典型假绿：前端把一个失效/别人的
+ * asset_id 送上去，本地拿到金额、生产拿到 404。
+ * mock 没有真资产表，故守「id 必须是本 mock 发得出来的形状」（uploads handler 只会发 `upload-N` / `video-asset-N`，
+ * 历史 seed 用 `upload-1`），这已足够把「随便编一个 id」挡在门外。
+ */
+const mockAssetExists = (assetId: string): boolean =>
+  /^(upload|video-asset)(-[a-z0-9]+)*-\d+$/.test(assetId);
 
 const mockReverseEstimate = (assetId: string) => {
   const duration = mockAssetDurationSec(assetId);
@@ -1513,13 +1598,21 @@ export const handlers = [
     // 这才是「rp-* 只能放行」的根因。
     if (typeof sourceAssetId === "string" && sourceAssetId.startsWith("video-")) {
       const id = `rpv-${++reverseSeq}`;
-      // §八 M5：长视频（61–180s）走分段 → 6 段起步 0/6；短视频恒 null（不伪造进度）。
-      const isLong = (mockAssetDurationSec(sourceAssetId) ?? 0) > REVERSE_SHORT_TIER_MAX_SEC;
+      // §八 M5：长视频（61–180s）走分段；短视频恒 null（不伪造进度）。
+      // 🔴 FIX2 真联调订正两处：
+      //  ① 段数不是写死的 6，而是 **ceil(时长 / 30s)**：BE `segments_total=len(segments)`
+      //     （services/reverse_prompt_video.py:394/436），切段步长 `_LONG_VIDEO_SEGMENT_SEC = 30.0`（:36）——
+      //     BE 自测里 75s 视频得到的是 **3** 段（tests:1860 `"segments_total": 3`），不是 6。
+      //     180s 恰好 6 段只是巧合，写死会在任何别的时长上失真。
+      //  ② **queued 阶段两字段恒 null**：BE 是任务真正跑起来（切完段）才写进度，202 刚返回时读到的是 null。
+      //     上一版在 202 就给出 6/0，等于让前端在「排队中」阶段就看到分段进度 —— 真机没有那一帧。
+      const durationSec = mockAssetDurationSec(sourceAssetId) ?? 0;
+      const isLong = durationSec > REVERSE_SHORT_TIER_MAX_SEC;
       const job = mkReverseJob({
         id,
         source_kind: "video",
-        status: "queued", // BE 202 queued（非 running）
-        ...(isLong ? { segments_total: 6, segments_done: 0 } : {})
+        status: "queued", // BE 202 queued（非 running），此时 segments_* 仍为 null
+        ...(isLong ? { pendingSegmentsTotal: Math.ceil(durationSec / MOCK_SEGMENT_SEC) } : {})
       });
       reverseJobs.set(id, job);
       return HttpResponse.json({ data: reverseJobRead(job), error: null, request_id: "mock-req" }, { status: 202 });
@@ -1584,14 +1677,32 @@ export const handlers = [
     if (!job) return jobNotFound();
     // 视频异步：queued/running 每被轮询一次 +1。
     //  · 短视频（无分段）：第 2 次起转 succeeded（含 result.video_analysis）——沿用既有形态，零回归。
-    //  · 长视频（§八 M5 分段）：每轮 segments_done += 2（2/6 → 4/6 → 6/6），跑满才 succeeded。
-    //    D10 决定了「串行不提速」，进度是**逐段真推进**的，故此处也照这个语义推，不按时间编。
+    //  · 长视频（§八 M5 分段）：**逐段 +1**，跑满 total 后还要再走一拍「整片汇总」才 succeeded。
+    //
+    // 🔴 FIX2 真联调订正两处：
+    //  ① 步长 +2 → **+1**。BE 是逐段推进：进入第 N 段之前写的是 `segments_done = N-1`
+    //     （证据 backend/tests/test_reverse_prompt_pipeline.py:1860 `progress == {"segments_total": 3,
+    //     "segments_done": index - 1}`）。上一版每轮 +2 **跳过了所有奇数**，恰好把
+    //     `segments_done = 0`（第一段进行中）这个真实状态永远跳过 —— 而那正是前端「正在分析第 0/6 段」
+    //     这个用户可见 bug 的触发条件。步长错误直接导致该 bug 在 mock 与单测里被结构性绕过（假绿）。
+    //  ② 跑满后**不立刻 succeeded**：BE 在 done == total 之后还有一次整片汇总调用
+    //     （tests:1901-1903 断言汇总阶段读到的是 `{"segments_total": 3, "segments_done": 3}`）。
+    //     真机确实存在「6/6 停一会儿」的窗口，mock 上一版把它压成 0 时长 → 前端那段
+    //     `Math.min(done + 1, total)` 的封顶逻辑在 mock 下永远走不到。
     if (job.source_kind === "video" && (job.status === "queued" || job.status === "running")) {
       job.polls += 1;
+      // 任务开跑（第一次被轮询）→ 才把切好的段数落库；在此之前两字段是 null，与 BE 的 202 queued 一致。
+      if (job.segments_total === null && job.pendingSegmentsTotal !== undefined) {
+        job.segments_total = job.pendingSegmentsTotal;
+        job.segments_done = 0;
+      }
       if (job.segments_total !== null) {
-        job.segments_done = Math.min(job.segments_total, (job.segments_done ?? 0) + 2);
-        if (job.segments_done >= job.segments_total) job.status = "succeeded";
-        else job.status = "running";
+        if ((job.segments_done ?? 0) < job.segments_total) {
+          job.segments_done = (job.segments_done ?? 0) + 1;
+          job.status = "running";
+        } else {
+          job.status = "succeeded"; // done == total 后的这一拍 = 整片汇总完成
+        }
       } else if (job.polls >= 2) {
         job.status = "succeeded";
       }
@@ -1609,8 +1720,15 @@ export const handlers = [
     const sourceAssetId = body.source_asset_id;
     if (!sourceAssetId || typeof sourceAssetId !== "string")
       return err(422, "VALIDATION_ERROR", "source_asset_id is required");
+    // BE Field(max_length=36)（schemas:43）→ 超长即 422，不是静默截断
+    if (sourceAssetId.length > REVERSE_ASSET_ID_MAX_LEN)
+      return err(422, "VALIDATION_ERROR", "source_asset_id 长度超出上限");
     const extra = Object.keys(body).filter((k) => k !== "source_asset_id");
     if (extra.length) return err(422, "VALIDATION_ERROR", `Extra inputs are not permitted: ${extra.join(",")}`);
+    // 🔴 FIX2：资产不存在 / 跨租户 → 404（BE `source_asset_or_raise`，TestClient 实测码为下者）。
+    //    上一版对任意字符串恒 200 报价，是「mock 比 BE 宽松」的典型：本地拿到金额、生产拿到 404。
+    if (!mockAssetExists(sourceAssetId))
+      return err(404, "REVERSE_PROMPT_SOURCE_NOT_FOUND", "Reverse prompt source asset not found.");
     return ok(mockReverseEstimate(sourceAssetId));
   }),
   /**

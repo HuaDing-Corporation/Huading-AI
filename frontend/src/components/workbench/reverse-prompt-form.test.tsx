@@ -46,8 +46,7 @@ const RESULT: ReversePromptResult = {
     seedance_i2v: { topic: "卖点", scene_prompt: "暖光" },
     video_gen: { topic: "杯", prompt: "运镜" },
     photo: { topic: "白底杯" },
-    ecom_model: { extra_prompt: "白底" },
-    ecom_poster: { title: "大促", subtitle: "5 折" }
+    ecom_model: { extra_prompt: "白底" }
   }
 };
 

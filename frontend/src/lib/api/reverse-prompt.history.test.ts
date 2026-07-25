@@ -124,7 +124,10 @@ describe("反推历史列表 GET /reverse-prompt/jobs", () => {
 });
 
 describe("反推详情 GET /reverse-prompt/jobs/{id}", () => {
-  it("succeeded(image)：含 result + fill_targets 6 键；video_analysis 为 null（图片源）", async () => {
+  // 🔴 FIX2 真联调：键集合从 6 键改 **5 键**。上一版这条把 `ecom_poster` 钉成了「正确答案」——
+  //    它是本项目最硬的那类假绿：**严格相等**断言把一个 BE 永不返回的键锁进了「契约」，对真 BE 必红。
+  //    BE 侧同款断言：backend/tests/test_reverse_prompt_pipeline.py:2713。
+  it("succeeded(image)：含 result + fill_targets 5 键；video_analysis 为 null（图片源）", async () => {
     const job = await getReversePromptJob("rh-img-1");
     expect(job.status).toBe("succeeded");
     expect(job.source_kind).toBe("image");
@@ -133,7 +136,6 @@ describe("反推详情 GET /reverse-prompt/jobs/{id}", () => {
     expect(Object.keys(job.result!.fill_targets).sort()).toEqual([
       "avatar_talk",
       "ecom_model",
-      "ecom_poster",
       "photo",
       "seedance_i2v",
       "video_gen"

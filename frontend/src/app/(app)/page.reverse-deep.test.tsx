@@ -62,7 +62,7 @@ const NEG = "低分辨率, 变形, 多余文字, 水印, 杂乱背景";
 const MASTER = "统一走高级产品广告质感，干净背景";
 const STRUCTURED_EN = "Subject: bottle.\nScene: marble counter.\nStyle: product ad";
 /** §八 M2：BE 拼好的完整分镜段（**含段头**），前端只拼不拆。 */
-const SHOT_SECTION = "Shots: 0-4s 产品特写；4-10s 使用场景。";
+const SHOT_SECTION = "Shots:\n0-4s 产品特写；4-10s 使用场景。";
 
 /** 视频源反推结果：video_gen 时长被 clamp 到 15（原 18s）；seedance 装得下 18s 不 clamp。 */
 const RESULT: ReversePromptResult = {
@@ -103,9 +103,12 @@ const RESULT: ReversePromptResult = {
       duration_clamped: true,
       generate_audio: false
     },
+    // ⚠️ master_prompt：BE 真机**恒 None**（services:770 硬编码）。这里刻意仍给一个真串 ——
+    //    本文件是**契约允许形态**的单测夹具，用来保住 masterPrompt 那条映射分支的覆盖（BE 日后填值即生效）；
+    //    而 MSW mock（handlers.ts）已按真机形态改成 null。两者分工不同，不要"统一"。
     photo: { topic: STRUCTURED_EN, master_prompt: MASTER, negative_prompt: NEG, aspect_ratio: "9:16" },
-    ecom_model: { extra_prompt: "白底", aspect_ratio: "3:4" },
-    ecom_poster: { title: "大促", subtitle: "5 折" }
+    ecom_model: { extra_prompt: "白底", aspect_ratio: "3:4" }
+    // FIX2 真联调：BE fill_targets 无 ecom_poster（自测 tests:2713 显式断言）→ 夹具一并删除。
   }
 };
 const JOB: ReversePromptJobRead = {

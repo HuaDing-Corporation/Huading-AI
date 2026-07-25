@@ -105,20 +105,23 @@ describe("PrefillConfirmDialog（带入前确认）", () => {
     const onConfirm = renderDialog({
       target: "video_gen",
       prompt: "Subject: bottle.\nStyle: ad",
-      shotSection: "Shots: 0-4s 特写；4-10s 场景。"
+      shotSection: "Shots:\n0-4s 特写；4-10s 场景。"
     });
     expect(screen.getByRole("checkbox", { name: copy.reverse.applyItemShots })).toBeInTheDocument();
     // 🔴 主提示词项 = BE 原串**一字未动**（上一版这里要靠正则把段头切掉，现在契约保证它本就不含分镜段）
     expect(
       (screen.getByLabelText(copy.reverse.applyItemEditAria(copy.reverse.applyItemPrompt)) as HTMLTextAreaElement).value
     ).toBe("Subject: bottle.\nStyle: ad");
-    // 分镜项 = BE 给的完整段（**含段头**，前端不再自造 "Shots: " 前缀）
+    // 分镜项 = BE 给的完整段（**含段头**，前端不再自造前缀）。
+    // 🔴 FIX2 真联调：段头逐字是 `Shots:` **紧跟换行、冒号后无空格**
+    //    （backend/app/services/reverse_prompt.py:872 `return f"Shots:\n{summary}" ...`）。
+    //    夹具已按真字面订正 —— 上一版写的是 `Shots: `（空格），差一个字符。
     expect(
       (screen.getByLabelText(copy.reverse.applyItemEditAria(copy.reverse.applyItemShots)) as HTMLTextAreaElement).value
-    ).toBe("Shots: 0-4s 特写；4-10s 场景。");
+    ).toBe("Shots:\n0-4s 特写；4-10s 场景。");
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyConfirmSubmit }));
     const payload = payloadOf(onConfirm);
-    expect(payload.prompt).toBe("Subject: bottle.\nStyle: ad\n\nShots: 0-4s 特写；4-10s 场景。");
+    expect(payload.prompt).toBe("Subject: bottle.\nStyle: ad\n\nShots:\n0-4s 特写；4-10s 场景。");
     // 伪项不许当独立键下发（目标表单没有 shotSection 控件，发过去只会被静默丢弃）
     expect("shotSection" in payload).toBe(false);
   });
@@ -130,11 +133,11 @@ describe("PrefillConfirmDialog（带入前确认）", () => {
       target: "seedance_i2v",
       topic: "保温杯",
       scenePrompt: "暖光特写",
-      shotSection: "Shots: 0-4s 特写。"
+      shotSection: "Shots:\n0-4s 特写。"
     });
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyConfirmSubmit }));
     const payload = payloadOf(onConfirm);
-    expect(payload.scenePrompt).toBe("暖光特写\n\nShots: 0-4s 特写。");
+    expect(payload.scenePrompt).toBe("暖光特写\n\nShots:\n0-4s 特写。");
     expect("shotSection" in payload).toBe(false);
   });
 
@@ -142,7 +145,7 @@ describe("PrefillConfirmDialog（带入前确认）", () => {
     const onConfirm = renderDialog({
       target: "video_gen",
       prompt: "Subject: bottle.\nStyle: ad",
-      shotSection: "Shots: 0-4s 特写；4-10s 场景。"
+      shotSection: "Shots:\n0-4s 特写；4-10s 场景。"
     });
     fireEvent.click(screen.getByRole("checkbox", { name: copy.reverse.applyItemShots }));
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyConfirmSubmit }));
@@ -160,7 +163,7 @@ describe("PrefillConfirmDialog（带入前确认）", () => {
     const onConfirm = renderDialog({
       target: "video_gen",
       prompt: "Subject: bottle.\nStyle: ad",
-      shotSection: "Shots: 0-4s 特写。",
+      shotSection: "Shots:\n0-4s 特写。",
       negativePrompt: "水印"
     });
     fireEvent.click(screen.getByRole("checkbox", { name: copy.reverse.applyItemPrompt }));

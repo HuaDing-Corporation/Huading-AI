@@ -26,8 +26,7 @@ const FULL: ReversePromptResult = {
     seedance_i2v: { topic: "保温杯卖点", scene_prompt: "暖光特写" },
     video_gen: { topic: "保温杯", prompt: "保温杯广告运镜" },
     photo: { topic: "白底保温杯特写" },
-    ecom_model: { extra_prompt: "白底柔光" },
-    ecom_poster: { title: "大促", subtitle: "5 折" }
+    ecom_model: { extra_prompt: "白底柔光" }
   }
 };
 
