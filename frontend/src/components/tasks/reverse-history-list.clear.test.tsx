@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
@@ -140,16 +140,45 @@ describe("反推历史 · 清空（真实 hooks + adapter spy）", () => {
     await waitFor(() => expect(screen.getByText("反推 v1")).toBeInTheDocument());
   });
 
-  // 🔴 门4：取消 = **一个请求都不发**（断言 adapter 零调用）。变异：去掉确认直接清 → 红。
-  it("门4：确认弹窗点取消 → clearReversePromptJobs 一次都没被调用，列表原样", async () => {
+  // 🔴 门4a：**确认框存在**——点「清空」必须先弹确认，不能直接清。变异：去掉确认直接清（onClick 里直接
+  // mutateAsync、不 setConfirmClear）→ 本条红（无 dialog）。职责单一：只管"有没有确认这道关"，不管请求时序（那是 4b）。
+  it("门4a：点清空 → 先弹确认框（不是直接清）", async () => {
+    wrap(<ReverseHistoryList />);
+    await waitFor(() => expect(screen.getByText("反推 i1")).toBeInTheDocument());
+
+    fireEvent.click(clearBtn());
+    expect(screen.queryByRole("dialog")).toBeInTheDocument();
+  });
+
+  /**
+   * 🔴 门4b：取消 = **一个请求都不发**，且必须**推进到静止点后**再断言。
+   *
+   * 为什么不能同步断言（CB 的 P1）：React Query 的 `mutationFn` 是**异步调度**的——
+   * `mutateAsync()` 同步返回 Promise，但真正调用 mutationFn 要等到微任务队列被冲刷。
+   * 同步 `expect(spy).not.toHaveBeenCalled()` 在调度发生**之前**就执行完了，于是「点清空时先把请求发出去、
+   * 再弹确认框」这种真危险的实现也能通过（CB 的受控变异 `void clear.mutateAsync(kind); setConfirmClear(true);`）。
+   *
+   * 为什么**不能用 `waitFor(() => expect(spy).not.toHaveBeenCalled())`**：waitFor 对**否定断言无效**——
+   * 第一个 tick 条件就满足、立即返回，与同步断言等价（看起来在等，其实没等）。
+   *
+   * 选用 `await act(async () => {})`（仓库既有先例：aibrain/composer.test.tsx、PHOTO-FORM-FLAKE-FIX）。
+   * **它为什么在结构上覆盖 React Query 的调度**：`act` 的异步形态会 ① await 传入的 thunk，② 冲刷 React 的
+   * 工作循环与 effect 队列，③ 在退出前**反复排空微任务队列直到没有新的更新产生**。React Query 的 mutation
+   * 调度全部走 Promise 微任务（mutateAsync → executeMutation → mutationFn），因此只要微任务被排空，
+   * 「已被排入队列的 mutationFn」必然已经执行——不存在"还没轮到"的窗口。故断言不再抢跑。
+   */
+  it("门4b：取消后推进到静止点 → clearReversePromptJobs 仍零调用，列表原样", async () => {
     wrap(<ReverseHistoryList />);
     await waitFor(() => expect(screen.getByText("反推 i1")).toBeInTheDocument());
 
     fireEvent.click(clearBtn());
     fireEvent.click(within(dialog()).getByRole("button", { name: copy.common.cancel }));
 
-    expect(api.clearReversePromptJobs).not.toHaveBeenCalled();
-    expect(screen.getByText("反推 i1")).toBeInTheDocument();
+    // 推进到 React / React Query 的静止点：微任务全部落定、effect 全部冲刷、级联重渲染全部提交。
+    await act(async () => {});
+
+    expect(api.clearReversePromptJobs).not.toHaveBeenCalled(); // 危险请求若在路上，此刻必已发出 → 红
+    expect(screen.getByText("反推 i1")).toBeInTheDocument(); // 列表也不该被清
   });
 
   it("清空失败(500) → 弹窗内友好错误、列表不乐观移除", async () => {

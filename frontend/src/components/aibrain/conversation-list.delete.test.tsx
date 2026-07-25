@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
@@ -119,6 +119,11 @@ describe("ConversationList 删除/清空（真实 hooks + api spy）", () => {
     fireEvent.click(delBtn("会话一"));
     fireEvent.click(screen.getByRole("button", { name: copy.common.cancel }));
 
+    // 🔴 REVERSE-CLEAR-HISTORY-UI-0001-FIX1 同源修复：**先推进到静止点再断言零调用**。
+    // 同步断言跑在 React Query 调度 mutationFn 之前 → 「先发请求再弹确认框」也能通过（CB 在 #229 证明）；
+    // waitFor 对否定断言无效（第一 tick 即满足）。act 的异步形态排空微任务直到无新更新，覆盖 RQ 的调度。
+    await act(async () => {});
+
     expect(api.deleteConversation).not.toHaveBeenCalled();
     expect(screen.getByText("会话一")).toBeInTheDocument();
   });
@@ -145,6 +150,7 @@ describe("ConversationList 删除/清空（真实 hooks + api spy）", () => {
     // 先测取消（门 4 的清空侧）。
     fireEvent.click(screen.getByRole("button", { name: new RegExp(copy.aibrain.clearChats) }));
     fireEvent.click(screen.getByRole("button", { name: copy.common.cancel }));
+    await act(async () => {}); // 同上：静止点后再断言零调用
     expect(api.clearConversations).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: new RegExp(copy.aibrain.clearChats) }));

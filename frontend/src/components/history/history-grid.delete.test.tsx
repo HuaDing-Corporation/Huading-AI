@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
@@ -106,6 +106,13 @@ describe("HistoryGrid 删除/清空（真实 hooks + adapter spy）", () => {
     fireEvent.click(deleteBtns()[0]);
     fireEvent.click(screen.getByRole("button", { name: copy.common.cancel }));
 
+    // 🔴 REVERSE-CLEAR-HISTORY-UI-0001-FIX1 同源修复：**先推进到静止点再断言零调用**。
+    // 同步断言会在 React Query 调度 mutationFn 之前就跑完 → 「点删除时先把请求发出去、再弹确认框」
+    // 这种真危险的实现也能通过（CB 在 #229 上用受控变异证明了这条）。而 waitFor 对否定断言无效
+    // （第一 tick 即满足、立即返回，与同步等价）。await act(async () => {}) 会排空微任务队列直到
+    // 不再产生新更新——React Query 的 mutation 调度全走 Promise 微任务，故已入队的 mutationFn 必已执行。
+    await act(async () => {});
+
     expect(adapter.deleteHistoryImageSet).not.toHaveBeenCalled();
     expect(cards()).toHaveLength(3);
   });
@@ -117,6 +124,7 @@ describe("HistoryGrid 删除/清空（真实 hooks + adapter spy）", () => {
     fireEvent.click(screen.getByRole("button", { name: new RegExp(copy.historyImages.clearCategory) }));
     fireEvent.click(screen.getByRole("button", { name: copy.common.cancel }));
 
+    await act(async () => {}); // 同上：静止点后再断言零调用（否则请求可在断言之后才发出）
     expect(adapter.clearHistoryImages).not.toHaveBeenCalled();
     expect(cards()).toHaveLength(3);
   });
