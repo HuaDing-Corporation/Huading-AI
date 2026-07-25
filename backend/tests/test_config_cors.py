@@ -75,6 +75,20 @@ def test_generation_wait_settings_remain_env_overridable(monkeypatch) -> None:
         assert getattr(s, field_name) == 1500 + index
 
 
+def test_generation_heartbeat_interval_defaults_and_is_env_overridable(monkeypatch) -> None:
+    monkeypatch.delenv("ENGINE_GEN_HEARTBEAT_INTERVAL_SECONDS", raising=False)
+    assert (
+        Settings(_env_file=None, jwt_secret_key=_JWT).engine_gen_heartbeat_interval_seconds
+        == 15
+    )
+
+    monkeypatch.setenv("ENGINE_GEN_HEARTBEAT_INTERVAL_SECONDS", "7.5")
+    assert (
+        Settings(_env_file=None, jwt_secret_key=_JWT).engine_gen_heartbeat_interval_seconds
+        == 7.5
+    )
+
+
 def test_engine_cors_origins_override_legacy_cors_env(monkeypatch) -> None:
     monkeypatch.setenv("CORS_ORIGINS", "http://localhost:3000")
     monkeypatch.setenv(

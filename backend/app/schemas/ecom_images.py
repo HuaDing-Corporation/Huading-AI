@@ -227,6 +227,7 @@ class EcomReplicateAccepted(BaseModel):
     credit_rate: float
     requested_size: str
     requested_aspect: str
+    heartbeat_at: str | None = None
     plan: EcomReplicatePlanPayload
 
 

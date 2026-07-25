@@ -35,6 +35,7 @@ from app.providers.base import (
 )
 from app.services.apimart_costs import apimart_cost_cents_from_result
 from app.services.ecom_replicate import record_analysis_cost, record_render_cost
+from app.services.generation_heartbeat import generation_heartbeat
 from app.services.history import prune_video_history_best_effort
 from app.services.progress import build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
@@ -931,16 +932,20 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                         provider_payload["image_urls"] = input_image_urls
                 if ecom_cutout and ecom_background == "white":
                     provider_payload["background"] = "opaque"
-                result = asyncio.run(
-                    invoke(
-                        db,
-                        tenant_id=tenant_id,
-                        capability="image",
-                        provider=provider.__class__.__name__,
-                        operation=lambda: provider.generate_image(provider_payload),
-                        timeout_seconds=settings.engine_image_provider_timeout_seconds,
+                with generation_heartbeat(
+                    store,
+                    task_id=scoped_task_id(tenant_id, task_id),
+                ):
+                    result = asyncio.run(
+                        invoke(
+                            db,
+                            tenant_id=tenant_id,
+                            capability="image",
+                            provider=provider.__class__.__name__,
+                            operation=lambda: provider.generate_image(provider_payload),
+                            timeout_seconds=settings.engine_image_provider_timeout_seconds,
+                        )
                     )
-                )
                 image_bytes = _image_bytes(result)
                 if ecom_cutout:
                     image_bytes = _normalize_ecom_cutout_image(
@@ -1388,6 +1393,7 @@ def _mark_ecom_replicate_job_finished(
 
 def run_ecom_replicate_generation(job_id: str, output_index: int | None = None) -> dict[str, Any]:
     storage = create_object_storage(settings)
+    store = build_progress_store(settings.redis_url)
     with SessionLocal() as db:
         job = db.get(EcomReplicateJob, job_id)
         if job is None:
@@ -1440,15 +1446,19 @@ def run_ecom_replicate_generation(job_id: str, output_index: int | None = None) 
                 # Publish a durable lease before a provider call that can run for 1500s.
                 db.commit()
                 try:
-                    _render_ecom_replicate_output_once(
-                        db,
-                        job=job,
-                        output=output,
-                        provider=provider,
-                        validator=validator,
-                        storage=storage,
-                        attempt=attempt + 1,
-                    )
+                    with generation_heartbeat(
+                        store,
+                        task_id=scoped_task_id(job.tenant_id, job.id),
+                    ):
+                        _render_ecom_replicate_output_once(
+                            db,
+                            job=job,
+                            output=output,
+                            provider=provider,
+                            validator=validator,
+                            storage=storage,
+                            attempt=attempt + 1,
+                        )
                     db.commit()
                     last_error = None
                     break
