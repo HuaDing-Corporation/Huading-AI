@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -18,6 +18,7 @@ from app.core.image_aspect_ratio import IMAGE_ASPECT_RATIOS
 from app.db.models import Asset, ReversePromptJob, User
 from app.providers.base import resolve
 from app.schemas.reverse_prompt import (
+    ReversePromptClearResponse,
     ReversePromptEstimateResponse,
     ReversePromptHistoryItem,
     ReversePromptHistoryListResponse,
@@ -408,6 +409,24 @@ def delete_reverse_prompt_job(
     db.commit()
     db.refresh(job)
     return job
+
+
+def clear_reverse_prompt_jobs(
+    db: Session,
+    *,
+    tenant_id: str,
+) -> ReversePromptClearResponse:
+    result = db.execute(
+        update(ReversePromptJob)
+        .where(
+            ReversePromptJob.tenant_id == tenant_id,
+            live_reverse_prompt_job_condition(),
+        )
+        .values(deleted_at=datetime.now(UTC))
+    )
+    deleted_count = int(result.rowcount or 0)
+    db.commit()
+    return ReversePromptClearResponse(deleted_count=deleted_count)
 
 
 def reverse_prompt_job_or_404(db: Session, *, tenant_id: str, job_id: str) -> ReversePromptJob:

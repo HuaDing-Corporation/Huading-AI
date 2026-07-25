@@ -183,6 +183,10 @@ class ReversePromptDeletedResponse(BaseModel):
     deleted_at: datetime
 
 
+class ReversePromptClearResponse(BaseModel):
+    deleted_count: int
+
+
 class ReversePromptHistoryItem(BaseModel):
     id: str
     source_kind: ReversePromptSourceKind

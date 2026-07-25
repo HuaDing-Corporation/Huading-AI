@@ -6,9 +6,9 @@ import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from fastapi.testclient import TestClient
-from sqlalchemy import Column, MetaData, String, Table, create_engine, inspect
+from sqlalchemy import Column, MetaData, String, Table, create_engine, inspect, text
 
-from app.db.models import Asset, ReversePromptJob, Tenant
+from app.db.models import Asset, ReversePromptJob, TaskAsset, Tenant, VideoTask
 from app.main import app
 
 
@@ -313,6 +313,178 @@ def test_reverse_prompt_delete_soft_hides_job_everywhere_and_keeps_source(
         assert source.deleted_at is None
         assert source.storage_key == source_key
     assert storage.deleted_keys == []
+
+
+def test_reverse_prompt_clear_history_soft_deletes_current_tenant_only_and_keeps_media(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    other_tenant_id = "reverse-clear-other"
+    now = datetime.now(UTC)
+    source_asset_id = "reverse-clear-source"
+    source_key = f"tenants/{tenant_id}/uploads/clear-source.png"
+    source_task_id = "reverse-clear-source-task"
+    task_asset_id = "reverse-clear-task-asset"
+    source_asset = Asset(
+        id=source_asset_id,
+        tenant_id=tenant_id,
+        type="avatar_image",
+        source="upload",
+        storage_key=source_key,
+        mime_type="image/png",
+        status="ready",
+    )
+    source_task = VideoTask(
+        id=source_task_id,
+        tenant_id=tenant_id,
+        status="done",
+        mode="photo",
+        video_mode="photo",
+    )
+    task_asset = TaskAsset(
+        id=task_asset_id,
+        video_task_id=source_task.id,
+        asset_id=source_asset.id,
+        role="input_reference_image",
+    )
+    already_deleted_at = now - timedelta(days=1)
+    already_deleted_job = _reverse_job(
+        job_id="reverse-clear-already-deleted",
+        tenant_id=tenant_id,
+        source_kind="image",
+        status="saved",
+        created_at=now - timedelta(minutes=2),
+        source_storage_key=source_key,
+    )
+    already_deleted_job.deleted_at = already_deleted_at
+
+    with auth_db() as db:
+        db.add(Tenant(id=other_tenant_id, slug=other_tenant_id, name="Other"))
+        db.add_all([source_asset, source_task])
+        db.flush()
+        db.add(task_asset)
+        db.add_all(
+            [
+                _reverse_job(
+                    job_id="reverse-clear-image",
+                    tenant_id=tenant_id,
+                    source_kind="image",
+                    status="succeeded",
+                    created_at=now,
+                    source_storage_key=source_key,
+                ),
+                _reverse_job(
+                    job_id="reverse-clear-video",
+                    tenant_id=tenant_id,
+                    source_kind="video",
+                    status="failed",
+                    created_at=now - timedelta(minutes=1),
+                    source_storage_key=f"tenants/{tenant_id}/uploads/clear-source.mp4",
+                ),
+                already_deleted_job,
+                _reverse_job(
+                    job_id="reverse-clear-foreign",
+                    tenant_id=other_tenant_id,
+                    source_kind="image",
+                    status="succeeded",
+                    created_at=now,
+                    source_storage_key=(
+                        f"tenants/{other_tenant_id}/uploads/clear-foreign.png"
+                    ),
+                ),
+            ]
+        )
+        db.commit()
+
+    storage = _HistoryStorage()
+    monkeypatch.setattr(
+        "app.api.v1.routes.reverse_prompt.get_object_storage",
+        lambda: storage,
+    )
+    client = TestClient(app)
+    response = client.delete(
+        "/api/v1/reverse-prompt/jobs",
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {"deleted_count": 2}
+    listed = client.get(
+        "/api/v1/reverse-prompt/jobs",
+        headers=auth_context["headers"],
+    )
+    assert listed.status_code == 200
+    assert listed.json()["data"]["items"] == []
+    assert listed.json()["data"]["total"] == 0
+
+    with auth_db() as db:
+        assert db.get(ReversePromptJob, "reverse-clear-image").deleted_at is not None
+        assert db.get(ReversePromptJob, "reverse-clear-video").deleted_at is not None
+        persisted_deleted_at = db.get(
+            ReversePromptJob,
+            "reverse-clear-already-deleted",
+        ).deleted_at
+        assert persisted_deleted_at is not None
+        assert persisted_deleted_at.replace(tzinfo=UTC) == already_deleted_at
+        assert db.get(ReversePromptJob, "reverse-clear-foreign").deleted_at is None
+        assert db.get(Asset, source_asset_id).deleted_at is None
+        assert db.get(Asset, source_asset_id).storage_key == source_key
+        assert db.get(VideoTask, source_task_id) is not None
+        assert db.get(TaskAsset, task_asset_id) is not None
+    assert storage.deleted_keys == []
+
+
+def test_reverse_prompt_clear_history_rolls_back_every_row_when_third_update_fails(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    now = datetime.now(UTC)
+    with auth_db() as db:
+        db.add_all(
+            [
+                _reverse_job(
+                    job_id=f"reverse-clear-atomic-{index}",
+                    tenant_id=tenant_id,
+                    source_kind="image",
+                    status="succeeded",
+                    created_at=now + timedelta(seconds=index),
+                    source_storage_key=(
+                        f"tenants/{tenant_id}/uploads/reverse-clear-atomic-{index}.png"
+                    ),
+                )
+                for index in range(1, 4)
+            ]
+        )
+        db.commit()
+        db.execute(
+            text(
+                """
+                CREATE TRIGGER reverse_prompt_fail_third_clear
+                BEFORE UPDATE OF deleted_at ON reverse_prompt_jobs
+                WHEN OLD.id = 'reverse-clear-atomic-3'
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected third-row update failure');
+                END
+                """
+            )
+        )
+        db.commit()
+
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.delete(
+        "/api/v1/reverse-prompt/jobs",
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 500
+    with auth_db() as db:
+        assert all(
+            db.get(ReversePromptJob, f"reverse-clear-atomic-{index}").deleted_at is None
+            for index in range(1, 4)
+        )
 
 
 def test_reverse_prompt_history_rejects_invalid_filters(auth_context) -> None:
