@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const taskMocks = vi.hoisted(() => ({ createAndTrack: vi.fn() }));
@@ -31,10 +31,22 @@ beforeEach(() => {
 });
 afterEach(() => vi.clearAllMocks());
 
-function uploadReferenceImages(n = 1) {
+// 🔴 PHOTO-FORM-FLAKE-FIX：必须 `await`。
+// 上传是异步的，而且落到断言要走一整条**跨组件级联**：
+//   picker 内 setItems（DOM 上「（n/…）」立刻变） → picker 的 useEffect([items]) → onChange = 父组件 setRefKeys
+//   → 父组件重渲染 → 「生成图片」的 onClick 闭包里才有新的 refKeys。
+// 而 onGenerate 在**点击那一刻**就把 payload（含/不含 image_keys）冻结进 requestConfirm——之后再怎么
+// await 都救不回来。原来只等 `waitRefUploaded`（= 观测 picker 的 items）**只覆盖了这条级联的第一环**，
+// 满负载/高争抢下后面几环会拖过它的放行点 → 点击时 refKeys 仍是 [] → 提交体整个不带 image_keys（undefined）。
+// 实测复现率：修前 1/40（8 并发 × 5 轮），修后见回执。
+// act 的异步形态会把「promise 全部落定 + effect 全部冲刷 + 级联重渲染全部提交」跑到静止再返回，
+// 于是这条级联在结构上不可能只跑一半。**不是加延时、不是调大 timeout、不是 retry。**
+async function uploadReferenceImages(n = 1) {
   const input = document.querySelector('input[type="file"]') as HTMLInputElement;
   const files = Array.from({ length: n }, (_, i) => new File(["x"], `r${i}.png`, { type: "image/png" }));
-  fireEvent.change(input, { target: { files } });
+  await act(async () => {
+    fireEvent.change(input, { target: { files } });
+  });
 }
 const setPrompt = (v: string) => fireEvent.change(screen.getByPlaceholderText(/描述想要的图片/), { target: { value: v } });
 // 等参考图上传落地：picker 上传按钮显示「（n/…）」= items/refKeys 已更新。photo 的 generate 不依赖参考图（可选），
@@ -115,7 +127,7 @@ describe("PhotoImageForm (图片生成 / 修改 · IMAGE-GEN-OPTIMIZE-UI-0001)",
   it("修图: 上传 1 张参考图 → 提交体 image_keys:[key]，不带标量 image_key", async () => {
     render(<PhotoImageForm />);
     setPrompt("把背景换成沙滩");
-    uploadReferenceImages(1);
+    await uploadReferenceImages(1);
     await waitRefUploaded(1); // 等 refKeys 落地（generate 不依赖参考图，不能靠 enabled 等）
     const generate = screen.getByRole("button", { name: /生成图片/ });
     await waitFor(() => expect(generate).toBeEnabled());
@@ -132,7 +144,7 @@ describe("PhotoImageForm (图片生成 / 修改 · IMAGE-GEN-OPTIMIZE-UI-0001)",
     render(<PhotoImageForm />);
     setPrompt("产品图合成");
     fireEvent.click(screen.getByRole("button", { name: "3 张" }));
-    uploadReferenceImages(3);
+    await uploadReferenceImages(3);
     await waitRefUploaded(3); // 等 3 张全落地
     const generate = screen.getByRole("button", { name: /生成图片/ });
     await waitFor(() => expect(generate).toBeEnabled());
@@ -151,7 +163,7 @@ describe("PhotoImageForm (图片生成 / 修改 · IMAGE-GEN-OPTIMIZE-UI-0001)",
     render(<PhotoImageForm />);
     setPrompt("x");
     fireEvent.click(screen.getByRole("button", { name: "3 张" }));
-    uploadReferenceImages(3);
+    await uploadReferenceImages(3);
     await waitRefUploaded(3); // 等 3 张全落地再切档
     const generate = screen.getByRole("button", { name: /生成图片/ });
     await waitFor(() => expect(generate).toBeEnabled());
