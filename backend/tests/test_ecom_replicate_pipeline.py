@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
+from datetime import UTC, datetime
 from io import BytesIO
 from time import perf_counter
 from types import SimpleNamespace
 
 import pytest
+import redis
 from fastapi.testclient import TestClient
 from PIL import Image
 from pydantic import ValidationError
@@ -54,8 +57,34 @@ class _FakeStorage:
 
 
 class _FakeProgressStore:
-    def read(self, _key: str):
-        return None
+    def __init__(self) -> None:
+        self.data: dict[str, dict] = {}
+        self.history: list[tuple[str, dict]] = []
+
+    def update(self, key: str, **fields) -> None:
+        snapshot = dict(self.data.get(key, {}))
+        snapshot.update({name: value for name, value in fields.items() if value is not None})
+        snapshot["task_id"] = key
+        self.data[key] = snapshot
+        self.history.append((key, dict(snapshot)))
+
+    def read(self, key: str):
+        snapshot = self.data.get(key)
+        return dict(snapshot) if snapshot else None
+
+
+@pytest.fixture(autouse=True)
+def _replicate_progress_store():
+    store = _FakeProgressStore()
+    previous = app.dependency_overrides.get(get_progress_store)
+    app.dependency_overrides[get_progress_store] = lambda: store
+    try:
+        yield store
+    finally:
+        if previous is None:
+            app.dependency_overrides.pop(get_progress_store, None)
+        else:
+            app.dependency_overrides[get_progress_store] = previous
 
 
 class _FakeReverseProvider:
@@ -1090,6 +1119,77 @@ def test_ecom_replicate_worker_records_requested_actual_dimensions_and_raw_bytes
     assert all(record.cost_cents == 4 for record in render_costs)
 
 
+def test_ecom_replicate_worker_heartbeats_each_blocking_output_and_poll_exposes_it(
+    monkeypatch,
+    auth_context,
+    auth_db,
+    _replicate_progress_store,
+) -> None:
+    _patch_replicate_providers(monkeypatch)
+    _stub_replicate_task(monkeypatch)
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    monkeypatch.setattr(image_gen, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(image_gen, "SessionLocal", auth_db)
+    monkeypatch.setattr(
+        image_gen,
+        "build_progress_store",
+        lambda _url: _replicate_progress_store,
+    )
+    monkeypatch.setattr(
+        image_gen.settings,
+        "engine_gen_heartbeat_interval_seconds",
+        0.01,
+        raising=False,
+    )
+
+    def slow_successful_render(
+        _db,
+        *,
+        output,
+        **_kwargs,
+    ) -> None:
+        time.sleep(0.035)
+        output.status = "succeeded"
+        output.updated_at = datetime.now(UTC)
+
+    monkeypatch.setattr(
+        image_gen,
+        "_render_ecom_replicate_output_once",
+        slow_successful_render,
+    )
+    try:
+        plan = _create_main_replicate_plan(
+            auth_context=auth_context,
+            auth_db=auth_db,
+            reference_id="heartbeat-ref",
+            product_id="heartbeat-product",
+        )
+        TestClient(app).post(
+            f"/api/v1/ecom-images/replicate/{plan['job_id']}/confirm",
+            headers=auth_context["headers"],
+        )
+
+        result = image_gen.run_ecom_replicate_generation(plan["job_id"])
+        response = TestClient(app).get(
+            f"/api/v1/ecom-images/replicate/{plan['job_id']}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert result["status"] == "SUCCESS"
+    scoped_id = f"{auth_context['tenant_id']}:{plan['job_id']}"
+    heartbeats = [
+        snapshot
+        for key, snapshot in _replicate_progress_store.history
+        if key == scoped_id and snapshot.get("heartbeat_at")
+    ]
+    assert len(heartbeats) >= 5
+    assert response.status_code == 200
+    assert response.json()["data"]["heartbeat_at"] == heartbeats[-1]["heartbeat_at"]
+
+
 def test_ecom_replicate_get_returns_generating_job_outputs_without_download_url(
     monkeypatch,
     auth_context,
@@ -1129,6 +1229,39 @@ def test_ecom_replicate_get_returns_generating_job_outputs_without_download_url(
     assert all(output["actual_width"] is None for output in data["plan"]["outputs"])
     assert all(output["actual_height"] is None for output in data["plan"]["outputs"])
     assert all(output["download_url"] is None for output in data["plan"]["outputs"])
+
+
+def test_ecom_replicate_get_degrades_when_heartbeat_store_is_unavailable(
+    monkeypatch,
+    auth_context,
+    auth_db,
+    _replicate_progress_store,
+) -> None:
+    class _UnavailableProgressStore:
+        def read(self, _key: str):
+            raise redis.RedisError("redis unavailable")
+
+    _patch_replicate_providers(monkeypatch)
+    storage = _FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    try:
+        plan = _create_main_replicate_plan(
+            auth_context=auth_context,
+            auth_db=auth_db,
+            reference_id="heartbeat-outage-ref",
+            product_id="heartbeat-outage-product",
+        )
+        app.dependency_overrides[get_progress_store] = lambda: _UnavailableProgressStore()
+        response = TestClient(app).get(
+            f"/api/v1/ecom-images/replicate/{plan['job_id']}",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides[get_progress_store] = lambda: _replicate_progress_store
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["heartbeat_at"] is None
 
 
 def test_ecom_replicate_get_returns_completed_outputs_with_download_urls(

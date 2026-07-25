@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     engine_admin_retry_stale_seconds: int = Field(default=60, ge=0)
     engine_orphan_task_stale_seconds: float = Field(default=1800.0, gt=0)
     engine_orphan_recovery_interval_seconds: float = Field(default=60.0, ge=0)
+    engine_gen_heartbeat_interval_seconds: float = Field(
+        default=15.0,
+        ge=1.0,
+        le=300.0,
+        allow_inf_nan=False,
+    )
 
     jwt_secret_key: str = Field(min_length=32)
     jwt_algorithm: str = "HS256"
@@ -172,7 +178,7 @@ class Settings(BaseSettings):
     engine_apimart_base_url: str = "https://api.apimart.ai/v1"
     engine_apimart_image_model: str = "gpt-image-2"
     engine_apimart_video_model: str = "doubao-seedance-2.0"
-    engine_apimart_request_timeout_seconds: float = 60.0
+    engine_apimart_request_timeout_seconds: float = 120.0
     engine_apimart_poll_initial_delay_seconds: float = 10.0
     engine_apimart_poll_interval_seconds: float = 4.0
     engine_apimart_timeout_seconds: float = 1500.0
@@ -203,6 +209,7 @@ class Settings(BaseSettings):
     engine_apimart_reverse_prompt_input_credits_per_m: float = 16.0
     engine_apimart_reverse_prompt_output_credits_per_m: float = 96.0
     engine_reverse_prompt_video_credits: float = Field(default=100.0, gt=0)
+    engine_reverse_prompt_video_long_credits: float = Field(default=250.0, gt=0)
     engine_ecom_replicate_enabled: bool = True
     engine_ecom_replicate_credits_per_image: float = 15.0
     engine_ecom_replicate_analysis_cny_per_call: float = 0.14

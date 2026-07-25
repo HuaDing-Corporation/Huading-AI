@@ -30,6 +30,7 @@ _KNOWN_FIELDS = {
     "error",
     "error_code",
     "error_message",
+    "heartbeat_at",
 }
 
 

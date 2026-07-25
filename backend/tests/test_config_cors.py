@@ -6,6 +6,7 @@ URL, and a JSON array. These tests go through the real env source.
 """
 
 import pytest
+from pydantic import ValidationError
 
 from app.core.config import Settings
 
@@ -62,7 +63,7 @@ def test_generation_wait_defaults_allow_1500_seconds(monkeypatch) -> None:
     # Polling endpoints should fail fast per request while the overall task waits.
     assert s.engine_seedance_request_timeout_seconds == 120
     assert s.engine_omnihuman_request_timeout_seconds == 120
-    assert s.engine_apimart_request_timeout_seconds == 60
+    assert s.engine_apimart_request_timeout_seconds == 120
 
 
 def test_generation_wait_settings_remain_env_overridable(monkeypatch) -> None:
@@ -73,6 +74,31 @@ def test_generation_wait_settings_remain_env_overridable(monkeypatch) -> None:
 
     for index, field_name in enumerate(_GENERATION_WAIT_ENV.values(), start=1):
         assert getattr(s, field_name) == 1500 + index
+
+
+def test_generation_heartbeat_interval_defaults_and_is_env_overridable(monkeypatch) -> None:
+    monkeypatch.delenv("ENGINE_GEN_HEARTBEAT_INTERVAL_SECONDS", raising=False)
+    assert (
+        Settings(_env_file=None, jwt_secret_key=_JWT).engine_gen_heartbeat_interval_seconds
+        == 15
+    )
+
+    monkeypatch.setenv("ENGINE_GEN_HEARTBEAT_INTERVAL_SECONDS", "7.5")
+    assert (
+        Settings(_env_file=None, jwt_secret_key=_JWT).engine_gen_heartbeat_interval_seconds
+        == 7.5
+    )
+
+
+@pytest.mark.parametrize("raw", ["1e-12", "1e300", "inf", "NaN", "0", "-1"])
+def test_generation_heartbeat_interval_rejects_unsafe_values(
+    monkeypatch,
+    raw: str,
+) -> None:
+    monkeypatch.setenv("ENGINE_GEN_HEARTBEAT_INTERVAL_SECONDS", raw)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, jwt_secret_key=_JWT)
 
 
 def test_engine_cors_origins_override_legacy_cors_env(monkeypatch) -> None:

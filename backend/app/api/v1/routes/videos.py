@@ -1495,6 +1495,8 @@ def _sse_payload(task_id: str, snapshot: dict) -> dict:
     step = snapshot.get("step") or snapshot.get("stage")
     if step:
         payload["step"] = step
+    if snapshot.get("heartbeat_at") is not None:
+        payload["heartbeat_at"] = snapshot["heartbeat_at"]
     if payload["status"] == "done":
         for name in ("playback_url", "download_url", "thumbnail_url"):
             if snapshot.get(name):

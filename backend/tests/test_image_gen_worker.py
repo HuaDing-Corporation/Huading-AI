@@ -1,3 +1,4 @@
+import asyncio
 import base64
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -110,6 +111,12 @@ class _FakeProvider:
             "quality": payload.get("quality"),
             "cost_cents": self.cost_cents,
         }
+
+
+class _SlowFakeProvider(_FakeProvider):
+    async def generate_image(self, payload: dict):
+        await asyncio.sleep(0.08)
+        return await super().generate_image(payload)
 
 
 def _openai_request() -> httpx.Request:
@@ -434,6 +441,52 @@ def test_image_worker_text_to_image_finishes_and_settles_quota(
         "uploading",
         "done",
     ]
+
+
+def test_image_worker_heartbeats_during_provider_call_without_fake_progress(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    task_id = "photo-heartbeat-unit"
+    with auth_db() as db:
+        _seed_reserved_photo(
+            db,
+            auth_context["tenant_id"],
+            auth_context["user_id"],
+            task_id,
+        )
+    storage = _FakeStorage()
+    store = _MemProgressStore()
+    provider = _SlowFakeProvider(image_bytes=b"heartbeat-png", cost_cents=4)
+    image_gen = _patch_worker(monkeypatch, auth_db, storage, store, provider)
+    monkeypatch.setattr(
+        image_gen.settings,
+        "engine_gen_heartbeat_interval_seconds",
+        0.02,
+        raising=False,
+    )
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": "slow premium product photo",
+        }
+    )
+
+    assert result["status"] == "SUCCESS"
+    scoped_id = f"{auth_context['tenant_id']}:{task_id}"
+    heartbeat_snapshots = [
+        snapshot
+        for key, snapshot in store.history
+        if key == scoped_id
+        and snapshot.get("heartbeat_at")
+        and snapshot.get("stage") == "generating"
+    ]
+    assert len(heartbeat_snapshots) >= 2
+    assert all(snapshot["progress"] == 30 for snapshot in heartbeat_snapshots)
+    assert all(snapshot["stage"] == "generating" for snapshot in heartbeat_snapshots)
 
 
 @pytest.mark.parametrize(

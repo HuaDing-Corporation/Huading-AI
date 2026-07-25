@@ -511,8 +511,10 @@ def test_upload_videos_reverse_prompt_allows_optional_or_non_aac_audio_only_for_
             duration_ms, audio_codec, video_codec = 45_000, "", "h264"
         elif content == b"opus reverse video":
             duration_ms, audio_codec, video_codec = 59_000, "opus", "h264"
+        elif content == b"long reverse video":
+            duration_ms, audio_codec, video_codec = 120_000, "aac", "h264"
         elif content == b"overlong reverse video":
-            duration_ms, audio_codec, video_codec = 60_001, "aac", "h264"
+            duration_ms, audio_codec, video_codec = 180_001, "aac", "h264"
         elif content == b"vp9 reverse video":
             duration_ms, audio_codec, video_codec = 15_000, "aac", "vp9"
         else:
@@ -541,6 +543,11 @@ def test_upload_videos_reverse_prompt_allows_optional_or_non_aac_audio_only_for_
             files={"file": ("opus.mp4", b"opus reverse video", "video/mp4")},
             headers=auth_context["headers"],
         )
+        long_video = client.post(
+            "/api/v1/uploads/videos?purpose=reverse_prompt",
+            files={"file": ("long.mp4", b"long reverse video", "video/mp4")},
+            headers=auth_context["headers"],
+        )
         avatar_silent = client.post(
             "/api/v1/uploads/videos",
             files={"file": ("avatar-silent.mp4", b"avatar silent video", "video/mp4")},
@@ -563,6 +570,7 @@ def test_upload_videos_reverse_prompt_allows_optional_or_non_aac_audio_only_for_
 
     assert silent.status_code == 201
     assert opus.status_code == 201
+    assert long_video.status_code == 201
     assert avatar_silent.status_code == 422
     assert avatar_silent.json()["error"]["code"] == "AVATAR_VIDEO_AUDIO_CODEC_INVALID"
     assert overlong.status_code == 422
@@ -581,12 +589,13 @@ def test_upload_videos_reverse_prompt_allows_optional_or_non_aac_audio_only_for_
                 .order_by(Asset.duration_ms)
             )
         )
-        assert [asset.duration_ms for asset in assets] == [45_000, 59_000]
+        assert [asset.duration_ms for asset in assets] == [45_000, 59_000, 120_000]
         assert [asset.metadata_["purpose"] for asset in assets] == [
             "reverse_prompt",
             "reverse_prompt",
+            "reverse_prompt",
         ]
-        assert [asset.metadata_["audio_codec"] for asset in assets] == ["", "opus"]
+        assert [asset.metadata_["audio_codec"] for asset in assets] == ["", "opus", "aac"]
 
 
 def test_upload_videos_rejects_invalid_source_without_asset(
@@ -3246,6 +3255,28 @@ def test_video_sse_payload_preserves_fractional_progress_for_watchdog() -> None:
     )
 
     assert payload["progress"] == 25.125
+
+
+def test_video_sse_payload_passes_through_generation_heartbeat() -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    payload = videos_route._sse_payload(
+        "image-heartbeat-task",
+        {
+            "status": "running",
+            "progress": 30,
+            "stage": "generating",
+            "heartbeat_at": "2026-07-25T08:00:00+00:00",
+        },
+    )
+
+    assert payload == {
+        "task_id": "image-heartbeat-task",
+        "status": "running",
+        "progress": 30,
+        "step": "generating",
+        "heartbeat_at": "2026-07-25T08:00:00+00:00",
+    }
 
 
 def test_video_sse_emits_new_enum_terminal_frame(auth_context, auth_db) -> None:
