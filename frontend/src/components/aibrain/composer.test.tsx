@@ -15,11 +15,14 @@ const props = () => ({ onTierChange: vi.fn(), onSend: vi.fn().mockResolvedValue(
 afterEach(() => vi.clearAllMocks());
 
 describe("Composer 承重", () => {
-  it("🔴 余额为 0 → **不发请求** + 弹充值窗（onInsufficient）", () => {
+  it("🔴 余额为 0 → **不发请求** + 弹充值窗（onInsufficient）", async () => {
     const p = props();
     wrap(<Composer tier="mid" balance={0} sending={false} {...p} />);
     fireEvent.change(screen.getByLabelText(/输入问题/), { target: { value: "你好" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    // 🔴 NEGATIVE-ASSERT-SWEEP-UI-0001：推进到静止点再断言。裸同步断言只看得见点击当下那一帧 ——
+    //    「预检不过、却仍在微任务之后把请求发出去」这种实现会整个溜过去（实测：变异后本条照样绿）。
+    await act(async () => {});
     expect(p.onSend).not.toHaveBeenCalled();
     expect(p.onInsufficient).toHaveBeenCalledTimes(1);
   });
