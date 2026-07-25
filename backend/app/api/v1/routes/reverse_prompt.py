@@ -10,6 +10,8 @@ from app.core.exceptions import AppError
 from app.db.models import ReversePromptJob, User
 from app.schemas.response import ApiResponse, ok
 from app.schemas.reverse_prompt import (
+    ReversePromptClearResponse,
+    ReversePromptClearScope,
     ReversePromptCreateRequest,
     ReversePromptDeletedResponse,
     ReversePromptEstimateRequest,
@@ -20,6 +22,7 @@ from app.schemas.reverse_prompt import (
     ReversePromptSourceKind,
 )
 from app.services.reverse_prompt import (
+    clear_reverse_prompt_jobs,
     create_reverse_prompt_job,
     delete_reverse_prompt_job,
     estimate_reverse_prompt,
@@ -167,6 +170,26 @@ def get_reverse_prompt_job(
 ) -> ApiResponse[ReversePromptJobRead]:
     job = reverse_prompt_job_or_404(db, tenant_id=user.tenant_id, job_id=job_id)
     return ok(request, ReversePromptJobRead.model_validate(job_to_read(job)))
+
+
+@router.delete(
+    "/jobs",
+    response_model=ApiResponse[ReversePromptClearResponse],
+)
+def clear_reverse_prompt_history(
+    request: Request,
+    scope: Annotated[ReversePromptClearScope, Query()],
+    user: User = ReversePromptPermissionDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[ReversePromptClearResponse]:
+    return ok(
+        request,
+        clear_reverse_prompt_jobs(
+            db,
+            tenant_id=user.tenant_id,
+            scope=scope,
+        ),
+    )
 
 
 @router.delete(
