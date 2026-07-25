@@ -67,8 +67,13 @@ export interface EcomReplicateJob {
    *
    * 前端只把它当"还活着"的**布尔证据**（`!= null`）用来门控计时的显示，**从不解析它的值**——
    * 这样 null / 怪格式在结构上就不可能变成「已 NaN 秒」「Invalid Date」，也绝不因此判失败。
+   *
+   * 🔴 **没有 `?`**（FIX3）：这是"键恒在、值可空"，不是"可选"。留着 `?` 等于允许 TS 构造一个**真实 BE
+   * 永远发不出**的夹具（整键缺失）——#220 那两个用户可见缺陷正是这么来的。把编译器当门用：
+   * 谁漏写这个键，tsc 当场报错。⚠️ 与通道①（SSE）**故意不同**：那边是 `heartbeat_at?: string`
+   * （可选、无 null，BE 无心跳时整键不出现）。两条通道本来就该长得不一样，别顺手对齐。
    */
-  heartbeat_at?: string | null;
+  heartbeat_at: string | null;
 }
 
 /** POST /confirm 的响应（BE EcomReplicateConfirmAccepted，**不含 plan/outputs**）。 */

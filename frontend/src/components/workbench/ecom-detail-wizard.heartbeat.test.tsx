@@ -57,6 +57,8 @@ function planJob(): EcomReplicateJob {
   return {
     job_id: "job-1",
     status: "plan_ready",
+    // 键恒在（BE schema `str | None` 默认 None）；plan_ready 阶段还没开始生成 → null。
+    heartbeat_at: null,
     output_mode: "main",
     output_count: 5,
     total_credits: 75,
