@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { ApiError } from "@/lib/api/client";
+
 import { clearHistoryImages, deleteHistoryImageSet, listHistoryImages } from "@/lib/api/history-images";
 import { createConversation, deleteConversation, listConversations } from "@/lib/aibrain/api";
 
@@ -37,8 +39,29 @@ describe("图片历史删除 · mock 契约（apiFetch 真走 MSW）", () => {
     expect(otherAfter.items.length).toBe(otherBefore.items.length); // 🔴 其余分类一条不少
   });
 
-  it("防假绿：不存在/跨租户 id → 404（不是静默 200）", async () => {
-    await expect(deleteHistoryImageSet("image_gen", "not-mine")).rejects.toThrow();
+  // 🔴 FIX1 真联调：BE 实打响应 404 的 code 是 **IMAGE_HISTORY_NOT_FOUND**（services/image_history.py:703），
+  // 原 mock 写的是 HISTORY_NOT_FOUND —— 形状/码不一致正是今天付了三次学费的那类缺陷。变异：改回 HISTORY_NOT_FOUND → 本条红。
+  it("防假绿：不存在/跨租户 id → 404 且 code=IMAGE_HISTORY_NOT_FOUND（逐字对齐 #221 真实响应）", async () => {
+    let caught: unknown;
+    try {
+      await deleteHistoryImageSet("image_gen", "not-mine");
+    } catch (e) {
+      caught = e;
+    }
+    expect((caught as ApiError)?.status).toBe(404);
+    expect((caught as ApiError)?.code).toBe("IMAGE_HISTORY_NOT_FOUND");
+  });
+
+  // FIX1 真联调：**成功响应形状**是 200 + {deleted:true}（不是 204 无 body）——冻结 §5 写的"204 或 {deleted:true}"，
+  // BE 实际取的是后者（ApiResponse[ImageHistoryDeletedResponse] 包裹）。adapter 若按 204 解析会拿到 undefined。
+  it("成功形状：删除返 {deleted:true}、清空返 {deleted_count:number}（200 + body，非 204）", async () => {
+    const list = await listHistoryImages({ category: "cover", page_size: 100 });
+    if (list.items.length > 0) {
+      const del = await deleteHistoryImageSet("cover", list.items[0].id);
+      expect(del).toEqual({ deleted: true });
+    }
+    const cleared = await clearHistoryImages("cover");
+    expect(typeof cleared.deleted_count).toBe("number");
   });
 
   it("防假绿：非法分类 → 422（mock 不比 BE 宽松，BE 对 Literal 参数 422）", async () => {
