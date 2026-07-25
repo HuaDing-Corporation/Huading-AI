@@ -12,6 +12,8 @@ from app.schemas.response import ApiResponse, ok
 from app.schemas.reverse_prompt import (
     ReversePromptCreateRequest,
     ReversePromptDeletedResponse,
+    ReversePromptEstimateRequest,
+    ReversePromptEstimateResponse,
     ReversePromptHistoryListResponse,
     ReversePromptJobRead,
     ReversePromptSavedResponse,
@@ -20,6 +22,7 @@ from app.schemas.reverse_prompt import (
 from app.services.reverse_prompt import (
     create_reverse_prompt_job,
     delete_reverse_prompt_job,
+    estimate_reverse_prompt,
     fail_reverse_prompt_video_dispatch,
     job_to_read,
     list_reverse_prompt_jobs,
@@ -59,6 +62,23 @@ def _enqueue_reverse_prompt_video(db: Session, job: ReversePromptJob) -> None:
             code="REVERSE_PROMPT_QUEUE_FAILED",
             status_code=503,
         ) from exc
+
+
+@router.post("/estimate", response_model=ApiResponse[ReversePromptEstimateResponse])
+def estimate_reverse_prompt_endpoint(
+    request: Request,
+    payload: ReversePromptEstimateRequest,
+    user: User = ReversePromptPermissionDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[ReversePromptEstimateResponse]:
+    return ok(
+        request,
+        estimate_reverse_prompt(
+            db,
+            tenant_id=user.tenant_id,
+            source_asset_id=payload.source_asset_id,
+        ),
+    )
 
 
 @router.get(

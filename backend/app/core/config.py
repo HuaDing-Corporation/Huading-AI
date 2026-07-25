@@ -172,7 +172,7 @@ class Settings(BaseSettings):
     engine_apimart_base_url: str = "https://api.apimart.ai/v1"
     engine_apimart_image_model: str = "gpt-image-2"
     engine_apimart_video_model: str = "doubao-seedance-2.0"
-    engine_apimart_request_timeout_seconds: float = 60.0
+    engine_apimart_request_timeout_seconds: float = 120.0
     engine_apimart_poll_initial_delay_seconds: float = 10.0
     engine_apimart_poll_interval_seconds: float = 4.0
     engine_apimart_timeout_seconds: float = 1500.0
@@ -203,6 +203,7 @@ class Settings(BaseSettings):
     engine_apimart_reverse_prompt_input_credits_per_m: float = 16.0
     engine_apimart_reverse_prompt_output_credits_per_m: float = 96.0
     engine_reverse_prompt_video_credits: float = Field(default=100.0, gt=0)
+    engine_reverse_prompt_video_long_credits: float = Field(default=250.0, gt=0)
     engine_ecom_replicate_enabled: bool = True
     engine_ecom_replicate_credits_per_image: float = 15.0
     engine_ecom_replicate_analysis_cny_per_call: float = 0.14

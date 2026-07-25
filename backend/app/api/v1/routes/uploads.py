@@ -63,7 +63,7 @@ _ALLOWED_VIDEO_REFERENCE_TYPES: dict[str, str] = {
 _MAX_BYTES = settings.upload_max_bytes
 _UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
 _REVERSE_PROMPT_VIDEO_MIN_DURATION_MS = 1_000
-_REVERSE_PROMPT_VIDEO_MAX_DURATION_MS = 60_000
+_REVERSE_PROMPT_VIDEO_MAX_DURATION_MS = 180_000
 _REVERSE_PROMPT_VIDEO_MIN_DIMENSION = 240
 _REVERSE_PROMPT_VIDEO_MAX_DIMENSION = 2160
 
@@ -380,7 +380,7 @@ def _validate_reverse_prompt_video_probe(asset: Asset, probe: _AvatarVideoProbe)
         or probe.duration_ms > _REVERSE_PROMPT_VIDEO_MAX_DURATION_MS
     ):
         raise AppError(
-            "Reverse prompt video must be between 1 and 60 seconds.",
+            "Reverse prompt video must be between 1 and 180 seconds.",
             code="REVERSE_PROMPT_VIDEO_DURATION_INVALID",
             status_code=422,
         )

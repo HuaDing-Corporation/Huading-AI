@@ -9,7 +9,14 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.exceptions import AppError
-from app.db.models import CreditRate, ReversePromptJob, Subscription, UsageRecord, VideoTask
+from app.db.models import (
+    Asset,
+    CreditRate,
+    ReversePromptJob,
+    Subscription,
+    UsageRecord,
+    VideoTask,
+)
 from app.services import provider_costs
 
 _SCRIPT_CPS = Decimal("5")
@@ -28,6 +35,8 @@ _VIDEO_GEN_RESOLUTION_MULTIPLIERS = {
 }
 _COSYVOICE_CLONE_PROVIDER = "cosyvoice-voice-clone"
 _VOICE_CLONE_DEFAULT_CREDITS = Decimal("30000.0000")
+_REVERSE_PROMPT_VIDEO_SHORT_MAX_DURATION_MS = 60_000
+_REVERSE_PROMPT_VIDEO_MAX_DURATION_MS = 180_000
 
 
 @dataclass(frozen=True)
@@ -131,9 +140,9 @@ def _lock_reverse_prompt_job_for_quota(
     *,
     tenant_id: str,
     reverse_prompt_job_id: str,
-) -> None:
-    db.scalar(
-        select(ReversePromptJob.id)
+) -> str | None:
+    return db.scalar(
+        select(ReversePromptJob.source_asset_id)
         .where(
             ReversePromptJob.id == reverse_prompt_job_id,
             ReversePromptJob.tenant_id == tenant_id,
@@ -478,14 +487,21 @@ def estimate_reverse_prompt_video_quota(
     db: Session,
     *,
     tenant_id: str,
+    duration_ms: int,
 ) -> QuotaEstimate:
-    reverse_prompt_rate = _rate(
-        db,
-        tenant_id=tenant_id,
-        capability="reverse_prompt_video",
-        unit="call",
-        default=Decimal(str(settings.engine_reverse_prompt_video_credits)),
-    )
+    tier = reverse_prompt_video_tier(duration_ms)
+    if tier == "video_short":
+        reverse_prompt_rate = _rate(
+            db,
+            tenant_id=tenant_id,
+            capability="reverse_prompt_video",
+            unit="call",
+            default=Decimal(str(settings.engine_reverse_prompt_video_credits)),
+        )
+    else:
+        reverse_prompt_rate = Decimal(
+            str(settings.engine_reverse_prompt_video_long_credits)
+        )
     credits = reverse_prompt_rate.quantize(Decimal("0.01"))
     return QuotaEstimate(
         estimated_seconds=1,
@@ -494,6 +510,15 @@ def estimate_reverse_prompt_video_quota(
         capability="reverse_prompt_video",
         unit="call",
     )
+
+
+def reverse_prompt_video_tier(duration_ms: int) -> str:
+    duration = int(duration_ms)
+    if duration < 1_000 or duration > _REVERSE_PROMPT_VIDEO_MAX_DURATION_MS:
+        raise ValueError("Reverse prompt video duration must be between 1 and 180 seconds.")
+    if duration <= _REVERSE_PROMPT_VIDEO_SHORT_MAX_DURATION_MS:
+        return "video_short"
+    return "video_long"
 
 
 def ensure_reverse_prompt_quota_available(db: Session, *, tenant_id: str) -> None:
@@ -664,11 +689,26 @@ def reserve_reverse_prompt_video_quota(
     tenant_id: str,
     reverse_prompt_job_id: str,
 ) -> Reservation:
-    estimate = estimate_reverse_prompt_video_quota(db, tenant_id=tenant_id)
-    _lock_reverse_prompt_job_for_quota(
+    source_asset_id = _lock_reverse_prompt_job_for_quota(
         db,
         tenant_id=tenant_id,
         reverse_prompt_job_id=reverse_prompt_job_id,
+    )
+    source = db.get(Asset, source_asset_id) if source_asset_id is not None else None
+    if (
+        source is None
+        or source.tenant_id != tenant_id
+        or source.duration_ms is None
+    ):
+        raise AppError(
+            "Reverse prompt source duration is unavailable.",
+            code="REVERSE_PROMPT_SOURCE_INVALID",
+            status_code=422,
+        )
+    estimate = estimate_reverse_prompt_video_quota(
+        db,
+        tenant_id=tenant_id,
+        duration_ms=source.duration_ms,
     )
     subscription = _reserve_active_quota(
         db,
