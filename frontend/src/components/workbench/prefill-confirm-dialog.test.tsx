@@ -97,46 +97,70 @@ describe("PrefillConfirmDialog（带入前确认）", () => {
     expect(screen.queryByText(/已按上限带入/)).not.toBeInTheDocument();
   });
 
-  // ── 分镜表（§4.3 Shots 段）──────────────────────────────────────────────
-  it("🔴 提示词末尾带 Shots 段 → 拆成「主提示词 + 分镜表」两项；默认勾选时原样拼回", () => {
+  // ── 分镜表（§八 M2：shot_section 独立键，前端**只拼不拆**）─────────────────────────
+  // 承重门12。🔴 变异点 = prefill-confirm-dialog.tsx composePrefill 里
+  //   `out[item.key] = on("shotSection") ? joinShotSection(...) : textOf(item)` 这一支：
+  //   把它删成 `out[item.key] = textOf(item)`（即不拼），本条与下面 seedance 那条同时红。
+  it("🔴 承重门12 · shot_section 只拼不拆：主提示词原样、分镜单列一项，勾选时接在末尾", () => {
     const onConfirm = renderDialog({
       target: "video_gen",
-      prompt: "Subject: bottle.\nStyle: ad\nShots: 0-4s 特写；4-10s 场景。"
+      prompt: "Subject: bottle.\nStyle: ad",
+      shotSection: "Shots: 0-4s 特写；4-10s 场景。"
     });
     expect(screen.getByRole("checkbox", { name: copy.reverse.applyItemShots })).toBeInTheDocument();
-    // 主提示词项里已不含分镜段（避免与分镜项重复）
+    // 🔴 主提示词项 = BE 原串**一字未动**（上一版这里要靠正则把段头切掉，现在契约保证它本就不含分镜段）
     expect(
       (screen.getByLabelText(copy.reverse.applyItemEditAria(copy.reverse.applyItemPrompt)) as HTMLTextAreaElement).value
-    ).toBe(
-      "Subject: bottle.\nStyle: ad"
-    );
+    ).toBe("Subject: bottle.\nStyle: ad");
+    // 分镜项 = BE 给的完整段（**含段头**，前端不再自造 "Shots: " 前缀）
+    expect(
+      (screen.getByLabelText(copy.reverse.applyItemEditAria(copy.reverse.applyItemShots)) as HTMLTextAreaElement).value
+    ).toBe("Shots: 0-4s 特写；4-10s 场景。");
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyConfirmSubmit }));
-    expect((onConfirm.mock.calls[0][0] as Record<string, unknown>).prompt).toBe(
-      "Subject: bottle.\nStyle: ad\n\nShots: 0-4s 特写；4-10s 场景。"
-    );
+    const payload = payloadOf(onConfirm);
+    expect(payload.prompt).toBe("Subject: bottle.\nStyle: ad\n\nShots: 0-4s 特写；4-10s 场景。");
+    // 伪项不许当独立键下发（目标表单没有 shotSection 控件，发过去只会被静默丢弃）
+    expect("shotSection" in payload).toBe(false);
+  });
+
+  // 🔴 seedance_i2v 的主提示词是 **scenePrompt** 而非 prompt —— 若 composePrefill 把宿主写死成 "prompt"，
+  //    本条会红（分镜勾了却没进任何字段）。这是「两个模块字段名不同」这一真实差异的护栏。
+  it("🔴 承重门12 · 电商带货：分镜拼进 scenePrompt（宿主字段按模块取，不写死 prompt）", () => {
+    const onConfirm = renderDialog({
+      target: "seedance_i2v",
+      topic: "保温杯",
+      scenePrompt: "暖光特写",
+      shotSection: "Shots: 0-4s 特写。"
+    });
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyConfirmSubmit }));
+    const payload = payloadOf(onConfirm);
+    expect(payload.scenePrompt).toBe("暖光特写\n\nShots: 0-4s 特写。");
+    expect("shotSection" in payload).toBe(false);
   });
 
   it("🔴 取消「分镜表」→ 带入的提示词里不含分镜段（开关真的有用，不是摆设）", () => {
     const onConfirm = renderDialog({
       target: "video_gen",
-      prompt: "Subject: bottle.\nStyle: ad\nShots: 0-4s 特写；4-10s 场景。"
+      prompt: "Subject: bottle.\nStyle: ad",
+      shotSection: "Shots: 0-4s 特写；4-10s 场景。"
     });
     fireEvent.click(screen.getByRole("checkbox", { name: copy.reverse.applyItemShots }));
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.applyConfirmSubmit }));
     expect((onConfirm.mock.calls[0][0] as Record<string, unknown>).prompt).toBe("Subject: bottle.\nStyle: ad");
   });
 
-  it("无 Shots 段（图片反推/老结构）→ 不产生分镜项（不造点了没用的开关）", () => {
+  it("BE 未给 shot_section（图片反推/老结构/photo 模块）→ 不产生分镜项（不造点了没用的开关）", () => {
     renderDialog({ target: "video_gen", prompt: "Subject: bottle." });
     expect(screen.queryByRole("checkbox", { name: copy.reverse.applyItemShots })).not.toBeInTheDocument();
   });
 
-  // 🔴 Code Review P1：取消主提示词后，分镜段无处可去（它是拼回主提示词才带走的）→ 分镜表必须一并置灰，
+  // 🔴 Code Review P1：取消主提示词后，分镜段无处可去（它是拼进主提示词才带走的）→ 分镜表必须一并置灰，
   //    否则就是一个「勾着、可编辑、确认后却什么都没发生」的死开关。
   it("🔴 取消「主提示词」→ 「分镜表」随之置灰且不参与带入（不留死开关）", () => {
     const onConfirm = renderDialog({
       target: "video_gen",
-      prompt: "Subject: bottle.\nStyle: ad\nShots: 0-4s 特写。",
+      prompt: "Subject: bottle.\nStyle: ad",
+      shotSection: "Shots: 0-4s 特写。",
       negativePrompt: "水印"
     });
     fireEvent.click(screen.getByRole("checkbox", { name: copy.reverse.applyItemPrompt }));

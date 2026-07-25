@@ -549,8 +549,13 @@ export const copy = {
     videoType: "仅支持 MP4 视频",
     videoTooLarge: "视频过大，请控制在 200MB 以内",
     videoTooLong: "请上传 3–10 秒的单人出镜视频",
-    reverseVideoDuration: "请上传 1–60 秒的视频",
+    // D2 放宽 60→180 秒（依据 §八 8.1 SPIKE 实测：180s 走方案 A = 6 段 × 30 秒，端到端 198.312s 可跑）。
+    // 数值单一真源是 lib/media/reverse-video.ts 的 MIN/MAX_REVERSE_VIDEO_SEC，此处文案与之同步改。
+    reverseVideoDuration: "请上传 1–180 秒的视频",
     reverseVideoFailed: "视频反推失败，请稍后重试",
+    // 计费预估失败（§八 M4）：🔴 **不给任何金额**、也不提「按实际结算」——分档是一口价预扣，
+    // 估不到就不许提交（宁可挡住也不能报错价）。
+    reverseEstimateFailed: "暂时无法获取本次反推的积分消耗，请稍后重试",
     videoResolution: "视频分辨率需在 360p–1080p",
     videoUnreadable: "无法读取视频信息，请换一个 MP4 文件",
     // 电商详情图复刻·客户端校验（ECOM-REPLICATE-UI-0001）
@@ -679,7 +684,8 @@ export const copy = {
     videoTitle: "提示词反推 · 视频",
     videoSubtitle: "上传一段视频，AI 分析分镜与节奏并反推可复用的提示词",
     videoUpload: "上传视频",
-    videoUploadHint: "MP4（H.264），≤200MB，1–60 秒；音轨可选（不强制）",
+    // 上限同 errors.reverseVideoDuration，真源 MAX_REVERSE_VIDEO_SEC（D2 放宽到 180 秒，依据 §八 8.1 SPIKE）
+    videoUploadHint: "MP4（H.264），≤200MB，1–180 秒；音轨可选（不强制）",
     videoReupload: "换一个视频",
     videoValidating: "校验视频中…",
     videoReady: "已上传，可反推",
@@ -687,11 +693,24 @@ export const copy = {
     videoAnalyze: "反推视频提示词",
     videoAnalyzing: "AI 正在分析视频并反推…",
     videoPollRetrying: "网络波动，正在重试…视频仍在后端分析，请稍候",
-    // 计费门（视频反推 100 积分/次）
+    // ── 分段进度（§八 M5 + D10）─────────────────────────────────────────────────
+    // 🔴 只有 BE 真给了 segments_total/segments_done 才渲染；两者为 null（图片 / ≤60s 短视频）时**什么都不显示**。
+    //    「别做假进度条」= 不拿 0、不拿 undefined、不按时间自增编一个百分比。
+    videoSegmentProgress: (done: number, total: number) => `正在分析第 ${done}/${total} 段`,
+    // 诚实预计：SPIKE 实测 180s 视频端到端 198.312s（§八 8.1），任务包记「约 3.5 分钟」。
+    // 故写区间而非「约 3 分钟」——低报等待时间同样是不诚实的那一侧。
+    videoSegmentEta: "长视频按段串行分析，预计约 3–4 分钟，请保持页面打开",
+    // ── 计费门（§八 M4 + D9：视频反推按时长分档，金额一律由 BE estimate 返回）──────────
     videoChargeTitle: "确认扣费反推视频？",
     videoChargeMessage: (credits: number) => `视频反推将一次性扣除 ${credits} 积分（分析分镜 + 生成提示词）；确认后开始，取消不扣费。`,
+    videoChargeEstimating: "正在获取本次反推的积分消耗…",
+    // 取不到金额时弹窗正文：解释「为什么这里没有数字、也不让点确认」。**一个数字都不许出现。**
+    videoChargeEstimateBlocked: "为避免显示金额与实际扣费不符，未取到本次金额前不能提交。",
     videoChargeConfirm: "确认扣费反推",
-    videoChargeBadge: (credits: number) => `${credits} 积分 / 次`,
+    // 🔴 徽标不再写死数字：D9 之后金额取决于视频时长（≤60s / 61–180s 两档），而此处在**上传之前**就要显示，
+    //    根本无从得知档位。写死「100 积分 / 次」= 长视频用户看到 100、实扣 250 的错价。改为定性说明，
+    //    具体金额由计费门弹窗显示 BE estimate 的返回值。
+    videoChargeBadge: "按视频时长计费",
     // 视频分析展示（在提示词结果之上）
     vaTitle: "视频分析",
     vaDuration: "时长",

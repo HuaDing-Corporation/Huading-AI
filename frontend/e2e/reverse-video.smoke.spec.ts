@@ -2,9 +2,11 @@ import { expect, test, type Page } from "@playwright/test";
 
 /**
  * VIDEO-REVERSE-PROMPT-UI-0001 交互冒烟（生产构建 next start，真走 MSW 视频异步）：提示词反推 切「视频」→ 上传 MP4 →
- * 反推(计费门 100 积分/确认) → 202+轮询 → 结果（视频分析 video_analysis 在上 + Seedance 提示词在下）→「带入·数字人口播」
- * 预填目标表单。图片模式零回归（切回图片仍在）。移动端(375)来源二选一可见。全程无 #130 / 无 /api/api 双前缀。
- * fixture: e2e/fixtures/avatar-sample.mp4（640×480/3s，MP4，过反推预检 1–60s）。需 NEXT_PUBLIC_USE_MOCK=1 构建后 next start。
+ * 反推(计费门金额来自 POST /reverse-prompt/estimate，确认扣费) → 202+轮询 → 结果（视频分析 video_analysis 在上 +
+ * Seedance 提示词在下）→「带入·数字人口播」预填目标表单。图片模式零回归（切回图片仍在）。移动端(375)来源二选一可见。
+ * 全程无 #130 / 无 /api/api 双前缀。
+ * fixture: e2e/fixtures/avatar-sample.mp4（640×480/3s，MP4，过反推预检 1–180s；3s → video_short 档）。
+ * 需 NEXT_PUBLIC_USE_MOCK=1 构建后 next start。
  */
 const VIDEO_FIXTURE = "e2e/fixtures/avatar-sample.mp4";
 
@@ -43,14 +45,17 @@ test("提示词反推·视频：切视频→上传→计费门→轮询→视频
   await page.getByRole("group", { name: "反推来源" }).getByRole("button", { name: /视频/ }).first().click();
   await expect(page.getByText("提示词反推 · 视频")).toBeVisible();
 
-  // 上传 MP4（过预检 1–60s）→ 已上传，可反推。
+  // 来源徽标**不再写死金额**（D9 分档后上传前无从判档）→ 只做定性说明。
+  await expect(page.getByText("按视频时长计费")).toBeVisible();
+
+  // 上传 MP4（过预检 1–180s）→ 已上传，可反推。
   // WORKBENCH-KEEPALIVE-UI-0001：面板常驻后其它（隐藏）表单的 file input 仍在 DOM → 选择器限定到当前面板。
   await page.getByTestId("panel-reverse_prompt").locator('input[type="file"]').setInputFiles(VIDEO_FIXTURE);
   await expect(page.getByText("已上传，可反推")).toBeVisible({ timeout: 20_000 });
 
-  // 计费门：反推 → 确认弹窗(100 积分) → 确认扣费反推。
+  // 计费门：反推 → 弹窗显示 **estimate 返回的**金额（3s fixture → video_short 档 = 100）→ 确认扣费反推。
   await page.getByRole("button", { name: "反推视频提示词" }).click();
-  await expect(page.getByText(/一次性扣除 100 积分/)).toBeVisible();
+  await expect(page.getByText(/一次性扣除 100 积分/)).toBeVisible({ timeout: 15_000 });
   await page.getByRole("button", { name: "确认扣费反推" }).click();
 
   // 202 + 轮询 → 结果：视频分析（video_analysis）在上 + Seedance 提示词。

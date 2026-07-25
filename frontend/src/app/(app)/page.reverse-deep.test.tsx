@@ -30,6 +30,14 @@ vi.mock("@/lib/api/hooks", () => ({
   useReverseFromAsset: () => ({ mutateAsync: reverseMock.mutateAsync, isPending: false }),
   useRegenerateReversePrompt: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useSaveReversePrompt: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  // §八 M4 计费预估（本文件只走图片路径、不开计费门，给个短档常态桩即可）
+  useEstimateReversePrompt: () => ({
+    mutate: vi.fn(),
+    reset: vi.fn(),
+    data: { credits: 100, duration_sec: 3, tier: "video_short" },
+    isPending: false,
+    isError: false
+  }),
   // 目标表单
   useUploadProductImage: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useUploadAvatarVideo: () => ({ mutateAsync: vi.fn(), isPending: false }),
@@ -53,6 +61,8 @@ import Home from "./page";
 const NEG = "低分辨率, 变形, 多余文字, 水印, 杂乱背景";
 const MASTER = "统一走高级产品广告质感，干净背景";
 const STRUCTURED_EN = "Subject: bottle.\nScene: marble counter.\nStyle: product ad";
+/** §八 M2：BE 拼好的完整分镜段（**含段头**），前端只拼不拆。 */
+const SHOT_SECTION = "Shots: 0-4s 产品特写；4-10s 使用场景。";
 
 /** 视频源反推结果：video_gen 时长被 clamp 到 15（原 18s）；seedance 装得下 18s 不 clamp。 */
 const RESULT: ReversePromptResult = {
@@ -87,6 +97,7 @@ const RESULT: ReversePromptResult = {
       topic: "杯",
       prompt: STRUCTURED_EN,
       negative_prompt: NEG,
+      shot_section: SHOT_SECTION, // §八 M2：独立键（含段头），主提示词里**不含**它
       aspect_ratio: "9:16",
       duration_sec: 15, // 原 18s 超 4–15 上限 → clamp 到 15
       duration_clamped: true,
@@ -163,6 +174,35 @@ describe("REVERSE-DEEP · 承重门1 逐字段直落（确定值）", () => {
     expect(vg.getByRole("button", { name: /15\s*秒/ })).toHaveAttribute("aria-pressed", "true");
     // 画面比例：触发器上显示 9:16
     expect(vg.getByLabelText(copy.workbench.vgAspectLabel).textContent).toContain("9:16");
+  });
+
+  // 承重门12 的端到端一半（弹窗侧在 prefill-confirm-dialog.test.tsx）：
+  // 🔴 断的是**真正落进目标表单控件里的那个串** —— 只在弹窗里断，拼对了却没落进控件也照样绿。
+  it("🔴 承重门12 · 带入 · 视频生成 → 提示词框拿到「主提示词 + BE 分镜段」的拼接结果", async () => {
+    render(<Home />);
+    await produceResult();
+    openApplyDialog(copy.reverse.applyVideoGen);
+    confirmApply();
+
+    const vg = panel("video_gen");
+    await waitFor(() =>
+      expect((vg.getByLabelText(copy.workbench.vgPromptLabel) as HTMLTextAreaElement).value).toBe(
+        `${STRUCTURED_EN}\n\n${SHOT_SECTION}`
+      )
+    );
+  });
+
+  it("🔴 承重门12 · 取消「分镜表」→ 落进控件的提示词不含分镜段（开关在真链路上也有用）", async () => {
+    render(<Home />);
+    await produceResult();
+    openApplyDialog(copy.reverse.applyVideoGen);
+    fireEvent.click(itemCheckbox(copy.reverse.applyItemShots));
+    confirmApply();
+
+    const vg = panel("video_gen");
+    await waitFor(() =>
+      expect((vg.getByLabelText(copy.workbench.vgPromptLabel) as HTMLTextAreaElement).value).toBe(STRUCTURED_EN)
+    );
   });
 
   it("🔴 带入 · 图片生成 → 图片负面提示词 / 总控前缀 / 画面比例 都拿到确定值", async () => {

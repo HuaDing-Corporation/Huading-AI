@@ -5,14 +5,14 @@ import { AlertTriangle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { joinShotSection, splitShotSection, type WorkbenchPrefill } from "@/lib/api/reverse-prompt";
+import { joinShotSection, type WorkbenchPrefill } from "@/lib/api/reverse-prompt";
 import { copy } from "@/lib/copy";
 
 /** 项形态：长文本 = 就地可编辑 textarea（编辑结果即实际带入值）；短值 = 只读展示 + 勾选。 */
 type PrefillItemKind = "text" | "value";
 
 interface PrefillItem {
-  /** prefill 上的属性名；`shots` 是**伪项**（分镜段最终合回 prompt，见 buildItems 注释）。 */
+  /** prefill 上的属性名；`shotSection` 是**伪项**（分镜段最终拼进主提示词，见 buildItems 注释）。 */
   key: string;
   label: string;
   kind: PrefillItemKind;
@@ -20,18 +20,14 @@ interface PrefillItem {
   text: string;
   /** value 项的只读展示串 */
   display?: string;
+  /**
+   * 伪项专用：本项最终**拼进**哪个字段（分镜段 → video_gen 的 `prompt` / seedance_i2v 的 `scenePrompt`）。
+   * 🔴 写成字段而不是在 composePrefill 里写死 "prompt"：两个模块的主提示词字段名**不同**，写死会让
+   *    seedance 的分镜静默丢失（勾了也没带进去）——正是「点了没用的开关」。
+   */
+  joinInto?: string;
 }
 
-/**
- * 由载荷推导「本次会带过去的每一项」（REVERSE-DEEP-UI-0001 · 范围3）。
- *
- * 🔴 **只列 prefill 里真实存在的键** —— 目标模块接不住的字段本就不会出现在载荷里（映射层已按模块裁好），
- *    故此处天然满足「接不了的项不显示，不许显示一个点了没用的开关」。
- * 🔴 分镜表：§4.3 规定 BE 把 `shot_summary` 作为 `Shots:` 段**追加在主提示词末尾**。要让它能被单独取消，
- *    这里把主提示词拆成「正文 + 分镜段」两项展示；确认时按勾选情况重新合成（见 composePrefill）。
- *    拆不出分镜段（图片反推 / 老结构）→ 不产生分镜项，不造死开关。
- * 顺序：正文内容 → 修饰项（负面/总控）→ 参数项（比例/时长/音频），由重到轻。
- */
 /** 秒数 → 展示串；undefined 原样传下去（= 不产生该项）。 */
 function durationDisplay(sec: number | undefined): string | undefined {
   return sec === undefined ? undefined : copy.reverse.applyDurationSec(sec);
@@ -42,6 +38,20 @@ function onOffDisplay(flag: boolean | undefined): string | undefined {
   return flag ? copy.reverse.applyValueOn : copy.reverse.applyValueOff;
 }
 
+/** 长文本项给 4 行（主提示词 / 画面提示词 / 分镜段），其余 2 行。新增长文本键要一并加进来。 */
+const TALL_TEXT_KEYS = new Set(["prompt", "scenePrompt", "shotSection"]);
+
+/**
+ * 由载荷推导「本次会带过去的每一项」（REVERSE-DEEP-UI-0001 · 范围3）。
+ *
+ * 🔴 **只列 prefill 里真实存在的键** —— 目标模块接不住的字段本就不会出现在载荷里（映射层已按模块裁好），
+ *    故此处天然满足「接不了的项不显示，不许显示一个点了没用的开关」。
+ * 🔴 分镜表（§八 M2 改版）：BE 现在把分镜段作为**独立键** `shot_section`（已拼好、含段头）单独给出，
+ *    主提示词里**不再含**这一段。故这里直接列成两项，勾选时把 shot_section 接在主提示词末尾（见 composePrefill）——
+ *    **只拼不拆**，上一版靠正则认段头把主提示词切开的做法已随契约删除。
+ *    BE 没给 shot_section（图片反推 / 老结构 / photo 模块）→ 不产生分镜项，不造死开关。
+ * 顺序：正文内容 → 修饰项（负面/总控）→ 参数项（比例/时长/音频），由重到轻。
+ */
 function buildItems(prefill: WorkbenchPrefill): PrefillItem[] {
   const items: PrefillItem[] = [];
   const pushText = (key: string, label: string, v: string | undefined) => {
@@ -50,12 +60,13 @@ function buildItems(prefill: WorkbenchPrefill): PrefillItem[] {
   const pushValue = (key: string, label: string, display: string | undefined) => {
     if (display !== undefined) items.push({ key, label, kind: "value", text: "", display });
   };
-  /** 主提示词 + 可选分镜段（两个 target 共用）。 */
-  const pushPromptWithShots = (prompt: string | undefined) => {
-    if (prompt === undefined) return;
-    const { body, shots } = splitShotSection(prompt);
-    items.push({ key: "prompt", label: copy.reverse.applyItemPrompt, kind: "text", text: body });
-    if (shots) items.push({ key: "shots", label: copy.reverse.applyItemShots, kind: "text", text: shots });
+  /**
+   * 分镜段伪项 —— 紧跟在它所依附的主提示词项之后（`joinInto` 指明拼进谁）。
+   * BE 未给 shot_section → 整项不出现。
+   */
+  const pushShotSection = (joinInto: string, shotSection: string | undefined) => {
+    if (!shotSection) return;
+    items.push({ key: "shotSection", label: copy.reverse.applyItemShots, kind: "text", text: shotSection, joinInto });
   };
 
   switch (prefill.target) {
@@ -66,19 +77,23 @@ function buildItems(prefill: WorkbenchPrefill): PrefillItem[] {
     case "seedance_i2v":
       pushText("topic", copy.reverse.applyItemTopic, prefill.topic);
       pushText("scenePrompt", copy.reverse.applyItemScenePrompt, prefill.scenePrompt);
+      // §八 M2：seedance 的主提示词是 scene_prompt → 分镜拼进 scenePrompt（不是 prompt，本模块压根没有 prompt 键）
+      pushShotSection("scenePrompt", prefill.shotSection);
       pushText("script", copy.reverse.applyItemScript, prefill.script);
       pushText("negativePrompt", copy.reverse.applyItemNegative, prefill.negativePrompt);
       pushValue("durationSec", copy.reverse.applyItemDuration, durationDisplay(prefill.durationSec));
       break;
     case "video_gen":
-      pushPromptWithShots(prefill.prompt);
+      pushText("prompt", copy.reverse.applyItemPrompt, prefill.prompt);
+      pushShotSection("prompt", prefill.shotSection);
       pushText("negativePrompt", copy.reverse.applyItemNegative, prefill.negativePrompt);
       pushValue("aspectRatio", copy.reverse.applyItemAspect, prefill.aspectRatio);
       pushValue("durationSec", copy.reverse.applyItemDuration, durationDisplay(prefill.durationSec));
       pushValue("generateAudio", copy.reverse.applyItemGenerateAudio, onOffDisplay(prefill.generateAudio));
       break;
     case "photo":
-      pushPromptWithShots(prefill.prompt);
+      // photo 没有 shot_section（§八 M2 只给 video_gen / seedance_i2v）→ 不产生分镜项
+      pushText("prompt", copy.reverse.applyItemPrompt, prefill.prompt);
       pushText("masterPrompt", copy.reverse.applyItemMasterPrompt, prefill.masterPrompt);
       pushText("negativePrompt", copy.reverse.applyItemNegative, prefill.negativePrompt);
       pushValue("aspectRatio", copy.reverse.applyItemAspect, prefill.aspectRatio);
@@ -108,7 +123,10 @@ function composePrefill(
   // 编辑过就用编辑值，否则用初值。⚠️ 用 `??` 而非 `||`：清空成 "" 是**用户的意思**，必须压过初值
   //（这正是「编辑结果即实际带入值」的边界情形）。
   const textOf = (i: PrefillItem) => edits[i.key] ?? i.text;
-  const shotsItem = items.find((i) => i.key === "shots");
+  // 🔴 判据用 `joinInto` 而非键名 "shotSection"：**「有宿主」就是伪项的定义**。写键名等于把同一件事
+  //    留两个真源；将来 BE 再给一个可单独取消的依附段（如 audio_section），键名版会把它当独立键下发
+  //    给目标表单被静默丢弃，而这一版自动走对分支。
+  const pseudo = items.find((i) => i.joinInto !== undefined);
   const source = prefill as unknown as Record<string, unknown>;
   // 🔴 与渲染侧同一判据：`checked` 只记录**用户的覆盖**，未记录 = 默认勾选。写成 `!checked[key]` 会把
   //    「用户什么都没动」当成「全部取消」→ 一项都带不进去。
@@ -116,14 +134,16 @@ function composePrefill(
 
   for (const item of items) {
     if (!on(item.key)) continue;
-    if (item.key === "shots") continue; // 伪项：由下面的 prompt 分支合回，自身不是独立字段
+    // 🔴 伪项：分镜段本身**不是**目标表单的字段（表单没有 shotSection 控件），它只会被拼进主提示词。
+    //    漏掉这个 continue 就会把 shotSection 当独立键下发 —— 目标表单收到一个它不认识的键，静默丢弃。
+    if (item.joinInto !== undefined) continue;
     if (item.kind === "value") {
       out[item.key] = source[item.key]; // 短值不可编辑 → 原值直取
       continue;
     }
-    if (item.key === "prompt") {
-      // 分镜段勾选 → 原样拼回（与 BE 给的串等价）；取消 → 正文里那段一并不带走。
-      out.prompt = shotsItem && on("shots") ? joinShotSection(textOf(item), textOf(shotsItem)) : textOf(item);
+    // 本项是某个分镜段的宿主（video_gen→prompt / seedance_i2v→scenePrompt）→ 勾选分镜则接在末尾。
+    if (pseudo?.joinInto === item.key) {
+      out[item.key] = on(pseudo.key) ? joinShotSection(textOf(item), textOf(pseudo)) : textOf(item);
       continue;
     }
     out[item.key] = textOf(item);
@@ -179,9 +199,11 @@ export function PrefillConfirmDialog({
   // clamp 提示里的模块名用**去掉「带入 · 」前缀**的裸名，否则读成「…带入 · 视频生成单条上限 15 秒」（Code Review nit）。
   const moduleName = moduleLabel.replace(/^带入\s*·\s*/, "");
   const isOn = (key: string) => checked[key] ?? true;
-  // 🔴 分镜表依附于主提示词（Code Review P1）：分镜段最终是**拼回主提示词**才带走的，主提示词一旦不带，
-  //    分镜表就无处可去。此时若仍让它可勾选，就成了「点了没用的开关」（规范明令禁止）→ 随主提示词一并置灰。
-  const shotsDisabled = (key: string) => key === "shots" && !isOn("prompt");
+  // 🔴 依附项随宿主置灰（Code Review P1）：分镜段最终是**拼进主提示词**才带走的，主提示词一旦不带，
+  //    分镜表就无处可去。此时若仍让它可勾选，就成了「点了没用的开关」（规范明令禁止）。
+  //    判据同 composePrefill：「有 joinInto」= 依附项，宿主字段名由它自己带（video_gen 是 prompt、
+  //    seedance_i2v 是 scenePrompt），两处都不写死键名。
+  const dependentDisabled = (item: PrefillItem) => item.joinInto !== undefined && !isOn(item.joinInto);
 
   // 「哪些 target 带时长」只列一次 —— 列两遍的话，将来多一个带时长的 target 只改了一处，clamp 提示会**静默不再渲染**。
   const durational =
@@ -209,7 +231,7 @@ export function PrefillConfirmDialog({
             <legend className="sr-only">{moduleLabel}</legend>
             <ul className="flex list-none flex-col gap-2.5 p-0">
               {items.map((item) => {
-                const disabled = shotsDisabled(item.key);
+                const disabled = dependentDisabled(item);
                 const on = isOn(item.key) && !disabled;
                 // useId 前缀：两个结果视图可能同时挂载（工作台 + 历史详情，皆常驻）→ 写死 id 会重复。
                 const inputId = `${uid}-${item.key}`;
@@ -255,7 +277,7 @@ export function PrefillConfirmDialog({
                         readOnly={!on}
                         aria-disabled={!on}
                         onChange={(e) => setEdits((s) => ({ ...s, [item.key]: e.target.value }))}
-                        rows={item.key === "prompt" || item.key === "shots" ? 4 : 2}
+                        rows={TALL_TEXT_KEYS.has(item.key) ? 4 : 2}
                         className={`mt-2 w-full resize-y rounded-field border border-line-gold bg-glass-soft px-3 py-2 text-[12.5px] leading-relaxed text-ink outline-none transition-shadow placeholder:text-ink-faint focus:border-line-sel focus:shadow-focus-gold ${on ? "" : "cursor-not-allowed opacity-60"}`}
                       />
                     ) : (
@@ -294,7 +316,7 @@ export function PrefillConfirmDialog({
             size="sm"
             // 一项都没勾 → 确认等于什么都不做（载荷只剩 target，目标表单全跳过、缓冲还结不掉）→ 直接禁用，
             // 不给「点了没反应」的按钮（Code Review P2）。
-            disabled={!prefill || items.length === 0 || !items.some((i) => isOn(i.key) && !shotsDisabled(i.key))}
+            disabled={!prefill || items.length === 0 || !items.some((i) => isOn(i.key) && !dependentDisabled(i))}
             onClick={() => prefill && onConfirm(composePrefill(prefill, items, checked, edits))}
           >
             {copy.reverse.applyConfirmSubmit}

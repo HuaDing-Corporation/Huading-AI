@@ -6,7 +6,10 @@ vi.mock("@/lib/api/hooks", () => ({
   useUploadReverseVideo: vi.fn(),
   useReverseFromAsset: vi.fn(),
   useRegenerateReversePrompt: vi.fn(),
-  useSaveReversePrompt: vi.fn()
+  useSaveReversePrompt: vi.fn(),
+  // §八 M4：本文件走**图片**路径（图片无计费门，estimate 不会被调）→ 常态桩即可；
+  // 计费门本身的承重在 reverse-prompt-form.video.test.tsx。
+  useEstimateReversePrompt: () => ({ mutate: vi.fn(), reset: vi.fn(), data: undefined, isPending: false, isError: false })
 }));
 
 import {

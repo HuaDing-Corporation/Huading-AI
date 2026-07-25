@@ -1,9 +1,9 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 
 import { copy } from "@/lib/copy";
-import type { ReversePromptJobRead } from "@/lib/api/reverse-prompt";
+import type { ReversePromptEstimate, ReversePromptJobRead } from "@/lib/api/reverse-prompt";
 
 // VIDEO-REVERSE-PROMPT-UI-0001 · 视频反推路径 TDD。隔离网络：mock hooks + getReversePromptJob（轮询）+
 // validateReverseVideo（jsdom 读不到视频元数据，直接判合规）。锁：图片/视频切换、上传、计费门恰一次/取消不扣、
@@ -13,7 +13,8 @@ const hooks = vi.hoisted(() => ({
   useUploadReverseVideo: vi.fn(),
   useReverseFromAsset: vi.fn(),
   useRegenerateReversePrompt: vi.fn(),
-  useSaveReversePrompt: vi.fn()
+  useSaveReversePrompt: vi.fn(),
+  useEstimateReversePrompt: vi.fn()
 }));
 vi.mock("@/lib/api/hooks", () => hooks);
 
@@ -74,12 +75,39 @@ const queuedJob = (): ReversePromptJobRead => ({
 const succeededJob = (): ReversePromptJobRead => ({ ...queuedJob(), status: "succeeded", result: { ...RESULT, video_analysis: VIDEO_ANALYSIS } });
 
 const reverseMut = vi.fn();
+const estimateMut = vi.fn();
+const estimateReset = vi.fn();
+/**
+ * 计费预估的可变桩态（§八 M4）。**用 mockImplementation 每次渲染重新读**，这样测试中途改档位/改成失败态
+ * 都能被下一次渲染看到 —— 若用 mockReturnValue 会把首帧那个对象钉死，「估算失败」这类用例根本进不去。
+ * 默认：短档 100 积分（对齐 mock 里 3s 视频的 video_short）。
+ */
+const estimateState: {
+  data: ReversePromptEstimate | undefined;
+  /** 这份报价是给哪条资产估的（TanStack mutation 的 variables）——「报价属于当前素材」的判据。 */
+  variables: { source_asset_id: string } | undefined;
+  isPending: boolean;
+  isError: boolean;
+} = {
+  data: { credits: 100, duration_sec: 3, tier: "video_short" },
+  variables: { source_asset_id: "video-asset-1" },
+  isPending: false,
+  isError: false
+};
 function stub() {
   (hooks.useUploadImage as Mock).mockReturnValue({ mutateAsync: vi.fn().mockResolvedValue({ asset_id: "aid-1" }), isPending: false });
   (hooks.useUploadReverseVideo as Mock).mockReturnValue({ mutateAsync: vi.fn().mockResolvedValue({ asset_id: "video-asset-1" }), isPending: false });
   (hooks.useReverseFromAsset as Mock).mockReturnValue({ mutateAsync: reverseMut, isPending: false });
   (hooks.useRegenerateReversePrompt as Mock).mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
   (hooks.useSaveReversePrompt as Mock).mockReturnValue({ mutateAsync: vi.fn().mockResolvedValue({ saved: true }), isPending: false });
+  (hooks.useEstimateReversePrompt as Mock).mockImplementation(() => ({
+    mutate: estimateMut,
+    reset: estimateReset,
+    data: estimateState.data,
+    variables: estimateState.variables,
+    isPending: estimateState.isPending,
+    isError: estimateState.isError
+  }));
 }
 
 function selectVideo() {
@@ -96,6 +124,10 @@ async function switchToVideoAndUpload() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  estimateState.data = { credits: 100, duration_sec: 3, tier: "video_short" }; // 每条用例回到默认短档
+  estimateState.variables = { source_asset_id: "video-asset-1" }; // 与 useUploadReverseVideo 桩返回的 asset 一致
+  estimateState.isPending = false;
+  estimateState.isError = false;
   stub();
   media.validateReverseVideo.mockResolvedValue(null); // 合规
   Object.defineProperty(URL, "createObjectURL", { value: vi.fn(() => "blob:x"), configurable: true });
@@ -104,13 +136,16 @@ beforeEach(() => {
 afterEach(() => vi.clearAllMocks());
 
 describe("ReversePromptForm · 视频反推路径", () => {
-  it("切「视频」→ 视频标题/上传 + 100 积分角标；图片入口零回归（默认图片）", () => {
+  it("切「视频」→ 视频标题/上传 + 定性计费角标（不写死金额）；图片入口零回归（默认图片）", () => {
     render(<ReversePromptForm />);
     // 默认图片
     expect(screen.getByText(copy.reverse.subtitle)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: new RegExp(copy.reverse.sourceVideo) }));
     expect(screen.getByText(copy.reverse.videoSubtitle)).toBeInTheDocument();
-    expect(screen.getByText(copy.reverse.videoChargeBadge(100))).toBeInTheDocument();
+    // D9 分档后徽标在上传前无从判档 → 只做定性说明，**界面上不许出现任何积分数字**。
+    const badge = screen.getByText(copy.reverse.videoChargeBadge);
+    expect(badge).toBeInTheDocument();
+    expect(badge.textContent).not.toMatch(/\d/);
   });
 
   it("视频上传预检不合规 → 友好中文，不触发上传", async () => {
@@ -159,6 +194,78 @@ describe("ReversePromptForm · 视频反推路径", () => {
     fireEvent.click(confirm); // 快速二次确认应被拦截
     await waitFor(() => expect(reverseMut).toHaveBeenCalledTimes(1));
     expect(reverseMut).toHaveBeenCalledTimes(1);
+  });
+
+  // ══ REVERSE-DEEP-UI-0001-FIX1 · 承重门 9–11 ═══════════════════════════════════════════════
+  // 承重门9「报价与实扣同源」：弹窗金额必须是 estimate 返回的那个数。
+  // 🔴 变异点就在 reverse-prompt-form.tsx 的 `message={estimate.data ? videoChargeMessage(estimate.data.credits) : …}`：
+  //    把它改回写死 100，本条（长档 250）立刻红 —— 这正是「报价 100、实扣 250」事故的护栏。
+  it("🔴 承重门9 延伸 · 上一条视频的报价不许沿用到当前素材（Code Review 自审 P1）", async () => {
+    // TanStack mutation 重跑时不清 data → 若判据只看「有 data」，换视频后新报价回来之前会显示旧金额。
+    // 这里模拟那一帧：data 还是旧的 100，但它是给 video-asset-OLD 估的，而当前素材是 video-asset-1。
+    estimateState.data = { credits: 100, duration_sec: 3, tier: "video_short" };
+    estimateState.variables = { source_asset_id: "video-asset-OLD" };
+    await switchToVideoAndUpload();
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
+    const dialog = await screen.findByRole("dialog");
+    // 对不上就当没报价：不显示任何金额、也不许提交（变异：删掉 quote 里的资产比对 → 本条红）
+    expect(dialog.textContent ?? "").not.toMatch(/\d/);
+    expect(within(dialog).getByRole("button", { name: copy.reverse.videoChargeConfirm })).toBeDisabled();
+  });
+
+  it("承重门9 · 报价与实扣同源：长档显示 estimate 返回的 250，不是写死的 100", async () => {
+    estimateState.data = { credits: 250, duration_sec: 180, tier: "video_long" };
+    estimateState.variables = { source_asset_id: "video-asset-1" }; // 就是当前这条素材的报价
+    await switchToVideoAndUpload();
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
+    // 打开计费门就必须去 BE 取价（而且带的是本次这条资产，不是随便一个 id）
+    await waitFor(() => expect(estimateMut).toHaveBeenCalledWith({ source_asset_id: "video-asset-1" }));
+    expect(await screen.findByText(copy.reverse.videoChargeMessage(250))).toBeInTheDocument();
+    expect(screen.queryByText(copy.reverse.videoChargeMessage(100))).not.toBeInTheDocument();
+  });
+
+  // 承重门10「estimate 失败不猜数」：不显示任何金额、且挡住提交（宁可挡住也不能报错价）。
+  it("承重门10 · estimate 失败：弹窗不出现任何积分数字，确认按钮禁用且点不动", async () => {
+    estimateState.data = undefined;
+    estimateState.isError = true;
+    await switchToVideoAndUpload();
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(copy.errors.reverseEstimateFailed)).toBeInTheDocument();
+    // 🔴 断的是「整个弹窗里没有任何数字」，而不是「没有 100」——兜底猜一个 88 也必须红。
+    expect(dialog.textContent ?? "").not.toMatch(/\d/);
+    const confirm = within(dialog).getByRole("button", { name: copy.reverse.videoChargeConfirm });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(reverseMut).not.toHaveBeenCalled();
+  });
+
+  // 承重门11「分段进度」：文案跟着 segments_done 走。
+  it("承重门11 · 分段进度：segments_done 从 2 变 4，文案跟着变", async () => {
+    reverseMut.mockResolvedValue({ ...queuedJob(), segments_total: 6, segments_done: 0 });
+    api.getReversePromptJob
+      .mockResolvedValueOnce({ ...queuedJob(), status: "running", segments_total: 6, segments_done: 2 })
+      .mockResolvedValueOnce({ ...queuedJob(), status: "running", segments_total: 6, segments_done: 4 })
+      .mockResolvedValue(succeededJob());
+    await switchToVideoAndUpload();
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
+    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.videoChargeConfirm }));
+    expect(await screen.findByText(copy.reverse.videoSegmentProgress(2, 6), {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(screen.getByText(copy.reverse.videoSegmentEta)).toBeInTheDocument();
+    expect(await screen.findByText(copy.reverse.videoSegmentProgress(4, 6), {}, { timeout: 3000 })).toBeInTheDocument();
+  });
+
+  // 承重门11 的另一半：两字段为 null（图片 / ≤60s 短视频）→ **整块不渲染**，形态与改动前一致。
+  it("承重门11 · segments 为 null：不渲染分段进度，不做假进度条", async () => {
+    reverseMut.mockResolvedValue(queuedJob()); // 无 segments_*
+    api.getReversePromptJob.mockResolvedValue({ ...queuedJob(), status: "running" }); // 一直在跑
+    await switchToVideoAndUpload();
+    fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
+    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.videoChargeConfirm }));
+    // 真轮询过（不是「还没开始所以没渲染」的假绿）
+    await waitFor(() => expect(api.getReversePromptJob).toHaveBeenCalled(), { timeout: 3000 });
+    expect(screen.queryByText(copy.reverse.videoSegmentEta)).not.toBeInTheDocument();
+    expect(screen.queryByText(/正在分析第/)).not.toBeInTheDocument();
   });
 
   it("轮询瞬时失败 → 软提示、不误跳结果页；下一拍自愈后展示", async () => {

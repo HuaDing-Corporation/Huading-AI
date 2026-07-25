@@ -202,10 +202,19 @@ const REVERSE_VIDEO_ANALYSIS = {
     "0-4s 产品特写：保温杯置于大理石台面，暖光扫过，缓慢推近；4-10s 使用场景：手部拧开杯盖，蒸汽升腾，手持跟拍；10-15s 卖点字幕叠加：24 小时保温、便携轻巧，固定机位；15-18s 收尾定格：品牌 logo 与行动号召，环绕收尾。"
 };
 /**
+ * BE 拼好的**完整分镜段（含段头）** —— §八 M2 的 `fill_targets.*.shot_section`。
+ * 🔴 段头由 BE 给、前端只拼不拆，故这里必须**带着段头**存在于串里（前端不再自造 `Shots: ` 前缀）。
+ * ⚠️ 真联调项：BE 合并后按 services/reverse_prompt.py 的实际产出核对段头字面（本包 mock 先行，BE 未合入 develop）。
+ */
+const REVERSE_SHOT_SECTION = `Shots: ${REVERSE_VIDEO_ANALYSIS.shot_summary}`;
+
+/**
  * mock 形态 ③：**视频反推结果**（REVERSE-DEEP-UI-0001）。在图片结果基础上：
  *  - 内嵌 video_analysis（含 shot_summary）；source_media.kind="video" 且有真时长；
- *  - §4.3：结构化提示词末尾**追加 `Shots:` 段**，且 video_gen.prompt / photo.topic 同样带这段
- *    （前端据此把「分镜表」拆成可单独取消的一项 —— splitShotSection）；
+ *  - 🔴 §八 M2 改版：`structured_prompt` 与 `video_gen.prompt` / `photo.topic` 里**都不再含分镜段**，
+ *    分镜段改由 `fill_targets.video_gen.shot_section` / `.seedance_i2v.shot_section` 单独给（含段头）。
+ *    上一版把 `\nShots: …` 拼进这三处，是为了配合前端拆段——契约改掉后那种拼法本身就是错的形状了。
+ *    photo **不给** shot_section（§八 M2 只列 video_gen / seedance_i2v）→ 前端不该给 photo 造分镜项。
  *  - D8：原视频 18s 超出 video_gen 的 4–15s 上限 → duration_sec=15 且 duration_clamped=true，
  *    前端必须显示「原视频 18 秒，…上限 15 秒，已按上限带入」（**不许静默改数**）。
  *    seedance_i2v 区间 5–120 装得下 18s → 不 clamp（同一份结果里两个模块结论不同，正是 clamp 是按模块算的证据）。
@@ -213,24 +222,26 @@ const REVERSE_VIDEO_ANALYSIS = {
 const REVERSE_RESULT_VIDEO = {
   ...REVERSE_RESULT,
   source_media: { kind: "video" as const, width: 1080, height: 1920, duration_sec: 18, aspect_ratio_raw: "9:16" },
-  structured_prompt: {
-    en: `${REVERSE_RESULT.structured_prompt.en}\nShots: ${REVERSE_VIDEO_ANALYSIS.shot_summary}`,
-    zh: `${REVERSE_RESULT.structured_prompt.zh}\n分镜：${REVERSE_VIDEO_ANALYSIS.shot_summary}`
-  },
+  // §八 M2：结构化串不含分镜段 → 与图片形态同构，直接复用（不再追加 Shots:/分镜：）
+  structured_prompt: REVERSE_RESULT.structured_prompt,
   video_analysis: REVERSE_VIDEO_ANALYSIS,
   fill_targets: {
     ...REVERSE_RESULT.fill_targets,
-    seedance_i2v: { ...REVERSE_RESULT.fill_targets.seedance_i2v, duration_sec: 18, duration_clamped: false },
+    seedance_i2v: {
+      ...REVERSE_RESULT.fill_targets.seedance_i2v,
+      shot_section: REVERSE_SHOT_SECTION,
+      duration_sec: 18,
+      duration_clamped: false
+    },
     video_gen: {
       ...REVERSE_RESULT.fill_targets.video_gen,
-      prompt: `${REVERSE_RESULT.fill_targets.video_gen.prompt}\nShots: ${REVERSE_VIDEO_ANALYSIS.shot_summary}`,
+      shot_section: REVERSE_SHOT_SECTION,
       aspect_ratio: "9:16", // 竖屏源 → 映射到视频枚举的 9:16
       duration_sec: 15,
       duration_clamped: true
     },
     photo: {
       ...REVERSE_RESULT.fill_targets.photo,
-      topic: `${REVERSE_RESULT.fill_targets.photo.topic}\nShots: ${REVERSE_VIDEO_ANALYSIS.shot_summary}`,
       aspect_ratio: "9:16" // 图片枚举里也有 9:16
     },
     // 竖屏视频源 → AI 模特（图片枚举）同样映射到 9:16，与 photo 保持一致（D7 是按源算的，不是按模块随便给）。
@@ -288,6 +299,13 @@ interface MockReverseJob {
   /** 视频异步轮询模拟：详情第 2 次读起 queued → succeeded。 */
   polls: number;
   /**
+   * §八 M5 分段进度。🔴 **只有长视频（61–180s）才有值**；图片与 ≤60s 短视频 BE 恒给 null（不伪造）。
+   * 长视频每被轮询一次 `segments_done += 2`（6 段 → 2/6 → 4/6 → 6/6 转 succeeded），
+   * 让「done 从 2 变 4 文案跟着变」可被确定性地测到。
+   */
+  segments_total: number | null;
+  segments_done: number | null;
+  /**
    * REVERSE-DEEP-UI-0001 · mock 形态 ②「**老结构结果**」：反推历史里存着大量深度化之前的结果，
    * 它们**没有** structured_prompt / source_media / shot_summary，fill_targets 也只有旧的那几个键。
    * true → 读模型返回 REVERSE_RESULT_LEGACY，用来真测前端的回落路径（不许白屏 / 不许显示 undefined）。
@@ -311,8 +329,43 @@ const mkReverseJob = (
   error_code: null,
   error_message: null,
   polls: 0,
+  segments_total: null, // 默认无分段（图片 / 短视频）—— 长视频分支显式给值
+  segments_done: null,
   ...seed
 });
+
+// ── 计费预估 (§八 M4 + D9) ────────────────────────────────────────────────────
+/**
+ * 🔴 **三档金额与 BE 同源，逐条给出坐标**（mock 不比 BE 宽松、也不比 BE 严）：
+ *  · image        → `backend/app/services/quota.py:465` `_rate(capability="reverse_prompt", default=Decimal("1.0000"))`
+ *  · video_short  → `backend/app/core/config.py:205` `engine_reverse_prompt_video_credits = 100.0`（D9「现价一字不动」）
+ *  · video_long   → §八 8.3 D9 新增 `ENGINE_REVERSE_PROMPT_VIDEO_LONG_CREDITS=250`
+ * ⚠️ 真联调项：`REVERSE-DEEP-BE-0001` 尚未合入 develop（本包按契约 mock 先行），BE 合并后须逐字复核这三个数
+ *    与 tier 字面量；两处对不上以 BE 为准。
+ * ⚠️ 注意 image 档的 1 积分是 CreditRate 表的**默认**费率，租户可被改写 —— 这正是「前端不许硬编码金额」的由来。
+ */
+const REVERSE_ESTIMATE_IMAGE_CREDITS = 1;
+const REVERSE_ESTIMATE_VIDEO_SHORT_CREDITS = 100;
+const REVERSE_ESTIMATE_VIDEO_LONG_CREDITS = 250;
+/** D9 档位阈值：≤60s 短档，61–180s 长档。**只存在于 mock/BE，前端一个都没有。** */
+const REVERSE_SHORT_TIER_MAX_SEC = 60;
+/**
+ * mock-only：从 asset_id 认时长。BE 是查**上传时已落库的 `duration_ms`**（D9 明确「不由客户端传参决定」），
+ * mock 没有真媒体可查，故用 id 约定：`video-...long...` = 180s 长视频，其余视频 = 3s（e2e fixture 的真时长）。
+ * 图片资产 → null（对应 tier="image"，`duration_sec` 为 null）。
+ */
+const mockAssetDurationSec = (assetId: string): number | null => {
+  if (!assetId.startsWith("video-")) return null; // 图片资产 → tier="image"，没有时长可言
+  return assetId.includes("long") ? 180 : 3; // 约定：id 含 long = 180s 长档；其余 = 3s（e2e fixture 的真时长）
+};
+
+const mockReverseEstimate = (assetId: string) => {
+  const duration = mockAssetDurationSec(assetId);
+  if (duration === null) return { credits: REVERSE_ESTIMATE_IMAGE_CREDITS, duration_sec: null, tier: "image" };
+  return duration <= REVERSE_SHORT_TIER_MAX_SEC
+    ? { credits: REVERSE_ESTIMATE_VIDEO_SHORT_CREDITS, duration_sec: duration, tier: "video_short" }
+    : { credits: REVERSE_ESTIMATE_VIDEO_LONG_CREDITS, duration_sec: duration, tier: "video_long" };
+};
 
 /**
  * 🔴 **唯一的存在性/软删守卫** —— GET/regenerate/save/delete 取 job 必须且只能走这里。
@@ -442,7 +495,10 @@ const reverseJobRead = (j: MockReverseJob) => ({
   cost_cents: j.source_kind === "video" ? 0 : 3,
   created_at: j.created_at,
   updated_at: j.created_at,
-  saved_at: j.saved_at
+  saved_at: j.saved_at,
+  // §八 M5：图片 / ≤60s 短视频恒 null（BE 不伪造）→ 前端据此**整块不渲染**分段进度。
+  segments_total: j.segments_total,
+  segments_done: j.segments_done
 });
 
 /** 列表项 = BE ReversePromptHistoryItem 的 6 字段（schemas:97-103，**无 result**）。 */
@@ -1457,7 +1513,14 @@ export const handlers = [
     // 这才是「rp-* 只能放行」的根因。
     if (typeof sourceAssetId === "string" && sourceAssetId.startsWith("video-")) {
       const id = `rpv-${++reverseSeq}`;
-      const job = mkReverseJob({ id, source_kind: "video", status: "queued" }); // BE 202 queued（非 running）
+      // §八 M5：长视频（61–180s）走分段 → 6 段起步 0/6；短视频恒 null（不伪造进度）。
+      const isLong = (mockAssetDurationSec(sourceAssetId) ?? 0) > REVERSE_SHORT_TIER_MAX_SEC;
+      const job = mkReverseJob({
+        id,
+        source_kind: "video",
+        status: "queued", // BE 202 queued（非 running）
+        ...(isLong ? { segments_total: 6, segments_done: 0 } : {})
+      });
       reverseJobs.set(id, job);
       return HttpResponse.json({ data: reverseJobRead(job), error: null, request_id: "mock-req" }, { status: 202 });
     }
@@ -1519,12 +1582,36 @@ export const handlers = [
   http.get(`${BASE}/api/v1/reverse-prompt/jobs/:id`, ({ params }) => {
     const job = liveJob(String(params.id));
     if (!job) return jobNotFound();
-    // 视频异步：queued/running 每被轮询一次 +1，第 2 次起转 succeeded（含 result.video_analysis）。
+    // 视频异步：queued/running 每被轮询一次 +1。
+    //  · 短视频（无分段）：第 2 次起转 succeeded（含 result.video_analysis）——沿用既有形态，零回归。
+    //  · 长视频（§八 M5 分段）：每轮 segments_done += 2（2/6 → 4/6 → 6/6），跑满才 succeeded。
+    //    D10 决定了「串行不提速」，进度是**逐段真推进**的，故此处也照这个语义推，不按时间编。
     if (job.source_kind === "video" && (job.status === "queued" || job.status === "running")) {
       job.polls += 1;
-      if (job.polls >= 2) job.status = "succeeded";
+      if (job.segments_total !== null) {
+        job.segments_done = Math.min(job.segments_total, (job.segments_done ?? 0) + 2);
+        if (job.segments_done >= job.segments_total) job.status = "succeeded";
+        else job.status = "running";
+      } else if (job.polls >= 2) {
+        job.status = "succeeded";
+      }
     }
     return ok(reverseJobRead(job));
+  }),
+  /**
+   * 计费预估（§八 M4）——**分档计费的唯一权威**。校验镜像 POST /reverse-prompt：
+   * 缺 source_asset_id → 422；多余键 → 422（BE extra="forbid"）。
+   * 🔴 档位由 BE 据**已落库的时长**判定，请求体里没有、也不接受任何时长/档位参数
+   *（前端若想传 duration 来影响报价，会撞上 extra="forbid" 的 422 —— 这道 422 就是「不许客户端定价」的执行面）。
+   */
+  http.post(`${BASE}/api/v1/reverse-prompt/estimate`, async ({ request }) => {
+    const body = (await request.json()) as Record<string, unknown>;
+    const sourceAssetId = body.source_asset_id;
+    if (!sourceAssetId || typeof sourceAssetId !== "string")
+      return err(422, "VALIDATION_ERROR", "source_asset_id is required");
+    const extra = Object.keys(body).filter((k) => k !== "source_asset_id");
+    if (extra.length) return err(422, "VALIDATION_ERROR", `Extra inputs are not permitted: ${extra.join(",")}`);
+    return ok(mockReverseEstimate(sourceAssetId));
   }),
   /**
    * regenerate —— 🔴 FIX3 逐条对齐 BE（读的是源码，不是转述）：

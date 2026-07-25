@@ -20,9 +20,12 @@ import { copy } from "@/lib/copy";
  *  - `aspect_ratio` 由 **BE** 按 D7 映射成目标模块各自的合法枚举（图片 8 档+auto / 视频 7 档+auto 两套不同），
  *    映射不出来给 null（不冒充）。前端不猜；各目标表单消费时再按**自己那份枚举常量**兜一道（单一真源在表单侧，
  *    此处不重复一份枚举以免漂移）。
- * ⚠️ `video_gen.topic`：§4.2 的键列表里没写 topic，但同节抬头写着「既有键全部保留」——两处措辞冲突。
- *    故此处声明为 **optional**（BE 留着也吃、去掉也吃），前端本就不消费它（video_gen 用 prompt 兼作 topic）。
- *    已在回执中作为证伪点提出，待 BE 合并后按真实源码复核。
+ * ✅ `video_gen.topic`：证伪点①已被 §八 **M3** 采纳（§4.2 抬头「既有键全部保留」与键列表漏写 topic 是文档笔误，
+ *    **保留 topic**）。此处维持 optional 声明即可（BE 留着也吃），前端本就不消费它（video_gen 用 prompt 兼作 topic）。
+ * ✅ `shot_section`：证伪点②已被 §八 **M2** 采纳 —— 分镜段**不再拼进 `structured_prompt.en`**（那是隐式字符串协议，
+ *    逼前端解析段头才能单独取消，脆弱）。改为 BE 单独给一个**拼好的完整分镜段文本（含段头）**，
+ *    **前端只拼不拆**（消费处见 prefill-confirm-dialog 的 shots 伪项 + joinShotSection）。
+ *    只有 video_gen / seedance_i2v 有此键（§八 M2 只列这两个模块）；photo 没有 → 不造分镜项。
  */
 export interface ReversePromptFillTargets {
   avatar_talk: { topic: string; script: string };
@@ -31,13 +34,15 @@ export interface ReversePromptFillTargets {
     script?: string;
     scene_prompt: string;
     negative_prompt?: string;
+    shot_section?: string | null; // §八 M2：完整分镜段（含段头），拼在 scene_prompt 末尾
     duration_sec?: number;
     duration_clamped?: boolean;
   };
   video_gen: {
-    topic?: string; // 见上方 ⚠️：§4.2 键列表未列、抬头称保留 → optional，前端不消费
+    topic?: string; // §八 M3 明确保留（现状即有，back-compat）；前端不消费
     prompt: string;
     negative_prompt?: string;
+    shot_section?: string | null; // §八 M2：完整分镜段（含段头），拼在 prompt 末尾
     aspect_ratio?: string | null;
     duration_sec?: number;
     duration_clamped?: boolean;
@@ -102,8 +107,10 @@ export interface ReverseSourceMedia {
 
 /**
  * REVERSE-DEEP-UI-0001 §4.1/§4.3 新增 —— 结构化主提示词。
- * `en` 分行标注版（Subject:/Scene:/Composition:/Camera:/Lighting:/Motion:/Style:，视频末尾追加 Shots:）供 provider 消费；
+ * `en` 分行标注版（Subject:/Scene:/Composition:/Camera:/Lighting:/Motion:/Style:）供 provider 消费；
  * `zh` 同结构中文版仅供界面展示与用户理解。
+ * 🔴 §八 M1/M2 两处修订：① 由 BE service **确定性拼装**（不再问模型要，避免二次摘要丢信息）；
+ *    ② **不含分镜段** —— 分镜走独立的 `fill_targets.*.shot_section`，故前端展示时**直接整串渲染、不做任何拆分**。
  * ⚠️ optional：老数据/历史记录没有本字段 → 展示与带入**回落** prompt_zh / prompt_en（必测，不许白屏/undefined）。
  */
 export interface ReverseStructuredPrompt {
@@ -155,13 +162,42 @@ export interface ReversePromptJobRead {
   created_at: string;
   updated_at: string;
   saved_at?: string | null;
+  /**
+   * §八 M5 分段进度（D10「保持串行、把进度说清楚」的代价转嫁面）：串行推进时 BE 逐段更新。
+   * 🔴 **图片路与 ≤60s 短视频路两者恒 null**（BE 不伪造）→ 前端 null 时**什么都不渲染**，
+   *    绝不拿 0/undefined 兜出一个假进度（「别做假进度条」）。
+   */
+  segments_total?: number | null;
+  segments_done?: number | null;
 }
 
 /**
- * 视频反推·租户计费：固定 100 积分/次（确认弹窗展示；扣费在后端 submit 时以 UsageRecord 记，与 job.credits 无关）。
- * 注意区分：本常量=租户扣费口径；job.credits=provider 引擎成本，二者语义不同，界面计费门只用本常量。
+ * 计费档位（镜像 §八 M4 的 `tier: "image" | "video_short" | "video_long"`）。
+ * 🔴 前端**只透传展示，不参与判档**：阈值（60s/180s）与金额（100/250）全在 BE，
+ *    此处出现任何阈值常量都是 D9 明令禁止的漂移源。
  */
-export const REVERSE_VIDEO_CREDITS = 100;
+export type ReverseEstimateTier = "image" | "video_short" | "video_long";
+
+/** `POST /reverse-prompt/estimate` 响应（§八 M4）。duration_sec 图片为 null。 */
+export interface ReversePromptEstimate {
+  credits: number;
+  duration_sec: number | null;
+  tier: ReverseEstimateTier;
+}
+
+/**
+ * 反推计费预估 —— **分档计费的唯一权威**（§八 M4，仿既有 `POST /videos/estimate` 先例）。
+ *
+ * 🔴 为什么必须走这条：D9 把视频反推改成按时长分档（≤60s / 61–180s 两档，图片另算），而
+ *    **档位阈值与积分数一律不许在前端硬编码**。前端自己判档 = 「报价 100、实扣 250」级资金体验事故。
+ *    档位由 BE 用**上传时已落库的 duration_ms** 判定，不由客户端传参决定（故请求体只有 source_asset_id）。
+ * 🔴 调用失败时调用方**不许猜一个数字兜底**：不显示金额、不允许提交（宁可挡住也不能报错价）。
+ *    这与既有 `ConfirmGenerateDialog` 的「暂无法预估，按实际结算」**语义相反**，故不复用那套文案。
+ *    差别在于：那边是按实际用量事后结算（估不准无所谓），这边是**一口价预扣**（估错就是扣错）。
+ */
+export function estimateReversePrompt(input: ReverseFromAssetInput): Promise<ReversePromptEstimate> {
+  return apiFetch<ReversePromptEstimate>("/api/v1/reverse-prompt/estimate", { method: "POST", body: input });
+}
 
 /** 反推任务是否终态（用于视频异步轮询判定；图片同步不经此路径）。 */
 export function isReverseSettled(status: string): boolean {
@@ -288,6 +324,8 @@ export type WorkbenchPrefill =
       scenePrompt?: string;
       script?: string;
       negativePrompt?: string;
+      /** §八 M2 分镜段（含段头）。**展示用中间态**：确认弹窗里作为可单独取消的一项，勾选则拼进 scenePrompt。 */
+      shotSection?: string;
       durationSec?: number;
       durationClamped?: boolean;
     }
@@ -295,6 +333,8 @@ export type WorkbenchPrefill =
       target: "video_gen";
       prompt?: string;
       negativePrompt?: string;
+      /** 同上，勾选则拼进 prompt。 */
+      shotSection?: string;
       aspectRatio?: string;
       durationSec?: number;
       durationClamped?: boolean;
@@ -303,37 +343,21 @@ export type WorkbenchPrefill =
   | { target: "photo"; prompt?: string; masterPrompt?: string; negativePrompt?: string; aspectRatio?: string }
   | { target: "ecom_image"; tool: "model"; custom?: string; aspectRatio?: string };
 
-/** 结构化提示词里的分镜段标记（§4.3：视频反推在 en 末尾追加 `Shots:` 段；中文版用「分镜」）。 */
-const SHOT_SECTION_RE = /\n\s*(?:Shots?|分镜表?)\s*[:：]\s*/;
-
 /**
- * 把结构化提示词拆成「正文」与「分镜段」（REVERSE-DEEP-UI-0001 · 范围4）。
+ * 勾选分镜表时把 BE 给的分镜段接在主提示词末尾（REVERSE-DEEP-UI-0001-FIX1 · §八 M2）。
  *
- * 为什么要拆：§4.3 规定 BE **已经**把 `shot_summary` 作为 `Shots:` 段追加进 `structured_prompt.en` 末尾，
- * 而范围3 要求「分镜表」是一个**可单独取消勾选**的项。若不拆：
- *   - 直接把 shot_summary 另作一项再拼 → 与正文里已有的那段**重复**；
- *   - 不给分镜项 → 违反「分镜表参与勾选带入」；
- *   - 给了却取消也无效 → 违反「不许显示一个点了没用的开关」。
- * 故此处按标记拆开，勾选时**原样拼回**（与 BE 给的串等价），取消时正文里那段一并不带走。
- * 无标记（老结构/图片反推）→ shots 为空串，调用方据此不渲染分镜项（不造死开关）。
- * ⚠️ 依赖 §4.3 约定的段标记；BE 合并后按真实产出复核（FIX 包真联调项，已在回执列出）。
+ * 🔴 **只拼不拆**。上一版这里还有一个 `splitShotSection`：因为 §4.3 当时把分镜段**拼进** `structured_prompt.en`，
+ *    前端要让「分镜表」可单独取消，就只能靠一条正则去认段头（Shots / 分镜表 + 中英文冒号）把它拆回来。
+ *    那是**隐式字符串协议** —— BE 改一个字（中文段头、多个空行、换成 "Shot list:"）前端就静默失灵，而且拆出来的
+ *    「正文」是否真等于 BE 的原意，代码根本无从校验。§八 M2 已从契约上消灭这个面：分镜段独立成
+ *    `fill_targets.*.shot_section`（BE 拼好、**含段头**），拆的那一半随之删除。
+ * 🔴 段头由 BE 给 → 前端不再自造 `Shots: ` 前缀，上一版注释里记的「恒发英文段头、BE 若给中文串会中英混排」
+ *    这个潜在缺陷**结构性消失**（不是靠测试盯住，是那行代码没有了）。
+ * 空段（trim 后为空）→ 原样返回正文，不留一条尾随空行。
  */
-export function splitShotSection(text: string): { body: string; shots: string } {
-  // 正则要求段前有换行 → 空串/无标记都落到 exec===null 这一支（无需额外空串判空）。无 g 标志，exec 无 lastIndex 状态。
-  const m = SHOT_SECTION_RE.exec(text);
-  if (!m) return { body: text, shots: "" };
-  return { body: text.slice(0, m.index).trimEnd(), shots: text.slice(m.index + m[0].length).trim() };
-}
-
-/**
- * 勾选分镜表时把分镜段拼回正文（与 BE 原串等价的重组，标记逐字对齐 §4.3）。
- * ⚠️ 始终重新发出**英文** `Shots:` 段头。当前无影响：进本函数的只有 `prefill.prompt`，而 §4.2 规定
- *    video_gen.prompt / photo.topic 用的都是 `structured_prompt.**en**`（英文段头）。
- *    若 BE 日后把中文结构化串塞进这些字段，则「中文正文 + 英文段头」会不一致 —— 已列入真联调复核项。
- */
-export function joinShotSection(body: string, shots: string): string {
-  const tail = shots.trim();
-  return tail ? `${body.trimEnd()}\n\nShots: ${tail}` : body;
+export function joinShotSection(body: string, shotSection: string): string {
+  const tail = shotSection.trim();
+  return tail ? `${body.trimEnd()}\n\n${tail}` : body;
 }
 
 /**
@@ -371,6 +395,8 @@ export function fillTargetToPrefill(
             scenePrompt: t.scene_prompt,
             ...(t.script ? { script: t.script } : {}),
             ...(t.negative_prompt ? { negativePrompt: t.negative_prompt } : {}),
+            // §八 M2：BE 给 null（图片/无分镜）或空串 → 不挂 → 确认弹窗不产生分镜项（不造死开关）
+            ...(t.shot_section ? { shotSection: t.shot_section } : {}),
             ...(t.duration_sec !== undefined ? { durationSec: t.duration_sec } : {}),
             ...(t.duration_clamped !== undefined ? { durationClamped: t.duration_clamped } : {})
           }
@@ -385,6 +411,7 @@ export function fillTargetToPrefill(
             prompt: t.prompt,
             // 空串按「没给」处理（同上 seedance 分支的说明：否则会把用户已填的负面词清空）
             ...(t.negative_prompt ? { negativePrompt: t.negative_prompt } : {}),
+            ...(t.shot_section ? { shotSection: t.shot_section } : {}), // §八 M2，同 seedance 分支
             ...(t.aspect_ratio ? { aspectRatio: t.aspect_ratio } : {}),
             ...(t.duration_sec !== undefined ? { durationSec: t.duration_sec } : {}),
             ...(t.duration_clamped !== undefined ? { durationClamped: t.duration_clamped } : {}),
