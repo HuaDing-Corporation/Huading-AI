@@ -38,9 +38,14 @@ afterEach(() => vi.clearAllMocks());
 // 而 onGenerate 在**点击那一刻**就把 payload（含/不含 image_keys）冻结进 requestConfirm——之后再怎么
 // await 都救不回来。原来只等 `waitRefUploaded`（= 观测 picker 的 items）**只覆盖了这条级联的第一环**，
 // 满负载/高争抢下后面几环会拖过它的放行点 → 点击时 refKeys 仍是 [] → 提交体整个不带 image_keys（undefined）。
-// 实测复现率：修前 1/40（8 并发 × 5 轮），修后见回执。
-// act 的异步形态会把「promise 全部落定 + effect 全部冲刷 + 级联重渲染全部提交」跑到静止再返回，
-// 于是这条级联在结构上不可能只跑一半。**不是加延时、不是调大 timeout、不是 retry。**
+// **不是加延时、不是调大 timeout、不是 retry。**
+//
+// 🔴 措辞更正（CB#3 在 #230 提、REF-VIDEOS-PICKER-FLAKE-FIX 一并收）：原文写的是「promise 全部落定……
+// 结构上不可能只跑一半」，**说过头了**。act 排空的是**微任务链**，对任意延迟 promise 并不成立。
+// 它在这里成立，是因为上传 mock 用的是**立刻落定的 `Promise.resolve`**（见上方 mockImplementation），
+// 且 picker 虽用 `void onFiles(...)` 丢掉了 promise，其后续仍都在微任务上，act 等得到。
+//   ❌ 不覆盖：真实计时器 / 宏任务（setTimeout、rAF）、要等真网络的 promise、以及在 act 返回**之后**
+//      才落定的工作。若哪天把上传 mock 改成延迟落定，这道门会失效，要换显式同步点而不是再包一层 act。
 async function uploadReferenceImages(n = 1) {
   const input = document.querySelector('input[type="file"]') as HTMLInputElement;
   const files = Array.from({ length: n }, (_, i) => new File(["x"], `r${i}.png`, { type: "image/png" }));
