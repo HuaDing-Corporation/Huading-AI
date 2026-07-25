@@ -186,31 +186,44 @@ describe("反推详情 GET /reverse-prompt/jobs/{id}", () => {
    * 🔴 前缀与英文原文之间是**一个半角空格**（`f"{PREFIX} {english_value}"`，services:831）。
    * 🔴 降级是**逐字段**的：同一份结果里可以有的行降级、有的行正常 —— 只准备「全降级」样本会漏掉
    *    真实里最常见的半降级形态。
-   * 变异：改动前缀任一个字（含标点/空格）→ 本条必红。
+   * 变异：改动前缀任一个字（含标点/空格）、或去掉方括号把降级行伪装成正常行 → 本条必红。
    */
   it("🔴 承重门2 · 中文缺失降级：前缀逐字为「[中文缺失，以下为英文原文] 」且逐字段生效", async () => {
     const sp = (await getReversePromptJob("rh-img-zh-degraded")).result!.structured_prompt!;
     const PREFIX = "[中文缺失，以下为英文原文]";
+    const HAN = /[㐀-䶿一-鿿]/;
     const zhLines = sp.zh.split("\n");
     const enLines = sp.en.split("\n");
+    const valueOf = (line: string) => line.split(": ").slice(1).join(": ");
 
-    const degraded = zhLines.filter((l) => l.includes(PREFIX));
-    const normal = zhLines.filter((l) => !l.includes(PREFIX));
-    // 逐字段降级：两种行都得有（全降级或全不降级都说明样本没覆盖到这个语义）
-    expect(degraded.length).toBeGreaterThan(0);
-    expect(normal.length).toBeGreaterThan(0);
-
-    for (const line of degraded) {
-      const [label, ...rest] = line.split(": ");
-      const value = rest.join(": ");
-      // 前缀 + 一个半角空格 + 英文原文；且英文原文逐字等于 .en 同标签行的值
-      expect(value.startsWith(`${PREFIX} `)).toBe(true);
-      const englishInZh = value.slice(PREFIX.length + 1);
-      const idx = zhLines.indexOf(line);
-      expect(englishInZh, `降级行「${label}」的英文原文应与 .en 同位置逐字相同`).toBe(
-        enLines[idx].split(": ").slice(1).join(": ")
-      );
+    // 🔴 判据是**穷举每一行**，不是「至少有一行降级」。
+    //    第一版我写的是 `filter(l => l.includes(PREFIX)).length > 0` —— 变异检验时它**抓不住**
+    //    「把某一行的前缀改错一个字」：那行只是从 degraded 桶掉进 normal 桶，两个 length 都还 > 0，测试照绿。
+    //    现在按 BE 的真实产出穷举：`_structured_zh_value`（services:827-831）只会产出两种值 ——
+    //      (a) 模型给的**纯中文**；(b) `[前缀] <英文原文>`（前缀后一个半角空格）。
+    //    于是每行只有两条合法路：以 `[` 开头就必须逐字是 (b)；否则必须是 (a)。
+    let degradedCount = 0;
+    let normalCount = 0;
+    for (const [idx, line] of zhLines.entries()) {
+      const value = valueOf(line);
+      const enValue = valueOf(enLines[idx]);
+      if (value.startsWith("[")) {
+        // 任何「看起来像降级」的行，前缀 + 空格 + 英文原文都必须**逐字**对上（改一个字即红）
+        expect(value, `第 ${idx + 1} 行降级形态应逐字匹配 BE 的 _STRUCTURED_ZH_FALLBACK_PREFIX`).toBe(
+          `${PREFIX} ${enValue}`
+        );
+        degradedCount += 1;
+      } else {
+        expect(value, `第 ${idx + 1} 行应为纯中文值`).toMatch(HAN);
+        // 🔴 正常行不许夹带英文原文 —— 否则「去掉方括号」就能把一个降级行伪装成正常行蒙混过关
+        //   （它仍含「中文缺失」等汉字，只靠 HAN 判据是抓不住的；这条是变异 2b 逼出来的）。
+        expect(value, `第 ${idx + 1} 行是正常中文行，不该夹带 .en 的英文原文`).not.toContain(enValue);
+        normalCount += 1;
+      }
     }
+    // 逐字段降级：两种行都得有（全降级或全不降级都说明样本没覆盖到这个语义）
+    expect(degradedCount).toBeGreaterThan(0);
+    expect(normalCount).toBeGreaterThan(0);
   });
 
   /**
