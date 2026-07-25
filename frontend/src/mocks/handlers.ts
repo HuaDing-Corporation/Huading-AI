@@ -389,9 +389,11 @@ function sseStream(id: string, fail = false): Response {
       let i = 0;
       const push = () => {
         if (beatMode && i >= 1) {
-          // 只发心跳：progress/step 逐字照抄第一帧，只多 heartbeat_at；**不写 videos**
+          // 只发心跳：progress/step 逐字照抄第一帧，只多 heartbeat_at（形状见 beHeartbeatNow）；**不写 videos**
           // （BE 侧 progress store 同样不变；写了会让 heartbeat_at 从 GET /videos/{id} 漏出去 = mock 比 BE 宽松）。
-          controller.enqueue(enc.encode(`data: ${JSON.stringify({ ...frames[0], heartbeat_at: new Date().toISOString() })}\n\n`));
+          // 🔴 通道① 的规矩：**非心跳帧整个键不出现**（BE videos.py:1489 只在 is not None 时写入），
+          // 所以下面的普通帧不带这个键、也不写成 null。
+          controller.enqueue(enc.encode(`data: ${JSON.stringify({ ...frames[0], heartbeat_at: beHeartbeatNow() })}\n\n`));
           setTimeout(push, 500);
           return;
         }
@@ -1076,6 +1078,18 @@ function ecomBuildOutputs(jobId: string, mode: string, refs: string[], products:
     actual_height: null
   }));
 }
+/**
+ * 心跳时间戳 —— **逐字照抄 BE 形状**（GEN-HEARTBEAT-UI-0001 · FIX2 真联调实测）。
+ *
+ * BE 是 Python `datetime.now(UTC).isoformat()`，实测产出 `"2026-07-25T13:16:56.439672+00:00"`：
+ * **6 位微秒 + `+00:00` 偏移**；而 JS 的 `toISOString()` 产出 `"2026-07-25T13:19:29.951Z"`：**3 位毫秒 + `Z`**。
+ * 两者都是合法 ISO8601，**但字面不同** —— #220 刚吃过大亏：两个用户可见缺陷全部由「mock 形状与 BE 不同」
+ * 结构性遮住。故这里把毫秒补齐到微秒位（补 0，不编造精度）、偏移写成 +00:00，与 BE 逐字同形。
+ */
+function beHeartbeatNow(): string {
+  return new Date().toISOString().replace(/\.(\d{3})Z$/, ".$1000+00:00");
+}
+
 // EcomReplicateAccepted 形状（POST /replicate 与 GET 共用）。
 function ecomAcceptedResponse(j: MockEcomJob) {
   return {
@@ -1083,10 +1097,11 @@ function ecomAcceptedResponse(j: MockEcomJob) {
     total_credits: j.total_credits, credit_rate: j.credit_rate, requested_size: j.requested_size, requested_aspect: j.requested_aspect,
     // GEN-HEARTBEAT-UI-0001 · FIX1 通道②：详情图**没有 SSE**，心跳走本轮询响应。
     // 只在**生成中**给心跳（终态没有"还活着"这回事）。
+    // 🔴 键**恒存在**（BE schema `str | None` 默认 None，FIX2 实测）——与通道① 的"整键不出现"相反，别搞混。
     // 🔴 Redis 不可用时 BE 降级为 `heartbeat_at: null`、**业务轮询不受影响** —— mock 忠实提供这条降级路径
     // 供承重：localStorage.setItem("hd_mock_heartbeat_null", "1")。
     heartbeat_at:
-      j.status === "generating" && readLS("hd_mock_heartbeat_null") !== "1" ? new Date().toISOString() : null,
+      j.status === "generating" && readLS("hd_mock_heartbeat_null") !== "1" ? beHeartbeatNow() : null,
     plan: {
       outputs: j.outputs.map((o) => ({
         id: o.id, index: o.index, theme: o.theme, reference_asset_id: o.reference_asset_id, product_asset_id: o.product_asset_id,
