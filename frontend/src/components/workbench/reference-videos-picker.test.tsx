@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { copy } from "@/lib/copy";
@@ -34,9 +34,27 @@ beforeEach(() => {
 });
 afterEach(() => vi.clearAllMocks());
 
-const pickFiles = (...names: string[]) => {
+// 🔴 REF-VIDEOS-PICKER-FLAKE-FIX：必须 `await`。
+// onFiles 是异步的（inspect → 上传 → setItems），而 **D10 联动前置闸读的是 `itemsRef.current`**
+// （picker :92 `batchTotal = itemsRef.current.reduce(...)`），那个 ref 由 `useEffect([items])`
+// 在 **commit 之后** 才同步（picker :64-67，注释亦自陈「itemsRef 在 render 前不更新」）。
+// 而 DOM 上的「（n/3）」计数在 commit 当刻就变了 —— 所以「等到计数」**严格早于**「闸能看见这一条」。
+// 于是第二次 pickFiles 若抢在那个 effect 之前，闸读到空 ref → 12s 这条不计入 → nextTotal=0+8 < 15.2
+// → b.mp4 被放行上传 → 超限提示永不出现（实测失败形态正是 `Unable to find 合计时长已超 15.2 秒上限`）。
+// **不是加延时、不是调大 timeout、不是 retry**；被守的行为与断言一字未改。
+//
+// 这道同步点**覆盖什么 / 不覆盖什么**（写死边界，别让下一个人以为它比实际结实）：
+//   ✅ 覆盖：本流程的每一步异步都**立即落定**（`inspect` 与上传 mock 都是 `Promise.resolve`），
+//      act 的异步形态会把这条**微任务链**连同它触发的 effect、重渲染一起排空到静止 —— itemsRef 必然已同步。
+//      picker 用 `void onFiles(...)` 丢掉了这个 promise，但只要它的后续都在微任务上，act 照样等得到。
+//   ❌ 不覆盖：**真实计时器 / 宏任务**（setTimeout、rAF）、要等真网络的 promise、以及任何在 act 返回**之后**
+//      才落定的工作。**若哪天把 `inspect` 或上传 mock 改成延迟落定（setTimeout / 真实 fetch），这道门就会失效**，
+//      届时要换成对"闸真正依赖的状态"的显式同步点，而不是把 act 再包一层。
+const pickFiles = async (...names: string[]) => {
   const input = document.querySelector('input[type="file"]') as HTMLInputElement;
-  fireEvent.change(input, { target: { files: names.map((n) => new File([""], n, { type: "video/mp4" })) } });
+  await act(async () => {
+    fireEvent.change(input, { target: { files: names.map((n) => new File([""], n, { type: "video/mp4" })) } });
+  });
 };
 const uploadBtn = () => screen.getByRole("button", { name: /添加参考视频/ });
 
@@ -48,7 +66,7 @@ describe("ReferenceVideosPicker (V2V · D5/D9/D10)", () => {
 
   it("上传 1 条（5s）→ 计数 1/3 + 合计时长显示 5.0 秒 + <video> 预览", async () => {
     render(<ReferenceVideosPicker inspect={inspect} />);
-    pickFiles("a.mp4");
+    await pickFiles("a.mp4");
     await waitFor(() => expect(screen.getByRole("button", { name: /（1\/3）/ })).toBeInTheDocument());
     expect(screen.getByText(copy.workbench.vgRefVideoTotal("5.0"))).toBeInTheDocument();
     expect(document.querySelector("video")).not.toBeNull(); // 视频预览分支（非 <img>）
@@ -59,9 +77,9 @@ describe("ReferenceVideosPicker (V2V · D5/D9/D10)", () => {
   it("D10 联动前置闸：已 12s 再传 8s → 第二条被拒不上传（合计超限提示），已传保持 1 条", async () => {
     inspectByName = { "a.mp4": passing(12), "b.mp4": passing(8) };
     render(<ReferenceVideosPicker inspect={inspect} />);
-    pickFiles("a.mp4");
+    await pickFiles("a.mp4");
     await waitFor(() => expect(screen.getByRole("button", { name: /（1\/3）/ })).toBeInTheDocument());
-    pickFiles("b.mp4");
+    await pickFiles("b.mp4");
     await waitFor(() => expect(screen.getByText(copy.workbench.vgRefVideoTotalOver)).toBeInTheDocument());
     expect(screen.getByRole("button", { name: /（1\/3）/ })).toBeInTheDocument(); // 仍 1 条
     expect(uploadMock.mutateAsync).toHaveBeenCalledTimes(1); // b.mp4 未发上传请求
@@ -73,7 +91,7 @@ describe("ReferenceVideosPicker (V2V · D5/D9/D10)", () => {
   it("FIX2 同批多选 8s+8s → 只上传一次（本批累计闸拦第二条）+ 超限提示", async () => {
     inspectByName = { "a.mp4": passing(8), "b.mp4": passing(8) };
     render(<ReferenceVideosPicker inspect={inspect} />);
-    pickFiles("a.mp4", "b.mp4"); // 同一个 FileList
+    await pickFiles("a.mp4", "b.mp4"); // 同一个 FileList
     await waitFor(() => expect(screen.getByText(copy.workbench.vgRefVideoTotalOver)).toBeInTheDocument());
     expect(screen.getByRole("button", { name: /（1\/3）/ })).toBeInTheDocument();
     expect(uploadMock.mutateAsync).toHaveBeenCalledTimes(1); // 第二条在上传前被本批累计闸拦下
@@ -82,7 +100,7 @@ describe("ReferenceVideosPicker (V2V · D5/D9/D10)", () => {
   it("FIX2 同批 5s+5s+5s（合计 15 < 15.2 合法）→ 三条全上传", async () => {
     inspectByName = { "a.mp4": passing(5), "b.mp4": passing(5), "c.mp4": passing(5) };
     render(<ReferenceVideosPicker inspect={inspect} />);
-    pickFiles("a.mp4", "b.mp4", "c.mp4");
+    await pickFiles("a.mp4", "b.mp4", "c.mp4");
     await waitFor(() => expect(screen.getByRole("button", { name: /（3\/3）/ })).toBeInTheDocument());
     expect(uploadMock.mutateAsync).toHaveBeenCalledTimes(3);
   });
@@ -91,7 +109,7 @@ describe("ReferenceVideosPicker (V2V · D5/D9/D10)", () => {
   it("合计恰 1.8s（单条 1.8s 合法）→ low 提示（开区间对齐 BE）", async () => {
     inspectByName = { "a.mp4": passing(1.8) };
     render(<ReferenceVideosPicker inspect={inspect} />);
-    pickFiles("a.mp4");
+    await pickFiles("a.mp4");
     await waitFor(() => expect(screen.getByText(new RegExp(copy.workbench.vgRefVideoTotalLow))).toBeInTheDocument());
   });
 
@@ -99,7 +117,7 @@ describe("ReferenceVideosPicker (V2V · D5/D9/D10)", () => {
   it("3 条上限：一次选 4 个 → 只收 3 条 + 超数提示；按钮转满额禁用", async () => {
     inspectByName = { "a.mp4": passing(2), "b.mp4": passing(2), "c.mp4": passing(2), "d.mp4": passing(2) };
     render(<ReferenceVideosPicker inspect={inspect} />);
-    pickFiles("a.mp4", "b.mp4", "c.mp4", "d.mp4");
+    await pickFiles("a.mp4", "b.mp4", "c.mp4", "d.mp4");
     await waitFor(() => expect(screen.getByRole("button", { name: /（3\/3）/ })).toBeInTheDocument());
     expect(screen.getByText(copy.workbench.vgRefVideoOverCount)).toBeInTheDocument();
     expect(uploadBtn()).toBeDisabled();
@@ -110,7 +128,7 @@ describe("ReferenceVideosPicker (V2V · D5/D9/D10)", () => {
   it("单条 20s → 拒绝提示「15 秒以内」，不上传", async () => {
     inspectByName = { "long.mp4": rejecting(copy.workbench.vgRefVideoTooLong) };
     render(<ReferenceVideosPicker inspect={inspect} />);
-    pickFiles("long.mp4");
+    await pickFiles("long.mp4");
     await waitFor(() => expect(screen.getByText(copy.workbench.vgRefVideoTooLong)).toBeInTheDocument());
     expect(uploadMock.mutateAsync).not.toHaveBeenCalled();
   });
@@ -119,7 +137,7 @@ describe("ReferenceVideosPicker (V2V · D5/D9/D10)", () => {
   it("转码/降码告知徽标：willTranscode + willDownscale 显示在预览上", async () => {
     inspectByName = { "a.mp4": passing(5, { willTranscode: true, willDownscale: true }) };
     render(<ReferenceVideosPicker inspect={inspect} />);
-    pickFiles("a.mp4");
+    await pickFiles("a.mp4");
     await waitFor(() => expect(screen.getByText(new RegExp(copy.workbench.vgRefVideoWillTranscode))).toBeInTheDocument());
     expect(screen.getByText(new RegExp(copy.workbench.vgRefVideoWillDownscale))).toBeInTheDocument();
   });
@@ -131,7 +149,7 @@ describe("ReferenceVideosPicker (V2V · D5/D9/D10)", () => {
   it("有压缩/转码徽标时删除按钮仍可点且能删除；徽标在底部条、按钮 z-10（结构互不遮挡）", async () => {
     inspectByName = { "a.mp4": passing(5, { willTranscode: true, willDownscale: true }) };
     render(<ReferenceVideosPicker inspect={inspect} />);
-    pickFiles("a.mp4");
+    await pickFiles("a.mp4");
     await waitFor(() => expect(screen.getByRole("button", { name: /（1\/3）/ })).toBeInTheDocument());
     // ② 结构：按钮提层；告知徽标位于 pointer-events-none 底部条（不在顶部角与按钮抢位）。
     const del = screen.getByRole("button", { name: copy.workbench.removeVideo });
@@ -157,7 +175,7 @@ describe("ReferenceVideosPicker (V2V · D5/D9/D10)", () => {
   it("移除一条 → 合计随之更新、object URL 释放", async () => {
     inspectByName = { "a.mp4": passing(6), "b.mp4": passing(4) };
     render(<ReferenceVideosPicker inspect={inspect} />);
-    pickFiles("a.mp4", "b.mp4");
+    await pickFiles("a.mp4", "b.mp4");
     await waitFor(() => expect(screen.getByText(copy.workbench.vgRefVideoTotal("10.0"))).toBeInTheDocument());
     fireEvent.click(screen.getAllByRole("button", { name: copy.workbench.removeVideo })[0]);
     expect(screen.getByText(copy.workbench.vgRefVideoTotal("4.0"))).toBeInTheDocument();
