@@ -4,7 +4,7 @@ import { expect, test, type Page } from "@playwright/test";
  * HISTORY-IMAGE-TAB-UI-0001 交互冒烟（生产构建 next start，真走 MSW /history/images list/detail + 6 category）：
  * 图片历史已并进工作台「历史生成」的图片 tab（/history 独立页下线）。验证：6 分类 chip → 切「电商·详情图」→
  * 「查看详情」重开整套(5 张 + 下载原图 + 信息并集：状态/分类/张数) → 点图开大图弹窗 → partial 缺图不死链。
- * FIX1：归一 API 的图片删除端点被摘（用户「三拆」改 GC 方案）→ 图片 tab 暂无删除入口，本冒烟不再测删除。
+ * HISTORY-CHAT-DELETE-UI-0001：删除入口复活（纯记录软删，不碰媒体）→ 本冒烟末尾追加「删一条 → 卡片真的消失、其余不少」。
  * 全程无 #130 白屏 / 无 /api/api 双前缀。需 NEXT_PUBLIC_USE_MOCK=1 构建后 next start。
  */
 function watch(page: Page): { errors: () => string[]; doublePrefix: () => string[] } {
@@ -86,6 +86,38 @@ test("详情套（partial_failed）→ 只返 11 张成功、全部可下载(非
   await expect(links).toHaveCount(11, { timeout: 15_000 });
   await expect(links.first()).toHaveAttribute("href", /\?dl=1$/);
   await expect(page.getByText("本套部分图片生成失败，仅展示成功生成的图片")).toBeVisible();
+
+  expect(g.errors(), `page errors：\n${g.errors().join("\n")}`).toEqual([]);
+  expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);
+});
+
+// HISTORY-CHAT-DELETE-UI-0001 · 真栈删除冒烟：卡片删除入口（**底部行、不与缩略图角标抢位**——#218 教训）
+// → 二次确认 → 该卡真的从列表消失、其余一条不少。mock 是**真删**（从 historyImageRecords 移除），
+// 所以"删除后列表刷新"这条在真栈里是可证的（不是返 200 而列表照旧）。
+test("图片 tab：删一条 → 二次确认 → 卡片消失、其余不少（Console 0）", async ({ page }) => {
+  const g = watch(page);
+  await login(page);
+  await page.getByRole("tab", { name: "图片历史" }).click();
+  await page.getByRole("button", { name: "图片生成/修改" }).click();
+
+  const cards = page.getByTestId("history-card");
+  await expect(cards.first()).toBeVisible({ timeout: 15_000 });
+  const firstTitle = ((await cards.first().locator("p").first().textContent()) ?? "").trim();
+  expect(firstTitle).not.toBe("");
+  // 该标题此刻确实在页面上（删除前的基线）。
+  await expect(page.getByText(firstTitle, { exact: true })).toHaveCount(1);
+
+  // 删除按钮在卡片底部行，与「查看详情」同排（不在缩略图内）。
+  await cards.first().getByRole("button", { name: "删除" }).click();
+  await expect(page.getByText("将从历史移除，无法撤销。")).toBeVisible();
+  await page.getByRole("button", { name: "确认删除" }).click();
+
+  // 🔴 断言「被删的那条真的消失」而不是「总数 -1」：本页 page_size=20 且该分类种子 >20，
+  // 删一条后 infiniteQuery 重取会把下一条补进首页 → 总数仍是 20（分页语义的正常行为，非漏删）。
+  // 「那条不见了」才是删除的可观察后果，也不受补位干扰。
+  await expect(page.getByText(firstTitle, { exact: true })).toHaveCount(0, { timeout: 15_000 });
+  // 且列表没被清空/塌陷（其余条目仍在）。
+  expect(await cards.count()).toBeGreaterThan(1);
 
   expect(g.errors(), `page errors：\n${g.errors().join("\n")}`).toEqual([]);
   expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);

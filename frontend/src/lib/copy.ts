@@ -848,6 +848,14 @@ export const copy = {
     retry: "重试",
     loadMore: "加载更多",
     itemCount: (n: number) => `${n} 张`,
+    // ── 删除 / 清空（HISTORY-CHAT-DELETE-UI-0001）──────────────────────────────
+    // 🔴 文案纪律（本项目栽过两次，见 history.deleteConfirmNoUndo 的长注释）：只讲**用户看得见的后果**。
+    // 复用 copy.history 的 deleteItem / deleteConfirmTitle / **deleteConfirmNoUndo** / deleteConfirmBtn /
+    // clearConfirmBtn / deleteFailed / clearFailed —— 值逐字相同就共用一个 key，不造同义 key（会各改各的）。
+    // 这里只补**图片历史专属**的两句：清空是「当前分类」（不是全部），且同样无恢复入口。
+    clearCategory: "清空当前分类",
+    clearCategoryConfirmTitle: "清空当前分类？",
+    clearCategoryConfirmMsg: "将从历史移除当前分类的全部记录，无法撤销；其它分类不受影响。",
     // 状态徽标（归一 completed/partial_failed/failed/ready）
     statusCompleted: "已完成",
     statusPartial: "部分失败",
@@ -1417,6 +1425,18 @@ export const copy = {
     conversationsTitle: "对话",
     conversationsEmpty: "还没有对话，点「新建对话」开始。",
     untitled: "新对话",
+    // ── 删除 / 清空（HISTORY-CHAT-DELETE-UI-0001，E2 只删整会话）─────────────────
+    // 同上文案纪律：讲用户可观察后果，**不提 BE 软删**。会话不是"历史记录"故不复用 historyImages 的措辞，
+    // 但同样是「删了就没了、没有恢复入口」；「不影响推理积分与账单」是用户真正关心且可核查的事实
+    // （冻结 §5.2：只写 conversations.deleted_at，不碰 chat_messages / 账本 / 钱包）。
+    deleteChat: "删除对话",
+    deleteChatConfirmTitle: "删除这个对话？",
+    deleteChatConfirmMsg: "对话及其消息将从列表移除，无法撤销；不影响推理积分余额与账单。",
+    clearChats: "清空全部对话",
+    clearChatsConfirmTitle: "清空全部对话？",
+    clearChatsConfirmMsg: "全部对话将从列表移除，无法撤销；不影响推理积分余额与账单。",
+    deleteChatFailed: "删除失败，请重试",
+    clearChatsFailed: "清空失败，请重试",
     // 空 / 加载 / 错误态
     emptyTitle: "开始和华鼎AI智脑对话",
     emptyHint: "选一个智能强度，输入问题，或上传图片 / 文档。",

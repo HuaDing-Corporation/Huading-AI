@@ -163,9 +163,37 @@ export function getHistoryImageSet(category: HistoryCategory | string, id: strin
   return apiFetch<HistoryImageSet>(`${BASE}/${encodeURIComponent(category)}/${encodeURIComponent(id)}`, { method: "GET" });
 }
 
-// FIX1（HISTORY-IMAGE-TAB-UI-0001）：归一 API 的图片删除端点被摘掉——#175 的同步删除媒体经 Codex B 三轮审查
-// 出七八条 P1（共享 Asset 误删 / 批次半删 / 跨租户路径穿越 / TOCTOU），用户「三拆」改 GC 方案将来补。
-// 故此处不再导出图片删除 adapter（不留死代码）；GC 包上线时原样复活。
+// ── 删除（HISTORY-CHAT-DELETE-UI-0001，契约 §5.1）─────────────────────────────
+// FIX1 曾摘掉删除 adapter（#175 的**同步删媒体**经 Codex B 三轮审查出七八条 P1 → 用户三拆）。本包按冻结文档
+// §二复活：**只删记录（BE 只写 deleted_at），一律不碰媒体与 Asset**——媒体回收仍归 GC。照抄唯一活着通过 CB 的
+// 删除端点（反推 DELETE /reverse-prompt/jobs/{id}，纯软删）的形状。跨租户 → 404（BE 租户过滤）。
+// ⚠️ 用户侧语义 = **删了就没了**（E1 无恢复入口）；文案讲可观察后果，不讲 BE 软删实现（见 copy.history.deleteConfirmNoUndo）。
+
+/** 单条删除响应（镜像 BE，与反推 ReversePromptDeletedResponse 同形）。 */
+export interface HistoryImageDeletedResponse {
+  deleted: boolean;
+}
+
+/** 清空当前分类响应（BE 返回本次软删条数）。 */
+export interface HistoryImageClearedResponse {
+  deleted_count: number;
+}
+
+/** 删一条整套（软删；跨租户/不存在 → 404）。 */
+export function deleteHistoryImageSet(
+  category: HistoryCategory | string,
+  id: string
+): Promise<HistoryImageDeletedResponse> {
+  return apiFetch<HistoryImageDeletedResponse>(
+    `${BASE}/${encodeURIComponent(category)}/${encodeURIComponent(id)}`,
+    { method: "DELETE" }
+  );
+}
+
+/** 清空**当前分类**（E3：单事务批量软删；category 必传——不提供"清全部"以免误清其它分类）。 */
+export function clearHistoryImages(category: HistoryCategory | string): Promise<HistoryImageClearedResponse> {
+  return apiFetch<HistoryImageClearedResponse>(`${BASE}?${qs({ category })}`, { method: "DELETE" });
+}
 
 /** 单张原始尺寸「宽x高」（width/height 均在才给；缺一即 null，UI 不得冒充）。 */
 export function historyImageDimensions(item: HistoryImageSetItem): string | null {

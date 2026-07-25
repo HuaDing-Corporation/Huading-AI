@@ -63,7 +63,10 @@ vi.mock("@/lib/api/hooks", () => ({
     histImgMock.fn(category);
     return { data: { pages: [{ items: [], total: 0 }] }, isLoading: false, isError: false, hasNextPage: false, isFetchingNextPage: false, fetchNextPage: vi.fn(), refetch: vi.fn() };
   },
-  useHistoryImageSet: () => ({ data: undefined, isLoading: false, isError: false, refetch: vi.fn() })
+  useHistoryImageSet: () => ({ data: undefined, isLoading: false, isError: false, refetch: vi.fn() }),
+  // HISTORY-CHAT-DELETE-UI-0001：HistoryGrid 复活删除/清空入口 → 补这两个 mutation 钩子。
+  useDeleteHistoryImageSet: () => ({ mutateAsync: vi.fn().mockResolvedValue({ deleted: true }), isPending: false }),
+  useClearHistoryImages: () => ({ mutateAsync: vi.fn().mockResolvedValue({ deleted_count: 0 }), isPending: false })
 }));
 
 import { CopyDraftList } from "./copy-draft-list";

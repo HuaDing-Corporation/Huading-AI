@@ -1,13 +1,14 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import { ImageOff, Loader2 } from "lucide-react";
+import { ImageOff, Loader2, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { HistoryCard } from "@/components/history/history-card";
 import { HistorySetDialog } from "@/components/history/history-set-dialog";
 import { ImageLightbox } from "@/components/history/image-lightbox";
-import { useHistoryImages } from "@/lib/api/hooks";
+import { useClearHistoryImages, useDeleteHistoryImageSet, useHistoryImages } from "@/lib/api/hooks";
 import { copy } from "@/lib/copy";
 import { useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 import type { HistoryCategory } from "@/lib/api/history-images";
@@ -15,11 +16,21 @@ import type { HistoryCategory } from "@/lib/api/history-images";
 /**
  * 单分类历史网格（HISTORY-IMAGE-TAB-UI-0001）——按 category 分页拉列表（category 省略 = 全部图片），
  * 卡片网格 + 加载/错误/空态 + 「加载更多」。交互：点图 → 大图弹窗；「查看详情」→ 详情弹窗（整套 + 信息并集）。
- * FIX1：归一 API 的图片删除端点被摘掉（用户「三拆」，改 GC 方案将来补）→ 本网格不再有删除入口/确认（GC 包上线时原样复活）。
  * 每个分类各自 useHistoryImages(category)（按 key 缓存）→ 切分类不串数据。
+ *
+ * 删除 / 清空（HISTORY-CHAT-DELETE-UI-0001，FIX1 曾摘、本包按冻结 §二复活为纯记录软删）：
+ * 逐条删（卡片底部入口 → 本组件持确认弹窗）+ 「清空当前分类」（E3 二次确认）。**不做乐观移除**——
+ * 失败即保持原样 + 弹窗内报错（承重门 5：绝不留"看起来删了其实没删"的界面），成功由 invalidate 刷新。
+ * ⚠️ 清空只在**具体分类**下可用：category 省略（"全部图片"聚合视图）时不渲染清空按钮——那会变成"清全部"，
+ * 而契约 §5.1 的清空是分类级（且 mock/BE 都要求 category 必传）。
  */
 export function HistoryGrid({ category }: { category?: HistoryCategory }) {
   const query = useHistoryImages(category);
+  const del = useDeleteHistoryImageSet();
+  const clear = useClearHistoryImages();
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; category: string } | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   // 🔴 **只存 id，不存列表项快照**（MEDIA-URL-REFRESH-CONVERGE-0001 · 第 4 片）。
   // `cover_url` 是 presign（history-images.ts:19）。存快照 = 弹窗里的 cover_url 冻结在点击那一刻 →
   // 下一片给弹窗挂上 onError + 重取后，refetch 拿回的新 URL **进不到弹窗里** → 得到一个
@@ -40,6 +51,30 @@ export function HistoryGrid({ category }: { category?: HistoryCategory }) {
   // 派生不到（该条已被删）→ null → 弹窗自动关闭，不挂着一个指向已消失记录的界面。
   const lightbox = lightboxId === null ? null : (items.find((i) => i.id === lightboxId) ?? null);
   const detail = detailId === null ? null : (items.find((i) => i.id === detailId) ?? null);
+
+  // 删一条：**只在成功后**关弹窗（失败留在弹窗里显示错误，列表原样不动——不乐观移除）。
+  const onConfirmDelete = async () => {
+    if (!confirmDelete) return;
+    setActionError(null);
+    try {
+      await del.mutateAsync(confirmDelete);
+      setConfirmDelete(null);
+    } catch {
+      setActionError(copy.history.deleteFailed);
+    }
+  };
+
+  // 清空当前分类（category 必在——按钮只在具体分类下渲染）。同样失败不关弹窗、列表不动。
+  const onConfirmClear = async () => {
+    if (!category) return;
+    setActionError(null);
+    try {
+      await clear.mutateAsync(category);
+      setConfirmClear(false);
+    } catch {
+      setActionError(copy.history.clearFailed);
+    }
+  };
 
   if (query.isLoading) {
     return (
@@ -74,6 +109,23 @@ export function HistoryGrid({ category }: { category?: HistoryCategory }) {
 
   return (
     <>
+      {/* 清空当前分类（E3 二次确认）——只在具体分类下渲染（见组件头注释）。 */}
+      {category ? (
+        <div className="mb-3 flex justify-end">
+          <Button
+            variant="soft"
+            size="sm"
+            onClick={() => {
+              setActionError(null); // 自查：actionError 两弹窗共享 → 打开前清，避免上次删除失败的错串到清空弹窗
+              setConfirmClear(true);
+            }}
+            disabled={clear.isPending}
+          >
+            <Trash2 size={14} strokeWidth={1.8} /> {copy.historyImages.clearCategory}
+          </Button>
+        </div>
+      ) : null}
+
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
         {items.map((item) => (
           <HistoryCard
@@ -81,6 +133,11 @@ export function HistoryGrid({ category }: { category?: HistoryCategory }) {
             item={item}
             onOpenImage={() => setLightboxId(item.id)}
             onDetail={() => setDetailId(item.id)}
+            onDelete={() => {
+              setActionError(null);
+              // 用**条目自己的 category**（"全部图片"聚合视图下每条的分类各不相同，不能用当前 tab 的 category）。
+              setConfirmDelete({ id: item.id, category: item.category });
+            }}
             // 每张卡是一个独立媒体位置（item.id 跨 refetch 稳定）：合流共享、封顶各自 —— 一张坏图
             // 无限重试不该被健康兄弟的 onLoad 清账，健康图也不该被坏图拖着一起封顶（FIX2）。
             refresh={refresh.forMedia(item.id)}
@@ -106,6 +163,41 @@ export function HistoryGrid({ category }: { category?: HistoryCategory }) {
         refresh={refresh.forMedia(lightbox?.id ?? "")}
       />
       <HistorySetDialog item={detail} onClose={() => setDetailId(null)} />
+
+      {/* 删除确认（E1/E3）。文案讲**用户可观察的后果**——BE 是软删（运维保险、不碰媒体），但用户侧列表过滤已删、
+          无恢复入口 → 说「可恢复」是骗人、说「永久删除」又谎报实现（媒体和数据都还在）。故用
+          copy.history.deleteConfirmNoUndo（与反推历史/文案草稿共用同一句，见该 key 的长注释）。
+          danger：无恢复入口 = 用户视角不可撤销的删除（DANGER-SEMANTICS-SIGNPOSTS-0001 方案 A ①支）。 */}
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title={copy.history.deleteConfirmTitle}
+        message={copy.history.deleteConfirmNoUndo}
+        confirmLabel={copy.history.deleteConfirmBtn}
+        danger
+        submitting={del.isPending}
+        error={actionError}
+        onConfirm={() => void onConfirmDelete()}
+        onCancel={() => {
+          setConfirmDelete(null);
+          setActionError(null);
+        }}
+      />
+
+      {/* 清空当前分类确认：正文点明「当前分类」+「其它分类不受影响」——用户最怕的就是误清全部。 */}
+      <ConfirmDialog
+        open={confirmClear}
+        title={copy.historyImages.clearCategoryConfirmTitle}
+        message={copy.historyImages.clearCategoryConfirmMsg}
+        confirmLabel={copy.history.clearConfirmBtn}
+        danger
+        submitting={clear.isPending}
+        error={actionError}
+        onConfirm={() => void onConfirmClear()}
+        onCancel={() => {
+          setConfirmClear(false);
+          setActionError(null);
+        }}
+      />
     </>
   );
 }

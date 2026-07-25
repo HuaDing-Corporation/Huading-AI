@@ -4,7 +4,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { useAuth } from "@/lib/auth/auth-context";
 import {
+  clearConversations,
   createConversation,
+  deleteConversation,
   getConversation,
   getWallet,
   listConversations,
@@ -37,6 +39,27 @@ export function useCreateConversation() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => createConversation(),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: aibrainKeys.conversations() })
+  });
+}
+
+// ── 会话删除 / 清空（HISTORY-CHAT-DELETE-UI-0001，E2 只删整会话）────────────────
+// 只失效**会话列表**：被删会话的详情键不主动清（BE 软删后详情按契约 404；列表刷新后 UI 已切走，
+// 留着的旧详情缓存无消费者，主动 remove 反而要多担一份"删哪个键"的耦合）。
+// 🔴 不碰 wallet 键：删会话不动账本/钱包（冻结 §5.2）——验收 4 要求余额与账单一分不变，
+// 这里**不失效 wallet** 正是它的前端侧保证（失效会触发重取，虽不改值但会掩盖 BE 侧异常）。
+export function useDeleteConversation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => deleteConversation(id),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: aibrainKeys.conversations() })
+  });
+}
+
+export function useClearConversations() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => clearConversations(),
     onSuccess: () => void qc.invalidateQueries({ queryKey: aibrainKeys.conversations() })
   });
 }
