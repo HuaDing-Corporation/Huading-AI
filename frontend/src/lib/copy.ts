@@ -821,6 +821,20 @@ export const copy = {
     // 原 `reverseDeleteConfirmMsg` 是 FIX2 为反推单独造的，值与文案草稿那句逐字相同 → 合成一个 key。
     // 它当初"单独造"是对的（§四 划了线不许动文案 tab），现在两域都归位了，就该合。
     reverseKindTag: (kind: string) => (kind === "video" ? "视频反推" : "图片反推"),
+    // ── 清空反推历史（REVERSE-CHARGE-GATE-UI-0001 FIX1 范围2）──────────────────────
+    // 🔴 正文**必须说清这次删的是哪一类**，不许含糊成「将清空历史」：CB 打回 BE 的第一条 P1 就是
+    // 「用户在图片筛选下清空可能误删看不见的视频历史」，而 E1 定的是**不给恢复入口** ——
+    // 文案含糊 + 删了没法后悔 = 用户会真的丢东西。故三种 scope 各一句、把范围写死在句子里。
+    // 文案范式沿用 deleteConfirmNoUndo：只讲用户看得见的后果（「无法撤销」），BE 怎么实现一个字不提。
+    reverseClear: "清空",
+    reverseClearConfirmTitle: "清空反推历史？",
+    reverseClearConfirmMsg: (scope: "all" | "image" | "video") =>
+      scope === "all"
+        ? "将清空全部反推历史（图片 + 视频），无法撤销。"
+        : scope === "image"
+          ? "将清空图片反推历史，无法撤销；视频反推历史不受影响。"
+          : "将清空视频反推历史，无法撤销；图片反推历史不受影响。",
+    reverseClearFailed: "清空失败，请重试",
     // ── 三视频 tab 升级（HISTORY-VIDEO-DIALOG-UI-0001）：与图片 tab 同款交互语言 ──
     // 点内容 → 大图/播放；点「查看详情」→ 详情弹窗（弹窗内保留「打开详情页」，跳 /videos/{id} 的能力不丢）。
     videoLightboxTitle: "视频预览",

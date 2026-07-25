@@ -329,6 +329,29 @@ export function deleteReversePromptJob(id: string): Promise<ReversePromptDeleted
   });
 }
 
+// ── 清空反推历史（REVERSE-CHARGE-GATE-UI-0001 FIX1 范围2）───────────────────────
+// **逐字对齐 BE 定稿契约**（真联调实打，非读源码推断；BE PR #226 · CB 打回一轮后改成 scope 必填）：
+//   DELETE /api/v1/reverse-prompt/jobs?scope=all|image|video → **200** `{data:{deleted_count:int}}`
+//   scope 缺失 → 422 VALIDATION_ERROR（loc=["query","scope"], type=missing）
+//   scope 非法 → 422 VALIDATION_ERROR（type=literal_error, "Input should be 'all', 'image' or 'video'"）
+// ⚠️ **不是 204**（本项目四个删除端点无一用 204；按 204 写 adapter 会让 res.json() 炸）。
+// 🔴 scope **必传**：UI 侧一律跟随当前筛选传值，绝不省略——省略在 BE 是 422，而"默认清全部"更是误删的温床。
+
+/** 清空范围（镜像 BE ReversePromptClearScope = Literal["all","image","video"]，schemas:10）。 */
+export type ReverseClearScope = "all" | ReverseSourceKind;
+
+/** 清空响应（镜像 BE ReversePromptClearResponse，schemas:187-188）。 */
+export interface ReversePromptClearedResponse {
+  deleted_count: number;
+}
+
+export function clearReversePromptJobs(scope: ReverseClearScope): Promise<ReversePromptClearedResponse> {
+  return apiFetch<ReversePromptClearedResponse>(
+    `/api/v1/reverse-prompt/jobs?scope=${encodeURIComponent(scope)}`,
+    { method: "DELETE" }
+  );
+}
+
 // ── 「带入生成」落点 ──────────────────────────────────────────────────────────
 // 工作台一次性 prefill 的富载荷（口播/电商带货 也复用于文案仿写「用此文案」的 script-only 变体）。
 // target 与 WorkbenchMode 同名（page.tsx 直接 setMode(target)）：avatar_talk/seedance_i2v/video_gen/photo/ecom_image。
