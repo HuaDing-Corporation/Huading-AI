@@ -387,6 +387,64 @@ def test_stale_generating_replicate_job_keeps_successes_and_fails_unfinished_out
     )
 
 
+def test_recovery_ignores_soft_deleted_ecom_replicate_job(
+    auth_db,
+    auth_context,
+) -> None:
+    from app.services.task_recovery import recover_orphaned_image_queue_tasks
+
+    now = datetime(2026, 7, 16, 8, 0, tzinfo=UTC)
+    stale_at = now - timedelta(seconds=1901)
+    job_id = "soft-deleted-orphan-replicate"
+    output_id = "soft-deleted-orphan-output"
+    with auth_db() as db:
+        job = EcomReplicateJob(
+            id=job_id,
+            tenant_id=auth_context["tenant_id"],
+            status="generating",
+            output_mode="main",
+            requested_size="1024x1024",
+            requested_aspect="1:1",
+            output_count=1,
+            total_credits=Decimal("15"),
+            started_at=stale_at,
+            updated_at=stale_at,
+            deleted_at=now,
+        )
+        db.add(job)
+        db.flush()
+        db.add(
+            EcomReplicateOutput(
+                id=output_id,
+                job_id=job.id,
+                tenant_id=job.tenant_id,
+                index=0,
+                theme="must-stay-generating",
+                status="generating",
+                requested_size="1024x1024",
+                requested_aspect="1:1",
+                updated_at=stale_at,
+            )
+        )
+        db.commit()
+
+    result = recover_orphaned_image_queue_tasks(
+        session_factory=auth_db,
+        now=now,
+        stale_after_seconds=1800,
+    )
+
+    assert result.ecom_replicate_jobs == 0
+    with auth_db() as db:
+        job = db.get(EcomReplicateJob, job_id)
+        output = db.get(EcomReplicateOutput, output_id)
+        assert job.status == "generating"
+        assert job.finished_at is None
+        assert job.deleted_at is not None
+        assert output.status == "generating"
+        assert output.error_code is None
+
+
 def test_stale_replicate_with_all_outputs_succeeded_finishes_completed(
     auth_db,
     auth_context,

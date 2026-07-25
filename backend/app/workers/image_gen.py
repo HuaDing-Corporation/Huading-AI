@@ -34,7 +34,11 @@ from app.providers.base import (
     validate_image_provider_request,
 )
 from app.services.apimart_costs import apimart_cost_cents_from_result
-from app.services.ecom_replicate import record_analysis_cost, record_render_cost
+from app.services.ecom_replicate import (
+    record_analysis_cost,
+    record_render_cost,
+    select_live_ecom_replicate_jobs,
+)
 from app.services.history import prune_video_history_best_effort
 from app.services.progress import build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
@@ -1389,7 +1393,9 @@ def _mark_ecom_replicate_job_finished(
 def run_ecom_replicate_generation(job_id: str, output_index: int | None = None) -> dict[str, Any]:
     storage = create_object_storage(settings)
     with SessionLocal() as db:
-        job = db.get(EcomReplicateJob, job_id)
+        job = db.scalar(
+            select_live_ecom_replicate_jobs(EcomReplicateJob.id == job_id)
+        )
         if job is None:
             raise ValueError("E-commerce replicate job not found.")
         if job.status != "generating":

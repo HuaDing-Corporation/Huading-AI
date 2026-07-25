@@ -1203,6 +1203,73 @@ def test_ecom_replicate_get_cross_tenant_returns_404(
     assert response.json()["error"]["code"] == "ECOM_REPLICATE_JOB_NOT_FOUND"
 
 
+def test_soft_deleted_ecom_replicate_job_is_not_available_from_native_detail(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    _patch_replicate_providers(monkeypatch)
+    _stub_replicate_task(monkeypatch)
+    plan = _create_main_replicate_plan(
+        auth_context=auth_context,
+        auth_db=auth_db,
+        reference_id="soft-deleted-detail-ref",
+        product_id="soft-deleted-detail-product",
+    )
+    with auth_db() as db:
+        job = db.get(EcomReplicateJob, plan["job_id"])
+        job.status = "failed"
+        db.commit()
+
+    client = TestClient(app)
+    deleted = client.delete(
+        f"/api/v1/history/images/ecom_detail/{plan['job_id']}",
+        headers=auth_context["headers"],
+    )
+    response = client.get(
+        f"/api/v1/ecom-images/replicate/{plan['job_id']}",
+        headers=auth_context["headers"],
+    )
+
+    assert deleted.status_code == 200
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "ECOM_REPLICATE_JOB_NOT_FOUND"
+
+
+def test_soft_deleted_ecom_replicate_job_cannot_be_confirmed(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    _patch_replicate_providers(monkeypatch)
+    enqueued = _stub_replicate_task(monkeypatch)
+    plan = _create_main_replicate_plan(
+        auth_context=auth_context,
+        auth_db=auth_db,
+        reference_id="soft-deleted-confirm-ref",
+        product_id="soft-deleted-confirm-product",
+    )
+    with auth_db() as db:
+        job = db.get(EcomReplicateJob, plan["job_id"])
+        job.status = "failed"
+        db.commit()
+
+    client = TestClient(app)
+    deleted = client.delete(
+        f"/api/v1/history/images/ecom_detail/{plan['job_id']}",
+        headers=auth_context["headers"],
+    )
+    response = client.post(
+        f"/api/v1/ecom-images/replicate/{plan['job_id']}/confirm",
+        headers=auth_context["headers"],
+    )
+
+    assert deleted.status_code == 200
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "ECOM_REPLICATE_JOB_NOT_FOUND"
+    assert enqueued == []
+
+
 def test_ecom_replicate_worker_retries_single_failed_output_without_extra_charge(
     monkeypatch,
     auth_context,
@@ -1535,6 +1602,63 @@ def test_ecom_replicate_manual_output_retry_requeues_failed_output_without_charg
     assert len(tenant_charges) == 1
     assert output.status == "planned"
     assert output.error_code is None
+
+
+def test_soft_deleted_ecom_replicate_job_output_cannot_be_retried(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    _patch_replicate_providers(monkeypatch)
+    enqueued = _stub_replicate_task(monkeypatch)
+    plan = _create_main_replicate_plan(
+        auth_context=auth_context,
+        auth_db=auth_db,
+        reference_id="soft-deleted-retry-ref",
+        product_id="soft-deleted-retry-product",
+    )
+    client = TestClient(app)
+    assert (
+        client.post(
+            f"/api/v1/ecom-images/replicate/{plan['job_id']}/confirm",
+            headers=auth_context["headers"],
+        ).status_code
+        == 202
+    )
+    with auth_db() as db:
+        job = db.get(EcomReplicateJob, plan["job_id"])
+        output = db.scalar(
+            select(EcomReplicateOutput).where(
+                EcomReplicateOutput.job_id == job.id,
+                EcomReplicateOutput.index == 0,
+            )
+        )
+        job.status = "partial_failed"
+        output.status = "failed"
+        db.commit()
+    enqueued.clear()
+
+    deleted = client.delete(
+        f"/api/v1/history/images/ecom_detail/{plan['job_id']}",
+        headers=auth_context["headers"],
+    )
+    response = client.post(
+        f"/api/v1/ecom-images/replicate/{plan['job_id']}/outputs/0/retry",
+        headers=auth_context["headers"],
+    )
+
+    assert deleted.status_code == 200
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "ECOM_REPLICATE_JOB_NOT_FOUND"
+    assert enqueued == []
+    with auth_db() as db:
+        output = db.scalar(
+            select(EcomReplicateOutput).where(
+                EcomReplicateOutput.job_id == plan["job_id"],
+                EcomReplicateOutput.index == 0,
+            )
+        )
+        assert output.status == "failed"
 
 
 def test_ecom_replicate_manual_output_retry_rejects_non_failed_output(

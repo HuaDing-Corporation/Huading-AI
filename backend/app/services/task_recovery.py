@@ -15,6 +15,7 @@ from app.db.models import (
     VideoTask,
 )
 from app.db.session import SessionLocal
+from app.services import ecom_replicate
 from app.services.aibrain import recover_stale_reasoning_reservations
 from app.services.batches import refresh_batch_job
 from app.services.quota import (
@@ -143,6 +144,7 @@ def recover_orphaned_image_queue_tasks(
                     EcomReplicateJob.started_at.is_not(None),
                     EcomReplicateJob.updated_at <= cutoff,
                     ~recent_replicate_output,
+                    ecom_replicate.live_ecom_replicate_job_condition(),
                 )
                 .with_for_update(skip_locked=True)
             )

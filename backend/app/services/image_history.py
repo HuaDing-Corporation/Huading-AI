@@ -137,7 +137,7 @@ def _replicate_source_query(tenant_id: str):
     ).where(
         EcomReplicateJob.tenant_id == tenant_id,
         EcomReplicateJob.status.in_(_REPLICATE_HISTORY_STATUSES),
-        EcomReplicateJob.deleted_at.is_(None),
+        ecom_replicate.live_ecom_replicate_job_condition(),
     )
 
 
@@ -316,10 +316,9 @@ def _replicate_history_item(
     row: Mapping[str, Any],
 ) -> ImageHistoryItem:
     job = db.scalar(
-        select(EcomReplicateJob).where(
+        ecom_replicate.select_live_ecom_replicate_jobs(
             EcomReplicateJob.id == str(row["id"]),
             EcomReplicateJob.tenant_id == tenant_id,
-            EcomReplicateJob.deleted_at.is_(None),
         )
     )
     if job is None:  # pragma: no cover - source row and hydration share one transaction
@@ -574,11 +573,10 @@ def _replicate_history_detail(
     history_id: str,
 ) -> ImageHistoryDetailResponse:
     job = db.scalar(
-        select(EcomReplicateJob).where(
+        ecom_replicate.select_live_ecom_replicate_jobs(
             EcomReplicateJob.id == history_id,
             EcomReplicateJob.tenant_id == tenant_id,
             EcomReplicateJob.status.in_(_REPLICATE_HISTORY_STATUSES),
-            EcomReplicateJob.deleted_at.is_(None),
         )
     )
     if job is None:
@@ -676,11 +674,10 @@ def delete_image_history(
 ) -> ImageHistoryDeletedResponse:
     if category == "ecom_detail":
         job = db.scalar(
-            select(EcomReplicateJob).where(
+            ecom_replicate.select_live_ecom_replicate_jobs(
                 EcomReplicateJob.id == history_id,
                 EcomReplicateJob.tenant_id == tenant_id,
                 EcomReplicateJob.status.in_(_REPLICATE_HISTORY_STATUSES),
-                EcomReplicateJob.deleted_at.is_(None),
             )
         )
         if job is not None:
@@ -721,7 +718,7 @@ def clear_image_history(
             .where(
                 EcomReplicateJob.tenant_id == tenant_id,
                 EcomReplicateJob.status.in_(_REPLICATE_HISTORY_STATUSES),
-                EcomReplicateJob.deleted_at.is_(None),
+                ecom_replicate.live_ecom_replicate_job_condition(),
             )
             .values(deleted_at=deleted_at)
         )

@@ -44,6 +44,11 @@ class _FakeProgressStore:
         return None
 
 
+class _DoneProgressStore:
+    def read(self, _task_id: str) -> dict[str, object]:
+        return {"status": "done", "stage": "done", "progress": 100}
+
+
 def _photo_task(
     *,
     task_id: str,
@@ -689,6 +694,42 @@ def test_soft_deleted_image_is_hidden_from_video_history_and_detail(
     assert listed.status_code == 200
     assert listed.json()["data"] == {"items": [], "total": 0}
     assert detail.status_code == 404
+
+
+def test_soft_deleted_image_is_hidden_from_video_events(
+    auth_context,
+    auth_db,
+) -> None:
+    tenant_id = auth_context["tenant_id"]
+    task_id = "soft-image-hidden-from-video-events"
+    with auth_db() as db:
+        db.add(
+            _photo_task(
+                task_id=task_id,
+                tenant_id=tenant_id,
+                created_at=datetime.now(UTC),
+                topic="Soft image events",
+            )
+        )
+        db.commit()
+
+    client = TestClient(app)
+    deleted = client.delete(
+        f"/api/v1/history/images/image_gen/{task_id}",
+        headers=auth_context["headers"],
+    )
+    app.dependency_overrides[get_progress_store] = lambda: _DoneProgressStore()
+    try:
+        response = client.get(
+            f"/api/v1/videos/{task_id}/events",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_progress_store, None)
+
+    assert deleted.status_code == 200
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "VIDEO_TASK_NOT_FOUND"
 
 
 def test_video_single_delete_does_not_hard_delete_a_soft_deleted_image(

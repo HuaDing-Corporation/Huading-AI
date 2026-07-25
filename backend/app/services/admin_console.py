@@ -615,6 +615,12 @@ def resolve_task_family(
                     ReversePromptJob.id == task_id
                 )
             )
+        elif family == "ecom_replicate":
+            item = db.scalar(
+                ecom_replicate.select_live_ecom_replicate_jobs(
+                    EcomReplicateJob.id == task_id
+                )
+            )
         else:
             item = db.get(model, task_id)
         if item is not None and not (
@@ -691,9 +697,9 @@ def prepare_ecom_replicate_retry(
     job_id: str,
 ) -> TaskRetryPreparation:
     existing = db.scalar(
-        select(EcomReplicateJob)
-        .where(EcomReplicateJob.id == job_id)
-        .with_for_update()
+        ecom_replicate.select_live_ecom_replicate_jobs(
+            EcomReplicateJob.id == job_id
+        ).with_for_update()
     )
     if existing is None:
         raise AppError("Task not found.", code="TASK_NOT_FOUND", status_code=404)
@@ -794,9 +800,9 @@ def compensate_ecom_replicate_retry_enqueue_failure(
     output_indexes: list[int],
 ) -> EcomReplicateJob | None:
     job = db.scalar(
-        select(EcomReplicateJob)
-        .where(EcomReplicateJob.id == job_id)
-        .with_for_update()
+        ecom_replicate.select_live_ecom_replicate_jobs(
+            EcomReplicateJob.id == job_id
+        ).with_for_update()
     )
     outputs = list(
         db.scalars(
@@ -1179,7 +1185,9 @@ def _task_union():
             )
             | replicate_stale
         ).label("retryable"),
-    ).join(Tenant, Tenant.id == EcomReplicateJob.tenant_id)
+    ).join(Tenant, Tenant.id == EcomReplicateJob.tenant_id).where(
+        ecom_replicate.live_ecom_replicate_job_condition()
+    )
     return union_all(video, reverse, replicate).subquery("admin_task_monitor")
 
 
