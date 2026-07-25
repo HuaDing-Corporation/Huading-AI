@@ -59,13 +59,11 @@ async function gotoReverseResult(
   // REVERSE-DEEP-UI-0001 · 范围4：BE 给了 structured_prompt → 主提示词展示的是**结构化中文版**
   //（分行标注：主体/场景/构图/…），不再是逗号糊成一行的 prompt_zh。
   await expect(page.getByText("结构化提示词（中文）")).toBeVisible();
-  // 🔴 FIX2 真联调订正断言形态：BE 的 `structured_prompt()`（services/reverse_prompt.py:792-806）
-  //    对 en/zh 用的是**同一组 value**、只换标签，分隔符是 **ASCII 冒号 + 一个空格**：
-  //      zh = "\n".join(f"{中文标签}: {value}")
-  //    所以真机是「中文标签 + 与英文块相同的正文」，**不是**「全角冒号 + 中文译文」。
-  //    上一版这条断言 `/主体：.*保温杯/`（全角冒号 + 中文正文）钉的是 BE 产不出的形状，
-  //    只因当时 mock 也被写成了那样才绿 —— mock 改回真形状后它立刻红，正说明这条断言此前是假绿。
-  await expect(page.getByText(/主体: .*insulated/)).toBeVisible();
+  // 🔴 REVERSE-ZH-MOCK-SYNC-UI-0001（BE #225 §九 v3）：`.zh` 的**值**改为模型原生中文，
+  //    不再与 `.en` 共用同一组串。上一版这条断言写的是 `/主体: .*insulated/` —— 它靠的正是
+  //    「zh 的值 = en 的值」这个已经作废的事实，属本包 §二.4 要清的那一类。
+  //    现在断言：中文标签 + **中文值**（标签分隔符仍是 ASCII 冒号 + 空格，services:821，不是全角「：」）。
+  await expect(page.getByText(/主体: 哑光白漆面便携不锈钢保温杯/)).toBeVisible();
 
   return { errors: () => pageErrors, doublePrefix: () => doublePrefix, consoleErrors: () => consoleErrors };
 }
