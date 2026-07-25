@@ -28,6 +28,14 @@ def _enclosing_statement(
     return current
 
 
+# Audit boundary: this guard recognizes literal model references in
+# select(EcomReplicateJob), update(EcomReplicateJob),
+# db.get(EcomReplicateJob, id), and db.query(EcomReplicateJob). It cannot follow
+# variable-held models (model = EcomReplicateJob; select(model)), dynamic
+# mappings, or import aliases. The only current dynamic-mapping consumer,
+# services/admin_console.py:604, explicitly uses the live helper, so there is no
+# known bypass. Variable data-flow analysis remains backlog and is out of scope
+# for this package.
 def _unguarded_ecom_job_reads(source: str, *, source_name: str) -> list[str]:
     tree = ast.parse(source, filename=source_name)
     parents = {
@@ -71,6 +79,30 @@ def get_fake_ecom_job(db, job_id):
         fake_endpoint,
         source_name="fake_ecom_endpoint.py",
     ) == ["fake_ecom_endpoint.py:4"]
+
+
+def test_live_ecom_query_audit_rejects_an_unguarded_db_get() -> None:
+    fake_endpoint = """
+def get_fake_ecom_job(db, job_id):
+    return db.get(EcomReplicateJob, job_id)
+"""
+
+    assert _unguarded_ecom_job_reads(
+        fake_endpoint,
+        source_name="fake_ecom_db_get.py",
+    ) == ["fake_ecom_db_get.py:3"]
+
+
+def test_live_ecom_query_audit_rejects_an_unguarded_db_query() -> None:
+    fake_endpoint = """
+def list_fake_ecom_jobs(db):
+    return db.query(EcomReplicateJob)
+"""
+
+    assert _unguarded_ecom_job_reads(
+        fake_endpoint,
+        source_name="fake_ecom_db_query.py",
+    ) == ["fake_ecom_db_query.py:3"]
 
 
 def test_all_ecom_replicate_job_reads_use_the_live_query_contract() -> None:
