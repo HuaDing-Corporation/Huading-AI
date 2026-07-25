@@ -51,6 +51,9 @@ async function gotoReverseResult(
   const analyze = page.getByRole("button", { name: "开始反推" });
   await expect(analyze).toBeEnabled({ timeout: 15_000 });
   await analyze.click();
+  // REVERSE-CHARGE-GATE-UI-0001 范围1：图片路也走计费门 → 弹窗显示 BE estimate 的金额（图片档 30），确认后才反推。
+  await expect(page.getByRole("dialog")).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("button", { name: "确认扣费反推" }).click();
   // 结果块 + 近似重建红线（BE 下发 disclaimer）。
   await expect(page.getByText("不保证完全复刻原素材").first()).toBeVisible({ timeout: 15_000 });
   // REVERSE-DEEP-UI-0001 · 范围4：BE 给了 structured_prompt → 主提示词展示的是**结构化中文版**

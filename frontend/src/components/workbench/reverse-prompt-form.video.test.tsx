@@ -171,7 +171,7 @@ describe("ReversePromptForm · 视频反推路径", () => {
     api.getReversePromptJob.mockResolvedValue(succeededJob());
     await switchToVideoAndUpload();
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
-    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.videoChargeConfirm }));
+    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.chargeConfirm }));
     await waitFor(() => expect(reverseMut).toHaveBeenCalledWith({ source_asset_id: "video-asset-1" }));
     expect(reverseMut).toHaveBeenCalledTimes(1);
     // 轮询(1500ms)后：视频分析在上（vaTitle + 分镜）+ Seedance 提示词在下。
@@ -188,7 +188,7 @@ describe("ReversePromptForm · 视频反推路径", () => {
     api.getReversePromptJob.mockResolvedValue(succeededJob());
     await switchToVideoAndUpload();
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
-    const confirm = await screen.findByRole("button", { name: copy.reverse.videoChargeConfirm });
+    const confirm = await screen.findByRole("button", { name: copy.reverse.chargeConfirm });
     fireEvent.click(confirm);
     fireEvent.click(confirm); // 快速二次确认应被拦截
     await waitFor(() => expect(reverseMut).toHaveBeenCalledTimes(1));
@@ -209,7 +209,7 @@ describe("ReversePromptForm · 视频反推路径", () => {
     const dialog = await screen.findByRole("dialog");
     // 对不上就当没报价：不显示任何金额、也不许提交（变异：删掉 quote 里的资产比对 → 本条红）
     expect(dialog.textContent ?? "").not.toMatch(/\d/);
-    expect(within(dialog).getByRole("button", { name: copy.reverse.videoChargeConfirm })).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: copy.reverse.chargeConfirm })).toBeDisabled();
   });
 
   it("承重门9 · 报价与实扣同源：长档显示 estimate 返回的 250，不是写死的 100", async () => {
@@ -233,7 +233,7 @@ describe("ReversePromptForm · 视频反推路径", () => {
     expect(within(dialog).getByText(copy.errors.reverseEstimateFailed)).toBeInTheDocument();
     // 🔴 断的是「整个弹窗里没有任何数字」，而不是「没有 100」——兜底猜一个 88 也必须红。
     expect(dialog.textContent ?? "").not.toMatch(/\d/);
-    const confirm = within(dialog).getByRole("button", { name: copy.reverse.videoChargeConfirm });
+    const confirm = within(dialog).getByRole("button", { name: copy.reverse.chargeConfirm });
     expect(confirm).toBeDisabled();
     fireEvent.click(confirm);
     expect(reverseMut).not.toHaveBeenCalled();
@@ -252,7 +252,7 @@ describe("ReversePromptForm · 视频反推路径", () => {
       .mockResolvedValue(succeededJob());
     await switchToVideoAndUpload();
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
-    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.videoChargeConfirm }));
+    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.chargeConfirm }));
     // 🔴 done=0（第一段进行中）→ 必须是「第 1/6 段」，**绝不能是「第 0/6 段」**
     expect(await screen.findByText(copy.reverse.videoSegmentProgress(1, 6), {}, { timeout: 3000 })).toBeInTheDocument();
     expect(screen.queryByText(/第 0\/6 段/)).not.toBeInTheDocument();
@@ -273,7 +273,7 @@ describe("ReversePromptForm · 视频反推路径", () => {
     });
     await switchToVideoAndUpload();
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
-    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.videoChargeConfirm }));
+    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.chargeConfirm }));
     expect(await screen.findByText(copy.reverse.videoSegmentProgress(6, 6), {}, { timeout: 3000 })).toBeInTheDocument();
     expect(screen.queryByText(/第 7\/6 段/)).not.toBeInTheDocument();
   });
@@ -284,7 +284,7 @@ describe("ReversePromptForm · 视频反推路径", () => {
     api.getReversePromptJob.mockResolvedValue({ ...queuedJob(), status: "running" }); // 一直在跑
     await switchToVideoAndUpload();
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
-    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.videoChargeConfirm }));
+    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.chargeConfirm }));
     // 真轮询过（不是「还没开始所以没渲染」的假绿）
     await waitFor(() => expect(api.getReversePromptJob).toHaveBeenCalled(), { timeout: 3000 });
     expect(screen.queryByText(copy.reverse.videoSegmentEta)).not.toBeInTheDocument();
@@ -296,7 +296,7 @@ describe("ReversePromptForm · 视频反推路径", () => {
     api.getReversePromptJob.mockRejectedValueOnce(new Error("boom")).mockResolvedValue(succeededJob());
     await switchToVideoAndUpload();
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
-    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.videoChargeConfirm }));
+    fireEvent.click(await screen.findByRole("button", { name: copy.reverse.chargeConfirm }));
     // 首拍失败 → 软提示，未出结果。
     expect(await screen.findByText(copy.reverse.videoPollRetrying, {}, { timeout: 3000 })).toBeInTheDocument();
     expect(screen.queryByText(copy.reverse.vaTitle)).not.toBeInTheDocument();
