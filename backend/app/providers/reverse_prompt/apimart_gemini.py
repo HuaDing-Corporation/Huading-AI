@@ -41,10 +41,14 @@ class APIMartGeminiReversePromptError(RuntimeError):
         *,
         status_code: int | None = None,
         error_type: str | None = None,
+        usage_results: list[Mapping[str, Any]] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.error_type = error_type
+        self.usage_results = tuple(
+            dict(item) for item in (usage_results or [])
+        )
 
 
 class APIMartGeminiReversePromptProvider:
@@ -162,7 +166,7 @@ class APIMartGeminiReversePromptProvider:
         if duration_sec <= 0:
             raise APIMartGeminiReversePromptError("duration_sec must be positive.")
 
-        parsed, response_payload, completion_payload = self._structured_vision_json(
+        parsed, usage = self._structured_vision_json(
             image_urls=image_urls,
             instruction=_video_reverse_prompt_instruction(
                 duration_sec=duration_sec,
@@ -179,7 +183,7 @@ class APIMartGeminiReversePromptProvider:
             **normalized,
             "provider": "apimart",
             "model": self.model,
-            **_usage_cost_payload(response_payload, completion_payload),
+            **usage,
             "raw_model_json": parsed,
         }
 
@@ -242,6 +246,7 @@ class APIMartGeminiReversePromptProvider:
         raise APIMartGeminiReversePromptError(
             invalid_json_message,
             error_type="invalid_json",
+            usage_results=usage_results,
         )
 
     def analyze_video_segment_sync(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -273,7 +278,7 @@ class APIMartGeminiReversePromptProvider:
         ):
             raise APIMartGeminiReversePromptError("Video segment bounds are invalid.")
 
-        parsed, response_payload, completion_payload = self._structured_vision_json(
+        parsed, usage = self._structured_vision_json(
             image_urls=image_urls,
             instruction=_video_segment_instruction(
                 full_duration_sec=duration_sec,
@@ -293,7 +298,7 @@ class APIMartGeminiReversePromptProvider:
             ),
             "provider": "apimart",
             "model": self.model,
-            **_usage_cost_payload(response_payload, completion_payload),
+            **usage,
             "raw_model_json": parsed,
         }
 
@@ -362,7 +367,7 @@ class APIMartGeminiReversePromptProvider:
                 "segment_analyses must contain JSON objects."
             )
         audio_transcript = _optional_transcript(payload.get("audio_transcript"))
-        parsed, response_payload, completion_payload = self._structured_vision_json(
+        parsed, usage = self._structured_vision_json(
             image_urls=[],
             instruction=_video_summary_instruction(
                 full_duration_sec=duration_sec,
@@ -380,9 +385,10 @@ class APIMartGeminiReversePromptProvider:
         )
         if not normalized["video_analysis"]["shot_summary"]:
             raise APIMartGeminiReversePromptError(
-                "Video summary response must include shot_summary."
+                "Video summary response must include shot_summary.",
+                error_type="invalid_json",
+                usage_results=[usage],
             )
-        usage = _usage_cost_payload(response_payload, completion_payload)
         if payload.get("model") is not None:
             logger.info(
                 "reverse_prompt_native_video_summary_cost",
@@ -447,7 +453,7 @@ class APIMartGeminiReversePromptProvider:
             raise APIMartGeminiReversePromptError("image_url is required.")
 
         instruction = _product_identity_instruction()
-        parsed, response_payload, completion_payload = self._structured_vision_json(
+        parsed, usage = self._structured_vision_json(
             image_urls=[image_url],
             instruction=instruction,
             invalid_json_message="APIMart Gemini returned invalid product identity JSON.",
@@ -456,7 +462,7 @@ class APIMartGeminiReversePromptProvider:
             "product_identity": normalize_product_identity_payload(parsed),
             "provider": "apimart",
             "model": self.model,
-            **_usage_cost_payload(response_payload, completion_payload),
+            **usage,
             "raw_model_json": parsed,
         }
 
@@ -473,7 +479,7 @@ class APIMartGeminiReversePromptProvider:
 
         instruction = _product_validation_instruction(product_identity)
         image_urls = [product_image_url, rendered_image_url]
-        parsed, response_payload, completion_payload = self._structured_vision_json(
+        parsed, usage = self._structured_vision_json(
             image_urls=image_urls,
             instruction=instruction,
             invalid_json_message="APIMart Gemini returned invalid product validation JSON.",
@@ -482,7 +488,7 @@ class APIMartGeminiReversePromptProvider:
             **normalize_product_validation_payload(parsed),
             "provider": "apimart",
             "model": self.model,
-            **_usage_cost_payload(response_payload, completion_payload),
+            **usage,
             "raw_model_json": parsed,
         }
 
@@ -542,13 +548,15 @@ class APIMartGeminiReversePromptProvider:
         instruction: str,
         invalid_json_message: str,
         model: str | None = None,
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        usage_results: list[dict[str, Any]] = []
         response_payload = self._chat_structured(
             image_urls=image_urls,
             instruction=instruction,
             model=model,
         )
         completion_payload = _completion_payload(response_payload)
+        usage_results.append(_usage_cost_payload(response_payload, completion_payload))
         raw_text = _extract_message_text(completion_payload)
         parsed = _parse_json_object(raw_text)
         if parsed is None:
@@ -561,13 +569,17 @@ class APIMartGeminiReversePromptProvider:
                 model=model,
             )
             completion_payload = _completion_payload(response_payload)
+            usage_results.append(
+                _usage_cost_payload(response_payload, completion_payload)
+            )
             parsed = _parse_json_object(_extract_message_text(completion_payload))
         if parsed is None:
             raise APIMartGeminiReversePromptError(
                 invalid_json_message,
                 error_type="invalid_json",
+                usage_results=usage_results,
             )
-        return parsed, response_payload, completion_payload
+        return parsed, _aggregate_native_usage(usage_results)
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}

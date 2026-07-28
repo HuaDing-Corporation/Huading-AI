@@ -751,6 +751,52 @@ def test_apimart_gemini_native_video_retries_invalid_json_and_aggregates_usage()
     assert result["cost_source"] == "token_formula"
 
 
+def test_apimart_gemini_native_video_invalid_json_error_carries_paid_usage() -> None:
+    session = _Session(
+        [
+            {
+                "candidates": [
+                    {"content": {"parts": [{"text": "first invalid response"}]}}
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 600,
+                    "candidatesTokenCount": 20,
+                    "thoughtsTokenCount": 10,
+                    "totalTokenCount": 630,
+                },
+            },
+            {
+                "candidates": [
+                    {"content": {"parts": [{"text": "second invalid response"}]}}
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 610,
+                    "candidatesTokenCount": 30,
+                    "thoughtsTokenCount": 10,
+                    "totalTokenCount": 650,
+                },
+            },
+        ]
+    )
+    provider = APIMartGeminiReversePromptProvider(
+        api_key="api-test-key",
+        video_model="gemini-3.6-flash",
+        session=session,
+    )
+
+    with pytest.raises(APIMartGeminiReversePromptError) as exc_info:
+        provider.reverse_video_native_sync(
+            {"video_bytes": b"video-bytes", "duration_sec": 24.0}
+        )
+
+    assert len(session.calls) == 2
+    assert [item["total_tokens"] for item in exc_info.value.usage_results] == [
+        630,
+        650,
+    ]
+    assert sum(item["cost_cents"] for item in exc_info.value.usage_results) > 0
+
+
 def test_apimart_gemini_native_video_retries_empty_content_once() -> None:
     valid = jsonlib.loads(VIDEO_JSON_CONTENT)
     valid["structured_fields_zh"] = STRUCTURED_FIELDS_ZH
@@ -1044,6 +1090,50 @@ def test_apimart_gemini_video_summary_can_use_video_model_without_changing_defau
     assert result["cost_source"] == "token_formula"
     assert session.calls[0]["json"]["model"] == "gemini-3.6-flash"
     assert provider.model == "gemini-3.1-pro-preview"
+
+
+def test_apimart_gemini_video_summary_invalid_json_error_carries_all_paid_usage() -> None:
+    session = _Session(
+        [
+            _chat_payload(
+                "first invalid summary",
+                usage={
+                    "prompt_tokens": 200,
+                    "completion_tokens": 30,
+                    "total_tokens": 230,
+                },
+            ),
+            _chat_payload(
+                "second invalid summary",
+                usage={
+                    "prompt_tokens": 210,
+                    "completion_tokens": 40,
+                    "total_tokens": 250,
+                },
+            ),
+        ]
+    )
+    provider = APIMartGeminiReversePromptProvider(
+        api_key="api-test-key",
+        session=session,
+    )
+
+    with pytest.raises(APIMartGeminiReversePromptError) as exc_info:
+        provider.summarize_video_segments_sync(
+            {
+                "duration_sec": 75.0,
+                "segment_analyses": [jsonlib.loads(SEGMENT_JSON_CONTENT)],
+                "audio_transcript": None,
+                "model": "gemini-3.6-flash",
+            }
+        )
+
+    assert len(session.calls) == 2
+    assert [item["total_tokens"] for item in exc_info.value.usage_results] == [
+        230,
+        250,
+    ]
+    assert sum(item["cost_cents"] for item in exc_info.value.usage_results) > 0
 
 
 def test_apimart_transcribes_reverse_prompt_audio_with_verified_request_shape() -> None:
@@ -2314,6 +2404,264 @@ def test_reverse_prompt_video_worker_succeeds_settles_once_and_is_pollable(
     db.close()
 
 
+def test_short_native_invalid_json_fallback_persists_provenance_and_all_cost(
+    auth_db,
+    auth_context,
+    monkeypatch,
+) -> None:
+    from app.core.config import settings
+    from app.services import reverse_prompt_video
+    from app.services.reverse_prompt import create_reverse_prompt_job
+
+    with auth_db() as setup:
+        asset = _seed_video_asset(setup, auth_context["tenant_id"])
+        user = setup.get(User, auth_context["user_id"])
+        job = create_reverse_prompt_job(
+            setup,
+            user=user,
+            source_asset_id=asset.id,
+            target_format="seedance_2_0",
+            storage=SimpleNamespace(),
+        )
+        job_id = job.id
+        storage_key = asset.storage_key
+
+    frame_payload = jsonlib.loads(VIDEO_JSON_CONTENT)
+    frame_payload["structured_fields_zh"] = STRUCTURED_FIELDS_ZH
+    session = _Session(
+        [
+            {
+                "candidates": [
+                    {"content": {"parts": [{"text": "first invalid response"}]}}
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 600,
+                    "candidatesTokenCount": 20,
+                    "thoughtsTokenCount": 10,
+                    "totalTokenCount": 630,
+                },
+            },
+            {
+                "candidates": [
+                    {"content": {"parts": [{"text": "second invalid response"}]}}
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 610,
+                    "candidatesTokenCount": 30,
+                    "thoughtsTokenCount": 10,
+                    "totalTokenCount": 650,
+                },
+            },
+            _chat_payload(jsonlib.dumps(frame_payload, ensure_ascii=False)),
+        ]
+    )
+    provider = APIMartGeminiReversePromptProvider(
+        api_key="api-test-key",
+        model="gemini-3.1-pro-preview",
+        video_model="gemini-3.6-flash",
+        session=session,
+    )
+    fallback_logs: list[tuple[str, dict[str, object]]] = []
+
+    class _Storage:
+        def get_bytes(self, key: str) -> bytes:
+            assert key == storage_key
+            return b"fake-video-content"
+
+    monkeypatch.setattr(
+        settings,
+        "engine_reverse_prompt_video_analysis_mode",
+        "native",
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "create_object_storage",
+        lambda _settings: _Storage(),
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "detect_video_scene_cuts",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "build_video_analysis_proxy",
+        lambda *args, **kwargs: b"native-proxy",
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "extract_uniform_video_frames",
+        lambda *args, **kwargs: [b"jpeg"] * 8,
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "extract_audio_track",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "resolve",
+        lambda *args, **kwargs: provider,
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video.logger,
+        "warning",
+        lambda event, **fields: fallback_logs.append((event, fields)),
+    )
+
+    result = reverse_prompt_video.run_reverse_prompt_video_job(
+        job_id,
+        session_factory=auth_db,
+    )
+
+    assert result == {"job_id": job_id, "status": "succeeded"}
+    assert len(session.calls) == 3
+    with auth_db() as result_db:
+        job = result_db.get(ReversePromptJob, job_id)
+        usage = result_db.scalar(
+            select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id)
+        )
+        fallback_events = job.raw_model_json["_fallback_events"]
+        assert fallback_events == [
+            {
+                "occurred_at": fallback_events[0]["occurred_at"],
+                "job_id": job_id,
+                "tenant_id": auth_context["tenant_id"],
+                "scope": "short",
+                "stage": "provider_call",
+                "reason": "invalid_json",
+                "from_model": "gemini-3.6-flash",
+                "to_model": "gemini-3.1-pro-preview",
+                "segment_index": None,
+                "incurred_cost_cents": 2,
+            }
+        ]
+        assert job.model == "gemini-3.1-pro-preview"
+        assert job.cost_cents == 7
+        assert usage.cost_cents == 7
+        assert usage.quantity == Decimal("2780.000")
+    assert fallback_logs == [
+        (
+            "reverse_prompt_native_video_fallback",
+            {
+                "job_id": job_id,
+                "tenant_id": auth_context["tenant_id"],
+                "scope": "short",
+                "stage": "provider_call",
+                "reason": "invalid_json",
+                "from_model": "gemini-3.6-flash",
+                "to_model": "gemini-3.1-pro-preview",
+                "segment_index": None,
+                "incurred_cost_cents": 2,
+            },
+        )
+    ]
+
+
+def test_short_native_programming_error_is_not_downgraded_to_frames(
+    auth_db,
+    auth_context,
+    monkeypatch,
+) -> None:
+    from app.core.config import settings
+    from app.services import reverse_prompt_video
+    from app.services.reverse_prompt import create_reverse_prompt_job
+
+    with auth_db() as setup:
+        asset = _seed_video_asset(setup, auth_context["tenant_id"])
+        user = setup.get(User, auth_context["user_id"])
+        subscription = setup.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        initial_used = subscription.quota_credits_used
+        initial_reserved = subscription.quota_credits_reserved
+        job = create_reverse_prompt_job(
+            setup,
+            user=user,
+            source_asset_id=asset.id,
+            target_format="seedance_2_0",
+            storage=SimpleNamespace(),
+        )
+        job_id = job.id
+        storage_key = asset.storage_key
+
+    frame_calls: list[dict[str, object]] = []
+
+    class _Storage:
+        def get_bytes(self, key: str) -> bytes:
+            assert key == storage_key
+            return b"fake-video-content"
+
+    def raise_programming_error(_payload):
+        raise AttributeError("injected missing provider attribute")
+
+    def record_frame_call(payload):
+        frame_calls.append(dict(payload))
+        return {}
+
+    provider = SimpleNamespace(
+        reverse_video_native=raise_programming_error,
+        reverse_video_frames=record_frame_call,
+    )
+    monkeypatch.setattr(
+        settings,
+        "engine_reverse_prompt_video_analysis_mode",
+        "native",
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "create_object_storage",
+        lambda _settings: _Storage(),
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "detect_video_scene_cuts",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "build_video_analysis_proxy",
+        lambda *args, **kwargs: b"native-proxy",
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "extract_audio_track",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "resolve",
+        lambda *args, **kwargs: provider,
+    )
+
+    with pytest.raises(
+        AttributeError,
+        match="injected missing provider attribute",
+    ):
+        reverse_prompt_video.run_reverse_prompt_video_job(
+            job_id,
+            session_factory=auth_db,
+        )
+
+    assert frame_calls == []
+    with auth_db() as result_db:
+        job = result_db.get(ReversePromptJob, job_id)
+        usage = result_db.scalar(
+            select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id)
+        )
+        subscription = result_db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        assert job.status == "failed"
+        assert usage.status == "released"
+        assert subscription.quota_credits_used == initial_used
+        assert subscription.quota_credits_reserved == initial_reserved
+
+
 def test_long_reverse_prompt_video_runs_serial_segments_persists_progress_and_degrades_asr(
     auth_db,
     auth_context,
@@ -2578,6 +2926,412 @@ def test_long_reverse_prompt_video_runs_serial_segments_persists_progress_and_de
         assert subscription.quota_credits_used == 250
 
 
+def test_long_native_failure_falls_back_only_failed_segment_and_merges_cost(
+    auth_db,
+    auth_context,
+    monkeypatch,
+) -> None:
+    from app.core.config import settings
+    from app.services import reverse_prompt_video
+    from app.services.reverse_prompt import create_reverse_prompt_job
+
+    with auth_db() as setup:
+        asset = _seed_video_asset(
+            setup,
+            auth_context["tenant_id"],
+            duration_ms=75_000,
+        )
+        user = setup.get(User, auth_context["user_id"])
+        job = create_reverse_prompt_job(
+            setup,
+            user=user,
+            source_asset_id=asset.id,
+            target_format="seedance_2_0",
+            storage=SimpleNamespace(),
+        )
+        job_id = job.id
+        storage_key = asset.storage_key
+
+    class _Storage:
+        def get_bytes(self, key: str) -> bytes:
+            assert key == storage_key
+            return b"fake-long-video"
+
+    call_order: list[str] = []
+    frame_segments: list[int] = []
+
+    def segment_result(
+        payload: dict[str, object],
+        *,
+        model: str,
+        cost_cents: int,
+        total_tokens: int,
+    ) -> dict[str, object]:
+        index = int(payload["segment_index"])
+        return {
+            "segment_analysis": {
+                "segment_index": index,
+                "segment_start_sec": payload["segment_start_sec"],
+                "segment_end_sec": payload["segment_end_sec"],
+                "subject": "subject",
+                "scene": "scene",
+                "composition": "composition",
+                "camera": "camera",
+                "lighting": "lighting",
+                "motion": "motion",
+                "style": "style",
+                "visible_text": [],
+                "shot_list": [
+                    {
+                        "index": 0,
+                        "start_sec": payload["segment_start_sec"],
+                        "end_sec": payload["segment_end_sec"],
+                        "visual": f"segment {index}",
+                        "camera": "",
+                        "motion": "",
+                        "transition": "",
+                    }
+                ],
+                "segment_summary": f"segment {index} summary",
+            },
+            "provider": "apimart",
+            "model": model,
+            "prompt_tokens": total_tokens - 50,
+            "completion_tokens": 50,
+            "total_tokens": total_tokens,
+            "credits": Decimal(cost_cents) / Decimal("100"),
+            "cost_cents": cost_cents,
+            "raw_model_json": {"segment_index": index},
+        }
+
+    def native_segment(payload):
+        index = int(payload["segment_index"])
+        call_order.append(f"native-{index}")
+        if index == 2:
+            raise APIMartGeminiReversePromptError(
+                "injected native segment failure",
+                error_type="provider_timeout",
+                usage_results=[
+                    {
+                        "prompt_tokens": 70,
+                        "completion_tokens": 30,
+                        "total_tokens": 100,
+                        "credits": Decimal("0.20"),
+                        "cost_cents": 20,
+                    }
+                ],
+            )
+        return segment_result(
+            payload,
+            model="gemini-3.6-flash",
+            cost_cents=40,
+            total_tokens=150,
+        )
+
+    def frame_segment(payload):
+        index = int(payload["segment_index"])
+        call_order.append(f"frame-{index}")
+        frame_segments.append(index)
+        return segment_result(
+            payload,
+            model="gemini-3.1-pro-preview",
+            cost_cents=30,
+            total_tokens=300,
+        )
+
+    def summarize(payload):
+        call_order.append("summary")
+        shots = [
+            dict(segment["shot_list"][0])
+            for segment in payload["segment_analyses"]
+        ]
+        return {
+            "target_format": "seedance_2_0",
+            "prompt_zh": "完整视频。",
+            "prompt_en": "Complete video.",
+            "negative_prompt": "",
+            "style_tags": ["commercial"],
+            "camera": "two shots",
+            "lighting": "soft",
+            "composition": "portrait",
+            "subject": "product",
+            "scene": "studio",
+            "motion_hint": "orbit",
+            "selling_points": [],
+            "text_in_media": [],
+            "disclaimer": "",
+            "confidence": 0.9,
+            "video_analysis": {
+                "duration_sec": 75.0,
+                "pacing": "medium",
+                "shot_list": shots,
+                "audio_transcript": None,
+                "bgm_style": None,
+                "shot_summary": "complete",
+            },
+            "provider": "apimart",
+            "model": str(
+                payload.get("model") or "gemini-3.1-pro-preview"
+            ),
+            "prompt_tokens": 300,
+            "completion_tokens": 100,
+            "total_tokens": 400,
+            "credits": Decimal("0.25"),
+            "cost_cents": 25,
+            "raw_model_json": {"summary": True},
+        }
+
+    provider = SimpleNamespace(
+        analyze_video_native_segment=native_segment,
+        analyze_video_segment=frame_segment,
+        summarize_video_segments=summarize,
+    )
+    monkeypatch.setattr(
+        settings,
+        "engine_reverse_prompt_video_analysis_mode",
+        "native",
+    )
+    monkeypatch.setattr(
+        settings,
+        "engine_reverse_prompt_video_native_segment_seconds",
+        60,
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "create_object_storage",
+        lambda _settings: _Storage(),
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "detect_video_scene_cuts",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "build_video_analysis_proxy",
+        lambda *args, **kwargs: b"native-proxy",
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "extract_video_frames_at_timestamps",
+        lambda _path, *, timestamps_sec, run=None: [b"jpeg"] * len(timestamps_sec),
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "extract_audio_track",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "resolve",
+        lambda *args, **kwargs: provider,
+    )
+
+    outcome = reverse_prompt_video.run_reverse_prompt_video_job(
+        job_id,
+        session_factory=auth_db,
+    )
+
+    assert outcome == {"job_id": job_id, "status": "succeeded"}
+    assert call_order == [
+        "native-1",
+        "native-2",
+        "native-2",
+        "frame-2",
+        "summary",
+    ]
+    assert frame_segments == [2]
+    with auth_db() as result_db:
+        job = result_db.get(ReversePromptJob, job_id)
+        usage = result_db.scalar(
+            select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id)
+        )
+        event = job.raw_model_json["_fallback_events"][0]
+        assert event["scope"] == "long"
+        assert event["stage"] == "provider_call"
+        assert event["reason"] == "provider_timeout"
+        assert event["segment_index"] == 2
+        assert event["incurred_cost_cents"] == 40
+        assert job.cost_cents == 135
+        assert usage.cost_cents == 135
+        assert usage.quantity == Decimal("1050.000")
+        assert usage.cost_cents <= 250
+
+
+def test_long_native_summary_failure_uses_legacy_text_summary_without_media_rerun(
+    monkeypatch,
+) -> None:
+    from app.core.config import settings
+    from app.services import reverse_prompt_video
+
+    job = SimpleNamespace(id="job-summary-fallback", tenant_id="tenant-a")
+    fallback_events: list[dict[str, object]] = []
+    call_order: list[str] = []
+
+    def native_segment(payload):
+        index = int(payload["segment_index"])
+        call_order.append(f"native-{index}")
+        return {
+            "segment_analysis": {
+                "segment_index": index,
+                "segment_start_sec": payload["segment_start_sec"],
+                "segment_end_sec": payload["segment_end_sec"],
+                "subject": "subject",
+                "scene": "scene",
+                "composition": "composition",
+                "camera": "camera",
+                "lighting": "lighting",
+                "motion": "motion",
+                "style": "style",
+                "visible_text": [],
+                "shot_list": [
+                    {
+                        "index": 0,
+                        "start_sec": payload["segment_start_sec"],
+                        "end_sec": payload["segment_end_sec"],
+                        "visual": f"segment {index}",
+                        "camera": "",
+                        "motion": "",
+                        "transition": "",
+                    }
+                ],
+                "segment_summary": f"segment {index}",
+            },
+            "provider": "apimart",
+            "model": "gemini-3.6-flash",
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150,
+            "credits": Decimal("0.40"),
+            "cost_cents": 40,
+            "raw_model_json": {"segment_index": index},
+        }
+
+    def summarize(payload):
+        model = str(payload.get("model") or "gemini-3.1-pro-preview")
+        call_order.append(f"summary-{model}")
+        if model == "gemini-3.6-flash":
+            raise APIMartGeminiReversePromptError(
+                "injected native summary failure",
+                error_type="invalid_json",
+                usage_results=[
+                    {
+                        "prompt_tokens": 200,
+                        "completion_tokens": 100,
+                        "total_tokens": 300,
+                        "credits": Decimal("0.35"),
+                        "cost_cents": 35,
+                    }
+                ],
+            )
+        shots = [
+            dict(segment["shot_list"][0])
+            for segment in payload["segment_analyses"]
+        ]
+        return {
+            "target_format": "seedance_2_0",
+            "prompt_zh": "完整视频。",
+            "prompt_en": "Complete video.",
+            "negative_prompt": "",
+            "style_tags": ["commercial"],
+            "camera": "two shots",
+            "lighting": "soft",
+            "composition": "portrait",
+            "subject": "product",
+            "scene": "studio",
+            "motion_hint": "orbit",
+            "selling_points": [],
+            "text_in_media": [],
+            "disclaimer": "",
+            "confidence": 0.9,
+            "video_analysis": {
+                "duration_sec": 75.0,
+                "pacing": "medium",
+                "shot_list": shots,
+                "audio_transcript": None,
+                "bgm_style": None,
+                "shot_summary": "complete",
+            },
+            "provider": "apimart",
+            "model": model,
+            "prompt_tokens": 300,
+            "completion_tokens": 100,
+            "total_tokens": 400,
+            "credits": Decimal("0.25"),
+            "cost_cents": 25,
+            "raw_model_json": {"summary": True},
+        }
+
+    provider = SimpleNamespace(
+        analyze_video_native_segment=native_segment,
+        analyze_video_segment=lambda _payload: pytest.fail(
+            "summary fallback reran frame analysis"
+        ),
+        summarize_video_segments=summarize,
+    )
+    monkeypatch.setattr(
+        settings,
+        "engine_reverse_prompt_video_analysis_mode",
+        "native",
+    )
+    monkeypatch.setattr(
+        settings,
+        "engine_reverse_prompt_video_native_segment_seconds",
+        60,
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "detect_video_scene_cuts",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "build_video_analysis_proxy",
+        lambda *args, **kwargs: b"native-proxy",
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "extract_video_frames_at_timestamps",
+        lambda *args, **kwargs: pytest.fail(
+            "summary fallback extracted frames"
+        ),
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "set_reverse_prompt_segment_progress",
+        lambda *args, **kwargs: None,
+    )
+
+    result, usage_results = reverse_prompt_video._run_long_video_analysis(
+        SimpleNamespace(),
+        job=job,
+        provider=provider,
+        video_path=Path("unused.mp4"),
+        duration_sec=75.0,
+        target_format="seedance_2_0",
+        audio_transcript=None,
+        fallback_events=fallback_events,
+    )
+    aggregated = reverse_prompt_video._aggregate_provider_usage(
+        result,
+        usage_results,
+    )
+
+    assert call_order == [
+        "native-1",
+        "native-2",
+        "summary-gemini-3.6-flash",
+        "summary-gemini-3.1-pro-preview",
+    ]
+    assert aggregated["cost_cents"] == 140
+    assert aggregated["cost_cents"] <= 250
+    assert aggregated["total_tokens"] == 1000
+    assert result["model"] == "gemini-3.1-pro-preview"
+    assert fallback_events[0]["stage"] == "summary_provider"
+    assert fallback_events[0]["reason"] == "invalid_json"
+    assert fallback_events[0]["incurred_cost_cents"] == 35
+
+
 def test_long_reverse_prompt_segment_failure_retries_once_and_releases_all_quota(
     auth_db,
     auth_context,
@@ -2628,7 +3382,10 @@ def test_long_reverse_prompt_segment_failure_retries_once_and_releases_all_quota
         index = int(payload["segment_index"])
         frame_attempts.append(index)
         if index == 2:
-            raise RuntimeError("injected segment failure")
+            raise APIMartGeminiReversePromptError(
+                "injected segment failure",
+                error_type="provider_timeout",
+            )
         return {
             "segment_analysis": {
                 "segment_index": index,
@@ -2711,7 +3468,7 @@ def test_long_reverse_prompt_segment_failure_retries_once_and_releases_all_quota
             session_factory=auth_db,
         )
 
-    assert native_attempts == [1, 1]
+    assert native_attempts == [1, 1, 2, 2]
     assert frame_attempts == [1, 2, 2]
     with auth_db() as result_db:
         job = result_db.get(ReversePromptJob, job_id)
@@ -2725,7 +3482,9 @@ def test_long_reverse_prompt_segment_failure_retries_once_and_releases_all_quota
         )
         assert job.status == "failed"
         assert job.result_json is None
-        assert job.raw_model_json is None
+        fallback_events = job.raw_model_json["_fallback_events"]
+        assert [event["segment_index"] for event in fallback_events] == [1, 2]
+        assert all(event["stage"] == "provider_call" for event in fallback_events)
         assert usage.status == "released"
         assert usage.credits == Decimal("250.00")
         assert subscription.quota_credits_used == initial_used

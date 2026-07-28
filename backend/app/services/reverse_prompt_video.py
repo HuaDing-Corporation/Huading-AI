@@ -14,13 +14,18 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
+from requests import RequestException
 from sqlalchemy import update
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.models import ReversePromptJob
 from app.db.session import SessionLocal
 from app.providers.base import resolve
+from app.providers.reverse_prompt.apimart_gemini import (
+    APIMartGeminiReversePromptError,
+)
 from app.services import quota
 from app.services.reverse_prompt import (
     mark_reverse_prompt_job_failed,
@@ -48,6 +53,54 @@ logger = get_logger(__name__)
 
 class ReversePromptVideoProcessingError(RuntimeError):
     pass
+
+
+class _NativeVideoFallback(RuntimeError):
+    def __init__(
+        self,
+        *,
+        stage: str,
+        cause: Exception,
+        usage_results: list[Mapping[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(str(cause))
+        self.stage = stage
+        self.cause = cause
+        self.usage_results = tuple(
+            dict(item) for item in (usage_results or [])
+        )
+
+
+class _ProviderCallFailure(RuntimeError):
+    def __init__(
+        self,
+        *,
+        cause: Exception,
+        usage_results: list[Mapping[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.usage_results = tuple(
+            dict(item) for item in (usage_results or [])
+        )
+
+
+_NATIVE_RUNTIME_ERRORS = (
+    APIMartGeminiReversePromptError,
+    _ProviderCallFailure,
+    ReversePromptVideoProcessingError,
+    RequestException,
+    subprocess.SubprocessError,
+    OSError,
+)
+_DIRECT_FAILURE_ERRORS = (
+    AttributeError,
+    TypeError,
+    KeyError,
+    AssertionError,
+    SQLAlchemyError,
+)
+_FALLBACK_EVENTS_KEY = "_fallback_events"
 
 
 @dataclass(frozen=True)
@@ -420,6 +473,7 @@ def run_reverse_prompt_video_job(
     session_factory=SessionLocal,
 ) -> dict[str, str]:
     temp_path: Path | None = None
+    fallback_events: list[dict[str, object]] = []
     with session_factory() as db:
         job = db.get(ReversePromptJob, job_id)
         if job is None or job.source_kind != "video":
@@ -463,9 +517,11 @@ def run_reverse_prompt_video_job(
                 result, usage_results = _run_short_video_analysis(
                     provider,
                     temp_path,
+                    job=job,
                     duration_sec=duration_sec,
                     target_format=job.target_format,
                     audio_transcript=audio_transcript,
+                    fallback_events=fallback_events,
                 )
             else:
                 result, usage_results = _run_long_video_analysis(
@@ -476,10 +532,12 @@ def run_reverse_prompt_video_job(
                     duration_sec=duration_sec,
                     target_format=job.target_format,
                     audio_transcript=audio_transcript,
+                    fallback_events=fallback_events,
                 )
             if audio_usage is not None:
                 usage_results.insert(0, audio_usage)
             result = _aggregate_provider_usage(result, usage_results)
+            _attach_fallback_events(result, fallback_events)
             if not isinstance(result.get("video_analysis"), dict):
                 raise ReversePromptVideoProcessingError(
                     "Reverse prompt provider returned no video analysis."
@@ -512,7 +570,11 @@ def run_reverse_prompt_video_job(
             failed_job = db.get(ReversePromptJob, job_id)
             if failed_job is not None:
                 failed_job.result_json = None
-                failed_job.raw_model_json = None
+                failed_job.raw_model_json = (
+                    _fallback_event_payload(fallback_events)
+                    if fallback_events
+                    else None
+                )
                 quota.release_reverse_prompt_video_quota(
                     db,
                     tenant_id=failed_job.tenant_id,
@@ -524,6 +586,8 @@ def run_reverse_prompt_video_job(
                     message="Reverse prompt video processing failed.",
                 )
             logger.exception("reverse_prompt_video_failed", job_id=job_id)
+            if isinstance(exc, _DIRECT_FAILURE_ERRORS):
+                raise
             raise ReversePromptVideoProcessingError(
                 "Reverse prompt video processing failed."
             ) from exc
@@ -532,13 +596,107 @@ def run_reverse_prompt_video_job(
                 temp_path.unlink(missing_ok=True)
 
 
+def _run_native_stage(
+    stage: str,
+    operation: Callable[[], Any],
+    *,
+    usage_results: list[Mapping[str, Any]] | None = None,
+) -> Any:
+    try:
+        return operation()
+    except _NATIVE_RUNTIME_ERRORS as exc:
+        raise _NativeVideoFallback(
+            stage=stage,
+            cause=exc,
+            usage_results=[
+                *(usage_results or []),
+                *_usage_results_from_exception(exc),
+            ],
+        ) from exc
+
+
+def _usage_results_from_exception(exc: Exception) -> list[Mapping[str, Any]]:
+    raw_usage = getattr(exc, "usage_results", ())
+    if not isinstance(raw_usage, list | tuple):
+        return []
+    return [dict(item) for item in raw_usage if isinstance(item, Mapping)]
+
+
+def _fallback_reason(exc: Exception) -> str:
+    root_cause = getattr(exc, "cause", exc)
+    error_type = str(
+        getattr(root_cause, "error_type", "") or ""
+    ).strip()
+    return error_type or type(root_cause).__name__
+
+
+def _record_native_fallback(
+    *,
+    job: ReversePromptJob,
+    fallback_events: list[dict[str, object]],
+    scope: str,
+    fallback: _NativeVideoFallback,
+    segment_index: int | None = None,
+) -> None:
+    incurred_cost_cents = sum(
+        nonnegative_int(item.get("cost_cents"))
+        for item in fallback.usage_results
+    )
+    log_fields: dict[str, object] = {
+        "job_id": job.id,
+        "tenant_id": job.tenant_id,
+        "scope": scope,
+        "stage": fallback.stage,
+        "reason": _fallback_reason(fallback.cause),
+        "from_model": settings.engine_apimart_reverse_prompt_video_model,
+        "to_model": settings.engine_apimart_reverse_prompt_model,
+        "segment_index": segment_index,
+        "incurred_cost_cents": incurred_cost_cents,
+    }
+    fallback_events.append(
+        {
+            "occurred_at": datetime.now(UTC).isoformat(),
+            **log_fields,
+        }
+    )
+    logger.warning("reverse_prompt_native_video_fallback", **log_fields)
+
+
+def _attach_fallback_events(
+    result: dict[str, Any],
+    fallback_events: list[dict[str, object]],
+) -> None:
+    if not fallback_events:
+        return
+    raw_model_json = result.get("raw_model_json")
+    persisted_raw = (
+        dict(raw_model_json)
+        if isinstance(raw_model_json, Mapping)
+        else {}
+    )
+    persisted_raw.update(_fallback_event_payload(fallback_events))
+    result["raw_model_json"] = persisted_raw
+
+
+def _fallback_event_payload(
+    fallback_events: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        _FALLBACK_EVENTS_KEY: [
+            dict(event) for event in fallback_events
+        ]
+    }
+
+
 def _run_short_video_analysis(
     provider: Any,
     video_path: Path,
     *,
+    job: ReversePromptJob,
     duration_sec: float,
     target_format: str,
     audio_transcript: str | None,
+    fallback_events: list[dict[str, object]],
 ) -> tuple[dict[str, Any], list[Mapping[str, Any]]]:
     if settings.engine_reverse_prompt_video_analysis_mode == "frames":
         return _run_short_video_frames_analysis(
@@ -556,19 +714,21 @@ def _run_short_video_analysis(
             target_format=target_format,
             audio_transcript=audio_transcript,
         )
-    except Exception as exc:
-        logger.warning(
-            "reverse_prompt_native_video_fallback",
+    except _NativeVideoFallback as exc:
+        _record_native_fallback(
+            job=job,
+            fallback_events=fallback_events,
             scope="short",
-            error_type=type(exc).__name__,
+            fallback=exc,
         )
-        return _run_short_video_frames_analysis(
+        frame_result, frame_usage = _run_short_video_frames_analysis(
             provider,
             video_path,
             duration_sec=duration_sec,
             target_format=target_format,
             audio_transcript=audio_transcript,
         )
+        return frame_result, [*exc.usage_results, *frame_usage]
 
 
 def _run_short_video_native_analysis(
@@ -579,25 +739,54 @@ def _run_short_video_native_analysis(
     target_format: str,
     audio_transcript: str | None,
 ) -> tuple[dict[str, Any], list[Mapping[str, Any]]]:
-    scene_cuts = detect_video_scene_cuts(
-        video_path,
-        duration_sec=duration_sec,
+    scene_cuts = _run_native_stage(
+        "scene_detection",
+        lambda: detect_video_scene_cuts(
+            video_path,
+            duration_sec=duration_sec,
+        ),
     )
-    proxy_bytes = build_video_analysis_proxy(
-        video_path,
-        max_edge=settings.engine_reverse_prompt_video_proxy_max_edge,
+    proxy_bytes = _run_native_stage(
+        "proxy_transcode",
+        lambda: build_video_analysis_proxy(
+            video_path,
+            max_edge=settings.engine_reverse_prompt_video_proxy_max_edge,
+        ),
     )
-    result = _mapping_result(
-        _invoke_provider(
-            provider.reverse_video_native(
-                {
-                    "video_bytes": proxy_bytes,
-                    "duration_sec": duration_sec,
-                    "target_format": target_format,
-                }
+    result = _run_native_stage(
+        "provider_call",
+        lambda: _mapping_result(
+            _invoke_provider(
+                provider.reverse_video_native(
+                    {
+                        "video_bytes": proxy_bytes,
+                        "duration_sec": duration_sec,
+                        "target_format": target_format,
+                    }
+                )
             )
-        )
+        ),
     )
+    _run_native_stage(
+        "result_validation",
+        lambda: _finalize_short_native_result(
+            result,
+            duration_sec=duration_sec,
+            audio_transcript=audio_transcript,
+            scene_cuts=scene_cuts,
+        ),
+        usage_results=[result],
+    )
+    return result, [result]
+
+
+def _finalize_short_native_result(
+    result: dict[str, Any],
+    *,
+    duration_sec: float,
+    audio_transcript: str | None,
+    scene_cuts: list[float],
+) -> None:
     _attach_audio_context(
         result,
         duration_sec=duration_sec,
@@ -609,7 +798,6 @@ def _run_short_video_native_analysis(
         start_sec=0.0,
         end_sec=duration_sec,
     )
-    return result, [result]
 
 
 def _run_short_video_frames_analysis(
@@ -673,6 +861,7 @@ def _run_long_video_analysis(
     duration_sec: float,
     target_format: str,
     audio_transcript: str | None,
+    fallback_events: list[dict[str, object]],
 ) -> tuple[dict[str, Any], list[Mapping[str, Any]]]:
     if settings.engine_reverse_prompt_video_analysis_mode == "frames":
         return _run_long_video_frames_analysis(
@@ -684,31 +873,16 @@ def _run_long_video_analysis(
             target_format=target_format,
             audio_transcript=audio_transcript,
         )
-    try:
-        return _run_long_video_native_analysis(
-            db,
-            job=job,
-            provider=provider,
-            video_path=video_path,
-            duration_sec=duration_sec,
-            target_format=target_format,
-            audio_transcript=audio_transcript,
-        )
-    except Exception as exc:
-        logger.warning(
-            "reverse_prompt_native_video_fallback",
-            scope="long",
-            error_type=type(exc).__name__,
-        )
-        return _run_long_video_frames_analysis(
-            db,
-            job=job,
-            provider=provider,
-            video_path=video_path,
-            duration_sec=duration_sec,
-            target_format=target_format,
-            audio_transcript=audio_transcript,
-        )
+    return _run_long_video_native_analysis(
+        db,
+        job=job,
+        provider=provider,
+        video_path=video_path,
+        duration_sec=duration_sec,
+        target_format=target_format,
+        audio_transcript=audio_transcript,
+        fallback_events=fallback_events,
+    )
 
 
 def _run_long_video_native_analysis(
@@ -720,11 +894,33 @@ def _run_long_video_native_analysis(
     duration_sec: float,
     target_format: str,
     audio_transcript: str | None,
+    fallback_events: list[dict[str, object]],
 ) -> tuple[dict[str, Any], list[Mapping[str, Any]]]:
-    scene_cuts = detect_video_scene_cuts(
-        video_path,
-        duration_sec=duration_sec,
-    )
+    try:
+        scene_cuts = _run_native_stage(
+            "scene_detection",
+            lambda: detect_video_scene_cuts(
+                video_path,
+                duration_sec=duration_sec,
+            ),
+        )
+    except _NativeVideoFallback as fallback:
+        _record_native_fallback(
+            job=job,
+            fallback_events=fallback_events,
+            scope="long",
+            fallback=fallback,
+        )
+        frame_result, frame_usage = _run_long_video_frames_analysis(
+            db,
+            job=job,
+            provider=provider,
+            video_path=video_path,
+            duration_sec=duration_sec,
+            target_format=target_format,
+            audio_transcript=audio_transcript,
+        )
+        return frame_result, [*fallback.usage_results, *frame_usage]
     segments = video_segment_plan(
         duration_sec,
         segment_seconds=settings.engine_reverse_prompt_video_native_segment_seconds,
@@ -739,39 +935,77 @@ def _run_long_video_native_analysis(
     usage_results: list[Mapping[str, Any]] = []
     raw_segments: list[dict[str, object]] = []
     for segment in segments:
-        proxy_bytes = build_video_analysis_proxy(
-            video_path,
-            start_sec=segment.start_sec,
-            end_sec=segment.end_sec,
-            max_edge=settings.engine_reverse_prompt_video_proxy_max_edge,
-        )
-        payload = {
-            "video_bytes": proxy_bytes,
-            "duration_sec": duration_sec,
-            "segment_index": segment.index,
-            "segment_start_sec": segment.start_sec,
-            "segment_end_sec": segment.end_sec,
-            "target_format": target_format,
-        }
-        segment_result = _segment_result_with_retry(
-            provider,
-            payload,
-            segment.index,
-            operation_name="analyze_video_native_segment",
-        )
+        try:
+            proxy_bytes = _run_native_stage(
+                "proxy_transcode",
+                lambda segment=segment: build_video_analysis_proxy(
+                    video_path,
+                    start_sec=segment.start_sec,
+                    end_sec=segment.end_sec,
+                    max_edge=settings.engine_reverse_prompt_video_proxy_max_edge,
+                ),
+            )
+            payload = {
+                "video_bytes": proxy_bytes,
+                "duration_sec": duration_sec,
+                "segment_index": segment.index,
+                "segment_start_sec": segment.start_sec,
+                "segment_end_sec": segment.end_sec,
+                "target_format": target_format,
+            }
+            segment_result = _run_native_stage(
+                "provider_call",
+                lambda payload=payload, segment=segment: _segment_result_with_retry(
+                    provider,
+                    payload,
+                    segment.index,
+                    operation_name="analyze_video_native_segment",
+                ),
+            )
+            normalized_segment = _run_native_stage(
+                "timeline_validation",
+                lambda segment=segment, segment_result=segment_result: _normalize_video_segment(
+                    segment=segment,
+                    segment_result=segment_result,
+                    scene_cuts_sec=scene_cuts,
+                ),
+                usage_results=[segment_result],
+            )
+        except _NativeVideoFallback as fallback:
+            _record_native_fallback(
+                job=job,
+                fallback_events=fallback_events,
+                scope="long",
+                fallback=fallback,
+                segment_index=segment.index,
+            )
+            usage_results.extend(fallback.usage_results)
+            segment_result = _run_frame_video_segment(
+                provider,
+                video_path,
+                duration_sec=duration_sec,
+                target_format=target_format,
+                segment=segment,
+            )
+            normalized_segment = _normalize_video_segment(
+                segment=segment,
+                segment_result=segment_result,
+            )
         _record_video_segment(
             db,
             job=job,
             segment=segment,
             segments_total=len(segments),
             segment_result=segment_result,
+            normalized_segment=normalized_segment,
             segment_analyses=segment_analyses,
             usage_results=usage_results,
             raw_segments=raw_segments,
-            scene_cuts_sec=scene_cuts,
         )
-    return _summarize_video_segments(
+    return _summarize_native_video_segments(
         provider,
+        job=job,
+        fallback_events=fallback_events,
         duration_sec=duration_sec,
         target_format=target_format,
         audio_transcript=audio_transcript,
@@ -804,26 +1038,24 @@ def _run_long_video_frames_analysis(
     usage_results: list[Mapping[str, Any]] = []
     raw_segments: list[dict[str, object]] = []
     for segment in segments:
-        frames = extract_video_frames_at_timestamps(
+        segment_result = _run_frame_video_segment(
+            provider,
             video_path,
-            timestamps_sec=segment.timestamps_sec,
+            duration_sec=duration_sec,
+            target_format=target_format,
+            segment=segment,
         )
-        payload = {
-            "image_urls": _frame_data_urls(frames),
-            "timestamps_sec": list(segment.timestamps_sec),
-            "duration_sec": duration_sec,
-            "segment_index": segment.index,
-            "segment_start_sec": segment.start_sec,
-            "segment_end_sec": segment.end_sec,
-            "target_format": target_format,
-        }
-        segment_result = _segment_result_with_retry(provider, payload, segment.index)
+        normalized_segment = _normalize_video_segment(
+            segment=segment,
+            segment_result=segment_result,
+        )
         _record_video_segment(
             db,
             job=job,
             segment=segment,
             segments_total=len(segments),
             segment_result=segment_result,
+            normalized_segment=normalized_segment,
             segment_analyses=segment_analyses,
             usage_results=usage_results,
             raw_segments=raw_segments,
@@ -839,18 +1071,36 @@ def _run_long_video_frames_analysis(
     )
 
 
-def _record_video_segment(
-    db,
+def _run_frame_video_segment(
+    provider: Any,
+    video_path: Path,
     *,
-    job: ReversePromptJob,
+    duration_sec: float,
+    target_format: str,
     segment: VideoSegment,
-    segments_total: int,
+) -> dict[str, Any]:
+    frames = extract_video_frames_at_timestamps(
+        video_path,
+        timestamps_sec=segment.timestamps_sec,
+    )
+    payload = {
+        "image_urls": _frame_data_urls(frames),
+        "timestamps_sec": list(segment.timestamps_sec),
+        "duration_sec": duration_sec,
+        "segment_index": segment.index,
+        "segment_start_sec": segment.start_sec,
+        "segment_end_sec": segment.end_sec,
+        "target_format": target_format,
+    }
+    return _segment_result_with_retry(provider, payload, segment.index)
+
+
+def _normalize_video_segment(
+    *,
+    segment: VideoSegment,
     segment_result: Mapping[str, Any],
-    segment_analyses: list[dict[str, Any]],
-    usage_results: list[Mapping[str, Any]],
-    raw_segments: list[dict[str, object]],
     scene_cuts_sec: list[float] | None = None,
-) -> None:
+) -> dict[str, Any]:
     segment_analysis = segment_result.get("segment_analysis")
     if not isinstance(segment_analysis, Mapping):
         raise ReversePromptVideoProcessingError(
@@ -869,6 +1119,21 @@ def _record_video_segment(
         start_sec=segment.start_sec,
         end_sec=segment.end_sec,
     )
+    return normalized_segment
+
+
+def _record_video_segment(
+    db,
+    *,
+    job: ReversePromptJob,
+    segment: VideoSegment,
+    segments_total: int,
+    segment_result: Mapping[str, Any],
+    normalized_segment: dict[str, Any],
+    segment_analyses: list[dict[str, Any]],
+    usage_results: list[Mapping[str, Any]],
+    raw_segments: list[dict[str, object]],
+) -> None:
     segment_analyses.append(normalized_segment)
     usage_results.append(segment_result)
     raw_segments.append(
@@ -896,6 +1161,94 @@ def _summarize_video_segments(
     model: str | None = None,
     scene_cuts_sec: list[float] | None = None,
 ) -> tuple[dict[str, Any], list[Mapping[str, Any]]]:
+    summary_payload = _video_summary_payload(
+        duration_sec=duration_sec,
+        target_format=target_format,
+        audio_transcript=audio_transcript,
+        segment_analyses=segment_analyses,
+        model=model,
+    )
+    summary_result = _request_video_summary(provider, summary_payload)
+    _finalize_video_summary(
+        summary_result,
+        duration_sec=duration_sec,
+        audio_transcript=audio_transcript,
+        raw_segments=raw_segments,
+        scene_cuts_sec=scene_cuts_sec,
+    )
+    usage_results.append(summary_result)
+    return summary_result, usage_results
+
+
+def _summarize_native_video_segments(
+    provider: Any,
+    *,
+    job: ReversePromptJob,
+    fallback_events: list[dict[str, object]],
+    duration_sec: float,
+    target_format: str,
+    audio_transcript: str | None,
+    segment_analyses: list[dict[str, Any]],
+    usage_results: list[Mapping[str, Any]],
+    raw_segments: list[dict[str, object]],
+    model: str,
+    scene_cuts_sec: list[float],
+) -> tuple[dict[str, Any], list[Mapping[str, Any]]]:
+    summary_payload = _video_summary_payload(
+        duration_sec=duration_sec,
+        target_format=target_format,
+        audio_transcript=audio_transcript,
+        segment_analyses=segment_analyses,
+        model=model,
+    )
+    try:
+        summary_result = _run_native_stage(
+            "summary_provider",
+            lambda: _request_video_summary(provider, summary_payload),
+        )
+        _run_native_stage(
+            "summary_validation",
+            lambda: _finalize_video_summary(
+                summary_result,
+                duration_sec=duration_sec,
+                audio_transcript=audio_transcript,
+                raw_segments=raw_segments,
+                scene_cuts_sec=scene_cuts_sec,
+            ),
+            usage_results=[summary_result],
+        )
+    except _NativeVideoFallback as fallback:
+        _record_native_fallback(
+            job=job,
+            fallback_events=fallback_events,
+            scope="long",
+            fallback=fallback,
+        )
+        usage_results.extend(fallback.usage_results)
+        legacy_payload = {
+            **summary_payload,
+            "model": settings.engine_apimart_reverse_prompt_model,
+        }
+        summary_result = _request_video_summary(provider, legacy_payload)
+        _finalize_video_summary(
+            summary_result,
+            duration_sec=duration_sec,
+            audio_transcript=audio_transcript,
+            raw_segments=raw_segments,
+            scene_cuts_sec=scene_cuts_sec,
+        )
+    usage_results.append(summary_result)
+    return summary_result, usage_results
+
+
+def _video_summary_payload(
+    *,
+    duration_sec: float,
+    target_format: str,
+    audio_transcript: str | None,
+    segment_analyses: list[dict[str, Any]],
+    model: str | None,
+) -> dict[str, Any]:
     summary_payload: dict[str, Any] = {
         "duration_sec": duration_sec,
         "segment_analyses": segment_analyses,
@@ -904,11 +1257,28 @@ def _summarize_video_segments(
     }
     if model is not None:
         summary_payload["model"] = model
-    summary_result = _mapping_result(
+    return summary_payload
+
+
+def _request_video_summary(
+    provider: Any,
+    summary_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    return _mapping_result(
         _invoke_provider(
             provider.summarize_video_segments(summary_payload)
         )
     )
+
+
+def _finalize_video_summary(
+    summary_result: dict[str, Any],
+    *,
+    duration_sec: float,
+    audio_transcript: str | None,
+    raw_segments: list[dict[str, object]],
+    scene_cuts_sec: list[float] | None,
+) -> None:
     _attach_audio_context(
         summary_result,
         duration_sec=duration_sec,
@@ -933,8 +1303,6 @@ def _summarize_video_segments(
         "segments": raw_segments,
         "summary": dict(summary_raw) if isinstance(summary_raw, Mapping) else {},
     }
-    usage_results.append(summary_result)
-    return summary_result, usage_results
 
 
 def _segment_result_with_retry(
@@ -945,12 +1313,17 @@ def _segment_result_with_retry(
     operation_name: str = "analyze_video_segment",
 ) -> dict[str, Any]:
     operation = getattr(provider, operation_name)
+    failed_usage: list[Mapping[str, Any]] = []
     for attempt in range(2):
         try:
             return _mapping_result(_invoke_provider(operation(payload)))
-        except Exception:
+        except _NATIVE_RUNTIME_ERRORS as exc:
+            failed_usage.extend(_usage_results_from_exception(exc))
             if attempt == 1:
-                raise
+                raise _ProviderCallFailure(
+                    cause=exc,
+                    usage_results=failed_usage,
+                ) from exc
             logger.warning(
                 "reverse_prompt_video_segment_retry",
                 segment_index=segment_index,
