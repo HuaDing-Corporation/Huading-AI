@@ -1,7 +1,7 @@
 import json
 from decimal import Decimal
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -187,6 +187,18 @@ class Settings(BaseSettings):
     engine_apimart_video_timeout_seconds: float = 1500.0
     engine_apimart_credit_usd: float = 0.10
     engine_apimart_reverse_prompt_model: str = "gemini-3.1-pro-preview"
+    engine_apimart_reverse_prompt_video_model: str = "gemini-3.6-flash"
+    engine_reverse_prompt_video_analysis_mode: Literal["native", "frames"] = "native"
+    engine_reverse_prompt_video_native_segment_seconds: int = Field(
+        default=60,
+        ge=15,
+        le=60,
+    )
+    engine_reverse_prompt_video_proxy_max_edge: int = Field(
+        default=640,
+        ge=240,
+        le=1280,
+    )
     engine_apimart_scene_prompt_model: str = "gpt-5.6-luna"
     engine_apimart_scene_prompt_input_usd_per_m: float = 1.0
     engine_apimart_scene_prompt_output_usd_per_m: float = 6.0

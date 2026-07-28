@@ -721,7 +721,11 @@ def reserve_reverse_prompt_video_quota(
         reverse_prompt_job_id=reverse_prompt_job_id,
         capability="reverse_prompt_video",
         provider="apimart",
-        model=settings.engine_apimart_reverse_prompt_model,
+        model=(
+            settings.engine_apimart_reverse_prompt_video_model
+            if settings.engine_reverse_prompt_video_analysis_mode == "native"
+            else settings.engine_apimart_reverse_prompt_model
+        ),
         unit="call",
         quantity=Decimal("1.000"),
         credits=estimate.estimated_credits,
