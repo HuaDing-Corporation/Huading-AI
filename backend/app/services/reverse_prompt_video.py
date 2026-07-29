@@ -34,6 +34,13 @@ from app.services.reverse_prompt import (
     set_reverse_prompt_segment_progress,
     source_asset_or_raise,
 )
+from app.services.reverse_prompt_usage import (
+    begin_reverse_prompt_usage_capture,
+    capture_reverse_prompt_usage,
+    finish_reverse_prompt_usage_capture,
+    reverse_prompt_usage_checkpoint,
+    reverse_prompt_usage_since,
+)
 from app.services.storage.factory import create_object_storage
 from app.services.storage.keys import get_tenant_storage_bytes
 
@@ -486,6 +493,7 @@ def run_reverse_prompt_video_job(
             status = current.status if current is not None else "missing"
             return {"job_id": job_id, "status": status}
         db.refresh(job)
+        usage_token, captured_usage = begin_reverse_prompt_usage_capture()
 
         try:
             source_kind, source = source_asset_or_raise(
@@ -509,12 +517,12 @@ def run_reverse_prompt_video_job(
 
             duration_sec = float(source.duration_ms or 0) / 1000.0
             provider = resolve(db, tenant_id=job.tenant_id, capability="reverse_prompt")
-            audio_transcript, audio_usage = _best_effort_audio_transcript(
+            audio_transcript, _ = _best_effort_audio_transcript(
                 provider,
                 temp_path,
             )
             if duration_sec <= _SHORT_VIDEO_MAX_DURATION_SEC:
-                result, usage_results = _run_short_video_analysis(
+                result, _ = _run_short_video_analysis(
                     provider,
                     temp_path,
                     job=job,
@@ -524,7 +532,7 @@ def run_reverse_prompt_video_job(
                     fallback_events=fallback_events,
                 )
             else:
-                result, usage_results = _run_long_video_analysis(
+                result, _ = _run_long_video_analysis(
                     db,
                     job=job,
                     provider=provider,
@@ -534,9 +542,7 @@ def run_reverse_prompt_video_job(
                     audio_transcript=audio_transcript,
                     fallback_events=fallback_events,
                 )
-            if audio_usage is not None:
-                usage_results.insert(0, audio_usage)
-            result = _aggregate_provider_usage(result, usage_results)
+            result = _aggregate_provider_usage(result, captured_usage)
             _attach_fallback_events(result, fallback_events)
             if not isinstance(result.get("video_analysis"), dict):
                 raise ReversePromptVideoProcessingError(
@@ -592,6 +598,7 @@ def run_reverse_prompt_video_job(
                 "Reverse prompt video processing failed."
             ) from exc
         finally:
+            finish_reverse_prompt_usage_capture(usage_token)
             if temp_path is not None:
                 temp_path.unlink(missing_ok=True)
 
@@ -602,13 +609,16 @@ def _run_native_stage(
     *,
     usage_results: list[Mapping[str, Any]] | None = None,
 ) -> Any:
+    usage_checkpoint = reverse_prompt_usage_checkpoint()
     try:
         return operation()
     except _NATIVE_RUNTIME_ERRORS as exc:
+        captured_usage = reverse_prompt_usage_since(usage_checkpoint)
         raise _NativeVideoFallback(
             stage=stage,
             cause=exc,
-            usage_results=[
+            usage_results=captured_usage
+            or [
                 *(usage_results or []),
                 *_usage_results_from_exception(exc),
             ],
@@ -755,16 +765,14 @@ def _run_short_video_native_analysis(
     )
     result = _run_native_stage(
         "provider_call",
-        lambda: _mapping_result(
-            _invoke_provider(
-                provider.reverse_video_native(
-                    {
-                        "video_bytes": proxy_bytes,
-                        "duration_sec": duration_sec,
-                        "target_format": target_format,
-                    }
-                )
-            )
+        lambda: _call_provider(
+            lambda: provider.reverse_video_native(
+                {
+                    "video_bytes": proxy_bytes,
+                    "duration_sec": duration_sec,
+                    "target_format": target_format,
+                }
+            ),
         ),
     )
     _run_native_stage(
@@ -813,17 +821,15 @@ def _run_short_video_frames_analysis(
         video_path,
         duration_sec=duration_sec,
     )
-    result = _mapping_result(
-        _invoke_provider(
-            provider.reverse_video_frames(
-                {
-                    "image_urls": _frame_data_urls(frames),
-                    "timestamps_sec": timestamps_sec,
-                    "duration_sec": duration_sec,
-                    "target_format": target_format,
-                }
-            )
-        )
+    result = _call_provider(
+        lambda: provider.reverse_video_frames(
+            {
+                "image_urls": _frame_data_urls(frames),
+                "timestamps_sec": timestamps_sec,
+                "duration_sec": duration_sec,
+                "target_format": target_format,
+            }
+        ),
     )
     _attach_audio_context(
         result,
@@ -1264,10 +1270,8 @@ def _request_video_summary(
     provider: Any,
     summary_payload: Mapping[str, Any],
 ) -> dict[str, Any]:
-    return _mapping_result(
-        _invoke_provider(
-            provider.summarize_video_segments(summary_payload)
-        )
+    return _call_provider(
+        lambda: provider.summarize_video_segments(summary_payload)
     )
 
 
@@ -1316,7 +1320,7 @@ def _segment_result_with_retry(
     failed_usage: list[Mapping[str, Any]] = []
     for attempt in range(2):
         try:
-            return _mapping_result(_invoke_provider(operation(payload)))
+            return _call_provider(lambda: operation(payload))
         except _NATIVE_RUNTIME_ERRORS as exc:
             failed_usage.extend(_usage_results_from_exception(exc))
             if attempt == 1:
@@ -1341,16 +1345,14 @@ def _best_effort_audio_transcript(
         transcribe = getattr(provider, "transcribe_audio", None)
         if not audio_bytes or not callable(transcribe):
             return None, None
-        result = _mapping_result(
-            _invoke_provider(
-                transcribe(
-                    {
-                        "audio_bytes": audio_bytes,
-                        "filename": "reverse-prompt.mp3",
-                        "language": "zh",
-                    }
-                )
-            )
+        result = _call_provider(
+            lambda: transcribe(
+                {
+                    "audio_bytes": audio_bytes,
+                    "filename": "reverse-prompt.mp3",
+                    "language": "zh",
+                }
+            ),
         )
         transcript = str(
             result.get("audio_transcript")
@@ -1371,6 +1373,20 @@ def _frame_data_urls(frames: list[bytes]) -> list[str]:
         "data:image/jpeg;base64," + base64.b64encode(frame).decode("ascii")
         for frame in frames
     ]
+
+
+def _call_provider(operation: Callable[[], Any]) -> dict[str, Any]:
+    usage_checkpoint = reverse_prompt_usage_checkpoint()
+    try:
+        result = _mapping_result(_invoke_provider(operation()))
+    except Exception as exc:
+        if not reverse_prompt_usage_since(usage_checkpoint):
+            for usage in _usage_results_from_exception(exc):
+                capture_reverse_prompt_usage(usage)
+        raise
+    if not reverse_prompt_usage_since(usage_checkpoint):
+        capture_reverse_prompt_usage(result)
+    return result
 
 
 def _invoke_provider(operation: Any) -> Any:

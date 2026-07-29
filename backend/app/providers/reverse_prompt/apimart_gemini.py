@@ -15,6 +15,7 @@ from app.core.logging import get_logger
 from app.db.models import ProviderConfig
 from app.providers.base import register_provider
 from app.services.apimart_costs import apimart_cost_cents_from_credits, apimart_usage_metadata
+from app.services.reverse_prompt_usage import capture_reverse_prompt_usage
 
 _DEFAULT_BASE_URL = "https://api.apimart.ai/v1"
 _DEFAULT_MODEL = "gemini-3.1-pro-preview"
@@ -427,13 +428,15 @@ class APIMartGeminiReversePromptProvider:
             timeout=self.request_timeout,
         )
         response_payload = _response_payload(response)
+        data = response_payload.get("data")
+        completion_payload = data if isinstance(data, Mapping) else response_payload
+        usage = _usage_cost_payload(response_payload, completion_payload)
+        capture_reverse_prompt_usage(usage)
         _raise_for_response(
             response,
             response_payload,
             "APIMart audio transcription failed",
         )
-        data = response_payload.get("data")
-        completion_payload = data if isinstance(data, Mapping) else response_payload
         transcript = _optional_transcript(completion_payload.get("text"))
         if transcript is None:
             raise APIMartGeminiReversePromptError(
@@ -443,7 +446,7 @@ class APIMartGeminiReversePromptProvider:
             "audio_transcript": transcript,
             "provider": "apimart",
             "model": _DEFAULT_TRANSCRIPTION_MODEL,
-            **_usage_cost_payload(response_payload, completion_payload),
+            **usage,
             "raw_model_json": dict(completion_payload),
         }
 
@@ -500,6 +503,9 @@ class APIMartGeminiReversePromptProvider:
             timeout=self.request_timeout,
         )
         payload = _response_payload(response)
+        capture_reverse_prompt_usage(
+            _usage_cost_payload(payload, _completion_payload(payload))
+        )
         _raise_for_response(response, payload, "APIMart Gemini reverse prompt failed")
         return payload
 
@@ -538,6 +544,9 @@ class APIMartGeminiReversePromptProvider:
             timeout=self.request_timeout,
         )
         payload = _response_payload(response)
+        capture_reverse_prompt_usage(
+            _usage_cost_payload(payload, _completion_payload(payload))
+        )
         _raise_for_response(response, payload, "APIMart Gemini structured vision failed")
         return payload
 
@@ -615,6 +624,7 @@ class APIMartGeminiReversePromptProvider:
             timeout=self.request_timeout,
         )
         payload = _response_payload(response)
+        capture_reverse_prompt_usage(_native_usage_cost_payload(payload))
         _raise_for_response(response, payload, "APIMart Gemini native video failed")
         return payload
 
