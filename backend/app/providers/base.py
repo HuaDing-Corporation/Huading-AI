@@ -97,6 +97,21 @@ class ReversePromptProvider(Protocol):
         payload: Mapping[str, Any],
     ) -> Mapping[str, Any]: ...
 
+    async def reverse_video_native(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]: ...
+
+    async def analyze_video_native_segment(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]: ...
+
+    async def summarize_video_segments(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]: ...
+
 
 @runtime_checkable
 class ScenePromptProvider(Protocol):
