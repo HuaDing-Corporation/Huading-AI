@@ -2843,6 +2843,18 @@ def test_short_native_invalid_json_fallback_persists_provenance_and_all_cost(
         assert usage.quantity == Decimal("2780.000")
     assert fallback_logs == [
         (
+            "reverse_prompt_video_structured_retry",
+            {
+                "job_id": job_id,
+                "tenant_id": auth_context["tenant_id"],
+                "parent_stage": "segment_1",
+                "operation": "reverse_video_native",
+                "segment_index": 1,
+                "call_attempt": 1,
+                "retry_count": 1,
+            },
+        ),
+        (
             "reverse_prompt_native_video_fallback",
             {
                 "job_id": job_id,
