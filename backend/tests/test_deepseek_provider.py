@@ -90,6 +90,8 @@ async def test_deepseek_provider_returns_token_usage_for_cost_reconcile() -> Non
         prompt_tokens = 1200
         completion_tokens = 300
         total_tokens = 1500
+        prompt_cache_hit_tokens = 400
+        prompt_cache_miss_tokens = 800
 
     class _Response:
         choices = [_Choice()]
@@ -116,6 +118,8 @@ async def test_deepseek_provider_returns_token_usage_for_cost_reconcile() -> Non
         "prompt_tokens": 1200,
         "completion_tokens": 300,
         "total_tokens": 1500,
+        "prompt_cache_hit_tokens": 400,
+        "prompt_cache_miss_tokens": 800,
     }
 
 

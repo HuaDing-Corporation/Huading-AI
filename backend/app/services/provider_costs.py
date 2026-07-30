@@ -9,8 +9,17 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.db.models import UsageRecord
 from app.services.apimart_token_pricing import apimart_token_usage_cost
+
+logger = get_logger(__name__)
+
+
+class DeepSeekCostError(ValueError):
+    def __init__(self, message: str, *, error_type: str) -> None:
+        super().__init__(message)
+        self.error_type = error_type
 
 
 @dataclass(frozen=True)
@@ -21,12 +30,25 @@ class DeepSeekUsageCost:
     completion_tokens: int
     total_tokens: int
     cost_cents: int
+    cost_cny: Decimal = Decimal("0")
+    prompt_cache_hit_tokens: int = 0
+    prompt_cache_miss_tokens: int = 0
+    cache_tokens_reported: bool = False
 
 
 _deepseek_usage_capture: ContextVar[list[DeepSeekUsageCost] | None] = ContextVar(
     "deepseek_usage_capture",
     default=None,
 )
+_DEEPSEEK_PROVIDER = "deepseek"
+_DEEPSEEK_DEFAULT_PRICED_MODEL = "deepseek-v4-flash"
+_DEEPSEEK_RATE_SETTINGS_BY_MODEL = {
+    "deepseek-v4-flash": (
+        "engine_deepseek_cny_per_1k_input",
+        "engine_deepseek_cny_per_1k_cache_hit",
+        "engine_deepseek_cny_per_1k_output",
+    ),
+}
 
 
 def _decimal_setting(value: Decimal | float | int | str) -> Decimal:
@@ -84,18 +106,68 @@ def tts_cost_cents(
     raise ValueError(f"Unsupported TTS provider cost basis: {provider!r}")
 
 
-def deepseek_cost_cents(*, prompt_tokens: int, completion_tokens: int) -> int:
-    input_cny = (
-        Decimal(max(0, int(prompt_tokens)))
+def deepseek_cost_cny(
+    *,
+    model: str | None = None,
+    prompt_tokens: int,
+    completion_tokens: int,
+    prompt_cache_hit_tokens: int | None = None,
+    prompt_cache_miss_tokens: int | None = None,
+) -> Decimal:
+    normalized_model = str(
+        model or _DEEPSEEK_DEFAULT_PRICED_MODEL
+    ).strip().lower()
+    rate_setting_names = _DEEPSEEK_RATE_SETTINGS_BY_MODEL.get(normalized_model)
+    if rate_setting_names is None:
+        raise DeepSeekCostError(
+            f"DeepSeek pricing is not configured for model {normalized_model!r}.",
+            error_type="unknown_model",
+        )
+    input_rate, cache_hit_rate, output_rate = (
+        _decimal_setting(getattr(settings, setting_name))
+        for setting_name in rate_setting_names
+    )
+    safe_prompt_tokens = max(0, int(prompt_tokens))
+    cache_hit_tokens, cache_miss_tokens, _ = _deepseek_cache_breakdown(
+        prompt_tokens=safe_prompt_tokens,
+        prompt_cache_hit_tokens=prompt_cache_hit_tokens,
+        prompt_cache_miss_tokens=prompt_cache_miss_tokens,
+    )
+    cache_miss_cny = (
+        Decimal(cache_miss_tokens)
         / Decimal("1000")
-        * _decimal_setting(settings.engine_deepseek_cny_per_1k_input)
+        * input_rate
+    )
+    cache_hit_cny = (
+        Decimal(cache_hit_tokens)
+        / Decimal("1000")
+        * cache_hit_rate
     )
     output_cny = (
         Decimal(max(0, int(completion_tokens)))
         / Decimal("1000")
-        * _decimal_setting(settings.engine_deepseek_cny_per_1k_output)
+        * output_rate
     )
-    return cny_to_cents(input_cny + output_cny)
+    return cache_miss_cny + cache_hit_cny + output_cny
+
+
+def deepseek_cost_cents(
+    *,
+    model: str | None = None,
+    prompt_tokens: int,
+    completion_tokens: int,
+    prompt_cache_hit_tokens: int | None = None,
+    prompt_cache_miss_tokens: int | None = None,
+) -> int:
+    return cny_to_cents(
+        deepseek_cost_cny(
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            prompt_cache_hit_tokens=prompt_cache_hit_tokens,
+            prompt_cache_miss_tokens=prompt_cache_miss_tokens,
+        )
+    )
 
 
 def apimart_scene_prompt_cost_cents(
@@ -143,6 +215,27 @@ def _optional_nonnegative_int(value: Any) -> int | None:
         return None
 
 
+def _deepseek_cache_breakdown(
+    *,
+    prompt_tokens: int,
+    prompt_cache_hit_tokens: int | None,
+    prompt_cache_miss_tokens: int | None,
+) -> tuple[int, int, bool]:
+    cache_hit_tokens = _optional_nonnegative_int(prompt_cache_hit_tokens)
+    cache_miss_tokens = _optional_nonnegative_int(prompt_cache_miss_tokens)
+    cache_tokens_reported = (
+        cache_hit_tokens is not None and cache_miss_tokens is not None
+    )
+    if not cache_tokens_reported:
+        return 0, prompt_tokens, False
+    if cache_hit_tokens + cache_miss_tokens == prompt_tokens:
+        return cache_hit_tokens, cache_miss_tokens, True
+    raise DeepSeekCostError(
+        "DeepSeek cache hit and miss tokens must equal prompt tokens.",
+        error_type="invalid_cache_usage",
+    )
+
+
 def deepseek_usage_from_result(result: Any) -> DeepSeekUsageCost | None:
     if not isinstance(result, dict):
         return None
@@ -154,20 +247,63 @@ def deepseek_usage_from_result(result: Any) -> DeepSeekUsageCost | None:
     total_tokens = _int_from_usage(usage, "total_tokens") or (
         prompt_tokens + completion_tokens
     )
+    raw_prompt_cache_hit_tokens = _optional_nonnegative_int(
+        usage.get("prompt_cache_hit_tokens")
+        if isinstance(usage, dict)
+        else getattr(usage, "prompt_cache_hit_tokens", None)
+    )
+    raw_prompt_cache_miss_tokens = _optional_nonnegative_int(
+        usage.get("prompt_cache_miss_tokens")
+        if isinstance(usage, dict)
+        else getattr(usage, "prompt_cache_miss_tokens", None)
+    )
     if total_tokens > 0 and prompt_tokens + completion_tokens == 0:
         prompt_tokens = total_tokens
     if total_tokens <= 0:
         return None
+    prompt_cache_hit_tokens, prompt_cache_miss_tokens, cache_tokens_reported = (
+        _deepseek_cache_breakdown(
+            prompt_tokens=prompt_tokens,
+            prompt_cache_hit_tokens=raw_prompt_cache_hit_tokens,
+            prompt_cache_miss_tokens=raw_prompt_cache_miss_tokens,
+        )
+    )
+    provider = str(result.get("provider") or _DEEPSEEK_PROVIDER).strip().lower()
+    if provider != _DEEPSEEK_PROVIDER:
+        raise DeepSeekCostError(
+            f"DeepSeek cost capture cannot price provider {provider!r}.",
+            error_type="unknown_provider",
+        )
+    model = str(
+        result.get("model")
+        or settings.engine_llm_model
+        or _DEEPSEEK_DEFAULT_PRICED_MODEL
+    )
+    if not cache_tokens_reported:
+        logger.warning(
+            "deepseek_cache_usage_unavailable",
+            provider=provider,
+            model=model,
+            prompt_tokens=prompt_tokens,
+        )
+    cost_cny = deepseek_cost_cny(
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        prompt_cache_hit_tokens=prompt_cache_hit_tokens,
+        prompt_cache_miss_tokens=prompt_cache_miss_tokens,
+    )
     return DeepSeekUsageCost(
-        provider=str(result.get("provider") or "deepseek"),
-        model=str(result.get("model") or settings.engine_llm_model or "") or None,
+        provider=provider,
+        model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
-        cost_cents=deepseek_cost_cents(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-        ),
+        cost_cents=cny_to_cents(cost_cny),
+        cost_cny=cost_cny,
+        prompt_cache_hit_tokens=prompt_cache_hit_tokens,
+        prompt_cache_miss_tokens=prompt_cache_miss_tokens,
+        cache_tokens_reported=cache_tokens_reported,
     )
 
 
@@ -208,20 +344,48 @@ def aggregate_deepseek_usages(usages: list[DeepSeekUsageCost]) -> DeepSeekUsageC
     prompt_tokens = sum(item.prompt_tokens for item in usages)
     completion_tokens = sum(item.completion_tokens for item in usages)
     total_tokens = sum(item.total_tokens for item in usages)
+    cache_breakdowns = [
+        _deepseek_cache_breakdown(
+            prompt_tokens=item.prompt_tokens,
+            prompt_cache_hit_tokens=(
+                item.prompt_cache_hit_tokens if item.cache_tokens_reported else None
+            ),
+            prompt_cache_miss_tokens=(
+                item.prompt_cache_miss_tokens if item.cache_tokens_reported else None
+            ),
+        )
+        for item in usages
+    ]
+    prompt_cache_hit_tokens = sum(item[0] for item in cache_breakdowns)
+    prompt_cache_miss_tokens = sum(item[1] for item in cache_breakdowns)
+    cache_tokens_reported = all(item[2] for item in cache_breakdowns)
     if total_tokens <= 0:
         return None
     provider = usages[0].provider
     model = usages[0].model
+    if any(item.provider != provider or item.model != model for item in usages):
+        raise DeepSeekCostError(
+            "DeepSeek usage aggregation requires one provider and model.",
+            error_type="mixed_usage",
+        )
+    cost_cny = deepseek_cost_cny(
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        prompt_cache_hit_tokens=prompt_cache_hit_tokens,
+        prompt_cache_miss_tokens=prompt_cache_miss_tokens,
+    )
     return DeepSeekUsageCost(
         provider=provider,
         model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
-        cost_cents=deepseek_cost_cents(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-        ),
+        cost_cents=cny_to_cents(cost_cny),
+        cost_cny=cost_cny,
+        prompt_cache_hit_tokens=prompt_cache_hit_tokens,
+        prompt_cache_miss_tokens=prompt_cache_miss_tokens,
+        cache_tokens_reported=cache_tokens_reported,
     )
 
 

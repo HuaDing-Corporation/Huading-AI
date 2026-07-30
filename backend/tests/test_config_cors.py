@@ -293,6 +293,7 @@ def test_direct_cny_provider_cost_settings_are_env_driven(monkeypatch) -> None:
     monkeypatch.setenv("ENGINE_SEEDTTS_CNY_PER_CHAR", "0.0004")
     monkeypatch.setenv("ENGINE_COSYVOICE_TTS_CNY_PER_CHAR", "0.0002")
     monkeypatch.setenv("ENGINE_DEEPSEEK_CNY_PER_1K_INPUT", "0.002")
+    monkeypatch.setenv("ENGINE_DEEPSEEK_CNY_PER_1K_CACHE_HIT", "0.00004")
     monkeypatch.setenv("ENGINE_DEEPSEEK_CNY_PER_1K_OUTPUT", "0.003")
     s = Settings(_env_file=None, jwt_secret_key=_JWT)
 
@@ -300,6 +301,7 @@ def test_direct_cny_provider_cost_settings_are_env_driven(monkeypatch) -> None:
     assert s.engine_seedtts_cny_per_char == 0.0004
     assert s.engine_cosyvoice_tts_cny_per_char == 0.0002
     assert s.engine_deepseek_cny_per_1k_input == 0.002
+    assert s.engine_deepseek_cny_per_1k_cache_hit == 0.00004
     assert s.engine_deepseek_cny_per_1k_output == 0.003
 
 
@@ -308,6 +310,7 @@ def test_direct_cny_provider_cost_settings_have_defaults(monkeypatch) -> None:
     monkeypatch.delenv("ENGINE_SEEDTTS_CNY_PER_CHAR", raising=False)
     monkeypatch.delenv("ENGINE_COSYVOICE_TTS_CNY_PER_CHAR", raising=False)
     monkeypatch.delenv("ENGINE_DEEPSEEK_CNY_PER_1K_INPUT", raising=False)
+    monkeypatch.delenv("ENGINE_DEEPSEEK_CNY_PER_1K_CACHE_HIT", raising=False)
     monkeypatch.delenv("ENGINE_DEEPSEEK_CNY_PER_1K_OUTPUT", raising=False)
     s = Settings(_env_file=None, jwt_secret_key=_JWT)
 
@@ -315,6 +318,7 @@ def test_direct_cny_provider_cost_settings_have_defaults(monkeypatch) -> None:
     assert s.engine_seedtts_cny_per_char == 0.0003
     assert s.engine_cosyvoice_tts_cny_per_char == 0.00015
     assert s.engine_deepseek_cny_per_1k_input == 0.001008
+    assert s.engine_deepseek_cny_per_1k_cache_hit == 0.00002016
     assert s.engine_deepseek_cny_per_1k_output == 0.002016
 
 
@@ -330,3 +334,18 @@ def test_tts_provider_cost_env_examples_keep_upstream_rates_distinct() -> None:
         contents = example.read_text(encoding="utf-8")
         assert "ENGINE_SEEDTTS_CNY_PER_CHAR=0.0003" in contents
         assert "ENGINE_COSYVOICE_TTS_CNY_PER_CHAR=0.00015" in contents
+
+
+def test_deepseek_cost_env_examples_include_cache_hit_rate() -> None:
+    repository_root = Path(__file__).parents[2]
+    examples = (
+        repository_root / "backend" / ".env.example",
+        repository_root / "infra" / ".env.example",
+        repository_root / "infra" / ".env.prod.example",
+    )
+
+    for example in examples:
+        contents = example.read_text(encoding="utf-8")
+        assert "ENGINE_DEEPSEEK_CNY_PER_1K_INPUT=0.001008" in contents
+        assert "ENGINE_DEEPSEEK_CNY_PER_1K_CACHE_HIT=0.00002016" in contents
+        assert "ENGINE_DEEPSEEK_CNY_PER_1K_OUTPUT=0.002016" in contents

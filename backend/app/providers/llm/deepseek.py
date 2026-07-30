@@ -52,6 +52,14 @@ class DeepSeekProvider:
                 "prompt_tokens": _usage_int(usage, "prompt_tokens"),
                 "completion_tokens": _usage_int(usage, "completion_tokens"),
                 "total_tokens": _usage_int(usage, "total_tokens"),
+                "prompt_cache_hit_tokens": _usage_optional_int(
+                    usage,
+                    "prompt_cache_hit_tokens",
+                ),
+                "prompt_cache_miss_tokens": _usage_optional_int(
+                    usage,
+                    "prompt_cache_miss_tokens",
+                ),
             },
         }
 
@@ -64,6 +72,18 @@ def _usage_int(usage: Any, key: str) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _usage_optional_int(usage: Any, key: str) -> int | None:
+    if usage is None:
+        return None
+    value = usage.get(key) if isinstance(usage, dict) else getattr(usage, key, None)
+    if value in (None, ""):
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _deepseek_factory(config: ProviderConfig) -> DeepSeekProvider:

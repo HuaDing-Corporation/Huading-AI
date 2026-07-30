@@ -244,6 +244,7 @@ class Settings(BaseSettings):
     engine_ecom_replicate_analysis_concurrency: int = Field(default=4, ge=1)
     engine_usd_cny_rate: float = 7.0
     engine_deepseek_cny_per_1k_input: float = 0.001008
+    engine_deepseek_cny_per_1k_cache_hit: float = 0.00002016
     engine_deepseek_cny_per_1k_output: float = 0.002016
     engine_image_provider_timeout_seconds: float = 1500.0
     engine_subtitle_font_path: str = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"

@@ -110,6 +110,7 @@ def _deepseek_backfill_cost(record: UsageRecord, _task: VideoTask | None) -> int
     if total_tokens <= 0:
         return 0
     return provider_costs.deepseek_cost_cents(
+        model=record.model,
         prompt_tokens=total_tokens,
         completion_tokens=0,
     )
