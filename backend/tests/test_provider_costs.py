@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 
 def test_provider_costs_use_provider_specific_bases(monkeypatch) -> None:
     from app.services import provider_costs
@@ -43,6 +45,26 @@ def test_provider_costs_use_provider_specific_bases(monkeypatch) -> None:
         prompt_tokens=100_000,
         completion_tokens=50_000,
     ) == 20
+
+
+def test_tts_cost_basis_requires_an_explicit_supported_provider(monkeypatch) -> None:
+    from app.services import provider_costs
+
+    monkeypatch.setattr(
+        provider_costs.settings,
+        "engine_seedtts_cny_per_char",
+        Decimal("0.0003"),
+    )
+    monkeypatch.setattr(
+        provider_costs.settings,
+        "engine_cosyvoice_tts_cny_per_char",
+        Decimal("0.00015"),
+    )
+
+    assert provider_costs.tts_cost_cents(100, provider="doubao-seed-tts") == 3
+    assert provider_costs.tts_cost_cents(100, provider="cosyvoice-tts") == 2
+    with pytest.raises(ValueError, match="Unsupported TTS provider cost basis"):
+        provider_costs.tts_cost_cents(100, provider="unpriced-tts")
 
 
 def test_provider_costs_do_not_apply_usd_exchange_to_direct_cny(monkeypatch) -> None:

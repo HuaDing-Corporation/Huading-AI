@@ -59,8 +59,29 @@ def omnihuman_change_lips_cost_cents(
 
 
 def seed_tts_cost_cents(characters: int | float | Decimal) -> int:
+    # Volcengine Doubao Seed-TTS direct CNY rate.
     safe_chars = max(0, Decimal(str(characters or 0)))
     return cny_to_cents(safe_chars * _decimal_setting(settings.engine_seedtts_cny_per_char))
+
+
+def cosyvoice_tts_cost_cents(characters: int | float | Decimal) -> int:
+    # Alibaba Cloud Bailian/DashScope CosyVoice direct CNY rate.
+    safe_chars = max(0, Decimal(str(characters or 0)))
+    return cny_to_cents(
+        safe_chars * _decimal_setting(settings.engine_cosyvoice_tts_cny_per_char)
+    )
+
+
+def tts_cost_cents(
+    characters: int | float | Decimal,
+    *,
+    provider: str,
+) -> int:
+    if provider == "doubao-seed-tts":
+        return seed_tts_cost_cents(characters)
+    if provider == "cosyvoice-tts":
+        return cosyvoice_tts_cost_cents(characters)
+    raise ValueError(f"Unsupported TTS provider cost basis: {provider!r}")
 
 
 def deepseek_cost_cents(*, prompt_tokens: int, completion_tokens: int) -> int:
@@ -336,7 +357,7 @@ def record_tts_usage(
         unit="char",
         quantity=Decimal(characters),
         credits=Decimal("0"),
-        cost_cents=seed_tts_cost_cents(characters),
+        cost_cents=tts_cost_cents(characters, provider=provider),
         status="settled",
         settled_at=datetime.now(UTC),
     )

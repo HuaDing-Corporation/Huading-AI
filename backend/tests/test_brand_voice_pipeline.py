@@ -1584,6 +1584,7 @@ def test_avatar_talk_cosyvoice_brand_voice_uses_cosyvoice_synthesizer(
 ):
     captured_tts_payloads: list[dict[str, Any]] = []
     unit_id = "cosyvoice-avatar-unit"
+    script_text = "c" * 100
     with auth_db() as db:
         brand_voice = BrandVoice(
             tenant_id=auth_context["tenant_id"],
@@ -1604,7 +1605,7 @@ def test_avatar_talk_cosyvoice_brand_voice_uses_cosyvoice_synthesizer(
                 video_mode="avatar_talk",
                 status="running",
                 topic="cosy brand voice",
-                script="cosy script",
+                script=script_text,
                 brand_voice_id=brand_voice.id,
                 params={
                     "voice_source": "brand_voice",
@@ -1644,6 +1645,18 @@ def test_avatar_talk_cosyvoice_brand_voice_uses_cosyvoice_synthesizer(
         monkeypatch.setattr(avatar_talk, "_work_dir", lambda _unit_id: tmp_path)
         monkeypatch.setattr(avatar_talk, "_audio_duration_sec", lambda _path: 1.0)
         monkeypatch.setattr(avatar_talk, "label_artifact_bytes", _passthrough_label)
+        monkeypatch.setattr(
+            avatar_talk.provider_costs.settings,
+            "engine_seedtts_cny_per_char",
+            Decimal("0.0003"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            avatar_talk.provider_costs.settings,
+            "engine_cosyvoice_tts_cny_per_char",
+            Decimal("0.00015"),
+            raising=False,
+        )
 
         ctx = avatar_talk.AvatarTalkContext(
             task_id=unit_id,
@@ -1659,7 +1672,9 @@ def test_avatar_talk_cosyvoice_brand_voice_uses_cosyvoice_synthesizer(
         assert usage.provider == "cosyvoice-tts"
         assert usage.model == "cosyvoice-v3.5-plus"
         assert usage.unit == "char"
-        assert usage.quantity == Decimal(len("cosy script"))
+        assert usage.quantity == Decimal(len(script_text))
+        assert usage.credits == Decimal("0")
+        assert usage.cost_cents == 2
 
     assert captured_tts_payloads[0]["voice"] == "cosy-speaker"
     assert captured_tts_payloads[0]["voice_source"] == "brand_voice"

@@ -166,6 +166,7 @@ class Settings(BaseSettings):
     engine_cosyvoice_voice_clone_target_model: str = "cosyvoice-v3.5-plus"
     engine_cosyvoice_voice_clone_base_url: str = ""
     engine_cosyvoice_voice_clone_request_timeout_seconds: float = 60.0
+    engine_cosyvoice_tts_cny_per_char: float = 0.00015
     # OpenAI Images for the photo pipeline. Credentials stay env-only.
     openai_api_key: str = ""
     openai_base_url: str = ""
