@@ -283,7 +283,7 @@ def test_apimart_cost_settings_have_defaults(monkeypatch) -> None:
     s = Settings(_env_file=None, jwt_secret_key=_JWT)
 
     assert s.engine_apimart_credit_usd == 0.10
-    assert s.engine_usd_cny_rate == 7.2
+    assert s.engine_usd_cny_rate == 7.0
 
 
 def test_direct_cny_provider_cost_settings_are_env_driven(monkeypatch) -> None:

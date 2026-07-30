@@ -16,7 +16,11 @@ _CREDIT_KEYS = {
 }
 _COST_CENTS_KEYS = {"cost_cents", "cny_cost_cents", "cost_cent"}
 _IMAGE_CREDITS_BY_MODEL_PREFIX = {
-    "gpt-image": Decimal("0.06"),
+    "gpt-image": {
+        "1k": Decimal("0.085"),
+        "2k": Decimal("0.14"),
+        "4k": Decimal("0.21"),
+    },
 }
 _VIDEO_CREDITS_PER_5_SECONDS_BY_RESOLUTION = {
     "480p": Decimal("3.3"),
@@ -95,9 +99,10 @@ def apimart_price_table_credits(
     duration_sec: Any | None = None,
 ) -> Decimal | None:
     normalized_model = model.strip().lower()
-    for prefix, credits in _IMAGE_CREDITS_BY_MODEL_PREFIX.items():
+    for prefix, credits_by_resolution in _IMAGE_CREDITS_BY_MODEL_PREFIX.items():
         if normalized_model.startswith(prefix):
-            return credits
+            normalized_resolution = str(resolution or "1k").strip().lower()
+            return credits_by_resolution.get(normalized_resolution)
 
     if "seedance" not in normalized_model:
         return None

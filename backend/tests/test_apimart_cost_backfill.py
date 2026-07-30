@@ -72,7 +72,7 @@ def test_cost_backfill_dry_run_previews_apimart_and_omnihuman_without_writing(
     from scripts.backfill_apimart_costs import backfill_provider_zero_costs
 
     monkeypatch.setattr(apimart_costs.settings, "engine_apimart_credit_usd", Decimal("0.10"))
-    monkeypatch.setattr(apimart_costs.settings, "engine_usd_cny_rate", Decimal("7.20"))
+    monkeypatch.setattr(apimart_costs.settings, "engine_usd_cny_rate", Decimal("7.0"))
     monkeypatch.setattr(
         provider_costs.settings,
         "engine_omnihuman_cny_per_sec",
@@ -227,8 +227,8 @@ def test_cost_backfill_dry_run_previews_apimart_and_omnihuman_without_writing(
         assert summary.matched == 5
         assert summary.updated == 0
         preview = {item["usage_record_id"]: item for item in summary.preview}
-        assert preview[image_usage.id]["new_cost_cents"] == 4
-        assert preview[video_usage.id]["new_cost_cents"] == 238
+        assert preview[image_usage.id]["new_cost_cents"] == 6
+        assert preview[video_usage.id]["new_cost_cents"] == 231
         assert preview[avatar_usage.id]["new_cost_cents"] == 1800
         assert preview[tts_usage.id]["new_cost_cents"] == 3
         assert preview[deepseek_token_usage.id]["new_cost_cents"] == 10
@@ -302,7 +302,7 @@ def test_cost_backfill_skips_legacy_ecom_i2v_without_resolution_but_recomputes_r
     from scripts.backfill_apimart_costs import backfill_provider_zero_costs
 
     monkeypatch.setattr(apimart_costs.settings, "engine_apimart_credit_usd", Decimal("0.10"))
-    monkeypatch.setattr(apimart_costs.settings, "engine_usd_cny_rate", Decimal("7.20"))
+    monkeypatch.setattr(apimart_costs.settings, "engine_usd_cny_rate", Decimal("7.0"))
     tenant_id = auth_context["tenant_id"]
     with auth_db() as db:
         subscription = _seed_subscription(db, tenant_id)
@@ -361,7 +361,7 @@ def test_cost_backfill_skips_legacy_ecom_i2v_without_resolution_but_recomputes_r
         skipped = {item["usage_record_id"]: item for item in summary.skipped}
         assert skipped[legacy_usage.id]["reason"] == "ecom_i2v_no_resolution"
         preview = {item["usage_record_id"]: item for item in summary.preview}
-        assert preview[recorded_usage.id]["new_cost_cents"] == 1276
+        assert preview[recorded_usage.id]["new_cost_cents"] == 1240
         assert legacy_usage.id not in preview
         assert db.get(UsageRecord, legacy_usage.id).cost_cents == 511
         assert db.get(UsageRecord, recorded_usage.id).cost_cents == 0
@@ -376,7 +376,7 @@ def test_cost_backfill_dry_run_recomputes_only_apimart_nonzero_mismatches(
     from scripts.backfill_apimart_costs import backfill_provider_zero_costs
 
     monkeypatch.setattr(apimart_costs.settings, "engine_apimart_credit_usd", Decimal("0.10"))
-    monkeypatch.setattr(apimart_costs.settings, "engine_usd_cny_rate", Decimal("7.20"))
+    monkeypatch.setattr(apimart_costs.settings, "engine_usd_cny_rate", Decimal("7.0"))
     tenant_id = auth_context["tenant_id"]
     with auth_db() as db:
         subscription = _seed_subscription(db, tenant_id)
@@ -473,7 +473,7 @@ def test_cost_backfill_dry_run_recomputes_only_apimart_nonzero_mismatches(
             capability="image",
             unit="image",
             quantity=Decimal("1"),
-            cost_cents=4,
+            cost_cents=6,
         )
         tolerated_video = _usage(
             db,
@@ -485,7 +485,7 @@ def test_cost_backfill_dry_run_recomputes_only_apimart_nonzero_mismatches(
             capability="video_gen",
             unit="second",
             quantity=Decimal("5"),
-            cost_cents=239,
+            cost_cents=232,
         )
         non_apimart_nonzero = _usage(
             db,
@@ -517,19 +517,19 @@ def test_cost_backfill_dry_run_recomputes_only_apimart_nonzero_mismatches(
 
         preview = {item["usage_record_id"]: item for item in summary.preview}
         assert preview[wrong_image.id]["old_cost_cents"] == 1440
-        assert preview[wrong_image.id]["new_cost_cents"] == 4
+        assert preview[wrong_image.id]["new_cost_cents"] == 6
         assert preview[wrong_video.id]["old_cost_cents"] == 24
-        assert preview[wrong_video.id]["new_cost_cents"] == 238
+        assert preview[wrong_video.id]["new_cost_cents"] == 231
         unchanged = {item["usage_record_id"]: item for item in summary.unchanged}
-        assert unchanged[correct_image.id]["old_cost_cents"] == 4
-        assert unchanged[correct_image.id]["new_cost_cents"] == 4
-        assert unchanged[tolerated_video.id]["old_cost_cents"] == 239
-        assert unchanged[tolerated_video.id]["new_cost_cents"] == 238
+        assert unchanged[correct_image.id]["old_cost_cents"] == 6
+        assert unchanged[correct_image.id]["new_cost_cents"] == 6
+        assert unchanged[tolerated_video.id]["old_cost_cents"] == 232
+        assert unchanged[tolerated_video.id]["new_cost_cents"] == 231
         anomalies = {item["usage_record_id"]: item for item in summary.anomalies}
         assert anomalies[wrong_image.id]["old_cost_cents"] == 1440
-        assert anomalies[wrong_image.id]["new_cost_cents"] == 4
+        assert anomalies[wrong_image.id]["new_cost_cents"] == 6
         assert anomalies[wrong_video.id]["old_cost_cents"] == 24
-        assert anomalies[wrong_video.id]["new_cost_cents"] == 238
+        assert anomalies[wrong_video.id]["new_cost_cents"] == 231
         assert non_apimart_nonzero.id not in preview
         assert non_apimart_nonzero.id not in unchanged
         assert direct_seedance.id not in preview
@@ -547,7 +547,7 @@ def test_cost_backfill_apply_rewrites_apimart_mismatch_but_protects_others(
     from scripts.backfill_apimart_costs import backfill_provider_zero_costs
 
     monkeypatch.setattr(apimart_costs.settings, "engine_apimart_credit_usd", Decimal("0.10"))
-    monkeypatch.setattr(apimart_costs.settings, "engine_usd_cny_rate", Decimal("7.20"))
+    monkeypatch.setattr(apimart_costs.settings, "engine_usd_cny_rate", Decimal("7.0"))
     tenant_id = auth_context["tenant_id"]
     with auth_db() as db:
         subscription = _seed_subscription(db, tenant_id)
@@ -603,7 +603,7 @@ def test_cost_backfill_apply_rewrites_apimart_mismatch_but_protects_others(
             capability="image",
             unit="image",
             quantity=Decimal("1"),
-            cost_cents=4,
+            cost_cents=6,
         )
         non_apimart_nonzero = _usage(
             db,
@@ -623,8 +623,8 @@ def test_cost_backfill_apply_rewrites_apimart_mismatch_but_protects_others(
 
         assert summary.matched == 1
         assert summary.updated == 1
-        assert db.get(UsageRecord, wrong_image.id).cost_cents == 4
-        assert db.get(UsageRecord, correct_image.id).cost_cents == 4
+        assert db.get(UsageRecord, wrong_image.id).cost_cents == 6
+        assert db.get(UsageRecord, correct_image.id).cost_cents == 6
         assert db.get(UsageRecord, non_apimart_nonzero.id).cost_cents == 1800
 
 
@@ -637,7 +637,7 @@ def test_cost_backfill_limit_counts_actionable_rows_not_unchanged_candidates(
     from scripts.backfill_apimart_costs import backfill_provider_zero_costs
 
     monkeypatch.setattr(apimart_costs.settings, "engine_apimart_credit_usd", Decimal("0.10"))
-    monkeypatch.setattr(apimart_costs.settings, "engine_usd_cny_rate", Decimal("7.20"))
+    monkeypatch.setattr(apimart_costs.settings, "engine_usd_cny_rate", Decimal("7.0"))
     tenant_id = auth_context["tenant_id"]
     with auth_db() as db:
         subscription = _seed_subscription(db, tenant_id)
@@ -672,7 +672,7 @@ def test_cost_backfill_limit_counts_actionable_rows_not_unchanged_candidates(
             capability="image",
             unit="image",
             quantity=Decimal("1"),
-            cost_cents=4,
+            cost_cents=6,
         )
         wrong_image = _usage(
             db,

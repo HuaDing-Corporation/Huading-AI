@@ -154,7 +154,7 @@ async def test_luna_generates_scene_and_negative_prompts_from_all_product_contex
         "completion_tokens": 80,
         "total_tokens": 200,
         "credits": Decimal("1.25"),
-        "cost_cents": 90,
+        "cost_cents": 88,
     }
     call = session.calls[0]
     assert call["url"] == "https://api.apimart.ai/v1/chat/completions"
@@ -247,7 +247,7 @@ def test_scene_prompt_usage_uses_total_tokens_as_input_when_breakdown_is_missing
     assert record.unit == "token"
     assert record.quantity == Decimal("1000000")
     assert record.credits == Decimal("0")
-    assert record.cost_cents == 720
+    assert record.cost_cents == 700
 
 
 def test_scene_prompt_usage_skips_results_without_usage_or_cost() -> None:
@@ -477,7 +477,7 @@ async def test_luna_retry_accumulates_usage_and_cost_from_both_paid_calls() -> N
     assert result["completion_tokens"] == 30
     assert result["total_tokens"] == 250
     assert result["credits"] == Decimal("2.5")
-    assert result["cost_cents"] == 180
+    assert result["cost_cents"] == 175
 
 
 @pytest.mark.asyncio
@@ -522,7 +522,7 @@ async def test_luna_double_invalid_error_carries_usage_from_both_paid_calls() ->
         "completion_tokens": 30,
         "total_tokens": 250,
         "credits": Decimal("2.5"),
-        "cost_cents": 180,
+        "cost_cents": 175,
     }
 
 
@@ -559,7 +559,7 @@ async def test_luna_retry_timeout_carries_usage_from_the_received_paid_call() ->
         "completion_tokens": 10,
         "total_tokens": 110,
         "credits": Decimal("1.0"),
-        "cost_cents": 72,
+        "cost_cents": 70,
     }
 
 
@@ -603,7 +603,7 @@ async def test_luna_accepts_apimart_data_wrapper_and_reasoning_content() -> None
     assert result["negative_prompt"] == "logos, misshapen handles"
     assert result["total_tokens"] == 150
     assert result["credits"] == Decimal("0.5")
-    assert result["cost_cents"] == 36
+    assert result["cost_cents"] == 35
 
 
 @pytest.mark.asyncio

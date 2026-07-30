@@ -22,6 +22,18 @@ _DEFAULT_MODEL = "gemini-3.1-pro-preview"
 _DEFAULT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 _TARGET_FORMAT = "seedance_2_0"
 _MAX_CHAT_IMAGES = 16
+_TOKEN_CREDITS_PER_M_BY_MODEL = {
+    "gemini-3.1-pro-preview": {
+        "input": Decimal("16"),
+        "cached_input": None,
+        "output": Decimal("96"),
+    },
+    "gemini-3.6-flash": {
+        "input": Decimal("12"),
+        "cached_input": Decimal("1.2"),
+        "output": Decimal("60"),
+    },
+}
 _STRUCTURED_ZH_KEYS = (
     "subject",
     "scene",
@@ -136,7 +148,11 @@ class APIMartGeminiReversePromptProvider:
             **normalized,
             "provider": "apimart",
             "model": self.model,
-            **_usage_cost_payload(response_payload, completion_payload),
+            **_usage_cost_payload(
+                response_payload,
+                completion_payload,
+                model=self.model,
+            ),
             "raw_model_json": parsed,
         }
 
@@ -233,7 +249,12 @@ class APIMartGeminiReversePromptProvider:
                 video_bytes=video_bytes,
                 instruction=request_instruction,
             )
-            usage_results.append(_native_usage_cost_payload(response_payload))
+            usage_results.append(
+                _native_usage_cost_payload(
+                    response_payload,
+                    model=self.video_model,
+                )
+            )
             raw_text = _extract_native_message_text(response_payload)
             parsed = _parse_json_object(raw_text)
             if parsed is not None:
@@ -430,7 +451,11 @@ class APIMartGeminiReversePromptProvider:
         response_payload = _response_payload(response)
         data = response_payload.get("data")
         completion_payload = data if isinstance(data, Mapping) else response_payload
-        usage = _usage_cost_payload(response_payload, completion_payload)
+        usage = _usage_cost_payload(
+            response_payload,
+            completion_payload,
+            model=_DEFAULT_TRANSCRIPTION_MODEL,
+        )
         capture_reverse_prompt_usage(usage)
         _raise_for_response(
             response,
@@ -504,7 +529,11 @@ class APIMartGeminiReversePromptProvider:
         )
         payload = _response_payload(response)
         capture_reverse_prompt_usage(
-            _usage_cost_payload(payload, _completion_payload(payload))
+            _usage_cost_payload(
+                payload,
+                _completion_payload(payload),
+                model=self.model,
+            )
         )
         _raise_for_response(response, payload, "APIMart Gemini reverse prompt failed")
         return payload
@@ -520,11 +549,12 @@ class APIMartGeminiReversePromptProvider:
             raise APIMartGeminiReversePromptError(
                 f"APIMart Gemini accepts at most {_MAX_CHAT_IMAGES} images per request."
             )
+        selected_model = model or self.model
         response = self.session.post(
             f"{self.base_url}/chat/completions",
             headers=self._headers(),
             json={
-                "model": model or self.model,
+                "model": selected_model,
                 "temperature": 0.1,
                 "stream": False,
                 "messages": [
@@ -545,7 +575,11 @@ class APIMartGeminiReversePromptProvider:
         )
         payload = _response_payload(response)
         capture_reverse_prompt_usage(
-            _usage_cost_payload(payload, _completion_payload(payload))
+            _usage_cost_payload(
+                payload,
+                _completion_payload(payload),
+                model=selected_model,
+            )
         )
         _raise_for_response(response, payload, "APIMart Gemini structured vision failed")
         return payload
@@ -559,13 +593,20 @@ class APIMartGeminiReversePromptProvider:
         model: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         usage_results: list[dict[str, Any]] = []
+        selected_model = model or self.model
         response_payload = self._chat_structured(
             image_urls=image_urls,
             instruction=instruction,
             model=model,
         )
         completion_payload = _completion_payload(response_payload)
-        usage_results.append(_usage_cost_payload(response_payload, completion_payload))
+        usage_results.append(
+            _usage_cost_payload(
+                response_payload,
+                completion_payload,
+                model=selected_model,
+            )
+        )
         raw_text = _extract_message_text(completion_payload)
         parsed = _parse_json_object(raw_text)
         if parsed is None:
@@ -579,7 +620,11 @@ class APIMartGeminiReversePromptProvider:
             )
             completion_payload = _completion_payload(response_payload)
             usage_results.append(
-                _usage_cost_payload(response_payload, completion_payload)
+                _usage_cost_payload(
+                    response_payload,
+                    completion_payload,
+                    model=selected_model,
+                )
             )
             parsed = _parse_json_object(_extract_message_text(completion_payload))
         if parsed is None:
@@ -624,7 +669,9 @@ class APIMartGeminiReversePromptProvider:
             timeout=self.request_timeout,
         )
         payload = _response_payload(response)
-        capture_reverse_prompt_usage(_native_usage_cost_payload(payload))
+        capture_reverse_prompt_usage(
+            _native_usage_cost_payload(payload, model=self.video_model)
+        )
         _raise_for_response(response, payload, "APIMart Gemini native video failed")
         return payload
 
@@ -665,18 +712,57 @@ class APIMartGeminiReversePromptProvider:
         }
 
 
-def reverse_prompt_credits_from_tokens(*, prompt_tokens: int, completion_tokens: int) -> Decimal:
+def reverse_prompt_credits_from_tokens(
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+    model: str,
+    cached_prompt_tokens: int | None = None,
+) -> Decimal:
+    pricing = _TOKEN_CREDITS_PER_M_BY_MODEL.get(str(model).strip().lower())
+    if pricing is None:
+        raise APIMartGeminiReversePromptError(
+            f"APIMart token pricing is not configured for model '{model}'.",
+            error_type="cost_model_unconfigured",
+        )
+    prompt_token_count = max(0, int(prompt_tokens))
+    cached_token_count = (
+        None
+        if cached_prompt_tokens is None
+        else max(0, int(cached_prompt_tokens))
+    )
+    if cached_token_count is not None and cached_token_count > prompt_token_count:
+        raise APIMartGeminiReversePromptError(
+            "APIMart cached prompt tokens exceed total prompt tokens.",
+            error_type="invalid_usage_metadata",
+        )
+    uncached_token_count = prompt_token_count
+    cached_input_credits = Decimal("0")
+    if cached_token_count is not None:
+        uncached_token_count -= cached_token_count
+        cached_rate = pricing["cached_input"]
+        if cached_token_count > 0 and cached_rate is None:
+            raise APIMartGeminiReversePromptError(
+                f"APIMart cached-input pricing is not configured for model '{model}'.",
+                error_type="cost_model_unconfigured",
+            )
+        if cached_rate is not None:
+            cached_input_credits = (
+                Decimal(cached_token_count)
+                / Decimal("1000000")
+                * cached_rate
+            )
     input_credits = (
-        Decimal(max(0, int(prompt_tokens)))
+        Decimal(uncached_token_count)
         / Decimal("1000000")
-        * Decimal(str(settings.engine_apimart_reverse_prompt_input_credits_per_m))
+        * pricing["input"]
     )
     output_credits = (
         Decimal(max(0, int(completion_tokens)))
         / Decimal("1000000")
-        * Decimal(str(settings.engine_apimart_reverse_prompt_output_credits_per_m))
+        * pricing["output"]
     )
-    return input_credits + output_credits
+    return input_credits + cached_input_credits + output_credits
 
 
 def normalize_reverse_prompt_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -1333,19 +1419,27 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _usage_tokens(payload: Mapping[str, Any]) -> dict[str, int]:
+def _usage_tokens(payload: Mapping[str, Any]) -> dict[str, Any]:
     usage = payload.get("usage")
     if not isinstance(usage, Mapping):
         usage = {}
     prompt_tokens = _int_value(usage.get("prompt_tokens"))
     completion_tokens = _int_value(usage.get("completion_tokens"))
     total_tokens = _int_value(usage.get("total_tokens")) or prompt_tokens + completion_tokens
+    prompt_details = usage.get("prompt_tokens_details")
+    cached_prompt_tokens = (
+        _optional_int_value(prompt_details.get("cached_tokens"))
+        if isinstance(prompt_details, Mapping)
+        else None
+    )
     if total_tokens > 0 and prompt_tokens + completion_tokens == 0:
         prompt_tokens = total_tokens
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
+        "cached_prompt_tokens": cached_prompt_tokens,
+        "cache_tokens_reported": cached_prompt_tokens is not None,
     }
 
 
@@ -1360,29 +1454,53 @@ def _credits_from_response(payload: Mapping[str, Any]) -> Decimal | None:
 def _usage_cost_payload(
     response_payload: Mapping[str, Any],
     completion_payload: Mapping[str, Any],
+    *,
+    model: str,
 ) -> dict[str, Any]:
     usage = _usage_tokens(completion_payload)
     provider_credits = _credits_from_response(response_payload)
     cost_source = "provider_credits"
+    cost_estimate_uncertain = False
     if provider_credits is None:
         provider_credits = reverse_prompt_credits_from_tokens(
             prompt_tokens=usage["prompt_tokens"],
             completion_tokens=usage["completion_tokens"],
+            model=model,
+            cached_prompt_tokens=usage["cached_prompt_tokens"],
         )
         cost_source = "token_formula"
+        cost_estimate_uncertain = (
+            _model_supports_cached_input(model)
+            and not usage["cache_tokens_reported"]
+        )
+        if cost_estimate_uncertain:
+            logger.warning(
+                "reverse_prompt_cache_usage_unavailable",
+                provider="apimart",
+                model=model,
+                cost_source=cost_source,
+            )
     return {
         **usage,
         "credits": provider_credits,
         "cost_cents": apimart_cost_cents_from_credits(provider_credits),
         "cost_source": cost_source,
+        "cost_estimate_uncertain": cost_estimate_uncertain,
     }
 
 
-def _native_usage_cost_payload(response_payload: Mapping[str, Any]) -> dict[str, Any]:
+def _native_usage_cost_payload(
+    response_payload: Mapping[str, Any],
+    *,
+    model: str,
+) -> dict[str, Any]:
     completion = _native_completion_payload(response_payload)
     raw_usage = completion.get("usageMetadata")
     usage = raw_usage if isinstance(raw_usage, Mapping) else {}
     prompt_tokens = _int_value(usage.get("promptTokenCount"))
+    cached_prompt_tokens = _optional_int_value(
+        usage.get("cachedContentTokenCount")
+    )
     candidate_tokens = _int_value(usage.get("candidatesTokenCount"))
     thought_tokens = _int_value(usage.get("thoughtsTokenCount"))
     completion_tokens = candidate_tokens + thought_tokens
@@ -1391,19 +1509,36 @@ def _native_usage_cost_payload(response_payload: Mapping[str, Any]) -> dict[str,
     )
     provider_credits = _credits_from_response(response_payload)
     cost_source = "provider_credits"
+    cost_estimate_uncertain = False
     if provider_credits is None:
         provider_credits = reverse_prompt_credits_from_tokens(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            model=model,
+            cached_prompt_tokens=cached_prompt_tokens,
         )
         cost_source = "token_formula"
+        cost_estimate_uncertain = (
+            _model_supports_cached_input(model)
+            and cached_prompt_tokens is None
+        )
+        if cost_estimate_uncertain:
+            logger.warning(
+                "reverse_prompt_cache_usage_unavailable",
+                provider="apimart",
+                model=model,
+                cost_source=cost_source,
+            )
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
+        "cached_prompt_tokens": cached_prompt_tokens,
+        "cache_tokens_reported": cached_prompt_tokens is not None,
         "credits": provider_credits,
         "cost_cents": apimart_cost_cents_from_credits(provider_credits),
         "cost_source": cost_source,
+        "cost_estimate_uncertain": cost_estimate_uncertain,
     }
 
 
@@ -1418,6 +1553,14 @@ def _aggregate_native_usage(
         str(item.get("cost_source") or "unknown")
         for item in usage_results
     }
+    cache_tokens_reported = bool(usage_results) and all(
+        item.get("cache_tokens_reported") is True for item in usage_results
+    )
+    cached_prompt_tokens = (
+        sum(_int_value(item.get("cached_prompt_tokens")) for item in usage_results)
+        if cache_tokens_reported
+        else None
+    )
     return {
         "prompt_tokens": sum(
             _int_value(item.get("prompt_tokens")) for item in usage_results
@@ -1428,9 +1571,14 @@ def _aggregate_native_usage(
         "total_tokens": sum(
             _int_value(item.get("total_tokens")) for item in usage_results
         ),
+        "cached_prompt_tokens": cached_prompt_tokens,
+        "cache_tokens_reported": cache_tokens_reported,
         "credits": credits,
         "cost_cents": apimart_cost_cents_from_credits(credits),
         "cost_source": sources.pop() if len(sources) == 1 else "mixed",
+        "cost_estimate_uncertain": any(
+            item.get("cost_estimate_uncertain") is True for item in usage_results
+        ),
     }
 
 
@@ -1439,6 +1587,17 @@ def _int_value(value: Any, *, default: int = 0) -> int:
         return max(0, int(value if value not in (None, "") else default))
     except (TypeError, ValueError):
         return max(0, default)
+
+
+def _optional_int_value(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    return _int_value(value)
+
+
+def _model_supports_cached_input(model: str) -> bool:
+    pricing = _TOKEN_CREDITS_PER_M_BY_MODEL.get(str(model).strip().lower())
+    return pricing is not None and pricing["cached_input"] is not None
 
 
 def _float_value(value: Any) -> float:

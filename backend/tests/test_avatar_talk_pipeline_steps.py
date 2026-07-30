@@ -484,7 +484,7 @@ def test_seedance_i2v_step_generates_multiple_scenes_from_product_image(
 
         assert result.base_video_bytes == b"CONCAT-SEEDANCE-MP4"
         assert result.use_tts_audio is True
-        assert result.provider_cost_cents == 3828
+        assert result.provider_cost_cents == 3721
         assert len(calls) == 3
         assert [call["prompt"] for call in calls] == [
             "visual prompt 1",

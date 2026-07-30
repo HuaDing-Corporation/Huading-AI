@@ -743,6 +743,7 @@ def test_apimart_gemini_analyzes_native_video_bytes_with_usage_provenance() -> N
                 ],
                 "usageMetadata": {
                     "promptTokenCount": 660,
+                    "cachedContentTokenCount": 60,
                     "candidatesTokenCount": 100,
                     "thoughtsTokenCount": 40,
                     "totalTokenCount": 800,
@@ -772,6 +773,10 @@ def test_apimart_gemini_analyzes_native_video_bytes_with_usage_provenance() -> N
     assert result["prompt_tokens"] == 660
     assert result["completion_tokens"] == 140
     assert result["total_tokens"] == 800
+    assert result["cached_prompt_tokens"] == 60
+    assert result["cache_tokens_reported"] is True
+    assert result["credits"] == Decimal("0.015672")
+    assert result["cost_estimate_uncertain"] is False
     assert result["cost_source"] == "token_formula"
     assert len(session.calls) == 1
     call = session.calls[0]
@@ -1179,9 +1184,51 @@ def test_apimart_gemini_video_summary_can_use_video_model_without_changing_defau
     )
 
     assert result["model"] == "gemini-3.6-flash"
+    assert result["credits"] == Decimal("0.042")
+    assert result["cached_prompt_tokens"] is None
+    assert result["cache_tokens_reported"] is False
+    assert result["cost_estimate_uncertain"] is True
     assert result["cost_source"] == "token_formula"
     assert session.calls[0]["json"]["model"] == "gemini-3.6-flash"
     assert provider.model == "gemini-3.1-pro-preview"
+
+
+def test_apimart_gemini_flash_prices_reported_cached_prompt_tokens() -> None:
+    summary_payload = jsonlib.loads(VIDEO_JSON_CONTENT)
+    summary_payload["structured_fields_zh"] = STRUCTURED_FIELDS_ZH
+    summary_payload["video_analysis"]["shot_summary"] = "0-24 seconds: two shots."
+    session = _Session(
+        [
+            _chat_payload(
+                jsonlib.dumps(summary_payload, ensure_ascii=False),
+                usage={
+                    "prompt_tokens": 1000,
+                    "completion_tokens": 500,
+                    "total_tokens": 1500,
+                    "prompt_tokens_details": {"cached_tokens": 600},
+                },
+            )
+        ]
+    )
+    provider = APIMartGeminiReversePromptProvider(
+        api_key="api-test-key",
+        model="gemini-3.1-pro-preview",
+        video_model="gemini-3.6-flash",
+        session=session,
+    )
+
+    result = provider.summarize_video_segments_sync(
+        {
+            "duration_sec": 24.0,
+            "segment_analyses": [jsonlib.loads(SEGMENT_JSON_CONTENT)],
+            "audio_transcript": None,
+            "model": "gemini-3.6-flash",
+        }
+    )
+
+    assert result["cached_prompt_tokens"] == 600
+    assert result["cache_tokens_reported"] is True
+    assert result["credits"] == Decimal("0.03552")
 
 
 def test_apimart_gemini_video_summary_invalid_json_error_carries_all_paid_usage() -> None:
@@ -1225,7 +1272,11 @@ def test_apimart_gemini_video_summary_invalid_json_error_carries_all_paid_usage(
         230,
         250,
     ]
-    assert sum(item["cost_cents"] for item in exc_info.value.usage_results) > 0
+    assert sum(
+        Decimal(str(item["credits"]))
+        for item in exc_info.value.usage_results
+    ) == Decimal("0.00912")
+    assert sum(item["cost_cents"] for item in exc_info.value.usage_results) == 0
 
 
 def test_apimart_structured_paid_invalid_then_retry_success_keeps_both_usage() -> None:
@@ -1829,6 +1880,22 @@ def test_apimart_gemini_provider_uses_token_pricing_when_chat_response_has_no_cr
     assert result["completion_tokens"] == 500
     assert result["credits"] == Decimal("0.064")
     assert result["cost_cents"] == 5
+
+
+def test_apimart_gemini_provider_rejects_unconfigured_token_pricing_model():
+    provider = APIMartGeminiReversePromptProvider(
+        api_key="api-test-key",
+        model="gemini-future-unpriced",
+        session=_Session([_chat_payload(JSON_CONTENT)]),
+    )
+
+    with pytest.raises(
+        APIMartGeminiReversePromptError,
+        match="token pricing is not configured",
+    ) as exc_info:
+        provider.reverse_image_sync({"image_url": "https://assets.test/input.png"})
+
+    assert exc_info.value.error_type == "cost_model_unconfigured"
 
 
 def test_apimart_gemini_provider_parses_streaming_sse_response(monkeypatch):
@@ -2605,7 +2672,7 @@ def test_reverse_prompt_video_worker_succeeds_settles_once_and_is_pollable(
     assert usage_records[0].unit == "token"
     assert usage_records[0].quantity == Decimal("3195.000")
     assert usage_records[0].credits == Decimal("100.00")
-    assert usage_records[0].cost_cents == 9
+    assert usage_records[0].cost_cents == 8
     assert subscription.quota_credits_reserved == 0
     assert subscription.quota_credits_used == 100
     db.close()
@@ -2744,8 +2811,8 @@ def test_short_native_invalid_json_fallback_persists_provenance_and_all_cost(
             }
         ]
         assert job.model == "gemini-3.1-pro-preview"
-        assert job.cost_cents == 7
-        assert usage.cost_cents == 7
+        assert job.cost_cents == 6
+        assert usage.cost_cents == 6
         assert usage.quantity == Decimal("2780.000")
     assert fallback_logs == [
         (
@@ -3354,8 +3421,8 @@ def test_long_native_paid_failure_then_retry_success_keeps_both_usage(
         usage = result_db.scalar(
             select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id)
         )
-        assert job.cost_cents == 7
-        assert usage.cost_cents == 7
+        assert job.cost_cents == 6
+        assert usage.cost_cents == 6
         assert usage.quantity == Decimal("70.000")
 
 
@@ -3585,8 +3652,8 @@ def test_long_native_failure_falls_back_only_failed_segment_and_merges_cost(
         assert event["reason"] == "provider_timeout"
         assert event["segment_index"] == 2
         assert event["incurred_cost_cents"] == 40
-        assert job.cost_cents == 135
-        assert usage.cost_cents == 135
+        assert job.cost_cents == 95
+        assert usage.cost_cents == 95
         assert usage.quantity == Decimal("1050.000")
         assert usage.cost_cents <= 250
 
@@ -3756,7 +3823,7 @@ def test_long_native_summary_failure_uses_legacy_text_summary_without_media_reru
         "summary-gemini-3.6-flash",
         "summary-gemini-3.1-pro-preview",
     ]
-    assert aggregated["cost_cents"] == 140
+    assert aggregated["cost_cents"] == 98
     assert aggregated["cost_cents"] <= 250
     assert aggregated["total_tokens"] == 1000
     assert result["model"] == "gemini-3.1-pro-preview"
