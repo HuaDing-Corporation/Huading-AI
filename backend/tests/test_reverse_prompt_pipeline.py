@@ -2037,6 +2037,33 @@ def test_apimart_gemini_provider_retries_once_when_model_returns_invalid_json():
     )
 
 
+def test_apimart_gemini_image_retry_aggregates_both_paid_calls(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.apimart_costs.settings.engine_apimart_credit_usd",
+        Decimal("0.10"),
+    )
+    monkeypatch.setattr(
+        "app.services.apimart_costs.settings.engine_usd_cny_rate",
+        Decimal("7.0"),
+    )
+    session = _Session(
+        [
+            _chat_payload("not-json", credits="1.0"),
+            _chat_payload(JSON_CONTENT, credits="1.5"),
+        ]
+    )
+    provider = APIMartGeminiReversePromptProvider(api_key="api-test-key", session=session)
+
+    result = provider.reverse_image_sync({"image_url": "https://assets.test/input.png"})
+
+    assert len(session.calls) == 2
+    assert result["prompt_tokens"] == 2_000
+    assert result["completion_tokens"] == 1_000
+    assert result["total_tokens"] == 3_000
+    assert result["credits"] == Decimal("2.5")
+    assert result["cost_cents"] == 175
+
+
 def test_apimart_gemini_provider_retries_once_when_model_returns_empty_content():
     session = _Session(
         [

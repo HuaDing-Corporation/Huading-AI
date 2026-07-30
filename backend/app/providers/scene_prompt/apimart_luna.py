@@ -16,7 +16,10 @@ from app.services.apimart_costs import (
     apimart_cost_cents_from_credits,
     apimart_usage_metadata,
 )
-from app.services.apimart_token_pricing import apimart_token_usage_cost
+from app.services.apimart_token_pricing import (
+    apimart_cache_token_usage,
+    apimart_token_usage_cost,
+)
 
 _DEFAULT_BASE_URL = "https://api.apimart.ai/v1"
 _DEFAULT_MODEL = "gpt-5.6-luna"
@@ -271,23 +274,9 @@ def _usage(payload: Mapping[str, Any]) -> dict[str, Any]:
     total_tokens = _nonnegative_int(raw_usage.get("total_tokens")) or (
         prompt_tokens + completion_tokens
     )
-    prompt_details = raw_usage.get("prompt_tokens_details")
-    if not isinstance(prompt_details, Mapping):
-        prompt_details = {}
-    cached_prompt_tokens = _first_optional_int(
-        prompt_details,
-        raw_usage,
-        keys=("cached_tokens", "cache_read_tokens", "cache_read_input_tokens"),
-    )
-    cache_write_tokens = _first_optional_int(
-        prompt_details,
-        raw_usage,
-        keys=(
-            "cache_write_tokens",
-            "cache_creation_tokens",
-            "cache_creation_input_tokens",
-        ),
-    )
+    cache_usage = apimart_cache_token_usage(raw_usage)
+    cached_prompt_tokens = cache_usage.cached_prompt_tokens
+    cache_write_tokens = cache_usage.cache_write_tokens
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -402,17 +391,6 @@ def _nonnegative_int(value: Any) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
-
-
-def _first_optional_int(
-    *mappings: Mapping[str, Any],
-    keys: tuple[str, ...],
-) -> int | None:
-    for mapping in mappings:
-        for key in keys:
-            if key in mapping and mapping[key] not in (None, ""):
-                return _nonnegative_int(mapping[key])
-    return None
 
 
 def _config_value(values: Mapping[str, Any], key: str, default: Any) -> Any:

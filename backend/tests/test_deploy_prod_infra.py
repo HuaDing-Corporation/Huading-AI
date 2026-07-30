@@ -295,6 +295,14 @@ def test_prod_env_example_and_runbook_have_placeholders_only() -> None:
     assert "https://huadingai.cn/minio" not in deploy_doc
 
 
+def test_deploy_runbook_requires_existing_cost_rate_env_migration() -> None:
+    deploy_doc = (INFRA / "DEPLOY.md").read_text(encoding="utf-8")
+
+    assert "ENGINE_APIMART_CREDIT_USD=0.10" in deploy_doc
+    assert "ENGINE_USD_CNY_RATE=7.0" in deploy_doc
+    assert "does not overwrite an existing `infra/.env`" in deploy_doc
+
+
 def test_deploy_script_runs_one_command_deploy_sequence() -> None:
     script = (INFRA / "deploy.sh").read_text(encoding="utf-8")
 

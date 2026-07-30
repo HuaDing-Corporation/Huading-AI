@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
 from app.core.config import settings
 from app.services.apimart_costs import apimart_cost_cents_from_credits
@@ -46,6 +48,12 @@ class APIMartTokenUsageCost:
     cache_tokens_reported: bool
     cache_write_tokens_reported: bool
     cost_estimate_uncertain: bool
+
+
+@dataclass(frozen=True)
+class APIMartCacheTokenUsage:
+    cached_prompt_tokens: int | None
+    cache_write_tokens: int | None
 
 
 # APIMart effective rates after its 0.8 price factor, represented as
@@ -106,6 +114,64 @@ _TOKEN_RATE_TIERS_BY_MODEL: dict[str, tuple[_TokenRateTier, ...]] = {
         ),
     ),
 }
+
+
+def apimart_cache_token_usage(
+    raw_usage: Mapping[str, Any],
+) -> APIMartCacheTokenUsage:
+    prompt_details = raw_usage.get("prompt_tokens_details")
+    if not isinstance(prompt_details, Mapping):
+        prompt_details = {}
+    cache_creation = raw_usage.get("cache_creation")
+    if not isinstance(cache_creation, Mapping):
+        cache_creation = {}
+
+    cached_prompt_tokens = _first_optional_nonnegative_int(
+        prompt_details,
+        raw_usage,
+        keys=("cached_tokens", "cache_read_tokens", "cache_read_input_tokens"),
+    )
+    generic_write_tokens = _first_optional_nonnegative_int(
+        prompt_details,
+        raw_usage,
+        keys=(
+            "cache_write_tokens",
+            "cache_creation_tokens",
+            "cache_creation_input_tokens",
+        ),
+    )
+    ttl_5m_tokens = _first_optional_nonnegative_int(
+        raw_usage,
+        prompt_details,
+        cache_creation,
+        keys=(
+            "claude_cache_creation_5_m_tokens",
+            "ephemeral_5m_input_tokens",
+        ),
+    )
+    ttl_1h_tokens = _first_optional_nonnegative_int(
+        raw_usage,
+        prompt_details,
+        cache_creation,
+        keys=(
+            "claude_cache_creation_1_h_tokens",
+            "ephemeral_1h_input_tokens",
+        ),
+    )
+    ttl_write_tokens = (ttl_5m_tokens or 0) + (ttl_1h_tokens or 0)
+    if ttl_write_tokens > 0:
+        cache_write_tokens = ttl_write_tokens
+    elif generic_write_tokens is not None:
+        cache_write_tokens = generic_write_tokens
+    elif ttl_5m_tokens is not None or ttl_1h_tokens is not None:
+        cache_write_tokens = 0
+    else:
+        cache_write_tokens = None
+
+    return APIMartCacheTokenUsage(
+        cached_prompt_tokens=cached_prompt_tokens,
+        cache_write_tokens=cache_write_tokens,
+    )
 
 
 def apimart_token_usage_cost(
@@ -194,17 +260,28 @@ def _rate_tier(model: str, prompt_tokens: int) -> _TokenRateTier:
     )
 
 
-def _nonnegative_int(value: int | None) -> int:
+def _nonnegative_int(value: Any) -> int:
     try:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
 
 
-def _optional_nonnegative_int(value: int | None) -> int | None:
+def _optional_nonnegative_int(value: Any) -> int | None:
     if value in (None, ""):
         return None
     return _nonnegative_int(value)
+
+
+def _first_optional_nonnegative_int(
+    *mappings: Mapping[str, Any],
+    keys: tuple[str, ...],
+) -> int | None:
+    for mapping in mappings:
+        for key in keys:
+            if key in mapping and mapping[key] not in (None, ""):
+                return _nonnegative_int(mapping[key])
+    return None
 
 
 def _optional_decimal(

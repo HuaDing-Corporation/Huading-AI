@@ -262,6 +262,52 @@ async def test_luna_token_fallback_prices_reported_cache_read_and_write() -> Non
     assert result["cost_estimate_uncertain"] is False
 
 
+@pytest.mark.asyncio
+async def test_luna_uses_apimart_ttl_cache_creation_breakdown_when_generic_is_zero() -> None:
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"scene_prompt":"TTL cached scene",'
+                                    '"negative_prompt":"blur"}'
+                                )
+                            }
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 1_000,
+                        "completion_tokens": 0,
+                        "total_tokens": 1_000,
+                        "prompt_tokens_details": {
+                            "cached_tokens": 0,
+                            "cache_write_tokens": 0,
+                        },
+                        "claude_cache_creation_5_m_tokens": 1_000,
+                        "claude_cache_creation_1_h_tokens": 0,
+                    },
+                }
+            )
+        ]
+    )
+    provider = APIMartLunaScenePromptProvider(
+        api_key="test-key",
+        model="gpt-5.6-luna",
+        session=session,
+    )
+
+    result = await provider.generate_scene_prompt(
+        {"image_urls": ["https://storage.test/product.png"]}
+    )
+
+    assert result["cache_write_tokens"] == 1_000
+    assert result["credits"] == Decimal("0.010")
+    assert result["cost_estimate_uncertain"] is False
+
+
 def test_scene_prompt_usage_does_not_treat_vendor_credits_as_business_credits() -> None:
     with Session() as db:
         record = record_scene_prompt_usage(

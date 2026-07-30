@@ -38,6 +38,17 @@ path when forwarding to MinIO. Configure object storage CORS for public
 Video generation defaults to APIMart `doubao-seedance-2.0`; `seedance-mini`
 remains registered only as a database rollback option.
 
+Existing deployments must set the corrected APIMart cost basis in their real
+`infra/.env` before deploying this release:
+
+```dotenv
+ENGINE_APIMART_CREDIT_USD=0.10
+ENGINE_USD_CNY_RATE=7.0
+```
+
+Updating an example does not overwrite an existing `infra/.env`. Confirm these
+values on the production host instead of copying the example over secrets.
+
 Overall generation waits in `infra/.env` must be `1500` seconds for Seedance,
 OmniHuman, APIMart image/video, the image-provider wrapper, and OpenAI image.
 Keep per-request HTTP timeouts and polling intervals at their shorter template

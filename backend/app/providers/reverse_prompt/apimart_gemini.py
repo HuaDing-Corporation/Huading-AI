@@ -130,13 +130,28 @@ class APIMartGeminiReversePromptProvider:
         if not image_url:
             raise APIMartGeminiReversePromptError("image_url is required.")
 
+        usage_results: list[dict[str, Any]] = []
         response_payload = self._chat(image_url=image_url)
         completion_payload = _completion_payload(response_payload)
+        usage_results.append(
+            _usage_cost_payload(
+                response_payload,
+                completion_payload,
+                model=self.model,
+            )
+        )
         raw_text = _extract_message_text(completion_payload)
         parsed = _parse_json_object(raw_text)
         if parsed is None:
             response_payload = self._chat(image_url=image_url, retry_text=raw_text)
             completion_payload = _completion_payload(response_payload)
+            usage_results.append(
+                _usage_cost_payload(
+                    response_payload,
+                    completion_payload,
+                    model=self.model,
+                )
+            )
             raw_text = _extract_message_text(completion_payload)
             parsed = _parse_json_object(raw_text)
         if parsed is None:
@@ -150,11 +165,7 @@ class APIMartGeminiReversePromptProvider:
             **normalized,
             "provider": "apimart",
             "model": self.model,
-            **_usage_cost_payload(
-                response_payload,
-                completion_payload,
-                model=self.model,
-            ),
+            **_aggregate_usage_costs(usage_results),
             "raw_model_json": parsed,
         }
 
@@ -260,7 +271,7 @@ class APIMartGeminiReversePromptProvider:
             raw_text = _extract_native_message_text(response_payload)
             parsed = _parse_json_object(raw_text)
             if parsed is not None:
-                return parsed, _aggregate_native_usage(usage_results)
+                return parsed, _aggregate_usage_costs(usage_results)
             if attempt == 0:
                 request_instruction = (
                     f"{instruction}\nPrevious response was not valid JSON. Return one valid "
@@ -635,7 +646,7 @@ class APIMartGeminiReversePromptProvider:
                 error_type="invalid_json",
                 usage_results=usage_results,
             )
-        return parsed, _aggregate_native_usage(usage_results)
+        return parsed, _aggregate_usage_costs(usage_results)
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
@@ -1544,7 +1555,7 @@ def _native_usage_cost_payload(
     }
 
 
-def _aggregate_native_usage(
+def _aggregate_usage_costs(
     usage_results: list[Mapping[str, Any]],
 ) -> dict[str, Any]:
     credits = sum(
