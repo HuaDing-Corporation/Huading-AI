@@ -185,6 +185,8 @@ class Settings(BaseSettings):
     engine_apimart_video_poll_initial_delay_seconds: float = 30.0
     engine_apimart_video_poll_interval_seconds: float = 10.0
     engine_apimart_video_timeout_seconds: float = 1500.0
+    # APIMart denomination and paid CNY conversion, verified from recharge
+    # invoices on 2026-07-30. These are not official model list prices.
     engine_apimart_credit_usd: float = 0.10
     engine_apimart_reverse_prompt_model: str = "gemini-3.1-pro-preview"
     engine_apimart_reverse_prompt_video_model: str = "gemini-3.6-flash"
@@ -200,16 +202,19 @@ class Settings(BaseSettings):
         le=1280,
     )
     engine_apimart_scene_prompt_model: str = "gpt-5.6-luna"
-    engine_apimart_scene_prompt_input_usd_per_m: float = 1.0
-    engine_apimart_scene_prompt_output_usd_per_m: float = 6.0
-    # AIBRAIN user rates are reasoning credits per 1K tokens. Provider rates are
-    # APIMart credits per 1M tokens and only feed high-precision cost accounting.
+    # Compatibility-only APIMart discounted USD rates from its pricing center,
+    # verified 2026-07-30. Central model/tier pricing is authoritative.
+    engine_apimart_scene_prompt_input_usd_per_m: float = 0.8
+    engine_apimart_scene_prompt_output_usd_per_m: float = 4.8
+    # AIBRAIN user rates are product charges per 1K tokens, not upstream prices.
     engine_aibrain_low_input_credits_per_1k: Decimal = Decimal("1.73")
     engine_aibrain_low_output_credits_per_1k: Decimal = Decimal("10.37")
     engine_aibrain_mid_input_credits_per_1k: Decimal = Decimal("4.32")
     engine_aibrain_mid_output_credits_per_1k: Decimal = Decimal("25.92")
     engine_aibrain_high_input_credits_per_1k: Decimal = Decimal("8.64")
     engine_aibrain_high_output_credits_per_1k: Decimal = Decimal("51.84")
+    # Compatibility snapshots of APIMart discounted low-context provider rates.
+    # Provider cost accounting uses apimart_token_pricing.py instead.
     engine_aibrain_low_input_provider_credits_per_m: Decimal = Decimal("8")
     engine_aibrain_low_output_provider_credits_per_m: Decimal = Decimal("48")
     engine_aibrain_mid_input_provider_credits_per_m: Decimal = Decimal("20")
@@ -218,12 +223,16 @@ class Settings(BaseSettings):
     engine_aibrain_high_output_provider_credits_per_m: Decimal = Decimal("240")
     engine_aibrain_max_completion_tokens: int = Field(default=4096, ge=1, le=16384)
     engine_aibrain_reservation_stale_minutes: int = Field(default=30, ge=1)
+    # Compatibility snapshots of APIMart discounted Gemini 3.1 Pro rates.
+    # The provider's model-specific table is authoritative.
     engine_apimart_reverse_prompt_input_credits_per_m: float = 16.0
     engine_apimart_reverse_prompt_output_credits_per_m: float = 96.0
     engine_reverse_prompt_video_credits: float = Field(default=100.0, gt=0)
     engine_reverse_prompt_video_long_credits: float = Field(default=250.0, gt=0)
     engine_ecom_replicate_enabled: bool = True
     engine_ecom_replicate_credits_per_image: float = 15.0
+    # Legacy operational fallbacks, not official list prices. Provider-reported
+    # credits/cost always take precedence in e-commerce replicate accounting.
     engine_ecom_replicate_analysis_cny_per_call: float = 0.14
     engine_ecom_replicate_render_cny_per_image: float = 0.0432
     engine_ecom_replicate_main_size: str = "1024x1024"

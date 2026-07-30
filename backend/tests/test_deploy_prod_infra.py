@@ -78,6 +78,13 @@ def test_generation_overall_waits_are_1500_in_every_env_example() -> None:
         }
 
 
+def test_prod_env_uses_calibrated_apimart_exchange_rate() -> None:
+    values = _env_values(INFRA / ".env.prod.example")
+
+    assert values["ENGINE_APIMART_CREDIT_USD"] == "0.10"
+    assert values["ENGINE_USD_CNY_RATE"] == "7.0"
+
+
 def test_prod_compose_exposes_only_nginx_and_persists_state() -> None:
     compose = _prod_compose()
     services = compose["services"]

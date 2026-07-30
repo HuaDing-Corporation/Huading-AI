@@ -9,6 +9,7 @@ import requests
 from app.core.config import settings
 from app.db.models import ProviderConfig
 from app.providers.base import ProviderResolutionError, register_provider
+from app.services.apimart_costs import apimart_usage_metadata
 
 _DEFAULT_BASE_URL = "https://api.apimart.ai/v1"
 _ALLOWED_MODELS = {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"}
@@ -101,7 +102,7 @@ def _raise_for_response(
     response: Any,
     payload: Mapping[str, Any],
     *,
-    usage: Mapping[str, int],
+    usage: Mapping[str, Any],
 ) -> None:
     status_code = int(getattr(response, "status_code", 200) or 200)
     api_code = payload.get("code")
@@ -153,7 +154,7 @@ def _message_content(payload: Mapping[str, Any]) -> str:
     raise APIMartGPT56ChatError("APIMart chat response contained no message content.")
 
 
-def _usage(payload: Mapping[str, Any]) -> dict[str, int]:
+def _usage(payload: Mapping[str, Any]) -> dict[str, Any]:
     raw_usage = _completion_payload(payload).get("usage")
     if not isinstance(raw_usage, Mapping):
         raw_usage = {}
@@ -162,11 +163,34 @@ def _usage(payload: Mapping[str, Any]) -> dict[str, int]:
     total_tokens = _nonnegative_int(raw_usage.get("total_tokens")) or (
         prompt_tokens + completion_tokens
     )
-    return {
+    result: dict[str, Any] = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
     }
+    prompt_details = raw_usage.get("prompt_tokens_details")
+    if not isinstance(prompt_details, Mapping):
+        prompt_details = {}
+    cached_prompt_tokens = _first_optional_int(
+        prompt_details,
+        raw_usage,
+        keys=("cached_tokens", "cache_read_tokens", "cache_read_input_tokens"),
+    )
+    cache_write_tokens = _first_optional_int(
+        prompt_details,
+        raw_usage,
+        keys=(
+            "cache_write_tokens",
+            "cache_creation_tokens",
+            "cache_creation_input_tokens",
+        ),
+    )
+    if cached_prompt_tokens is not None:
+        result["cached_prompt_tokens"] = cached_prompt_tokens
+    if cache_write_tokens is not None:
+        result["cache_write_tokens"] = cache_write_tokens
+    result.update(apimart_usage_metadata(payload))
+    return result
 
 
 def _nonnegative_int(value: Any) -> int:
@@ -174,6 +198,17 @@ def _nonnegative_int(value: Any) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _first_optional_int(
+    *mappings: Mapping[str, Any],
+    keys: tuple[str, ...],
+) -> int | None:
+    for mapping in mappings:
+        for key in keys:
+            if key in mapping and mapping[key] not in (None, ""):
+                return _nonnegative_int(mapping[key])
+    return None
 
 
 def _positive_int(value: Any, *, field: str) -> int:

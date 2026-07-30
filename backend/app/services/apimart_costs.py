@@ -15,6 +15,8 @@ _CREDIT_KEYS = {
     "credits_cost",
 }
 _COST_CENTS_KEYS = {"cost_cents", "cny_cost_cents", "cost_cent"}
+# APIMart provider price-table fallbacks, in discounted provider Credits.
+# Source: https://apib.ai/zh/pricing, verified 2026-07-30.
 _IMAGE_CREDITS_BY_MODEL_PREFIX = {
     "gpt-image": {
         "1k": Decimal("0.085"),
@@ -22,6 +24,8 @@ _IMAGE_CREDITS_BY_MODEL_PREFIX = {
         "4k": Decimal("0.21"),
     },
 }
+# APIMart provider price-table fallbacks per five-second billing window.
+# Source: https://apib.ai/zh/pricing, verified against provider bills 2026-07-30.
 _VIDEO_CREDITS_PER_5_SECONDS_BY_RESOLUTION = {
     "480p": Decimal("3.3"),
     "720p": Decimal("7.1"),

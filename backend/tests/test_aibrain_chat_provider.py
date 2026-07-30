@@ -87,6 +87,43 @@ async def test_apimart_gpt56_chat_returns_content_and_usage_non_streaming() -> N
 
 
 @pytest.mark.asyncio
+async def test_apimart_gpt56_chat_preserves_cache_usage_and_provider_credits() -> None:
+    session = _FakeSession(
+        _FakeResponse(
+            {
+                "choices": [{"message": {"content": "Cached answer."}}],
+                "usage": {
+                    "prompt_tokens": 1_000,
+                    "completion_tokens": 500,
+                    "total_tokens": 1_500,
+                    "prompt_tokens_details": {
+                        "cached_tokens": 400,
+                        "cache_write_tokens": 100,
+                    },
+                },
+                "credits": "0.5",
+            }
+        )
+    )
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=session,
+    )
+
+    result = await provider.chat(
+        {
+            "model": "gpt-5.6-luna",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+    )
+
+    assert result["cached_prompt_tokens"] == 400
+    assert result["cache_write_tokens"] == 100
+    assert result["credits"] == Decimal("0.5")
+    assert result["cost_cents"] == 35
+
+
+@pytest.mark.asyncio
 async def test_apimart_gpt56_chat_rejects_models_outside_the_fixed_allowlist() -> None:
     session = _FakeSession(_FakeResponse({}))
     provider = APIMartGPT56ChatProvider(api_key="unit-test-key", session=session)

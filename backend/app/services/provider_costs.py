@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.models import UsageRecord
+from app.services.apimart_token_pricing import apimart_token_usage_cost
 
 
 @dataclass(frozen=True)
@@ -78,27 +79,27 @@ def deepseek_cost_cents(*, prompt_tokens: int, completion_tokens: int) -> int:
 
 def apimart_scene_prompt_cost_cents(
     *,
+    model: str,
     prompt_tokens: int,
     completion_tokens: int,
     total_tokens: int = 0,
+    cached_prompt_tokens: int | None = None,
+    cache_write_tokens: int | None = None,
+    authoritative_credits: Decimal | int | float | str | None = None,
 ) -> int:
     safe_prompt_tokens = max(0, int(prompt_tokens))
     safe_completion_tokens = max(0, int(completion_tokens))
     if safe_prompt_tokens + safe_completion_tokens <= 0:
         safe_prompt_tokens = max(0, int(total_tokens))
-    input_usd = (
-        Decimal(safe_prompt_tokens)
-        / Decimal("1000000")
-        * _decimal_setting(settings.engine_apimart_scene_prompt_input_usd_per_m)
+    usage_cost = apimart_token_usage_cost(
+        model=model,
+        prompt_tokens=safe_prompt_tokens,
+        completion_tokens=safe_completion_tokens,
+        cached_prompt_tokens=cached_prompt_tokens,
+        cache_write_tokens=cache_write_tokens,
+        authoritative_credits=authoritative_credits,
     )
-    output_usd = (
-        Decimal(safe_completion_tokens)
-        / Decimal("1000000")
-        * _decimal_setting(settings.engine_apimart_scene_prompt_output_usd_per_m)
-    )
-    return cny_to_cents(
-        (input_usd + output_usd) * _decimal_setting(settings.engine_usd_cny_rate)
-    )
+    return usage_cost.cost_cents
 
 
 def _int_from_usage(usage: Any, key: str) -> int:
@@ -265,14 +266,23 @@ def record_scene_prompt_usage(
     total_tokens = _int_from_usage(result, "total_tokens")
     if total_tokens <= 0:
         total_tokens = prompt_tokens + completion_tokens
+    model = str(result.get("model") or settings.engine_apimart_scene_prompt_model)
     explicit_cost_cents = _optional_nonnegative_int(result.get("cost_cents"))
     cost_cents = (
         explicit_cost_cents
         if explicit_cost_cents is not None
         else apimart_scene_prompt_cost_cents(
+            model=model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
+            cached_prompt_tokens=_optional_nonnegative_int(
+                result.get("cached_prompt_tokens")
+            ),
+            cache_write_tokens=_optional_nonnegative_int(
+                result.get("cache_write_tokens")
+            ),
+            authoritative_credits=result.get("credits"),
         )
     )
     if total_tokens > 0:
@@ -287,7 +297,7 @@ def record_scene_prompt_usage(
         tenant_id=tenant_id,
         capability="scene_prompt",
         provider=str(result.get("provider") or "apimart"),
-        model=str(result.get("model") or settings.engine_apimart_scene_prompt_model),
+        model=model,
         unit=unit,
         quantity=quantity,
         credits=Decimal("0"),

@@ -22,6 +22,8 @@ _DEFAULT_MODEL = "gemini-3.1-pro-preview"
 _DEFAULT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 _TARGET_FORMAT = "seedance_2_0"
 _MAX_CHAT_IMAGES = 16
+# APIMart discounted provider Credits per 1M tokens, not official list prices.
+# Source: https://apib.ai/zh/pricing, verified 2026-07-30.
 _TOKEN_CREDITS_PER_M_BY_MODEL = {
     "gemini-3.1-pro-preview": {
         "input": Decimal("16"),
