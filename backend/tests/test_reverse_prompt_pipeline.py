@@ -1392,6 +1392,37 @@ def test_apimart_transcribes_reverse_prompt_audio_with_verified_request_shape() 
     }
 
 
+def test_apimart_transcription_without_provider_credits_uses_asr_token_rates() -> None:
+    session = _Session(
+        [
+            {
+                "text": "这是原样台词。",
+                "usage": {
+                    "prompt_tokens": 300,
+                    "completion_tokens": 95,
+                    "total_tokens": 395,
+                },
+            }
+        ]
+    )
+    provider = APIMartGeminiReversePromptProvider(
+        api_key="api-test-key",
+        session=session,
+    )
+
+    result = provider.transcribe_audio_sync(
+        {
+            "audio_bytes": b"ID3-test-audio",
+            "filename": "source.mp3",
+            "language": "zh",
+        }
+    )
+
+    assert result["credits"] == Decimal("0.0068")
+    assert result["cost_source"] == "token_formula"
+    assert result["cost_estimate_uncertain"] is False
+
+
 def test_apimart_transcription_paid_response_without_text_is_still_captured() -> None:
     from app.services.reverse_prompt_usage import (
         begin_reverse_prompt_usage_capture,
@@ -1896,6 +1927,50 @@ def test_apimart_gemini_provider_rejects_unconfigured_token_pricing_model():
         provider.reverse_image_sync({"image_url": "https://assets.test/input.png"})
 
     assert exc_info.value.error_type == "cost_model_unconfigured"
+
+
+def test_apimart_authoritative_credits_do_not_require_a_token_rate() -> None:
+    provider = APIMartGeminiReversePromptProvider(
+        api_key="api-test-key",
+        model="gemini-future-unpriced",
+        session=_Session([_chat_payload(JSON_CONTENT, credits="0.01")]),
+    )
+
+    result = provider.reverse_image_sync(
+        {"image_url": "https://assets.test/input.png"}
+    )
+
+    assert result["credits"] == Decimal("0.01")
+    assert result["cost_source"] == "provider_credits"
+
+
+def test_apimart_provider_error_is_not_masked_by_unconfigured_cost_model() -> None:
+    provider = APIMartGeminiReversePromptProvider(
+        api_key="api-test-key",
+        model="gemini-future-unpriced",
+        session=_Session(
+            [
+                _Response(
+                    {
+                        "message": "APIMart rate limited",
+                        "type": "rate_limit",
+                    },
+                    status_code=429,
+                )
+            ]
+        ),
+    )
+
+    with pytest.raises(
+        APIMartGeminiReversePromptError,
+        match="APIMart rate limited",
+    ) as exc_info:
+        provider.reverse_image_sync(
+            {"image_url": "https://assets.test/input.png"}
+        )
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.error_type == "rate_limit"
 
 
 def test_apimart_gemini_provider_parses_streaming_sse_response(monkeypatch):

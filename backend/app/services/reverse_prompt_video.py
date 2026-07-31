@@ -26,12 +26,15 @@ from app.core.logging import get_logger
 from app.db.models import ReversePromptJob
 from app.db.session import SessionLocal
 from app.providers.base import resolve
-from app.providers.reverse_prompt import apimart_gemini as apimart_gemini_provider
 from app.providers.reverse_prompt.apimart_gemini import (
     APIMartGeminiReversePromptError,
 )
 from app.services import quota
 from app.services.apimart_costs import apimart_cost_cents_from_credits
+from app.services.apimart_token_pricing import (
+    APIMartTokenPricingError,
+    apimart_token_rate,
+)
 from app.services.reverse_prompt import (
     mark_reverse_prompt_job_failed,
     mark_reverse_prompt_job_succeeded,
@@ -1973,7 +1976,10 @@ def _log_upstream_calls(
             or model_hint
             or "unknown"
         )
-        rate_fields = _token_rate_log_fields(model)
+        rate_fields = _token_rate_log_fields(
+            model,
+            prompt_tokens=nonnegative_int(usage.get("prompt_tokens")),
+        )
         input_video_tokens = nonnegative_int(
             usage.get("input_video_tokens")
         )
@@ -2076,41 +2082,39 @@ def _log_upstream_calls(
         )
 
 
-def _token_rate_log_fields(model: str) -> dict[str, Any]:
-    pricing_by_model = getattr(
-        apimart_gemini_provider,
-        "_TOKEN_CREDITS_PER_M_BY_MODEL",
-        {},
-    )
-    pricing = (
-        pricing_by_model.get(model.strip().lower())
-        if isinstance(pricing_by_model, Mapping)
-        else None
-    )
-    if isinstance(pricing, Mapping):
+def _token_rate_log_fields(
+    model: str,
+    *,
+    prompt_tokens: int = 0,
+) -> dict[str, Any]:
+    try:
+        rate = apimart_token_rate(
+            model=model,
+            prompt_tokens=prompt_tokens,
+        )
+    except APIMartTokenPricingError as exc:
+        _log_event(
+            "warning",
+            "reverse_prompt_token_rate_unconfigured",
+            provider="apimart",
+            model=model,
+            error_type=exc.error_type,
+        )
         return {
-            "input_credits_per_m": str(pricing.get("input")),
-            "output_credits_per_m": str(pricing.get("output")),
-            "cached_input_credits_per_m": (
-                str(pricing.get("cached_input"))
-                if pricing.get("cached_input") is not None
-                else None
-            ),
-            "token_rate_source": "model_rate_table",
+            "input_credits_per_m": None,
+            "output_credits_per_m": None,
+            "cached_input_credits_per_m": None,
+            "token_rate_source": "unconfigured_model",
         }
     return {
-        "input_credits_per_m": (
-            settings.engine_apimart_reverse_prompt_input_credits_per_m
+        "input_credits_per_m": str(rate.input_credits_per_m),
+        "output_credits_per_m": str(rate.output_credits_per_m),
+        "cached_input_credits_per_m": (
+            str(rate.cached_input_credits_per_m)
+            if rate.cached_input_credits_per_m is not None
+            else None
         ),
-        "output_credits_per_m": (
-            settings.engine_apimart_reverse_prompt_output_credits_per_m
-        ),
-        "cached_input_credits_per_m": getattr(
-            settings,
-            "engine_apimart_reverse_prompt_cached_input_credits_per_m",
-            None,
-        ),
-        "token_rate_source": "legacy_settings",
+        "token_rate_source": "central_rate_table",
     }
 
 
