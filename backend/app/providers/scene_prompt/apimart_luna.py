@@ -9,12 +9,21 @@ from typing import Any
 import requests
 
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.db.models import ProviderConfig
 from app.providers.base import ProviderResolutionError, register_provider
-from app.services.apimart_costs import apimart_usage_metadata
+from app.services.apimart_costs import (
+    apimart_cost_cents_from_credits,
+    apimart_usage_metadata,
+)
+from app.services.apimart_token_pricing import (
+    apimart_cache_token_usage,
+    apimart_token_usage_cost,
+)
 
 _DEFAULT_BASE_URL = "https://api.apimart.ai/v1"
 _DEFAULT_MODEL = "gpt-5.6-luna"
+logger = get_logger(__name__)
 
 
 class APIMartLunaScenePromptError(RuntimeError):
@@ -255,7 +264,7 @@ def _prompt_fields(payload: Mapping[str, Any]) -> tuple[str, str]:
     return scene_prompt, negative_prompt
 
 
-def _usage(payload: Mapping[str, Any]) -> dict[str, int]:
+def _usage(payload: Mapping[str, Any]) -> dict[str, Any]:
     payload = _completion_payload(payload)
     raw_usage = payload.get("usage")
     if not isinstance(raw_usage, Mapping):
@@ -265,39 +274,99 @@ def _usage(payload: Mapping[str, Any]) -> dict[str, int]:
     total_tokens = _nonnegative_int(raw_usage.get("total_tokens")) or (
         prompt_tokens + completion_tokens
     )
+    cache_usage = apimart_cache_token_usage(raw_usage)
+    cached_prompt_tokens = cache_usage.cached_prompt_tokens
+    cache_write_tokens = cache_usage.cache_write_tokens
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
+        "cached_prompt_tokens": cached_prompt_tokens,
+        "cache_write_tokens": cache_write_tokens,
+        "cache_tokens_reported": cached_prompt_tokens is not None,
+        "cache_write_tokens_reported": cache_write_tokens is not None,
     }
 
 
-def _aggregate_usage(payloads: list[Mapping[str, Any]]) -> dict[str, int]:
+def _aggregate_usage(payloads: list[Mapping[str, Any]]) -> dict[str, Any]:
     usages = [_usage(payload) for payload in payloads]
-    return {
+    cache_tokens_reported = bool(usages) and all(
+        usage["cache_tokens_reported"] for usage in usages
+    )
+    cache_write_tokens_reported = bool(usages) and all(
+        usage["cache_write_tokens_reported"] for usage in usages
+    )
+    result: dict[str, Any] = {
         key: sum(usage[key] for usage in usages)
         for key in ("prompt_tokens", "completion_tokens", "total_tokens")
     }
+    result.update(
+        {
+            "cached_prompt_tokens": (
+                sum(usage["cached_prompt_tokens"] for usage in usages)
+                if cache_tokens_reported
+                else None
+            ),
+            "cache_write_tokens": (
+                sum(usage["cache_write_tokens"] for usage in usages)
+                if cache_write_tokens_reported
+                else None
+            ),
+            "cache_tokens_reported": cache_tokens_reported,
+            "cache_write_tokens_reported": cache_write_tokens_reported,
+        }
+    )
+    return result
 
 
-def _aggregate_usage_metadata(payloads: list[Mapping[str, Any]]) -> dict[str, Any]:
+def _aggregate_cost(model: str, payloads: list[Mapping[str, Any]]) -> dict[str, Any]:
     credits = Decimal("0")
-    cost_cents = 0
-    has_credits = False
-    has_cost = False
+    explicit_cost_cents = 0
+    has_credit_cost = False
+    has_explicit_cost = False
+    sources: set[str] = set()
+    cost_estimate_uncertain = False
     for payload in payloads:
+        usage = _usage(payload)
         metadata = apimart_usage_metadata(payload)
-        if metadata.get("credits") is not None:
-            credits += Decimal(str(metadata["credits"]))
-            has_credits = True
-        if metadata.get("cost_cents") is not None:
-            cost_cents += int(metadata["cost_cents"])
-            has_cost = True
-    result: dict[str, Any] = {}
-    if has_credits:
+        authoritative_credits = metadata.get("credits")
+        if authoritative_credits is None and metadata.get("cost_cents") is not None:
+            explicit_cost_cents += int(metadata["cost_cents"])
+            has_explicit_cost = True
+            sources.add("provider_cost_cents")
+            continue
+        usage_cost = apimart_token_usage_cost(
+            model=model,
+            prompt_tokens=usage["prompt_tokens"],
+            completion_tokens=usage["completion_tokens"],
+            cached_prompt_tokens=usage["cached_prompt_tokens"],
+            cache_write_tokens=usage["cache_write_tokens"],
+            authoritative_credits=authoritative_credits,
+        )
+        credits += usage_cost.credits
+        has_credit_cost = True
+        sources.add(usage_cost.cost_source)
+        cost_estimate_uncertain = (
+            cost_estimate_uncertain or usage_cost.cost_estimate_uncertain
+        )
+
+    cost_cents = explicit_cost_cents
+    if has_credit_cost:
+        cost_cents += apimart_cost_cents_from_credits(credits)
+    result: dict[str, Any] = {
+        "cost_cents": cost_cents,
+        "cost_source": sources.pop() if len(sources) == 1 else "mixed",
+        "cost_estimate_uncertain": cost_estimate_uncertain,
+    }
+    if has_credit_cost and not has_explicit_cost:
         result["credits"] = credits
-    if has_cost:
-        result["cost_cents"] = cost_cents
+    if cost_estimate_uncertain:
+        logger.warning(
+            "apimart_scene_prompt_cache_usage_unavailable",
+            provider="apimart",
+            model=model,
+            cost_source=result["cost_source"],
+        )
     return result
 
 
@@ -306,7 +375,7 @@ def _billing_result(model: str, payloads: list[Mapping[str, Any]]) -> dict[str, 
         "provider": "apimart",
         "model": model,
         **_aggregate_usage(payloads),
-        **_aggregate_usage_metadata(payloads),
+        **_aggregate_cost(model, payloads),
     }
 
 

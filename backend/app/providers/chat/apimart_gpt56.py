@@ -9,6 +9,8 @@ import requests
 from app.core.config import settings
 from app.db.models import ProviderConfig
 from app.providers.base import ProviderResolutionError, register_provider
+from app.services.apimart_costs import apimart_usage_metadata
+from app.services.apimart_token_pricing import apimart_cache_token_usage
 
 _DEFAULT_BASE_URL = "https://api.apimart.ai/v1"
 _ALLOWED_MODELS = {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"}
@@ -101,7 +103,7 @@ def _raise_for_response(
     response: Any,
     payload: Mapping[str, Any],
     *,
-    usage: Mapping[str, int],
+    usage: Mapping[str, Any],
 ) -> None:
     status_code = int(getattr(response, "status_code", 200) or 200)
     api_code = payload.get("code")
@@ -153,7 +155,7 @@ def _message_content(payload: Mapping[str, Any]) -> str:
     raise APIMartGPT56ChatError("APIMart chat response contained no message content.")
 
 
-def _usage(payload: Mapping[str, Any]) -> dict[str, int]:
+def _usage(payload: Mapping[str, Any]) -> dict[str, Any]:
     raw_usage = _completion_payload(payload).get("usage")
     if not isinstance(raw_usage, Mapping):
         raw_usage = {}
@@ -162,11 +164,18 @@ def _usage(payload: Mapping[str, Any]) -> dict[str, int]:
     total_tokens = _nonnegative_int(raw_usage.get("total_tokens")) or (
         prompt_tokens + completion_tokens
     )
-    return {
+    result: dict[str, Any] = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
     }
+    cache_usage = apimart_cache_token_usage(raw_usage)
+    if cache_usage.cached_prompt_tokens is not None:
+        result["cached_prompt_tokens"] = cache_usage.cached_prompt_tokens
+    if cache_usage.cache_write_tokens is not None:
+        result["cache_write_tokens"] = cache_usage.cache_write_tokens
+    result.update(apimart_usage_metadata(payload))
+    return result
 
 
 def _nonnegative_int(value: Any) -> int:

@@ -748,7 +748,7 @@ def test_image_worker_marks_generated_image_as_cover_when_requested(
 
     assert asset.metadata_["purpose"] == "cover"
     assert asset.metadata_["kind"] == "cover"
-    assert usage.cost_cents == 4
+    assert usage.cost_cents == 6
 
 
 def test_image_worker_cover_keeps_scalar_reference_edit_compatibility(

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
+from decimal import ROUND_FLOOR, Decimal
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -14,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.exceptions import AppError
+from app.core.logging import get_logger
 from app.db.models import (
     Asset,
     ChatConversation,
@@ -38,6 +40,11 @@ from app.schemas.aibrain import (
     ReasoningWalletRead,
 )
 from app.services import quota
+from app.services.apimart_token_pricing import (
+    APIMartTokenPricingError,
+    APIMartTokenUsageCost,
+    apimart_token_usage_cost,
+)
 from app.services.storage.base import ObjectStorage
 from app.services.storage.keys import presign_tenant_storage_key
 
@@ -54,6 +61,7 @@ _TIER_MODELS: dict[str, str] = {
 }
 _IMAGE_ASSET_TYPES = {"avatar_image", "product_image", "generated_image", "cover"}
 _IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -61,8 +69,6 @@ class TierPricing:
     model: str
     input_credits_per_1k: Decimal
     output_credits_per_1k: Decimal
-    provider_input_credits_per_m: Decimal
-    provider_output_credits_per_m: Decimal
 
 
 @dataclass(frozen=True)
@@ -198,7 +204,7 @@ async def send_chat_message(
             pricing=pricing,
             reservation=reservation,
             provider_messages=provider_messages,
-            usage_result={},
+            usage_result=dict(result),
             error_code="AIBRAIN_USAGE_MISSING",
         )
         raise AppError(
@@ -217,6 +223,7 @@ async def send_chat_message(
             reservation=reservation,
             provider_messages=provider_messages,
             usage_result={
+                **dict(result),
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
@@ -233,11 +240,30 @@ async def send_chat_message(
         _user_credits(pricing, prompt_tokens, completion_tokens),
         reservation,
     )
-    provider_cost_usd = _provider_cost_usd(
-        pricing,
-        prompt_tokens,
-        completion_tokens,
-    )
+    try:
+        provider_usage_cost = _provider_usage_cost(
+            pricing,
+            usage_result=result,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+    except APIMartTokenPricingError as exc:
+        _fail_chat_message(
+            db,
+            tenant_id=user.tenant_id,
+            user_message_id=user_message.id,
+            pricing=pricing,
+            reservation=reservation,
+            provider_messages=provider_messages,
+            usage_result=dict(result),
+            error_code="AIBRAIN_PROVIDER_FAILED",
+        )
+        raise AppError(
+            "AIBRAIN provider returned invalid billing usage.",
+            code="AIBRAIN_PROVIDER_FAILED",
+            status_code=502,
+        ) from exc
+    provider_cost_usd = provider_usage_cost.cost_usd
     persisted_user_message = _chat_message_for_update(
         db,
         tenant_id=user.tenant_id,
@@ -300,7 +326,7 @@ async def send_chat_message(
             unit="token",
             quantity=Decimal(total_tokens),
             credits=charged_credits,
-            cost_cents=_provider_cost_cents(provider_cost_usd),
+            cost_cents=provider_usage_cost.cost_cents,
             provider_cost_usd=provider_cost_usd,
             currency="CNY",
             status="settled",
@@ -566,27 +592,17 @@ def tier_pricing(tier: AIBrainTier) -> TierPricing:
             model=_TIER_MODELS[tier],
             input_credits_per_1k=settings.engine_aibrain_low_input_credits_per_1k,
             output_credits_per_1k=settings.engine_aibrain_low_output_credits_per_1k,
-            provider_input_credits_per_m=(settings.engine_aibrain_low_input_provider_credits_per_m),
-            provider_output_credits_per_m=(
-                settings.engine_aibrain_low_output_provider_credits_per_m
-            ),
         )
     if tier == "mid":
         return TierPricing(
             model=_TIER_MODELS[tier],
             input_credits_per_1k=settings.engine_aibrain_mid_input_credits_per_1k,
             output_credits_per_1k=settings.engine_aibrain_mid_output_credits_per_1k,
-            provider_input_credits_per_m=(settings.engine_aibrain_mid_input_provider_credits_per_m),
-            provider_output_credits_per_m=(
-                settings.engine_aibrain_mid_output_provider_credits_per_m
-            ),
         )
     return TierPricing(
         model=_TIER_MODELS[tier],
         input_credits_per_1k=settings.engine_aibrain_high_input_credits_per_1k,
         output_credits_per_1k=settings.engine_aibrain_high_output_credits_per_1k,
-        provider_input_credits_per_m=(settings.engine_aibrain_high_input_provider_credits_per_m),
-        provider_output_credits_per_m=(settings.engine_aibrain_high_output_provider_credits_per_m),
     )
 
 
@@ -824,26 +840,33 @@ def _user_credits(
     )
 
 
-def _provider_cost_usd(
+def _provider_usage_cost(
     pricing: TierPricing,
+    *,
+    usage_result: Mapping[str, object],
     prompt_tokens: int,
     completion_tokens: int,
-) -> Decimal:
-    provider_credits = (
-        Decimal(prompt_tokens) * pricing.provider_input_credits_per_m
-        + Decimal(completion_tokens) * pricing.provider_output_credits_per_m
-    ) / Decimal(1_000_000)
-    return (provider_credits * Decimal(str(settings.engine_apimart_credit_usd))).quantize(
-        Decimal("0.00000001")
+) -> APIMartTokenUsageCost:
+    cost = apimart_token_usage_cost(
+        model=pricing.model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cached_prompt_tokens=_optional_nonnegative_int(
+            usage_result.get("cached_prompt_tokens")
+        ),
+        cache_write_tokens=_optional_nonnegative_int(
+            usage_result.get("cache_write_tokens")
+        ),
+        authoritative_credits=usage_result.get("credits"),
     )
-
-
-def _provider_cost_cents(cost_usd: Decimal) -> int:
-    return int(
-        (cost_usd * Decimal(str(settings.engine_usd_cny_rate)) * Decimal(100)).to_integral_value(
-            rounding=ROUND_HALF_UP
+    if cost.cost_estimate_uncertain:
+        logger.warning(
+            "aibrain_cache_usage_unavailable",
+            provider=_CHAT_PROVIDER,
+            model=pricing.model,
+            cost_source=cost.cost_source,
         )
-    )
+    return cost
 
 
 def _chat_message_for_update(
@@ -871,7 +894,7 @@ def _fail_chat_message(
     pricing: TierPricing,
     reservation: Decimal,
     provider_messages: list[dict[str, object]],
-    usage_result: dict[str, object],
+    usage_result: Mapping[str, object],
     error_code: str,
 ) -> None:
     user_message = _chat_message_for_update(
@@ -890,11 +913,25 @@ def _fail_chat_message(
     total_tokens = _nonnegative_int(usage_result.get("total_tokens")) or (
         prompt_tokens + completion_tokens
     )
-    estimated_cost_usd = _provider_cost_usd(
-        pricing,
-        prompt_tokens,
-        completion_tokens,
-    )
+    try:
+        provider_usage_cost = _provider_usage_cost(
+            pricing,
+            usage_result=usage_result,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+    except APIMartTokenPricingError as exc:
+        logger.warning(
+            "aibrain_provider_cost_unavailable",
+            provider=_CHAT_PROVIDER,
+            model=pricing.model,
+            error_type=exc.error_type,
+        )
+        estimated_cost_usd = Decimal("0")
+        provider_cost_cents = 0
+    else:
+        estimated_cost_usd = provider_usage_cost.cost_usd
+        provider_cost_cents = provider_usage_cost.cost_cents
     user_message.status = "failed"
     user_message.error_code = error_code
     user_message.provider = _CHAT_PROVIDER
@@ -925,7 +962,7 @@ def _fail_chat_message(
             unit="token",
             quantity=Decimal(total_tokens),
             credits=Decimal("0"),
-            cost_cents=_provider_cost_cents(estimated_cost_usd),
+            cost_cents=provider_cost_cents,
             provider_cost_usd=estimated_cost_usd,
             currency="CNY",
             status="released",
@@ -982,6 +1019,12 @@ def _nonnegative_int(value: object) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _optional_nonnegative_int(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    return _nonnegative_int(value)
 
 
 def create_conversation(

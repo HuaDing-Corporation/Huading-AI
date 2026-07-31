@@ -583,6 +583,217 @@ def test_message_reserves_then_settles_exact_token_usage(
         assert wallet.available_credits + wallet.total_spent_credits == wallet.total_topup_credits
 
 
+def test_message_provider_cost_prefers_authoritative_apimart_credits(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    assert (
+        client.post(
+            "/api/v1/aibrain/wallet/topup",
+            json=_topup_payload(500),
+            headers=auth_context["headers"],
+        ).status_code
+        == 200
+    )
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    provider = _FakeChatProvider(
+        {
+            "content": "Use the provider-reported cost.",
+            "model": "gpt-5.6-luna",
+            "prompt_tokens": 1_000,
+            "completion_tokens": 500,
+            "total_tokens": 1_500,
+            "credits": Decimal("1.25"),
+        }
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+
+    response = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "Account for this answer", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    with auth_db() as db:
+        usage = db.scalar(
+            select(UsageRecord).where(
+                UsageRecord.tenant_id == auth_context["tenant_id"],
+                UsageRecord.capability == "chat",
+            )
+        )
+        assert usage.provider_cost_usd == Decimal("0.12500000")
+        assert usage.cost_cents == 88
+
+
+def test_message_provider_cost_uses_cache_read_and_write_rates(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        aibrain.settings,
+        "engine_aibrain_low_input_provider_credits_per_m",
+        Decimal("999"),
+    )
+    monkeypatch.setattr(
+        aibrain.settings,
+        "engine_aibrain_low_output_provider_credits_per_m",
+        Decimal("999"),
+    )
+    client = TestClient(app)
+    assert (
+        client.post(
+            "/api/v1/aibrain/wallet/topup",
+            json=_topup_payload(500),
+            headers=auth_context["headers"],
+        ).status_code
+        == 200
+    )
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    provider = _FakeChatProvider(
+        {
+            "content": "Use cache-specific rates.",
+            "model": "gpt-5.6-luna",
+            "prompt_tokens": 100_000,
+            "completion_tokens": 50_000,
+            "total_tokens": 150_000,
+            "cached_prompt_tokens": 40_000,
+            "cache_write_tokens": 10_000,
+        }
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+
+    response = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "Account for cached context", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    with auth_db() as db:
+        usage = db.scalar(
+            select(UsageRecord).where(
+                UsageRecord.tenant_id == auth_context["tenant_id"],
+                UsageRecord.capability == "chat",
+            )
+        )
+        assert usage.provider_cost_usd == Decimal("0.29320000")
+        assert usage.cost_cents == 205
+
+
+def test_invalid_provider_cost_usage_releases_reservation_without_charge(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=_topup_payload(500),
+        headers=auth_context["headers"],
+    )
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    provider = _FakeChatProvider(
+        {
+            "content": "Invalid provider usage must not leak the reservation.",
+            "model": "gpt-5.6-luna",
+            "prompt_tokens": 100,
+            "completion_tokens": 0,
+            "total_tokens": 100,
+            "cached_prompt_tokens": 80,
+            "cache_write_tokens": 30,
+        }
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+
+    response = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "Reject invalid usage safely", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "AIBRAIN_PROVIDER_FAILED"
+    with auth_db() as db:
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        usage = db.scalar(
+            select(UsageRecord).where(
+                UsageRecord.tenant_id == auth_context["tenant_id"],
+                UsageRecord.capability == "chat",
+            )
+        )
+        assert wallet.available_credits == Decimal("500")
+        assert wallet.reserved_credits == Decimal("0")
+        assert usage.status == "released"
+        assert usage.credits == Decimal("0")
+        assert usage.cost_cents == 0
+
+
+def test_message_provider_cost_uses_sol_high_tier_above_272k(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    assert (
+        client.post(
+            "/api/v1/aibrain/wallet/topup",
+            json=_topup_payload(500),
+            headers=auth_context["headers"],
+        ).status_code
+        == 200
+    )
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    provider = _FakeChatProvider(
+        {
+            "content": "Use the high-context Sol tier.",
+            "model": "gpt-5.6-sol",
+            "prompt_tokens": 272_001,
+            "completion_tokens": 1_000,
+            "total_tokens": 273_001,
+            "cached_prompt_tokens": 0,
+            "cache_write_tokens": 0,
+        }
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+
+    response = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "Account for a long context", "tier": "high"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    with auth_db() as db:
+        usage = db.scalar(
+            select(UsageRecord).where(
+                UsageRecord.tenant_id == auth_context["tenant_id"],
+                UsageRecord.capability == "chat",
+            )
+        )
+        assert usage.provider_cost_usd == Decimal("2.21200800")
+        assert usage.cost_cents == 1548
+
+
 def test_insufficient_reasoning_balance_never_calls_provider_or_reserves(
     auth_context,
     auth_db,
@@ -706,6 +917,54 @@ def test_provider_failure_releases_reservation_without_user_charge(
         assert usage.credits == Decimal("0")
         assert usage.provider_cost_usd > 0
         assert failed_message.error_code == "AIBRAIN_PROVIDER_FAILED"
+
+
+def test_empty_answer_failure_preserves_authoritative_provider_cost(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=_topup_payload(500),
+        headers=auth_context["headers"],
+    )
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    provider = _FakeChatProvider(
+        {
+            "content": "",
+            "model": "gpt-5.6-luna",
+            "prompt_tokens": 1_000,
+            "completion_tokens": 500,
+            "total_tokens": 1_500,
+            "credits": Decimal("1.25"),
+        }
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+
+    response = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "Return an empty answer", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 502
+    with auth_db() as db:
+        usage = db.scalar(
+            select(UsageRecord).where(
+                UsageRecord.tenant_id == auth_context["tenant_id"],
+                UsageRecord.capability == "chat",
+            )
+        )
+        assert usage.status == "released"
+        assert usage.credits == Decimal("0")
+        assert usage.provider_cost_usd == Decimal("0.12500000")
+        assert usage.cost_cents == 88
 
 
 def test_missing_usage_releases_reservation_without_a_second_provider_call(

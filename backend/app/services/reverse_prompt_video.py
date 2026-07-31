@@ -27,6 +27,7 @@ from app.providers.reverse_prompt.apimart_gemini import (
     APIMartGeminiReversePromptError,
 )
 from app.services import quota
+from app.services.apimart_costs import apimart_cost_cents_from_credits
 from app.services.reverse_prompt import (
     mark_reverse_prompt_job_failed,
     mark_reverse_prompt_job_succeeded,
@@ -1421,7 +1422,11 @@ def _aggregate_provider_usage(
         (Decimal(str(item.get("credits") or "0")) for item in usage_results),
         Decimal("0"),
     )
-    cost_cents = sum(nonnegative_int(item.get("cost_cents")) for item in usage_results)
+    cost_cents = (
+        apimart_cost_cents_from_credits(credits)
+        if credits > 0
+        else sum(nonnegative_int(item.get("cost_cents")) for item in usage_results)
+    )
     return {
         **dict(result),
         "prompt_tokens": prompt_tokens,

@@ -250,7 +250,7 @@ async def test_apimart_video_provider_submits_polls_downloads_and_maps_i2v_paylo
     assert result["resolution"] == "720p"
     assert result["size"] == "adaptive"
     assert result["credits"] == Decimal("3.3")
-    assert result["cost_cents"] == 238
+    assert result["cost_cents"] == 231
     assert sleep_calls == [30, 10]
     assert session.post_calls == [
         {

@@ -1634,7 +1634,7 @@ def test_video_gen_pipeline_mixes_library_bgm_from_track_storage(
         usage = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
         assert usage is not None
         assert usage.status == "settled"
-        assert usage.cost_cents == 511
+        assert usage.cost_cents == 497
         subscription = _subscription(db, auth_context["tenant_id"])
         assert subscription.quota_credits_reserved == 0
         assert subscription.quota_credits_used == 10

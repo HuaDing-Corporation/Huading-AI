@@ -153,8 +153,14 @@ async def test_luna_generates_scene_and_negative_prompts_from_all_product_contex
         "prompt_tokens": 120,
         "completion_tokens": 80,
         "total_tokens": 200,
+        "cached_prompt_tokens": None,
+        "cache_write_tokens": None,
+        "cache_tokens_reported": False,
+        "cache_write_tokens_reported": False,
         "credits": Decimal("1.25"),
-        "cost_cents": 90,
+        "cost_cents": 88,
+        "cost_source": "provider_credits",
+        "cost_estimate_uncertain": False,
     }
     call = session.calls[0]
     assert call["url"] == "https://api.apimart.ai/v1/chat/completions"
@@ -166,6 +172,140 @@ async def test_luna_generates_scene_and_negative_prompts_from_all_product_contex
     assert "premium ceramic mug" in content[0]["text"]
     assert "Keeps coffee warm through the morning." in content[0]["text"]
     assert [part["image_url"]["url"] for part in content[1:]] == image_urls
+
+
+@pytest.mark.asyncio
+async def test_luna_uses_discounted_token_fallback_when_credits_are_missing() -> None:
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"scene_prompt":"Discounted scene",'
+                                    '"negative_prompt":"blur"}'
+                                )
+                            }
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 1_000,
+                        "completion_tokens": 500,
+                        "total_tokens": 1_500,
+                    },
+                }
+            )
+        ]
+    )
+    provider = APIMartLunaScenePromptProvider(
+        api_key="test-key",
+        model="gpt-5.6-luna",
+        session=session,
+    )
+
+    result = await provider.generate_scene_prompt(
+        {"image_urls": ["https://storage.test/product.png"]}
+    )
+
+    assert result["credits"] == Decimal("0.032")
+    assert result["cost_cents"] == 2
+    assert result["cost_source"] == "token_formula"
+    assert result["cache_tokens_reported"] is False
+    assert result["cache_write_tokens_reported"] is False
+    assert result["cost_estimate_uncertain"] is True
+
+
+@pytest.mark.asyncio
+async def test_luna_token_fallback_prices_reported_cache_read_and_write() -> None:
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"scene_prompt":"Cached scene",'
+                                    '"negative_prompt":"blur"}'
+                                )
+                            }
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 1_000,
+                        "completion_tokens": 500,
+                        "total_tokens": 1_500,
+                        "prompt_tokens_details": {
+                            "cached_tokens": 400,
+                            "cache_write_tokens": 100,
+                        },
+                    },
+                }
+            )
+        ]
+    )
+    provider = APIMartLunaScenePromptProvider(
+        api_key="test-key",
+        model="gpt-5.6-luna",
+        session=session,
+    )
+
+    result = await provider.generate_scene_prompt(
+        {"image_urls": ["https://storage.test/product.png"]}
+    )
+
+    assert result["cached_prompt_tokens"] == 400
+    assert result["cache_write_tokens"] == 100
+    assert result["credits"] == Decimal("0.02932")
+    assert result["cost_estimate_uncertain"] is False
+
+
+@pytest.mark.asyncio
+async def test_luna_uses_apimart_ttl_cache_creation_breakdown_when_generic_is_zero() -> None:
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"scene_prompt":"TTL cached scene",'
+                                    '"negative_prompt":"blur"}'
+                                )
+                            }
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 1_000,
+                        "completion_tokens": 0,
+                        "total_tokens": 1_000,
+                        "prompt_tokens_details": {
+                            "cached_tokens": 0,
+                            "cache_write_tokens": 0,
+                        },
+                        "claude_cache_creation_5_m_tokens": 1_000,
+                        "claude_cache_creation_1_h_tokens": 0,
+                    },
+                }
+            )
+        ]
+    )
+    provider = APIMartLunaScenePromptProvider(
+        api_key="test-key",
+        model="gpt-5.6-luna",
+        session=session,
+    )
+
+    result = await provider.generate_scene_prompt(
+        {"image_urls": ["https://storage.test/product.png"]}
+    )
+
+    assert result["cache_write_tokens"] == 1_000
+    assert result["credits"] == Decimal("0.010")
+    assert result["cost_estimate_uncertain"] is False
 
 
 def test_scene_prompt_usage_does_not_treat_vendor_credits_as_business_credits() -> None:
@@ -231,7 +371,7 @@ def test_scene_prompt_usage_estimates_luna_cost_when_provider_omits_cost_metadat
     assert record.cost_cents == 1
 
 
-def test_scene_prompt_usage_uses_total_tokens_as_input_when_breakdown_is_missing() -> None:
+def test_scene_prompt_usage_uses_high_tier_when_total_input_exceeds_272k() -> None:
     with Session() as db:
         record = record_scene_prompt_usage(
             db,
@@ -247,7 +387,7 @@ def test_scene_prompt_usage_uses_total_tokens_as_input_when_breakdown_is_missing
     assert record.unit == "token"
     assert record.quantity == Decimal("1000000")
     assert record.credits == Decimal("0")
-    assert record.cost_cents == 720
+    assert record.cost_cents == 1120
 
 
 def test_scene_prompt_usage_skips_results_without_usage_or_cost() -> None:
@@ -345,8 +485,8 @@ def test_luna_model_setting_is_declared_for_runtime_and_deployment() -> None:
     repository_root = Path(__file__).resolve().parents[2]
 
     assert settings.engine_apimart_scene_prompt_model == "gpt-5.6-luna"
-    assert settings.engine_apimart_scene_prompt_input_usd_per_m == 1.0
-    assert settings.engine_apimart_scene_prompt_output_usd_per_m == 6.0
+    assert settings.engine_apimart_scene_prompt_input_usd_per_m == 0.8
+    assert settings.engine_apimart_scene_prompt_output_usd_per_m == 4.8
     assert (
         "ENGINE_APIMART_SCENE_PROMPT_MODEL=gpt-5.6-luna"
         in (repository_root / "backend" / ".env.example").read_text(encoding="utf-8")
@@ -360,8 +500,8 @@ def test_luna_model_setting_is_declared_for_runtime_and_deployment() -> None:
         repository_root / "infra" / ".env.example",
     ):
         env_text = env_path.read_text(encoding="utf-8")
-        assert "ENGINE_APIMART_SCENE_PROMPT_INPUT_USD_PER_M=1.0" in env_text
-        assert "ENGINE_APIMART_SCENE_PROMPT_OUTPUT_USD_PER_M=6.0" in env_text
+        assert "ENGINE_APIMART_SCENE_PROMPT_INPUT_USD_PER_M=0.8" in env_text
+        assert "ENGINE_APIMART_SCENE_PROMPT_OUTPUT_USD_PER_M=4.8" in env_text
 
 
 def test_scene_prompt_migration_extends_provider_and_usage_capabilities_and_seeds_luna() -> None:
@@ -477,7 +617,61 @@ async def test_luna_retry_accumulates_usage_and_cost_from_both_paid_calls() -> N
     assert result["completion_tokens"] == 30
     assert result["total_tokens"] == 250
     assert result["credits"] == Decimal("2.5")
-    assert result["cost_cents"] == 180
+    assert result["cost_cents"] == 175
+
+
+@pytest.mark.asyncio
+async def test_luna_retry_selects_token_tier_per_paid_call_before_aggregation() -> None:
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                {
+                    "choices": [{"message": {"content": "not-json"}}],
+                    "usage": {
+                        "prompt_tokens": 272_001,
+                        "completion_tokens": 0,
+                        "total_tokens": 272_001,
+                        "prompt_tokens_details": {
+                            "cached_tokens": 0,
+                            "cache_write_tokens": 0,
+                        },
+                    },
+                }
+            ),
+            _FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"scene_prompt":"Recovered tiered scene",'
+                                    '"negative_prompt":"blur"}'
+                                )
+                            }
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 1_000,
+                        "completion_tokens": 0,
+                        "total_tokens": 1_000,
+                        "prompt_tokens_details": {
+                            "cached_tokens": 0,
+                            "cache_write_tokens": 0,
+                        },
+                    },
+                }
+            ),
+        ]
+    )
+    provider = APIMartLunaScenePromptProvider(api_key="test-key", session=session)
+
+    result = await provider.generate_scene_prompt(
+        {"image_urls": ["https://storage.test/product.png"]}
+    )
+
+    assert result["prompt_tokens"] == 273_001
+    assert result["credits"] == Decimal("4.360016")
+    assert result["cost_cents"] == 305
 
 
 @pytest.mark.asyncio
@@ -521,8 +715,14 @@ async def test_luna_double_invalid_error_carries_usage_from_both_paid_calls() ->
         "prompt_tokens": 220,
         "completion_tokens": 30,
         "total_tokens": 250,
+        "cached_prompt_tokens": None,
+        "cache_write_tokens": None,
+        "cache_tokens_reported": False,
+        "cache_write_tokens_reported": False,
         "credits": Decimal("2.5"),
-        "cost_cents": 180,
+        "cost_cents": 175,
+        "cost_source": "provider_credits",
+        "cost_estimate_uncertain": False,
     }
 
 
@@ -558,8 +758,14 @@ async def test_luna_retry_timeout_carries_usage_from_the_received_paid_call() ->
         "prompt_tokens": 100,
         "completion_tokens": 10,
         "total_tokens": 110,
+        "cached_prompt_tokens": None,
+        "cache_write_tokens": None,
+        "cache_tokens_reported": False,
+        "cache_write_tokens_reported": False,
         "credits": Decimal("1.0"),
-        "cost_cents": 72,
+        "cost_cents": 70,
+        "cost_source": "provider_credits",
+        "cost_estimate_uncertain": False,
     }
 
 
@@ -603,7 +809,7 @@ async def test_luna_accepts_apimart_data_wrapper_and_reasoning_content() -> None
     assert result["negative_prompt"] == "logos, misshapen handles"
     assert result["total_tokens"] == 150
     assert result["credits"] == Decimal("0.5")
-    assert result["cost_cents"] == 36
+    assert result["cost_cents"] == 35
 
 
 @pytest.mark.asyncio
