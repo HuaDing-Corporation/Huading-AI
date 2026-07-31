@@ -3,15 +3,18 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+import json
 import os
 import re
 import subprocess
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from time import perf_counter
 from typing import Any
 
 from requests import RequestException
@@ -23,6 +26,7 @@ from app.core.logging import get_logger
 from app.db.models import ReversePromptJob
 from app.db.session import SessionLocal
 from app.providers.base import resolve
+from app.providers.reverse_prompt import apimart_gemini as apimart_gemini_provider
 from app.providers.reverse_prompt.apimart_gemini import (
     APIMartGeminiReversePromptError,
 )
@@ -52,6 +56,7 @@ _LONG_VIDEO_FRAMES_PER_SEGMENT = 6
 _FRAME_MAX_EDGE = 768
 _FRAME_TIMEOUT_SEC = 30.0
 _PROXY_TIMEOUT_SEC = 180.0
+_PROXY_PROBE_TIMEOUT_SEC = 30.0
 _AUDIO_TIMEOUT_SEC = 60.0
 _SCENE_CUT_THRESHOLD = 0.25
 _SCENE_CUT_SNAP_TOLERANCE_SEC = 1.25
@@ -111,12 +116,217 @@ _DIRECT_FAILURE_ERRORS = (
 _FALLBACK_EVENTS_KEY = "_fallback_events"
 
 
+@dataclass
+class _ObservabilityContext:
+    job_id: str
+    tenant_id: str
+    input_width: int | None = None
+    input_height: int | None = None
+    input_size_bytes: int | None = None
+    duration_sec: float | None = None
+    call_index: int = 0
+
+
+_observability_context: ContextVar[_ObservabilityContext | None] = ContextVar(
+    "reverse_prompt_video_observability",
+    default=None,
+)
+
+
 @dataclass(frozen=True)
 class VideoSegment:
     index: int
     start_sec: float
     end_sec: float
     timestamps_sec: tuple[float, ...]
+
+
+def _log_event(level: str, event: str, **fields: Any) -> None:
+    context = _observability_context.get()
+    context_fields: dict[str, Any] = {}
+    if context is not None:
+        context_fields = {
+            "job_id": context.job_id,
+            "tenant_id": context.tenant_id,
+        }
+    context_fields.update(fields)
+    getattr(logger, level)(event, **context_fields)
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return round(max(0.0, perf_counter() - started_at) * 1000, 3)
+
+
+def _probe_video_dimensions(
+    video_bytes: bytes,
+    *,
+    run: Callable[..., Any] = subprocess.run,
+) -> tuple[int, int]:
+    with NamedTemporaryFile(delete=False, suffix=".mp4") as probe_file:
+        probe_path = Path(probe_file.name)
+        probe_file.write(video_bytes)
+    try:
+        result = run(
+            [
+                os.environ.get("FFPROBE_BINARY", "ffprobe"),
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "json",
+                str(probe_path),
+            ],
+            capture_output=True,
+            check=False,
+            timeout=_PROXY_PROBE_TIMEOUT_SEC,
+        )
+        if result.returncode != 0:
+            raise ReversePromptVideoProcessingError("Failed to probe video dimensions.")
+        payload = json.loads(bytes(result.stdout or b"{}"))
+        streams = payload.get("streams")
+        if not isinstance(streams, list) or not streams:
+            raise ReversePromptVideoProcessingError("Video probe returned no video stream.")
+        width = int(streams[0].get("width") or 0)
+        height = int(streams[0].get("height") or 0)
+        if width <= 0 or height <= 0:
+            raise ReversePromptVideoProcessingError("Video probe returned invalid dimensions.")
+        return width, height
+    finally:
+        probe_path.unlink(missing_ok=True)
+
+
+def _log_segment_plan(
+    *,
+    duration_sec: float,
+    segments: list[VideoSegment],
+    summary_required: bool,
+) -> None:
+    _log_event(
+        "info",
+        "reverse_prompt_video_segment_plan",
+        duration_sec=duration_sec,
+        segment_count=len(segments),
+        summary_required=summary_required,
+        segments=[
+            {
+                "index": segment.index,
+                "start_sec": segment.start_sec,
+                "end_sec": segment.end_sec,
+            }
+            for segment in segments
+        ],
+    )
+
+
+def _log_proxy_skipped(
+    *,
+    reason: str,
+    segment_index: int | None = None,
+) -> None:
+    context = _observability_context.get()
+    _log_event(
+        "warning",
+        "reverse_prompt_video_proxy_transcode",
+        executed=False,
+        outcome="skipped",
+        reason=reason,
+        segment_index=segment_index,
+        start_sec=None,
+        end_sec=None,
+        max_edge=settings.engine_reverse_prompt_video_proxy_max_edge,
+        input_width=context.input_width if context else None,
+        input_height=context.input_height if context else None,
+        input_size_bytes=context.input_size_bytes if context else None,
+        output_width=None,
+        output_height=None,
+        output_size_bytes=0,
+        resolution_source="skipped",
+        probe_error_type=None,
+        probe_elapsed_ms=0.0,
+        elapsed_ms=0.0,
+    )
+
+
+def _build_observed_video_analysis_proxy(
+    video_path: Path,
+    *,
+    start_sec: float = 0.0,
+    end_sec: float | None = None,
+    segment_index: int | None = None,
+) -> bytes:
+    started_at = perf_counter()
+    context = _observability_context.get()
+    max_edge = settings.engine_reverse_prompt_video_proxy_max_edge
+    try:
+        proxy_bytes = build_video_analysis_proxy(
+            video_path,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            max_edge=max_edge,
+        )
+    except Exception as exc:
+        _log_event(
+            "warning",
+            "reverse_prompt_video_proxy_transcode",
+            executed=True,
+            outcome="failed",
+            reason=type(exc).__name__,
+            segment_index=segment_index,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            max_edge=max_edge,
+            input_width=context.input_width if context else None,
+            input_height=context.input_height if context else None,
+            input_size_bytes=context.input_size_bytes if context else None,
+            output_width=None,
+            output_height=None,
+            output_size_bytes=0,
+            resolution_source="transcode_failed",
+            probe_error_type=None,
+            probe_elapsed_ms=0.0,
+            elapsed_ms=_elapsed_ms(started_at),
+        )
+        raise
+    probe_started_at = perf_counter()
+    try:
+        output_width, output_height = _probe_video_dimensions(proxy_bytes)
+    except Exception as exc:
+        output_width, output_height = None, None
+        resolution_source = "probe_failed"
+        probe_error_type = type(exc).__name__
+        log_level = "warning"
+        reason = "dimension_probe_failed"
+    else:
+        resolution_source = "probed"
+        probe_error_type = None
+        log_level = "info"
+        reason = None
+    probe_elapsed_ms = _elapsed_ms(probe_started_at)
+    _log_event(
+        log_level,
+        "reverse_prompt_video_proxy_transcode",
+        executed=True,
+        outcome="succeeded",
+        reason=reason,
+        segment_index=segment_index,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        max_edge=max_edge,
+        input_width=context.input_width if context else None,
+        input_height=context.input_height if context else None,
+        input_size_bytes=context.input_size_bytes if context else None,
+        output_width=output_width,
+        output_height=output_height,
+        output_size_bytes=len(proxy_bytes),
+        resolution_source=resolution_source,
+        probe_error_type=probe_error_type,
+        probe_elapsed_ms=probe_elapsed_ms,
+        elapsed_ms=_elapsed_ms(started_at),
+    )
+    return proxy_bytes
 
 
 def frame_timestamps(duration_sec: float) -> list[float]:
@@ -494,6 +704,23 @@ def run_reverse_prompt_video_job(
             status = current.status if current is not None else "missing"
             return {"job_id": job_id, "status": status}
         db.refresh(job)
+        job_started_at = perf_counter()
+        observability_token = _observability_context.set(
+            _ObservabilityContext(
+                job_id=job.id,
+                tenant_id=job.tenant_id,
+            )
+        )
+        _log_event(
+            "info",
+            "reverse_prompt_video_job_started",
+            analysis_mode=settings.engine_reverse_prompt_video_analysis_mode,
+            target_format=job.target_format,
+            proxy_max_edge=settings.engine_reverse_prompt_video_proxy_max_edge,
+            native_segment_seconds=(
+                settings.engine_reverse_prompt_video_native_segment_seconds
+            ),
+        )
         usage_token, captured_usage = begin_reverse_prompt_usage_capture()
 
         try:
@@ -512,11 +739,27 @@ def run_reverse_prompt_video_job(
             )
             if not video_bytes:
                 raise ReversePromptVideoProcessingError("Reverse prompt video is empty.")
+            duration_sec = float(source.duration_ms or 0) / 1000.0
+            observability = _observability_context.get()
+            if observability is not None:
+                observability.input_width = source.width
+                observability.input_height = source.height
+                observability.input_size_bytes = len(video_bytes)
+                observability.duration_sec = duration_sec
+            _log_event(
+                "info",
+                "reverse_prompt_video_source_loaded",
+                input_width=source.width,
+                input_height=source.height,
+                duration_sec=duration_sec,
+                input_size_bytes=len(video_bytes),
+                asset_size_bytes=source.size_bytes,
+                mime_type=source.mime_type,
+            )
             with NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
                 temp_file.write(video_bytes)
                 temp_path = Path(temp_file.name)
 
-            duration_sec = float(source.duration_ms or 0) / 1000.0
             provider = resolve(db, tenant_id=job.tenant_id, capability="reverse_prompt")
             audio_transcript, _ = _best_effort_audio_transcript(
                 provider,
@@ -571,6 +814,25 @@ def run_reverse_prompt_video_job(
                 cost_cents=nonnegative_int(result.get("cost_cents")),
             )
             db.commit()
+            _log_event(
+                "info",
+                "reverse_prompt_video_job_completed",
+                outcome="succeeded",
+                prompt_tokens=nonnegative_int(result.get("prompt_tokens")),
+                completion_tokens=nonnegative_int(
+                    result.get("completion_tokens")
+                ),
+                total_tokens=total_tokens,
+                cost_cents=nonnegative_int(result.get("cost_cents")),
+                credits=str(result.get("credits") or "0"),
+                upstream_call_count=(
+                    _observability_context.get().call_index
+                    if _observability_context.get() is not None
+                    else len(captured_usage)
+                ),
+                fallback_count=len(fallback_events),
+                elapsed_ms=_elapsed_ms(job_started_at),
+            )
             return {"job_id": job.id, "status": "succeeded"}
         except Exception as exc:
             db.rollback()
@@ -592,7 +854,13 @@ def run_reverse_prompt_video_job(
                     job=failed_job,
                     message="Reverse prompt video processing failed.",
                 )
-            logger.exception("reverse_prompt_video_failed", job_id=job_id)
+            _log_event(
+                "exception",
+                "reverse_prompt_video_failed",
+                job_id=job_id,
+                error_type=type(exc).__name__,
+                elapsed_ms=_elapsed_ms(job_started_at),
+            )
             if isinstance(exc, _DIRECT_FAILURE_ERRORS):
                 raise
             raise ReversePromptVideoProcessingError(
@@ -602,6 +870,7 @@ def run_reverse_prompt_video_job(
             finish_reverse_prompt_usage_capture(usage_token)
             if temp_path is not None:
                 temp_path.unlink(missing_ok=True)
+            _observability_context.reset(observability_token)
 
 
 def _run_native_stage(
@@ -670,7 +939,11 @@ def _record_native_fallback(
             **log_fields,
         }
     )
-    logger.warning("reverse_prompt_native_video_fallback", **log_fields)
+    _log_event(
+        "warning",
+        "reverse_prompt_native_video_fallback",
+        **log_fields,
+    )
 
 
 def _attach_fallback_events(
@@ -709,37 +982,72 @@ def _run_short_video_analysis(
     audio_transcript: str | None,
     fallback_events: list[dict[str, object]],
 ) -> tuple[dict[str, Any], list[Mapping[str, Any]]]:
+    segment = VideoSegment(
+        index=1,
+        start_sec=0.0,
+        end_sec=duration_sec,
+        timestamps_sec=tuple(frame_timestamps(duration_sec)),
+    )
+    _log_segment_plan(
+        duration_sec=duration_sec,
+        segments=[segment],
+        summary_required=False,
+    )
+    segment_started_at = perf_counter()
     if settings.engine_reverse_prompt_video_analysis_mode == "frames":
-        return _run_short_video_frames_analysis(
+        _log_proxy_skipped(reason="analysis_mode_frames", segment_index=1)
+        result = _run_short_video_frames_analysis(
             provider,
             video_path,
             duration_sec=duration_sec,
             target_format=target_format,
             audio_transcript=audio_transcript,
         )
-    try:
-        return _run_short_video_native_analysis(
-            provider,
-            video_path,
-            duration_sec=duration_sec,
-            target_format=target_format,
-            audio_transcript=audio_transcript,
-        )
-    except _NativeVideoFallback as exc:
-        _record_native_fallback(
-            job=job,
-            fallback_events=fallback_events,
-            scope="short",
-            fallback=exc,
-        )
-        frame_result, frame_usage = _run_short_video_frames_analysis(
-            provider,
-            video_path,
-            duration_sec=duration_sec,
-            target_format=target_format,
-            audio_transcript=audio_transcript,
-        )
-        return frame_result, [*exc.usage_results, *frame_usage]
+        analysis_path = "frames"
+    else:
+        try:
+            result = _run_short_video_native_analysis(
+                provider,
+                video_path,
+                duration_sec=duration_sec,
+                target_format=target_format,
+                audio_transcript=audio_transcript,
+            )
+            analysis_path = "native"
+        except _NativeVideoFallback as exc:
+            _record_native_fallback(
+                job=job,
+                fallback_events=fallback_events,
+                scope="short",
+                fallback=exc,
+            )
+            if exc.stage == "scene_detection":
+                _log_proxy_skipped(
+                    reason="native_fallback_before_transcode",
+                    segment_index=1,
+                )
+            frame_result, frame_usage = _run_short_video_frames_analysis(
+                provider,
+                video_path,
+                duration_sec=duration_sec,
+                target_format=target_format,
+                audio_transcript=audio_transcript,
+            )
+            result = (
+                frame_result,
+                [*exc.usage_results, *frame_usage],
+            )
+            analysis_path = "frames_fallback"
+    _log_event(
+        "info",
+        "reverse_prompt_video_segment_completed",
+        segment_index=1,
+        start_sec=0.0,
+        end_sec=duration_sec,
+        analysis_path=analysis_path,
+        elapsed_ms=_elapsed_ms(segment_started_at),
+    )
+    return result
 
 
 def _run_short_video_native_analysis(
@@ -759,9 +1067,9 @@ def _run_short_video_native_analysis(
     )
     proxy_bytes = _run_native_stage(
         "proxy_transcode",
-        lambda: build_video_analysis_proxy(
+        lambda: _build_observed_video_analysis_proxy(
             video_path,
-            max_edge=settings.engine_reverse_prompt_video_proxy_max_edge,
+            segment_index=1,
         ),
     )
     result = _run_native_stage(
@@ -774,6 +1082,12 @@ def _run_short_video_native_analysis(
                     "target_format": target_format,
                 }
             ),
+            stage="segment_1",
+            operation_name="reverse_video_native",
+            segment_index=1,
+            media_bytes=len(proxy_bytes),
+            media_duration_sec=duration_sec,
+            model_hint=settings.engine_apimart_reverse_prompt_video_model,
         ),
     )
     _run_native_stage(
@@ -822,6 +1136,15 @@ def _run_short_video_frames_analysis(
         video_path,
         duration_sec=duration_sec,
     )
+    _log_event(
+        "info",
+        "reverse_prompt_video_frames_prepared",
+        segment_index=1,
+        frame_count=len(frames),
+        frame_bytes=sum(len(frame) for frame in frames),
+        timestamps_sec=timestamps_sec,
+        max_edge=_FRAME_MAX_EDGE,
+    )
     result = _call_provider(
         lambda: provider.reverse_video_frames(
             {
@@ -831,6 +1154,13 @@ def _run_short_video_frames_analysis(
                 "target_format": target_format,
             }
         ),
+        stage="segment_1",
+        operation_name="reverse_video_frames",
+        segment_index=1,
+        media_bytes=sum(len(frame) for frame in frames),
+        frame_count=len(frames),
+        media_duration_sec=duration_sec,
+        model_hint=settings.engine_apimart_reverse_prompt_model,
     )
     _attach_audio_context(
         result,
@@ -918,6 +1248,7 @@ def _run_long_video_native_analysis(
             scope="long",
             fallback=fallback,
         )
+        _log_proxy_skipped(reason="native_fallback_before_transcode")
         frame_result, frame_usage = _run_long_video_frames_analysis(
             db,
             job=job,
@@ -932,6 +1263,11 @@ def _run_long_video_native_analysis(
         duration_sec,
         segment_seconds=settings.engine_reverse_prompt_video_native_segment_seconds,
     )
+    _log_segment_plan(
+        duration_sec=duration_sec,
+        segments=segments,
+        summary_required=True,
+    )
     set_reverse_prompt_segment_progress(
         db,
         job=job,
@@ -942,14 +1278,16 @@ def _run_long_video_native_analysis(
     usage_results: list[Mapping[str, Any]] = []
     raw_segments: list[dict[str, object]] = []
     for segment in segments:
+        segment_started_at = perf_counter()
+        analysis_path = "native"
         try:
             proxy_bytes = _run_native_stage(
                 "proxy_transcode",
-                lambda segment=segment: build_video_analysis_proxy(
+                lambda segment=segment: _build_observed_video_analysis_proxy(
                     video_path,
                     start_sec=segment.start_sec,
                     end_sec=segment.end_sec,
-                    max_edge=settings.engine_reverse_prompt_video_proxy_max_edge,
+                    segment_index=segment.index,
                 ),
             )
             payload = {
@@ -986,6 +1324,7 @@ def _run_long_video_native_analysis(
                 fallback=fallback,
                 segment_index=segment.index,
             )
+            analysis_path = "frames_fallback"
             usage_results.extend(fallback.usage_results)
             segment_result = _run_frame_video_segment(
                 provider,
@@ -1008,6 +1347,15 @@ def _run_long_video_native_analysis(
             segment_analyses=segment_analyses,
             usage_results=usage_results,
             raw_segments=raw_segments,
+        )
+        _log_event(
+            "info",
+            "reverse_prompt_video_segment_completed",
+            segment_index=segment.index,
+            start_sec=segment.start_sec,
+            end_sec=segment.end_sec,
+            analysis_path=analysis_path,
+            elapsed_ms=_elapsed_ms(segment_started_at),
         )
     return _summarize_native_video_segments(
         provider,
@@ -1035,6 +1383,12 @@ def _run_long_video_frames_analysis(
     audio_transcript: str | None,
 ) -> tuple[dict[str, Any], list[Mapping[str, Any]]]:
     segments = video_segment_plan(duration_sec)
+    _log_segment_plan(
+        duration_sec=duration_sec,
+        segments=segments,
+        summary_required=True,
+    )
+    _log_proxy_skipped(reason="analysis_mode_frames")
     set_reverse_prompt_segment_progress(
         db,
         job=job,
@@ -1045,6 +1399,7 @@ def _run_long_video_frames_analysis(
     usage_results: list[Mapping[str, Any]] = []
     raw_segments: list[dict[str, object]] = []
     for segment in segments:
+        segment_started_at = perf_counter()
         segment_result = _run_frame_video_segment(
             provider,
             video_path,
@@ -1066,6 +1421,15 @@ def _run_long_video_frames_analysis(
             segment_analyses=segment_analyses,
             usage_results=usage_results,
             raw_segments=raw_segments,
+        )
+        _log_event(
+            "info",
+            "reverse_prompt_video_segment_completed",
+            segment_index=segment.index,
+            start_sec=segment.start_sec,
+            end_sec=segment.end_sec,
+            analysis_path="frames",
+            elapsed_ms=_elapsed_ms(segment_started_at),
         )
     return _summarize_video_segments(
         provider,
@@ -1089,6 +1453,15 @@ def _run_frame_video_segment(
     frames = extract_video_frames_at_timestamps(
         video_path,
         timestamps_sec=segment.timestamps_sec,
+    )
+    _log_event(
+        "info",
+        "reverse_prompt_video_frames_prepared",
+        segment_index=segment.index,
+        frame_count=len(frames),
+        frame_bytes=sum(len(frame) for frame in frames),
+        timestamps_sec=list(segment.timestamps_sec),
+        max_edge=_FRAME_MAX_EDGE,
     )
     payload = {
         "image_urls": _frame_data_urls(frames),
@@ -1168,6 +1541,7 @@ def _summarize_video_segments(
     model: str | None = None,
     scene_cuts_sec: list[float] | None = None,
 ) -> tuple[dict[str, Any], list[Mapping[str, Any]]]:
+    summary_started_at = perf_counter()
     summary_payload = _video_summary_payload(
         duration_sec=duration_sec,
         target_format=target_format,
@@ -1175,7 +1549,11 @@ def _summarize_video_segments(
         segment_analyses=segment_analyses,
         model=model,
     )
-    summary_result = _request_video_summary(provider, summary_payload)
+    summary_result = _request_video_summary(
+        provider,
+        summary_payload,
+        stage="summary",
+    )
     _finalize_video_summary(
         summary_result,
         duration_sec=duration_sec,
@@ -1184,6 +1562,14 @@ def _summarize_video_segments(
         scene_cuts_sec=scene_cuts_sec,
     )
     usage_results.append(summary_result)
+    _log_event(
+        "info",
+        "reverse_prompt_video_summary_completed",
+        segment_count=len(segment_analyses),
+        fallback_used=False,
+        model=summary_result.get("model"),
+        elapsed_ms=_elapsed_ms(summary_started_at),
+    )
     return summary_result, usage_results
 
 
@@ -1201,6 +1587,8 @@ def _summarize_native_video_segments(
     model: str,
     scene_cuts_sec: list[float],
 ) -> tuple[dict[str, Any], list[Mapping[str, Any]]]:
+    summary_started_at = perf_counter()
+    summary_fallback_used = False
     summary_payload = _video_summary_payload(
         duration_sec=duration_sec,
         target_format=target_format,
@@ -1211,7 +1599,11 @@ def _summarize_native_video_segments(
     try:
         summary_result = _run_native_stage(
             "summary_provider",
-            lambda: _request_video_summary(provider, summary_payload),
+            lambda: _request_video_summary(
+                provider,
+                summary_payload,
+                stage="summary",
+            ),
         )
         _run_native_stage(
             "summary_validation",
@@ -1225,6 +1617,7 @@ def _summarize_native_video_segments(
             usage_results=[summary_result],
         )
     except _NativeVideoFallback as fallback:
+        summary_fallback_used = True
         _record_native_fallback(
             job=job,
             fallback_events=fallback_events,
@@ -1236,7 +1629,11 @@ def _summarize_native_video_segments(
             **summary_payload,
             "model": settings.engine_apimart_reverse_prompt_model,
         }
-        summary_result = _request_video_summary(provider, legacy_payload)
+        summary_result = _request_video_summary(
+            provider,
+            legacy_payload,
+            stage="summary_fallback",
+        )
         _finalize_video_summary(
             summary_result,
             duration_sec=duration_sec,
@@ -1245,6 +1642,14 @@ def _summarize_native_video_segments(
             scene_cuts_sec=scene_cuts_sec,
         )
     usage_results.append(summary_result)
+    _log_event(
+        "info",
+        "reverse_prompt_video_summary_completed",
+        segment_count=len(segment_analyses),
+        fallback_used=summary_fallback_used,
+        model=summary_result.get("model"),
+        elapsed_ms=_elapsed_ms(summary_started_at),
+    )
     return summary_result, usage_results
 
 
@@ -1270,9 +1675,19 @@ def _video_summary_payload(
 def _request_video_summary(
     provider: Any,
     summary_payload: Mapping[str, Any],
+    *,
+    stage: str,
 ) -> dict[str, Any]:
     return _call_provider(
-        lambda: provider.summarize_video_segments(summary_payload)
+        lambda: provider.summarize_video_segments(summary_payload),
+        stage=stage,
+        operation_name="summarize_video_segments",
+        media_bytes=0,
+        frame_count=0,
+        model_hint=str(
+            summary_payload.get("model")
+            or settings.engine_apimart_reverse_prompt_model
+        ),
     )
 
 
@@ -1321,7 +1736,35 @@ def _segment_result_with_retry(
     failed_usage: list[Mapping[str, Any]] = []
     for attempt in range(2):
         try:
-            return _call_provider(lambda: operation(payload))
+            media = payload.get("video_bytes")
+            image_urls = payload.get("image_urls")
+            return _call_provider(
+                lambda: operation(payload),
+                stage=f"segment_{segment_index}",
+                operation_name=operation_name,
+                segment_index=segment_index,
+                call_attempt=attempt + 1,
+                media_bytes=(
+                    len(media)
+                    if isinstance(media, bytes | bytearray)
+                    else None
+                ),
+                frame_count=(
+                    len(image_urls)
+                    if isinstance(image_urls, list | tuple)
+                    else None
+                ),
+                media_duration_sec=max(
+                    0.0,
+                    float(payload.get("segment_end_sec") or 0)
+                    - float(payload.get("segment_start_sec") or 0),
+                ),
+                model_hint=(
+                    settings.engine_apimart_reverse_prompt_video_model
+                    if operation_name == "analyze_video_native_segment"
+                    else settings.engine_apimart_reverse_prompt_model
+                ),
+            )
         except _NATIVE_RUNTIME_ERRORS as exc:
             failed_usage.extend(_usage_results_from_exception(exc))
             if attempt == 1:
@@ -1329,10 +1772,14 @@ def _segment_result_with_retry(
                     cause=exc,
                     usage_results=failed_usage,
                 ) from exc
-            logger.warning(
+            _log_event(
+                "warning",
                 "reverse_prompt_video_segment_retry",
                 segment_index=segment_index,
                 operation=operation_name,
+                failed_attempt=attempt + 1,
+                next_attempt=attempt + 2,
+                error_type=type(exc).__name__,
             )
     raise AssertionError("unreachable")
 
@@ -1341,10 +1788,25 @@ def _best_effort_audio_transcript(
     provider: Any,
     video_path: Path,
 ) -> tuple[str | None, Mapping[str, Any] | None]:
+    usage_checkpoint = reverse_prompt_usage_checkpoint()
     try:
         audio_bytes = extract_audio_track(video_path)
         transcribe = getattr(provider, "transcribe_audio", None)
-        if not audio_bytes or not callable(transcribe):
+        if not audio_bytes:
+            _log_event(
+                "info",
+                "reverse_prompt_video_asr_skipped",
+                reason="no_audio_track",
+                audio_bytes=0,
+            )
+            return None, None
+        if not callable(transcribe):
+            _log_event(
+                "info",
+                "reverse_prompt_video_asr_skipped",
+                reason="provider_unsupported",
+                audio_bytes=len(audio_bytes),
+            )
             return None, None
         result = _call_provider(
             lambda: transcribe(
@@ -1354,17 +1816,55 @@ def _best_effort_audio_transcript(
                     "language": "zh",
                 }
             ),
+            stage="asr",
+            operation_name="transcribe_audio",
+            media_bytes=len(audio_bytes),
+            frame_count=0,
+            media_duration_sec=(
+                _observability_context.get().duration_sec
+                if _observability_context.get() is not None
+                else None
+            ),
+            model_hint="gpt-4o-mini-transcribe",
         )
         transcript = str(
             result.get("audio_transcript")
             or result.get("text")
             or ""
         ).strip()
+        _log_event(
+            "info",
+            "reverse_prompt_video_asr_result",
+            has_text=bool(transcript),
+            transcript_chars=len(transcript),
+            audio_bytes=len(audio_bytes),
+        )
         return (transcript or None), result
     except Exception as exc:
-        logger.warning(
+        paid_usage = reverse_prompt_usage_since(usage_checkpoint)
+        _log_event(
+            "warning",
             "reverse_prompt_audio_transcription_degraded",
             error_type=type(exc).__name__,
+            has_text=False,
+            transcript_chars=0,
+            paid_without_text=any(
+                nonnegative_int(item.get("total_tokens"))
+                or nonnegative_int(item.get("cost_cents"))
+                for item in paid_usage
+            ),
+            prompt_tokens=sum(
+                nonnegative_int(item.get("prompt_tokens"))
+                for item in paid_usage
+            ),
+            completion_tokens=sum(
+                nonnegative_int(item.get("completion_tokens"))
+                for item in paid_usage
+            ),
+            cost_cents=sum(
+                nonnegative_int(item.get("cost_cents"))
+                for item in paid_usage
+            ),
         )
         return None, None
 
@@ -1376,18 +1876,242 @@ def _frame_data_urls(frames: list[bytes]) -> list[str]:
     ]
 
 
-def _call_provider(operation: Callable[[], Any]) -> dict[str, Any]:
+def _call_provider(
+    operation: Callable[[], Any],
+    *,
+    stage: str,
+    operation_name: str,
+    segment_index: int | None = None,
+    call_attempt: int = 1,
+    media_bytes: int | None = None,
+    frame_count: int | None = None,
+    media_duration_sec: float | None = None,
+    model_hint: str | None = None,
+) -> dict[str, Any]:
     usage_checkpoint = reverse_prompt_usage_checkpoint()
+    started_at = perf_counter()
     try:
         result = _mapping_result(_invoke_provider(operation()))
     except Exception as exc:
         if not reverse_prompt_usage_since(usage_checkpoint):
             for usage in _usage_results_from_exception(exc):
                 capture_reverse_prompt_usage(usage)
+        _log_upstream_calls(
+            reverse_prompt_usage_since(usage_checkpoint),
+            stage=stage,
+            operation_name=operation_name,
+            segment_index=segment_index,
+            call_attempt=call_attempt,
+            media_bytes=media_bytes,
+            frame_count=frame_count,
+            media_duration_sec=media_duration_sec,
+            model_hint=model_hint,
+            result=None,
+            outcome="failed",
+            error_type=type(exc).__name__,
+            elapsed_ms=_elapsed_ms(started_at),
+        )
         raise
     if not reverse_prompt_usage_since(usage_checkpoint):
         capture_reverse_prompt_usage(result)
+    _log_upstream_calls(
+        reverse_prompt_usage_since(usage_checkpoint),
+        stage=stage,
+        operation_name=operation_name,
+        segment_index=segment_index,
+        call_attempt=call_attempt,
+        media_bytes=media_bytes,
+        frame_count=frame_count,
+        media_duration_sec=media_duration_sec,
+        model_hint=model_hint,
+        result=result,
+        outcome="succeeded",
+        error_type=None,
+        elapsed_ms=_elapsed_ms(started_at),
+    )
     return result
+
+
+def _log_upstream_calls(
+    usage_results: list[Mapping[str, Any]],
+    *,
+    stage: str,
+    operation_name: str,
+    segment_index: int | None,
+    call_attempt: int,
+    media_bytes: int | None,
+    frame_count: int | None,
+    media_duration_sec: float | None,
+    model_hint: str | None,
+    result: Mapping[str, Any] | None,
+    outcome: str,
+    error_type: str | None,
+    elapsed_ms: float,
+) -> None:
+    usages = usage_results or [{}]
+    if len(usages) > 1:
+        _log_event(
+            "warning",
+            "reverse_prompt_video_structured_retry",
+            parent_stage=stage,
+            operation=operation_name,
+            segment_index=segment_index,
+            call_attempt=call_attempt,
+            retry_count=len(usages) - 1,
+        )
+    for usage_index, usage in enumerate(usages):
+        context = _observability_context.get()
+        if context is not None:
+            context.call_index += 1
+            call_index = context.call_index
+        else:
+            call_index = usage_index + 1
+        effective_stage = "structured_retry" if usage_index else stage
+        model = str(
+            usage.get("model")
+            or (result or {}).get("model")
+            or model_hint
+            or "unknown"
+        )
+        rate_fields = _token_rate_log_fields(model)
+        input_video_tokens = nonnegative_int(
+            usage.get("input_video_tokens")
+        )
+        cached_tokens = nonnegative_int(
+            usage.get("cached_tokens")
+            if usage.get("cached_tokens") is not None
+            else usage.get("cached_prompt_tokens")
+        )
+        _log_event(
+            "error" if outcome == "failed" else "info",
+            "reverse_prompt_video_upstream_call",
+            call_index=call_index,
+            stage=effective_stage,
+            parent_stage=stage if usage_index else None,
+            operation=operation_name,
+            provider=str(
+                usage.get("provider")
+                or (result or {}).get("provider")
+                or "apimart"
+            ),
+            model=model,
+            prompt_tokens=nonnegative_int(usage.get("prompt_tokens")),
+            completion_tokens=nonnegative_int(
+                usage.get("completion_tokens")
+            ),
+            total_tokens=(
+                nonnegative_int(usage.get("total_tokens"))
+                or (
+                    nonnegative_int(usage.get("prompt_tokens"))
+                    + nonnegative_int(usage.get("completion_tokens"))
+                )
+            ),
+            cached_tokens=cached_tokens,
+            cache_tokens_reported=bool(
+                usage.get("cache_tokens_reported")
+                or usage.get("cached_tokens") is not None
+            ),
+            input_modality_tokens_reported=bool(
+                usage.get("input_modality_tokens_reported")
+            ),
+            output_modality_tokens_reported=bool(
+                usage.get("output_modality_tokens_reported")
+            ),
+            input_text_tokens=nonnegative_int(
+                usage.get("input_text_tokens")
+            ),
+            input_image_tokens=nonnegative_int(
+                usage.get("input_image_tokens")
+            ),
+            input_video_tokens=input_video_tokens,
+            input_audio_tokens=nonnegative_int(
+                usage.get("input_audio_tokens")
+            ),
+            output_text_tokens=nonnegative_int(
+                usage.get("output_text_tokens")
+            ),
+            output_image_tokens=nonnegative_int(
+                usage.get("output_image_tokens")
+            ),
+            output_video_tokens=nonnegative_int(
+                usage.get("output_video_tokens")
+            ),
+            output_audio_tokens=nonnegative_int(
+                usage.get("output_audio_tokens")
+            ),
+            candidate_tokens=nonnegative_int(
+                usage.get("candidate_tokens")
+            ),
+            thought_tokens=nonnegative_int(usage.get("thought_tokens")),
+            credits=str(usage.get("credits") or "0"),
+            cost_cents=nonnegative_int(usage.get("cost_cents")),
+            cost_source=str(usage.get("cost_source") or "unknown"),
+            input_credits_per_m=rate_fields["input_credits_per_m"],
+            output_credits_per_m=rate_fields["output_credits_per_m"],
+            cached_input_credits_per_m=rate_fields[
+                "cached_input_credits_per_m"
+            ],
+            token_rate_source=rate_fields["token_rate_source"],
+            apimart_credit_usd=settings.engine_apimart_credit_usd,
+            usd_cny_rate=settings.engine_usd_cny_rate,
+            cost_estimate_uncertain=bool(
+                usage.get("cost_estimate_uncertain")
+            ),
+            elapsed_ms=elapsed_ms,
+            outcome=outcome,
+            error_type=error_type,
+            media_bytes=media_bytes,
+            frame_count=frame_count,
+            media_duration_sec=media_duration_sec,
+            video_tokens_per_second=(
+                round(input_video_tokens / media_duration_sec, 3)
+                if input_video_tokens
+                and media_duration_sec
+                and media_duration_sec > 0
+                else None
+            ),
+            segment_index=segment_index,
+            call_attempt=call_attempt,
+            upstream_attempt=usage_index + 1,
+        )
+
+
+def _token_rate_log_fields(model: str) -> dict[str, Any]:
+    pricing_by_model = getattr(
+        apimart_gemini_provider,
+        "_TOKEN_CREDITS_PER_M_BY_MODEL",
+        {},
+    )
+    pricing = (
+        pricing_by_model.get(model.strip().lower())
+        if isinstance(pricing_by_model, Mapping)
+        else None
+    )
+    if isinstance(pricing, Mapping):
+        return {
+            "input_credits_per_m": str(pricing.get("input")),
+            "output_credits_per_m": str(pricing.get("output")),
+            "cached_input_credits_per_m": (
+                str(pricing.get("cached_input"))
+                if pricing.get("cached_input") is not None
+                else None
+            ),
+            "token_rate_source": "model_rate_table",
+        }
+    return {
+        "input_credits_per_m": (
+            settings.engine_apimart_reverse_prompt_input_credits_per_m
+        ),
+        "output_credits_per_m": (
+            settings.engine_apimart_reverse_prompt_output_credits_per_m
+        ),
+        "cached_input_credits_per_m": getattr(
+            settings,
+            "engine_apimart_reverse_prompt_cached_input_credits_per_m",
+            None,
+        ),
+        "token_rate_source": "legacy_settings",
+    }
 
 
 def _invoke_provider(operation: Any) -> Any:

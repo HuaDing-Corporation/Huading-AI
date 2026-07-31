@@ -469,7 +469,10 @@ class APIMartGeminiReversePromptProvider:
             completion_payload,
             model=_DEFAULT_TRANSCRIPTION_MODEL,
         )
-        capture_reverse_prompt_usage(usage)
+        capture_reverse_prompt_usage(
+            usage,
+            observability=_usage_observability(completion_payload),
+        )
         _raise_for_response(
             response,
             response_payload,
@@ -541,12 +544,14 @@ class APIMartGeminiReversePromptProvider:
             timeout=self.request_timeout,
         )
         payload = _response_payload(response)
+        completion = _completion_payload(payload)
         capture_reverse_prompt_usage(
             _usage_cost_payload(
                 payload,
-                _completion_payload(payload),
+                completion,
                 model=self.model,
-            )
+            ),
+            observability=_usage_observability(completion),
         )
         _raise_for_response(response, payload, "APIMart Gemini reverse prompt failed")
         return payload
@@ -587,12 +592,14 @@ class APIMartGeminiReversePromptProvider:
             timeout=self.request_timeout,
         )
         payload = _response_payload(response)
+        completion = _completion_payload(payload)
         capture_reverse_prompt_usage(
             _usage_cost_payload(
                 payload,
-                _completion_payload(payload),
+                completion,
                 model=selected_model,
-            )
+            ),
+            observability=_usage_observability(completion),
         )
         _raise_for_response(response, payload, "APIMart Gemini structured vision failed")
         return payload
@@ -683,7 +690,8 @@ class APIMartGeminiReversePromptProvider:
         )
         payload = _response_payload(response)
         capture_reverse_prompt_usage(
-            _native_usage_cost_payload(payload, model=self.video_model)
+            _native_usage_cost_payload(payload, model=self.video_model),
+            observability=_native_usage_observability(payload),
         )
         _raise_for_response(response, payload, "APIMart Gemini native video failed")
         return payload
@@ -1553,6 +1561,189 @@ def _native_usage_cost_payload(
         "cost_source": cost_source,
         "cost_estimate_uncertain": cost_estimate_uncertain,
     }
+
+
+def _native_usage_observability(
+    response_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    completion = _native_completion_payload(response_payload)
+    raw_usage = completion.get("usageMetadata")
+    usage = raw_usage if isinstance(raw_usage, Mapping) else {}
+    input_modalities = _modality_token_counts(usage.get("promptTokensDetails"))
+    output_modalities = _modality_token_counts(
+        usage.get("candidatesTokensDetails")
+    )
+    cached_tokens = (
+        _int_value(usage.get("cachedContentTokenCount"))
+        if "cachedContentTokenCount" in usage
+        else None
+    )
+    return {
+        "cached_prompt_tokens": cached_tokens,
+        "cache_tokens_reported": cached_tokens is not None,
+        "input_modality_tokens_reported": "promptTokensDetails" in usage,
+        "output_modality_tokens_reported": "candidatesTokensDetails" in usage,
+        "input_text_tokens": input_modalities.get("text", 0),
+        "input_image_tokens": input_modalities.get("image", 0),
+        "input_video_tokens": input_modalities.get("video", 0),
+        "input_audio_tokens": input_modalities.get("audio", 0),
+        "output_text_tokens": output_modalities.get("text", 0),
+        "output_image_tokens": output_modalities.get("image", 0),
+        "output_video_tokens": output_modalities.get("video", 0),
+        "output_audio_tokens": output_modalities.get("audio", 0),
+        "candidate_tokens": _int_value(usage.get("candidatesTokenCount")),
+        "thought_tokens": _int_value(usage.get("thoughtsTokenCount")),
+    }
+
+
+def _usage_observability(
+    completion_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    raw_usage = completion_payload.get("usage")
+    usage = raw_usage if isinstance(raw_usage, Mapping) else {}
+    input_modalities, input_reported = _usage_modality_details(
+        usage,
+        (
+            "prompt_tokens_details",
+            "input_tokens_details",
+            "promptTokensDetails",
+            "inputTokensDetails",
+        ),
+    )
+    output_modalities, output_reported = _usage_modality_details(
+        usage,
+        (
+            "completion_tokens_details",
+            "output_tokens_details",
+            "completionTokensDetails",
+            "outputTokensDetails",
+        ),
+    )
+    cached_tokens, cache_reported = _first_reported_int(
+        input_modalities,
+        ("cached",),
+    )
+    if not cache_reported:
+        cached_tokens, cache_reported = _first_reported_int(
+            usage,
+            (
+                "cached_tokens",
+                "cached_prompt_tokens",
+                "cachedTokens",
+                "cachedPromptTokens",
+            ),
+        )
+    return {
+        "cached_prompt_tokens": cached_tokens,
+        "cache_tokens_reported": cache_reported,
+        "input_modality_tokens_reported": input_reported,
+        "output_modality_tokens_reported": output_reported,
+        "input_text_tokens": _int_value(input_modalities.get("text")),
+        "input_image_tokens": _int_value(input_modalities.get("image")),
+        "input_video_tokens": _int_value(input_modalities.get("video")),
+        "input_audio_tokens": _int_value(input_modalities.get("audio")),
+        "output_text_tokens": _int_value(output_modalities.get("text")),
+        "output_image_tokens": _int_value(output_modalities.get("image")),
+        "output_video_tokens": _int_value(output_modalities.get("video")),
+        "output_audio_tokens": _int_value(output_modalities.get("audio")),
+        "thought_tokens": _int_value(output_modalities.get("reasoning")),
+    }
+
+
+def _usage_modality_details(
+    usage: Mapping[str, Any],
+    keys: tuple[str, ...],
+) -> tuple[dict[str, int], bool]:
+    raw_details: Any = None
+    reported = False
+    for key in keys:
+        if key in usage:
+            raw_details = usage.get(key)
+            reported = True
+            break
+    if isinstance(raw_details, list | tuple):
+        return _modality_token_counts(raw_details), reported
+    if not isinstance(raw_details, Mapping):
+        return {}, reported
+
+    aliases = {
+        "cached": (
+            "cached_tokens",
+            "cached_token_count",
+            "cachedTokens",
+            "cachedTokenCount",
+        ),
+        "text": (
+            "text_tokens",
+            "text_token_count",
+            "textTokens",
+            "textTokenCount",
+        ),
+        "image": (
+            "image_tokens",
+            "image_token_count",
+            "imageTokens",
+            "imageTokenCount",
+        ),
+        "video": (
+            "video_tokens",
+            "video_token_count",
+            "videoTokens",
+            "videoTokenCount",
+        ),
+        "audio": (
+            "audio_tokens",
+            "audio_token_count",
+            "audioTokens",
+            "audioTokenCount",
+        ),
+        "reasoning": (
+            "reasoning_tokens",
+            "reasoning_token_count",
+            "thought_tokens",
+            "thought_token_count",
+            "reasoningTokens",
+            "reasoningTokenCount",
+            "thoughtTokens",
+            "thoughtTokenCount",
+        ),
+    }
+    details: dict[str, int] = {}
+    for modality, modality_keys in aliases.items():
+        value, value_reported = _first_reported_int(
+            raw_details,
+            modality_keys,
+        )
+        if value_reported:
+            details[modality] = value or 0
+    return details, reported
+
+
+def _first_reported_int(
+    values: Mapping[str, Any],
+    keys: tuple[str, ...],
+) -> tuple[int | None, bool]:
+    for key in keys:
+        if key in values:
+            return _int_value(values.get(key)), True
+    return None, False
+
+
+def _modality_token_counts(value: Any) -> dict[str, int]:
+    if not isinstance(value, list | tuple):
+        return {}
+    counts: dict[str, int] = {}
+    for raw_detail in value:
+        if not isinstance(raw_detail, Mapping):
+            continue
+        modality = str(raw_detail.get("modality") or "").strip().lower()
+        if not modality:
+            continue
+        token_count = _int_value(
+            raw_detail.get("tokenCount", raw_detail.get("token_count"))
+        )
+        counts[modality] = counts.get(modality, 0) + token_count
+    return counts
 
 
 def _aggregate_usage_costs(
