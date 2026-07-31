@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +29,39 @@ class _CaptureLogger:
 
     def exception(self, event: str, **fields: Any) -> None:
         self.records.append(("error", event, fields))
+
+
+@pytest.fixture(scope="module")
+def oversized_proxy_bytes(tmp_path_factory) -> bytes:
+    proxy_path = tmp_path_factory.mktemp("reverse-prompt-observability") / "oversized.mp4"
+    result = subprocess.run(
+        [
+            os.environ.get("FFMPEG_BINARY", "ffmpeg"),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=1280x720:r=2:d=1",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-y",
+            str(proxy_path),
+        ],
+        capture_output=True,
+        check=False,
+        timeout=30.0,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    return proxy_path.read_bytes()
 
 
 _UPSTREAM_REQUIRED_FIELDS = {
@@ -308,6 +343,11 @@ def test_long_video_full_flow_emits_reconstructable_logs_without_changing_billin
     )
     monkeypatch.setattr(
         reverse_prompt_video,
+        "_probe_video_dimensions",
+        lambda _video_bytes: (360, 640),
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
         "extract_audio_track",
         lambda _path: b"audio-bytes",
     )
@@ -419,6 +459,9 @@ def test_long_video_full_flow_emits_reconstructable_logs_without_changing_billin
     assert all(record["output_width"] == 360 for record in proxies)
     assert all(record["output_height"] == 640 for record in proxies)
     assert all(record["output_size_bytes"] == len(b"proxy-video") for record in proxies)
+    assert all(record["resolution_source"] == "probed" for record in proxies)
+    assert all(record["probe_error_type"] is None for record in proxies)
+    assert all(record["probe_elapsed_ms"] >= 0 for record in proxies)
     assert all(record["elapsed_ms"] >= 0 for record in proxies)
 
     completed_segments = [
@@ -900,3 +943,97 @@ def test_proxy_failure_and_frames_skip_are_explicit_warnings(
     ]
     assert proxy_warnings[0]["reason"] == "ReversePromptVideoProcessingError"
     assert proxy_warnings[1]["reason"] == "analysis_mode_frames"
+    assert proxy_warnings[0]["resolution_source"] == "transcode_failed"
+    assert proxy_warnings[1]["resolution_source"] == "skipped"
+    assert all(record["output_width"] is None for record in proxy_warnings)
+    assert all(record["output_height"] is None for record in proxy_warnings)
+
+
+def test_proxy_log_uses_probed_dimensions_instead_of_scale_contract(
+    monkeypatch,
+    tmp_path: Path,
+    oversized_proxy_bytes: bytes,
+) -> None:
+    from app.services import reverse_prompt_video
+
+    captured = _CaptureLogger()
+    monkeypatch.setattr(reverse_prompt_video, "logger", captured)
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "build_video_analysis_proxy",
+        lambda *args, **kwargs: oversized_proxy_bytes,
+    )
+    context_token = reverse_prompt_video._observability_context.set(
+        reverse_prompt_video._ObservabilityContext(
+            job_id="proxy-probe-job",
+            tenant_id="proxy-probe-tenant",
+            input_width=720,
+            input_height=1280,
+            input_size_bytes=10_000,
+            duration_sec=30.0,
+        )
+    )
+    try:
+        proxy_bytes = reverse_prompt_video._build_observed_video_analysis_proxy(
+            tmp_path / "source.mp4",
+            segment_index=1,
+        )
+    finally:
+        reverse_prompt_video._observability_context.reset(context_token)
+
+    assert proxy_bytes == oversized_proxy_bytes
+    proxy_log = next(
+        fields
+        for level, event, fields in captured.records
+        if level == "info" and event == "reverse_prompt_video_proxy_transcode"
+    )
+    assert (proxy_log["output_width"], proxy_log["output_height"]) == (1280, 720)
+    assert proxy_log["resolution_source"] == "probed"
+    assert proxy_log["output_size_bytes"] == len(oversized_proxy_bytes)
+    assert proxy_log["probe_elapsed_ms"] >= 0
+
+
+def test_proxy_probe_failure_logs_unknown_dimensions_without_changing_proxy(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from app.services import reverse_prompt_video
+
+    invalid_proxy_bytes = b"not-a-video"
+    captured = _CaptureLogger()
+    monkeypatch.setattr(reverse_prompt_video, "logger", captured)
+    monkeypatch.setattr(
+        reverse_prompt_video,
+        "build_video_analysis_proxy",
+        lambda *args, **kwargs: invalid_proxy_bytes,
+    )
+    context_token = reverse_prompt_video._observability_context.set(
+        reverse_prompt_video._ObservabilityContext(
+            job_id="proxy-probe-failure-job",
+            tenant_id="proxy-probe-failure-tenant",
+            input_width=720,
+            input_height=1280,
+            input_size_bytes=10_000,
+            duration_sec=30.0,
+        )
+    )
+    try:
+        proxy_bytes = reverse_prompt_video._build_observed_video_analysis_proxy(
+            tmp_path / "source.mp4",
+            segment_index=1,
+        )
+    finally:
+        reverse_prompt_video._observability_context.reset(context_token)
+
+    assert proxy_bytes == invalid_proxy_bytes
+    proxy_log = next(
+        fields
+        for level, event, fields in captured.records
+        if level == "warning" and event == "reverse_prompt_video_proxy_transcode"
+    )
+    assert proxy_log["outcome"] == "succeeded"
+    assert proxy_log["output_width"] is None
+    assert proxy_log["output_height"] is None
+    assert proxy_log["resolution_source"] == "probe_failed"
+    assert proxy_log["probe_error_type"] == "ReversePromptVideoProcessingError"
+    assert proxy_log["probe_elapsed_ms"] >= 0

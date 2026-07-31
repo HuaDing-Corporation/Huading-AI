@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+import json
 import os
 import re
 import subprocess
@@ -55,6 +56,7 @@ _LONG_VIDEO_FRAMES_PER_SEGMENT = 6
 _FRAME_MAX_EDGE = 768
 _FRAME_TIMEOUT_SEC = 30.0
 _PROXY_TIMEOUT_SEC = 180.0
+_PROXY_PROBE_TIMEOUT_SEC = 30.0
 _AUDIO_TIMEOUT_SEC = 60.0
 _SCENE_CUT_THRESHOLD = 0.25
 _SCENE_CUT_SNAP_TOLERANCE_SEC = 1.25
@@ -155,21 +157,45 @@ def _elapsed_ms(started_at: float) -> float:
     return round(max(0.0, perf_counter() - started_at) * 1000, 3)
 
 
-def _scaled_proxy_dimensions(
-    width: int | None,
-    height: int | None,
+def _probe_video_dimensions(
+    video_bytes: bytes,
     *,
-    max_edge: int,
-) -> tuple[int | None, int | None]:
-    if not width or not height or width <= 0 or height <= 0 or max_edge < 2:
-        return None, None
-    scale = min(max_edge / width, max_edge / height)
-
-    def even_dimension(value: float) -> int:
-        rounded = max(2, int(round(value / 2.0)) * 2)
-        return min(max_edge, rounded)
-
-    return even_dimension(width * scale), even_dimension(height * scale)
+    run: Callable[..., Any] = subprocess.run,
+) -> tuple[int, int]:
+    with NamedTemporaryFile(delete=False, suffix=".mp4") as probe_file:
+        probe_path = Path(probe_file.name)
+        probe_file.write(video_bytes)
+    try:
+        result = run(
+            [
+                os.environ.get("FFPROBE_BINARY", "ffprobe"),
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "json",
+                str(probe_path),
+            ],
+            capture_output=True,
+            check=False,
+            timeout=_PROXY_PROBE_TIMEOUT_SEC,
+        )
+        if result.returncode != 0:
+            raise ReversePromptVideoProcessingError("Failed to probe video dimensions.")
+        payload = json.loads(bytes(result.stdout or b"{}"))
+        streams = payload.get("streams")
+        if not isinstance(streams, list) or not streams:
+            raise ReversePromptVideoProcessingError("Video probe returned no video stream.")
+        width = int(streams[0].get("width") or 0)
+        height = int(streams[0].get("height") or 0)
+        if width <= 0 or height <= 0:
+            raise ReversePromptVideoProcessingError("Video probe returned invalid dimensions.")
+        return width, height
+    finally:
+        probe_path.unlink(missing_ok=True)
 
 
 def _log_segment_plan(
@@ -217,6 +243,9 @@ def _log_proxy_skipped(
         output_width=None,
         output_height=None,
         output_size_bytes=0,
+        resolution_source="skipped",
+        probe_error_type=None,
+        probe_elapsed_ms=0.0,
         elapsed_ms=0.0,
     )
 
@@ -255,20 +284,33 @@ def _build_observed_video_analysis_proxy(
             output_width=None,
             output_height=None,
             output_size_bytes=0,
+            resolution_source="transcode_failed",
+            probe_error_type=None,
+            probe_elapsed_ms=0.0,
             elapsed_ms=_elapsed_ms(started_at),
         )
         raise
-    output_width, output_height = _scaled_proxy_dimensions(
-        context.input_width if context else None,
-        context.input_height if context else None,
-        max_edge=max_edge,
-    )
+    probe_started_at = perf_counter()
+    try:
+        output_width, output_height = _probe_video_dimensions(proxy_bytes)
+    except Exception as exc:
+        output_width, output_height = None, None
+        resolution_source = "probe_failed"
+        probe_error_type = type(exc).__name__
+        log_level = "warning"
+        reason = "dimension_probe_failed"
+    else:
+        resolution_source = "probed"
+        probe_error_type = None
+        log_level = "info"
+        reason = None
+    probe_elapsed_ms = _elapsed_ms(probe_started_at)
     _log_event(
-        "info",
+        log_level,
         "reverse_prompt_video_proxy_transcode",
         executed=True,
         outcome="succeeded",
-        reason=None,
+        reason=reason,
         segment_index=segment_index,
         start_sec=start_sec,
         end_sec=end_sec,
@@ -279,7 +321,9 @@ def _build_observed_video_analysis_proxy(
         output_width=output_width,
         output_height=output_height,
         output_size_bytes=len(proxy_bytes),
-        resolution_source="ffmpeg_scale_contract",
+        resolution_source=resolution_source,
+        probe_error_type=probe_error_type,
+        probe_elapsed_ms=probe_elapsed_ms,
         elapsed_ms=_elapsed_ms(started_at),
     )
     return proxy_bytes

@@ -2791,6 +2791,11 @@ def test_short_native_invalid_json_fallback_persists_provenance_and_all_cost(
     )
     monkeypatch.setattr(
         reverse_prompt_video,
+        "_probe_video_dimensions",
+        lambda _video_bytes: (360, 640),
+    )
+    monkeypatch.setattr(
+        reverse_prompt_video,
         "extract_uniform_video_frames",
         lambda *args, **kwargs: [b"jpeg"] * 8,
     )
