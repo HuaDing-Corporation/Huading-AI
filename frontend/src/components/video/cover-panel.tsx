@@ -203,7 +203,14 @@ export function AiCoverTab() {
     setSubmitting(true);
     try {
       const id = await createAndTrack(
-        { topic: p, video_mode: "photo", purpose: "cover", image_size: "1024x1536", image_quality: "medium" },
+        {
+          topic: p,
+          video_mode: "photo",
+          purpose: "cover",
+          image_size: "1024x1536",
+          image_quality: "medium",
+          image_resolution: "1k"
+        },
         p
       );
       setCoverTaskId(id);

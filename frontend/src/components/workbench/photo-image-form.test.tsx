@@ -118,6 +118,25 @@ describe("PhotoImageForm (图片生成 / 修改 · IMAGE-GEN-OPTIMIZE-UI-0001)",
     expect(taskMocks.createAndTrack.mock.calls[0][0].image_resolution).toBe("4k");
   });
 
+  it("图片修改固定 1K：上传参考图后锁定档位并显式提交 image_resolution:1k", async () => {
+    render(<PhotoImageForm />);
+    setPrompt("把背景换成沙滩");
+    fireEvent.click(screen.getByRole("button", { name: "4K" }));
+    expect(screen.getByRole("button", { name: "4K" })).toHaveAttribute("aria-pressed", "true");
+
+    await uploadReferenceImages(1);
+    await waitFor(() => expect(screen.getByRole("button", { name: "4K" })).toBeDisabled());
+    expect(screen.getByRole("button", { name: "1K" })).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: /生成图片/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+    expect(taskMocks.createAndTrack.mock.calls[0][0]).toMatchObject({
+      image_keys: ["uploads/ref-1.png"],
+      image_resolution: "1k"
+    });
+  });
+
   it("开启 AI 标识开关 → 提交体 apply_visible_label:true（承重）", async () => {
     render(<PhotoImageForm />);
     setPrompt("一只橘猫");

@@ -13,17 +13,25 @@ export const DEFAULT_IMAGE_RESOLUTION: ImageResolutionTier = "1k";
 
 export function ImageResolutionPicker({
   value,
-  onChange
+  onChange,
+  disabled = false
 }: {
   value: ImageResolutionTier;
   onChange: (tier: ImageResolutionTier) => void;
+  disabled?: boolean;
 }) {
   return (
     <fieldset className="mb-[15px] m-0 min-w-0 border-0 p-0">
       <legend className={labelClass}>{copy.workbench.imageResolutionLabel}</legend>
       <div className="grid grid-cols-3 gap-2">
         {IMAGE_RESOLUTION_TIERS.map((t) => (
-          <SelectableOption key={t} selected={value === t} onSelect={() => onChange(t)} className="justify-center">
+          <SelectableOption
+            key={t}
+            selected={value === t}
+            disabled={disabled}
+            onSelect={() => onChange(t)}
+            className="justify-center"
+          >
             {t.toUpperCase()}
           </SelectableOption>
         ))}
