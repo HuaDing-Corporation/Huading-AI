@@ -11,6 +11,8 @@ from app.providers.chat.apimart_gpt56 import (
     APIMartGPT56ChatProvider,
     _apimart_gpt56_factory,
 )
+from app.services import aibrain
+from app.services.apimart_token_pricing import apimart_token_rate
 
 
 class _FakeResponse:
@@ -258,21 +260,21 @@ def test_aibrain_rate_defaults_are_declared_in_runtime_and_env_examples() -> Non
         settings.engine_aibrain_high_input_credits_per_1k,
         settings.engine_aibrain_high_output_credits_per_1k,
     ) == (
-        Decimal("1.73"),
-        Decimal("10.37"),
-        Decimal("4.32"),
-        Decimal("25.92"),
-        Decimal("8.64"),
-        Decimal("51.84"),
+        Decimal("1.12"),
+        Decimal("6.72"),
+        Decimal("2.80"),
+        Decimal("16.80"),
+        Decimal("5.60"),
+        Decimal("33.60"),
     )
     repository_root = Path(__file__).resolve().parents[2]
     expected_lines = {
-        "ENGINE_AIBRAIN_LOW_INPUT_CREDITS_PER_1K=1.73",
-        "ENGINE_AIBRAIN_LOW_OUTPUT_CREDITS_PER_1K=10.37",
-        "ENGINE_AIBRAIN_MID_INPUT_CREDITS_PER_1K=4.32",
-        "ENGINE_AIBRAIN_MID_OUTPUT_CREDITS_PER_1K=25.92",
-        "ENGINE_AIBRAIN_HIGH_INPUT_CREDITS_PER_1K=8.64",
-        "ENGINE_AIBRAIN_HIGH_OUTPUT_CREDITS_PER_1K=51.84",
+        "ENGINE_AIBRAIN_LOW_INPUT_CREDITS_PER_1K=1.12",
+        "ENGINE_AIBRAIN_LOW_OUTPUT_CREDITS_PER_1K=6.72",
+        "ENGINE_AIBRAIN_MID_INPUT_CREDITS_PER_1K=2.80",
+        "ENGINE_AIBRAIN_MID_OUTPUT_CREDITS_PER_1K=16.80",
+        "ENGINE_AIBRAIN_HIGH_INPUT_CREDITS_PER_1K=5.60",
+        "ENGINE_AIBRAIN_HIGH_OUTPUT_CREDITS_PER_1K=33.60",
         "ENGINE_AIBRAIN_RESERVATION_STALE_MINUTES=30",
     }
     for path in (
@@ -282,3 +284,27 @@ def test_aibrain_rate_defaults_are_declared_in_runtime_and_env_examples() -> Non
     ):
         lines = set(path.read_text(encoding="utf-8").splitlines())
         assert expected_lines <= lines
+
+
+@pytest.mark.parametrize(
+    ("tier", "model"),
+    [
+        ("low", "gpt-5.6-luna"),
+        ("mid", "gpt-5.6-terra"),
+        ("high", "gpt-5.6-sol"),
+    ],
+)
+def test_aibrain_six_user_rates_equal_140_credits_per_apimart_credit(
+    tier: str,
+    model: str,
+) -> None:
+    pricing = aibrain.tier_pricing(tier)
+    provider_rate = apimart_token_rate(model=model)
+    conversion = Decimal("140") / Decimal("1000")
+
+    assert pricing.input_credits_per_1k == (
+        provider_rate.input_credits_per_m * conversion
+    )
+    assert pricing.output_credits_per_1k == (
+        provider_rate.output_credits_per_m * conversion
+    )

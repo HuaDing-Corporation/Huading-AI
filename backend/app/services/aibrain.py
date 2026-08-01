@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import ROUND_FLOOR, Decimal
+from decimal import ROUND_CEILING, Decimal
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -50,7 +50,9 @@ from app.services.storage.keys import presign_tenant_storage_key
 
 _DEFAULT_CONVERSATION_TITLE = "新对话"
 _REASONING_CREDIT_QUANTUM = Decimal("0.000001")
+# Kept in the wallet response for backward compatibility; reservations are dynamic.
 _SINGLE_REQUEST_LIMIT = Decimal("200")
+_PROMPT_RESERVATION_MULTIPLIER = Decimal("1.25")
 _CONTEXT_ROUND_LIMIT = 20
 _CONTEXT_MESSAGE_LIMIT = _CONTEXT_ROUND_LIMIT * 2
 _CHAT_PROVIDER = "apimart"
@@ -59,6 +61,7 @@ _TIER_MODELS: dict[str, str] = {
     "mid": "gpt-5.6-terra",
     "high": "gpt-5.6-sol",
 }
+_IMAGE_PROMPT_TOKEN_ESTIMATE = 4096
 _IMAGE_ASSET_TYPES = {"avatar_image", "product_image", "generated_image", "cover"}
 _IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 logger = get_logger(__name__)
@@ -129,28 +132,26 @@ async def send_chat_message(
     if conversation.title == _DEFAULT_CONVERSATION_TITLE:
         conversation.title = _conversation_title(content, has_attachments=bool(attachments))
     db.flush([conversation, user_message])
+    max_completion_tokens = settings.engine_aibrain_max_completion_tokens
+    requested_reservation = _reservation_credits(
+        provider_messages,
+        pricing=pricing,
+        max_completion_tokens=max_completion_tokens,
+    )
     reservation = _apply_reasoning_wallet_change(
         db,
         tenant_id=user.tenant_id,
         entry_type="reserve",
-        amount_credits=_SINGLE_REQUEST_LIMIT,
+        amount_credits=requested_reservation,
         chat_message_id=user_message.id,
         operation_key=f"reserve:{user_message.id}",
-        details={"tier": tier, "model": pricing.model},
+        details={
+            "tier": tier,
+            "model": pricing.model,
+            "max_completion_tokens": max_completion_tokens,
+        },
     ).ledger_entry.amount_credits
     user_message.reserved_credits = reservation
-    max_completion_tokens = _max_completion_tokens(
-        provider_messages,
-        pricing=pricing,
-        reservation=reservation,
-    )
-    if max_completion_tokens <= 0:
-        db.rollback()
-        raise AppError(
-            "The request exceeds the per-answer reasoning limit.",
-            code="AIBRAIN_REQUEST_LIMIT_EXCEEDED",
-            status_code=422,
-        )
     db.commit()
 
     try:
@@ -236,10 +237,34 @@ async def send_chat_message(
             status_code=502,
         )
 
-    charged_credits = min(
-        _user_credits(pricing, prompt_tokens, completion_tokens),
-        reservation,
-    )
+    charged_credits = _user_credits(pricing, prompt_tokens, completion_tokens)
+    try:
+        reservation = _expand_reasoning_reservation(
+            db,
+            tenant_id=user.tenant_id,
+            user_message_id=user_message.id,
+            reservation=reservation,
+            required_credits=charged_credits,
+            tier=tier,
+            model=pricing.model,
+        )
+    except AppError as exc:
+        _fail_chat_message(
+            db,
+            tenant_id=user.tenant_id,
+            user_message_id=user_message.id,
+            pricing=pricing,
+            reservation=reservation,
+            provider_messages=provider_messages,
+            usage_result={
+                **dict(result),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+            },
+            error_code=exc.code,
+        )
+        raise
     try:
         provider_usage_cost = _provider_usage_cost(
             pricing,
@@ -513,18 +538,22 @@ def _apply_reasoning_wallet_change(
         available_delta = requested
         reserved_delta = zero
     elif entry_type == "reserve":
-        requested = min(requested, _reasoning_credits(wallet.available_credits))
-        if requested <= zero:
+        available = _reasoning_credits(wallet.available_credits)
+        if requested <= zero or available < requested:
             raise AppError(
-                "Insufficient reasoning balance.",
+                (
+                    "Insufficient reasoning balance for this request "
+                    f"(required {requested}, available {available})."
+                ),
                 code="AIBRAIN_INSUFFICIENT_BALANCE",
                 status_code=402,
             )
         available_delta = -requested
         reserved_delta = requested
     elif entry_type == "settle":
-        charged = min(requested, reserved)
-        requested = charged
+        if requested > reserved:
+            raise RuntimeError("Reasoning settlement exceeds its reservation.")
+        charged = requested
         available_delta = reserved - charged
         reserved_delta = -reserved
     else:
@@ -787,25 +816,23 @@ def _provider_message_content(
     return parts or content
 
 
-def _max_completion_tokens(
+def _reservation_credits(
     provider_messages: list[dict[str, object]],
     *,
     pricing: TierPricing,
-    reservation: Decimal,
-) -> int:
+    max_completion_tokens: int,
+) -> Decimal:
     estimated_prompt_tokens = _estimate_prompt_tokens(provider_messages)
-    estimated_input_credits = (
-        Decimal(estimated_prompt_tokens) * pricing.input_credits_per_1k / Decimal(1000)
+    buffered_prompt_tokens = int(
+        (
+            Decimal(estimated_prompt_tokens) * _PROMPT_RESERVATION_MULTIPLIER
+        ).to_integral_value(rounding=ROUND_CEILING)
     )
-    output_budget = reservation - estimated_input_credits
-    if output_budget <= 0:
-        return 0
-    budget_tokens = int(
-        (output_budget * Decimal(1000) / pricing.output_credits_per_1k).to_integral_value(
-            rounding=ROUND_FLOOR
-        )
+    return _user_credits(
+        pricing,
+        buffered_prompt_tokens,
+        max_completion_tokens,
     )
-    return min(settings.engine_aibrain_max_completion_tokens, budget_tokens)
 
 
 def _estimate_prompt_tokens(messages: list[dict[str, object]]) -> int:
@@ -813,17 +840,23 @@ def _estimate_prompt_tokens(messages: list[dict[str, object]]) -> int:
     for message in messages:
         content = message.get("content")
         if isinstance(content, str):
-            tokens += max(1, (len(content) + 1) // 2)
+            tokens += _estimate_text_tokens(content)
         elif isinstance(content, list):
             for part in content:
                 if not isinstance(part, dict):
                     continue
                 if part.get("type") == "image_url":
-                    tokens += 1024
+                    tokens += _IMAGE_PROMPT_TOKEN_ESTIMATE
                 elif part.get("type") == "text":
-                    tokens += max(1, (len(str(part.get("text") or "")) + 1) // 2)
+                    tokens += _estimate_text_tokens(str(part.get("text") or ""))
         tokens += 4
     return max(1, tokens)
+
+
+def _estimate_text_tokens(text: str) -> int:
+    ascii_chars = sum(ord(char) < 128 for char in text)
+    non_ascii_chars = len(text) - ascii_chars
+    return max(1, (ascii_chars + 3) // 4 + non_ascii_chars)
 
 
 def _user_credits(
@@ -838,6 +871,50 @@ def _user_credits(
         )
         / Decimal(1000)
     )
+
+
+def _expand_reasoning_reservation(
+    db: Session,
+    *,
+    tenant_id: str,
+    user_message_id: str,
+    reservation: Decimal,
+    required_credits: Decimal,
+    tier: AIBrainTier,
+    model: str,
+) -> Decimal:
+    if required_credits <= reservation:
+        return reservation
+    message = _chat_message_for_update(
+        db,
+        tenant_id=tenant_id,
+        message_id=user_message_id,
+    )
+    if message is None or message.status != "pending":
+        raise AppError(
+            "The AIBRAIN request is no longer pending.",
+            code="AIBRAIN_REQUEST_EXPIRED",
+            status_code=409,
+        )
+    additional_credits = _reasoning_credits(required_credits - reservation)
+    adjustment = _apply_reasoning_wallet_change(
+        db,
+        tenant_id=tenant_id,
+        entry_type="reserve",
+        amount_credits=additional_credits,
+        chat_message_id=user_message_id,
+        operation_key=f"reserve-adjust:{user_message_id}",
+        details={
+            "tier": tier,
+            "model": model,
+            "reservation_adjustment": True,
+        },
+    ).ledger_entry.amount_credits
+    expanded = _reasoning_credits(reservation + adjustment)
+    message.reserved_credits = expanded
+    message.updated_at = datetime.now(UTC)
+    db.flush([message])
+    return expanded
 
 
 def _provider_usage_cost(

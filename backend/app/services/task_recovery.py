@@ -19,6 +19,7 @@ from app.services import ecom_replicate
 from app.services.aibrain import recover_stale_reasoning_reservations
 from app.services.batches import refresh_batch_job
 from app.services.quota import (
+    recover_stale_copy_quota_reservations,
     release_reserved_quota,
     release_reverse_prompt_video_quota,
 )
@@ -44,6 +45,7 @@ class ImageQueueRecoveryResult:
     reverse_prompt_jobs: int = 0
     ecom_replicate_jobs: int = 0
     aibrain_reservations: int = 0
+    copy_reservations: int = 0
 
 
 def recover_orphaned_image_queue_tasks(
@@ -186,6 +188,11 @@ def recover_orphaned_image_queue_tasks(
             cutoff=aibrain_cutoff,
             recovered_at=recovered_at,
         )
+        copy_reservations = recover_stale_copy_quota_reservations(
+            db,
+            cutoff=cutoff,
+            recovered_at=recovered_at,
+        )
         db.commit()
 
     if progress_store is not None:
@@ -212,4 +219,5 @@ def recover_orphaned_image_queue_tasks(
         reverse_prompt_jobs=len(reverse_prompt_jobs),
         ecom_replicate_jobs=len(replicate_jobs),
         aibrain_reservations=aibrain_reservations,
+        copy_reservations=copy_reservations,
     )

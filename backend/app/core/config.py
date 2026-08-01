@@ -208,12 +208,12 @@ class Settings(BaseSettings):
     engine_apimart_scene_prompt_input_usd_per_m: float = 0.8
     engine_apimart_scene_prompt_output_usd_per_m: float = 4.8
     # AIBRAIN user rates are product charges per 1K tokens, not upstream prices.
-    engine_aibrain_low_input_credits_per_1k: Decimal = Decimal("1.73")
-    engine_aibrain_low_output_credits_per_1k: Decimal = Decimal("10.37")
-    engine_aibrain_mid_input_credits_per_1k: Decimal = Decimal("4.32")
-    engine_aibrain_mid_output_credits_per_1k: Decimal = Decimal("25.92")
-    engine_aibrain_high_input_credits_per_1k: Decimal = Decimal("8.64")
-    engine_aibrain_high_output_credits_per_1k: Decimal = Decimal("51.84")
+    engine_aibrain_low_input_credits_per_1k: Decimal = Decimal("1.12")
+    engine_aibrain_low_output_credits_per_1k: Decimal = Decimal("6.72")
+    engine_aibrain_mid_input_credits_per_1k: Decimal = Decimal("2.80")
+    engine_aibrain_mid_output_credits_per_1k: Decimal = Decimal("16.80")
+    engine_aibrain_high_input_credits_per_1k: Decimal = Decimal("5.60")
+    engine_aibrain_high_output_credits_per_1k: Decimal = Decimal("33.60")
     # Compatibility snapshots of APIMart discounted low-context provider rates.
     # Provider cost accounting uses apimart_token_pricing.py instead.
     engine_aibrain_low_input_provider_credits_per_m: Decimal = Decimal("8")

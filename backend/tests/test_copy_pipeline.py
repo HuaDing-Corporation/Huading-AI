@@ -1,10 +1,14 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
-from app.db.models import CopyDraft, VideoTask
+from app.db.models import CopyDraft, Subscription, UsageRecord, VideoTask
 from app.main import app
+from app.schemas.copy import CopyRewriteRequest
 
 
 def _register_tenant(client: TestClient, slug: str) -> dict:
@@ -42,6 +46,236 @@ def _patch_copy_llm(monkeypatch, results: list[str], payloads: list[dict]) -> No
         lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
         raising=False,
     )
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/api/v1/copy/rewrite", {"source_text": "卖点", "mode": "smart"}),
+        ("/api/v1/copy/titles", {"source_text": "卖点", "n": 1}),
+        ("/api/v1/copy/topics", {"source_text": "卖点", "n": 1}),
+    ],
+)
+def test_copy_generation_endpoints_share_one_reserved_then_settled_usage_record(
+    path: str,
+    payload: dict,
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    payloads: list[dict] = []
+    _patch_copy_llm(monkeypatch, ["候选文案"], payloads)
+    with auth_db() as db:
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        used_before = subscription.quota_credits_used
+
+    response = TestClient(app).post(
+        path,
+        json=payload,
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    assert len(payloads) == 1
+    with auth_db() as db:
+        records = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.tenant_id == auth_context["tenant_id"],
+                    UsageRecord.capability == "llm",
+                )
+            )
+        )
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        assert len(records) == 1
+        assert records[0].status == "settled"
+        assert records[0].credits == Decimal("1")
+        assert subscription.quota_credits_used == used_before + 1
+        assert subscription.quota_credits_reserved == 0
+
+
+def test_copy_generation_rejects_insufficient_quota_before_provider_call(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    payloads: list[dict] = []
+    _patch_copy_llm(monkeypatch, ["must not run"], payloads)
+    with auth_db() as db:
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        subscription.quota_credits_used = subscription.quota_credits_total
+        db.commit()
+
+    response = TestClient(app).post(
+        "/api/v1/copy/rewrite",
+        json={"source_text": "余额不足", "mode": "smart"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "TENANT_QUOTA_EXCEEDED"
+    assert payloads == []
+    with auth_db() as db:
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == 0
+
+
+def test_copy_provider_failure_releases_reserved_quota(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.services import copy as copy_service
+
+    calls: list[dict] = []
+
+    class _FailingDeepSeek:
+        async def generate_text(self, payload: dict):
+            calls.append(payload)
+            raise RuntimeError("provider failed")
+
+    monkeypatch.setattr(copy_service.settings, "engine_llm_api_key", "k")
+    monkeypatch.setattr(copy_service.settings, "engine_llm_base_url", "https://deepseek.test")
+    monkeypatch.setattr(copy_service.settings, "engine_llm_model", "deepseek-v4-flash")
+    monkeypatch.setattr(copy_service, "resolve", lambda *_args, **_kwargs: _FailingDeepSeek())
+
+    response = TestClient(app).post(
+        "/api/v1/copy/rewrite",
+        json={"source_text": "触发上游失败", "mode": "smart"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 502
+    assert len(calls) == 1
+    _assert_single_released_copy_reservation(auth_db, auth_context["tenant_id"])
+
+
+def test_copy_timeout_releases_reserved_quota(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.services import copy as copy_service
+
+    payloads: list[dict] = []
+    _patch_copy_llm(monkeypatch, ["unused"], payloads)
+
+    async def timeout(*_args, **_kwargs):
+        raise TimeoutError("provider timeout")
+
+    monkeypatch.setattr(copy_service, "invoke", timeout)
+
+    response = TestClient(app).post(
+        "/api/v1/copy/titles",
+        json={"source_text": "触发超时", "n": 1},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 502
+    _assert_single_released_copy_reservation(auth_db, auth_context["tenant_id"])
+
+
+def test_copy_result_validation_failure_releases_and_keeps_provider_cost(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.services import copy as copy_service
+
+    class _EmptyDeepSeek:
+        async def generate_text(self, _payload: dict):
+            return {
+                "text": "",
+                "provider": "deepseek",
+                "model": "deepseek-v4-flash",
+                "usage": {
+                    "prompt_tokens": 100_000,
+                    "completion_tokens": 50_000,
+                    "total_tokens": 150_000,
+                },
+            }
+
+    monkeypatch.setattr(copy_service.settings, "engine_llm_api_key", "k")
+    monkeypatch.setattr(copy_service.settings, "engine_llm_base_url", "https://deepseek.test")
+    monkeypatch.setattr(copy_service.settings, "engine_llm_model", "deepseek-v4-flash")
+    monkeypatch.setattr(copy_service, "resolve", lambda *_args, **_kwargs: _EmptyDeepSeek())
+
+    response = TestClient(app).post(
+        "/api/v1/copy/topics",
+        json={"source_text": "触发结果校验失败", "n": 1},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 502
+    with auth_db() as db:
+        record = db.scalar(
+            select(UsageRecord).where(
+                UsageRecord.tenant_id == auth_context["tenant_id"],
+                UsageRecord.capability == "llm",
+            )
+        )
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        assert record.status == "released"
+        assert record.cost_cents > 0
+        assert subscription.quota_credits_reserved == 0
+
+
+def test_copy_cancellation_releases_reserved_quota(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.services import copy as copy_service
+
+    payloads: list[dict] = []
+    _patch_copy_llm(monkeypatch, ["unused"], payloads)
+
+    async def cancel(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(copy_service, "invoke", cancel)
+    with auth_db() as db:
+        with pytest.raises(asyncio.CancelledError):
+            copy_service.rewrite_copy(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                payload=CopyRewriteRequest(source_text="取消请求", mode="smart"),
+            )
+
+    _assert_single_released_copy_reservation(auth_db, auth_context["tenant_id"])
+
+
+def _assert_single_released_copy_reservation(auth_db, tenant_id: str) -> None:
+    with auth_db() as db:
+        records = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.tenant_id == tenant_id,
+                    UsageRecord.capability == "llm",
+                )
+            )
+        )
+        subscription = db.scalar(
+            select(Subscription).where(Subscription.tenant_id == tenant_id)
+        )
+        assert len(records) == 1
+        assert records[0].status == "released"
+        assert subscription.quota_credits_reserved == 0
 
 
 def test_copy_rewrite_seedance_i2v_cleans_and_uses_duration_budget(

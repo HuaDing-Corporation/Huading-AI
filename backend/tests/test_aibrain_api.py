@@ -542,8 +542,8 @@ def test_message_reserves_then_settles_exact_token_usage(
     assert data["assistant_message"]["model"] == "gpt-5.6-terra"
     assert data["assistant_message"]["prompt_tokens"] == 1000
     assert data["assistant_message"]["completion_tokens"] == 500
-    assert data["assistant_message"]["charged_credits"] == 17.28
-    assert data["wallet"]["available_credits"] == 482.72
+    assert data["assistant_message"]["charged_credits"] == 11.2
+    assert data["wallet"]["available_credits"] == 488.8
     assert data["wallet"]["reserved_credits"] == 0
     assert len(provider.calls) == 1
     assert provider.calls[0]["model"] == "gpt-5.6-terra"
@@ -570,14 +570,16 @@ def test_message_reserves_then_settles_exact_token_usage(
         assistant = db.scalar(
             select(ChatMessage).where(ChatMessage.id == data["assistant_message"]["id"])
         )
-        assert wallet.available_credits == Decimal("482.720000")
+        assert wallet.available_credits == Decimal("488.800000")
         assert wallet.reserved_credits == Decimal("0")
         assert [entry.entry_type for entry in entries] == ["topup", "reserve", "settle"]
-        assert entries[1].amount_credits == Decimal("200")
-        assert entries[2].amount_credits == Decimal("17.280000")
-        assert usage.credits == Decimal("17.280000")
+        assert Decimal("11.200000") <= entries[1].amount_credits < Decimal("200")
+        assert entries[2].amount_credits == Decimal("11.200000")
+        assert usage.credits == Decimal("11.200000")
         assert usage.provider_cost_usd == Decimal("0.00800000")
         assert usage.chat_message_id == assistant.id
+        assert assistant.input_rate == Decimal("2.800000")
+        assert assistant.output_rate == Decimal("16.800000")
         assert sum(entry.available_delta for entry in entries) == wallet.available_credits
         assert sum(entry.reserved_delta for entry in entries) == wallet.reserved_credits
         assert wallet.available_credits + wallet.total_spent_credits == wallet.total_topup_credits
@@ -753,7 +755,7 @@ def test_message_provider_cost_uses_sol_high_tier_above_272k(
     assert (
         client.post(
             "/api/v1/aibrain/wallet/topup",
-            json=_topup_payload(500),
+            json=_topup_payload(2000),
             headers=auth_context["headers"],
         ).status_code
         == 200
@@ -831,8 +833,9 @@ def test_insufficient_reasoning_balance_never_calls_provider_or_reserves(
         assert db.scalar(select(ChatMessage.id)) is None
 
 
-def test_single_answer_charge_is_capped_at_200_reasoning_credits(
+def test_dynamic_reservation_can_exceed_200_and_settles_exact_usage(
     auth_context,
+    auth_db,
     monkeypatch,
 ) -> None:
     client = TestClient(app)
@@ -848,27 +851,191 @@ def test_single_answer_charge_is_capped_at_200_reasoning_credits(
     ).json()["data"]["id"]
     provider = _FakeChatProvider(
         {
-            "content": "An intentionally expensive mock answer.",
+            "content": "An answer whose estimated prompt requires more than 200 credits.",
             "model": "gpt-5.6-sol",
-            "prompt_tokens": 10_000,
-            "completion_tokens": 10_000,
-            "total_tokens": 20_000,
+            "prompt_tokens": 20_000,
+            "completion_tokens": 4_096,
+            "total_tokens": 24_096,
+        }
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(aibrain, "_estimate_prompt_tokens", lambda _messages: 20_000)
+
+    response = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "Reserve the full dynamic amount", "tier": "high"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["assistant_message"]["charged_credits"] == 249.6256
+    assert data["assistant_message"]["reserved_credits"] > 200.0
+    assert data["wallet"]["available_credits"] == 250.3744
+    assert data["wallet"]["reserved_credits"] == 0.0
+    assert provider.calls[0]["max_completion_tokens"] == 4_096
+    with auth_db() as db:
+        entries = list(
+            db.scalars(
+                select(ReasoningLedgerEntry)
+                .where(ReasoningLedgerEntry.tenant_id == auth_context["tenant_id"])
+                .order_by(ReasoningLedgerEntry.created_at.asc())
+            )
+        )
+        reservation = next(entry for entry in entries if entry.entry_type == "reserve")
+        settlement = next(entry for entry in entries if entry.entry_type == "settle")
+        assert reservation.amount_credits > Decimal("200")
+        assert settlement.amount_credits == Decimal("249.625600")
+
+
+def test_dynamic_reservation_rejects_before_provider_when_full_budget_is_unfunded(
+    auth_context,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=_topup_payload(100),
+        headers=auth_context["headers"],
+    )
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    provider = _FakeChatProvider(
+        {
+            "content": "must not be returned",
+            "model": "gpt-5.6-sol",
+            "prompt_tokens": 10,
+            "completion_tokens": 10,
+            "total_tokens": 20,
         }
     )
     monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
 
     response = client.post(
         f"/api/v1/aibrain/conversations/{conversation_id}/messages",
-        json={"content": "Spend no more than the cap", "tier": "high"},
+        json={"content": "A short high-tier request", "tier": "high"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 402
+    assert response.json()["error"]["code"] == "AIBRAIN_INSUFFICIENT_BALANCE"
+    assert provider.calls == []
+
+
+def test_actual_usage_above_estimate_expands_reservation_without_truncating(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=_topup_payload(500),
+        headers=auth_context["headers"],
+    )
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    provider = _FakeChatProvider(
+        {
+            "content": "Settle the actual amount.",
+            "model": "gpt-5.6-sol",
+            "prompt_tokens": 20_000,
+            "completion_tokens": 4_096,
+            "total_tokens": 24_096,
+        }
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(aibrain, "_estimate_prompt_tokens", lambda _messages: 1)
+
+    response = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "Force an underestimated prompt", "tier": "high"},
         headers=auth_context["headers"],
     )
 
     assert response.status_code == 200
-    data = response.json()["data"]
-    assert data["assistant_message"]["charged_credits"] == 200.0
-    assert data["assistant_message"]["reserved_credits"] == 200.0
-    assert data["wallet"]["available_credits"] == 300.0
-    assert data["wallet"]["reserved_credits"] == 0.0
+    assistant = response.json()["data"]["assistant_message"]
+    assert assistant["charged_credits"] == 249.6256
+    assert assistant["reserved_credits"] == 249.6256
+    with auth_db() as db:
+        reserves = list(
+            db.scalars(
+                select(ReasoningLedgerEntry).where(
+                    ReasoningLedgerEntry.tenant_id == auth_context["tenant_id"],
+                    ReasoningLedgerEntry.entry_type == "reserve",
+                )
+            )
+        )
+        assert len(reserves) == 2
+        assert sum(entry.amount_credits for entry in reserves) == Decimal("249.625600")
+
+
+def test_actual_usage_shortfall_rejects_answer_and_releases_estimated_reservation(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    with auth_db() as db:
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("200"),
+            operation_key=f"seed-topup:{auth_context['tenant_id']}",
+        )
+        db.commit()
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    provider = _FakeChatProvider(
+        {
+            "content": "Do not deliver an underfunded answer.",
+            "model": "gpt-5.6-sol",
+            "prompt_tokens": 20_000,
+            "completion_tokens": 4_096,
+            "total_tokens": 24_096,
+        }
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(aibrain, "_estimate_prompt_tokens", lambda _messages: 1)
+
+    response = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "Force an unfunded estimate", "tier": "high"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 402
+    assert response.json()["error"]["code"] == "AIBRAIN_INSUFFICIENT_BALANCE"
+    assert len(provider.calls) == 1
+    with auth_db() as db:
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        assistant = db.scalar(
+            select(ChatMessage).where(
+                ChatMessage.tenant_id == auth_context["tenant_id"],
+                ChatMessage.role == "assistant",
+            )
+        )
+        entries = list(
+            db.scalars(
+                select(ReasoningLedgerEntry)
+                .where(ReasoningLedgerEntry.tenant_id == auth_context["tenant_id"])
+                .order_by(ReasoningLedgerEntry.created_at.asc())
+            )
+        )
+        assert assistant is None
+        assert wallet.available_credits == Decimal("200")
+        assert wallet.reserved_credits == Decimal("0")
+        assert [entry.entry_type for entry in entries] == ["topup", "reserve", "release"]
 
 
 def test_provider_failure_releases_reservation_without_user_charge(

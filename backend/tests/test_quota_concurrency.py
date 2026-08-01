@@ -43,6 +43,11 @@ _ALLOWED_RUNTIME_WRITES_BY_FUNCTION = {
             "quota_credits_reserved",
         },
         "release_reserved_quota": {"quota_credits_reserved"},
+        "release_copy_quota": {"quota_credits_reserved"},
+        "settle_copy_quota": {
+            "quota_credits_used",
+            "quota_credits_reserved",
+        },
         "settle_reserved_quota": {
             "quota_credits_used",
             "quota_credits_reserved",

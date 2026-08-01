@@ -1,8 +1,9 @@
 import asyncio
 import json
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypeVar
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -17,11 +18,13 @@ from app.schemas.copy import (
     CopyTitlesRequest,
     CopyTopicsRequest,
 )
-from app.services import provider_costs
+from app.services import provider_costs, quota
 from app.workers.avatar_talk import build_script_payload, clean_spoken_script
 
 _CHAINABLE_VIDEO_MODES = {"avatar_talk", "seedance_i2v"}
 _COPY_DRAFT_KEEP_LIMIT = 20
+_COPY_PROVIDER = "deepseek"
+T = TypeVar("T")
 
 
 def _ensure_llm_configured() -> None:
@@ -129,10 +132,48 @@ def _generate_text(
     *,
     tenant_id: str,
     provider_payload: dict[str, Any],
-    record_cost: bool = True,
 ) -> Any:
     _ensure_llm_configured()
     provider = resolve(db, tenant_id=tenant_id, capability="llm")
+    try:
+        return asyncio.run(
+            invoke(
+                db,
+                tenant_id=tenant_id,
+                capability="llm",
+                provider=provider.__class__.__name__,
+                operation=lambda: provider.generate_text(provider_payload),
+                timeout_seconds=30.0,
+            )
+        )
+    except AppError:
+        raise
+    except Exception as exc:
+        raise AppError(
+            "Copy generation failed.",
+            code="COPY_GEN_FAILED",
+            status_code=502,
+        ) from exc
+
+
+def _generate_billed_copy(
+    db: Session,
+    *,
+    tenant_id: str,
+    provider_payload: dict[str, Any],
+    transform: Callable[[Any], T],
+) -> T:
+    _ensure_llm_configured()
+    provider = resolve(db, tenant_id=tenant_id, capability="llm")
+    reservation = quota.reserve_copy_quota(
+        db,
+        tenant_id=tenant_id,
+        provider=_COPY_PROVIDER,
+        model=settings.engine_llm_model or None,
+    )
+    reservation_id = reservation.usage_record.id
+    db.commit()
+    usage: provider_costs.DeepSeekUsageCost | None = None
     try:
         result = asyncio.run(
             invoke(
@@ -144,13 +185,31 @@ def _generate_text(
                 timeout_seconds=30.0,
             )
         )
-        if record_cost:
-            provider_costs.record_deepseek_usage(db, tenant_id=tenant_id, result=result)
-            db.commit()
-        return result
-    except AppError:
-        raise
-    except Exception as exc:
+        usage = provider_costs.deepseek_usage_from_result(result)
+        transformed = transform(result)
+        quota.settle_copy_quota(
+            db,
+            tenant_id=tenant_id,
+            usage_record_id=reservation_id,
+            provider=_COPY_PROVIDER,
+            model=settings.engine_llm_model or None,
+            llm_usage=usage,
+        )
+        db.commit()
+        return transformed
+    except BaseException as exc:
+        db.rollback()
+        quota.release_copy_quota(
+            db,
+            tenant_id=tenant_id,
+            usage_record_id=reservation_id,
+            provider=_COPY_PROVIDER,
+            model=settings.engine_llm_model or None,
+            llm_usage=usage,
+        )
+        db.commit()
+        if isinstance(exc, (AppError, asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+            raise
         raise AppError(
             "Copy generation failed.",
             code="COPY_GEN_FAILED",
@@ -164,8 +223,12 @@ def rewrite_copy(
     tenant_id: str,
     payload: CopyRewriteRequest,
 ) -> list[str]:
-    result = _generate_text(db, tenant_id=tenant_id, provider_payload=_rewrite_payload(payload))
-    return _rewrite_results(result, payload)
+    return _generate_billed_copy(
+        db,
+        tenant_id=tenant_id,
+        provider_payload=_rewrite_payload(payload),
+        transform=lambda result: _rewrite_results(result, payload),
+    )
 
 
 def _title_payload(payload: CopyTitlesRequest) -> dict[str, Any]:
@@ -184,11 +247,18 @@ def _title_payload(payload: CopyTitlesRequest) -> dict[str, Any]:
 
 
 def generate_titles(db: Session, *, tenant_id: str, payload: CopyTitlesRequest) -> list[str]:
-    result = _generate_text(db, tenant_id=tenant_id, provider_payload=_title_payload(payload))
-    titles = _candidate_lines(_result_text(result), limit=payload.n)
-    if not titles:
-        raise AppError("Copy generation failed.", code="COPY_GEN_FAILED", status_code=502)
-    return titles
+    def transform(result: Any) -> list[str]:
+        titles = _candidate_lines(_result_text(result), limit=payload.n)
+        if not titles:
+            raise AppError("Copy generation failed.", code="COPY_GEN_FAILED", status_code=502)
+        return titles
+
+    return _generate_billed_copy(
+        db,
+        tenant_id=tenant_id,
+        provider_payload=_title_payload(payload),
+        transform=transform,
+    )
 
 
 def _topic_payload(payload: CopyTopicsRequest) -> dict[str, Any]:
@@ -211,13 +281,20 @@ def _normalize_topic(topic: str) -> str:
 
 
 def generate_topics(db: Session, *, tenant_id: str, payload: CopyTopicsRequest) -> list[str]:
-    result = _generate_text(db, tenant_id=tenant_id, provider_payload=_topic_payload(payload))
-    candidates = _candidate_lines(_result_text(result), limit=payload.n)
-    topics = [_normalize_topic(topic) for topic in candidates]
-    topics = [topic for topic in topics if topic]
-    if not topics:
-        raise AppError("Copy generation failed.", code="COPY_GEN_FAILED", status_code=502)
-    return topics
+    def transform(result: Any) -> list[str]:
+        candidates = _candidate_lines(_result_text(result), limit=payload.n)
+        topics = [_normalize_topic(topic) for topic in candidates]
+        topics = [topic for topic in topics if topic]
+        if not topics:
+            raise AppError("Copy generation failed.", code="COPY_GEN_FAILED", status_code=502)
+        return topics
+
+    return _generate_billed_copy(
+        db,
+        tenant_id=tenant_id,
+        provider_payload=_topic_payload(payload),
+        transform=transform,
+    )
 
 
 def _publish_copy_payload(
@@ -294,7 +371,6 @@ def generate_publish_copy(
         db,
         tenant_id=tenant_id,
         provider_payload=_publish_copy_payload(source_text=source_text, platform=platform),
-        record_cost=False,
     )
     payload = _publish_copy_from_text(
         _result_text(result),
