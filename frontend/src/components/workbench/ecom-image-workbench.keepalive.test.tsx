@@ -81,8 +81,8 @@ function mainPlanJob(): EcomReplicateJob {
     heartbeat_at: null, // GEN-HEARTBEAT-UI-0001 · FIX3：BE 详情图响应键恒在（plan_ready → null）
     output_mode: "main",
     output_count: 5,
-    total_credits: 75,
-    credit_rate: 15,
+    total_credits: 650,
+    credit_rate: 130,
     requested_size: "1024x1024",
     requested_aspect: "1:1",
     plan: {
@@ -191,7 +191,7 @@ describe("ECOM-SUBTOOL-KEEPALIVE-UI-0001 · 切子工具不丢输入（承重）
 
     // 仍停在规划表（旧行为：回到 upload 步，job 全丢）。
     expect(subtool("detail").getByText(copy.workbench.ecomPlanTitle)).toBeInTheDocument();
-    expect(subtool("detail").getByText(copy.workbench.ecomPlanTotalPrice(75))).toBeInTheDocument();
+    expect(subtool("detail").getByText(copy.workbench.ecomPlanTotalPrice(650))).toBeInTheDocument();
     // 不重新规划（不重复请求、更不重复扣费）。
     expect(api.planEcomReplicate).toHaveBeenCalledTimes(1);
     expect(api.confirmEcomReplicate).not.toHaveBeenCalled();

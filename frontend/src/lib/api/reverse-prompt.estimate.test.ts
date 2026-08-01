@@ -5,12 +5,12 @@ import { estimateReversePrompt } from "@/lib/api/reverse-prompt";
 /**
  * REVERSE-DEEP-UI-0001-FIX1 · 承重门9 的**契约一半**：`POST /reverse-prompt/estimate` 三档金额。
  * （另一半「弹窗显示的就是这个数」在 reverse-prompt-form.video.test.tsx。两半都要，因为：
- *   只测契约 → 弹窗写死 100 也绿；只测弹窗 → 桩给什么就是什么，档位算错也绿。）
+ *   只测契约 → 弹窗写死 150 也绿；只测弹窗 → 桩给什么就是什么，档位算错也绿。）
  *
  * 真走 MSW（非 stub）：apiFetch → handlers.ts 的 estimate handler，验响应形状 + 三档取值 + 校验严格度。
  *
  * ✅ FIX2 真联调**已核**（BE #219 已合入 develop）：三档取值取自 TestClient 真实响应体 ——
- *    图片 `{credits:30, duration_sec:null, tier:"image"}`、60_000ms `{100, 60.0, "video_short"}`、
+ *    图片 `{credits:30, duration_sec:null, tier:"image"}`、60_000ms `{150, 60.0, "video_short"}`、
  *    60_001ms `{250, 60.001, "video_long"}`（BE 自测同款：tests/test_reverse_prompt_pipeline.py:1311-1323）。
  *
  * 🔴 **image 档的 30 绝不许写进业务逻辑的断言里**：它来自 CreditRate 表（迁移播种的
@@ -18,16 +18,16 @@ import { estimateReversePrompt } from "@/lib/api/reverse-prompt";
  *    展示层一律照抄后端返回值 —— 计费门那边断的是「显示的就是响应里的那个数」，而不是「显示 30」。
  */
 describe("estimateReversePrompt · POST /reverse-prompt/estimate（§八 M4，真走 MSW）", () => {
-  it("🔴 承重门9 · 短视频档（≤60s）→ 100 积分 / tier=video_short", async () => {
+  it("🔴 承重门9 · 短视频档（≤60s）→ 150 积分 / tier=video_short", async () => {
     const res = await estimateReversePrompt({ source_asset_id: "video-asset-1" }); // mock 约定 3s
-    expect(res).toEqual({ credits: 100, duration_sec: 3, tier: "video_short" });
+    expect(res).toEqual({ credits: 150, duration_sec: 3, tier: "video_short" });
   });
 
-  it("🔴 承重门9 · 长视频档（61–180s）→ 250 积分 / tier=video_long（**不是** 100）", async () => {
+  it("🔴 承重门9 · 长视频档（61–180s）→ 250 积分 / tier=video_long（**不是** 150）", async () => {
     const res = await estimateReversePrompt({ source_asset_id: "video-asset-long-1" }); // mock 约定 180s
     expect(res).toEqual({ credits: 250, duration_sec: 180, tier: "video_long" });
     // 这一句是本包存在的理由：分档后同一个端点对不同素材必须给出不同金额。
-    expect(res.credits).not.toBe(100);
+    expect(res.credits).not.toBe(150);
   });
 
   it("图片档 → tier=image、duration_sec 为 null（图片没有时长可言，不冒充 0）", async () => {

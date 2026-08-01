@@ -180,7 +180,7 @@ export interface ReversePromptJobRead {
   model?: string | null;
   prompt_tokens: number;
   completion_tokens: number;
-  credits: number; // FIX1：**provider credits**（引擎调用成本），非租户扣费；租户固定 100 积分由 BE UsageRecord 记
+  credits: number; // FIX1：**provider credits**（引擎调用成本），非租户扣费；租户档位积分由 BE UsageRecord 记
   cost_cents: number;
   created_at: string;
   updated_at: string;
@@ -196,7 +196,7 @@ export interface ReversePromptJobRead {
 
 /**
  * 计费档位（镜像 §八 M4 的 `tier: "image" | "video_short" | "video_long"`）。
- * 🔴 前端**只透传展示，不参与判档**：阈值（60s/180s）与金额（100/250）全在 BE，
+ * 🔴 前端**只透传展示，不参与判档**：阈值（60s/180s）与金额（150/250）全在 BE，
  *    此处出现任何阈值常量都是 D9 明令禁止的漂移源。
  */
 export type ReverseEstimateTier = "image" | "video_short" | "video_long";
@@ -212,7 +212,7 @@ export interface ReversePromptEstimate {
  * 反推计费预估 —— **分档计费的唯一权威**（§八 M4，仿既有 `POST /videos/estimate` 先例）。
  *
  * 🔴 为什么必须走这条：D9 把视频反推改成按时长分档（≤60s / 61–180s 两档，图片另算），而
- *    **档位阈值与积分数一律不许在前端硬编码**。前端自己判档 = 「报价 100、实扣 250」级资金体验事故。
+ *    **档位阈值与积分数一律不许在前端硬编码**。前端自己判档 = 「报价 150、实扣 250」级资金体验事故。
  *    档位由 BE 用**上传时已落库的 duration_ms** 判定，不由客户端传参决定（故请求体只有 source_asset_id）。
  * 🔴 调用失败时调用方**不许猜一个数字兜底**：不显示金额、不允许提交（宁可挡住也不能报错价）。
  *    这与既有 `ConfirmGenerateDialog` 的「暂无法预估，按实际结算」**语义相反**，故不复用那套文案。

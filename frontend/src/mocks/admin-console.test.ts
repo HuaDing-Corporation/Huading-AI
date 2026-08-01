@@ -266,9 +266,9 @@ describe("平台账号 · 写端点确定值（响应 + 审计，真契约字段
     // ① job-f1：released avatar_talk → charged + credits=原预留 + is_estimate:true（唯一 estimate）。
     const est = await retryAdminTask("job-f1", "video");
     expect(est).toEqual({ id: "job-f1", task_family: "video", tenant_id: "ten-acme", status: "queued", progress: 0, charged: true, credits: 1501, is_estimate: true });
-    // ② job-f3：released 反推固定价 100 → is_estimate:false。
+    // ② job-f3：released 视频反推短档 150 → is_estimate:false。
     const fixed = await retryAdminTask("job-f3", "reverse_prompt");
-    expect(fixed).toEqual({ id: "job-f3", task_family: "reverse_prompt", tenant_id: "ten-beta", status: "queued", progress: 0, charged: true, credits: 100, is_estimate: false });
+    expect(fixed).toEqual({ id: "job-f3", task_family: "reverse_prompt", tenant_id: "ten-beta", status: "queued", progress: 0, charged: true, credits: 150, is_estimate: false });
     // ③ job-f2：电商复刻（确认时已扣）→ 不重复扣费。
     const free = await retryAdminTask("job-f2");
     expect(free).toEqual({ id: "job-f2", task_family: "ecom_replicate", tenant_id: "ten-gamma", status: "queued", progress: 0, charged: false, credits: 0, is_estimate: false });

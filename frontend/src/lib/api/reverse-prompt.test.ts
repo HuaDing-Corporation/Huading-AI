@@ -204,13 +204,13 @@ describe("reverse-prompt API ↔ MSW（mock 镜像 BE 真形状：ReversePromptJ
 });
 
 describe("视频反推异步（VIDEO-REVERSE-PROMPT-UI-0001）↔ MSW", () => {
-  it("视频源(video-asset-*) → 202 queued（无 result）→ 轮询 GET 第 2 次 succeeded + result.video_analysis；job.credits=provider（非 100）", async () => {
+  it("视频源(video-asset-*) → 202 queued（无 result）→ 轮询 GET 第 2 次 succeeded + result.video_analysis；job.credits=provider（非短档 150）", async () => {
     const created = await reverseFromAsset({ source_asset_id: "video-asset-1" });
     expect(created.status).toBe("queued"); // FIX1③：BE 202 queued（非 running）
     expect(created.source_kind).toBe("video");
     expect(created.result).toBeNull();
-    // FIX1④：job.credits=provider 引擎成本，非租户固定 100 扣费（100 走 BE UsageRecord）。
-    expect(created.credits).not.toBe(100);
+    // FIX1④：job.credits=provider 引擎成本，非租户短档 150 扣费（150 走 BE UsageRecord）。
+    expect(created.credits).not.toBe(150);
     // 轮询：第 1 次仍 queued，第 2 次终态。
     const poll1 = await getReversePromptJob(created.id);
     expect(poll1.status).toBe("queued");

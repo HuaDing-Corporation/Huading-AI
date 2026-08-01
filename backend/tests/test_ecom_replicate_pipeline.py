@@ -698,7 +698,8 @@ def test_ecom_replicate_plan_creates_plan_ready_job_with_total_price(
     body = response.json()["data"]
     assert body["status"] == "plan_ready"
     assert body["output_count"] == 5
-    assert body["total_credits"] == 75
+    assert body["total_credits"] == 650
+    assert body["credit_rate"] == 130
     assert len(body["plan"]["outputs"]) == 5
     assert len(reverse.calls) == 5
 
@@ -713,7 +714,7 @@ def test_ecom_replicate_plan_creates_plan_ready_job_with_total_price(
     assert job.status == "plan_ready"
     assert job.output_mode == "main"
     assert job.output_count == 5
-    assert job.total_credits == 75
+    assert job.total_credits == 650
     assert len(outputs) == 5
     assert outputs[-1].theme == "white_background"
     assert subscription.quota_credits_used == 0
@@ -818,7 +819,8 @@ def test_ecom_replicate_detail_supports_short_and_full_reference_sets(
     assert response.status_code == 201
     data = response.json()["data"]
     assert data["output_count"] == 12
-    assert data["total_credits"] == 180
+    assert data["total_credits"] == 1560
+    assert data["credit_rate"] == 130
     themes = [item["theme"] for item in data["plan"]["outputs"]]
     assert len(themes) == 12
     assert len(set(themes)) == 12
@@ -893,10 +895,10 @@ def test_ecom_replicate_confirm_charges_once_and_enqueues_generation(
             )
         ).all()
 
-    assert subscription.quota_credits_used == 75
+    assert subscription.quota_credits_used == 650
     assert subscription.quota_credits_reserved == 0
     assert len(usages) == 1
-    assert usages[0].credits == 75
+    assert usages[0].credits == 650
     assert usages[0].quantity == 5
     assert usages[0].status == "settled"
 
@@ -1450,7 +1452,7 @@ def test_ecom_replicate_worker_retries_single_failed_output_without_extra_charge
     assert outputs[0].retry_count == 1
     assert all(output.status == "succeeded" for output in outputs)
     assert len(tenant_charges) == 1
-    assert tenant_charges[0].credits == 75
+    assert tenant_charges[0].credits == 650
 
 
 def test_ecom_replicate_product_mismatch_retries_before_persisting_output(
@@ -1513,7 +1515,7 @@ def test_ecom_replicate_product_mismatch_retries_before_persisting_output(
     ]
     assert all(output.status == "succeeded" for output in outputs)
     assert len(tenant_charges) == 1
-    assert tenant_charges[0].credits == 75
+    assert tenant_charges[0].credits == 650
     assert len(render_costs) == 6
 
 

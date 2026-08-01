@@ -77,8 +77,8 @@ function mainPlanJob(over?: Partial<EcomReplicateJob>): EcomReplicateJob {
     heartbeat_at: null,
     output_mode: "main",
     output_count: 5,
-    total_credits: 75,
-    credit_rate: 15,
+    total_credits: 650,
+    credit_rate: 130,
     requested_size: "1024x1024",
     requested_aspect: "1:1",
     plan: {
@@ -98,8 +98,8 @@ function detailPlanJob(): EcomReplicateJob {
     heartbeat_at: null, // 同上：键恒在
     output_mode: "detail",
     output_count: 12,
-    total_credits: 180,
-    credit_rate: 15,
+    total_credits: 1560,
+    credit_rate: 130,
     requested_size: "768x1024",
     requested_aspect: "3:4",
     plan: {
@@ -112,7 +112,7 @@ function detailPlanJob(): EcomReplicateJob {
 }
 
 function confirmMinimal(over?: Partial<EcomReplicateConfirmAccepted>): EcomReplicateConfirmAccepted {
-  return { job_id: "job-1", status: "generating", output_count: 5, total_credits: 75, ...over };
+  return { job_id: "job-1", status: "generating", output_count: 5, total_credits: 650, ...over };
 }
 
 function succeededOutput(index: number, over?: Partial<EcomReplicatePlanOutput>): EcomReplicatePlanOutput {
@@ -429,11 +429,11 @@ describe("EcomDetailWizard (电商详情图向导 · FIX1 真契约)", () => {
     expect(screen.getAllByRole("link", { name: copy.workbench.ecomResultDownload })).toHaveLength(5);
   });
 
-  it("详情模式：12 张规划 + total_credits 由后端(180) + 尺寸 768x1024", async () => {
+  it("详情模式：12 张规划 + total_credits 由后端(1560) + 尺寸 768x1024", async () => {
     api.planEcomReplicate.mockResolvedValue(detailPlanJob());
     await driveToPlan("detail");
     expect(api.planEcomReplicate).toHaveBeenCalledWith(expect.objectContaining({ output_mode: "detail" }));
-    expect(screen.getByText(copy.workbench.ecomPlanTotalPrice(180))).toBeInTheDocument();
+    expect(screen.getByText(copy.workbench.ecomPlanTotalPrice(1560))).toBeInTheDocument();
     expect(screen.getAllByText("768x1024")).toHaveLength(12);
   });
 

@@ -62,7 +62,7 @@ function chargeGateMessage(
  *    → 计费门 ConfirmDialog(**金额由 POST /reverse-prompt/estimate 返回**，确认一次扣/取消不扣) → 提交(202 queued)
  *    → 轮询 GET /jobs/{id} 到终态（瞬时失败软提示、不误跳结果页；长视频按 segments_done/total 显示分段进度）
  *    → 结果先展示视频分析(video_analysis) 再展示 Seedance 提示词；「带入」沿用现有 fill_targets。
- *    ⚠️ 时长上限 180s 与「金额不写死」两条都是 §八 v2 修订（D2 / M4+D9）；本注释此前写的 60s 与「100 积分/次」
+ *    ⚠️ 时长上限 180s 与「金额不写死」两条都是 §八 v2 修订（D2 / M4+D9）；本注释此前写的 60s 与「150 积分/次」
  *    已随契约作废——本项目栽过四连注释债（#209→#212），改数值类文案先核 BE 源码。
  * 请求体仅 { source_asset_id }（BE 据资产推 source_kind）。带入落点由结果视图据 BE 载荷直落，冒泡至 page 切模式并预填。
  */
@@ -96,8 +96,8 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
    * 🔴 本次可用的报价 —— 判据是「这份报价就是给**当前这条资产**的」，而不是「有 data」。
    *
    * 起因（Code Review 自审 P1）：TanStack Query v5 的 mutation **重新执行时不会清掉上一次的 `data`**
-   *（pending 分支只重置 error / failureCount / isPaused）。于是「短视频报价 100 → 换成长视频 → 打开计费门」
-   * 这条路径上，新报价还在途时弹窗会先显示上一条的 100，而实扣是 250 —— 正是本包存在的那类事故。
+   *（pending 分支只重置 error / failureCount / isPaused）。于是「短视频报价 150 → 换成长视频 → 打开计费门」
+   * 这条路径上，新报价还在途时弹窗会先显示上一条的 150，而实扣是 250 —— 正是本包存在的那类事故。
    * openChargeGate / onSelectVideo 里的 `estimate.reset()` 是生命周期侧的修法，但它依赖「每条新增路径都记得
    * reset」；此处再用**资产比对**兜一道结构性的：对不上就当没有报价（挡住提交、不显示任何金额）。
    */
@@ -273,7 +273,7 @@ export function ReversePromptForm({ onApplyPrefill }: { onApplyPrefill?: (prefil
     setVideoJobId(null);
     setPolling(false);
     setSegments(null);
-    estimate.reset(); // 🔴 换视频 = 换档位：上一条视频的报价绝不许留到下一条（250 的视频显示 100 就是错价）
+    estimate.reset(); // 🔴 换视频 = 换档位：上一条视频的报价绝不许留到下一条（250 的视频显示 150 就是错价）
     resetResult();
   };
 

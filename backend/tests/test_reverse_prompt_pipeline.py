@@ -147,7 +147,7 @@ def test_reverse_prompt_video_quota_uses_stored_duration_tiers_and_short_tenant_
     monkeypatch,
 ) -> None:
     env_example = (Path(__file__).parents[1] / ".env.example").read_text(encoding="utf-8")
-    assert "ENGINE_REVERSE_PROMPT_VIDEO_CREDITS=100" in env_example
+    assert "ENGINE_REVERSE_PROMPT_VIDEO_CREDITS=150" in env_example
     assert "ENGINE_REVERSE_PROMPT_VIDEO_LONG_CREDITS=250" in env_example
 
     from app.core.config import settings
@@ -198,6 +198,9 @@ def test_reverse_prompt_video_native_defaults_do_not_change_image_model() -> Non
     assert isolated.engine_reverse_prompt_video_analysis_mode == "native"
     assert isolated.engine_reverse_prompt_video_native_segment_seconds == 60
     assert isolated.engine_reverse_prompt_video_proxy_max_edge == 640
+    assert isolated.engine_reverse_prompt_video_credits == 150.0
+    assert isolated.engine_reverse_prompt_video_long_credits == 250.0
+    assert isolated.engine_ecom_replicate_credits_per_image == 130.0
 
 
 class _Response:
@@ -2275,7 +2278,7 @@ def test_reverse_prompt_estimate_uses_stored_asset_tier_and_tenant_scope(
         "tier": "image",
     }
     assert estimates["short"].json()["data"] == {
-        "credits": 100,
+        "credits": 150,
         "duration_sec": 60.0,
         "tier": "video_short",
     }
@@ -2438,7 +2441,7 @@ def test_reverse_prompt_video_returns_202_queues_job_and_reserves_fixed_quota(
     assert usage.model == "gemini-3.6-flash"
     assert usage.credits == Decimal(estimated_credits).quantize(Decimal("0.01"))
     assert subscription.quota_credits_used == initial_used
-    assert subscription.quota_credits_reserved == initial_reserved + 100
+    assert subscription.quota_credits_reserved == initial_reserved + 150
     db.close()
 
 
@@ -2452,7 +2455,7 @@ def test_reverse_prompt_video_two_sessions_allow_only_one_create_when_balance_fi
     subscription = setup.scalar(
         select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
     )
-    subscription.quota_credits_total = 100
+    subscription.quota_credits_total = 150
     subscription.quota_credits_used = 0
     subscription.quota_credits_reserved = 0
     asset_id = asset.id
@@ -2773,10 +2776,10 @@ def test_reverse_prompt_video_worker_succeeds_settles_once_and_is_pollable(
     assert usage_records[0].status == "settled"
     assert usage_records[0].unit == "token"
     assert usage_records[0].quantity == Decimal("3195.000")
-    assert usage_records[0].credits == Decimal("100.00")
+    assert usage_records[0].credits == Decimal("150.00")
     assert usage_records[0].cost_cents == 8
     assert subscription.quota_credits_reserved == 0
-    assert subscription.quota_credits_used == 100
+    assert subscription.quota_credits_used == 150
     db.close()
 
 
@@ -4404,8 +4407,8 @@ def test_reverse_prompt_video_regenerate_returns_202_and_reserves_one_new_call(
         select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
     )
     assert [usage.status for usage in usages] == ["settled", "reserved"]
-    assert subscription.quota_credits_used == 100
-    assert subscription.quota_credits_reserved == 100
+    assert subscription.quota_credits_used == 150
+    assert subscription.quota_credits_reserved == 150
     db.close()
 
 

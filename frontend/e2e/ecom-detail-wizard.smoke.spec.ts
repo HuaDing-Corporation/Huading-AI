@@ -4,7 +4,7 @@ import { expect, test, type Page } from "@playwright/test";
  * ECOM-REPLICATE-UI-0001 电商详情图·复刻向导 交互冒烟（生产构建 next start，真走 MSW 两阶段状态机）：
  * ① 主图流：切电商图→电商详情图→模式「主图(5张)」→真上传参考图+商品图→商品信息+卖点→生成规划表(整套总价取后端)
  *    →确认扣费→轮询生成(禁分批)→结果一次性 5 张→**下载给原图 URL(<a download>) + 显示 AI 原始尺寸**（原图红线）。
- * ② 详情流：模式「详情页(12张)」→整套 12 张 + 后端总价 180；移动端(375)三子工具可见。
+ * ② 详情流：模式「详情页(12张)」→整套 12 张 + 后端总价 1560；移动端(375)三子工具可见。
  * 全程无 #130 白屏 / 无 /api/api 双前缀。需以 NEXT_PUBLIC_USE_MOCK=1 构建后 next start 运行（webServer 已配）。
  */
 const PNG = { name: "ref.png", mimeType: "image/png", buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) };
@@ -57,9 +57,9 @@ test("主图流：上传→规划(75积分)→确认扣费→一次性 5 张→�
   await fillUpload(page, "主图（5 张）");
 
   await page.getByRole("button", { name: "生成规划表" }).click();
-  // 规划表 + 整套总价取后端 total_credits（主图 5×15=75）+ 未裁剪红线列。
+  // 规划表 + 整套总价取后端 total_credits（主图 5×130=650）+ 未裁剪红线列。
   await expect(page.getByText("生成规划（确认后按此复刻，仅确认一次）")).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText("整套预计 75 积分")).toBeVisible();
+  await expect(page.getByText("整套预计 650 积分")).toBeVisible();
   await expect(page.getByText("原图不裁剪").first()).toBeVisible();
 
   // 扣费门：确认恰一次。
@@ -80,14 +80,14 @@ test("主图流：上传→规划(75积分)→确认扣费→一次性 5 张→�
   expect(g.doublePrefix(), `/api/api 双前缀：\n${g.doublePrefix().join("\n")}`).toEqual([]);
 });
 
-test("详情流：模式「详情页(12张)」→规划 180 积分 + 12 张；移动端(375)三子工具可见", async ({ page }) => {
+test("详情流：模式「详情页(12张)」→规划 1560 积分 + 12 张；移动端(375)三子工具可见", async ({ page }) => {
   const g = await login(page);
   await fillUpload(page, "详情页（12 张）");
 
   await page.getByRole("button", { name: "生成规划表" }).click();
   await expect(page.getByText("生成规划（确认后按此复刻，仅确认一次）")).toBeVisible({ timeout: 15_000 });
-  // 详情页 12×15=180，尺寸 768x1024（12 行）。
-  await expect(page.getByText("整套预计 180 积分")).toBeVisible();
+  // 详情页 12×130=1560，尺寸 768x1024（12 行）。
+  await expect(page.getByText("整套预计 1560 积分")).toBeVisible();
   await expect(page.getByText("768x1024").first()).toBeVisible();
 
   await page.getByRole("button", { name: "确认并生成" }).click();

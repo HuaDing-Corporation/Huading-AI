@@ -65,7 +65,7 @@ test("历史反推记录 → 带入 · AI 模特 → 电商图面板被激活且
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("反推详情")).toBeVisible({ timeout: 15_000 });
 
-  // 历史场景不给「重新反推」入口（二次扣 100 积分且无计费门）。
+  // 历史场景不给「重新反推」入口（二次扣短档 150 积分且无计费门）。
   await expect(dialog.getByRole("button", { name: "重新反推" })).toHaveCount(0);
 
   // 🔴 带入 —— 本条的核心：跨四层的那条链在此通电。

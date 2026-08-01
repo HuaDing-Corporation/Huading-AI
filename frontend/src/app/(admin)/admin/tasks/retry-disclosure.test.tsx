@@ -65,11 +65,11 @@ describe("任务重跑 · 回执披露三态（精确文案，不许静默扣费
     expect(banner).toHaveTextContent(/^已重新排队（job-f1），预计扣费约 1,501 积分，最终按实际成片时长结算$/);
   });
 
-  it("固定价实扣（job-f3）→ 横幅精确：「已重新排队（job-f3），将扣费 100 积分」（alert 角色）", async () => {
+  it("固定价实扣（job-f3）→ 横幅精确：「已重新排队（job-f3），将扣费 150 积分」（alert 角色）", async () => {
     renderTasks();
     await retryTask("job-f3");
     const banner = await screen.findByRole("alert");
-    expect(banner).toHaveTextContent(/^已重新排队（job-f3），将扣费 100 积分$/);
+    expect(banner).toHaveTextContent(/^已重新排队（job-f3），将扣费 150 积分$/);
   });
 
   it("不重复扣费（job-f2）→ 横幅精确：「已重新排队（job-f2），不会重复扣费」（status 角色，非 alert）", async () => {

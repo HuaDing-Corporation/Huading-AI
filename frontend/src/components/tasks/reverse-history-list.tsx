@@ -78,7 +78,7 @@ function SourceThumb({ item, size = "sm" }: { item: ReversePromptHistoryItem; si
  * （完整反推结果 + 复制 + 保存 + 「带入生成」闭环）。严禁重造：带入链路 = fillTargetToPrefill → page 的
  * injectPrefill → 目标表单 useEffect 同步消费，与工作台反推页走同一条路。
  * 惰性：item=null 即不打开、useReversePromptJob 的 enabled 门控 → 关闭态不发请求（同 HistorySetDialog 惯例）。
- * 🔴 hideRegenerate：视频「重新反推」会二次扣 100 积分且历史场景无计费门 → 隐藏，避免误扣（与 reverse-video 一致）。
+ * 🔴 hideRegenerate：视频「重新反推」会二次扣短档 150 积分且历史场景无计费门 → 隐藏，避免误扣（与 reverse-video 一致）。
  */
 function ReverseDetailDialog({
   item,

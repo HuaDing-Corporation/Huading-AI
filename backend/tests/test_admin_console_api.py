@@ -1528,7 +1528,7 @@ def test_admin_task_retry_reuses_reverse_video_and_replicate_output_paths(
     assert reverse_response.status_code == 202
     assert reverse_response.json()["data"]["task_family"] == "reverse_prompt"
     assert reverse_response.json()["data"]["charged"] is True
-    assert reverse_response.json()["data"]["credits"] == 100
+    assert reverse_response.json()["data"]["credits"] == 150
     assert reverse_response.json()["data"]["is_estimate"] is False
     assert reverse_calls == [
         {"args": [jobs["reverse_job_id"]], "task_id": jobs["reverse_job_id"], "queue": "image"}
@@ -1619,7 +1619,7 @@ def test_reverse_retry_released_charge_settles_once_and_replicate_retry_stays_fr
                     model="gemini-3.1-pro-preview",
                     unit="call",
                     quantity=Decimal("1"),
-                    credits=Decimal("100"),
+                    credits=Decimal("150"),
                     cost_cents=0,
                     status="released",
                 ),
@@ -1660,7 +1660,7 @@ def test_reverse_retry_released_charge_settles_once_and_replicate_retry_stays_fr
 
     assert reverse_response.status_code == 202
     assert reverse_response.json()["data"]["charged"] is True
-    assert reverse_response.json()["data"]["credits"] == 100
+    assert reverse_response.json()["data"]["credits"] == 150
     assert reverse_response.json()["data"]["is_estimate"] is False
     assert replicate_response.status_code == 202
     assert replicate_response.json()["data"]["charged"] is False
@@ -1681,9 +1681,9 @@ def test_reverse_retry_released_charge_settles_once_and_replicate_retry_stays_fr
         )
         assert positive_after_retry == positive_before + 1
         assert len(reservations) == 1
-        assert reservations[0].credits == Decimal("100")
+        assert reservations[0].credits == Decimal("150")
         assert subscription.quota_credits_used == used_before
-        assert subscription.quota_credits_reserved == reserved_before + 100
+        assert subscription.quota_credits_reserved == reserved_before + 150
         settle_reverse_prompt_video_quota(
             db,
             tenant_id=fixture["tenant_id"],
@@ -1706,10 +1706,10 @@ def test_reverse_retry_released_charge_settles_once_and_replicate_retry_stays_fr
                 )
             )
         )
-        assert subscription.quota_credits_used == used_before + 100
+        assert subscription.quota_credits_used == used_before + 150
         assert subscription.quota_credits_reserved == reserved_before
         assert len(settled_retry_records) == 1
-        assert settled_retry_records[0].credits == Decimal("100")
+        assert settled_retry_records[0].credits == Decimal("150")
 
 
 def test_settled_reverse_video_retry_is_free_and_adds_no_positive_usage(
@@ -1739,7 +1739,7 @@ def test_settled_reverse_video_retry_is_free_and_adds_no_positive_usage(
                 model="gemini-3.1-pro-preview",
                 unit="call",
                 quantity=Decimal("1"),
-                credits=Decimal("100"),
+                credits=Decimal("150"),
                 cost_cents=7,
                 status="settled",
                 settled_at=datetime.now(UTC),
@@ -1917,7 +1917,7 @@ def test_non_video_stale_retries_redispatch_without_duplicate_charge_or_audit(
 
     assert reverse.status_code == 202
     assert reverse.json()["data"]["charged"] is True
-    assert reverse.json()["data"]["credits"] == 100
+    assert reverse.json()["data"]["credits"] == 150
     assert replicate.status_code == 202
     assert replicate.json()["data"]["charged"] is False
     assert replicate.json()["data"]["credits"] == 0

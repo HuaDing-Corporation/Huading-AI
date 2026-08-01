@@ -71,7 +71,7 @@ export interface ReversePromptResultViewProps {
   regenerating?: boolean;
   saving?: boolean;
   saved?: boolean;
-  /** 视频反推：重新反推会二次扣费（100 积分/次），一期无二次计费门 → 隐藏「重新反推」避免误扣（VIDEO-REVERSE-PROMPT-UI-0001）。 */
+  /** 视频反推：重新反推会二次扣费（短档 150 积分/次），一期无二次计费门 → 隐藏「重新反推」避免误扣（VIDEO-REVERSE-PROMPT-UI-0001）。 */
   hideRegenerate?: boolean;
 }
 
