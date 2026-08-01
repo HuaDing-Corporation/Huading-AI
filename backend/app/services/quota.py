@@ -30,8 +30,13 @@ _VIDEO_GEN_MIN_DURATION_SEC = 4
 _VIDEO_GEN_MAX_DURATION_SEC = 15
 _VIDEO_GEN_RESOLUTION_MULTIPLIERS = {
     "480p": Decimal("1.0000"),
-    "720p": Decimal("1.6250"),
-    "1080p": Decimal("3.5000"),
+    "720p": Decimal("2.0000"),
+    "1080p": Decimal("5.0000"),
+}
+_IMAGE_RESOLUTION_MULTIPLIERS = {
+    "1k": Decimal("1.0000"),
+    "2k": Decimal("1.6250"),
+    "4k": Decimal("2.2500"),
 }
 _COSYVOICE_CLONE_PROVIDER = "cosyvoice-voice-clone"
 _VOICE_CLONE_DEFAULT_CREDITS = Decimal("30000.0000")
@@ -274,11 +279,36 @@ def _credit_units(value: Decimal) -> int:
     return int(Decimal(value).to_integral_value(rounding=ROUND_CEILING))
 
 
-def _video_resolution_multiplier(resolution: str) -> Decimal:
-    multiplier = _VIDEO_GEN_RESOLUTION_MULTIPLIERS.get(resolution)
+def _resolution_multiplier(
+    resolution: str,
+    *,
+    multipliers: dict[str, Decimal],
+    media_type: str,
+) -> Decimal:
+    multiplier = multipliers.get(resolution)
     if multiplier is None:
-        raise AppError("Invalid video resolution.", code="VALIDATION_ERROR", status_code=422)
+        raise AppError(
+            f"Invalid {media_type} resolution.",
+            code="VALIDATION_ERROR",
+            status_code=422,
+        )
     return multiplier
+
+
+def _video_resolution_multiplier(resolution: str) -> Decimal:
+    return _resolution_multiplier(
+        resolution,
+        multipliers=_VIDEO_GEN_RESOLUTION_MULTIPLIERS,
+        media_type="video",
+    )
+
+
+def _image_resolution_multiplier(resolution: str) -> Decimal:
+    return _resolution_multiplier(
+        resolution,
+        multipliers=_IMAGE_RESOLUTION_MULTIPLIERS,
+        media_type="image",
+    )
 
 
 def estimate_avatar_talk_quota(
@@ -392,6 +422,7 @@ def estimate_image_generation_quota(
     *,
     tenant_id: str,
     n: int = 1,
+    resolution: str,
 ) -> QuotaEstimate:
     count = max(1, int(n))
     image_rate = _rate(
@@ -401,7 +432,9 @@ def estimate_image_generation_quota(
         unit="image",
         default=Decimal("10.0000"),
     )
-    credits = (Decimal(count) * image_rate).quantize(Decimal("0.01"))
+    credits = (
+        Decimal(count) * image_rate * _image_resolution_multiplier(resolution)
+    ).quantize(Decimal("0.01"))
     return QuotaEstimate(
         estimated_seconds=count,
         estimated_credits=credits,
@@ -842,6 +875,7 @@ def reserve_image_generation_quota(
     *,
     tenant_id: str,
     video_task_id: str,
+    resolution: str,
     n: int = 1,
     provider: str = "apimart",
 ) -> Reservation:
@@ -849,6 +883,7 @@ def reserve_image_generation_quota(
         db,
         tenant_id=tenant_id,
         n=n,
+        resolution=resolution,
     )
     _lock_video_task_for_quota(
         db,

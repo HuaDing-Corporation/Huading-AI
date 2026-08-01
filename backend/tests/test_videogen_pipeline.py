@@ -488,8 +488,8 @@ def test_video_gen_1080p_quota_estimate_uses_resolution_multiplier(
         )
 
     assert estimate.estimated_seconds == 15
-    assert estimate.estimated_credits == Decimal("4200.00")
-    assert estimate.reservation_units == 4200
+    assert estimate.estimated_credits == Decimal("6000.00")
+    assert estimate.reservation_units == 6000
 
 
 def test_create_video_gen_validates_assets_reserves_quota_and_enqueues(

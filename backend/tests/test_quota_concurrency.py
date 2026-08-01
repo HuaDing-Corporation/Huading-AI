@@ -482,6 +482,7 @@ def test_postgres_concurrent_image_reservations_allow_exactly_one_order(
             first,
             tenant_id=tenant_id,
             video_task_id=task_ids[0],
+            resolution="1k",
         )
         thread, done, errors = _start_transition(
             factory,
@@ -489,6 +490,7 @@ def test_postgres_concurrent_image_reservations_allow_exactly_one_order(
                 db,
                 tenant_id=tenant_id,
                 video_task_id=task_ids[1],
+                resolution="1k",
             ),
         )
         second_was_blocked = not done.wait(timeout=0.4)

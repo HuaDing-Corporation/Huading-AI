@@ -88,6 +88,7 @@ def test_repriced_credit_rates_match_bearing_estimates(auth_db, auth_context):
         image = quota.estimate_image_generation_quota(
             db,
             tenant_id=auth_context["tenant_id"],
+            resolution="1k",
         )
         copy = quota.estimate_copy_quota(db, tenant_id=auth_context["tenant_id"])
         reverse = quota.estimate_reverse_prompt_quota(
@@ -98,12 +99,12 @@ def test_repriced_credit_rates_match_bearing_estimates(auth_db, auth_context):
     assert avatar.estimated_seconds == 13
     assert avatar.estimated_credits == Decimal("1956.00")
     assert avatar.reservation_units == 1956
-    assert ecom_720p.estimated_credits == Decimal("656.00")
-    assert ecom_720p.reservation_units == 656
-    assert video_gen_720p.estimated_credits == Decimal("650.00")
-    assert video_gen_720p.reservation_units == 650
-    assert video_gen_1080p.estimated_credits == Decimal("1400.00")
-    assert video_gen_1080p.reservation_units == 1400
+    assert ecom_720p.estimated_credits == Decimal("806.00")
+    assert ecom_720p.reservation_units == 806
+    assert video_gen_720p.estimated_credits == Decimal("800.00")
+    assert video_gen_720p.reservation_units == 800
+    assert video_gen_1080p.estimated_credits == Decimal("2000.00")
+    assert video_gen_1080p.reservation_units == 2000
     assert image.estimated_credits == Decimal("10.00")
     assert image.reservation_units == 10
     assert copy.estimated_credits == Decimal("1.00")
@@ -190,8 +191,8 @@ def test_tenant_custom_rates_still_override_platform_defaults(auth_db, auth_cont
             resolution="720p",
         )
 
-    assert ecom_720p.estimated_credits == Decimal("54.38")
-    assert ecom_720p.reservation_units == 55
+    assert ecom_720p.estimated_credits == Decimal("60.00")
+    assert ecom_720p.reservation_units == 60
 
 
 def test_settle_avatar_keeps_tts_character_component_when_duration_changes(
@@ -258,7 +259,7 @@ def test_settle_seedance_keeps_tts_character_component_when_duration_changes(
             select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
         )
         assert subscription is not None
-        subscription.quota_credits_reserved = 656
+        subscription.quota_credits_reserved = 806
         task = VideoTask(
             id="seedance-reprice-settle",
             tenant_id=auth_context["tenant_id"],
@@ -279,7 +280,7 @@ def test_settle_seedance_keeps_tts_character_component_when_duration_changes(
             model="doubao-seedance-2.0",
             unit="second",
             quantity=Decimal("5"),
-            credits=Decimal("656.00"),
+            credits=Decimal("806.00"),
             cost_cents=0,
             status="reserved",
         )
@@ -296,9 +297,9 @@ def test_settle_seedance_keeps_tts_character_component_when_duration_changes(
         db.flush()
 
         assert subscription.quota_credits_reserved == 0
-        assert subscription.quota_credits_used == 526
+        assert subscription.quota_credits_used == 646
         assert usage.quantity == Decimal("4.000")
-        assert usage.credits == Decimal("526.00")
+        assert usage.credits == Decimal("646.00")
 
 
 def test_reprice_migration_updates_only_platform_default_rates():

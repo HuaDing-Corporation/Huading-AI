@@ -1039,7 +1039,7 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
 ) -> None:
     with auth_db() as db:
         subscription = _seed_billing(db, auth_context["tenant_id"])
-        subscription.quota_credits_total = 10000
+        subscription.quota_credits_total = 20000
         voice, _avatar = _seed_voice_and_avatar(db, auth_context["tenant_id"])
         voice_id = voice.id
         subscription_id = subscription.id
@@ -1122,14 +1122,14 @@ def test_seedance_i2v_order_routes_before_avatar_when_voice_is_present(
         assert task.params["resolution"] == "1080p"
         assert task.duration_sec == 30
         subscription = db.get(Subscription, subscription_id)
-        assert subscription.quota_credits_reserved == 8408
+        assert subscription.quota_credits_reserved == 12008
         reserved = db.query(UsageRecord).filter_by(video_task_id=data["id"]).one()
         assert reserved.status == "reserved"
         assert reserved.capability == "video"
         assert reserved.provider == "apimart"
         assert reserved.model == "doubao-seedance-2.0"
         assert reserved.quantity == Decimal("30")
-        assert reserved.credits == Decimal("8403.00")
+        assert reserved.credits == Decimal("12003.00")
 
 
 def test_seedance_i2v_rejects_missing_product_image_without_side_effects(
@@ -1329,10 +1329,8 @@ def test_photo_order_routes_before_avatar_when_voice_is_present(
         assert reserved.credits == Decimal("10.00")
 
 
-@pytest.mark.parametrize("image_resolution", ["1k", "2k", "4k"])
 @pytest.mark.parametrize("image_count", range(1, 7))
-def test_photo_accepts_apimart_resolution_and_reference_image_matrix(
-    image_resolution,
+def test_photo_edit_accepts_reference_image_matrix_at_fixed_1k(
     image_count,
     monkeypatch,
     auth_context,
@@ -1362,7 +1360,7 @@ def test_photo_accepts_apimart_resolution_and_reference_image_matrix(
             "topic": "combine all references into one premium product image",
             "video_mode": "photo",
             "image_keys": image_keys,
-            "image_resolution": image_resolution,
+            "image_resolution": "1k",
         },
         headers=auth_context["headers"],
     )
@@ -1372,17 +1370,57 @@ def test_photo_accepts_apimart_resolution_and_reference_image_matrix(
     assert enqueued["task_id"] == task_id
     assert enqueued["queue"] == "image"
     assert enqueued["args"][0]["image_keys"] == image_keys
-    assert enqueued["args"][0]["image_resolution"] == image_resolution
+    assert enqueued["args"][0]["image_resolution"] == "1k"
     with auth_db() as db:
         task = db.get(VideoTask, task_id)
         subscription = db.get(Subscription, subscription_id)
         usage = db.query(UsageRecord).filter_by(video_task_id=task_id).one()
 
     assert task.params["image_keys"] == image_keys
-    assert task.params["image_resolution"] == image_resolution
+    assert task.params["image_resolution"] == "1k"
     assert subscription.quota_credits_reserved - reserved_before == 10
     assert usage.quantity == Decimal("1.000")
     assert usage.credits == Decimal("10.00")
+
+
+@pytest.mark.parametrize("image_resolution", ["2k", "4k"])
+def test_photo_edit_rejects_non_1k_resolution_without_side_effects(
+    image_resolution,
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        subscription = _seed_billing(db, auth_context["tenant_id"])
+        subscription_id = subscription.id
+        reserved_before = subscription.quota_credits_reserved
+        task_count_before = db.scalar(select(func.count()).select_from(VideoTask))
+        usage_count_before = db.scalar(select(func.count()).select_from(UsageRecord))
+
+    class _UnexpectedImageTask:
+        def apply_async(self, **kwargs):  # pragma: no cover
+            raise AssertionError("invalid photo edit must not enqueue")
+
+    from app.api.v1.routes import videos as videos_route
+
+    monkeypatch.setattr(videos_route, "generate_image_task", _UnexpectedImageTask())
+    response = TestClient(app).post(
+        "/api/v1/videos",
+        json={
+            "topic": "retouch this product photo",
+            "video_mode": "photo",
+            "image_keys": ["uploads/reference.png"],
+            "image_resolution": image_resolution,
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+    with auth_db() as db:
+        subscription = db.get(Subscription, subscription_id)
+        assert subscription.quota_credits_reserved == reserved_before
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == task_count_before
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == usage_count_before
 
 
 def test_photo_rejects_seven_reference_images_with_friendly_message(
@@ -1758,9 +1796,18 @@ def test_photo_rejects_image_provider_with_invalid_capability_declaration(
         assert db.scalar(select(func.count()).select_from(UsageRecord)) == usage_count_before
 
 
-@pytest.mark.parametrize("image_resolution", ["1k", "2k", "4k"])
+@pytest.mark.parametrize(
+    ("image_resolution", "expected_units", "expected_credits"),
+    [
+        ("1k", 10, Decimal("10.00")),
+        ("2k", 17, Decimal("16.25")),
+        ("4k", 23, Decimal("22.50")),
+    ],
+)
 def test_photo_propagates_requested_image_resolution(
     image_resolution,
+    expected_units,
+    expected_credits,
     monkeypatch,
     auth_context,
     auth_db,
@@ -1799,9 +1846,9 @@ def test_photo_propagates_requested_image_resolution(
         subscription = db.get(Subscription, subscription_id)
         usage = db.query(UsageRecord).filter_by(video_task_id=task_id).one()
     assert task.params["image_resolution"] == image_resolution
-    assert subscription.quota_credits_reserved - reserved_before == 10
+    assert subscription.quota_credits_reserved - reserved_before == expected_units
     assert usage.quantity == Decimal("1.000")
-    assert usage.credits == Decimal("10.00")
+    assert usage.credits == expected_credits
 
 
 def test_video_estimate_seedance_i2v_matches_reserved_quota_with_tenant_rate(
@@ -1860,34 +1907,35 @@ def test_video_estimate_seedance_i2v_matches_reserved_quota_with_tenant_rate(
 
     assert estimate_resp.status_code == 200
     assert estimate_resp.json()["data"] == {
-        "estimated_credits": 150,
+        "estimated_credits": 183,
         "unit": "credits",
         "note": "Estimated reservation; final settlement uses actual generated duration.",
     }
     assert create_resp.status_code == 202
     with auth_db() as db:
         subscription = db.get(Subscription, subscription_id)
-        assert subscription.quota_credits_reserved - reserved_before == 150
+        assert subscription.quota_credits_reserved - reserved_before == 183
         reserved = db.query(UsageRecord).filter_by(
             video_task_id=create_resp.json()["data"]["id"]
         ).one()
         assert reserved.quantity == Decimal("30")
-        assert reserved.credits == Decimal("149.25")
+        assert reserved.credits == Decimal("183.00")
 
 
-def test_video_estimate_photo_matches_flat_tenant_image_rate(
+def test_video_estimate_photo_matches_resolution_tier_reservation(
     monkeypatch,
     auth_context,
     auth_db,
 ) -> None:
     with auth_db() as db:
         subscription = _seed_billing(db, auth_context["tenant_id"])
+        subscription.quota_credits_total = 1_000
         db.add(
             CreditRate(
                 tenant_id=auth_context["tenant_id"],
                 capability="image",
                 unit="image",
-                credits_per_unit=Decimal("2.0000"),
+                credits_per_unit=Decimal("80.0000"),
             )
         )
         subscription_id = subscription.id
@@ -1905,6 +1953,7 @@ def test_video_estimate_photo_matches_flat_tenant_image_rate(
     payload = {
         "topic": "premium mug on a clean studio table",
         "video_mode": "photo",
+        "image_resolution": "4k",
         "image_quality": "medium",
     }
 
@@ -1921,21 +1970,21 @@ def test_video_estimate_photo_matches_flat_tenant_image_rate(
 
     assert estimate_resp.status_code == 200
     assert estimate_resp.json()["data"] == {
-        "estimated_credits": 2,
+        "estimated_credits": 180,
         "unit": "credits",
         "note": "Estimated reservation; final settlement uses actual generated duration.",
     }
     assert create_resp.status_code == 202
     with auth_db() as db:
         subscription = db.get(Subscription, subscription_id)
-        assert subscription.quota_credits_reserved - reserved_before == 2
+        assert subscription.quota_credits_reserved - reserved_before == 180
         reserved = db.query(UsageRecord).filter_by(
             video_task_id=create_resp.json()["data"]["id"]
         ).one()
         assert reserved.capability == "image"
         assert reserved.unit == "image"
         assert reserved.quantity == Decimal("1.000")
-        assert reserved.credits == Decimal("2.00")
+        assert reserved.credits == Decimal("180.00")
 
 
 def test_video_estimate_avatar_uses_existing_script_duration_and_tenant_rates(

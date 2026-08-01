@@ -326,6 +326,8 @@ class VideoGenerateRequest(BaseModel):
         ):
             raise ValueError("non-photo topic must contain at most 2000 characters")
         if self.video_mode == "photo":
+            if (self.image_key or self.image_keys) and (self.image_resolution or "1k") != "1k":
+                raise ValueError("photo image editing supports only image_resolution=1k")
             photo_prompt_values = (
                 self.topic,
                 self.master_prompt,
