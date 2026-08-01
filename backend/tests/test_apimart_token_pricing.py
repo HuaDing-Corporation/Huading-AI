@@ -99,6 +99,35 @@ def test_gpt56_models_keep_separate_apimart_rate_tiers(
     assert cost.output_credits_per_m == Decimal(expected_output)
 
 
+def test_mini_transcribe_uses_its_verified_apimart_token_rates() -> None:
+    from app.services.apimart_token_pricing import apimart_token_usage_cost
+
+    cost = apimart_token_usage_cost(
+        model="gpt-4o-mini-transcribe",
+        prompt_tokens=300,
+        completion_tokens=95,
+    )
+
+    assert cost.input_credits_per_m == Decimal("10")
+    assert cost.cached_input_credits_per_m is None
+    assert cost.cache_write_credits_per_m is None
+    assert cost.output_credits_per_m == Decimal("40")
+    assert cost.credits == Decimal("0.0068")
+    assert cost.cost_source == "token_formula"
+    assert cost.cost_estimate_uncertain is False
+
+
+def test_full_transcribe_keeps_its_separate_verified_token_rates() -> None:
+    from app.services.apimart_token_pricing import apimart_token_rate
+
+    rate = apimart_token_rate(model="gpt-4o-transcribe")
+
+    assert rate.input_credits_per_m == Decimal("20")
+    assert rate.cached_input_credits_per_m is None
+    assert rate.cache_write_credits_per_m is None
+    assert rate.output_credits_per_m == Decimal("80")
+
+
 def test_cache_read_and_write_tokens_use_their_own_rates() -> None:
     from app.services.apimart_token_pricing import apimart_token_usage_cost
 
@@ -176,6 +205,25 @@ def test_overlapping_cache_usage_is_rejected() -> None:
             completion_tokens=0,
             cached_prompt_tokens=80,
             cache_write_tokens=30,
+        )
+
+    assert exc_info.value.error_type == "invalid_usage_metadata"
+
+
+def test_authoritative_credits_do_not_bypass_invalid_cache_usage() -> None:
+    from app.services.apimart_token_pricing import (
+        APIMartTokenPricingError,
+        apimart_token_usage_cost,
+    )
+
+    with pytest.raises(APIMartTokenPricingError) as exc_info:
+        apimart_token_usage_cost(
+            model="gpt-5.6-luna",
+            prompt_tokens=10,
+            completion_tokens=0,
+            cached_prompt_tokens=8,
+            cache_write_tokens=8,
+            authoritative_credits=Decimal("0.5"),
         )
 
     assert exc_info.value.error_type == "invalid_usage_metadata"

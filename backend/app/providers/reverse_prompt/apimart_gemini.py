@@ -15,6 +15,11 @@ from app.core.logging import get_logger
 from app.db.models import ProviderConfig
 from app.providers.base import register_provider
 from app.services.apimart_costs import apimart_cost_cents_from_credits, apimart_usage_metadata
+from app.services.apimart_token_pricing import (
+    APIMartTokenPricingError,
+    APIMartTokenUsageCost,
+    apimart_token_usage_cost,
+)
 from app.services.reverse_prompt_usage import capture_reverse_prompt_usage
 
 _DEFAULT_BASE_URL = "https://api.apimart.ai/v1"
@@ -22,20 +27,6 @@ _DEFAULT_MODEL = "gemini-3.1-pro-preview"
 _DEFAULT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 _TARGET_FORMAT = "seedance_2_0"
 _MAX_CHAT_IMAGES = 16
-# APIMart discounted provider Credits per 1M tokens, not official list prices.
-# Source: https://apib.ai/zh/pricing, verified 2026-07-30.
-_TOKEN_CREDITS_PER_M_BY_MODEL = {
-    "gemini-3.1-pro-preview": {
-        "input": Decimal("16"),
-        "cached_input": None,
-        "output": Decimal("96"),
-    },
-    "gemini-3.6-flash": {
-        "input": Decimal("12"),
-        "cached_input": Decimal("1.2"),
-        "output": Decimal("60"),
-    },
-}
 _STRUCTURED_ZH_KEYS = (
     "subject",
     "scene",
@@ -464,19 +455,12 @@ class APIMartGeminiReversePromptProvider:
         response_payload = _response_payload(response)
         data = response_payload.get("data")
         completion_payload = data if isinstance(data, Mapping) else response_payload
-        usage = _usage_cost_payload(
+        usage = _capture_openai_response_usage(
+            response,
             response_payload,
             completion_payload,
             model=_DEFAULT_TRANSCRIPTION_MODEL,
-        )
-        capture_reverse_prompt_usage(
-            usage,
-            observability=_usage_observability(completion_payload),
-        )
-        _raise_for_response(
-            response,
-            response_payload,
-            "APIMart audio transcription failed",
+            fallback="APIMart audio transcription failed",
         )
         transcript = _optional_transcript(completion_payload.get("text"))
         if transcript is None:
@@ -545,15 +529,13 @@ class APIMartGeminiReversePromptProvider:
         )
         payload = _response_payload(response)
         completion = _completion_payload(payload)
-        capture_reverse_prompt_usage(
-            _usage_cost_payload(
-                payload,
-                completion,
-                model=self.model,
-            ),
-            observability=_usage_observability(completion),
+        _capture_openai_response_usage(
+            response,
+            payload,
+            completion,
+            model=self.model,
+            fallback="APIMart Gemini reverse prompt failed",
         )
-        _raise_for_response(response, payload, "APIMart Gemini reverse prompt failed")
         return payload
 
     def _chat_structured(
@@ -593,15 +575,13 @@ class APIMartGeminiReversePromptProvider:
         )
         payload = _response_payload(response)
         completion = _completion_payload(payload)
-        capture_reverse_prompt_usage(
-            _usage_cost_payload(
-                payload,
-                completion,
-                model=selected_model,
-            ),
-            observability=_usage_observability(completion),
+        _capture_openai_response_usage(
+            response,
+            payload,
+            completion,
+            model=selected_model,
+            fallback="APIMart Gemini structured vision failed",
         )
-        _raise_for_response(response, payload, "APIMart Gemini structured vision failed")
         return payload
 
     def _structured_vision_json(
@@ -689,11 +669,12 @@ class APIMartGeminiReversePromptProvider:
             timeout=self.request_timeout,
         )
         payload = _response_payload(response)
-        capture_reverse_prompt_usage(
-            _native_usage_cost_payload(payload, model=self.video_model),
-            observability=_native_usage_observability(payload),
+        _capture_native_response_usage(
+            response,
+            payload,
+            model=self.video_model,
+            fallback="APIMart Gemini native video failed",
         )
-        _raise_for_response(response, payload, "APIMart Gemini native video failed")
         return payload
 
     def _log_native_video_cost(self, usage: Mapping[str, Any]) -> None:
@@ -740,50 +721,12 @@ def reverse_prompt_credits_from_tokens(
     model: str,
     cached_prompt_tokens: int | None = None,
 ) -> Decimal:
-    pricing = _TOKEN_CREDITS_PER_M_BY_MODEL.get(str(model).strip().lower())
-    if pricing is None:
-        raise APIMartGeminiReversePromptError(
-            f"APIMart token pricing is not configured for model '{model}'.",
-            error_type="cost_model_unconfigured",
-        )
-    prompt_token_count = max(0, int(prompt_tokens))
-    cached_token_count = (
-        None
-        if cached_prompt_tokens is None
-        else max(0, int(cached_prompt_tokens))
-    )
-    if cached_token_count is not None and cached_token_count > prompt_token_count:
-        raise APIMartGeminiReversePromptError(
-            "APIMart cached prompt tokens exceed total prompt tokens.",
-            error_type="invalid_usage_metadata",
-        )
-    uncached_token_count = prompt_token_count
-    cached_input_credits = Decimal("0")
-    if cached_token_count is not None:
-        uncached_token_count -= cached_token_count
-        cached_rate = pricing["cached_input"]
-        if cached_token_count > 0 and cached_rate is None:
-            raise APIMartGeminiReversePromptError(
-                f"APIMart cached-input pricing is not configured for model '{model}'.",
-                error_type="cost_model_unconfigured",
-            )
-        if cached_rate is not None:
-            cached_input_credits = (
-                Decimal(cached_token_count)
-                / Decimal("1000000")
-                * cached_rate
-            )
-    input_credits = (
-        Decimal(uncached_token_count)
-        / Decimal("1000000")
-        * pricing["input"]
-    )
-    output_credits = (
-        Decimal(max(0, int(completion_tokens)))
-        / Decimal("1000000")
-        * pricing["output"]
-    )
-    return input_credits + cached_input_credits + output_credits
+    return _token_usage_cost(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        model=model,
+        cached_prompt_tokens=cached_prompt_tokens,
+    ).credits
 
 
 def normalize_reverse_prompt_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -1371,6 +1314,51 @@ def _raise_for_response(response: Any, payload: Mapping[str, Any], fallback: str
     )
 
 
+def _capture_openai_response_usage(
+    response: Any,
+    response_payload: Mapping[str, Any],
+    completion_payload: Mapping[str, Any],
+    *,
+    model: str,
+    fallback: str,
+) -> dict[str, Any]:
+    try:
+        usage = _usage_cost_payload(
+            response_payload,
+            completion_payload,
+            model=model,
+        )
+    except Exception:
+        _raise_for_response(response, response_payload, fallback)
+        raise
+    capture_reverse_prompt_usage(
+        usage,
+        observability=_usage_observability(completion_payload),
+    )
+    _raise_for_response(response, response_payload, fallback)
+    return usage
+
+
+def _capture_native_response_usage(
+    response: Any,
+    response_payload: Mapping[str, Any],
+    *,
+    model: str,
+    fallback: str,
+) -> dict[str, Any]:
+    try:
+        usage = _native_usage_cost_payload(response_payload, model=model)
+    except Exception:
+        _raise_for_response(response, response_payload, fallback)
+        raise
+    capture_reverse_prompt_usage(
+        usage,
+        observability=_native_usage_observability(response_payload),
+    )
+    _raise_for_response(response, response_payload, fallback)
+    return usage
+
+
 def _payload_message(payload: Mapping[str, Any], fallback: str) -> str:
     for key in ("message", "msg", "error"):
         value = payload.get(key)
@@ -1480,33 +1468,26 @@ def _usage_cost_payload(
 ) -> dict[str, Any]:
     usage = _usage_tokens(completion_payload)
     provider_credits = _credits_from_response(response_payload)
-    cost_source = "provider_credits"
-    cost_estimate_uncertain = False
-    if provider_credits is None:
-        provider_credits = reverse_prompt_credits_from_tokens(
-            prompt_tokens=usage["prompt_tokens"],
-            completion_tokens=usage["completion_tokens"],
+    cost = _token_usage_cost(
+        prompt_tokens=usage["prompt_tokens"],
+        completion_tokens=usage["completion_tokens"],
+        model=model,
+        cached_prompt_tokens=usage["cached_prompt_tokens"],
+        authoritative_credits=provider_credits,
+    )
+    if cost.cost_estimate_uncertain:
+        logger.warning(
+            "reverse_prompt_cache_usage_unavailable",
+            provider="apimart",
             model=model,
-            cached_prompt_tokens=usage["cached_prompt_tokens"],
+            cost_source=cost.cost_source,
         )
-        cost_source = "token_formula"
-        cost_estimate_uncertain = (
-            _model_supports_cached_input(model)
-            and not usage["cache_tokens_reported"]
-        )
-        if cost_estimate_uncertain:
-            logger.warning(
-                "reverse_prompt_cache_usage_unavailable",
-                provider="apimart",
-                model=model,
-                cost_source=cost_source,
-            )
     return {
         **usage,
-        "credits": provider_credits,
-        "cost_cents": apimart_cost_cents_from_credits(provider_credits),
-        "cost_source": cost_source,
-        "cost_estimate_uncertain": cost_estimate_uncertain,
+        "credits": cost.credits,
+        "cost_cents": cost.cost_cents,
+        "cost_source": cost.cost_source,
+        "cost_estimate_uncertain": cost.cost_estimate_uncertain,
     }
 
 
@@ -1529,37 +1510,30 @@ def _native_usage_cost_payload(
         prompt_tokens + completion_tokens
     )
     provider_credits = _credits_from_response(response_payload)
-    cost_source = "provider_credits"
-    cost_estimate_uncertain = False
-    if provider_credits is None:
-        provider_credits = reverse_prompt_credits_from_tokens(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
+    cost = _token_usage_cost(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        model=model,
+        cached_prompt_tokens=cached_prompt_tokens,
+        authoritative_credits=provider_credits,
+    )
+    if cost.cost_estimate_uncertain:
+        logger.warning(
+            "reverse_prompt_cache_usage_unavailable",
+            provider="apimart",
             model=model,
-            cached_prompt_tokens=cached_prompt_tokens,
+            cost_source=cost.cost_source,
         )
-        cost_source = "token_formula"
-        cost_estimate_uncertain = (
-            _model_supports_cached_input(model)
-            and cached_prompt_tokens is None
-        )
-        if cost_estimate_uncertain:
-            logger.warning(
-                "reverse_prompt_cache_usage_unavailable",
-                provider="apimart",
-                model=model,
-                cost_source=cost_source,
-            )
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
         "cached_prompt_tokens": cached_prompt_tokens,
         "cache_tokens_reported": cached_prompt_tokens is not None,
-        "credits": provider_credits,
-        "cost_cents": apimart_cost_cents_from_credits(provider_credits),
-        "cost_source": cost_source,
-        "cost_estimate_uncertain": cost_estimate_uncertain,
+        "credits": cost.credits,
+        "cost_cents": cost.cost_cents,
+        "cost_source": cost.cost_source,
+        "cost_estimate_uncertain": cost.cost_estimate_uncertain,
     }
 
 
@@ -1799,9 +1773,27 @@ def _optional_int_value(value: Any) -> int | None:
     return _int_value(value)
 
 
-def _model_supports_cached_input(model: str) -> bool:
-    pricing = _TOKEN_CREDITS_PER_M_BY_MODEL.get(str(model).strip().lower())
-    return pricing is not None and pricing["cached_input"] is not None
+def _token_usage_cost(
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+    model: str,
+    cached_prompt_tokens: int | None = None,
+    authoritative_credits: Decimal | None = None,
+) -> APIMartTokenUsageCost:
+    try:
+        return apimart_token_usage_cost(
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_prompt_tokens=cached_prompt_tokens,
+            authoritative_credits=authoritative_credits,
+        )
+    except APIMartTokenPricingError as exc:
+        raise APIMartGeminiReversePromptError(
+            str(exc),
+            error_type=exc.error_type,
+        ) from exc
 
 
 def _float_value(value: Any) -> float:

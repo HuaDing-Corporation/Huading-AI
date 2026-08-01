@@ -113,6 +113,33 @@ _UPSTREAM_REQUIRED_FIELDS = {
 }
 
 
+def test_production_code_has_no_legacy_token_rate_consumer() -> None:
+    app_root = Path(__file__).parents[1] / "app"
+    forbidden_sources = (
+        "legacy_" "settings",
+        "_TOKEN_CREDITS_PER_M_BY_MODEL",
+    )
+    offenders = [
+        (str(path.relative_to(app_root)), forbidden_source)
+        for path in app_root.rglob("*.py")
+        for forbidden_source in forbidden_sources
+        if forbidden_source in path.read_text(encoding="utf-8")
+    ]
+
+    assert offenders == []
+    compatibility_fields = (
+        "engine_apimart_reverse_prompt_input_credits_per_m",
+        "engine_apimart_reverse_prompt_output_credits_per_m",
+    )
+    for compatibility_field in compatibility_fields:
+        references = [
+            path.relative_to(app_root).as_posix()
+            for path in app_root.rglob("*.py")
+            if compatibility_field in path.read_text(encoding="utf-8")
+        ]
+        assert references == ["core/config.py"]
+
+
 def _usage(
     *,
     model: str,
@@ -630,6 +657,10 @@ def test_native_usage_modality_details_reach_upstream_log(
     assert upstream["candidate_tokens"] == 100
     assert upstream["thought_tokens"] == 40
     assert upstream["video_tokens_per_second"] == 66.0
+    assert upstream["input_credits_per_m"] == "12"
+    assert upstream["output_credits_per_m"] == "60"
+    assert upstream["cached_input_credits_per_m"] == "1.2"
+    assert upstream["token_rate_source"] == "central_rate_table"
     serialized_logs = json.dumps(captured.records, default=str)
     assert "test-api-key" not in serialized_logs
     assert "dmlkZW8tYnl0ZXM=" not in serialized_logs
@@ -726,6 +757,58 @@ def test_openai_usage_details_reach_asr_log_without_changing_result(
     assert upstream["input_audio_tokens"] == 90
     assert upstream["output_text_tokens"] == 18
     assert upstream["thought_tokens"] == 2
+    assert upstream["input_credits_per_m"] == "10"
+    assert upstream["output_credits_per_m"] == "40"
+    assert upstream["cached_input_credits_per_m"] is None
+    assert upstream["token_rate_source"] == "central_rate_table"
+
+
+def test_unconfigured_model_log_never_inherits_another_models_rate(
+    monkeypatch,
+) -> None:
+    from app.services import reverse_prompt_video
+    from app.services.reverse_prompt_usage import (
+        begin_reverse_prompt_usage_capture,
+        finish_reverse_prompt_usage_capture,
+    )
+
+    captured = _CaptureLogger()
+    monkeypatch.setattr(reverse_prompt_video, "logger", captured)
+    usage_token, _ = begin_reverse_prompt_usage_capture()
+    try:
+        result = reverse_prompt_video._call_provider(
+            lambda: {
+                "provider": "apimart",
+                "model": "future-unpriced-model",
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+                "credits": Decimal("0.01"),
+                "cost_cents": 1,
+                "cost_source": "provider_credits",
+            },
+            stage="analysis",
+            operation_name="analyze_video",
+        )
+    finally:
+        finish_reverse_prompt_usage_capture(usage_token)
+
+    assert result["model"] == "future-unpriced-model"
+    upstream = next(
+        fields
+        for level, event, fields in captured.records
+        if level == "info" and event == "reverse_prompt_video_upstream_call"
+    )
+    assert upstream["input_credits_per_m"] is None
+    assert upstream["output_credits_per_m"] is None
+    assert upstream["cached_input_credits_per_m"] is None
+    assert upstream["token_rate_source"] == "unconfigured_model"
+    assert any(
+        level == "warning"
+        and event == "reverse_prompt_token_rate_unconfigured"
+        and fields["model"] == "future-unpriced-model"
+        for level, event, fields in captured.records
+    )
 
 
 def test_structured_retry_logs_each_paid_upstream_call_and_warns(

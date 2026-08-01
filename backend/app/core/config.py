@@ -224,8 +224,8 @@ class Settings(BaseSettings):
     engine_aibrain_high_output_provider_credits_per_m: Decimal = Decimal("240")
     engine_aibrain_max_completion_tokens: int = Field(default=4096, ge=1, le=16384)
     engine_aibrain_reservation_stale_minutes: int = Field(default=30, ge=1)
-    # Compatibility snapshots of APIMart discounted Gemini 3.1 Pro rates.
-    # The provider's model-specific table is authoritative.
+    # Compatibility-only snapshots accepted from older deployments. Production
+    # costing and observability must use app.services.apimart_token_pricing.
     engine_apimart_reverse_prompt_input_credits_per_m: float = 16.0
     engine_apimart_reverse_prompt_output_credits_per_m: float = 96.0
     engine_reverse_prompt_video_credits: float = Field(default=100.0, gt=0)
