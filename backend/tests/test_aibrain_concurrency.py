@@ -275,6 +275,37 @@ def test_runtime_guard_rejects_dynamic_setattr_on_a_wallet(
             setattr(wallet, field_name, Decimal("999"))
 
 
+def test_settlement_above_reservation_requires_explicit_overdraft_authorization(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+        )
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="reserve",
+            amount_credits=Decimal("10"),
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="exceeds its reservation without overdraft authorization",
+        ):
+            aibrain._apply_reasoning_wallet_change(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                entry_type="settle",
+                amount_credits=Decimal("11"),
+                reserved_credits=Decimal("10"),
+            )
+
+
 def test_runtime_guard_rejects_dynamic_core_wallet_update(
     auth_context,
     auth_db,
@@ -707,6 +738,86 @@ def test_postgres_concurrent_reservations_allow_exactly_one_request(
         assert wallet.available_credits == Decimal("0")
         assert wallet.reserved_credits == Decimal("200")
         assert len(ledger_entries) == 1
+
+
+def test_postgres_already_reserved_requests_can_stack_overdrafts_then_close_gate(
+    postgres_session_factory,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id = _seed_postgres_wallet(factory, available=Decimal("200"))
+    with factory() as db:
+        for index in range(2):
+            aibrain._apply_reasoning_wallet_change(
+                db,
+                tenant_id=tenant_id,
+                entry_type="reserve",
+                amount_credits=Decimal("100"),
+                operation_key=f"in-flight-reserve:{index}",
+            )
+        db.commit()
+
+    start = threading.Event()
+    done = [threading.Event(), threading.Event()]
+    errors: list[BaseException] = []
+
+    def settle(index: int) -> None:
+        try:
+            assert start.wait(timeout=5)
+            with factory() as db:
+                aibrain._apply_reasoning_wallet_change(
+                    db,
+                    tenant_id=tenant_id,
+                    entry_type="settle",
+                    amount_credits=Decimal("250"),
+                    reserved_credits=Decimal("100"),
+                    operation_key=f"in-flight-settle:{index}",
+                    allow_overdraft=True,
+                )
+                db.commit()
+        except BaseException as exc:  # noqa: BLE001 - thread failures are evidence.
+            errors.append(exc)
+        finally:
+            done[index].set()
+
+    threads = [threading.Thread(target=settle, args=(index,), daemon=True) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    start.set()
+    for event_ in done:
+        assert event_.wait(timeout=5)
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+
+    with factory() as db:
+        with pytest.raises(AppError) as blocked:
+            aibrain._apply_reasoning_wallet_change(
+                db,
+                tenant_id=tenant_id,
+                entry_type="reserve",
+                amount_credits=Decimal("1"),
+                operation_key="blocked-after-overdrafts",
+            )
+        assert blocked.value.code == "AIBRAIN_OUTSTANDING_BALANCE"
+        assert blocked.value.detail == {
+            "available_credits": -300.0,
+            "outstanding_credits": 300.0,
+        }
+        wallet = db.get(ReasoningWallet, tenant_id)
+        settlements = list(
+            db.scalars(
+                select(ReasoningLedgerEntry).where(
+                    ReasoningLedgerEntry.tenant_id == tenant_id,
+                    ReasoningLedgerEntry.entry_type == "settle",
+                )
+            )
+        )
+        assert wallet.available_credits == Decimal("-300")
+        assert wallet.reserved_credits == Decimal("0")
+        assert wallet.total_spent_credits == Decimal("500")
+        assert len(settlements) == 2
 
 
 def _seed_postgres_subscription(factory, *, total: int) -> tuple[str, str]:

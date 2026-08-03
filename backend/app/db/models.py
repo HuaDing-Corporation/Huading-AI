@@ -704,10 +704,6 @@ class ReasoningWallet(Base):
     __tablename__ = "reasoning_wallets"
     __table_args__ = (
         CheckConstraint(
-            "available_credits >= 0",
-            name="ck_reasoning_wallets_available_nonnegative",
-        ),
-        CheckConstraint(
             "reserved_credits >= 0",
             name="ck_reasoning_wallets_reserved_nonnegative",
         ),

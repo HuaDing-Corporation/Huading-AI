@@ -238,6 +238,7 @@ async def send_chat_message(
         )
 
     charged_credits = _user_credits(pricing, prompt_tokens, completion_tokens)
+    overdraft_authorized = False
     try:
         reservation = _expand_reasoning_reservation(
             db,
@@ -249,22 +250,36 @@ async def send_chat_message(
             model=pricing.model,
         )
     except AppError as exc:
-        _fail_chat_message(
-            db,
-            tenant_id=user.tenant_id,
-            user_message_id=user_message.id,
-            pricing=pricing,
-            reservation=reservation,
-            provider_messages=provider_messages,
-            usage_result={
-                **dict(result),
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": total_tokens,
-            },
-            error_code=exc.code,
-        )
-        raise
+        if exc.code in {
+            "AIBRAIN_INSUFFICIENT_BALANCE",
+            "AIBRAIN_OUTSTANDING_BALANCE",
+        }:
+            # The provider has already completed the paid work. Keep the original
+            # reservation and settle the actual charge below; the wallet may become
+            # negative, and the reserve gate blocks further paid requests until top-up.
+            # APIMart publishes a 922,000-token Sol input ceiling. At the default
+            # 4,096 completion cap, one request is at most 5,300.825600 credits:
+            # 922000*5.60/1000 + 4096*33.60/1000. This provider-contract bound is
+            # not locally validated and is per request; already-reserved concurrent
+            # requests can accumulate debt beyond it.
+            overdraft_authorized = True
+        else:
+            _fail_chat_message(
+                db,
+                tenant_id=user.tenant_id,
+                user_message_id=user_message.id,
+                pricing=pricing,
+                reservation=reservation,
+                provider_messages=provider_messages,
+                usage_result={
+                    **dict(result),
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
+                },
+                error_code=exc.code,
+            )
+            raise
     try:
         provider_usage_cost = _provider_usage_cost(
             pricing,
@@ -334,6 +349,7 @@ async def send_chat_message(
         reserved_credits=reservation,
         chat_message_id=assistant_message.id,
         operation_key=f"settle:{user_message.id}",
+        allow_overdraft=overdraft_authorized,
         details={
             "tier": tier,
             "model": pricing.model,
@@ -479,6 +495,7 @@ def _apply_reasoning_wallet_change(
     chat_message_id: str | None = None,
     operation_key: str | None = None,
     reserved_credits: Decimal = Decimal("0"),
+    allow_overdraft: bool = False,
     details: dict[str, object] | None = None,
 ) -> WalletMutation:
     dialect_name = db.get_bind().dialect.name
@@ -539,7 +556,18 @@ def _apply_reasoning_wallet_change(
         reserved_delta = zero
     elif entry_type == "reserve":
         available = _reasoning_credits(wallet.available_credits)
+        if available < zero:
+            raise AppError(
+                "Pay the outstanding AIBRAIN balance before starting new work.",
+                code="AIBRAIN_OUTSTANDING_BALANCE",
+                status_code=402,
+                detail={
+                    "available_credits": float(available),
+                    "outstanding_credits": float(-available),
+                },
+            )
         if requested <= zero or available < requested:
+            shortfall = _reasoning_credits(max(zero, requested - available))
             raise AppError(
                 (
                     "Insufficient reasoning balance for this request "
@@ -547,12 +575,21 @@ def _apply_reasoning_wallet_change(
                 ),
                 code="AIBRAIN_INSUFFICIENT_BALANCE",
                 status_code=402,
+                detail={
+                    "required_credits": float(requested),
+                    "available_credits": float(available),
+                    "shortfall_credits": float(shortfall),
+                    "temporary_reservation": True,
+                },
             )
         available_delta = -requested
         reserved_delta = requested
     elif entry_type == "settle":
-        if requested > reserved:
-            raise RuntimeError("Reasoning settlement exceeds its reservation.")
+        if requested > reserved and not allow_overdraft:
+            raise RuntimeError(
+                "Reasoning settlement exceeds its reservation without overdraft "
+                "authorization."
+            )
         charged = requested
         available_delta = reserved - charged
         reserved_delta = -reserved
@@ -563,8 +600,8 @@ def _apply_reasoning_wallet_change(
 
     next_available = _reasoning_credits(wallet.available_credits + available_delta)
     next_reserved = _reasoning_credits(wallet.reserved_credits + reserved_delta)
-    if next_available < zero or next_reserved < zero:
-        raise RuntimeError("Reasoning wallet balance would become negative.")
+    if next_reserved < zero:
+        raise RuntimeError("Reasoning wallet reserved balance would become negative.")
 
     wallet.available_credits = next_available
     wallet.reserved_credits = next_reserved
@@ -574,6 +611,11 @@ def _apply_reasoning_wallet_change(
         wallet.total_spent_credits = _reasoning_credits(wallet.total_spent_credits + requested)
     wallet.updated_at = datetime.now(UTC)
     ledger_details = dict(details or {})
+    if entry_type == "settle" and requested > reserved:
+        ledger_details["reservation_shortfall"] = str(
+            _reasoning_credits(requested - reserved)
+        )
+        ledger_details["overdraft_after"] = str(max(zero, -next_available))
     if entry_type == "topup":
         ledger_details["wallet_snapshot"] = {
             "available_credits": str(next_available),

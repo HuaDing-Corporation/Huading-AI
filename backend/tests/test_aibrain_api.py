@@ -825,7 +825,12 @@ def test_insufficient_reasoning_balance_never_calls_provider_or_reserves(
     )
 
     assert response.status_code == 402
-    assert response.json()["error"]["code"] == "AIBRAIN_INSUFFICIENT_BALANCE"
+    error = response.json()["error"]
+    assert error["code"] == "AIBRAIN_INSUFFICIENT_BALANCE"
+    assert error["detail"]["available_credits"] == 0.0
+    assert error["detail"]["required_credits"] > 0
+    assert error["detail"]["shortfall_credits"] == error["detail"]["required_credits"]
+    assert error["detail"]["temporary_reservation"] is True
     assert provider.calls == []
     with auth_db() as db:
         assert db.get(ReasoningWallet, auth_context["tenant_id"]) is None
@@ -976,7 +981,7 @@ def test_actual_usage_above_estimate_expands_reservation_without_truncating(
         assert sum(entry.amount_credits for entry in reserves) == Decimal("249.625600")
 
 
-def test_actual_usage_shortfall_rejects_answer_and_releases_estimated_reservation(
+def test_actual_usage_shortfall_delivers_answer_and_settles_actual_charge(
     auth_context,
     auth_db,
     monkeypatch,
@@ -998,7 +1003,7 @@ def test_actual_usage_shortfall_rejects_answer_and_releases_estimated_reservatio
     ).json()["data"]["id"]
     provider = _FakeChatProvider(
         {
-            "content": "Do not deliver an underfunded answer.",
+            "content": "Deliver the completed answer and settle its actual charge.",
             "model": "gpt-5.6-sol",
             "prompt_tokens": 20_000,
             "completion_tokens": 4_096,
@@ -1014,8 +1019,12 @@ def test_actual_usage_shortfall_rejects_answer_and_releases_estimated_reservatio
         headers=auth_context["headers"],
     )
 
-    assert response.status_code == 402
-    assert response.json()["error"]["code"] == "AIBRAIN_INSUFFICIENT_BALANCE"
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["assistant_message"]["content"] == (
+        "Deliver the completed answer and settle its actual charge."
+    )
+    assert data["assistant_message"]["charged_credits"] == 249.6256
     assert len(provider.calls) == 1
     with auth_db() as db:
         wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
@@ -1032,10 +1041,180 @@ def test_actual_usage_shortfall_rejects_answer_and_releases_estimated_reservatio
                 .order_by(ReasoningLedgerEntry.created_at.asc())
             )
         )
-        assert assistant is None
-        assert wallet.available_credits == Decimal("200")
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.capability == "chat"))
+        assert assistant is not None
+        assert assistant.status == "completed"
+        assert assistant.charged_credits == Decimal("249.625600")
+        assert wallet.available_credits == Decimal("-49.625600")
         assert wallet.reserved_credits == Decimal("0")
-        assert [entry.entry_type for entry in entries] == ["topup", "reserve", "release"]
+        assert wallet.total_spent_credits == Decimal("249.625600")
+        assert [entry.entry_type for entry in entries] == ["topup", "reserve", "settle"]
+        assert entries[-1].details["reservation_shortfall"] == "111.988800"
+        assert entries[-1].details["overdraft_after"] == "49.625600"
+        assert usage.status == "settled"
+        assert usage.credits == Decimal("249.625600")
+
+
+def test_outstanding_reasoning_balance_blocks_new_provider_work(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    with auth_db() as db:
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("200"),
+            operation_key=f"seed-topup:{auth_context['tenant_id']}",
+        )
+        db.commit()
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    provider = _FakeChatProvider(
+        {
+            "content": "The first completed answer creates an outstanding balance.",
+            "model": "gpt-5.6-sol",
+            "prompt_tokens": 20_000,
+            "completion_tokens": 4_096,
+            "total_tokens": 24_096,
+        }
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(aibrain, "_estimate_prompt_tokens", lambda _messages: 1)
+
+    completed = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "Create a settled overdraft", "tier": "high"},
+        headers=auth_context["headers"],
+    )
+    blocked = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "Do not call the provider again", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert completed.status_code == 200
+    assert blocked.status_code == 402
+    assert blocked.json()["error"] == {
+        "code": "AIBRAIN_OUTSTANDING_BALANCE",
+        "message": "Pay the outstanding AIBRAIN balance before starting new work.",
+        "request_id": blocked.headers["X-Request-ID"],
+        "detail": {
+            "available_credits": -49.6256,
+            "outstanding_credits": 49.6256,
+        },
+        "details": None,
+    }
+    assert len(provider.calls) == 1
+    with auth_db() as db:
+        messages = list(
+            db.scalars(
+                select(ChatMessage).where(
+                    ChatMessage.tenant_id == auth_context["tenant_id"]
+                )
+            )
+        )
+        entries = list(
+            db.scalars(
+                select(ReasoningLedgerEntry).where(
+                    ReasoningLedgerEntry.tenant_id == auth_context["tenant_id"]
+                )
+            )
+        )
+        usages = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.tenant_id == auth_context["tenant_id"]
+                )
+            )
+        )
+        assert len(messages) == 2
+        assert len(entries) == 3
+        assert len(usages) == 1
+
+
+def test_topups_automatically_restore_aibrain_access_after_debt_is_repaid(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    with auth_db() as db:
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("200"),
+            operation_key=f"seed-topup:{auth_context['tenant_id']}",
+        )
+        db.commit()
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    provider = _FakeChatProvider(
+        {
+            "content": "Settle a debt larger than one 100-credit top-up.",
+            "model": "gpt-5.6-sol",
+            "prompt_tokens": 40_000,
+            "completion_tokens": 4_096,
+            "total_tokens": 44_096,
+        }
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(aibrain, "_estimate_prompt_tokens", lambda _messages: 1)
+
+    overdrawn = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "Create a larger settled overdraft", "tier": "high"},
+        headers=auth_context["headers"],
+    )
+    still_negative = client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=_topup_payload(100),
+        headers=auth_context["headers"],
+    )
+    still_blocked = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "Remain blocked while debt exists", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+    repaid = client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=_topup_payload(100),
+        headers=auth_context["headers"],
+    )
+    provider.result = {
+        "content": "Access resumed automatically after repayment.",
+        "model": "gpt-5.6-luna",
+        "prompt_tokens": 1,
+        "completion_tokens": 1,
+        "total_tokens": 2,
+    }
+    resumed = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "Resume without manual intervention", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert overdrawn.status_code == 200
+    assert still_negative.status_code == 200
+    assert still_negative.json()["data"]["available_credits"] == -61.6256
+    assert still_blocked.status_code == 402
+    assert still_blocked.json()["error"]["detail"]["outstanding_credits"] == 61.6256
+    assert repaid.status_code == 200
+    assert repaid.json()["data"]["available_credits"] == 38.3744
+    assert resumed.status_code == 200
+    assert resumed.json()["data"]["assistant_message"]["content"] == (
+        "Access resumed automatically after repayment."
+    )
+    assert len(provider.calls) == 2
 
 
 def test_provider_failure_releases_reservation_without_user_charge(

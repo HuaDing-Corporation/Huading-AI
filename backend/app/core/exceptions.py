@@ -4,9 +4,14 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.schemas.response import ApiResponse, ErrorDetail
+from app.schemas.response import ApiResponse, ErrorDetail, OperationOutcome
 
 logger = structlog.get_logger(__name__)
+_COPY_GENERATION_OPERATION_SUFFIXES = {
+    "/copy/rewrite": "rewrite",
+    "/copy/titles": "titles",
+    "/copy/topics": "topics",
+}
 
 
 class AppError(Exception):
@@ -16,15 +21,32 @@ class AppError(Exception):
         *,
         code: str = "APP_ERROR",
         status_code: int = status.HTTP_400_BAD_REQUEST,
+        detail: object | None = None,
     ) -> None:
         self.message = message
         self.code = code
         self.status_code = status_code
+        self.detail = detail
         super().__init__(message)
 
 
 def _request_id(request: Request) -> str | None:
     return getattr(request.state, "request_id", None)
+
+
+def _copy_generation_error_outcome(request: Request) -> OperationOutcome | None:
+    path = request.url.path.rstrip("/")
+    operation = next(
+        (
+            operation
+            for suffix, operation in _COPY_GENERATION_OPERATION_SUFFIXES.items()
+            if path.endswith(suffix)
+        ),
+        None,
+    )
+    if operation is None:
+        return None
+    return OperationOutcome(operation=operation, status="failed")
 
 
 def _error_response(
@@ -37,6 +59,7 @@ def _error_response(
 ) -> JSONResponse:
     request_id = _request_id(request)
     details = detail if isinstance(detail, list) else None
+    outcome = _copy_generation_error_outcome(request)
     payload = ApiResponse(
         error=ErrorDetail(
             code=code,
@@ -44,6 +67,7 @@ def _error_response(
             request_id=request_id,
             detail=detail,
             details=details,
+            outcome=outcome,
         ),
         request_id=request_id,
     )
@@ -51,9 +75,12 @@ def _error_response(
     # 500 handler, whose response is produced by ServerErrorMiddleware (outside
     # RequestIdMiddleware, which therefore can't add the header) (#003-FIX P2).
     headers = {"X-Request-ID": request_id} if request_id else None
+    content = payload.model_dump(mode="json")
+    if outcome is None and isinstance(content.get("error"), dict):
+        content["error"].pop("outcome", None)
     return JSONResponse(
         status_code=status_code,
-        content=payload.model_dump(mode="json"),
+        content=content,
         headers=headers,
     )
 
@@ -64,6 +91,7 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
         status_code=exc.status_code,
         code=exc.code,
         message=exc.message,
+        detail=exc.detail,
     )
 
 

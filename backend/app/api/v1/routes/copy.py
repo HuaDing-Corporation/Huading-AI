@@ -9,6 +9,7 @@ from app.schemas.copy import (
     CopyDraftDeletedResponse,
     CopyDraftListResponse,
     CopyDraftRead,
+    CopyGenerationOutcome,
     CopyRewriteRequest,
     CopyRewriteResponse,
     CopyRewriteResult,
@@ -41,7 +42,8 @@ def rewrite(
 ) -> ApiResponse[CopyRewriteResponse]:
     results = rewrite_copy(db, tenant_id=user.tenant_id, payload=payload)
     response = CopyRewriteResponse(
-        results=[CopyRewriteResult(text=text) for text in results]
+        results=[CopyRewriteResult(text=text) for text in results],
+        outcome=CopyGenerationOutcome(operation="rewrite", status="succeeded"),
     )
     return ok(request, response)
 
@@ -54,7 +56,13 @@ def titles(
     db: Session = DbSessionDependency,
 ) -> ApiResponse[CopyTitlesResponse]:
     title_items = generate_titles(db, tenant_id=user.tenant_id, payload=payload)
-    return ok(request, CopyTitlesResponse(titles=title_items))
+    return ok(
+        request,
+        CopyTitlesResponse(
+            titles=title_items,
+            outcome=CopyGenerationOutcome(operation="titles", status="succeeded"),
+        ),
+    )
 
 
 @router.post("/topics", response_model=ApiResponse[CopyTopicsResponse])
@@ -65,7 +73,13 @@ def topics(
     db: Session = DbSessionDependency,
 ) -> ApiResponse[CopyTopicsResponse]:
     topic_items = generate_topics(db, tenant_id=user.tenant_id, payload=payload)
-    return ok(request, CopyTopicsResponse(topics=topic_items))
+    return ok(
+        request,
+        CopyTopicsResponse(
+            topics=topic_items,
+            outcome=CopyGenerationOutcome(operation="topics", status="succeeded"),
+        ),
+    )
 
 
 @router.post(

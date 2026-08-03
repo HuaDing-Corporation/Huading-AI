@@ -49,16 +49,21 @@ def _patch_copy_llm(monkeypatch, results: list[str], payloads: list[dict]) -> No
 
 
 @pytest.mark.parametrize(
-    ("path", "payload"),
+    ("path", "payload", "operation"),
     [
-        ("/api/v1/copy/rewrite", {"source_text": "卖点", "mode": "smart"}),
-        ("/api/v1/copy/titles", {"source_text": "卖点", "n": 1}),
-        ("/api/v1/copy/topics", {"source_text": "卖点", "n": 1}),
+        (
+            "/api/v1/copy/rewrite",
+            {"source_text": "卖点", "mode": "smart"},
+            "rewrite",
+        ),
+        ("/api/v1/copy/titles", {"source_text": "卖点", "n": 1}, "titles"),
+        ("/api/v1/copy/topics", {"source_text": "卖点", "n": 1}, "topics"),
     ],
 )
 def test_copy_generation_endpoints_share_one_reserved_then_settled_usage_record(
     path: str,
     payload: dict,
+    operation: str,
     monkeypatch,
     auth_context,
     auth_db,
@@ -80,6 +85,10 @@ def test_copy_generation_endpoints_share_one_reserved_then_settled_usage_record(
     )
 
     assert response.status_code == 200
+    assert response.json()["data"]["outcome"] == {
+        "operation": operation,
+        "status": "succeeded",
+    }
     assert len(payloads) == 1
     with auth_db() as db:
         records = list(
@@ -102,7 +111,22 @@ def test_copy_generation_endpoints_share_one_reserved_then_settled_usage_record(
         assert subscription.quota_credits_reserved == 0
 
 
+@pytest.mark.parametrize(
+    ("path", "payload", "operation"),
+    [
+        (
+            "/api/v1/copy/rewrite",
+            {"source_text": "余额不足", "mode": "smart"},
+            "rewrite",
+        ),
+        ("/api/v1/copy/titles", {"source_text": "余额不足", "n": 1}, "titles"),
+        ("/api/v1/copy/topics", {"source_text": "余额不足", "n": 1}, "topics"),
+    ],
+)
 def test_copy_generation_rejects_insufficient_quota_before_provider_call(
+    path: str,
+    payload: dict,
+    operation: str,
     monkeypatch,
     auth_context,
     auth_db,
@@ -119,16 +143,90 @@ def test_copy_generation_rejects_insufficient_quota_before_provider_call(
         db.commit()
 
     response = TestClient(app).post(
-        "/api/v1/copy/rewrite",
-        json={"source_text": "余额不足", "mode": "smart"},
+        path,
+        json=payload,
         headers=auth_context["headers"],
     )
 
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "TENANT_QUOTA_EXCEEDED"
+    assert response.json()["error"]["outcome"] == {
+        "operation": operation,
+        "status": "failed",
+    }
+    assert response.json()["error"]["detail"] is None
     assert payloads == []
     with auth_db() as db:
         assert db.scalar(select(func.count()).select_from(UsageRecord)) == 0
+
+
+def test_copy_generation_partial_success_only_bills_the_successful_endpoint(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    payloads: list[dict] = []
+    _patch_copy_llm(monkeypatch, ["候选文案"], payloads)
+    with auth_db() as db:
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        subscription.quota_credits_used = subscription.quota_credits_total - 1
+        db.commit()
+
+    client = TestClient(app)
+    rewrite = client.post(
+        "/api/v1/copy/rewrite",
+        json={"source_text": "只剩一积分", "mode": "smart"},
+        headers=auth_context["headers"],
+    )
+    titles = client.post(
+        "/api/v1/copy/titles",
+        json={"source_text": "只剩一积分", "n": 1},
+        headers=auth_context["headers"],
+    )
+    topics = client.post(
+        "/api/v1/copy/topics",
+        json={"source_text": "只剩一积分", "n": 1},
+        headers=auth_context["headers"],
+    )
+
+    assert rewrite.status_code == 200
+    assert rewrite.json()["data"]["outcome"] == {
+        "operation": "rewrite",
+        "status": "succeeded",
+    }
+    assert titles.status_code == 403
+    assert titles.json()["error"]["outcome"] == {
+        "operation": "titles",
+        "status": "failed",
+    }
+    assert topics.status_code == 403
+    assert topics.json()["error"]["outcome"] == {
+        "operation": "topics",
+        "status": "failed",
+    }
+    assert len(payloads) == 1
+    with auth_db() as db:
+        records = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.tenant_id == auth_context["tenant_id"],
+                    UsageRecord.capability == "llm",
+                )
+            )
+        )
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        assert len(records) == 1
+        assert records[0].status == "settled"
+        assert records[0].credits == Decimal("1")
+        assert subscription.quota_credits_reserved == 0
 
 
 def test_copy_provider_failure_releases_reserved_quota(
@@ -157,6 +255,10 @@ def test_copy_provider_failure_releases_reserved_quota(
     )
 
     assert response.status_code == 502
+    assert response.json()["error"]["outcome"] == {
+        "operation": "rewrite",
+        "status": "failed",
+    }
     assert len(calls) == 1
     _assert_single_released_copy_reservation(auth_db, auth_context["tenant_id"])
 
@@ -183,6 +285,10 @@ def test_copy_timeout_releases_reserved_quota(
     )
 
     assert response.status_code == 502
+    assert response.json()["error"]["outcome"] == {
+        "operation": "titles",
+        "status": "failed",
+    }
     _assert_single_released_copy_reservation(auth_db, auth_context["tenant_id"])
 
 
@@ -218,6 +324,10 @@ def test_copy_result_validation_failure_releases_and_keeps_provider_cost(
     )
 
     assert response.status_code == 502
+    assert response.json()["error"]["outcome"] == {
+        "operation": "topics",
+        "status": "failed",
+    }
     with auth_db() as db:
         record = db.scalar(
             select(UsageRecord).where(
@@ -308,7 +418,8 @@ def test_copy_rewrite_seedance_i2v_cleans_and_uses_duration_budget(
     body = resp.json()
     assert body["error"] is None
     assert body["data"] == {
-        "results": [{"text": "姐妹们，这条裤子显瘦又舒服，现在下单更划算。"}]
+        "results": [{"text": "姐妹们，这条裤子显瘦又舒服，现在下单更划算。"}],
+        "outcome": {"operation": "rewrite", "status": "succeeded"},
     }
     assert body["request_id"]
 
@@ -358,7 +469,8 @@ def test_copy_rewrite_auto_clamps_n_and_returns_multiple_candidates(
             {"text": "第三条改写"},
             {"text": "第四条改写"},
             {"text": "第五条改写"},
-        ]
+        ],
+        "outcome": {"operation": "rewrite", "status": "succeeded"},
     }
     assert payloads[0]["candidate_count"] == 5
     assert "生成5条" in payloads[0]["user_prompt"]
@@ -388,7 +500,8 @@ def test_copy_titles_generates_title_candidates(monkeypatch, auth_context) -> No
 
     assert resp.status_code == 200
     assert resp.json()["data"] == {
-        "titles": ["质感通勤裤", "显瘦不费力", "一条穿出高级感"]
+        "titles": ["质感通勤裤", "显瘦不费力", "一条穿出高级感"],
+        "outcome": {"operation": "titles", "status": "succeeded"},
     }
     assert payloads[0]["candidate_count"] == 3
     assert "短句" in payloads[0]["user_prompt"]
@@ -416,7 +529,10 @@ def test_copy_topics_generates_hash_tag_candidates(monkeypatch, auth_context) ->
     )
 
     assert resp.status_code == 200
-    assert resp.json()["data"] == {"topics": ["#通勤穿搭", "#显瘦裤子", "#高级感穿搭"]}
+    assert resp.json()["data"] == {
+        "topics": ["#通勤穿搭", "#显瘦裤子", "#高级感穿搭"],
+        "outcome": {"operation": "topics", "status": "succeeded"},
+    }
     assert payloads[0]["candidate_count"] == 3
     assert "话题" in payloads[0]["user_prompt"]
 
@@ -431,6 +547,11 @@ def test_copy_rewrite_validation_errors_return_m2_422(auth_context) -> None:
     )
     assert blank.status_code == 422
     assert blank.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert blank.json()["error"]["outcome"] == {
+        "operation": "rewrite",
+        "status": "failed",
+    }
+    assert blank.json()["error"]["detail"] == blank.json()["error"]["details"]
 
     too_long = client.post(
         "/api/v1/copy/rewrite",
@@ -439,6 +560,11 @@ def test_copy_rewrite_validation_errors_return_m2_422(auth_context) -> None:
     )
     assert too_long.status_code == 422
     assert too_long.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert too_long.json()["error"]["outcome"] == {
+        "operation": "rewrite",
+        "status": "failed",
+    }
+    assert too_long.json()["error"]["detail"] == too_long.json()["error"]["details"]
 
     missing_instruction = client.post(
         "/api/v1/copy/rewrite",
@@ -447,6 +573,27 @@ def test_copy_rewrite_validation_errors_return_m2_422(auth_context) -> None:
     )
     assert missing_instruction.status_code == 422
     assert missing_instruction.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert missing_instruction.json()["error"]["outcome"] == {
+        "operation": "rewrite",
+        "status": "failed",
+    }
+    assert missing_instruction.json()["error"]["detail"] == (
+        missing_instruction.json()["error"]["details"]
+    )
+
+
+def test_copy_generation_auth_failure_identifies_the_requested_operation() -> None:
+    response = TestClient(app).post(
+        "/api/v1/copy/topics",
+        json={"source_text": "未登录", "n": 1},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["outcome"] == {
+        "operation": "topics",
+        "status": "failed",
+    }
+    assert response.json()["error"]["detail"] is None
 
 
 def test_copy_generation_errors_are_stable_and_friendly(monkeypatch, auth_context) -> None:
