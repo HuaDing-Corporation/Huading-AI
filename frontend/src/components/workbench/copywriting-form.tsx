@@ -56,10 +56,20 @@ function CopyChipGroup({ label, items, onCopy }: { label: string; items: string[
 
 /**
  * 文案仿写 + 标题/话题生成 (mode="copywriting") workbench container — 第四模式。
- * 同步 REST（不扣费、无确认窗）：粘贴参考文案 → 选改写模式 → 一键并发 rewrite+titles+
- * topics（各自独立降级）→ 结果区编辑/复制/保存到历史/一键串联进口播·电商表单。
+ * 同步 REST（无确认窗）：粘贴参考文案 → 选改写模式 → 一键并发 rewrite+titles+topics →
+ * 结果区编辑/复制/保存到历史/一键串联进口播·电商表单。
  * The ONLY hooks caller here；子控件全是 props（AiTextField/SelectableOption/Chip/Select）。
  * 一键串联只种 script（result_text）→ 经 onUseInVideo 回调由 page 层 prefill 目标表单。
+ *
+ * ── PRICING-UI-0001 §五 ──────────────────────────────────────────────────────────────
+ * 🔴 本注释此前写着「**不扣费**」，同时界面上一个字的价格披露都没有。两条都不成立了：
+ *    BE PR #239（`services/copy.py` `_generate_billed_copy`）给 rewrite / titles / topics 三个端点
+ *    各加了 reserve→settle，单价取 `estimate_copy_quota` 的 `capability="llm" unit="call"` 费率
+ *    （函数默认 1 积分/次）。本组件一次「生成文案」并发打三个端点 → **合计 3 积分**。
+ * 🔴 「各自独立降级」也从优点变成了缺陷：titles/topics 失败被静默置空，用户看不到失败、
+ *    更无从理解为什么只扣了 1 分而不是 3 分。现在失败必须显式列出（`partFailures`）。
+ *    注意这**不依赖 BE 返回 per-endpoint 结果**——三个端点是本组件自己 `Promise.allSettled` 并发调的，
+ *    每一路的成败在这里当场就知道（详见 onGenerate 的注释）。
  */
 export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: VideoTarget, script: string) => void }) {
   const rewrite = useRewriteCopy();
@@ -78,6 +88,8 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
   const [titles, setTitles] = useState<string[]>([]);
   const [topics, setTopics] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  /** 🔴 §五.3：本次哪几路没出来（各带原因）。空数组 = 全成或还没生成过。 */
+  const [partFailures, setPartFailures] = useState<string[]>([]);
   const [copiedFlash, setCopiedFlash] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -96,7 +108,16 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
     }
   };
 
-  // 一键三出：rewrite 为主产出（失败则报错），titles/topics 各自独立降级（失败置空、不阻断）。
+  /**
+   * 一键三出：rewrite 为主产出（失败则报错），titles/topics 不阻断主产出 —— 但**失败必须说出来**。
+   *
+   * 🔴 §五.3 的实现落点就在这里，且**不需要等 BE 在返回体里带 per-endpoint 结果**：
+   *    三个端点是本函数自己用 `Promise.allSettled` 并发调的，`ti.status === "rejected"` 就是
+   *    「标题这一路失败了」，原因也在 `ti.reason` 里。此前的代码是 `ti.status === "fulfilled" ? … : []`
+   *    ——把失败**当成了空结果**，这才是「降级隐藏」的真身。
+   * 🔴 「该项未计费」是可核查的事实，不是安慰话：BE `_generate_billed_copy` 的 except 分支调
+   *    `quota.release_copy_quota` 把预留原额释放（不落 settled），所以失败的那一路确实不进账单。
+   */
   const onGenerate = async () => {
     const source = sourceText.trim();
     if (!source) return;
@@ -105,6 +126,7 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
       return;
     }
     setError(null);
+    setPartFailures([]);
     setSaved(false);
 
     const rewriteReq: CopyRewriteRequest = {
@@ -130,6 +152,15 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
     }
     setTitles(ti.status === "fulfilled" ? ti.value.titles ?? [] : []);
     setTopics(to.status === "fulfilled" ? to.value.topics ?? [] : []);
+    // 失败的那几路逐条列出（含各自原因——可能一路 502 上游失败、另一路 403 配额不足）。
+    setPartFailures(
+      [
+        [copy.workbench.copyPartTitles, ti] as const,
+        [copy.workbench.copyPartTopics, to] as const
+      ]
+        .filter(([, r]) => r.status === "rejected")
+        .map(([part, r]) => copy.workbench.copyPartFailed(part, errorText((r as PromiseRejectedResult).reason)))
+    );
   };
 
   const onSave = async () => {
@@ -231,12 +262,23 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
         </div>
       </div>
 
-      <p className="mb-3 text-[12px] text-ink-faint">{copy.workbench.copyCompliance}</p>
+      <p className="mb-2 text-[12px] text-ink-faint">{copy.workbench.copyCompliance}</p>
+      {/* 🔴 §五.1/§五.2：扣费披露 —— 与其它功能（反推计费门 / 视频 estimate）口径一致，在**发起之前**告知。 */}
+      <p className="mb-3 text-[12px] leading-relaxed text-ink-soft">{copy.workbench.copyPriceDisclosure}</p>
 
       {error && (
         <p role="alert" className="mb-3 rounded-field bg-error-bg px-3 py-2 text-[13px] text-error-fg">
           {error}
         </p>
+      )}
+
+      {/* 🔴 §五.3：部分失败**必须可见**——不然用户只看到「少了话题」，也不知道为什么只扣了 2 分。 */}
+      {partFailures.length > 0 && (
+        <ul role="alert" className="mb-3 space-y-1 rounded-field bg-error-bg px-3 py-2 text-[12.5px] text-error-fg">
+          {partFailures.map((msg) => (
+            <li key={msg}>{msg}</li>
+          ))}
+        </ul>
       )}
 
       {!error && !sourceText.trim() && (

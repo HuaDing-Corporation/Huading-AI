@@ -12,14 +12,47 @@ import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
 import { ApiError } from "@/lib/api/client";
 import { useTopup } from "@/lib/aibrain/hooks";
-import { AIBRAIN_ERROR, TOPUP_OPTIONS } from "@/lib/aibrain/types";
+import { AIBRAIN_ERROR, TOPUP_OPTIONS, formatCredits, type ShortfallView } from "@/lib/aibrain/types";
+
+/**
+ * 余额不足说明块（PRICING-UI-0001 §三）—— 只在**因 402 而弹开**时渲染。
+ *
+ * 🔴 §三 要求交代四件事，这里逐条落位：
+ *   1 需要多少 → `insufficientMinRequired`（**下界** + 「至少」二字，见 `ShortfallView` 的注释）
+ *   2 当前多少 → `insufficientAvailable`（钱包未加载则整行不渲染，**不填 0 冒充**）
+ *   3 还差多少 → `insufficientShortfall`；余额高于下界仍被拒时改用 `insufficientContextHint`
+ *   4 这是临时预留、不是扣费 → `insufficientReserveNote`（**四条里最要紧的一条**：高速档光 completion
+ *     就预留 137.6，不说清楚会被当成「一次对话花 137 积分」而吓退用户）
+ * 🔴 第 4 条放在**最前面**且用 error 语义色 —— 用户此刻正在看一个被拒的操作，先解释"这笔钱不是花掉了"，
+ *    再给数字，顺序反了数字就先造成误解了。
+ */
+function ShortfallNotice({ shortfall }: { shortfall: ShortfallView }) {
+  const { minRequired, available, shortfall: gap } = shortfall;
+  return (
+    <div className="mb-4 rounded-field border border-line-gold bg-glass-fill px-3 py-2.5">
+      <p className="text-[13px] font-medium text-ink">{copy.aibrain.insufficientTitle}</p>
+      <p className="mt-1.5 text-[12.5px] leading-relaxed text-error-fg">{copy.aibrain.insufficientReserveNote}</p>
+      <ul className="mt-2 space-y-0.5 text-[12.5px] tabular-nums text-ink-soft">
+        <li>{copy.aibrain.insufficientMinRequired(formatCredits(minRequired))}</li>
+        {available !== undefined && <li>{copy.aibrain.insufficientAvailable(formatCredits(available))}</li>}
+        {gap !== undefined && <li className="text-ink">{copy.aibrain.insufficientShortfall(formatCredits(gap))}</li>}
+      </ul>
+      {available !== undefined && gap === undefined && (
+        <p className="mt-2 text-[12px] leading-relaxed text-ink-faint">{copy.aibrain.insufficientContextHint}</p>
+      )}
+    </div>
+  );
+}
 
 export function RechargeDialog({
   open,
-  onOpenChange
+  onOpenChange,
+  shortfall
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** 由 402 弹开时传入；用户主动点「充值」时不传（那时没有缺口可言，别凭空吓人）。 */
+  shortfall?: ShortfallView;
 }) {
   const recharge = useTopup();
   const [amount, setAmount] = useState<number>(TOPUP_OPTIONS[1]);
@@ -67,6 +100,8 @@ export function RechargeDialog({
             </Button>
           </DialogClose>
         </div>
+
+        {shortfall && <ShortfallNotice shortfall={shortfall} />}
 
         <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label={copy.aibrain.rechargeTitle}>
           {TOPUP_OPTIONS.map((tier) => {

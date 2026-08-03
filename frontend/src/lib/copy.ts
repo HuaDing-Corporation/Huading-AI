@@ -281,6 +281,19 @@ export const copy = {
     copyTopicsLabel: "话题候选（点击复制）",
     copyEmptyTitles: "本次未生成标题候选",
     copyEmptyTopics: "本次未生成话题候选",
+    // ── 计费披露 + 部分失败（PRICING-UI-0001 §五）─────────────────────────────
+    // 🔴 这个模块此前在注释里自称「不扣费」，界面上**一个字的价格披露都没有**。而 BE PR #239
+    //   （services/copy.py `_generate_billed_copy`）给 rewrite / titles / topics 三个端点各自加了
+    //    reserve→settle，单价 = `estimate_copy_quota` 的 `capability="llm" unit="call"` 费率（默认 1 积分/次）。
+    //    「生成文案」按钮是前端并发打这三个端点（copywriting-form `Promise.allSettled`）→ 合计 3 积分。
+    // 🔴 「未成功的那一项不计费」不是安慰话，是可核查的事实：`_generate_billed_copy` 的 except 分支
+    //    调 `quota.release_copy_quota` 把预留原额释放，不落 settled。
+    copyPriceDisclosure:
+      "计费：「生成文案」会同时生成改写 / 标题 / 话题三项，各 1 积分，合计 3 积分；未成功的那一项不计费。",
+    /** 部分失败必须看得见——否则用户只会看到「少了话题」而不知为何，更不知道为什么只扣了 2 分。 */
+    copyPartFailed: (part: string, reason: string) => `${part}生成失败（该项未计费）：${reason}`,
+    copyPartTitles: "标题",
+    copyPartTopics: "话题",
     copyCopy: "复制",
     copyCopied: "已复制",
     copySave: "保存到历史",
@@ -1485,8 +1498,30 @@ export const copy = {
     intensityLow: "低",
     intensityMid: "中",
     intensityHigh: "高",
+    // 🔴 PRICING-UI-0001 §二：「约 N 积分/次」是**估算**，不是价目。它此前作为裸整数出现（6/15/30），
+    //    没人知道那是「500 输入 + 500 输出 token」的估值，于是 BE 降价 35% 之后 UI 静默错价了三个月。
+    //    现在这个数由费率推导（`typicalCredits`），且**必须与 `intensityRateHint` 同屏出现**——
+    //    口径行是常驻文本而非 hover tooltip，因为触屏上 hover 不可达（等于没有说明）。
     intensityCost: (n: number) => `约 ${n} 积分/次`,
-    intensityAria: (label: string, cost: number) => `智能强度 ${label}，约 ${cost} 积分每次`,
+    intensityAria: (label: string, cost: number) => `智能强度 ${label}，约 ${cost} 积分每次（按典型对话估算）`,
+    /** 常驻口径行：真实费率 + 「约 N 积分」是怎么估出来的。 */
+    intensityRateHint: (input: string, output: string, promptTokens: number, completionTokens: number) =>
+      `按输入 ${input} / 输出 ${output} 积分每千 token 计费；「约 N 积分/次」是按 ${promptTokens} 输入 + ${completionTokens} 输出 token 的典型对话估算，实际以本次用量结算。`,
+    // ── 402 余额不足（§三）────────────────────────────────────────────────
+    // 此前 402 只是**默默弹开充值窗**，用户看不到任何解释；而新预留逻辑会锁住一个远大于实际花费的数
+    //（高速档光 completion 就 137.6），不解释清楚会被当成「一次对话要花 137 积分」。
+    insufficientTitle: "推理积分不足，本次没有发送",
+    /** 🔴 §三 第 4 条 —— 本包最要紧的一句话：预留 ≠ 扣费。 */
+    insufficientReserveNote:
+      "这是「临时预留」，不是实际扣费：发送时按「最长回答」先锁住一笔积分，对话结束立即按实际用量结算，差额当场退回余额。",
+    insufficientMinRequired: (credits: string) => `本次至少需临时预留 ${credits} 积分`,
+    insufficientAvailable: (credits: string) => `当前可用 ${credits} 积分`,
+    insufficientShortfall: (credits: string) => `至少还差 ${credits} 积分`,
+    /** 余额 ≥ 下界却仍被拒：缺口来自提示词那一段（前端算不出精确值，故换一句话说清方向）。 */
+    insufficientContextHint:
+      "余额高于这个下限仍被拒，通常是本次对话的上下文较长或带了图片——提示词也要计入预留。可新建对话或精简内容后重试。",
+    /** 409：答完要追加预留时，这条消息已不在等待中（并发发送 / 超时回收）。 */
+    requestExpired: "这条消息已超时或被其他操作打断，未计费。请重新发送。",
     // 附件（一期只图片；文档解析是 BE 增量 3，本期不提供入口）
     attachImage: "上传图片",
     attachRemove: "移除附件",

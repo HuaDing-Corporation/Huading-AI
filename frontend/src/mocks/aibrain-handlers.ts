@@ -1,15 +1,29 @@
 // 华鼎AI智脑 · MSW mock（AIBRAIN-UI-0001 · FIX1：逐字段镜像 BE f2e9a2e0，**不比 BE 宽松**，含 402/422/502 状态码本身）。
 //
 // 对齐点（以 BE 源码为准）：/wallet/topup（非 recharge）· 钱包 available_credits/... · 发消息体 attachment_asset_ids ·
-// 响应含 wallet（非 balance）· 预留 flat min(200,available)：available<=0→402 AIBRAIN_INSUFFICIENT_BALANCE、
-// 预留不够→422 AIBRAIN_REQUEST_LIMIT_EXCEEDED · 会话 404 AIBRAIN_CONVERSATION_NOT_FOUND。
+// 响应含 wallet（非 balance）· 会话 404 AIBRAIN_CONVERSATION_NOT_FOUND。
 // ⚠️ BE 增量 1 无 DELETE 会话、无文档上传（增量 3）→ 本 mock 不提供这两个端点（一期路径不调用）。
 // ⚠️ 跨租户在 mock 不可表达（单租户 token）→ store 查不到 = 404，不伪造 tenant 自比（本项目既有诚实做法）。
+//
+// ── PRICING-UI-0001 §四 · 计费口径重写（对齐 PR #239 `codex/pricing-c3c4-be`）────────────────────
+// 旧 mock 是 flat `min(200, available)` 预留 + `min(typical, reservation)` 结算，与真实逻辑已完全脱节
+//（真实是**动态预留**：提示词估算 × 1.25 + 完整 completion 配额）。mock 比 BE 宽松 = 前端测试的绿是假绿。
+// 现在逐条镜像 `backend/app/services/aibrain.py`：
+//   预留 `_reservation_credits` = _user_credits(ceil(估算提示词 tokens × 1.25), max_completion_tokens=4096)
+//   估算 `_estimate_prompt_tokens` / `_estimate_text_tokens`（ASCII 每 4 字符 1 token、非 ASCII 每字 1 token、
+//        每条消息 +4、图片附件每张 4096）
+//   预留闸 `_apply_reasoning_wallet_change` reserve 分支：`available < requested` → 402（**不再是 available<=0**）
+//   结算    settle 分支：`available += reserved - charged`（差额**立即退回**），reserved 归零
+//   追加预留 `_expand_reasoning_reservation`：实扣 > 预留时补一笔；补不上 → 402（此时请求已经跑完了）
+// 🔴 **本 mock 不实现「余额为负拒绝新请求」闸门**：BE 三个分支 grep 下来没有这条逻辑、也没有第二个 402 码，
+//    且当前 BE 的 reserve 硬拦 + settle 断言（`requested > reserved` 抛 RuntimeError）使余额**根本无法变负**。
+//    mock 造一个 BE 没有的闸门 = 反方向的不一致（假杀），与假绿同样有害。待 CA 实装透支方案后补。
 
 import { http, HttpResponse } from "msw";
 
 import {
   AIBRAIN_ERROR,
+  MAX_COMPLETION_TOKENS,
   SINGLE_REQUEST_LIMIT,
   TIERS,
   TOPUP_OPTIONS,
@@ -32,8 +46,62 @@ const err = (status: number, code: string, message: string) =>
 
 /** content 含此串 → 模拟上游失败（测 502 分流）。 */
 const PROVIDER_FAIL_MARKER = "__mock_provider_fail__";
-/** 超长 content → 模拟「预留 200 也不够的大请求」→ 422（BE：max_completion_tokens<=0）。 */
-const OVERSIZED_CONTENT = 8000;
+/**
+ * content 含此串 → 模拟「答完才发现实扣超出预留、**追加预留**时余额不够」→ 402
+ * （BE `_expand_reasoning_reservation`，PR #239 新增分支）。这条路径的特别之处：**请求已经跑完了**才被拒，
+ * 消息落 failed、预留全额释放，用户看到的是「花了时间、没拿到答案、也没扣钱」。
+ */
+const RESERVE_OVERRUN_MARKER = "__mock_reserve_overrun__";
+
+// ── 计费镜像（逐条对应 BE services/aibrain.py，见文件抬头）──────────────────────────────────
+const PROMPT_RESERVATION_MULTIPLIER = 1.25; // BE `_PROMPT_RESERVATION_MULTIPLIER`
+const IMAGE_PROMPT_TOKEN_ESTIMATE = 4096; // BE `_IMAGE_PROMPT_TOKEN_ESTIMATE`
+const CREDIT_QUANTUM = 1_000_000; // BE `_REASONING_CREDIT_QUANTUM = Decimal("0.000001")`
+
+/** BE `_reasoning_credits`：量化到 6 位小数（浮点误差不许渗进钱包数字）。 */
+const quantizeCredits = (value: number) => Math.round(value * CREDIT_QUANTUM) / CREDIT_QUANTUM;
+
+/** BE `_user_credits`：prompt × 输入费率 + completion × 输出费率，再量化。 */
+function userCredits(tier: IntensityTier, promptTokens: number, completionTokens: number): number {
+  const { inputPer1k, outputPer1k } = TIERS[tier].rate;
+  return quantizeCredits((promptTokens * inputPer1k + completionTokens * outputPer1k) / 1000);
+}
+
+/** BE `_estimate_text_tokens`：ASCII 每 4 字符 1 token（向上取整），非 ASCII 每字 1 token，至少 1。 */
+function estimateTextTokens(text: string): number {
+  const chars = Array.from(text); // 按 code point 数，对齐 Python 的 len()
+  const ascii = chars.filter((ch) => (ch.codePointAt(0) ?? 0) < 128).length;
+  return Math.max(1, Math.floor((ascii + 3) / 4) + (chars.length - ascii));
+}
+
+/**
+ * BE `_estimate_prompt_tokens`：逐条消息累加（文本按上式、每张图片 4096、每条消息再 +4），至少 1。
+ * ⚠️ **未逐字复刻**的两点（诚实标注，别把 mock 当成 BE 的等价物）：
+ *   ① BE 的上下文取最近 20 轮（40 条）；mock 直接全量算 —— mock 会话不会长到 40 条，两者等价。
+ *   ② BE 把历史消息的图片附件也重建成 image_url part；此处同样按 4096/张 计入，但 `_provider_context`
+ *      对历史附件的取舍细节我没有逐行核到，若 CA 那边不是这样，差的是**预留的绝对值**，不是行为形态。
+ */
+function estimatePromptTokens(history: ChatMessage[], content: string, attachmentCount: number): number {
+  let tokens = 0;
+  for (const m of history) {
+    if (m.content) tokens += estimateTextTokens(m.content);
+    tokens += m.attachments.length * IMAGE_PROMPT_TOKEN_ESTIMATE;
+    tokens += 4;
+  }
+  if (content) tokens += estimateTextTokens(content);
+  tokens += attachmentCount * IMAGE_PROMPT_TOKEN_ESTIMATE;
+  tokens += 4;
+  return Math.max(1, tokens);
+}
+
+/**
+ * BE `_reservation_credits`：**动态预留** = 提示词估算 × 1.25（向上取整到整 token）+ 完整 completion 配额。
+ * 🔴 这就是 §三 那个「用户看到一个远大于实际花费的数字被扣住」的来源：光 completion 段
+ *    （4096 token）在 high 档就是 137.6 积分，而一次典型对话实扣不到 20。
+ */
+function reservationCredits(tier: IntensityTier, promptTokens: number): number {
+  return userCredits(tier, Math.ceil(promptTokens * PROMPT_RESERVATION_MULTIPLIER), MAX_COMPLETION_TOKENS);
+}
 
 interface MockConversation extends Conversation {
   messages: ChatMessage[];
@@ -207,42 +275,95 @@ export function aibrainHandlers() {
       const resolved = resolveAttachments(ids);
       if ("error" in resolved) return resolved.error;
 
-      // 🔴 预留：flat min(200, available)。available<=0 → 402（BE：reserve<=0）。
-      if (available <= 0) return err(402, AIBRAIN_ERROR.INSUFFICIENT_BALANCE, "推理积分不足，请充值后再试");
-      const reservation = Math.min(SINGLE_REQUEST_LIMIT, available);
-      // 🔴 FIX2 · 次序对齐 BE：预留不够买最小答复 → 422，**先于** provider 调用（BE aibrain.py:138-144 rollback+422）。
-      if (content.length > OVERSIZED_CONTENT || reservation < TIERS[body.tier].typical)
-        return err(422, AIBRAIN_ERROR.REQUEST_LIMIT_EXCEEDED, `单次问答超过 ${SINGLE_REQUEST_LIMIT} 积分上限或余额不足以作答，请精简内容或充值`);
-      // 上游失败（测 502 分流）——在 422 之后（只有实际调用了 provider 才可能 502）。
-      if (content.includes(PROVIDER_FAIL_MARKER))
-        return err(502, AIBRAIN_ERROR.PROVIDER_FAILED, "AI 服务暂时不可用，请稍后重试");
-
-      // 结算：min(实耗, 预留)。实耗用典型消耗；退回未用（available 只减实扣）。
-      const charged = Math.min(TIERS[body.tier].typical, reservation);
-      available -= charged;
-      totalSpent += charged;
-
       const attachments = resolved.attachments;
+      const tier = body.tier;
+
+      // ── 路径①/② 预留（BE `_reservation_credits` + `_apply_reasoning_wallet_change` 的 reserve 分支）──
+      // 🔴 闸门是 `available < requested`（**不是旧 mock 的 available<=0**）：账上有钱但不够这次预留，
+      //    照样 402 —— 这正是 §三 要向用户解释清楚的那个 402。
+      const promptTokens = estimatePromptTokens(conv.messages, content, attachments.length);
+      const reservation = reservationCredits(tier, promptTokens);
+      if (available < reservation)
+        return err(
+          402,
+          AIBRAIN_ERROR.INSUFFICIENT_BALANCE,
+          // 镜像 BE 的 message 形态（英文自由文本、required/available 只在这句话里，无结构化字段）。
+          // 🔴 前端**不解析这句话**（见 lib/aibrain/types.ts `ShortfallView` 的注释）；mock 照抄形态是为了
+          //    让「前端不该依赖它」这件事在 mock 层面也成立 —— 谁要是写了解析，这里一改措辞就该红。
+          `Insufficient reasoning balance for this request (required ${reservation}, available ${available}).`
+        );
+      available = quantizeCredits(available - reservation); // 预留：available → reserved
+
+      // 上游失败（测 502 分流）——发生在预留之后，故要**把预留还回去**（BE `_fail_chat_message` 释放预留）。
+      if (content.includes(PROVIDER_FAIL_MARKER)) {
+        available = quantizeCredits(available + reservation);
+        return err(502, AIBRAIN_ERROR.PROVIDER_FAILED, "AI 服务暂时不可用，请稍后重试");
+      }
+
       const now = new Date(2026, 6, 19, 10, 30, msgSeq).toISOString();
+      const answer = content.includes(RESERVE_OVERRUN_MARKER)
+        ? "（mock）本次模拟「实扣超出预留」路径。"
+        : `（${TIERS[tier].label}档 · ${TIERS[tier].model}）已收到：「${content || "[图片]"}」。这是 mock 回答，联调后由真实模型作答。`;
+      // 实际用量：prompt 用预留时的同一估算，completion 用回答本身的长度 —— 于是响应里的
+      // prompt_tokens/completion_tokens/charged_credits 三者**能互相验算**（不是拍脑袋的常数）。
+      const completionTokens = estimateTextTokens(answer);
+      let charged = userCredits(tier, promptTokens, completionTokens);
+
+      // ── 路径③ 追加预留（BE `_expand_reasoning_reservation`）──────────────────────────────
+      // 实扣 > 预留 → 补一笔；补不上 → 402，且**请求已经跑完了**：消息落 failed、预留全额释放。
+      // ⚠️ 倍数 5 是**测试钩子的放大量**，不是对 BE 的建模：真实世界里 `charged > reservation` 只可能
+      //    因为提示词估算低估了（completion 那头被 `max_completion_tokens` 硬顶住，超不了）。而 prompt
+      //    费率只有输出的 1/6，要靠堆 token 把实扣顶过预留，得几万个 token —— 在 mock 里造那种输入
+      //    只会让用例难读。取 ×5 是为了**稳定命中这条分支**，行为形态（补一笔 / 补不上就全额释放）是真的。
+      if (content.includes(RESERVE_OVERRUN_MARKER)) charged = quantizeCredits(reservation * 5);
+      if (charged > reservation) {
+        const additional = quantizeCredits(charged - reservation);
+        if (available < additional) {
+          // ⚠️ message 里的 available 必须是**释放预留之前**的值：BE 是先在 `_apply_reasoning_wallet_change`
+          //    里抛 402（那时预留还挂着），`_fail_chat_message` 才释放。先释放再取值会报出一个更大的、
+          //    与拒绝时刻不符的数。前端虽然不解析这句话，mock 也得照实说。
+          const availableAtRejection = available;
+          available = quantizeCredits(available + reservation); // 释放预留：不扣用户一分钱
+          return err(
+            402,
+            AIBRAIN_ERROR.INSUFFICIENT_BALANCE,
+            `Insufficient reasoning balance for this request (required ${additional}, available ${availableAtRejection}).`
+          );
+        }
+        available = quantizeCredits(available - additional);
+      }
+
+      // ── 结算（BE settle 分支：`available += reserved - charged`）──────────────────────────
+      // 🔴 差额**立即退回**：available 净减少的只有 charged，那个吓人的预留额一秒都不多占。
+      //    这正是 §三 第 4 条要向用户讲清的事实，mock 必须真的这么行为，否则测试没法钉住它。
+      available = quantizeCredits(available + Math.max(0, reservation - charged));
+      totalSpent = quantizeCredits(totalSpent + charged);
+
       const userMsg: ChatMessage = {
         id: `msg-${++msgSeq}`,
         conversation_id: conv.id,
         role: "user",
         content,
         attachments,
-        tier: body.tier,
+        tier,
         status: "completed",
+        // 预留额落在 user_message 上（BE `user_message.reserved_credits = reservation`）——UI 若要展示
+        // 「本次锁了多少」，取的是这个字段，不是 wallet 的 single_request_limit。
+        reserved_credits: reservation,
         created_at: now
       };
       const assistantMsg: ChatMessage = {
         id: `msg-${++msgSeq}`,
         conversation_id: conv.id,
         role: "assistant",
-        content: `（${TIERS[body.tier].label}档 · ${TIERS[body.tier].model}）已收到：「${content || "[图片]"}」。这是 mock 回答，联调后由真实模型作答。`,
+        content: answer,
         attachments: [],
-        tier: body.tier,
-        model: TIERS[body.tier].model,
+        tier,
+        model: TIERS[tier].model,
         status: "completed",
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        total_tokens: promptTokens + completionTokens,
         charged_credits: charged,
         created_at: new Date(2026, 6, 19, 10, 30, msgSeq).toISOString()
       };

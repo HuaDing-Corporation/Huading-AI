@@ -33,7 +33,13 @@ const IMAGE_PROVIDER_CAPABILITY_CODES = new Set([
  */
 export function errorText(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.code === "tenant_quota_exceeded") return copy.errors.quota;
+    // 🔴 PRICING-UI-0001 本包顺手修的既有 P1：这里此前只匹配**小写** `tenant_quota_exceeded`，
+    //    而 BE 三处发的全是**大写** `TENANT_QUOTA_EXCEEDED`（services/quota.py:174 / :530、
+    //    routes/batches.py:168 亦按大写判断）。于是这条 curated 文案**从未命中过** —— 全站任何功能
+    //    配额不足时，用户看到的都是英文 "Insufficient tenant quota."（落到下面"透出 BE message"那一支）。
+    //    本包会撞上它：文案三端点的余额不足正是这个 403（BE `_apply_active_quota_delta`）。
+    //    改成大小写不敏感，两种写法都命中，省得哪天 BE 改回来又静默失效。
+    if (err.code?.toUpperCase() === "TENANT_QUOTA_EXCEEDED") return copy.errors.quota;
     // VIP 门禁（ADMIN-VIP-GATE-UI-0001 §二之二）：doubao 通路无权限 → 友好中文；与「槽位空」(VOICE_CLONE_SLOT_UNAVAILABLE) 区分。
     if (err.code === "VOICE_CLONE_PLAN_REQUIRED") return copy.errors.voiceClonePlanRequired;
     // 出镜视频源校验码 → 友好中文（BE 权威二次校验，含前端读不到的 codec/容器）。

@@ -15,6 +15,7 @@ vi.mock("@/lib/api/hooks", () => ({
 
 import { CopywritingForm } from "./copywriting-form";
 import { copy } from "@/lib/copy";
+import { ApiError } from "@/lib/api/client";
 
 const SOURCE = /粘贴你有权使用/;
 
@@ -175,14 +176,87 @@ describe("CopywritingForm (文案仿写 + 标题/话题)", () => {
     expect(screen.queryByText(copy.workbench.copyCopied)).not.toBeInTheDocument();
   });
 
-  it("标题端点失败时降级不渲染标题区，但文案与话题仍出", async () => {
-    titlesMock.mutateAsync.mockRejectedValue(new Error("titles boom"));
+  // ══ PRICING-UI-0001 §五 · 扣费披露 + 部分失败可见 ═════════════════════════════════════════
+  // 🔴 这条用例的**旧版本在给缺陷站岗**：它叫「标题端点失败时降级不渲染标题区」，断言的全部内容
+  //    就是"标题区没渲染"——也就是说，它把 CB 指出的那个缺陷（失败被静默隐藏）当成了正确行为来守护。
+  //    用户看到的是"标题莫名其妙没出来"，且**不知道为什么只扣了 2 分而不是 3 分**。
+  //    现在改成：失败必须**说出来**，且主产出与另一路不受影响。
+  // 变异：把 onGenerate 里的 setPartFailures(...) 改回 `ti.status === "fulfilled" ? … : []` 的静默降级
+  //      → 本条红（找不到失败提示）。
+  it("🔴 §五.3 标题端点失败 → 显式告知「标题生成失败（该项未计费）」，文案与话题照出", async () => {
+    // 用 BE 真实会发的错误（502 COPY_GEN_FAILED，services/copy.py `_generate_billed_copy` 的兜底）——
+    // 而不是裸 Error：裸 Error 走 errorText 的通用兜底，测不出"原因有没有带给用户"。
+    titlesMock.mutateAsync.mockRejectedValue(new ApiError("Copy generation failed.", "COPY_GEN_FAILED", 502));
     render(<CopywritingForm />);
     typeSource("原文");
     fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
 
     expect(await screen.findByDisplayValue("改写后的文案")).toBeInTheDocument();
+    // 失败这件事本身必须出现在界面上，并写明该项不计费、以及为什么失败。
+    const failure = await screen.findByText(/标题生成失败/);
+    expect(failure.textContent ?? "").toContain("未计费");
+    expect(failure.textContent ?? "").toContain("Copy generation failed.");
+    // 不阻断：主产出与另一路照常。
     expect(screen.queryByText("标题候选（点击复制）")).not.toBeInTheDocument();
     expect(screen.getByText("#话题A")).toBeInTheDocument();
+    // 话题这一路成功 → 不许连坐报失败。
+    expect(screen.queryByText(/话题生成失败/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * 🔴 §五.4 相关：文案端点余额不足时 BE 发的是 **403 TENANT_QUOTA_EXCEEDED**
+   * （每个端点各自 `reserve_copy_quota` → `_apply_active_quota_delta`，即"逐个尝试"而非总额预检）。
+   * 这条同时守住本包顺手修的那个 P1：error-text.ts 此前只认小写码，配额不足会漏成英文
+   * "Insufficient tenant quota."。变异：把 error-text.ts 改回小写比较 → 本条红。
+   * ⚠️ 「余额不足该如何处置」（要不要整体拦、要不要提示充值）任务包要求与 CA 对齐后再定，
+   *    本条只钉「不许把英文原文甩给用户」这条底线，不预设处置策略。
+   */
+  it("🔴 §五.4 话题端点配额不足(403 TENANT_QUOTA_EXCEEDED) → 显示中文额度提示，不是英文原文", async () => {
+    topicsMock.mutateAsync.mockRejectedValue(
+      new ApiError("Insufficient tenant quota.", "TENANT_QUOTA_EXCEEDED", 403)
+    );
+    render(<CopywritingForm />);
+    typeSource("原文");
+    fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
+
+    const failure = await screen.findByText(/话题生成失败/);
+    expect(failure.textContent ?? "").toContain(copy.errors.quota);
+    expect(failure.textContent ?? "").not.toContain("Insufficient tenant quota.");
+  });
+
+  /** 两路同时失败 → 两条都要列出来（不是只报第一条）。变异：只取首个失败 → 本条红。 */
+  it("🔴 §五.3 标题与话题同时失败 → 两条失败各自列出", async () => {
+    titlesMock.mutateAsync.mockRejectedValue(new Error("titles boom"));
+    topicsMock.mutateAsync.mockRejectedValue(new Error("topics boom"));
+    render(<CopywritingForm />);
+    typeSource("原文");
+    fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
+
+    expect(await screen.findByDisplayValue("改写后的文案")).toBeInTheDocument();
+    expect(screen.getByText(/标题生成失败/)).toBeInTheDocument();
+    expect(screen.getByText(/话题生成失败/)).toBeInTheDocument();
+  });
+
+  /** 全成 → 一条失败提示都不出现（防止把提示写成常驻）。 */
+  it("§五.3 三路全成 → 不出现任何失败提示", async () => {
+    render(<CopywritingForm />);
+    typeSource("原文");
+    fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
+    expect(await screen.findByDisplayValue("改写后的文案")).toBeInTheDocument();
+    expect(screen.queryByText(/生成失败/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * 🔴 §五.1/§五.2：扣费披露必须在**发起之前**就在界面上，且说清「一键 3 积分 / 各 1 积分」。
+   * 变异：删掉那行 `copy.workbench.copyPriceDisclosure` → 本条红。
+   * 🔴 顺带钉住「不扣费」三个字**不许**再出现在这个界面上（那是本包修掉的谎）。
+   */
+  it("🔴 §五.1/2 界面上有扣费披露（3 积分 / 各 1 积分），且不再出现「不扣费」", () => {
+    const { container } = render(<CopywritingForm />);
+    const disclosure = screen.getByText(copy.workbench.copyPriceDisclosure);
+    expect(disclosure).toBeInTheDocument();
+    expect(disclosure.textContent ?? "").toContain("3 积分");
+    expect(disclosure.textContent ?? "").toContain("1 积分");
+    expect(container.textContent ?? "").not.toContain("不扣费");
   });
 });

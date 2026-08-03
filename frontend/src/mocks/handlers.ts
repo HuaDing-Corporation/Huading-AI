@@ -449,8 +449,22 @@ const mkReverseJob = (
  *    而 `_credit_units` 是 **ROUND_CEILING 取整**（quota.py:273-274）→ 响应里恒为 int（schema `credits: int`）。
  * ⚠️ 短档可被租户 CreditRate 覆盖（quota.py:494-500 走 `_rate`），**长档不能**（:502-504 直接读 settings）——
  *    上一版注释把短档说成 config 常量，方向反了，一并订正。
+ *
+ * ── PRICING-UI-0001 §六 · image 档 30 → 100 ──────────────────────────────────────────────
+ * PR #237（`codex/pricing-rollout-ab-0001`）在本文件把视频短档 100→150、电商复刻 15→130 都改了，
+ * **唯独漏了 image 档**，故归本包。
+ * 🔴🔴 **这个 100 我没能从源码核实，按任务包指令写入**（承重要求第 4 条要求明确标注）。已核到的事实是：
+ *    · BE `estimate_reverse_prompt_quota` 的函数默认值是 `Decimal("1.0000")`（三个分支一致，均非 100）；
+ *    · BE 测试 fixture 里播的 `credits_per_unit` 仍是 **30**（test_reverse_prompt_pipeline.py:120，#237 未改）；
+ *    · `config.py` 里**没有**图片反推的积分常量（只有 video / video_long），#237 也没新增。
+ *    → 即：图片反推价格纯由数据库 `CreditRate` 行决定，源码里根本不存在「100」这个数。它只能来自生产库的
+ *      费率播种，而那份播种我在仓库里查不到。**请 CA 在 #237 回执里确认 100 的出处**；若实际不是 100，
+ *      改这一行即可（前端产品代码没有任何地方硬编码它，见下）。
+ * ✅ 为什么改错了也炸不到用户：图片/视频反推的金额**全程走 `POST /reverse-prompt/estimate` 的返回值**
+ *    （计费门 `reverse-prompt-form.tsx`，承重见 `reverse-prompt-form.charge.test.tsx` 门1——那条用 47 这个
+ *    故意非档位的桩值断言，硬编码任何档位价都会红）。此处这个数只决定 mock 自己回什么。
  */
-const REVERSE_ESTIMATE_IMAGE_CREDITS = 30;
+const REVERSE_ESTIMATE_IMAGE_CREDITS = 100;
 const REVERSE_ESTIMATE_VIDEO_SHORT_CREDITS = 150;
 const REVERSE_ESTIMATE_VIDEO_LONG_CREDITS = 250;
 /**
