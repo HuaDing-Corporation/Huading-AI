@@ -222,7 +222,12 @@ class Settings(BaseSettings):
     engine_aibrain_mid_output_provider_credits_per_m: Decimal = Decimal("120")
     engine_aibrain_high_input_provider_credits_per_m: Decimal = Decimal("40")
     engine_aibrain_high_output_provider_credits_per_m: Decimal = Decimal("240")
+    # APIMart's published Sol input ceiling. Local preflight uses a conservative
+    # UTF-8/token upper bound and never permits a higher configured value.
+    engine_aibrain_max_prompt_tokens: int = Field(default=922_000, ge=1, le=922_000)
     engine_aibrain_max_completion_tokens: int = Field(default=4096, ge=1, le=16384)
+    # Two maximum-size Sol requests may be in provider flight per tenant.
+    engine_aibrain_inflight_exposure_multiplier: int = Field(default=2, ge=1, le=3)
     engine_aibrain_reservation_stale_minutes: int = Field(default=30, ge=1)
     # Compatibility-only snapshots accepted from older deployments. Production
     # costing and observability must use app.services.apimart_token_pricing.

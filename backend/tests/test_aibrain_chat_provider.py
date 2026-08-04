@@ -29,8 +29,24 @@ class _FakeSession:
         self.response = response
         self.calls: list[dict] = []
 
-    def post(self, url: str, *, headers: dict, json: dict, timeout: float):
-        self.calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+    def post(
+        self,
+        url: str,
+        *,
+        headers: dict,
+        json: dict,
+        timeout: float,
+        allow_redirects: bool,
+    ):
+        self.calls.append(
+            {
+                "url": url,
+                "headers": headers,
+                "json": json,
+                "timeout": timeout,
+                "allow_redirects": allow_redirects,
+            }
+        )
         return self.response
 
 
@@ -84,6 +100,7 @@ async def test_apimart_gpt56_chat_returns_content_and_usage_non_streaming() -> N
                 "stream": False,
             },
             "timeout": 12.5,
+            "allow_redirects": False,
         }
     ]
 
@@ -209,6 +226,41 @@ async def test_apimart_gpt56_chat_preserves_usage_from_an_error_response() -> No
     }
 
 
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {"prompt_tokens": "bad", "completion_tokens": 1, "total_tokens": 1},
+        {"prompt_tokens": 1, "completion_tokens": 1},
+        {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 0},
+        {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 3},
+    ],
+)
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_marks_untrusted_usage_contracts(
+    usage: dict[str, object],
+) -> None:
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=_FakeSession(
+            _FakeResponse(
+                {
+                    "choices": [{"message": {"content": "Untrusted usage"}}],
+                    "usage": usage,
+                }
+            )
+        ),
+    )
+
+    result = await provider.chat(
+        {
+            "model": "gpt-5.6-luna",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+    )
+
+    assert result["_usage_contract_valid"] is False
+
+
 @pytest.mark.asyncio
 async def test_apimart_gpt56_chat_uses_reasoning_content_as_a_fallback() -> None:
     session = _FakeSession(
@@ -250,8 +302,28 @@ def test_apimart_gpt56_factory_never_accepts_an_api_key_from_database_config(
         _apimart_gpt56_factory(config)
 
 
+@pytest.mark.parametrize("request_timeout", [900, -1, "nan"])
+def test_apimart_gpt56_factory_rejects_timeouts_that_can_outlive_recovery(
+    monkeypatch,
+    request_timeout: object,
+) -> None:
+    monkeypatch.setattr(settings, "engine_apimart_api_key", "unit-test-key")
+    monkeypatch.setattr(settings, "engine_aibrain_reservation_stale_minutes", 30)
+    config = ProviderConfig(
+        capability="chat",
+        provider="apimart-gpt56",
+        config={"request_timeout": request_timeout},
+        is_active=True,
+    )
+
+    with pytest.raises(ProviderResolutionError):
+        _apimart_gpt56_factory(config)
+
+
 def test_aibrain_rate_defaults_are_declared_in_runtime_and_env_examples() -> None:
     assert settings.engine_aibrain_reservation_stale_minutes == 30
+    assert settings.engine_aibrain_max_prompt_tokens == 922_000
+    assert settings.engine_aibrain_inflight_exposure_multiplier == 2
     assert (
         settings.engine_aibrain_low_input_credits_per_1k,
         settings.engine_aibrain_low_output_credits_per_1k,
@@ -275,6 +347,8 @@ def test_aibrain_rate_defaults_are_declared_in_runtime_and_env_examples() -> Non
         "ENGINE_AIBRAIN_MID_OUTPUT_CREDITS_PER_1K=16.80",
         "ENGINE_AIBRAIN_HIGH_INPUT_CREDITS_PER_1K=5.60",
         "ENGINE_AIBRAIN_HIGH_OUTPUT_CREDITS_PER_1K=33.60",
+        "ENGINE_AIBRAIN_MAX_PROMPT_TOKENS=922000",
+        "ENGINE_AIBRAIN_INFLIGHT_EXPOSURE_MULTIPLIER=2",
         "ENGINE_AIBRAIN_RESERVATION_STALE_MINUTES=30",
     }
     for path in (

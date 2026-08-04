@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, delete, event, insert, select, text, updat
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import sessionmaker
 
+from app.core.config import settings
 from app.core.exceptions import AppError
 from app.db.models import (
     Base,
@@ -740,84 +741,1009 @@ def test_postgres_concurrent_reservations_allow_exactly_one_request(
         assert len(ledger_entries) == 1
 
 
-def test_postgres_already_reserved_requests_can_stack_overdrafts_then_close_gate(
+class _ExposureBlockingChatProvider:
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self.calls: list[dict[str, object]] = []
+        self.release = threading.Event()
+
+    async def chat(self, payload: dict[str, object]) -> dict[str, object]:
+        with self._condition:
+            self.calls.append(payload)
+            call_count = len(self.calls)
+            self._condition.notify_all()
+        if call_count > 2:
+            raise AssertionError("A third provider call bypassed the exposure gate.")
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("Exposure test provider was not released.")
+        return {
+            "content": "authorized provider response",
+            "model": "gpt-5.6-sol",
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+        }
+
+    def wait_for_calls(self, expected: int, *, timeout: float = 5) -> bool:
+        deadline = datetime.now(UTC).timestamp() + timeout
+        with self._condition:
+            while len(self.calls) < expected:
+                remaining = deadline - datetime.now(UTC).timestamp()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(timeout=remaining)
+        return True
+
+
+def test_postgres_inflight_exposure_authorization_is_atomic_before_provider(
     postgres_session_factory,
+    monkeypatch,
 ) -> None:
     factory = postgres_session_factory
-    tenant_id = _seed_postgres_wallet(factory, available=Decimal("200"))
+    tenant_id = str(uuid4())
     with factory() as db:
-        for index in range(2):
-            aibrain._apply_reasoning_wallet_change(
-                db,
+        tenant = Tenant(
+            id=tenant_id,
+            slug=f"aibrain-exposure-{uuid4().hex[:8]}",
+            name="AIBRAIN Exposure",
+        )
+        user = User(
+            tenant_id=tenant_id,
+            email=f"exposure-{uuid4().hex[:8]}@example.com",
+            password_hash="not-used-by-test",
+        )
+        db.add(tenant)
+        db.flush([tenant])
+        db.add(user)
+        conversations = [
+            ChatConversation(
                 tenant_id=tenant_id,
-                entry_type="reserve",
-                amount_credits=Decimal("100"),
-                operation_key=f"in-flight-reserve:{index}",
+                title=f"Exposure request {index}",
             )
+            for index in range(3)
+        ]
+        db.add_all(conversations)
+        db.flush([user, *conversations])
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=tenant_id,
+            entry_type="topup",
+            amount_credits=Decimal("1000"),
+            operation_key=f"seed:{tenant_id}",
+        )
+        user_id = user.id
+        conversation_ids = [conversation.id for conversation in conversations]
         db.commit()
 
-    start = threading.Event()
-    done = [threading.Event(), threading.Event()]
+    provider = _ExposureBlockingChatProvider()
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(settings, "engine_aibrain_max_prompt_tokens", 1000)
+    monkeypatch.setattr(settings, "engine_aibrain_inflight_exposure_multiplier", 2)
+    original_exposure_snapshot = aibrain._current_inflight_exposure
+    original_wallet_change = aibrain._apply_reasoning_wallet_change
+    contender_entry_barrier = threading.Barrier(2)
+    synchronize_contenders = threading.Event()
+    first_stale_snapshot = threading.Event()
+    second_stale_snapshot = threading.Event()
+    release_stale_snapshot = threading.Event()
+    stale_snapshot_lock = threading.Lock()
+    stale_snapshot_count = 0
+
+    def synchronized_wallet_change(*args, **kwargs):
+        if (
+            synchronize_contenders.is_set()
+            and kwargs.get("entry_type") == "reserve"
+            and kwargs.get("in_flight_exposure_credits") is not None
+        ):
+            contender_entry_barrier.wait(timeout=5)
+        return original_wallet_change(*args, **kwargs)
+
+    def synchronized_exposure_snapshot(*args, **kwargs):
+        nonlocal stale_snapshot_count
+        snapshot = original_exposure_snapshot(*args, **kwargs)
+        if synchronize_contenders.is_set() and snapshot.requests == 1:
+            with stale_snapshot_lock:
+                stale_snapshot_count += 1
+                snapshot_number = stale_snapshot_count
+            if snapshot_number == 1:
+                first_stale_snapshot.set()
+            else:
+                second_stale_snapshot.set()
+            assert release_stale_snapshot.wait(timeout=5)
+        return snapshot
+
+    monkeypatch.setattr(
+        aibrain,
+        "_apply_reasoning_wallet_change",
+        synchronized_wallet_change,
+    )
+    monkeypatch.setattr(
+        aibrain,
+        "_current_inflight_exposure",
+        synchronized_exposure_snapshot,
+    )
+    rejected = threading.Event()
+    results: list[object] = []
     errors: list[BaseException] = []
 
-    def settle(index: int) -> None:
+    def send(index: int) -> None:
         try:
-            assert start.wait(timeout=5)
             with factory() as db:
-                aibrain._apply_reasoning_wallet_change(
-                    db,
-                    tenant_id=tenant_id,
-                    entry_type="settle",
-                    amount_credits=Decimal("250"),
-                    reserved_credits=Decimal("100"),
-                    operation_key=f"in-flight-settle:{index}",
-                    allow_overdraft=True,
+                user = db.get(User, user_id)
+                results.append(
+                    asyncio.run(
+                        aibrain.send_chat_message(
+                            db,
+                            user=user,
+                            conversation_id=conversation_ids[index],
+                            content=f"Concurrent exposure request {index}",
+                            tier="high",
+                            attachment_asset_ids=[],
+                            storage=object(),
+                        )
+                    )
                 )
-                db.commit()
         except BaseException as exc:  # noqa: BLE001 - thread failures are evidence.
             errors.append(exc)
-        finally:
-            done[index].set()
+            rejected.set()
 
-    threads = [threading.Thread(target=settle, args=(index,), daemon=True) for index in range(2)]
-    for thread in threads:
+    first = threading.Thread(target=send, args=(0,))
+    first.start()
+    assert provider.wait_for_calls(1)
+
+    contenders = [
+        threading.Thread(
+            target=send,
+            args=(index,),
+            daemon=True,
+        )
+        for index in (1, 2)
+    ]
+    synchronize_contenders.set()
+    for thread in contenders:
         thread.start()
-    start.set()
-    for event_ in done:
-        assert event_.wait(timeout=5)
-    for thread in threads:
+
+    assert first_stale_snapshot.wait(timeout=5)
+    stale_snapshot_raced = second_stale_snapshot.wait(timeout=1)
+    release_stale_snapshot.set()
+    assert provider.wait_for_calls(2)
+    assert rejected.wait(timeout=5)
+    assert len(provider.calls) == 2
+    provider.release.set()
+    first.join(timeout=5)
+    for thread in contenders:
         thread.join(timeout=5)
 
-    assert all(not thread.is_alive() for thread in threads)
-    assert errors == []
+    assert not first.is_alive()
+    assert all(not thread.is_alive() for thread in contenders)
+    assert len(results) == 2
+    assert len(errors) == 1
+    assert stale_snapshot_raced is False
+    assert isinstance(errors[0], AppError)
+    assert errors[0].code == "AIBRAIN_INFLIGHT_EXPOSURE_LIMIT"
+    assert errors[0].status_code == 402
+    assert errors[0].detail["in_flight_requests"] == 2
+    assert errors[0].detail["retryable"] is True
 
     with factory() as db:
-        with pytest.raises(AppError) as blocked:
-            aibrain._apply_reasoning_wallet_change(
-                db,
-                tenant_id=tenant_id,
-                entry_type="reserve",
-                amount_credits=Decimal("1"),
-                operation_key="blocked-after-overdrafts",
-            )
-        assert blocked.value.code == "AIBRAIN_OUTSTANDING_BALANCE"
-        assert blocked.value.detail == {
-            "available_credits": -300.0,
-            "outstanding_credits": 300.0,
-        }
-        wallet = db.get(ReasoningWallet, tenant_id)
-        settlements = list(
+        user_messages = list(
             db.scalars(
-                select(ReasoningLedgerEntry).where(
-                    ReasoningLedgerEntry.tenant_id == tenant_id,
-                    ReasoningLedgerEntry.entry_type == "settle",
+                select(ChatMessage).where(
+                    ChatMessage.tenant_id == tenant_id,
+                    ChatMessage.role == "user",
                 )
             )
         )
-        assert wallet.available_credits == Decimal("-300")
+        assistant_messages = list(
+            db.scalars(
+                select(ChatMessage).where(
+                    ChatMessage.tenant_id == tenant_id,
+                    ChatMessage.role == "assistant",
+                )
+            )
+        )
+        usage_records = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.tenant_id == tenant_id,
+                    UsageRecord.capability == "chat",
+                )
+            )
+        )
+        assert len(user_messages) == 2
+        assert all(message.status == "completed" for message in user_messages)
+        assert len(assistant_messages) == 2
+        assert len(usage_records) == 2
+        assert all(record.status == "settled" for record in usage_records)
+
+
+class _ThreadBackedCancellationProvider:
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self.calls: list[dict[str, object]] = []
+        self.active_threads = 0
+        self.release = threading.Event()
+
+    async def chat(self, payload: dict[str, object]) -> dict[str, object]:
+        return await asyncio.to_thread(self._chat_sync, payload)
+
+    def _chat_sync(self, payload: dict[str, object]) -> dict[str, object]:
+        with self._condition:
+            self.calls.append(payload)
+            self.active_threads += 1
+            call_count = len(self.calls)
+            self._condition.notify_all()
+        try:
+            if call_count > 2:
+                raise AssertionError("Cancellation released live provider exposure.")
+            if not self.release.wait(timeout=5):
+                raise TimeoutError("Cancellation test provider was not released.")
+            return {
+                "content": "provider work completed after caller cancellation",
+                "model": "gpt-5.6-sol",
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2,
+            }
+        finally:
+            with self._condition:
+                self.active_threads -= 1
+                self._condition.notify_all()
+
+    def wait_for_calls(self, expected: int, *, timeout: float = 5) -> bool:
+        deadline = datetime.now(UTC).timestamp() + timeout
+        with self._condition:
+            while len(self.calls) < expected:
+                remaining = deadline - datetime.now(UTC).timestamp()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(timeout=remaining)
+        return True
+
+
+def test_postgres_external_cancellation_keeps_live_provider_exposure_authorized(
+    postgres_session_factory,
+    monkeypatch,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id = str(uuid4())
+    with factory() as db:
+        tenant = Tenant(
+            id=tenant_id,
+            slug=f"aibrain-cancel-exposure-{uuid4().hex[:8]}",
+            name="AIBRAIN Cancellation Exposure",
+        )
+        user = User(
+            tenant_id=tenant_id,
+            email=f"cancel-exposure-{uuid4().hex[:8]}@example.com",
+            password_hash="not-used-by-test",
+        )
+        db.add(tenant)
+        db.flush([tenant])
+        db.add(user)
+        conversations = [
+            ChatConversation(
+                tenant_id=tenant_id,
+                title=f"Cancellation exposure {index}",
+            )
+            for index in range(3)
+        ]
+        db.add_all(conversations)
+        db.flush([user, *conversations])
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=tenant_id,
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+            operation_key=f"seed:{tenant_id}",
+        )
+        user_id = user.id
+        conversation_ids = [conversation.id for conversation in conversations]
+        db.commit()
+
+    provider = _ThreadBackedCancellationProvider()
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(settings, "engine_aibrain_max_prompt_tokens", 1000)
+    monkeypatch.setattr(settings, "engine_aibrain_max_completion_tokens", 1)
+    monkeypatch.setattr(settings, "engine_aibrain_inflight_exposure_multiplier", 2)
+    monkeypatch.setattr(aibrain, "_inflight_heartbeat_interval_seconds", lambda: 0.05)
+
+    async def scenario() -> list[BaseException]:
+        sessions = [factory(), factory()]
+        tasks: list[asyncio.Task[object]] = []
+        outcomes: list[BaseException] = []
+        try:
+            for index, db in enumerate(sessions):
+                user = db.get(User, user_id)
+                tasks.append(
+                    asyncio.create_task(
+                        aibrain.send_chat_message(
+                            db,
+                            user=user,
+                            conversation_id=conversation_ids[index],
+                            content=str(index),
+                            tier="high",
+                            attachment_asset_ids=[],
+                            storage=object(),
+                        )
+                    )
+                )
+            assert await asyncio.to_thread(provider.wait_for_calls, 2)
+
+            heartbeat_cutoff = datetime.now(UTC) - timedelta(minutes=5)
+            with factory() as db:
+                db.execute(
+                    update(ChatMessage)
+                    .where(
+                        ChatMessage.tenant_id == tenant_id,
+                        ChatMessage.role == "user",
+                        ChatMessage.status == "pending",
+                    )
+                    .values(updated_at=datetime.now(UTC) - timedelta(hours=1))
+                )
+                db.commit()
+            for _attempt in range(100):
+                await asyncio.sleep(0.02)
+                with factory() as db:
+                    heartbeat_times = list(
+                        db.scalars(
+                            select(ChatMessage.updated_at).where(
+                                ChatMessage.tenant_id == tenant_id,
+                                ChatMessage.role == "user",
+                                ChatMessage.status == "pending",
+                            )
+                        )
+                    )
+                if len(heartbeat_times) == 2 and all(
+                    updated_at > heartbeat_cutoff for updated_at in heartbeat_times
+                ):
+                    break
+            assert len(heartbeat_times) == 2
+            assert all(updated_at > heartbeat_cutoff for updated_at in heartbeat_times)
+            with factory() as db:
+                recovered = aibrain.recover_stale_reasoning_reservations(
+                    db,
+                    cutoff=heartbeat_cutoff,
+                    recovered_at=datetime.now(UTC),
+                )
+                assert recovered == 0
+                db.rollback()
+
+            for task in tasks:
+                task.cancel()
+            await asyncio.sleep(0)
+            assert all(not task.done() for task in tasks)
+            assert provider.active_threads == 2
+
+            # Parent cancellation is absorbed until the shielded paid work finishes.
+            # Prove the shared native scheduler keeps both leases alive during that
+            # post-cancel window, not only before cancellation is requested.
+            post_cancel_cutoff = datetime.now(UTC) - timedelta(minutes=5)
+            with factory() as db:
+                db.execute(
+                    update(ChatMessage)
+                    .where(
+                        ChatMessage.tenant_id == tenant_id,
+                        ChatMessage.role == "user",
+                        ChatMessage.status == "pending",
+                    )
+                    .values(updated_at=datetime.now(UTC) - timedelta(hours=1))
+                )
+                db.commit()
+            post_cancel_heartbeat_times: list[datetime] = []
+            for _attempt in range(100):
+                await asyncio.sleep(0.02)
+                with factory() as db:
+                    post_cancel_heartbeat_times = list(
+                        db.scalars(
+                            select(ChatMessage.updated_at).where(
+                                ChatMessage.tenant_id == tenant_id,
+                                ChatMessage.role == "user",
+                                ChatMessage.status == "pending",
+                            )
+                        )
+                    )
+                if len(post_cancel_heartbeat_times) == 2 and all(
+                    updated_at > post_cancel_cutoff
+                    for updated_at in post_cancel_heartbeat_times
+                ):
+                    break
+            assert len(post_cancel_heartbeat_times) == 2
+            assert all(
+                updated_at > post_cancel_cutoff
+                for updated_at in post_cancel_heartbeat_times
+            )
+            with factory() as db:
+                recovered = aibrain.recover_stale_reasoning_reservations(
+                    db,
+                    cutoff=post_cancel_cutoff,
+                    recovered_at=datetime.now(UTC),
+                )
+                assert recovered == 0
+                db.rollback()
+
+            with factory() as db:
+                user = db.get(User, user_id)
+                with pytest.raises(AppError) as blocked:
+                    await aibrain.send_chat_message(
+                        db,
+                        user=user,
+                        conversation_id=conversation_ids[2],
+                        content="A third request must remain blocked",
+                        tier="low",
+                        attachment_asset_ids=[],
+                        storage=object(),
+                    )
+                assert blocked.value.code == "AIBRAIN_INFLIGHT_EXPOSURE_LIMIT"
+                assert blocked.value.detail["in_flight_requests"] == 2
+                db.rollback()
+            assert len(provider.calls) == 2
+        finally:
+            provider.release.set()
+            if tasks:
+                gathered = await asyncio.gather(*tasks, return_exceptions=True)
+                outcomes = [item for item in gathered if isinstance(item, BaseException)]
+            for db in sessions:
+                db.close()
+        return outcomes
+
+    outcomes = asyncio.run(scenario())
+    assert len(outcomes) == 2
+    assert all(isinstance(item, asyncio.CancelledError) for item in outcomes)
+
+    with factory() as db:
+        wallet = db.get(ReasoningWallet, tenant_id)
+        user_messages = list(
+            db.scalars(
+                select(ChatMessage).where(
+                    ChatMessage.tenant_id == tenant_id,
+                    ChatMessage.role == "user",
+                )
+            )
+        )
+        assistant_messages = list(
+            db.scalars(
+                select(ChatMessage).where(
+                    ChatMessage.tenant_id == tenant_id,
+                    ChatMessage.role == "assistant",
+                )
+            )
+        )
+        assert wallet.available_credits == Decimal("99.921600")
         assert wallet.reserved_credits == Decimal("0")
-        assert wallet.total_spent_credits == Decimal("500")
-        assert len(settlements) == 2
+        assert wallet.total_spent_credits == Decimal("0.078400")
+        assert len(user_messages) == 2
+        assert all(message.status == "completed" for message in user_messages)
+        assert len(assistant_messages) == 2
+
+
+class _ImmediateChatProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def chat(self, payload: dict[str, object]) -> dict[str, object]:
+        self.calls.append(payload)
+        return {
+            "content": "provider completed before settlement blocked",
+            "model": "gpt-5.6-sol",
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+        }
+
+
+def test_postgres_heartbeat_survives_blocked_post_provider_settlement(
+    postgres_session_factory,
+    monkeypatch,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id = str(uuid4())
+    with factory() as db:
+        tenant = Tenant(
+            id=tenant_id,
+            slug=f"aibrain-settlement-heartbeat-{uuid4().hex[:8]}",
+            name="AIBRAIN Settlement Heartbeat",
+        )
+        user = User(
+            tenant_id=tenant_id,
+            email=f"settlement-heartbeat-{uuid4().hex[:8]}@example.com",
+            password_hash="not-used-by-test",
+        )
+        conversation = ChatConversation(
+            tenant_id=tenant_id,
+            title="Settlement heartbeat",
+        )
+        db.add(tenant)
+        db.flush([tenant])
+        db.add_all([user, conversation])
+        db.flush([user, conversation])
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=tenant_id,
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+            operation_key=f"seed:{tenant_id}",
+        )
+        user_id = user.id
+        conversation_id = conversation.id
+        db.commit()
+
+    provider = _ImmediateChatProvider()
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(settings, "engine_aibrain_max_prompt_tokens", 1000)
+    monkeypatch.setattr(settings, "engine_aibrain_max_completion_tokens", 1)
+    monkeypatch.setattr(aibrain, "_inflight_heartbeat_interval_seconds", lambda: 0.05)
+    original_provider_usage_cost = aibrain._provider_usage_cost
+    settlement_blocked = threading.Event()
+    release_settlement = threading.Event()
+
+    def blocking_provider_usage_cost(*args, **kwargs):
+        settlement_blocked.set()
+        assert release_settlement.wait(timeout=5)
+        return original_provider_usage_cost(*args, **kwargs)
+
+    monkeypatch.setattr(aibrain, "_provider_usage_cost", blocking_provider_usage_cost)
+    results: list[object] = []
+    errors: list[BaseException] = []
+
+    def send() -> None:
+        try:
+            with factory() as db:
+                user = db.get(User, user_id)
+                results.append(
+                    asyncio.run(
+                        aibrain.send_chat_message(
+                            db,
+                            user=user,
+                            conversation_id=conversation_id,
+                            content="Keep the lease alive through settlement",
+                            tier="high",
+                            attachment_asset_ids=[],
+                            storage=object(),
+                        )
+                    )
+                )
+        except BaseException as exc:  # noqa: BLE001 - thread failures are evidence.
+            errors.append(exc)
+
+    sender = threading.Thread(target=send, daemon=True)
+    sender.start()
+    try:
+        assert settlement_blocked.wait(timeout=5)
+        heartbeat_cutoff = datetime.now(UTC) - timedelta(minutes=5)
+        with factory() as db:
+            db.execute(
+                update(ChatMessage)
+                .where(
+                    ChatMessage.tenant_id == tenant_id,
+                    ChatMessage.role == "user",
+                    ChatMessage.status == "pending",
+                )
+                .values(updated_at=datetime.now(UTC) - timedelta(hours=1))
+            )
+            db.commit()
+
+        heartbeat_times: list[datetime] = []
+        for _attempt in range(100):
+            threading.Event().wait(0.02)
+            with factory() as db:
+                heartbeat_times = list(
+                    db.scalars(
+                        select(ChatMessage.updated_at).where(
+                            ChatMessage.tenant_id == tenant_id,
+                            ChatMessage.role == "user",
+                            ChatMessage.status == "pending",
+                        )
+                    )
+                )
+            if len(heartbeat_times) == 1 and heartbeat_times[0] > heartbeat_cutoff:
+                break
+        assert len(heartbeat_times) == 1
+        assert heartbeat_times[0] > heartbeat_cutoff
+        with factory() as db:
+            recovered = aibrain.recover_stale_reasoning_reservations(
+                db,
+                cutoff=heartbeat_cutoff,
+                recovered_at=datetime.now(UTC),
+            )
+            assert recovered == 0
+            db.rollback()
+    finally:
+        release_settlement.set()
+        sender.join(timeout=5)
+
+    assert not sender.is_alive()
+    assert errors == []
+    assert len(results) == 1
+    assert len(provider.calls) == 1
+    with factory() as db:
+        wallet = db.get(ReasoningWallet, tenant_id)
+        user_message = db.scalar(
+            select(ChatMessage).where(
+                ChatMessage.tenant_id == tenant_id,
+                ChatMessage.role == "user",
+            )
+        )
+        assistant_message = db.scalar(
+            select(ChatMessage).where(
+                ChatMessage.tenant_id == tenant_id,
+                ChatMessage.role == "assistant",
+            )
+        )
+        assert wallet.reserved_credits == Decimal("0")
+        assert user_message.status == "completed"
+        assert assistant_message.status == "completed"
+
+
+def test_postgres_locked_heartbeat_rows_do_not_starve_unlocked_lease(
+    postgres_session_factory,
+    monkeypatch,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id = str(uuid4())
+    stale_timestamp = datetime.now(UTC) - timedelta(hours=1)
+    cutoff = datetime.now(UTC) - timedelta(minutes=5)
+    with factory() as db:
+        tenant = Tenant(
+            id=tenant_id,
+            slug=f"heartbeat-lock-timeout-{uuid4().hex[:8]}",
+            name="Heartbeat Lock Timeout",
+        )
+        db.add(tenant)
+        db.flush([tenant])
+        conversations = [
+            ChatConversation(
+                tenant_id=tenant_id,
+                title=f"Heartbeat lock timeout {index}",
+            )
+            for index in range(5)
+        ]
+        db.add_all(conversations)
+        db.flush(conversations)
+        messages = [
+            ChatMessage(
+                tenant_id=tenant_id,
+                conversation_id=conversation.id,
+                role="user",
+                content=f"Heartbeat lock timeout {index}",
+                attachments=[],
+                tier="high",
+                model="gpt-5.6-sol",
+                status="pending",
+                updated_at=stale_timestamp,
+            )
+            for index, conversation in enumerate(conversations)
+        ]
+        db.add_all(messages)
+        db.flush(messages)
+        message_ids = [message.id for message in messages]
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=tenant_id,
+            entry_type="topup",
+            amount_credits=Decimal("10"),
+            operation_key=f"seed:{tenant_id}",
+        )
+        live_reservation = aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=tenant_id,
+            entry_type="reserve",
+            amount_credits=Decimal("1"),
+            chat_message_id=messages[4].id,
+            operation_key=f"reserve:{messages[4].id}",
+        ).ledger_entry.amount_credits
+        messages[4].reserved_credits = live_reservation
+        bind = db.get_bind()
+        db.commit()
+        db.execute(
+            update(ChatMessage)
+            .where(ChatMessage.id.in_(message_ids))
+            .values(updated_at=stale_timestamp)
+        )
+        db.commit()
+
+    locked_message_ids = message_ids[:4]
+    unlocked_message_id = message_ids[4]
+    lock_sessions = []
+    scheduler = aibrain._InflightHeartbeatScheduler(worker_count=4, queue_capacity=5)
+    attempted = threading.Condition()
+    attempted_message_ids: set[str] = set()
+    original_touch = aibrain._touch_pending_chat_message
+
+    def observed_touch(bind, *, tenant_id: str, message_id: str) -> bool:
+        with attempted:
+            attempted_message_ids.add(message_id)
+            attempted.notify_all()
+        return original_touch(
+            bind,
+            tenant_id=tenant_id,
+            message_id=message_id,
+        )
+
+    monkeypatch.setattr(aibrain, "_touch_pending_chat_message", observed_touch)
+    monkeypatch.setattr(
+        aibrain,
+        "_INFLIGHT_HEARTBEAT_LOCK_TIMEOUT_MILLISECONDS",
+        250,
+    )
+    monkeypatch.setattr(
+        aibrain,
+        "_INFLIGHT_HEARTBEAT_STATEMENT_TIMEOUT_MILLISECONDS",
+        1_000,
+    )
+    entries: list[aibrain._InflightHeartbeatEntry] = []
+    try:
+        for message_id in locked_message_ids:
+            lock_db = factory()
+            lock_db.scalar(
+                select(ChatMessage)
+                .where(ChatMessage.id == message_id)
+                .with_for_update()
+            )
+            lock_sessions.append(lock_db)
+
+        for message_id in locked_message_ids:
+            entries.append(
+                scheduler.register(
+                    bind,
+                    tenant_id=tenant_id,
+                    message_id=message_id,
+                    interval_seconds=0.01,
+                )
+            )
+        deadline = datetime.now(UTC).timestamp() + 5
+        with attempted:
+            while not set(locked_message_ids).issubset(attempted_message_ids):
+                remaining = deadline - datetime.now(UTC).timestamp()
+                assert remaining > 0
+                attempted.wait(timeout=remaining)
+
+        unlocked_entry = scheduler.register(
+            bind,
+            tenant_id=tenant_id,
+            message_id=unlocked_message_id,
+            interval_seconds=0.01,
+        )
+        entries.append(unlocked_entry)
+
+        refreshed_at = stale_timestamp
+        for _attempt in range(100):
+            threading.Event().wait(0.02)
+            with factory() as db:
+                refreshed_at = db.scalar(
+                    select(ChatMessage.updated_at).where(
+                        ChatMessage.id == unlocked_message_id
+                    )
+                )
+            if refreshed_at > cutoff:
+                break
+
+        assert refreshed_at > cutoff
+        assert unlocked_message_id in attempted_message_ids
+        with factory() as db:
+            locked_timestamps = list(
+                db.scalars(
+                    select(ChatMessage.updated_at).where(
+                        ChatMessage.id.in_(locked_message_ids)
+                    )
+                )
+            )
+        assert locked_timestamps == [stale_timestamp] * 4
+    finally:
+        for entry in entries:
+            scheduler.unregister(entry)
+        scheduler.shutdown(timeout=2)
+        for lock_db in lock_sessions:
+            lock_db.rollback()
+            lock_db.close()
+
+    with factory() as db:
+        db.execute(
+            update(ChatMessage)
+            .where(ChatMessage.id.in_(locked_message_ids))
+            .values(status="completed", updated_at=datetime.now(UTC))
+        )
+        db.commit()
+        recovered = aibrain.recover_stale_reasoning_reservations(
+            db,
+            cutoff=cutoff,
+            recovered_at=datetime.now(UTC),
+        )
+        assert recovered == 0
+        db.rollback()
+        wallet = db.get(ReasoningWallet, tenant_id)
+        live_message = db.get(ChatMessage, unlocked_message_id)
+        assert wallet.reserved_credits == Decimal("1")
+        assert live_message.status == "pending"
+        assert live_message.reserved_credits == Decimal("1")
+        live_message.status = "failed"
+        live_message.error_code = "AIBRAIN_RESERVATION_EXPIRED"
+        live_message.updated_at = datetime.now(UTC)
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=tenant_id,
+            entry_type="release",
+            amount_credits=live_message.reserved_credits,
+            reserved_credits=live_message.reserved_credits,
+            chat_message_id=live_message.id,
+            operation_key=f"release:{live_message.id}",
+            details={"test_cleanup": True},
+        )
+        db.commit()
+        db.refresh(wallet)
+        assert wallet.reserved_credits == Decimal("0")
+
+
+class _SequencedOverdraftChatProvider:
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self.calls: list[dict[str, object]] = []
+        self.release = [threading.Event(), threading.Event()]
+
+    async def chat(self, payload: dict[str, object]) -> dict[str, object]:
+        with self._condition:
+            call_index = len(self.calls)
+            self.calls.append(payload)
+            self._condition.notify_all()
+        if call_index >= len(self.release):
+            raise AssertionError("An unauthorized request reached the provider.")
+        if not self.release[call_index].wait(timeout=5):
+            raise TimeoutError("Sequenced overdraft provider was not released.")
+        return {
+            "content": f"authorized overdraft response {call_index}",
+            "model": "gpt-5.6-sol",
+            "prompt_tokens": 500,
+            "completion_tokens": 1,
+            "total_tokens": 501,
+        }
+
+    def wait_for_calls(self, expected: int, *, timeout: float = 5) -> bool:
+        deadline = datetime.now(UTC).timestamp() + timeout
+        with self._condition:
+            while len(self.calls) < expected:
+                remaining = deadline - datetime.now(UTC).timestamp()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(timeout=remaining)
+        return True
+
+
+def test_postgres_pre_authorized_requests_settle_after_first_overdraft(
+    postgres_session_factory,
+    monkeypatch,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id = str(uuid4())
+    with factory() as db:
+        tenant = Tenant(
+            id=tenant_id,
+            slug=f"aibrain-authorized-debt-{uuid4().hex[:8]}",
+            name="AIBRAIN Authorized Debt",
+        )
+        user = User(
+            tenant_id=tenant_id,
+            email=f"authorized-debt-{uuid4().hex[:8]}@example.com",
+            password_hash="not-used-by-test",
+        )
+        db.add(tenant)
+        db.flush([tenant])
+        db.add(user)
+        conversations = [
+            ChatConversation(
+                tenant_id=tenant_id,
+                title=f"Authorized debt {index}",
+            )
+            for index in range(3)
+        ]
+        db.add_all(conversations)
+        db.flush([user, *conversations])
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=tenant_id,
+            entry_type="topup",
+            amount_credits=Decimal("1"),
+            operation_key=f"seed:{tenant_id}",
+        )
+        user_id = user.id
+        conversation_ids = [conversation.id for conversation in conversations]
+        db.commit()
+
+    provider = _SequencedOverdraftChatProvider()
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(settings, "engine_aibrain_max_prompt_tokens", 1000)
+    monkeypatch.setattr(settings, "engine_aibrain_max_completion_tokens", 1)
+    monkeypatch.setattr(settings, "engine_aibrain_inflight_exposure_multiplier", 2)
+    completed = threading.Event()
+    results: list[object] = []
+    errors: list[BaseException] = []
+
+    def send(index: int) -> None:
+        try:
+            with factory() as db:
+                user = db.get(User, user_id)
+                results.append(
+                    asyncio.run(
+                        aibrain.send_chat_message(
+                            db,
+                            user=user,
+                            conversation_id=conversation_ids[index],
+                            # Keep both real high-tier reservations below the seeded
+                            # 1-credit balance, while the provider's 500-token usage
+                            # still drives the first settlement into overdraft.
+                            content=str(index),
+                            tier="high",
+                            attachment_asset_ids=[],
+                            storage=object(),
+                        )
+                    )
+                )
+                completed.set()
+        except BaseException as exc:  # noqa: BLE001 - thread failures are evidence.
+            errors.append(exc)
+
+    senders = [threading.Thread(target=send, args=(index,), daemon=True) for index in (0, 1)]
+    for sender in senders:
+        sender.start()
+    assert provider.wait_for_calls(2)
+
+    provider.release[0].set()
+    assert completed.wait(timeout=5)
+    with factory() as db:
+        wallet_after_first = db.get(ReasoningWallet, tenant_id)
+        assert wallet_after_first.available_credits < 0
+        assert wallet_after_first.reserved_credits > 0
+
+    provider.release[1].set()
+    for sender in senders:
+        sender.join(timeout=5)
+
+    assert all(not sender.is_alive() for sender in senders)
+    assert errors == []
+    assert len(results) == 2
+    assert len(provider.calls) == 2
+
+    with factory() as db:
+        user = db.get(User, user_id)
+        with pytest.raises(AppError) as blocked:
+            asyncio.run(
+                aibrain.send_chat_message(
+                    db,
+                    user=user,
+                    conversation_id=conversation_ids[2],
+                    content="Block new work after the authorized debt settles",
+                    tier="low",
+                    attachment_asset_ids=[],
+                    storage=object(),
+                )
+            )
+        assert blocked.value.code == "AIBRAIN_OUTSTANDING_BALANCE"
+        assert len(provider.calls) == 2
+        db.rollback()
+
+    with factory() as db:
+        wallet = db.get(ReasoningWallet, tenant_id)
+        user_messages = list(
+            db.scalars(
+                select(ChatMessage).where(
+                    ChatMessage.tenant_id == tenant_id,
+                    ChatMessage.role == "user",
+                )
+            )
+        )
+        assistant_messages = list(
+            db.scalars(
+                select(ChatMessage).where(
+                    ChatMessage.tenant_id == tenant_id,
+                    ChatMessage.role == "assistant",
+                )
+            )
+        )
+        assert wallet.available_credits == Decimal("-4.667200")
+        assert wallet.reserved_credits == Decimal("0")
+        assert wallet.total_spent_credits == Decimal("5.667200")
+        assert len(user_messages) == 2
+        assert all(message.status == "completed" for message in user_messages)
+        assert len(assistant_messages) == 2
 
 
 def _seed_postgres_subscription(factory, *, total: int) -> tuple[str, str]:

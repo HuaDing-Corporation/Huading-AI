@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -45,10 +47,30 @@ class _FailingChatProvider:
 class _CancelledChatProvider:
     def __init__(self) -> None:
         self.calls: list[dict] = []
+        self.task: asyncio.Task[object] | None = None
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.finished = threading.Event()
 
     async def chat(self, payload: dict) -> dict:
         self.calls.append(payload)
-        raise asyncio.CancelledError
+        self.task = asyncio.current_task()
+        return await asyncio.to_thread(self._chat_sync)
+
+    def _chat_sync(self) -> dict:
+        self.started.set()
+        try:
+            if not self.release.wait(timeout=5):
+                raise TimeoutError("Cancelled provider thread was not released.")
+            return {
+                "content": "thread result is lost after task cancellation",
+                "model": "gpt-5.6-luna",
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2,
+            }
+        finally:
+            self.finished.set()
 
 
 class _FakeObjectStorage:
@@ -68,6 +90,203 @@ class _FakeObjectStorage:
         assert download_filename is None
         self.presigned_keys.append(key)
         return f"https://storage.example/{key}"
+
+
+def test_inflight_heartbeat_scheduler_bounds_workers_and_retries_full_queue(
+    monkeypatch,
+) -> None:
+    scheduler = aibrain._InflightHeartbeatScheduler(worker_count=2, queue_capacity=1)
+    touch_state = threading.Condition()
+    release_touches = threading.Event()
+    calls: list[str] = []
+    active_touches = 0
+    max_active_touches = 0
+
+    def blocking_touch(_bind, *, tenant_id: str, message_id: str) -> bool:
+        nonlocal active_touches, max_active_touches
+        assert tenant_id == "bounded-tenant"
+        with touch_state:
+            calls.append(message_id)
+            active_touches += 1
+            max_active_touches = max(max_active_touches, active_touches)
+            touch_state.notify_all()
+        try:
+            assert release_touches.wait(timeout=5)
+        finally:
+            with touch_state:
+                active_touches -= 1
+                touch_state.notify_all()
+        return False
+
+    monkeypatch.setattr(aibrain, "_touch_pending_chat_message", blocking_touch)
+    message_ids = [f"message-{index}" for index in range(8)]
+    threads: list[threading.Thread] = []
+    try:
+        for message_id in message_ids:
+            scheduler.register(
+                object(),
+                tenant_id="bounded-tenant",
+                message_id=message_id,
+                interval_seconds=0.01,
+            )
+
+        deadline = time.monotonic() + 5
+        with touch_state:
+            while max_active_touches < 2:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0
+                touch_state.wait(timeout=remaining)
+
+        assert scheduler._scheduler_thread is not None
+        threads = [scheduler._scheduler_thread, *scheduler._workers]
+        assert len(threads) == 3
+        assert all(thread.daemon for thread in threads)
+        assert max_active_touches == 2
+        assert scheduler._work_queue.qsize() <= 1
+
+        release_touches.set()
+        deadline = time.monotonic() + 5
+        with scheduler._condition:
+            while scheduler._registry:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0
+                scheduler._condition.wait(timeout=remaining)
+
+        assert sorted(calls) == message_ids
+        assert max_active_touches == 2
+        assert [scheduler._scheduler_thread, *scheduler._workers] == threads
+        assert scheduler._work_queue.empty()
+    finally:
+        release_touches.set()
+        scheduler.shutdown(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+
+
+def test_inflight_heartbeat_scheduler_retries_transient_touch_failure(
+    monkeypatch,
+) -> None:
+    scheduler = aibrain._InflightHeartbeatScheduler(worker_count=1, queue_capacity=1)
+    completed = threading.Event()
+    calls = 0
+
+    def flaky_touch(_bind, *, tenant_id: str, message_id: str) -> bool:
+        nonlocal calls
+        assert (tenant_id, message_id) == ("retry-tenant", "retry-message")
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient heartbeat failure")
+        completed.set()
+        return False
+
+    monkeypatch.setattr(aibrain, "_touch_pending_chat_message", flaky_touch)
+    try:
+        scheduler.register(
+            object(),
+            tenant_id="retry-tenant",
+            message_id="retry-message",
+            interval_seconds=0.01,
+        )
+        assert completed.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        with scheduler._condition:
+            while scheduler._registry:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0
+                scheduler._condition.wait(timeout=remaining)
+        assert calls == 2
+    finally:
+        scheduler.shutdown(timeout=2)
+
+
+def test_inflight_message_heartbeat_stop_is_idempotent_during_touch(
+    monkeypatch,
+) -> None:
+    scheduler = aibrain._InflightHeartbeatScheduler(worker_count=1, queue_capacity=1)
+    target_started = threading.Event()
+    release_target = threading.Event()
+    target_finished = threading.Event()
+    sentinel_finished = threading.Event()
+    calls: list[str] = []
+
+    def racing_touch(_bind, *, tenant_id: str, message_id: str) -> bool:
+        assert tenant_id == "race-tenant"
+        calls.append(message_id)
+        if message_id == "target-message":
+            target_started.set()
+            assert release_target.wait(timeout=5)
+            target_finished.set()
+            return True
+        assert message_id == "sentinel-message"
+        sentinel_finished.set()
+        return False
+
+    monkeypatch.setattr(aibrain, "_INFLIGHT_HEARTBEAT_SCHEDULER", scheduler)
+    monkeypatch.setattr(aibrain, "_inflight_heartbeat_interval_seconds", lambda: 0.01)
+    monkeypatch.setattr(aibrain, "_touch_pending_chat_message", racing_touch)
+    heartbeat = aibrain.InflightMessageHeartbeat(
+        object(),
+        tenant_id="race-tenant",
+        message_id="target-message",
+    )
+    try:
+        heartbeat.start()
+        assert target_started.wait(timeout=5)
+        heartbeat.stop()
+        heartbeat.stop()
+        with scheduler._condition:
+            assert ("race-tenant", "target-message") not in scheduler._registry
+
+        release_target.set()
+        assert target_finished.wait(timeout=5)
+        scheduler.register(
+            object(),
+            tenant_id="race-tenant",
+            message_id="sentinel-message",
+            interval_seconds=0.01,
+        )
+        assert sentinel_finished.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        with scheduler._condition:
+            while scheduler._registry:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0
+                scheduler._condition.wait(timeout=remaining)
+
+        assert calls.count("target-message") == 1
+        assert calls.count("sentinel-message") == 1
+    finally:
+        release_target.set()
+        heartbeat.stop()
+        scheduler.shutdown(timeout=2)
+
+
+@pytest.mark.parametrize(
+    ("messages", "expected_tokens"),
+    [
+        ([{"role": "user", "content": "你好"}], 38),
+        (
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "é"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://storage.example/image.png"},
+                        },
+                    ],
+                }
+            ],
+            8_226,
+        ),
+    ],
+)
+def test_prompt_token_upper_bound_counts_utf8_bytes_framing_and_image_budget(
+    messages: list[dict[str, object]],
+    expected_tokens: int,
+) -> None:
+    assert aibrain._prompt_token_upper_bound(messages) == expected_tokens
 
 
 def _topup_payload(
@@ -668,8 +887,8 @@ def test_message_provider_cost_uses_cache_read_and_write_rates(
             "content": "Use cache-specific rates.",
             "model": "gpt-5.6-luna",
             "prompt_tokens": 100_000,
-            "completion_tokens": 50_000,
-            "total_tokens": 150_000,
+            "completion_tokens": 4_000,
+            "total_tokens": 104_000,
             "cached_prompt_tokens": 40_000,
             "cache_write_tokens": 10_000,
         }
@@ -690,8 +909,8 @@ def test_message_provider_cost_uses_cache_read_and_write_rates(
                 UsageRecord.capability == "chat",
             )
         )
-        assert usage.provider_cost_usd == Decimal("0.29320000")
-        assert usage.cost_cents == 205
+        assert usage.provider_cost_usd == Decimal("0.07240000")
+        assert usage.cost_cents == 51
 
 
 def test_invalid_provider_cost_usage_releases_reservation_without_charge(
@@ -836,6 +1055,314 @@ def test_insufficient_reasoning_balance_never_calls_provider_or_reserves(
         assert db.get(ReasoningWallet, auth_context["tenant_id"]) is None
         assert db.scalar(select(ReasoningLedgerEntry.id)) is None
         assert db.scalar(select(ChatMessage.id)) is None
+
+
+def test_prompt_hard_limit_rejects_before_provider_or_reservation(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    provider = _FakeChatProvider(
+        {
+            "content": "must not be returned",
+            "model": "gpt-5.6-luna",
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+        }
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(
+        aibrain.settings,
+        "engine_aibrain_max_prompt_tokens",
+        256,
+    )
+
+    response = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "x" * 20_000, "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "AIBRAIN_PROMPT_LIMIT_EXCEEDED"
+    assert error["message"] == "AIBRAIN prompt exceeds the local safety limit."
+    assert error["detail"]["prompt_token_upper_bound"] > 256
+    assert error["detail"]["max_prompt_tokens"] == 256
+    assert error["details"] is None
+    assert provider.calls == []
+    with auth_db() as db:
+        assert db.get(ReasoningWallet, auth_context["tenant_id"]) is None
+        assert db.scalar(select(ReasoningLedgerEntry.id)) is None
+        assert db.scalar(select(ChatMessage.id)) is None
+
+
+@pytest.mark.parametrize(
+    ("prompt_tokens", "completion_tokens", "total_tokens", "usage_contract_valid"),
+    [
+        (922_001, 1, 922_002, None),
+        (1, 4_097, 4_098, None),
+        (1, 1, 999_999_999, None),
+        (1, 1, 2, False),
+    ],
+)
+def test_provider_usage_outside_pre_authorized_envelope_is_released(
+    auth_context,
+    auth_db,
+    monkeypatch,
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+    usage_contract_valid: bool | None,
+) -> None:
+    client = TestClient(app)
+    client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=_topup_payload(500),
+        headers=auth_context["headers"],
+    )
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    provider_result = {
+        "content": "provider usage violates the authorized envelope",
+        "model": "gpt-5.6-luna",
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }
+    if usage_contract_valid is not None:
+        provider_result["_usage_contract_valid"] = usage_contract_valid
+    provider = _FakeChatProvider(provider_result)
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+
+    response = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "Keep provider usage inside the authorization", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 502
+    error = response.json()["error"]
+    assert error["code"] == "AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED"
+    assert error["detail"] == {
+        "reported_prompt_tokens": prompt_tokens,
+        "authorized_prompt_tokens": 922_000,
+        "max_prompt_tokens": 922_000,
+        "reported_completion_tokens": completion_tokens,
+        "max_completion_tokens": 4_096,
+        "reported_total_tokens": total_tokens,
+        "max_total_tokens": 926_096,
+    }
+    assert len(provider.calls) == 1
+    with auth_db() as db:
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        user_message = db.scalar(
+            select(ChatMessage).where(
+                ChatMessage.tenant_id == auth_context["tenant_id"],
+                ChatMessage.role == "user",
+            )
+        )
+        assistant_messages = list(
+            db.scalars(
+                select(ChatMessage).where(
+                    ChatMessage.tenant_id == auth_context["tenant_id"],
+                    ChatMessage.role == "assistant",
+                )
+            )
+        )
+        usage = db.scalar(
+            select(UsageRecord).where(
+                UsageRecord.tenant_id == auth_context["tenant_id"],
+                UsageRecord.capability == "chat",
+            )
+        )
+        ledger_entries = list(
+            db.scalars(
+                select(ReasoningLedgerEntry).where(
+                    ReasoningLedgerEntry.tenant_id == auth_context["tenant_id"]
+                )
+            )
+        )
+        assert wallet.available_credits == Decimal("500")
+        assert wallet.reserved_credits == Decimal("0")
+        assert wallet.total_spent_credits == Decimal("0")
+        assert user_message.status == "failed"
+        assert user_message.error_code == "AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED"
+        assert assistant_messages == []
+        assert [entry.entry_type for entry in ledger_entries] == [
+            "topup",
+            "reserve",
+            "release",
+        ]
+        assert usage.status == "released"
+        assert usage.credits == Decimal("0")
+        assert usage.provider_cost_usd > 0
+
+
+def test_provider_usage_at_configured_hard_bound_settles_normally(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=_topup_payload(2000),
+        headers=auth_context["headers"],
+    )
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    provider = _FakeChatProvider(
+        {
+            "content": "usage exactly at the configured safety envelope",
+            "model": "gpt-5.6-luna",
+            "prompt_tokens": 922_000,
+            "completion_tokens": 4_096,
+            "total_tokens": 926_096,
+        }
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+
+    response = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "Accept the exact provider boundary", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["assistant_message"]["charged_credits"] == 1060.16512
+    assert len(provider.calls) == 1
+    with auth_db() as db:
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        usage = db.scalar(
+            select(UsageRecord).where(
+                UsageRecord.tenant_id == auth_context["tenant_id"],
+                UsageRecord.capability == "chat",
+            )
+        )
+        assert wallet.available_credits == Decimal("939.834880")
+        assert wallet.reserved_credits == Decimal("0")
+        assert wallet.total_spent_credits == Decimal("1060.165120")
+        assert usage.status == "settled"
+        assert usage.quantity == Decimal("926096")
+
+
+def test_inflight_exposure_limit_returns_structured_402_before_provider(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    provider = _FakeChatProvider(
+        {
+            "content": "must not be returned",
+            "model": "gpt-5.6-luna",
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+        }
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    target_conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={"title": "Exposure target"},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+
+    with auth_db() as db:
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            entry_type="topup",
+            amount_credits=Decimal("1000"),
+            operation_key=f"exposure-topup:{auth_context['tenant_id']}",
+        )
+        for index in range(2):
+            conversation = ChatConversation(
+                tenant_id=auth_context["tenant_id"],
+                title=f"Legacy in-flight {index}",
+            )
+            db.add(conversation)
+            db.flush([conversation])
+            message = ChatMessage(
+                tenant_id=auth_context["tenant_id"],
+                conversation_id=conversation.id,
+                role="user",
+                content="A legacy request already sent to the provider",
+                attachments=[],
+                tier="high",
+                model="gpt-5.6-sol",
+                status="pending",
+            )
+            db.add(message)
+            db.flush([message])
+            reservation = aibrain._apply_reasoning_wallet_change(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                entry_type="reserve",
+                amount_credits=Decimal("1"),
+                chat_message_id=message.id,
+                operation_key=f"reserve:{message.id}",
+                details={"legacy_without_exposure_metadata": True},
+            ).ledger_entry.amount_credits
+            message.reserved_credits = reservation
+        db.commit()
+
+    response = client.post(
+        f"/api/v1/aibrain/conversations/{target_conversation_id}/messages",
+        json={"content": "Do not start a third exposed request", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 402
+    error = response.json()["error"]
+    assert error["code"] == "AIBRAIN_INFLIGHT_EXPOSURE_LIMIT"
+    assert error["message"] == (
+        "Too much AIBRAIN work is already in progress. "
+        "Wait for an existing request to finish before retrying."
+    )
+    assert error["detail"]["in_flight_exposure_credits"] == 10_601.6512
+    assert error["detail"]["requested_exposure_credits"] == 5_300.8256
+    assert error["detail"]["exposure_limit_credits"] == 10_601.6512
+    assert error["detail"]["excess_credits"] == error["detail"][
+        "requested_exposure_credits"
+    ]
+    assert error["detail"]["in_flight_requests"] == 2
+    assert error["detail"]["retryable"] is True
+    assert error["details"] is None
+    assert provider.calls == []
+    with auth_db() as db:
+        messages = list(
+            db.scalars(
+                select(ChatMessage).where(
+                    ChatMessage.tenant_id == auth_context["tenant_id"],
+                    ChatMessage.role == "user",
+                )
+            )
+        )
+        reserves = list(
+            db.scalars(
+                select(ReasoningLedgerEntry).where(
+                    ReasoningLedgerEntry.tenant_id == auth_context["tenant_id"],
+                    ReasoningLedgerEntry.entry_type == "reserve",
+                )
+            )
+        )
+        assert len(messages) == 2
+        assert len(reserves) == 2
 
 
 def test_dynamic_reservation_can_exceed_200_and_settles_exact_usage(
@@ -1356,7 +1883,7 @@ def test_missing_usage_releases_reservation_without_a_second_provider_call(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_provider_call_releases_the_reasoning_reservation(
+async def test_cancelled_provider_task_preserves_exposure_until_stale_recovery(
     auth_context,
     auth_db,
     monkeypatch,
@@ -1377,8 +1904,8 @@ async def test_cancelled_provider_call_releases_the_reasoning_reservation(
 
     with auth_db() as db:
         user = db.get(User, auth_context["user_id"])
-        with pytest.raises(asyncio.CancelledError):
-            await aibrain.send_chat_message(
+        send_task = asyncio.create_task(
+            aibrain.send_chat_message(
                 db,
                 user=user,
                 conversation_id=conversation_id,
@@ -1387,10 +1914,54 @@ async def test_cancelled_provider_call_releases_the_reasoning_reservation(
                 attachment_asset_ids=[],
                 storage=_FakeObjectStorage(),
             )
+        )
+        assert await asyncio.to_thread(provider.started.wait, 5)
+        assert provider.task is not None
+        provider.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await send_task
 
     assert len(provider.calls) == 1
     with auth_db() as db:
         wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        user_message = db.scalar(
+            select(ChatMessage).where(
+                ChatMessage.tenant_id == auth_context["tenant_id"],
+                ChatMessage.role == "user",
+            )
+        )
+        entries = list(
+            db.scalars(
+                select(ReasoningLedgerEntry)
+                .where(ReasoningLedgerEntry.tenant_id == auth_context["tenant_id"])
+                .order_by(ReasoningLedgerEntry.created_at.asc())
+            )
+        )
+        assert wallet.available_credits < Decimal("100")
+        assert wallet.reserved_credits > Decimal("0")
+        assert user_message.status == "pending"
+        assert [entry.entry_type for entry in entries] == ["topup", "reserve"]
+
+    provider.release.set()
+    assert await asyncio.to_thread(provider.finished.wait, 5)
+    recovered_at = datetime.now(UTC) + timedelta(hours=1)
+    with auth_db() as db:
+        recovered = aibrain.recover_stale_reasoning_reservations(
+            db,
+            cutoff=recovered_at,
+            recovered_at=recovered_at,
+        )
+        db.commit()
+        assert recovered == 1
+
+    with auth_db() as db:
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        user_message = db.scalar(
+            select(ChatMessage).where(
+                ChatMessage.tenant_id == auth_context["tenant_id"],
+                ChatMessage.role == "user",
+            )
+        )
         entries = list(
             db.scalars(
                 select(ReasoningLedgerEntry)
@@ -1400,6 +1971,8 @@ async def test_cancelled_provider_call_releases_the_reasoning_reservation(
         )
         assert wallet.available_credits == Decimal("100")
         assert wallet.reserved_credits == Decimal("0")
+        assert user_message.status == "failed"
+        assert user_message.error_code == "AIBRAIN_RESERVATION_EXPIRED"
         assert [entry.entry_type for entry in entries] == ["topup", "reserve", "release"]
 
 

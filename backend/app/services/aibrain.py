@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import queue
+import threading
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -8,7 +12,7 @@ from decimal import ROUND_CEILING, Decimal
 from typing import Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -62,6 +66,15 @@ _TIER_MODELS: dict[str, str] = {
     "high": "gpt-5.6-sol",
 }
 _IMAGE_PROMPT_TOKEN_ESTIMATE = 4096
+_IMAGE_PROMPT_TOKEN_UPPER_BOUND = 8192
+_MESSAGE_PROMPT_TOKEN_UPPER_BOUND_OVERHEAD = 32
+_INFLIGHT_EXPOSURE_DETAIL_KEY = "in_flight_exposure_credits"
+_INFLIGHT_HEARTBEAT_MAX_INTERVAL_SECONDS = 30.0
+_INFLIGHT_HEARTBEAT_WORKER_COUNT = 4
+_INFLIGHT_HEARTBEAT_QUEUE_CAPACITY = 256
+_INFLIGHT_HEARTBEAT_QUEUE_RETRY_SECONDS = 0.05
+_INFLIGHT_HEARTBEAT_LOCK_TIMEOUT_MILLISECONDS = 1_000
+_INFLIGHT_HEARTBEAT_STATEMENT_TIMEOUT_MILLISECONDS = 5_000
 _IMAGE_ASSET_TYPES = {"avatar_image", "product_image", "generated_image", "cover"}
 _IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 logger = get_logger(__name__)
@@ -80,6 +93,252 @@ class WalletMutation:
     ledger_entry: ReasoningLedgerEntry
 
 
+@dataclass(frozen=True)
+class InflightExposureSnapshot:
+    credits: Decimal
+    requests: int
+
+
+@dataclass
+class _InflightHeartbeatEntry:
+    bind: object
+    tenant_id: str
+    message_id: str
+    interval_seconds: float
+    next_due: float
+    in_progress: bool = False
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return self.tenant_id, self.message_id
+
+
+class _InflightHeartbeatScheduler:
+    """Refresh pending AIBRAIN leases with a process-bounded thread pool."""
+
+    def __init__(
+        self,
+        *,
+        worker_count: int = _INFLIGHT_HEARTBEAT_WORKER_COUNT,
+        queue_capacity: int = _INFLIGHT_HEARTBEAT_QUEUE_CAPACITY,
+    ) -> None:
+        if worker_count <= 0 or queue_capacity <= 0:
+            raise ValueError("Heartbeat worker and queue sizes must be positive.")
+        self._worker_count = worker_count
+        self._queue_capacity = queue_capacity
+        self._pid = os.getpid()
+        self._condition = threading.Condition()
+        self._registry: dict[tuple[str, str], _InflightHeartbeatEntry] = {}
+        self._work_queue: queue.Queue[_InflightHeartbeatEntry] = queue.Queue(maxsize=queue_capacity)
+        self._started = False
+        self._shutdown = False
+        self._worker_generation = 0
+        self._scheduler_thread: threading.Thread | None = None
+        self._workers: list[threading.Thread] = []
+
+    def register(
+        self,
+        bind: object,
+        *,
+        tenant_id: str,
+        message_id: str,
+        interval_seconds: float,
+    ) -> _InflightHeartbeatEntry:
+        if interval_seconds <= 0:
+            raise ValueError("Heartbeat interval must be positive.")
+        entry = _InflightHeartbeatEntry(
+            bind=bind,
+            tenant_id=tenant_id,
+            message_id=message_id,
+            interval_seconds=interval_seconds,
+            next_due=time.monotonic() + interval_seconds,
+        )
+        self._reset_after_fork_if_needed()
+        with self._condition:
+            if self._shutdown:
+                raise RuntimeError("Heartbeat scheduler is shut down.")
+            self._start_threads_locked()
+            self._registry[entry.key] = entry
+            self._condition.notify_all()
+        return entry
+
+    def unregister(self, entry: _InflightHeartbeatEntry) -> None:
+        self._reset_after_fork_if_needed()
+        with self._condition:
+            if self._registry.get(entry.key) is entry:
+                del self._registry[entry.key]
+                self._condition.notify_all()
+
+    def shutdown(self, *, timeout: float = 1.0) -> None:
+        """Stop an isolated scheduler; the process singleton remains long-lived."""
+        self._reset_after_fork_if_needed()
+        with self._condition:
+            self._shutdown = True
+            self._registry.clear()
+            self._condition.notify_all()
+            threads = [*self._workers]
+            if self._scheduler_thread is not None:
+                threads.append(self._scheduler_thread)
+        deadline = time.monotonic() + max(0.0, timeout)
+        for thread in threads:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+
+    def _reset_after_fork_if_needed(self) -> None:
+        current_pid = os.getpid()
+        if current_pid == self._pid:
+            return
+        # Only the forking thread survives in the child, so this pre-lock reset
+        # cannot race with another child thread. Never acquire synchronization
+        # inherited from the parent: it may have been held at the instant of fork.
+        self._pid = current_pid
+        self._condition = threading.Condition()
+        self._registry = {}
+        self._work_queue = queue.Queue(maxsize=self._queue_capacity)
+        self._workers = []
+        self._scheduler_thread = None
+        self._worker_generation = 0
+        self._started = False
+
+    def _start_threads_locked(self) -> None:
+        self._workers = [worker for worker in self._workers if worker.is_alive()]
+        missing_workers = self._worker_count - len(self._workers)
+        first_worker_index = self._worker_generation
+        self._worker_generation += missing_workers
+        self._workers.extend(
+            threading.Thread(
+                target=self._run_worker,
+                name=f"aibrain-inflight-heartbeat-worker-{index}",
+                daemon=True,
+            )
+            for index in range(
+                first_worker_index,
+                first_worker_index + missing_workers,
+            )
+        )
+        new_workers = self._workers[-missing_workers:] if missing_workers else []
+        scheduler_alive = self._scheduler_thread is not None and self._scheduler_thread.is_alive()
+        if not scheduler_alive:
+            self._scheduler_thread = threading.Thread(
+                target=self._run_scheduler,
+                name="aibrain-inflight-heartbeat-scheduler",
+                daemon=True,
+            )
+        self._started = True
+        for worker in new_workers:
+            worker.start()
+        if not scheduler_alive:
+            self._scheduler_thread.start()
+
+    def _run_scheduler(self) -> None:
+        while True:
+            with self._condition:
+                if self._shutdown:
+                    return
+                now = time.monotonic()
+                due_entries = sorted(
+                    (
+                        entry
+                        for entry in self._registry.values()
+                        if not entry.in_progress and entry.next_due <= now
+                    ),
+                    key=lambda entry: entry.next_due,
+                )
+                queue_full = False
+                for entry in due_entries:
+                    try:
+                        self._work_queue.put_nowait(entry)
+                    except queue.Full:
+                        queue_full = True
+                        break
+                    entry.in_progress = True
+
+                if queue_full:
+                    wait_seconds: float | None = _INFLIGHT_HEARTBEAT_QUEUE_RETRY_SECONDS
+                else:
+                    next_due = min(
+                        (
+                            entry.next_due
+                            for entry in self._registry.values()
+                            if not entry.in_progress
+                        ),
+                        default=None,
+                    )
+                    wait_seconds = (
+                        None if next_due is None else max(0.0, next_due - time.monotonic())
+                    )
+                self._condition.wait(timeout=wait_seconds)
+
+    def _run_worker(self) -> None:
+        while True:
+            try:
+                entry = self._work_queue.get(timeout=0.1)
+            except queue.Empty:
+                with self._condition:
+                    if self._shutdown:
+                        return
+                continue
+
+            try:
+                with self._condition:
+                    self._condition.notify_all()
+                    if self._registry.get(entry.key) is not entry:
+                        continue
+                try:
+                    still_pending = _touch_pending_chat_message(
+                        entry.bind,
+                        tenant_id=entry.tenant_id,
+                        message_id=entry.message_id,
+                    )
+                except Exception as exc:  # pragma: no cover - transient DB failures retry.
+                    logger.warning(
+                        "aibrain_inflight_heartbeat_failed",
+                        error_type=type(exc).__name__,
+                    )
+                    still_pending = True
+
+                with self._condition:
+                    if self._registry.get(entry.key) is not entry:
+                        continue
+                    if still_pending:
+                        entry.in_progress = False
+                        entry.next_due = time.monotonic() + entry.interval_seconds
+                    else:
+                        del self._registry[entry.key]
+                    self._condition.notify_all()
+            finally:
+                self._work_queue.task_done()
+
+
+_INFLIGHT_HEARTBEAT_SCHEDULER = _InflightHeartbeatScheduler()
+
+
+class InflightMessageHeartbeat:
+    def __init__(self, bind, *, tenant_id: str, message_id: str) -> None:
+        self._bind = bind
+        self._tenant_id = tenant_id
+        self._message_id = message_id
+        self._lock = threading.Lock()
+        self._entry: _InflightHeartbeatEntry | None = None
+
+    def start(self) -> InflightMessageHeartbeat:
+        with self._lock:
+            if self._entry is None:
+                self._entry = _INFLIGHT_HEARTBEAT_SCHEDULER.register(
+                    self._bind,
+                    tenant_id=self._tenant_id,
+                    message_id=self._message_id,
+                    interval_seconds=_inflight_heartbeat_interval_seconds(),
+                )
+        return self
+
+    def stop(self) -> None:
+        with self._lock:
+            entry = self._entry
+            self._entry = None
+        if entry is not None:
+            _INFLIGHT_HEARTBEAT_SCHEDULER.unregister(entry)
+
+
 async def send_chat_message(
     db: Session,
     *,
@@ -96,7 +355,6 @@ async def send_chat_message(
         conversation_id=conversation_id,
     )
     pricing = tier_pricing(tier)
-    provider = resolve(db, tenant_id=user.tenant_id, capability="chat")
     historical_messages = _context_messages(
         db,
         tenant_id=user.tenant_id,
@@ -116,6 +374,24 @@ async def send_chat_message(
         current_assets=current_assets,
         storage=storage,
     )
+    prompt_token_upper_bound = _prompt_token_upper_bound(provider_messages)
+    max_prompt_tokens = settings.engine_aibrain_max_prompt_tokens
+    if prompt_token_upper_bound > max_prompt_tokens:
+        raise AppError(
+            "AIBRAIN prompt exceeds the local safety limit.",
+            code="AIBRAIN_PROMPT_LIMIT_EXCEEDED",
+            status_code=422,
+            detail={
+                "prompt_token_upper_bound": prompt_token_upper_bound,
+                "max_prompt_tokens": max_prompt_tokens,
+            },
+        )
+    max_completion_tokens = settings.engine_aibrain_max_completion_tokens
+    # Every pending provider request consumes one conservative Sol-sized exposure
+    # slot, regardless of the selected tier. This prevents tier/config drift from
+    # weakening the tenant-wide cap.
+    in_flight_exposure = _max_single_request_exposure_credits()
+    provider = resolve(db, tenant_id=user.tenant_id, capability="chat")
     user_message = ChatMessage(
         id=str(uuid4()),
         tenant_id=user.tenant_id,
@@ -132,7 +408,6 @@ async def send_chat_message(
     if conversation.title == _DEFAULT_CONVERSATION_TITLE:
         conversation.title = _conversation_title(content, has_attachments=bool(attachments))
     db.flush([conversation, user_message])
-    max_completion_tokens = settings.engine_aibrain_max_completion_tokens
     requested_reservation = _reservation_credits(
         provider_messages,
         pricing=pricing,
@@ -145,58 +420,76 @@ async def send_chat_message(
         amount_credits=requested_reservation,
         chat_message_id=user_message.id,
         operation_key=f"reserve:{user_message.id}",
+        in_flight_exposure_credits=in_flight_exposure,
         details={
             "tier": tier,
             "model": pricing.model,
+            "prompt_token_upper_bound": prompt_token_upper_bound,
             "max_completion_tokens": max_completion_tokens,
         },
     ).ledger_entry.amount_credits
     user_message.reserved_credits = reservation
     db.commit()
 
-    try:
-        result = await provider.chat(
+    provider_task = asyncio.create_task(
+        provider.chat(
             {
                 "model": pricing.model,
                 "messages": provider_messages,
                 "max_completion_tokens": max_completion_tokens,
             }
         )
-    except asyncio.CancelledError:
-        _fail_chat_message(
-            db,
-            tenant_id=user.tenant_id,
-            user_message_id=user_message.id,
-            pricing=pricing,
-            reservation=reservation,
-            provider_messages=provider_messages,
-            usage_result={},
-            error_code="AIBRAIN_REQUEST_CANCELLED",
-        )
-        raise
-    except Exception as exc:
-        usage_result = exc.usage_result if isinstance(exc, APIMartGPT56ChatError) else {}
-        _fail_chat_message(
-            db,
-            tenant_id=user.tenant_id,
-            user_message_id=user_message.id,
-            pricing=pricing,
-            reservation=reservation,
-            provider_messages=provider_messages,
-            usage_result=usage_result,
-            error_code="AIBRAIN_PROVIDER_FAILED",
-        )
-        raise AppError(
-            "AIBRAIN provider request failed.",
-            code="AIBRAIN_PROVIDER_FAILED",
-            status_code=502,
-        ) from exc
+    )
+    heartbeat = InflightMessageHeartbeat(
+        db.get_bind(),
+        tenant_id=user.tenant_id,
+        message_id=user_message.id,
+    ).start()
+    owner_task = asyncio.current_task()
+    if owner_task is not None:
+        owner_task.add_done_callback(lambda _completed: heartbeat.stop())
+    request_cancelled = False
+    while True:
+        try:
+            # APIMart's async adapter delegates requests to a worker thread. Shield
+            # the provider task so cancelling the HTTP coroutine cannot release the
+            # tenant exposure while that underlying paid request is still running.
+            result = await asyncio.shield(provider_task)
+            break
+        except asyncio.CancelledError:
+            if not provider_task.cancelled():
+                request_cancelled = True
+                continue
+            # Cancelling an asyncio.to_thread task cannot prove its requests worker
+            # stopped. Preserve pending exposure for stale recovery instead of
+            # opening an unbounded cancellation bypass.
+            heartbeat.stop()
+            raise
+        except Exception as exc:
+            usage_result = exc.usage_result if isinstance(exc, APIMartGPT56ChatError) else {}
+            _fail_chat_message(
+                db,
+                tenant_id=user.tenant_id,
+                user_message_id=user_message.id,
+                pricing=pricing,
+                reservation=reservation,
+                provider_messages=provider_messages,
+                usage_result=usage_result,
+                error_code="AIBRAIN_PROVIDER_FAILED",
+                heartbeat=heartbeat,
+            )
+            if request_cancelled:
+                raise asyncio.CancelledError from exc
+            raise AppError(
+                "AIBRAIN provider request failed.",
+                code="AIBRAIN_PROVIDER_FAILED",
+                status_code=502,
+            ) from exc
 
     prompt_tokens = _nonnegative_int(result.get("prompt_tokens"))
     completion_tokens = _nonnegative_int(result.get("completion_tokens"))
-    total_tokens = _nonnegative_int(result.get("total_tokens")) or (
-        prompt_tokens + completion_tokens
-    )
+    component_total_tokens = prompt_tokens + completion_tokens
+    total_tokens = _nonnegative_int(result.get("total_tokens")) or component_total_tokens
     if total_tokens <= 0:
         _fail_chat_message(
             db,
@@ -207,11 +500,45 @@ async def send_chat_message(
             provider_messages=provider_messages,
             usage_result=dict(result),
             error_code="AIBRAIN_USAGE_MISSING",
+            heartbeat=heartbeat,
         )
         raise AppError(
             "AIBRAIN provider returned no billing usage.",
             code="AIBRAIN_USAGE_MISSING",
             status_code=502,
+        )
+
+    if (
+        result.get("_usage_contract_valid", True) is False
+        or prompt_tokens > max_prompt_tokens
+        or completion_tokens > max_completion_tokens
+        or total_tokens != component_total_tokens
+    ):
+        _fail_chat_message(
+            db,
+            tenant_id=user.tenant_id,
+            user_message_id=user_message.id,
+            pricing=pricing,
+            reservation=reservation,
+            provider_messages=provider_messages,
+            # Do not persist untrusted, potentially overflowing provider counters.
+            usage_result={},
+            error_code="AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED",
+            heartbeat=heartbeat,
+        )
+        raise AppError(
+            "AIBRAIN provider usage exceeded the pre-authorized safety envelope.",
+            code="AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED",
+            status_code=502,
+            detail={
+                "reported_prompt_tokens": prompt_tokens,
+                "authorized_prompt_tokens": max_prompt_tokens,
+                "max_prompt_tokens": max_prompt_tokens,
+                "reported_completion_tokens": completion_tokens,
+                "max_completion_tokens": max_completion_tokens,
+                "reported_total_tokens": total_tokens,
+                "max_total_tokens": max_prompt_tokens + max_completion_tokens,
+            },
         )
 
     answer = str(result.get("content") or "").strip()
@@ -230,6 +557,7 @@ async def send_chat_message(
                 "total_tokens": total_tokens,
             },
             error_code="AIBRAIN_PROVIDER_FAILED",
+            heartbeat=heartbeat,
         )
         raise AppError(
             "AIBRAIN provider returned no answer.",
@@ -254,14 +582,10 @@ async def send_chat_message(
             "AIBRAIN_INSUFFICIENT_BALANCE",
             "AIBRAIN_OUTSTANDING_BALANCE",
         }:
-            # The provider has already completed the paid work. Keep the original
-            # reservation and settle the actual charge below; the wallet may become
-            # negative, and the reserve gate blocks further paid requests until top-up.
-            # APIMart publishes a 922,000-token Sol input ceiling. At the default
-            # 4,096 completion cap, one request is at most 5,300.825600 credits:
-            # 922000*5.60/1000 + 4096*33.60/1000. This provider-contract bound is
-            # not locally validated and is per request; already-reserved concurrent
-            # requests can accumulate debt beyond it.
+            # The provider has already completed pre-authorized work. The local prompt
+            # gate and returned-usage validation bound this settlement to its ledgered
+            # exposure; tenant-wide exposure was atomically capped before provider use.
+            # Keep the original reservation, deliver the answer, and settle actual use.
             overdraft_authorized = True
         else:
             _fail_chat_message(
@@ -278,6 +602,7 @@ async def send_chat_message(
                     "total_tokens": total_tokens,
                 },
                 error_code=exc.code,
+                heartbeat=heartbeat,
             )
             raise
     try:
@@ -297,6 +622,7 @@ async def send_chat_message(
             provider_messages=provider_messages,
             usage_result=dict(result),
             error_code="AIBRAIN_PROVIDER_FAILED",
+            heartbeat=heartbeat,
         )
         raise AppError(
             "AIBRAIN provider returned invalid billing usage.",
@@ -310,8 +636,10 @@ async def send_chat_message(
         message_id=user_message.id,
     )
     if persisted_user_message is None:  # pragma: no cover - row was committed above.
+        heartbeat.stop()
         raise RuntimeError("Pending AIBRAIN message disappeared before settlement.")
     if persisted_user_message.status != "pending":
+        heartbeat.stop()
         raise AppError(
             "The AIBRAIN request is no longer pending.",
             code="AIBRAIN_REQUEST_EXPIRED",
@@ -375,6 +703,11 @@ async def send_chat_message(
         )
     )
     db.commit()
+    heartbeat.stop()
+    if request_cancelled:
+        # The paid work is durable and visible in chat history even though the
+        # original caller no longer needs an HTTP response.
+        raise asyncio.CancelledError
     attachment_urls = _attachment_download_urls(
         db,
         tenant_id=user.tenant_id,
@@ -495,6 +828,7 @@ def _apply_reasoning_wallet_change(
     chat_message_id: str | None = None,
     operation_key: str | None = None,
     reserved_credits: Decimal = Decimal("0"),
+    in_flight_exposure_credits: Decimal | None = None,
     allow_overdraft: bool = False,
     details: dict[str, object] | None = None,
 ) -> WalletMutation:
@@ -547,8 +881,17 @@ def _apply_reasoning_wallet_change(
 
     requested = _reasoning_credits(amount_credits)
     reserved = _reasoning_credits(reserved_credits)
+    requested_exposure = (
+        _reasoning_credits(in_flight_exposure_credits)
+        if in_flight_exposure_credits is not None
+        else None
+    )
     zero = Decimal("0")
-    if requested < zero or reserved < zero:
+    if (
+        requested < zero
+        or reserved < zero
+        or (requested_exposure is not None and requested_exposure <= zero)
+    ):
         raise ValueError("Reasoning credit mutations must be non-negative.")
 
     if entry_type == "topup":
@@ -582,13 +925,21 @@ def _apply_reasoning_wallet_change(
                     "temporary_reservation": True,
                 },
             )
+        if requested_exposure is not None:
+            if chat_message_id is None:
+                raise ValueError("In-flight exposure authorization requires a chat message.")
+            _authorize_inflight_exposure(
+                db,
+                tenant_id=tenant_id,
+                current_message_id=chat_message_id,
+                requested_exposure=requested_exposure,
+            )
         available_delta = -requested
         reserved_delta = requested
     elif entry_type == "settle":
         if requested > reserved and not allow_overdraft:
             raise RuntimeError(
-                "Reasoning settlement exceeds its reservation without overdraft "
-                "authorization."
+                "Reasoning settlement exceeds its reservation without overdraft authorization."
             )
         charged = requested
         available_delta = reserved - charged
@@ -611,10 +962,10 @@ def _apply_reasoning_wallet_change(
         wallet.total_spent_credits = _reasoning_credits(wallet.total_spent_credits + requested)
     wallet.updated_at = datetime.now(UTC)
     ledger_details = dict(details or {})
+    if requested_exposure is not None:
+        ledger_details[_INFLIGHT_EXPOSURE_DETAIL_KEY] = str(requested_exposure)
     if entry_type == "settle" and requested > reserved:
-        ledger_details["reservation_shortfall"] = str(
-            _reasoning_credits(requested - reserved)
-        )
+        ledger_details["reservation_shortfall"] = str(_reasoning_credits(requested - reserved))
         ledger_details["overdraft_after"] = str(max(zero, -next_available))
     if entry_type == "topup":
         ledger_details["wallet_snapshot"] = {
@@ -866,9 +1217,9 @@ def _reservation_credits(
 ) -> Decimal:
     estimated_prompt_tokens = _estimate_prompt_tokens(provider_messages)
     buffered_prompt_tokens = int(
-        (
-            Decimal(estimated_prompt_tokens) * _PROMPT_RESERVATION_MULTIPLIER
-        ).to_integral_value(rounding=ROUND_CEILING)
+        (Decimal(estimated_prompt_tokens) * _PROMPT_RESERVATION_MULTIPLIER).to_integral_value(
+            rounding=ROUND_CEILING
+        )
     )
     return _user_credits(
         pricing,
@@ -901,6 +1252,30 @@ def _estimate_text_tokens(text: str) -> int:
     return max(1, (ascii_chars + 3) // 4 + non_ascii_chars)
 
 
+def _prompt_token_upper_bound(messages: list[dict[str, object]]) -> int:
+    """Return a conservative local bound for the provider's prompt token count.
+
+    GPT-family tokenizers cannot emit more byte-level tokens than the UTF-8 input
+    bytes. Image parts use a deliberately conservative fixed allowance, while the
+    per-message allowance covers roles and provider serialization overhead.
+    """
+    tokens = 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            tokens += len(content.encode("utf-8"))
+        elif isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "image_url":
+                    tokens += _IMAGE_PROMPT_TOKEN_UPPER_BOUND
+                elif part.get("type") == "text":
+                    tokens += len(str(part.get("text") or "").encode("utf-8"))
+        tokens += _MESSAGE_PROMPT_TOKEN_UPPER_BOUND_OVERHEAD
+    return max(1, tokens)
+
+
 def _user_credits(
     pricing: TierPricing,
     prompt_tokens: int,
@@ -912,6 +1287,136 @@ def _user_credits(
             + Decimal(completion_tokens) * pricing.output_credits_per_1k
         )
         / Decimal(1000)
+    )
+
+
+def _inflight_heartbeat_interval_seconds() -> float:
+    stale_seconds = settings.engine_aibrain_reservation_stale_minutes * 60
+    return max(
+        1.0,
+        min(_INFLIGHT_HEARTBEAT_MAX_INTERVAL_SECONDS, stale_seconds / 3),
+    )
+
+
+def _touch_pending_chat_message(
+    bind,
+    *,
+    tenant_id: str,
+    message_id: str,
+) -> bool:
+    with Session(bind=bind) as heartbeat_db:
+        if heartbeat_db.get_bind().dialect.name == "postgresql":
+            # A settlement or recovery transaction may already own this message's
+            # row lock. Bound each attempt so four locked messages cannot occupy the
+            # fixed worker pool indefinitely and starve unrelated tenants' leases.
+            heartbeat_db.execute(
+                text(
+                    "SELECT "
+                    "set_config('lock_timeout', :lock_timeout, true), "
+                    "set_config('statement_timeout', :statement_timeout, true)"
+                ),
+                {
+                    "lock_timeout": (
+                        f"{_INFLIGHT_HEARTBEAT_LOCK_TIMEOUT_MILLISECONDS}ms"
+                    ),
+                    "statement_timeout": (
+                        f"{_INFLIGHT_HEARTBEAT_STATEMENT_TIMEOUT_MILLISECONDS}ms"
+                    ),
+                },
+            )
+        result = heartbeat_db.execute(
+            update(ChatMessage)
+            .where(
+                ChatMessage.id == message_id,
+                ChatMessage.tenant_id == tenant_id,
+                ChatMessage.role == "user",
+                ChatMessage.status == "pending",
+            )
+            .values(updated_at=datetime.now(UTC))
+        )
+        heartbeat_db.commit()
+        return bool(result.rowcount)
+
+
+def _max_single_request_exposure_credits() -> Decimal:
+    max_prompt_tokens = settings.engine_aibrain_max_prompt_tokens
+    max_completion_tokens = settings.engine_aibrain_max_completion_tokens
+    return max(
+        _user_credits(
+            tier_pricing(tier),
+            max_prompt_tokens,
+            max_completion_tokens,
+        )
+        for tier in ("low", "mid", "high")
+    )
+
+
+def _tenant_inflight_exposure_limit() -> Decimal:
+    return _reasoning_credits(
+        _max_single_request_exposure_credits()
+        * settings.engine_aibrain_inflight_exposure_multiplier
+    )
+
+
+def _current_inflight_exposure(
+    db: Session,
+    *,
+    tenant_id: str,
+    exclude_message_id: str,
+) -> InflightExposureSnapshot:
+    pending_requests = int(
+        db.scalar(
+            select(func.count(ChatMessage.id)).where(
+                ChatMessage.tenant_id == tenant_id,
+                ChatMessage.role == "user",
+                ChatMessage.status == "pending",
+                ChatMessage.id != exclude_message_id,
+            )
+        )
+        or 0
+    )
+    if pending_requests == 0:
+        return InflightExposureSnapshot(credits=Decimal("0"), requests=0)
+    return InflightExposureSnapshot(
+        credits=_reasoning_credits(_max_single_request_exposure_credits() * pending_requests),
+        requests=pending_requests,
+    )
+
+
+def _authorize_inflight_exposure(
+    db: Session,
+    *,
+    tenant_id: str,
+    current_message_id: str,
+    requested_exposure: Decimal,
+) -> None:
+    # Caller holds the tenant ReasoningWallet row FOR UPDATE. Every provider-bound
+    # request uses this same lock, so reading pending ledgered exposure and writing
+    # the current reserve entry are one serialized authorization operation.
+    current = _current_inflight_exposure(
+        db,
+        tenant_id=tenant_id,
+        exclude_message_id=current_message_id,
+    )
+    limit = _tenant_inflight_exposure_limit()
+    next_exposure = _reasoning_credits(current.credits + requested_exposure)
+    if next_exposure <= limit:
+        return
+    raise AppError(
+        (
+            "Too much AIBRAIN work is already in progress. "
+            "Wait for an existing request to finish before retrying."
+        ),
+        code="AIBRAIN_INFLIGHT_EXPOSURE_LIMIT",
+        status_code=402,
+        detail={
+            "in_flight_exposure_credits": float(current.credits),
+            "requested_exposure_credits": float(requested_exposure),
+            "exposure_limit_credits": float(limit),
+            "excess_credits": float(_reasoning_credits(next_exposure - limit)),
+            "in_flight_requests": current.requests,
+            "retryable": True,
+        },
     )
 
 
@@ -970,12 +1475,8 @@ def _provider_usage_cost(
         model=pricing.model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
-        cached_prompt_tokens=_optional_nonnegative_int(
-            usage_result.get("cached_prompt_tokens")
-        ),
-        cache_write_tokens=_optional_nonnegative_int(
-            usage_result.get("cache_write_tokens")
-        ),
+        cached_prompt_tokens=_optional_nonnegative_int(usage_result.get("cached_prompt_tokens")),
+        cache_write_tokens=_optional_nonnegative_int(usage_result.get("cache_write_tokens")),
         authoritative_credits=usage_result.get("credits"),
     )
     if cost.cost_estimate_uncertain:
@@ -1015,6 +1516,7 @@ def _fail_chat_message(
     provider_messages: list[dict[str, object]],
     usage_result: Mapping[str, object],
     error_code: str,
+    heartbeat: InflightMessageHeartbeat,
 ) -> None:
     user_message = _chat_message_for_update(
         db,
@@ -1022,8 +1524,10 @@ def _fail_chat_message(
         message_id=user_message_id,
     )
     if user_message is None:  # pragma: no cover - committed before provider invocation.
+        heartbeat.stop()
         raise RuntimeError("Pending AIBRAIN message disappeared before release.")
     if user_message.status != "pending":
+        heartbeat.stop()
         return
     prompt_tokens = _nonnegative_int(usage_result.get("prompt_tokens"))
     completion_tokens = _nonnegative_int(usage_result.get("completion_tokens"))
@@ -1089,6 +1593,7 @@ def _fail_chat_message(
         )
     )
     db.commit()
+    heartbeat.stop()
 
 
 def recover_stale_reasoning_reservations(

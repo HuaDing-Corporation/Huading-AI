@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -14,6 +15,7 @@ from app.services.apimart_token_pricing import apimart_cache_token_usage
 
 _DEFAULT_BASE_URL = "https://api.apimart.ai/v1"
 _ALLOWED_MODELS = {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"}
+_REQUEST_TIMEOUT_STALE_SAFETY_FACTOR = 2
 
 
 class APIMartGPT56ChatError(RuntimeError):
@@ -73,6 +75,7 @@ class APIMartGPT56ChatProvider:
             },
             json=request_body,
             timeout=self.request_timeout,
+            allow_redirects=False,
         )
         response_payload = _response_payload(response)
         usage = _usage(response_payload)
@@ -157,18 +160,28 @@ def _message_content(payload: Mapping[str, Any]) -> str:
 
 def _usage(payload: Mapping[str, Any]) -> dict[str, Any]:
     raw_usage = _completion_payload(payload).get("usage")
-    if not isinstance(raw_usage, Mapping):
+    usage_is_mapping = isinstance(raw_usage, Mapping)
+    if not usage_is_mapping:
         raw_usage = {}
     prompt_tokens = _nonnegative_int(raw_usage.get("prompt_tokens"))
     completion_tokens = _nonnegative_int(raw_usage.get("completion_tokens"))
-    total_tokens = _nonnegative_int(raw_usage.get("total_tokens")) or (
-        prompt_tokens + completion_tokens
-    )
+    reported_total_tokens = _nonnegative_int(raw_usage.get("total_tokens"))
+    total_tokens = reported_total_tokens or (prompt_tokens + completion_tokens)
     result: dict[str, Any] = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
     }
+    usage_contract_valid = usage_is_mapping and all(
+        _is_nonnegative_integer(raw_usage.get(key))
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+    )
+    if usage_contract_valid:
+        usage_contract_valid = reported_total_tokens == prompt_tokens + completion_tokens
+    if not usage_contract_valid:
+        # Preserve safe normalized counters for failure observability while telling
+        # the service not to trust them for delivery, settlement, or overdraft.
+        result["_usage_contract_valid"] = False
     cache_usage = apimart_cache_token_usage(raw_usage)
     if cache_usage.cached_prompt_tokens is not None:
         result["cached_prompt_tokens"] = cache_usage.cached_prompt_tokens
@@ -183,6 +196,21 @@ def _nonnegative_int(value: Any) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _is_nonnegative_integer(value: Any) -> bool:
+    if isinstance(value, bool) or value in (None, ""):
+        return False
+    if isinstance(value, int):
+        return value >= 0
+    if isinstance(value, float):
+        return math.isfinite(value) and value >= 0 and value.is_integer()
+    if isinstance(value, str):
+        try:
+            return int(value.strip()) >= 0
+        except (TypeError, ValueError):
+            return False
+    return False
 
 
 def _positive_int(value: Any, *, field: str) -> int:
@@ -200,6 +228,22 @@ def _config_value(values: Mapping[str, Any], key: str, default: Any) -> Any:
     return default if value in (None, "") else value
 
 
+def _safe_chat_request_timeout(value: Any) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ProviderResolutionError("APIMart chat request_timeout must be numeric.") from exc
+    stale_seconds = settings.engine_aibrain_reservation_stale_minutes * 60
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ProviderResolutionError("APIMart chat request_timeout must be positive and finite.")
+    if timeout * _REQUEST_TIMEOUT_STALE_SAFETY_FACTOR >= stale_seconds:
+        raise ProviderResolutionError(
+            "APIMart chat request_timeout is too long for the AIBRAIN reservation "
+            "recovery window."
+        )
+    return timeout
+
+
 def _apimart_gpt56_factory(config: ProviderConfig) -> APIMartGPT56ChatProvider:
     values = config.config or {}
     api_key = settings.engine_apimart_api_key.strip()
@@ -208,7 +252,7 @@ def _apimart_gpt56_factory(config: ProviderConfig) -> APIMartGPT56ChatProvider:
     return APIMartGPT56ChatProvider(
         api_key=api_key,
         base_url=str(_config_value(values, "base_url", settings.engine_apimart_base_url)),
-        request_timeout=float(
+        request_timeout=_safe_chat_request_timeout(
             _config_value(
                 values,
                 "request_timeout",
