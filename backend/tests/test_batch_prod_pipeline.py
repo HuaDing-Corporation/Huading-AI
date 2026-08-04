@@ -362,8 +362,8 @@ def test_batch_estimate_prompt_set_sums_video_gen_quota(
     data = resp.json()["data"]
     assert data == {
         "total_rows": 2,
-        "per_row_credits": 1300,
-        "total_credits": 2600,
+        "per_row_credits": 1600,
+        "total_credits": 3200,
         "insufficient": False,
         "balance_credits": 5000,
     }
@@ -515,7 +515,7 @@ def test_batch_create_prompt_set_fans_out_video_gen_tasks_on_video_queue(
             select(func.count()).select_from(UsageRecord).where(UsageRecord.status == "reserved")
         )
         assert usage_count == 2
-        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 2800
+        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 4000
         roles = {
             item.role
             for item in db.scalars(
@@ -1122,7 +1122,7 @@ def test_batch_cancel_releases_queued_tasks_and_leaves_running_tasks(
         )
         assert released.status == "released"
         assert reserved.status == "reserved"
-        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 650
+        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 800
         assert db.get(BatchJob, "batch-cancel").status == "running"
 
 

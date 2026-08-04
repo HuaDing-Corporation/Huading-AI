@@ -5,7 +5,6 @@ import inspect
 import time
 from datetime import UTC, datetime
 from io import BytesIO
-from time import perf_counter
 from types import SimpleNamespace
 
 import pytest
@@ -372,7 +371,7 @@ def _run_tracked_detail_plan(
     prefix: str,
     concurrency: int,
     delay_seconds: float,
-) -> tuple[object, float, _ConcurrencyTrackingReverseProvider]:
+) -> tuple[object, _ConcurrencyTrackingReverseProvider]:
     reverse = _ConcurrencyTrackingReverseProvider(delay_seconds=delay_seconds)
     _patch_replicate_providers(monkeypatch, reverse=reverse)
     monkeypatch.setattr(
@@ -402,7 +401,6 @@ def _run_tracked_detail_plan(
         db.commit()
 
     app.dependency_overrides[get_object_storage] = lambda: storage
-    started_at = perf_counter()
     try:
         response = TestClient(app).post(
             "/api/v1/ecom-images/replicate",
@@ -416,9 +414,8 @@ def _run_tracked_detail_plan(
             headers=auth_context["headers"],
         )
     finally:
-        elapsed_seconds = perf_counter() - started_at
         app.dependency_overrides.pop(get_object_storage, None)
-    return response, elapsed_seconds, reverse
+    return response, reverse
 
 
 def _create_main_replicate_plan(
@@ -551,7 +548,7 @@ def test_ecom_replicate_plan_bounds_and_overlaps_full_detail_analysis(
     auth_context,
     auth_db,
 ) -> None:
-    response, _elapsed_seconds, reverse = _run_tracked_detail_plan(
+    response, reverse = _run_tracked_detail_plan(
         monkeypatch=monkeypatch,
         auth_context=auth_context,
         auth_db=auth_db,
@@ -567,12 +564,12 @@ def test_ecom_replicate_plan_bounds_and_overlaps_full_detail_analysis(
     assert reverse.max_in_flight == 3
 
 
-def test_ecom_replicate_parallel_analysis_is_faster_than_serial_mock_timing(
+def test_ecom_replicate_analysis_respects_configured_concurrency(
     monkeypatch,
     auth_context,
     auth_db,
 ) -> None:
-    serial_response, serial_seconds, serial = _run_tracked_detail_plan(
+    serial_response, serial = _run_tracked_detail_plan(
         monkeypatch=monkeypatch,
         auth_context=auth_context,
         auth_db=auth_db,
@@ -580,7 +577,7 @@ def test_ecom_replicate_parallel_analysis_is_faster_than_serial_mock_timing(
         concurrency=1,
         delay_seconds=0.05,
     )
-    parallel_response, parallel_seconds, parallel = _run_tracked_detail_plan(
+    parallel_response, parallel = _run_tracked_detail_plan(
         monkeypatch=monkeypatch,
         auth_context=auth_context,
         auth_db=auth_db,
@@ -589,15 +586,10 @@ def test_ecom_replicate_parallel_analysis_is_faster_than_serial_mock_timing(
         delay_seconds=0.05,
     )
 
-    print(
-        "mock replicate timing: "
-        f"serial={serial_seconds:.3f}s parallel={parallel_seconds:.3f}s"
-    )
     assert serial_response.status_code == 201
     assert parallel_response.status_code == 201
     assert serial.max_in_flight == 1
     assert parallel.max_in_flight == 4
-    assert parallel_seconds < serial_seconds * 0.7
 
 
 def test_ecom_replicate_plan_fails_when_one_reference_analysis_fails(

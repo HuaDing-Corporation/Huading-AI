@@ -469,6 +469,10 @@ def _avatar_video_asset_or_404(
     return avatar_video
 
 
+def _photo_image_resolution(payload: VideoGenerateRequest) -> str:
+    return payload.image_resolution or "1k"
+
+
 def _quota_estimate_for_payload(
     payload: VideoGenerateRequest,
     *,
@@ -480,6 +484,7 @@ def _quota_estimate_for_payload(
             db,
             tenant_id=tenant_id,
             n=1,
+            resolution=_photo_image_resolution(payload),
         )
     if payload.video_mode == "seedance_i2v":
         target_duration_sec = seedance_i2v_target_seconds(payload.duration_sec)
@@ -1059,7 +1064,7 @@ def _create_photo_video(
         "image_keys": list(payload.image_keys),
         "aspect_ratio": payload.aspect_ratio,
         "requested_aspect_ratio": payload.aspect_ratio,
-        "image_resolution": payload.image_resolution or "1k",
+        "image_resolution": _photo_image_resolution(payload),
         "image_provider": image_provider,
         "estimated": True,
         "apply_visible_label": payload.apply_visible_label,
@@ -1095,6 +1100,7 @@ def _create_photo_video(
         db,
         tenant_id=user.tenant_id,
         video_task_id=task.id,
+        resolution=_photo_image_resolution(payload),
         n=1,
         provider=image_provider,
     )
@@ -1114,7 +1120,7 @@ def _validate_photo_provider_capabilities(
         validate_image_provider_request(
             selection.provider,
             {
-                "image_resolution": payload.image_resolution or "1k",
+                "image_resolution": _photo_image_resolution(payload),
                 "image_keys": payload.image_keys,
                 "image_key": payload.image_key,
             },

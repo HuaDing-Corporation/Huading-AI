@@ -1,9 +1,11 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app.core.exceptions import AppError
 from app.db.models import Asset, CreditRate, Plan, Subscription, UsageRecord, VideoTask, Voice
 from app.main import app
 from app.services import quota
@@ -225,18 +227,23 @@ def test_settle_avatar_video_source_keeps_avatar_credits_and_updates_provider_co
         assert record.model == "realman_change_lips"
 
 
-def test_image_generation_quota_is_flat_per_image(auth_context, auth_db) -> None:
+def test_image_generation_quota_scales_by_count_within_a_resolution_tier(
+    auth_context,
+    auth_db,
+) -> None:
     with auth_db() as db:
         _seed_subscription(db, auth_context["tenant_id"], total=100)
 
         single = quota.estimate_image_generation_quota(
             db,
             tenant_id=auth_context["tenant_id"],
+            resolution="1k",
         )
         batch = quota.estimate_image_generation_quota(
             db,
             tenant_id=auth_context["tenant_id"],
             n=3,
+            resolution="1k",
         )
 
     assert single.capability == "image"
@@ -247,9 +254,163 @@ def test_image_generation_quota_is_flat_per_image(auth_context, auth_db) -> None
     assert batch.estimated_credits == Decimal("30.00")
 
 
+@pytest.mark.parametrize(
+    ("resolution", "expected_credits"),
+    [
+        ("480p", Decimal("500.00")),
+        ("720p", Decimal("1000.00")),
+        ("1080p", Decimal("2500.00")),
+    ],
+)
+def test_video_products_share_resolution_tier_pricing(
+    resolution,
+    expected_credits,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        _seed_subscription(db, auth_context["tenant_id"], total=10_000)
+        db.add_all(
+            [
+                CreditRate(
+                    capability="video",
+                    unit="second",
+                    credits_per_unit=Decimal("100.0000"),
+                ),
+                CreditRate(
+                    capability="video_gen",
+                    unit="second",
+                    credits_per_unit=Decimal("100.0000"),
+                ),
+            ]
+        )
+        db.flush()
+
+        ecom = quota.estimate_seedance_i2v_quota(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            script="",
+            speed=1,
+            estimated_seconds=5,
+            resolution=resolution,
+        )
+        video_gen = quota.estimate_video_gen_quota(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            duration_sec=5,
+            resolution=resolution,
+        )
+
+    assert ecom.estimated_credits == expected_credits
+    assert video_gen.estimated_credits == expected_credits
+
+
+@pytest.mark.parametrize(
+    ("resolution", "expected_credits"),
+    [
+        ("1k", Decimal("80.00")),
+        ("2k", Decimal("130.00")),
+        ("4k", Decimal("180.00")),
+    ],
+)
+def test_image_resolution_tiers_price_each_output(
+    resolution,
+    expected_credits,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        _seed_subscription(db, auth_context["tenant_id"], total=10_000)
+        db.add(
+            CreditRate(
+                tenant_id=auth_context["tenant_id"],
+                capability="image",
+                unit="image",
+                credits_per_unit=Decimal("80.0000"),
+            )
+        )
+        db.flush()
+
+        estimate = quota.estimate_image_generation_quota(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            n=1,
+            resolution=resolution,
+        )
+
+    assert estimate.estimated_credits == expected_credits
+    assert estimate.reservation_units == int(expected_credits)
+
+
+def test_image_resolution_tiers_multiply_tenant_base_rate(auth_context, auth_db) -> None:
+    with auth_db() as db:
+        _seed_subscription(db, auth_context["tenant_id"], total=10_000)
+        db.add(
+            CreditRate(
+                tenant_id=auth_context["tenant_id"],
+                capability="image",
+                unit="image",
+                credits_per_unit=Decimal("37.0000"),
+            )
+        )
+        db.flush()
+
+        estimates = {
+            resolution: quota.estimate_image_generation_quota(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                resolution=resolution,
+            )
+            for resolution in ("1k", "2k", "4k")
+        }
+
+    assert {tier: item.estimated_credits for tier, item in estimates.items()} == {
+        "1k": Decimal("37.00"),
+        "2k": Decimal("60.12"),
+        "4k": Decimal("83.25"),
+    }
+    assert {tier: item.reservation_units for tier, item in estimates.items()} == {
+        "1k": 37,
+        "2k": 61,
+        "4k": 84,
+    }
+
+
+def test_resolution_tier_pricing_rejects_unknown_values(auth_context, auth_db) -> None:
+    with auth_db() as db:
+        _seed_subscription(db, auth_context["tenant_id"], total=10_000)
+
+        with pytest.raises(AppError) as image_error:
+            quota.estimate_image_generation_quota(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                resolution="8k",
+            )
+        with pytest.raises(AppError) as video_error:
+            quota.estimate_video_gen_quota(
+                db,
+                tenant_id=auth_context["tenant_id"],
+                duration_sec=5,
+                resolution="4k",
+            )
+
+    assert image_error.value.code == "VALIDATION_ERROR"
+    assert image_error.value.status_code == 422
+    assert video_error.value.code == "VALIDATION_ERROR"
+    assert video_error.value.status_code == 422
+
+
 def test_reserve_image_generation_quota_creates_reserved_usage(auth_context, auth_db) -> None:
     with auth_db() as db:
-        sub = _seed_subscription(db, auth_context["tenant_id"], total=100)
+        sub = _seed_subscription(db, auth_context["tenant_id"], total=1_000)
+        db.add(
+            CreditRate(
+                tenant_id=auth_context["tenant_id"],
+                capability="image",
+                unit="image",
+                credits_per_unit=Decimal("80.0000"),
+            )
+        )
         db.add(
             VideoTask(
                 id="photo-reserve-unit",
@@ -263,6 +424,7 @@ def test_reserve_image_generation_quota_creates_reserved_usage(auth_context, aut
             db,
             tenant_id=auth_context["tenant_id"],
             video_task_id="photo-reserve-unit",
+            resolution="4k",
         )
         db.commit()
 
@@ -270,8 +432,8 @@ def test_reserve_image_generation_quota_creates_reserved_usage(auth_context, aut
         reserved = sub.quota_credits_reserved
 
     assert reservation.estimated_seconds == 1
-    assert reservation.estimated_credits == Decimal("10.00")
-    assert reserved == 10
+    assert reservation.estimated_credits == Decimal("180.00")
+    assert reserved == 180
     assert record.status == "reserved"
     assert record.capability == "image"
     assert record.provider == "apimart"

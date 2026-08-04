@@ -140,6 +140,8 @@ export function PhotoImageForm({
   // 已上传参考图 > 所选张数 → 明确越限（不静默丢图，沿用 ECOM-REF-LIMIT 先例）；仅在张数合法时判。
   const refCountValid = isValidImageCount(refCount, PHOTO_REF_MAX);
   const refOverLimit = refCountValid && refKeys.length > refCount;
+  const isImageEdit = refKeys.length > 0;
+  const effectiveImageResolution = isImageEdit ? DEFAULT_IMAGE_RESOLUTION : imageResolution;
   // onGenerate 守卫 与 generateDisabled 共用同一判据，杜绝漂移（uploadRef.isPending 仅在按钮禁用侧、守卫侧不判）。
   const inputInvalid = !prompt.trim() || !refCountValid || refOverLimit;
 
@@ -159,7 +161,7 @@ export function PhotoImageForm({
       ...(imageNegative.trim() ? { negative_prompt: imageNegative.trim() } : {}), // 图片负面复用 negative_prompt 字段
       ...enabledStrengths,
       aspect_ratio: aspectRatio, // 画面比例（默认 1:1）；不再带 image_quality/image_size
-      image_resolution: imageResolution, // §3之二：清晰度档位，界面选择是硬条件、总随请求传（默认 1k）
+      image_resolution: effectiveImageResolution, // 修图固定 1K；纯文生图显式传用户所选档位
       apply_visible_label: applyLabel
     });
   };
@@ -217,7 +219,11 @@ export function PhotoImageForm({
       <AspectRatioSelect value={aspectRatio} onValueChange={setAspectRatio} />
 
       {/* §3之二 清晰度档位 1K/2K/4K：与画面比例并列（比例定形状、档位定大小）。 */}
-      <ImageResolutionPicker value={imageResolution} onChange={setImageResolution} />
+      <ImageResolutionPicker
+        value={effectiveImageResolution}
+        onChange={setImageResolution}
+        disabled={isImageEdit}
+      />
 
       {/* 生成强度（可选）：三个滑块，各带开关、默认关、关闭不提交。默认收起，避免表单过长。 */}
       <CollapsibleSection label={copy.workbench.strengthGroupLabel}>

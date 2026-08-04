@@ -93,7 +93,8 @@ describe("CoverPanel · AI tab (AiCoverTab)", () => {
     expect(createMock.fn.mock.calls[0][0]).toMatchObject({
       topic: "咖啡杯特写",
       video_mode: "photo",
-      purpose: "cover"
+      purpose: "cover",
+      image_resolution: "1k"
     });
   });
 

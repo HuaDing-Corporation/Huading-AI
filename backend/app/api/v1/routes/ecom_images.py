@@ -372,6 +372,7 @@ def _create_cutout_task(
         db,
         tenant_id=user.tenant_id,
         video_task_id=task.id,
+        resolution="1k",
         n=1,
         provider=image_provider,
     )
@@ -454,6 +455,7 @@ def _create_model_task(
         db,
         tenant_id=user.tenant_id,
         video_task_id=task.id,
+        resolution="1k",
         n=1,
         provider=image_provider,
     )
