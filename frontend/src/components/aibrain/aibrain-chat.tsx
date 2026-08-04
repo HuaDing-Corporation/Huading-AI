@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { useConversation, useCreateConversation, useSendMessage, useWallet } from "@/lib/aibrain/hooks";
 import {
   AIBRAIN_ERROR,
+  inflightExposureView,
   outstandingView,
   shortfallView,
   type IntensityTier,
@@ -21,6 +22,23 @@ import { MessageStream } from "@/components/aibrain/message-stream";
 import { Composer } from "@/components/aibrain/composer";
 import { WalletBalance } from "@/components/aibrain/wallet-balance";
 import { RechargeDialog, type RechargeReason } from "@/components/aibrain/recharge-dialog";
+
+/**
+ * 在途敞口 402 的提示文本（FIX2）—— 三段拼接，每段都可能缺席但**「充值不解决」那句永远在**。
+ * ① 定性（不是余额问题、充值无效）② 有几条在途（拿得到才说）③ 可重试则说「稍后重试即可」
+ * 走内联提示而**不是**充值弹窗：弹窗里有充值按钮，对这个码是错的引导。
+ */
+function inflightExposureText(detail: unknown): string {
+  const { inFlightRequests, retryable } = inflightExposureView(detail);
+  return [
+    copy.aibrain.inflightExposureTitle,
+    inFlightRequests !== undefined ? copy.aibrain.inflightExposureCount(inFlightRequests) : undefined,
+    copy.aibrain.inflightExposureNote, // 🔴 这一句无论 detail 有没有都必须出现
+    retryable ? copy.aibrain.inflightExposureRetry : undefined
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
 
 export function AibrainChat() {
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -78,22 +96,33 @@ export function AibrainChat() {
         setSendError(copy.aibrain.error);
         return false;
       }
-      // 🔴 402 有**两种情形**（BE PR #239 `e2bc2c02`），必须分开，因为两套话术是相反的：
-      //    · OUTSTANDING_BALANCE → 上次已答完并交付、实际用量超预留 → 欠款，**那笔钱花掉了**
-      //    · INSUFFICIENT_BALANCE → 这次预留不够 → 充值即可，**这笔钱只是临时锁住**
-      //    欠费判在前（与 BE reserve 分支的判定次序一致），否则欠费用户会收到一句不相干的
-      //    「结束后差额会退回」——他上次的钱早就退不回来了。
-      // ⚠️ `err.status === 402` 的兜底放在**最后**：新码（如 #239 还在加的「租户级聚合在途敞口」
-      //    闸门，`e2bc2c02` 里尚未实现）会落到这里，按「预留不足」展示——那是较温和的一种说法，
-      //    不会把没欠费的人说成欠费。
+      // ══ 402 有**三种情形**（BE #239 `2a98b5d0`），三套话术互不相容，必须逐码分流 ══════════
+      //    · OUTSTANDING_BALANCE       → 上次已答完并交付、实扣超预留 → 欠款，**那笔钱花掉了**
+      //    · INSUFFICIENT_BALANCE      → 这次预留不够 → 充值即可，**这笔钱只是临时锁住会退回**
+      //    · INFLIGHT_EXPOSURE_LIMIT   → 在途太多 → 🔴**不是余额问题、充值无效**，等前面答完
+      //    次序照抄 BE reserve 分支（aibrain.py:901/:912/:927）：负余额 → 预留不足 → 敞口。
+      //    前两条走充值窗；**第三条绝不许走充值窗**（走内联提示），否则用户会花钱买一个解决不了的问题。
       if (err.code === AIBRAIN_ERROR.OUTSTANDING_BALANCE) openRechargeFor("outstanding", err.detail);
-      else if (err.code === AIBRAIN_ERROR.INSUFFICIENT_BALANCE || err.status === 402)
-        openRechargeFor("insufficient", err.detail);
+      else if (err.code === AIBRAIN_ERROR.INSUFFICIENT_BALANCE) openRechargeFor("insufficient", err.detail);
+      else if (err.code === AIBRAIN_ERROR.INFLIGHT_EXPOSURE_LIMIT)
+        setSendError(inflightExposureText(err.detail));
+      // 422：输入太长（BE 在建消息、动钱包**之前**就拦了）——用户可自行解决，讲清怎么做。
+      else if (err.code === AIBRAIN_ERROR.PROMPT_LIMIT_EXCEEDED) setSendError(copy.aibrain.promptLimitExceeded);
+      // 502：上游返回了但用量越界 / 没给用量 → 都是 fail-closed 不交付。
+      // ⚠️ 前者的**结算性质 CB 仍在判定**，故文案中性、不提扣费（详见 copy.ts 的注释）。
+      else if (err.code === AIBRAIN_ERROR.PROVIDER_USAGE_LIMIT_EXCEEDED)
+        setSendError(copy.aibrain.providerUsageLimit);
       else if (err.code === AIBRAIN_ERROR.REQUEST_EXPIRED) setSendError(copy.aibrain.requestExpired);
       else if (err.code === AIBRAIN_ERROR.REQUEST_LIMIT_EXCEEDED) setSendError(copy.aibrain.reqLimit);
-      else if (err.code === AIBRAIN_ERROR.PROVIDER_FAILED) setSendError(copy.aibrain.providerFailed);
+      // USAGE_MISSING 与 PROVIDER_FAILED 对用户是同一件事（这次没成、可重试）→ 共用文案。
+      else if (err.code === AIBRAIN_ERROR.PROVIDER_FAILED || err.code === AIBRAIN_ERROR.USAGE_MISSING)
+        setSendError(copy.aibrain.providerFailed);
       else if (err.code === AIBRAIN_ERROR.ATTACHMENT_NOT_FOUND || err.code === AIBRAIN_ERROR.ATTACHMENT_INVALID)
         setSendError(copy.aibrain.attachmentRejected);
+      // 🔴 未知 402 的兜底**从「引导充值」翻转为中性**（FIX2）：三个已知 402 里已经有一个是
+      //    「充值无效」，而猜错方向的代价不对称 —— 引导充值猜错 = 用户白花钱（不可逆）；中性猜错
+      //    只是让他多点一次顶部那个一直都在的充值入口。故不再弹充值窗。
+      else if (err.status === 402) setSendError(copy.aibrain.unknownPaymentIssue);
       else setSendError(err.message || copy.aibrain.error);
       return false;
     }
@@ -121,8 +150,10 @@ export function AibrainChat() {
             </div>
           )}
 
+          {/* leading-relaxed：敞口 402 那条会拼到四句（标题 + 条数 + 「充值不解决」+ 重试提示），
+              原来的紧行距读起来是一堵墙。其余单句提示不受影响。 */}
           {sendError ? (
-            <p role="alert" className="mt-2 rounded-field bg-error-bg px-3 py-2 text-[12.5px] text-error-fg">
+            <p role="alert" className="mt-2 rounded-field bg-error-bg px-3 py-2 text-[12.5px] leading-relaxed text-error-fg">
               {sendError}
             </p>
           ) : null}

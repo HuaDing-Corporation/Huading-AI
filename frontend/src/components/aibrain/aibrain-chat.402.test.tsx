@@ -118,21 +118,195 @@ describe("402 分流：欠费 vs 预留不足（CB 第 1 点）", () => {
   });
 
   /**
-   * 未知的 402 码（如 #239 还在加的「租户级聚合在途敞口」闸门，`e2bc2c02` 里尚未实现）→
-   * 落到**较温和**的「预留不足」兜底：把没欠费的人说成欠费，比反过来更糟。
-   * 变异：把兜底改成 outstanding → 本条红。
+   * 🔴🔴 FIX2 · **兜底方向翻转**（本条上一版断言的是「未知 402 → 弹充值窗、按预留不足展示」）。
+   *
+   * 上一轮那个判断在**只有两个码**时成立（两个都是「充值有效」，把没欠费的人说成欠费更糟）。
+   * `2a98b5d0` 加了 `AIBRAIN_INFLIGHT_EXPOSURE_LIMIT` —— 一个「**充值无效**」的 402 之后就不成立了：
+   * 猜错方向的代价**不对称** —— 引导充值猜错 = 用户真花了钱还是发不出去（不可逆）；
+   * 中性猜错 = 他多点一次顶部那个一直都在的充值入口。
+   * 变异：把兜底改回 `openRechargeFor("insufficient", …)` → 本条红（会弹出充值窗）。
    */
-  it("未知 402 码 → 落「预留不足」兜底（不把没欠费的人说成欠费）", async () => {
+  it("🔴 未知 402 码 → **中性提示、不弹充值窗**（方向从「引导充值」翻转）", async () => {
     hooks.sendMutateAsync.mockRejectedValue(new ApiError("nope", "AIBRAIN_SOMETHING_NEW", 402));
     renderChat();
     await typeAndSend();
 
-    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
-    const d = within(dialog());
-    expect(d.getByText(copy.aibrain.insufficientTitle)).toBeInTheDocument();
-    expect(d.queryByText(copy.aibrain.outstandingTitle)).not.toBeInTheDocument();
-    // 无 detail → 回退到下界 + 「至少」措辞（这条同时守住了回退在真实链路上确实生效）。
-    expect(d.getByText(copy.aibrain.insufficientMinRequired("68.8"))).toBeInTheDocument(); // mid 档默认
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.unknownPaymentIssue));
+    // 🔴 不弹充值窗 —— 未知码可能是「充值无效」那一类。
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    // 也不许出现任何引导充值 / 说欠费的字样。
+    const alertText = screen.getByRole("alert").textContent ?? "";
+    expect(alertText).not.toContain("充值");
+    expect(alertText).not.toContain("余额");
+  });
+});
+
+// ══ FIX2 · 三个新码的集成级门（每个码都要在这一层有门——M5 已经证明组件级守不住分流）══════════
+describe("🔴 在途敞口 402：不是余额问题，充值无效", () => {
+  /** BE `2a98b5d0` aibrain.py:1412-1419 的 detail 真实形状（6 个字段）。 */
+  const EXPOSURE = new ApiError(
+    "Too much AIBRAIN work is already in progress. Wait for an existing request to finish before retrying.",
+    "AIBRAIN_INFLIGHT_EXPOSURE_LIMIT",
+    402,
+    {
+      in_flight_exposure_credits: 5300.8256,
+      requested_exposure_credits: 5300.8256,
+      exposure_limit_credits: 10601.6512,
+      excess_credits: 0.0001,
+      in_flight_request_count: 2,
+      retryable: true
+    }
+  );
+
+  /**
+   * 🔴🔴 **本包最要紧的一条门**（对标上一轮门D2 钉住「欠费文案里不出现临时预留」的做法）。
+   * 敞口上限 = 单请求最大敞口 × multiplier，两个都是 config 常量，**钱包余额不在那个式子里**。
+   * 用户充再多钱上限一分不涨 —— 所以这个 402 的界面上**绝不许出现充值引导**。
+   * 变异：把这个码的分流改成 `openRechargeFor("insufficient", err.detail)` → 本条红（弹窗出现）。
+   */
+  it("🔴 敞口 402 → **不弹充值窗**，且提示里不出现「充值 / 余额 / 积分不足」任何字样", async () => {
+    hooks.sendMutateAsync.mockRejectedValue(EXPOSURE);
+    renderChat();
+    await typeAndSend();
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    // 🔴 一个充值弹窗都不许弹。
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    const text = screen.getByRole("alert").textContent ?? "";
+    // 🔴 「充值」二字只许以「充值不会解决」的形式出现——故断言的是**引导性说法**不存在。
+    expect(text).not.toContain("充值即可");
+    expect(text).not.toContain("余额不足");
+    expect(text).not.toContain("积分不足");
+    // 🔴 主动澄清必须在：用户刚被 402 拦下，默认联想就是没钱，不说破他就会去充值。
+    expect(text).toContain(copy.aibrain.inflightExposureNote);
+  });
+
+  /**
+   * 用上 `in_flight_request_count`（任务包 §三.1 明确要求）——用户据此知道要等几条。
+   * 变异：`inflightExposureView` 忽略该字段 → 本条红。
+   */
+  it("用上 in_flight_request_count → 「当前有 2 条对话正在进行中」", async () => {
+    hooks.sendMutateAsync.mockRejectedValue(EXPOSURE);
+    renderChat();
+    await typeAndSend();
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.inflightExposureCount(2))
+    );
+  });
+
+  /**
+   * 用上 `retryable`（任务包 §三.1 明确要求）：为真 → 说「稍后重试即可」；为假 → **不说**。
+   * 变异：把 `retryable` 判断写死为 true → 后半段红。
+   */
+  it("用上 retryable：true → 提示可重试；false → 不承诺重试", async () => {
+    hooks.sendMutateAsync.mockRejectedValue(EXPOSURE);
+    const first = renderChat();
+    await typeAndSend();
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.inflightExposureRetry)
+    );
+    first.unmount();
+
+    hooks.sendMutateAsync.mockRejectedValue(
+      new ApiError("x", "AIBRAIN_INFLIGHT_EXPOSURE_LIMIT", 402, { in_flight_request_count: 2, retryable: false })
+    );
+    renderChat();
+    await typeAndSend();
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    expect(screen.getByRole("alert").textContent ?? "").not.toContain(copy.aibrain.inflightExposureRetry);
+  });
+
+  /**
+   * detail 缺失 → 不提条数，但「充值不解决」那句**照样在**（那是这个码的立身之本）。
+   * 变异：把 `inflightExposureNote` 挪进「有 detail」的分支 → 本条红。
+   */
+  it("detail 缺失 → 不提条数，但「充值不会解决」照样说", async () => {
+    hooks.sendMutateAsync.mockRejectedValue(new ApiError("x", "AIBRAIN_INFLIGHT_EXPOSURE_LIMIT", 402));
+    renderChat();
+    await typeAndSend();
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    const text = screen.getByRole("alert").textContent ?? "";
+    expect(text).toContain(copy.aibrain.inflightExposureNote);
+    expect(text).not.toMatch(/当前有 \d+ 条/);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  /** in_flight_request_count 为 0（自相矛盾）→ 不说条数，别讲「当前有 0 条正在进行中」。 */
+  it("in_flight_request_count 为 0 → 不说条数（避免自相矛盾）", async () => {
+    hooks.sendMutateAsync.mockRejectedValue(
+      new ApiError("x", "AIBRAIN_INFLIGHT_EXPOSURE_LIMIT", 402, { in_flight_request_count: 0, retryable: true })
+    );
+    renderChat();
+    await typeAndSend();
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    expect(screen.getByRole("alert").textContent ?? "").not.toMatch(/当前有 \d+ 条/);
+  });
+});
+
+describe("422 提示词超限 / 502 上游用量越界 / 502 缺用量", () => {
+  /**
+   * 422：用户可自行解决 → 讲清三条可做的事；**不弹充值窗**（这不是钱的问题）。
+   * 🔴 且**不展示 detail 里的 token 数**：`prompt_token_upper_bound` 是 BE 按 UTF-8 字节算的
+   *    保守上界（比真实 token 大不少），摆给用户既看不懂也据此行动不了。
+   * 变异：把 token 数拼进文案 → 本条红。
+   */
+  it("🔴 PROMPT_LIMIT_EXCEEDED(422) → 讲清怎么办、不弹窗、**不出现 token 数字**", async () => {
+    hooks.sendMutateAsync.mockRejectedValue(
+      new ApiError("AIBRAIN prompt exceeds the local safety limit.", "AIBRAIN_PROMPT_LIMIT_EXCEEDED", 422, {
+        prompt_token_upper_bound: 950_000,
+        max_prompt_tokens: 922_000
+      })
+    );
+    renderChat();
+    await typeAndSend();
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.promptLimitExceeded));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    const text = screen.getByRole("alert").textContent ?? "";
+    expect(text).not.toContain("950000");
+    expect(text).not.toContain("922000");
+    expect(text).not.toMatch(/\d{4,}/); // 任何四位以上的裸数字都不该出现
+  });
+
+  /**
+   * 🔴 502 用量越界：**文案暂按中性定稿**（任务包 §六.3 明令，CB 尚未判定其结算性质）。
+   * 本条钉住的是「**不承诺任何结算事实**」——「未扣费」「已扣费」都不许出现，
+   * 因为在 CB 判定之前这两句话都可能是错的，而这是钱的事。
+   * 变异：把文案改成「本次未扣费，请重试」→ 本条红。
+   */
+  it("🔴 PROVIDER_USAGE_LIMIT_EXCEEDED(502) → 中性文案，**不说扣没扣费**（等 CB 判定）", async () => {
+    hooks.sendMutateAsync.mockRejectedValue(
+      new ApiError("envelope", "AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED", 502, {
+        reported_prompt_tokens: 922_001,
+        max_prompt_tokens: 922_000
+      })
+    );
+    renderChat();
+    await typeAndSend();
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.providerUsageLimit));
+    const text = screen.getByRole("alert").textContent ?? "";
+    expect(text).not.toContain("未扣费");
+    expect(text).not.toContain("已扣费");
+    expect(text).not.toContain("扣费");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  /**
+   * 🔴 `AIBRAIN_USAGE_MISSING`(502) 是**任务包没列、我从源码里捡到的第四个新码**
+   * （aibrain.py:502-509）。对用户与 PROVIDER_FAILED 是同一件事 → 共用文案。
+   * 变异：把它从分流里删掉 → 本条红（会落到 `err.message` 的英文原文）。
+   */
+  it("🔴 USAGE_MISSING(502)（任务包未列）→ 走 providerFailed 文案，不落英文原文", async () => {
+    hooks.sendMutateAsync.mockRejectedValue(
+      new ApiError("AIBRAIN provider returned no billing usage.", "AIBRAIN_USAGE_MISSING", 502)
+    );
+    renderChat();
+    await typeAndSend();
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.providerFailed));
+    expect(screen.getByRole("alert").textContent ?? "").not.toContain("no billing usage");
   });
 });
 

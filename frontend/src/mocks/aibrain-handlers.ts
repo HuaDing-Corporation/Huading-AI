@@ -73,6 +73,42 @@ const PROVIDER_FAIL_MARKER = "__mock_provider_fail__";
  * ⚠️ 这与本 mock 上一版的方向**完全相反**（旧版是「不交付 + 释放预留」），别按旧印象改。
  */
 const RESERVE_OVERRUN_MARKER = "__mock_reserve_overrun__";
+/**
+ * content 含此串 → 模拟**在途敞口打满** 402 `AIBRAIN_INFLIGHT_EXPOSURE_LIMIT`
+ * （BE `2a98b5d0` aibrain.py:1405-1420）。
+ * ⚠️ 为什么用 marker 而不是真的数并发：BE 的判据是「本租户 `status=pending` 的 user 消息数」，
+ *    而本 mock 是**同步 handler** —— 请求进来就走完，永远不存在 pending 中间态，真实条件在这里
+ *    根本无法自然发生。marker 换来的是这条分支在前端侧可测；行为形态（402 + 6 个 detail 字段）是真的。
+ */
+const INFLIGHT_EXPOSURE_MARKER = "__mock_inflight_exposure__";
+/** content 含此串 → 模拟上游用量越界 502（BE aibrain.py:511-542，fail-closed 不交付）。 */
+const PROVIDER_USAGE_LIMIT_MARKER = "__mock_usage_limit__";
+/** content 含此串 → 强制触发提示词硬上限 422（免得测试要造 922KB 输入；真实字节数超限同样会触发）。 */
+const PROMPT_LIMIT_MARKER = "__mock_prompt_limit__";
+
+// ── 提示词本地硬上限（BE `_prompt_token_upper_bound` vs `engine_aibrain_max_prompt_tokens`）──
+/** BE config 默认值（`engine_aibrain_max_prompt_tokens`，config.py:227，上界也是 922_000）。 */
+const MAX_PROMPT_TOKENS = 922_000;
+/**
+ * BE `_prompt_token_upper_bound`：**按 UTF-8 字节数**取保守上界（GPT 系分词器产出的 token 数
+ * 不会超过输入字节数），图片按固定配额，每条消息再加序列化开销。
+ * 🔴 与 `estimatePromptTokens`（计费用的**估算**）是**两个不同的量**，别混：
+ *    这个是"绝不会更多"的上界，用于安全闸；那个是"大概多少"的估算，用于预留额。
+ *    BE 也是两个独立函数，mock 照搬这个区分。
+ */
+function promptTokenUpperBound(history: ChatMessage[], content: string, attachmentCount: number): number {
+  const bytes = (s: string) => new TextEncoder().encode(s).length;
+  let tokens = 0;
+  for (const m of history) {
+    if (m.content) tokens += bytes(m.content);
+    tokens += m.attachments.length * IMAGE_PROMPT_TOKEN_ESTIMATE;
+    tokens += 4;
+  }
+  if (content) tokens += bytes(content);
+  tokens += attachmentCount * IMAGE_PROMPT_TOKEN_ESTIMATE;
+  tokens += 4;
+  return tokens;
+}
 
 // ── 计费镜像（逐条对应 BE services/aibrain.py，见文件抬头）──────────────────────────────────
 const PROMPT_RESERVATION_MULTIPLIER = 1.25; // BE `_PROMPT_RESERVATION_MULTIPLIER`
@@ -299,6 +335,27 @@ export function aibrainHandlers() {
       const attachments = resolved.attachments;
       const tier = body.tier;
 
+      // ── 闸门⓪ 提示词超本地硬上限 → 422（BE aibrain.py:379，在**建消息与动钱包之前**）─────────
+      // 次序照抄 BE：这一条比任何钱包闸门都早 —— 输入太长时消息压根不落库、钱包一分不动。
+      // 真实条件（UTF-8 字节数 > 922000）在 mock 里也**真的**会触发；marker 只是让测试不必造 922KB 输入。
+      {
+        const upperBound = promptTokenUpperBound(conv.messages, content, ids.length);
+        if (upperBound > MAX_PROMPT_TOKENS)
+          return err(
+            422,
+            AIBRAIN_ERROR.PROMPT_LIMIT_EXCEEDED,
+            "AIBRAIN prompt exceeds the local safety limit.",
+            { prompt_token_upper_bound: upperBound, max_prompt_tokens: MAX_PROMPT_TOKENS }
+          );
+        if (content.includes(PROMPT_LIMIT_MARKER))
+          return err(
+            422,
+            AIBRAIN_ERROR.PROMPT_LIMIT_EXCEEDED,
+            "AIBRAIN prompt exceeds the local safety limit.",
+            { prompt_token_upper_bound: MAX_PROMPT_TOKENS + 1, max_prompt_tokens: MAX_PROMPT_TOKENS }
+          );
+      }
+
       // ── 闸门① 负余额（欠费）→ 402 OUTSTANDING（BE reserve 分支 :557，**判在最前**）───────────
       // 🔴 FIX1：上一版 mock 没有这条，理由是「BE 无此逻辑，造一个是反方向的假杀」——`e2bc2c02` 之后
       //    BE 有了：结算允许透支（见下方路径③），余额可为负，随后一切新的付费请求被这道闸门拦住。
@@ -328,12 +385,52 @@ export function aibrainHandlers() {
             temporary_reservation: true
           }
         );
+      // ── 闸门③ 在途敞口打满 → 402 INFLIGHT_EXPOSURE（BE reserve 分支 :927，**判在预留不足之后**）──
+      // 🔴 它也是 402，但**跟余额毫无关系**：上限 = 单请求最大敞口 × multiplier，两个都是 config 常量。
+      //    前端因此绝不许对这个码引导充值 —— mock 照发 6 个 detail 字段，好让那条分流真的被测到。
+      if (content.includes(INFLIGHT_EXPOSURE_MARKER))
+        return err(
+          402,
+          AIBRAIN_ERROR.INFLIGHT_EXPOSURE_LIMIT,
+          "Too much AIBRAIN work is already in progress. Wait for an existing request to finish before retrying.",
+          {
+            in_flight_exposure_credits: 5300.8256,
+            requested_exposure_credits: 5300.8256,
+            exposure_limit_credits: 10601.6512,
+            excess_credits: 0.0001,
+            in_flight_request_count: 2,
+            retryable: true
+          }
+        );
+
       available = quantizeCredits(available - reservation); // 预留：available → reserved
 
       // 上游失败（测 502 分流）——发生在预留之后，故要**把预留还回去**（BE `_fail_chat_message` 释放预留）。
       if (content.includes(PROVIDER_FAIL_MARKER)) {
         available = quantizeCredits(available + reservation);
         return err(502, AIBRAIN_ERROR.PROVIDER_FAILED, "AI 服务暂时不可用，请稍后重试");
+      }
+
+      // 上游用量越界 → 502 fail-closed（BE aibrain.py:511-542）。同样在预留之后，故同样释放预留。
+      // ⚠️ BE 走的是 `_fail_chat_message` → `entry_type="release"` + `UsageRecord.credits=0`，
+      //    即**对用户不计积分**；但该路径的结算性质 CB 仍在判定，故前端文案保持中性（见 copy.ts）。
+      //    mock 忠实照做 BE 现在的行为：释放全额预留。
+      if (content.includes(PROVIDER_USAGE_LIMIT_MARKER)) {
+        available = quantizeCredits(available + reservation);
+        return err(
+          502,
+          AIBRAIN_ERROR.PROVIDER_USAGE_LIMIT_EXCEEDED,
+          "AIBRAIN provider usage exceeded the pre-authorized safety envelope.",
+          {
+            reported_prompt_tokens: MAX_PROMPT_TOKENS + 1,
+            authorized_prompt_tokens: MAX_PROMPT_TOKENS,
+            max_prompt_tokens: MAX_PROMPT_TOKENS,
+            reported_completion_tokens: MAX_COMPLETION_TOKENS,
+            max_completion_tokens: MAX_COMPLETION_TOKENS,
+            reported_total_tokens: MAX_PROMPT_TOKENS + 1 + MAX_COMPLETION_TOKENS,
+            max_total_tokens: MAX_PROMPT_TOKENS + MAX_COMPLETION_TOKENS
+          }
+        );
       }
 
       const now = new Date(2026, 6, 19, 10, 30, msgSeq).toISOString();

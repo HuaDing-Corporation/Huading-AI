@@ -216,6 +216,20 @@ export const AIBRAIN_ERROR = {
   //    reserve 分支最前面的 `available < 0` 闸门（:557）拦住一切新的付费请求，直到补齐。
   //    所以用户看到它时：上一次对话是**成功拿到答案**的，欠的是那一次的差额。
   OUTSTANDING_BALANCE: "AIBRAIN_OUTSTANDING_BALANCE", // 402 · 欠费（需先补齐）
+  // 🔴🔴 FIX2 · `2a98b5d0` 新增：**租户在途敞口打满**。虽然也是 402，但它**不是余额问题**——
+  //    上限 = `单请求最大敞口 × engine_aibrain_inflight_exposure_multiplier(默认 2)`，是 config 常量，
+  //    与钱包余额毫无关系（BE `_tenant_inflight_exposure_limit`）。
+  //    🔴 **充值不会解决它**：用户充再多钱，limit 也不会变大，必须等在途的请求答完（pending → 终态）。
+  //    故本码**绝不许**走充值弹窗，见 aibrain-chat.tsx 的分流与 `copy.aibrain.inflightExposure*`。
+  INFLIGHT_EXPOSURE_LIMIT: "AIBRAIN_INFLIGHT_EXPOSURE_LIMIT", // 402 · 在途太多（等待重试，充值无效）
+  // FIX2 新增：提示词超过**本地**硬上限（BE `_prompt_token_upper_bound` > `engine_aibrain_max_prompt_tokens`）。
+  // 发生在建消息、预留**之前**（aibrain.py:379）→ 未建消息、未动钱包。属于用户可自行解决的一类。
+  PROMPT_LIMIT_EXCEEDED: "AIBRAIN_PROMPT_LIMIT_EXCEEDED", // 422
+  // FIX2 新增：上游**已返回**，但用量超出预授权安全信封 → fail-closed，不交付（aibrain.py:511-542）。
+  PROVIDER_USAGE_LIMIT_EXCEEDED: "AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED", // 502
+  // 🔴 FIX2 **任务包未提、我从源码里捡到的第四个新码**（aibrain.py:502-509）：上游返回了内容但
+  //    没给计费用量 → 同样 fail-closed。与 PROVIDER_FAILED 对用户是同一件事（这次没成），故共用文案。
+  USAGE_MISSING: "AIBRAIN_USAGE_MISSING", // 502
   // ⚠️ PR #239 起 BE **不再发这个码**（`_max_completion_tokens` 连同那条 422 一起被删——预留改为动态、
   //    答不下就追加预留而不是拒绝）。分流保留：#239 上线前的 BE 仍会发，删掉会让那段时间漏分流；
   //    #239 之后它永不触发，留着无害。确认全环境升级完毕后可摘。
@@ -373,4 +387,38 @@ export function outstandingView(detail: unknown, availableCredits?: number): Out
   if (typeof availableCredits === "number" && availableCredits < 0)
     return { outstanding: -availableCredits, available: availableCredits };
   return undefined;
+}
+
+/**
+ * 402 之三：**在途敞口打满**（`AIBRAIN_INFLIGHT_EXPOSURE_LIMIT`，BE `2a98b5d0` aibrain.py:1405-1420）。
+ *
+ * 🔴 这一条与前两个 402 的根本区别：**它不是余额问题，充值不解决**。
+ *    BE `_tenant_inflight_exposure_limit()` = `_max_single_request_exposure_credits() × multiplier`，
+ *    两个都是 config 常量（默认 multiplier=2）——钱包余额**不在这个式子里**。用户充再多钱，
+ *    上限一分不涨；唯一能做的是等在途请求答完（每条 pending 的 user 消息占一个 Sol 尺寸槽位）。
+ *
+ * 🔴 detail 里 BE 一共给了 6 个字段，前端**只用两个**：
+ *    `in_flight_request_count` → 「当前有 N 条对话正在进行中」，用户能据此行动（等它们答完）
+ *    `retryable`               → 决定说不说「稍后重试即可」
+ *    另外四个（in_flight_exposure_credits / requested_exposure_credits / exposure_limit_credits /
+ *    excess_credits）都是**积分口径的敞口额度**，看着像钱其实不是钱 —— 把「还差 3200 积分敞口」
+ *    摆给用户，只会让他去充值，而充值恰恰无效。**故意不展示**，这不是遗漏。
+ */
+export interface InflightExposureView {
+  /** 当前在途请求数；detail 缺失时 undefined → 文案不提数字。 */
+  inFlightRequests?: number;
+  /** 是否可重试。BE 目前恒发 `true`；detail 缺失时按 true 处理（重试最坏只是再看到同一条提示）。 */
+  retryable: boolean;
+}
+
+export function inflightExposureView(detail: unknown): InflightExposureView {
+  if (typeof detail !== "object" || detail === null) return { retryable: true };
+  const d = detail as Record<string, unknown>;
+  const count = finiteNumber(d.in_flight_request_count);
+  return {
+    // 0 条在途却报敞口满，说的话会自相矛盾（「当前有 0 条进行中」）→ 当作拿不到，只说定性。
+    inFlightRequests: count !== undefined && count > 0 ? count : undefined,
+    // 只有**显式** false 才当不可重试；缺失/非布尔一律按可重试（同上，较温和的一侧）。
+    retryable: d.retryable !== false
+  };
 }

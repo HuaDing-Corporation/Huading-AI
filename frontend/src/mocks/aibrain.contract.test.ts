@@ -10,6 +10,9 @@ import { registerMockAsset } from "./asset-registry";
 beforeEach(() => resetAibrain());
 const PROVIDER_FAIL = "__mock_provider_fail__"; // 与 mock 内约定一致
 const OVERRUN = "__mock_reserve_overrun__"; // 触发「实扣超预留 → 追加预留」路径（同上，与 mock 内约定一致）
+const EXPOSURE = "__mock_inflight_exposure__"; // FIX2：在途敞口打满 402
+const USAGE_LIMIT = "__mock_usage_limit__"; // FIX2：上游用量越界 502
+const PROMPT_LIMIT = "__mock_prompt_limit__"; // FIX2：提示词超本地硬上限 422
 // idempotency_key 是 BE 必填 UUID → 测试用真 UUID（每次唯一，避免跨用例串键）。
 const topup = (amount: number, key = crypto.randomUUID()) => topupWallet({ amount, idempotency_key: key });
 
@@ -239,6 +242,84 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
    * 「哪天 CA 补了字段本条会红，那正是去接精确值的时刻」。现在正是那一刻，改为钉住新形状。
    * 变异：mock 的 402 不带 detail → 本条红（前端读 detail 的路径就会静默退回下界而无人知）。
    */
+  // ══ FIX2 · 三个新码的 mock 契约（detail 逐字段对齐 `2a98b5d0` 源码）═══════════════════════
+  /**
+   * 🔴 敞口 402 的 detail 有 **6 个字段**，逐字对齐 BE aibrain.py:1412-1419。
+   * 其中 `in_flight_request_count` 的名字 CA 回执前后给过两个版本（`in_flight_requests` /
+   * `in_flight_request_count`）——**以源码为准**，这条钉住的就是源码那个名字。
+   * 变异：mock 把它写成 `in_flight_requests` → 本条红（前端也就拿不到条数）。
+   */
+  it("🔴 敞口 402 detail 六字段齐全，计数字段名是 in_flight_request_count（不是 in_flight_requests）", async () => {
+    await topup(2000);
+    const conv = await createConversation();
+    const err = await sendMessage(conv.id, { content: `${EXPOSURE} 你好`, tier: "low", attachment_asset_ids: [] }).catch((e) => e);
+    expect(err.status).toBe(402);
+    expect(err.code).toBe("AIBRAIN_INFLIGHT_EXPOSURE_LIMIT");
+    expect(Object.keys(err.detail).sort()).toEqual(
+      [
+        "excess_credits",
+        "exposure_limit_credits",
+        "in_flight_exposure_credits",
+        "in_flight_request_count",
+        "requested_exposure_credits",
+        "retryable"
+      ].sort()
+    );
+    expect(err.detail.in_flight_request_count).toBeGreaterThan(0);
+    expect(err.detail.retryable).toBe(true);
+    // 🔴 上限是 config 常量（单请求最大敞口 × multiplier），**与余额无关** —— 这一条 402 充值无解。
+    expect(err.detail.exposure_limit_credits).toBeGreaterThan(err.detail.requested_exposure_credits);
+  });
+
+  /** 敞口被拒 = 请求没发出去 → 钱包一分未动（预留在敞口闸门之后才落）。 */
+  it("敞口 402 → 余额一分未动", async () => {
+    await topup(2000);
+    const conv = await createConversation();
+    await sendMessage(conv.id, { content: `${EXPOSURE} 你好`, tier: "low", attachment_asset_ids: [] }).catch(() => {});
+    expect((await getWallet()).available_credits).toBe(2000);
+  });
+
+  /**
+   * 422 提示词超限：BE 判在**建消息与动钱包之前**（aibrain.py:379）→ 钱包不动、会话里不留消息。
+   * 变异：mock 把这道闸挪到预留之后 → 「余额一分未动」仍绿，但「会话里没留消息」会红。
+   */
+  it("🔴 422 提示词超限：detail = {prompt_token_upper_bound, max_prompt_tokens}，且钱包与会话都不动", async () => {
+    await topup(2000);
+    const conv = await createConversation();
+    const err = await sendMessage(conv.id, { content: `${PROMPT_LIMIT} 你好`, tier: "low", attachment_asset_ids: [] }).catch((e) => e);
+    expect(err.status).toBe(422);
+    expect(err.code).toBe("AIBRAIN_PROMPT_LIMIT_EXCEEDED");
+    expect(err.detail.max_prompt_tokens).toBe(922_000);
+    expect(err.detail.prompt_token_upper_bound).toBeGreaterThan(err.detail.max_prompt_tokens);
+    expect((await getWallet()).available_credits).toBe(2000);
+    expect((await getConversation(conv.id)).messages).toHaveLength(0);
+  });
+
+  /**
+   * 🔴 502 上游用量越界：BE 走 `_fail_chat_message` → `entry_type="release"` 释放**全额**预留
+   * + `UsageRecord.credits=0`。mock 忠实照做。
+   * ⚠️ 这条断言的是**钱包行为**（源码事实），不是用户文案 —— 该码的结算性质 CB 仍在判定，
+   *    前端文案因此保持中性（见 copy.ts）。行为可以钉，说法先不定稿。
+   */
+  it("🔴 502 用量越界：detail 七字段 + 预留全额释放（余额一分未动）", async () => {
+    await topup(2000);
+    const conv = await createConversation();
+    const err = await sendMessage(conv.id, { content: `${USAGE_LIMIT} 你好`, tier: "low", attachment_asset_ids: [] }).catch((e) => e);
+    expect(err.status).toBe(502);
+    expect(err.code).toBe("AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED");
+    expect(Object.keys(err.detail)).toHaveLength(7);
+    expect(err.detail.reported_prompt_tokens).toBeGreaterThan(err.detail.max_prompt_tokens);
+    expect((await getWallet()).available_credits).toBe(2000); // 预留释放干净
+  });
+
+  /** 闸门次序照抄 BE：提示词硬上限比任何钱包闸门都早 —— 余额为 0 也应报 422 而不是 402。 */
+  it("🔴 闸门次序：余额为 0 + 提示词超限 → 报 422（提示词闸在钱包闸之前）", async () => {
+    const conv = await createConversation(); // 余额 0
+    const err = await sendMessage(conv.id, { content: `${PROMPT_LIMIT} x`, tier: "low", attachment_asset_ids: [] }).catch((e) => e);
+    expect(err.status).toBe(422);
+    expect(err.code).toBe("AIBRAIN_PROMPT_LIMIT_EXCEEDED");
+  });
+
   it("🔴 402「预留不足」带结构化 detail：required/available/shortfall/temporary_reservation", async () => {
     const conv = await createConversation();
     const err = await sendMessage(conv.id, { content: "hi", tier: "low", attachment_asset_ids: [] }).catch((e) => e);

@@ -1537,6 +1537,40 @@ export const copy = {
     outstandingBalance: (credits: string) => `当前余额 ${credits} 积分`,
     /** detail 与钱包都拿不到数时只给定性说明——**不编数字**。 */
     outstandingUnknown: "补齐欠款后即可继续；具体金额请在充值后查看余额。",
+    // ── 402 之三：在途敞口打满 AIBRAIN_INFLIGHT_EXPOSURE_LIMIT（FIX2）────────────────────────
+    // 🔴🔴 本组文案的**硬要求**：说清这不是余额问题、充值不解决。
+    //    上限是 config 常量（单请求最大敞口 × 2），钱包余额不在那个式子里 —— 用户充了钱照样发不出去，
+    //    那比说错「欠费」更糟：他花了钱还是解决不了。故这里**不许**出现「余额」「充值」「积分不足」
+    //    任何字样，也不许弹充值窗（分流在 aibrain-chat.tsx，门在 aibrain-chat.402.test.tsx）。
+    // 🔴 「不是余额问题」这句是**主动澄清**，不是废话：用户刚被一个 402 拦下，默认联想就是没钱，
+    //    不说破他就会去充值。
+    inflightExposureTitle: "同时进行的对话太多，本次没有发送",
+    inflightExposureNote: "这不是余额问题，充值不会解决——请等前面的对话答完再发。",
+    /** 有 `in_flight_request_count` 时给出条数（用户据此知道要等几条）。 */
+    inflightExposureCount: (n: number) => `当前有 ${n} 条对话正在进行中。`,
+    /** `retryable` 为真（BE 目前恒真）→ 明确告诉用户重试就行，不必做别的。 */
+    inflightExposureRetry: "稍后重试即可。",
+    // ── 422：提示词超本地硬上限 AIBRAIN_PROMPT_LIMIT_EXCEEDED（FIX2）────────────────────────
+    // 🔴 **故意不展示 detail 里的两个 token 数**（`prompt_token_upper_bound` / `max_prompt_tokens`）：
+    //    前者是 BE 按 UTF-8 **字节数**算的保守上界（`_prompt_token_upper_bound` 的 docstring 自陈
+    //    "conservative"），比真实 token 数大不少；把「你用了 95 万 token / 上限 92.2 万」摆给用户，
+    //    既看不懂也据此行动不了，还是个虚高的数。只讲**能做的三件事**。
+    promptLimitExceeded: "本次输入太长，没有发送。可以新建对话（历史消息也计入长度）、缩短输入内容，或减少图片后重试。",
+    // ── 502：上游用量超预授权信封 AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED（FIX2）──────────────
+    // 🔴🔴 **暂按中性定稿，等 CB 判定后再改**（任务包 §三.3 明令）。
+    //    刻意**不写**「未扣费」也不写「已扣费」：这条 502 发生在上游已返回、交付与结算之前的
+    //    fail-closed 校验上，它的结算性质 CB 还在判。写错任何一边都是对用户说假话，而这是钱的事。
+    //    ⚠️ 源码事实（已写进回执供 CB 判定，**但不作为文案依据**）：该路径走 `_fail_chat_message`
+    //       → `entry_type="release"` 释放全额预留 + `UsageRecord.credits=0`。CB 定了性质再来改这句。
+    providerUsageLimit: "本次生成未能完成，请重试；如果反复出现，请联系我们。",
+    /**
+     * 🔴 未知 402 的**中性**兜底（FIX2 · 方向从「引导充值」翻转）。
+     * 上一轮的兜底是「按预留不足展示」，理由是「把没欠费的人说成欠费更糟」——那在只有两个码时成立。
+     * 敞口码出现后不成立了：它是「充值无效」，把用户往充值上引 = 让他花了钱还解决不了。
+     * 代价不对称是关键：猜错方向让用户白花钱（不可逆），而中性最多让他多点一次顶部的充值入口
+     * （那个入口一直都在，从未消失）。理由与判断写进了回执。
+     */
+    unknownPaymentIssue: "本次未能发送，请稍后重试。",
     /** 409：答完要追加预留时，这条消息已不在等待中（并发发送 / 超时回收）。 */
     requestExpired: "这条消息已超时或被其他操作打断，未计费。请重新发送。",
     // 附件（一期只图片；文档解析是 BE 增量 3，本期不提供入口）
