@@ -41,7 +41,7 @@ def _load_migration():
     return migration
 
 
-def test_credit_rate_resolution_reprice_revision_follows_current_head() -> None:
+def test_credit_rate_resolution_reprice_revision_follows_0031() -> None:
     migration = _load_migration()
     source = _MIGRATION_PATH.read_text(encoding="utf-8")
 

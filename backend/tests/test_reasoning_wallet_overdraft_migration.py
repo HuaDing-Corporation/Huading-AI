@@ -6,8 +6,10 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
+from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
+from alembic.script import ScriptDirectory
 
 
 def _load_migration():
@@ -15,7 +17,7 @@ def _load_migration():
         Path(__file__).resolve().parents[1]
         / "alembic"
         / "versions"
-        / "20260803_0032_reasoning_wallet_overdraft.py"
+        / "20260805_0033_reasoning_wallet_overdraft.py"
     )
     spec = importlib.util.spec_from_file_location(
         "reasoning_wallet_overdraft_migration",
@@ -27,10 +29,18 @@ def _load_migration():
     return migration
 
 
+def test_reasoning_wallet_overdraft_revision_is_the_only_alembic_head() -> None:
+    backend_root = Path(__file__).resolve().parents[1]
+    config = Config(str(backend_root / "alembic.ini"))
+    config.set_main_option("script_location", str(backend_root / "alembic"))
+
+    assert ScriptDirectory.from_config(config).get_heads() == ["20260805_0033"]
+
+
 def test_upgrade_allows_reasoning_wallet_available_balance_to_be_negative() -> None:
     migration = _load_migration()
-    assert migration.revision == "20260803_0032"
-    assert migration.down_revision == "20260724_0031"
+    assert migration.revision == "20260805_0033"
+    assert migration.down_revision == "20260804_0032"
 
     engine = sa.create_engine("sqlite+pysqlite:///:memory:")
     with engine.begin() as connection:
@@ -84,7 +94,7 @@ def test_downgrade_refuses_to_restore_nonnegative_constraint_while_debt_exists()
         with pytest.raises(
             RuntimeError,
             match=(
-                r"Cannot downgrade 20260803_0032: 1 reasoning wallet has a "
+                r"Cannot downgrade 20260805_0033: 1 reasoning wallet has a "
                 r"negative available_credits balance.*Balances were not modified"
             ),
         ):

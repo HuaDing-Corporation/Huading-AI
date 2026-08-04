@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
 from typing import Literal
 from uuid import UUID, uuid4
@@ -75,6 +75,14 @@ _INFLIGHT_HEARTBEAT_QUEUE_CAPACITY = 256
 _INFLIGHT_HEARTBEAT_QUEUE_RETRY_SECONDS = 0.05
 _INFLIGHT_HEARTBEAT_LOCK_TIMEOUT_MILLISECONDS = 1_000
 _INFLIGHT_HEARTBEAT_STATEMENT_TIMEOUT_MILLISECONDS = 5_000
+_PROVIDER_USAGE_ANOMALY_ERROR_CODES = {
+    "AIBRAIN_PROVIDER_USAGE_INVALID",
+    "AIBRAIN_USAGE_MISSING",
+}
+# UsageRecord.quantity is Numeric(12, 3); larger counters cannot be persisted safely.
+_MAX_PERSISTABLE_TOTAL_TOKENS = 999_999_999
+_MAX_PERSISTABLE_PROVIDER_COST_USD = Decimal("9999999999.99999999")
+_MAX_PERSISTABLE_COST_CENTS = 2_147_483_647
 _IMAGE_ASSET_TYPES = {"avatar_image", "product_image", "generated_image", "cover"}
 _IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 logger = get_logger(__name__)
@@ -354,6 +362,7 @@ async def send_chat_message(
         tenant_id=user.tenant_id,
         conversation_id=conversation_id,
     )
+    _raise_if_provider_usage_anomaly_cooldown(db, tenant_id=user.tenant_id)
     pricing = tier_pricing(tier)
     historical_messages = _context_messages(
         db,
@@ -510,9 +519,8 @@ async def send_chat_message(
 
     if (
         result.get("_usage_contract_valid", True) is False
-        or prompt_tokens > max_prompt_tokens
-        or completion_tokens > max_completion_tokens
         or total_tokens != component_total_tokens
+        or total_tokens > _MAX_PERSISTABLE_TOTAL_TOKENS
     ):
         _fail_chat_message(
             db,
@@ -523,22 +531,13 @@ async def send_chat_message(
             provider_messages=provider_messages,
             # Do not persist untrusted, potentially overflowing provider counters.
             usage_result={},
-            error_code="AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED",
+            error_code="AIBRAIN_PROVIDER_USAGE_INVALID",
             heartbeat=heartbeat,
         )
         raise AppError(
-            "AIBRAIN provider usage exceeded the pre-authorized safety envelope.",
-            code="AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED",
+            "AIBRAIN provider returned invalid billing usage.",
+            code="AIBRAIN_PROVIDER_USAGE_INVALID",
             status_code=502,
-            detail={
-                "reported_prompt_tokens": prompt_tokens,
-                "authorized_prompt_tokens": max_prompt_tokens,
-                "max_prompt_tokens": max_prompt_tokens,
-                "reported_completion_tokens": completion_tokens,
-                "max_completion_tokens": max_completion_tokens,
-                "reported_total_tokens": total_tokens,
-                "max_total_tokens": max_prompt_tokens + max_completion_tokens,
-            },
         )
 
     answer = str(result.get("content") or "").strip()
@@ -565,7 +564,17 @@ async def send_chat_message(
             status_code=502,
         )
 
-    charged_credits = _user_credits(pricing, prompt_tokens, completion_tokens)
+    billable_prompt_tokens = min(prompt_tokens, max_prompt_tokens)
+    billable_completion_tokens = min(completion_tokens, max_completion_tokens)
+    usage_charge_capped = (
+        billable_prompt_tokens != prompt_tokens
+        or billable_completion_tokens != completion_tokens
+    )
+    charged_credits = _user_credits(
+        pricing,
+        billable_prompt_tokens,
+        billable_completion_tokens,
+    )
     overdraft_authorized = False
     try:
         reservation = _expand_reasoning_reservation(
@@ -621,12 +630,12 @@ async def send_chat_message(
             reservation=reservation,
             provider_messages=provider_messages,
             usage_result=dict(result),
-            error_code="AIBRAIN_PROVIDER_FAILED",
+            error_code="AIBRAIN_PROVIDER_USAGE_INVALID",
             heartbeat=heartbeat,
         )
         raise AppError(
             "AIBRAIN provider returned invalid billing usage.",
-            code="AIBRAIN_PROVIDER_FAILED",
+            code="AIBRAIN_PROVIDER_USAGE_INVALID",
             status_code=502,
         ) from exc
     provider_cost_usd = provider_usage_cost.cost_usd
@@ -681,8 +690,13 @@ async def send_chat_message(
         details={
             "tier": tier,
             "model": pricing.model,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
+            "prompt_tokens": billable_prompt_tokens,
+            "completion_tokens": billable_completion_tokens,
+            "billable_prompt_tokens": billable_prompt_tokens,
+            "billable_completion_tokens": billable_completion_tokens,
+            "reported_prompt_tokens": prompt_tokens,
+            "reported_completion_tokens": completion_tokens,
+            "usage_charge_capped": usage_charge_capped,
         },
     )
     db.add(
@@ -1276,6 +1290,34 @@ def _prompt_token_upper_bound(messages: list[dict[str, object]]) -> int:
     return max(1, tokens)
 
 
+def _raise_if_provider_usage_anomaly_cooldown(
+    db: Session,
+    *,
+    tenant_id: str,
+) -> None:
+    cutoff = datetime.now(UTC) - timedelta(
+        seconds=settings.engine_aibrain_usage_anomaly_cooldown_seconds
+    )
+    recent_anomaly_id = db.scalar(
+        select(ChatMessage.id)
+        .where(
+            ChatMessage.tenant_id == tenant_id,
+            ChatMessage.role == "user",
+            ChatMessage.status == "failed",
+            ChatMessage.error_code.in_(_PROVIDER_USAGE_ANOMALY_ERROR_CODES),
+            ChatMessage.updated_at >= cutoff,
+        )
+        .limit(1)
+    )
+    if recent_anomaly_id is None:
+        return
+    raise AppError(
+        "AIBRAIN provider billing usage is temporarily unavailable. Try again later.",
+        code="AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN",
+        status_code=503,
+    )
+
+
 def _user_credits(
     pricing: TierPricing,
     prompt_tokens: int,
@@ -1415,6 +1457,9 @@ def _authorize_inflight_exposure(
             "exposure_limit_credits": float(limit),
             "excess_credits": float(_reasoning_credits(next_exposure - limit)),
             "in_flight_request_count": current.requests,
+            # Frozen client-contract placeholder. True only means this in-flight
+            # exposure condition can clear after an existing request finishes; other
+            # admission checks may still reject the retry. No false state exists yet.
             "retryable": True,
         },
     )
@@ -1471,14 +1516,39 @@ def _provider_usage_cost(
     prompt_tokens: int,
     completion_tokens: int,
 ) -> APIMartTokenUsageCost:
-    cost = apimart_token_usage_cost(
-        model=pricing.model,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        cached_prompt_tokens=_optional_nonnegative_int(usage_result.get("cached_prompt_tokens")),
-        cache_write_tokens=_optional_nonnegative_int(usage_result.get("cache_write_tokens")),
-        authoritative_credits=usage_result.get("credits"),
-    )
+    try:
+        cost = apimart_token_usage_cost(
+            model=pricing.model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_prompt_tokens=_optional_nonnegative_int(
+                usage_result.get("cached_prompt_tokens")
+            ),
+            cache_write_tokens=_optional_nonnegative_int(
+                usage_result.get("cache_write_tokens")
+            ),
+            authoritative_credits=usage_result.get("credits"),
+        )
+    except APIMartTokenPricingError:
+        raise
+    except (ArithmeticError, OverflowError, ValueError) as exc:
+        raise APIMartTokenPricingError(
+            "APIMart provider billing usage is invalid.",
+            error_type="invalid_usage_metadata",
+        ) from exc
+    if (
+        not cost.credits.is_finite()
+        or not cost.cost_usd.is_finite()
+        or cost.credits < 0
+        or cost.cost_usd < 0
+        or cost.cost_usd > _MAX_PERSISTABLE_PROVIDER_COST_USD
+        or cost.cost_cents < 0
+        or cost.cost_cents > _MAX_PERSISTABLE_COST_CENTS
+    ):
+        raise APIMartTokenPricingError(
+            "APIMart provider billing usage is outside persistence bounds.",
+            error_type="invalid_usage_metadata",
+        )
     if cost.cost_estimate_uncertain:
         logger.warning(
             "aibrain_cache_usage_unavailable",

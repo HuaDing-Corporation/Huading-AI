@@ -261,6 +261,41 @@ async def test_apimart_gpt56_chat_marks_untrusted_usage_contracts(
     assert result["_usage_contract_valid"] is False
 
 
+@pytest.mark.parametrize(
+    "credits",
+    ["NaN", "Infinity", "-1", "not-a-number", "1e1000000"],
+)
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_marks_invalid_provider_cost_metadata(
+    credits: str,
+) -> None:
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=_FakeSession(
+            _FakeResponse(
+                {
+                    "choices": [{"message": {"content": "Untrusted provider cost"}}],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                    "credits": credits,
+                }
+            )
+        ),
+    )
+
+    result = await provider.chat(
+        {
+            "model": "gpt-5.6-luna",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+    )
+
+    assert result["_usage_contract_valid"] is False
+
+
 @pytest.mark.asyncio
 async def test_apimart_gpt56_chat_uses_reasoning_content_as_a_fallback() -> None:
     session = _FakeSession(

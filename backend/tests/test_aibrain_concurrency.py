@@ -667,6 +667,121 @@ def _seed_postgres_wallet(factory, *, available: Decimal) -> str:
     return tenant_id
 
 
+class _InvalidCostChatProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def chat(self, payload: dict[str, object]) -> dict[str, object]:
+        self.calls.append(payload)
+        return {
+            "content": "invalid provider cost metadata",
+            "model": "gpt-5.6-luna",
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+            "credits": "100000000000",
+        }
+
+
+def test_postgres_invalid_provider_cost_releases_and_opens_tenant_cooldown(
+    postgres_session_factory,
+    monkeypatch,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id = str(uuid4())
+    with factory() as db:
+        tenant = Tenant(
+            id=tenant_id,
+            slug=f"aibrain-invalid-cost-{uuid4().hex[:8]}",
+            name="AIBRAIN Invalid Cost",
+        )
+        user = User(
+            tenant_id=tenant_id,
+            email=f"invalid-cost-{uuid4().hex[:8]}@example.com",
+            password_hash="not-used-by-test",
+        )
+        conversations = [
+            ChatConversation(tenant_id=tenant_id, title=f"Invalid cost {index}")
+            for index in range(2)
+        ]
+        db.add(tenant)
+        db.flush([tenant])
+        db.add_all([user, *conversations])
+        db.flush([user, *conversations])
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=tenant_id,
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+            operation_key=f"seed:{tenant_id}",
+        )
+        user_id = user.id
+        conversation_ids = [conversation.id for conversation in conversations]
+        db.commit()
+
+    provider = _InvalidCostChatProvider()
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    with factory() as db:
+        user = db.get(User, user_id)
+        with pytest.raises(AppError) as first_error:
+            asyncio.run(
+                aibrain.send_chat_message(
+                    db,
+                    user=user,
+                    conversation_id=conversation_ids[0],
+                    content="Reject the invalid provider cost",
+                    tier="low",
+                    attachment_asset_ids=[],
+                    storage=object(),
+                )
+            )
+        assert first_error.value.code == "AIBRAIN_PROVIDER_USAGE_INVALID"
+
+    with factory() as db:
+        user = db.get(User, user_id)
+        with pytest.raises(AppError) as replay_error:
+            asyncio.run(
+                aibrain.send_chat_message(
+                    db,
+                    user=user,
+                    conversation_id=conversation_ids[1],
+                    content="Do not replay invalid provider cost work",
+                    tier="low",
+                    attachment_asset_ids=[],
+                    storage=object(),
+                )
+            )
+        assert replay_error.value.code == "AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN"
+        assert replay_error.value.status_code == 503
+
+    assert len(provider.calls) == 1
+    with factory() as db:
+        wallet = db.get(ReasoningWallet, tenant_id)
+        messages = list(
+            db.scalars(
+                select(ChatMessage).where(ChatMessage.tenant_id == tenant_id)
+            )
+        )
+        usage_records = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.tenant_id == tenant_id,
+                    UsageRecord.capability == "chat",
+                )
+            )
+        )
+        assert wallet.available_credits == Decimal("100")
+        assert wallet.reserved_credits == Decimal("0")
+        assert wallet.total_spent_credits == Decimal("0")
+        assert len(messages) == 1
+        assert messages[0].status == "failed"
+        assert messages[0].error_code == "AIBRAIN_PROVIDER_USAGE_INVALID"
+        assert len(usage_records) == 1
+        assert usage_records[0].status == "released"
+        assert usage_records[0].credits == Decimal("0")
+        assert usage_records[0].cost_cents == 0
+
+
 def _start_reservation(factory, *, tenant_id: str, operation_key: str):
     done = threading.Event()
     errors: list[BaseException] = []

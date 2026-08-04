@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 from collections.abc import Mapping
+from decimal import DecimalException
 from typing import Any
 
 import requests
@@ -10,7 +11,10 @@ import requests
 from app.core.config import settings
 from app.db.models import ProviderConfig
 from app.providers.base import ProviderResolutionError, register_provider
-from app.services.apimart_costs import apimart_usage_metadata
+from app.services.apimart_costs import (
+    apimart_usage_metadata,
+    apimart_usage_metadata_contract_valid,
+)
 from app.services.apimart_token_pricing import apimart_cache_token_usage
 
 _DEFAULT_BASE_URL = "https://api.apimart.ai/v1"
@@ -172,7 +176,17 @@ def _usage(payload: Mapping[str, Any]) -> dict[str, Any]:
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
     }
-    usage_contract_valid = usage_is_mapping and all(
+    cost_contract_valid = apimart_usage_metadata_contract_valid(payload)
+    cost_metadata: dict[str, Any] = {}
+    if cost_contract_valid:
+        try:
+            cost_metadata = apimart_usage_metadata(payload)
+        except DecimalException:
+            # A finite, nonnegative provider value can still exceed Decimal's
+            # arithmetic range. Treat it as untrusted usage instead of turning
+            # the completed provider call into a replayable provider failure.
+            cost_contract_valid = False
+    usage_contract_valid = usage_is_mapping and cost_contract_valid and all(
         _is_nonnegative_integer(raw_usage.get(key))
         for key in ("prompt_tokens", "completion_tokens", "total_tokens")
     )
@@ -187,7 +201,7 @@ def _usage(payload: Mapping[str, Any]) -> dict[str, Any]:
         result["cached_prompt_tokens"] = cache_usage.cached_prompt_tokens
     if cache_usage.cache_write_tokens is not None:
         result["cache_write_tokens"] = cache_usage.cache_write_tokens
-    result.update(apimart_usage_metadata(payload))
+    result.update(cost_metadata)
     return result
 
 

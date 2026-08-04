@@ -60,6 +60,15 @@ def apimart_usage_metadata(payload: Mapping[str, Any]) -> dict[str, Any]:
     return metadata
 
 
+def apimart_usage_metadata_contract_valid(payload: Mapping[str, Any]) -> bool:
+    """Return whether explicitly reported provider cost fields are usable."""
+    raw_credits = _first_nested_value(payload, _CREDIT_KEYS)
+    if raw_credits not in (None, "") and not _is_finite_nonnegative_decimal(raw_credits):
+        return False
+    raw_cost_cents = _first_nested_value(payload, _COST_CENTS_KEYS)
+    return raw_cost_cents in (None, "") or _is_finite_nonnegative_decimal(raw_cost_cents)
+
+
 def apimart_cost_cents_from_result(result: Mapping[str, Any] | None) -> int:
     if not result:
         return 0
@@ -155,6 +164,14 @@ def _decimal_or_none(value: Any) -> Decimal | None:
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
+
+
+def _is_finite_nonnegative_decimal(value: Any) -> bool:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return False
+    return parsed.is_finite() and parsed >= 0
 
 
 def _int_or_none(value: Any) -> int | None:

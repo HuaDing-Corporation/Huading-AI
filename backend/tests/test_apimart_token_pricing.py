@@ -176,6 +176,24 @@ def test_authoritative_credits_override_token_estimate() -> None:
     assert cost.cost_estimate_uncertain is False
 
 
+@pytest.mark.parametrize("credits", ["NaN", "Infinity", "-Infinity"])
+def test_authoritative_credits_must_be_finite(credits: str) -> None:
+    from app.services.apimart_token_pricing import (
+        APIMartTokenPricingError,
+        apimart_token_usage_cost,
+    )
+
+    with pytest.raises(APIMartTokenPricingError) as exc_info:
+        apimart_token_usage_cost(
+            model="gpt-5.6-luna",
+            prompt_tokens=1,
+            completion_tokens=1,
+            authoritative_credits=credits,
+        )
+
+    assert exc_info.value.error_type == "invalid_usage_metadata"
+
+
 def test_unknown_model_never_inherits_another_models_rate() -> None:
     from app.services.apimart_token_pricing import (
         APIMartTokenPricingError,

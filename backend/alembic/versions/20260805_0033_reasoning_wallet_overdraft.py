@@ -6,8 +6,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "20260803_0032"
-down_revision = "20260724_0031"
+revision = "20260805_0033"
+down_revision = "20260804_0032"
 branch_labels = None
 depends_on = None
 
@@ -39,7 +39,7 @@ def downgrade() -> None:
             "wallet has" if negative_wallet_count == 1 else "wallets have"
         )
         raise RuntimeError(
-            "Cannot downgrade 20260803_0032: "
+            "Cannot downgrade 20260805_0033: "
             f"{negative_wallet_count} reasoning {wallet_verb} a negative "
             "available_credits balance. Top up or settle every outstanding "
             "balance before retrying. Balances were not modified."

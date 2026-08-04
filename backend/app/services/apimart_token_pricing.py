@@ -404,9 +404,15 @@ def _optional_decimal(
     if value in (None, ""):
         return None
     try:
-        return Decimal(str(value))
+        parsed = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
         raise APIMartTokenPricingError(
             "APIMart provider credits are invalid.",
             error_type="invalid_usage_metadata",
         ) from exc
+    if not parsed.is_finite():
+        raise APIMartTokenPricingError(
+            "APIMart provider credits are invalid.",
+            error_type="invalid_usage_metadata",
+        )
+    return parsed
