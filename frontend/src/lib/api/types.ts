@@ -322,8 +322,27 @@ export interface CopyRewriteRequest {
 export interface CopyRewriteResult {
   text: string;
 }
+
+/**
+ * 每个文案端点的成败标记（BE PR #239 `e2bc2c02`：`schemas/response.py OperationOutcome`
+ * + `schemas/copy.py CopyGenerationOutcome`）。**成功响应必带**（BE 是必填字段），
+ * 失败响应则由 `core/exceptions.py:_copy_generation_error_outcome` 按 URL 后缀推断后
+ * 挂在 `error.outcome` 上。
+ *
+ * 🔴 前端**不拿它当成败主判据**，主判据仍是 `Promise.allSettled` 的 fulfilled/rejected
+ *   （见 copywriting-form.tsx `onGenerate`）。理由：网络中断 / 超时 / 5xx 无响应体时**根本没有
+ *    outcome 可读**，靠它判会把这些情形漏成"成功"。此处保留它是为了①类型与 BE 契约一致、
+ *    ②mock 必须照发（不比 BE 松），③日后若出现"HTTP 200 但业务失败"的端点可直接接。
+ */
+export type CopyGenerationOperation = "rewrite" | "titles" | "topics";
+export interface CopyGenerationOutcome {
+  operation: CopyGenerationOperation;
+  status: "succeeded" | "failed";
+}
+
 export interface CopyRewriteResponse {
   results: CopyRewriteResult[]; // smart/custom 返 1 条；auto 返 n 条
+  outcome: CopyGenerationOutcome;
 }
 
 // POST /api/v1/copy/titles
@@ -334,6 +353,7 @@ export interface CopyTitlesRequest {
 }
 export interface CopyTitlesResponse {
   titles: string[];
+  outcome: CopyGenerationOutcome;
 }
 
 // POST /api/v1/copy/topics
@@ -343,6 +363,7 @@ export interface CopyTopicsRequest {
 }
 export interface CopyTopicsResponse {
   topics: string[]; // 带 # 标签
+  outcome: CopyGenerationOutcome;
 }
 
 // 历史草稿持久化（存历史「文案」tab）

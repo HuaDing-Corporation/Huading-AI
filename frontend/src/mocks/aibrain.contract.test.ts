@@ -177,31 +177,80 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
   });
 
   /**
-   * 🔴 路径③ 追加预留失败（BE #239 `_expand_reasoning_reservation`）：**请求已经跑完**才被 402，
-   * 预留全额释放 —— 用户花了时间、没拿到答案，但也**没被扣一分钱**。
-   * 变异：删掉追加预留失败分支里的 `available += reservation`（不释放预留）→ 本条红（余额少了一截）。
+   * 🔴🔴 路径③ **透支交付**（FIX1 · 方向与上一版整个相反）。
+   * BE `e2bc2c02`（aibrain.py:250-266）：provider 已经把答案生成出来了（上游的钱已经花了），
+   * 此时才发现实扣超预留且追不上 → **不再拒绝**，而是照常交付 + 按实际用量结算 + **允许余额变负**。
+   * 上一版 mock 是「追加失败 → 释放预留 → 402、不交付」，方向反了，会让前端测试建立在假象上。
+   * 变异A：把结算改回 `available += max(0, reservation - charged)`（夹逼不许变负）→ 本条红（余额不为负）。
+   * 变异B：恢复成「402 不交付」→ 本条红（拿不到 assistant_message）。
    */
-  it("路径③：实扣超出预留、追加预留又不够 → 402，且预留全额释放（余额一分未动）", async () => {
+  it("路径③：实扣超出预留 → **照常交付答案**，按实扣结算，余额允许变负（透支）", async () => {
     await topup(100);
     const conv = await createConversation();
-    await expect(
-      sendMessage(conv.id, { content: `${OVERRUN} 你好`, tier: "low", attachment_asset_ids: [] })
-    ).rejects.toMatchObject({ status: 402, code: "AIBRAIN_INSUFFICIENT_BALANCE" });
-    expect((await getWallet()).available_credits).toBe(100);
+    const res = await sendMessage(conv.id, { content: `${OVERRUN} 你好`, tier: "low", attachment_asset_ids: [] });
+    // 🔴 答案**交付了**——上游的钱花了，不能既扣钱又不给答案，也不能白花钱不交付。
+    expect(res.assistant_message.status).toBe("completed");
+    expect(res.assistant_message.content.length).toBeGreaterThan(0);
+    const charged = res.assistant_message.charged_credits ?? 0;
+    const reserved = res.user_message.reserved_credits ?? 0;
+    expect(charged).toBeGreaterThan(reserved); // 确实超预留了
+    // 🔴 余额变负 = 欠费，且净减少恰好是实扣。
+    expect(res.wallet.available_credits).toBeLessThan(0);
+    expect(res.wallet.available_credits).toBeCloseTo(100 - charged, 6);
   });
 
   /**
-   * 🔴 §三 的实现前提：402 响应体里**没有**结构化的 required/available（BE `app_error_handler`
-   * 只转发 code + message，detail 恒 null）。前端因此不去解析那句英文（见 lib/aibrain/types.ts
-   * `ShortfallView` 注释），改用可验证的下界。这条把「BE 没给字段」这个事实钉住 ——
-   * 哪天 CA 补了结构化字段，本条会红，那正是提醒去接精确值的时刻。
+   * 🔴 路径④ **负余额闸门**（FIX1 新增，BE reserve 分支 :557，判在预留不足之前）：
+   * 透支之后，一切新的付费请求被 402 `AIBRAIN_OUTSTANDING_BALANCE` 拦住，直到补齐。
+   * ⚠️ 上一版 mock **故意没有**这条，理由是「BE 无此逻辑，造一个是反方向的假杀」——那个判断在
+   *    `42db0ecb` 上是对的；`e2bc2c02` 之后 BE 有了，所以现在必须有。
+   * 变异：删掉 mock 的 `available < 0` 闸门 → 本条红（会放行并返回一个正常回答）。
    */
-  it("🔴 402 响应**不含**结构化 required/available（前端据此改用下界，而非解析英文 message）", async () => {
+  it("路径④：透支后余额为负 → 新请求被 402 AIBRAIN_OUTSTANDING_BALANCE 拦住（不是 INSUFFICIENT）", async () => {
+    await topup(100);
+    const conv = await createConversation();
+    await sendMessage(conv.id, { content: `${OVERRUN} 你好`, tier: "low", attachment_asset_ids: [] });
+    expect((await getWallet()).available_credits).toBeLessThan(0);
+
+    // 🔴 码必须是 OUTSTANDING 而不是 INSUFFICIENT —— 两者文案相反，串了就是对用户说错话。
+    const err = await sendMessage(conv.id, { content: "再问一句", tier: "low", attachment_asset_ids: [] }).catch((e) => e);
+    expect(err.status).toBe(402);
+    expect(err.code).toBe("AIBRAIN_OUTSTANDING_BALANCE");
+    // detail 逐字段对齐 BE aibrain.py:564-567。
+    expect(err.detail.outstanding_credits).toBeGreaterThan(0);
+    expect(err.detail.available_credits).toBeLessThan(0);
+    expect(err.detail.outstanding_credits).toBeCloseTo(-err.detail.available_credits, 6);
+  });
+
+  /** 充值补齐欠款后即可继续（闸门是"余额转正"而非某个一次性标记）。 */
+  it("路径④b：补齐欠款（充值）后 → 新请求恢复正常", async () => {
+    await topup(100);
+    const conv = await createConversation();
+    await sendMessage(conv.id, { content: `${OVERRUN} 你好`, tier: "low", attachment_asset_ids: [] });
+    await topup(500); // 补齐并有余
+    expect((await getWallet()).available_credits).toBeGreaterThan(0);
+    const res = await sendMessage(conv.id, { content: "再问一句", tier: "low", attachment_asset_ids: [] });
+    expect(res.assistant_message.status).toBe("completed");
+  });
+
+  /**
+   * 🔴 FIX1：402「预留不足」现在**带结构化 detail**（BE `e2bc2c02` 给 AppError 加了 detail 形参并在
+   * `app_error_handler` 里转发）。上一版这条断言的是 `detail` 为 undefined —— 当时属实，且当时就写明
+   * 「哪天 CA 补了字段本条会红，那正是去接精确值的时刻」。现在正是那一刻，改为钉住新形状。
+   * 变异：mock 的 402 不带 detail → 本条红（前端读 detail 的路径就会静默退回下界而无人知）。
+   */
+  it("🔴 402「预留不足」带结构化 detail：required/available/shortfall/temporary_reservation", async () => {
     const conv = await createConversation();
     const err = await sendMessage(conv.id, { content: "hi", tier: "low", attachment_asset_ids: [] }).catch((e) => e);
     expect(err.status).toBe(402);
-    expect(err.detail).toBeUndefined();
-    expect(err.message).toMatch(/required .*available/); // 两个数只存在于这句英文自由文本里
+    expect(err.code).toBe("AIBRAIN_INSUFFICIENT_BALANCE");
+    expect(err.detail.required_credits).toBeGreaterThan(0);
+    expect(err.detail.available_credits).toBe(0);
+    expect(err.detail.shortfall_credits).toBeCloseTo(err.detail.required_credits, 6);
+    // 🔴 BE 恒发 true —— 「这是临时预留」由 BE 自己标注，不是前端猜的。
+    expect(err.detail.temporary_reservation).toBe(true);
+    // message 仍是英文自由文本（BE 没改这句）；前端**不解析它**，只读 detail。
+    expect(err.message).toMatch(/required .*available/);
   });
 
   // ── P1-2：附件必须真存在于资产注册表（不再凭空伪造）──────────────────────────

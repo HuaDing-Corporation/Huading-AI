@@ -8,6 +8,8 @@ import {
   formatCredits,
   formatRate,
   minReservationCredits,
+  outstandingView,
+  precheckSend,
   shortfallView,
   typicalCredits
 } from "./types";
@@ -94,33 +96,151 @@ describe("低余额阈值", () => {
   });
 });
 
-describe("shortfallView（402 要交代的三个数）", () => {
+// ── FIX1 · 402 结构化 detail（BE #239 `e2bc2c02`）────────────────────────────────────────────
+// 契约变更史见 types.ts 的注释。这里的门分成两组，**互不塌缩**：
+//   「精确态」组：detail 在 → 读 BE 的数、exact=true（文案不带「至少」）
+//   「回退态」组：detail 缺/形状不符 → 退回下界、exact=false（文案带「至少」）
+// 🔴 回退那组是 FIX1 明确要求钉住的：BE 哪天不发 detail（回滚 / 新增第三种 402 忘了带），
+//    UI 必须退回「至少 X」而不是什么都不显示 —— 没有这组门，那种退化是**静默**的。
+
+describe("shortfallView · 精确态（BE 给了 detail）", () => {
+  /** BE 真实形状（aibrain.py:578-583）。 */
+  const DETAIL = {
+    required_credits: 137.6256,
+    available_credits: 20,
+    shortfall_credits: 117.6256,
+    temporary_reservation: true
+  };
+
   /**
-   * 🔴 钱包未加载时**不填 0 冒充**：显示「当前可用 0 积分」而实际有余额，是在对用户撒谎。
-   * 变异：把 `available` 的 undefined 兜底成 0 → 本条红。
+   * 🔴 三个数**全部来自 BE**，不是前端算的。
+   * 变异：`shortfallView` 忽略 detail 参数（回到 FIX1 之前只用下界的版本）→ 本条红
+   *       （exact 会变 false；且若 BE 的 required 与下界恰好相等也仍能抓到，因为 exact 断言独立）。
    */
-  it("钱包未加载 → available/shortfall 均 undefined（不拿 0 冒充「没钱」）", () => {
-    const v = shortfallView("high", undefined);
-    expect(v.minRequired).toBeCloseTo(137.6256, 4);
-    expect(v.available).toBeUndefined();
-    expect(v.shortfall).toBeUndefined();
+  it("detail 在 → required/available/shortfall 全取 BE 的值，exact=true", () => {
+    const v = shortfallView("high", 999, DETAIL);
+    expect(v.exact).toBe(true);
+    expect(v.required).toBe(137.6256);
+    expect(v.available).toBe(20); // 🔴 取 BE 的 20，**不是**传进去的钱包值 999
+    expect(v.shortfall).toBe(117.6256);
   });
 
-  it("余额低于下界 → 给出差额（137.6256 − 20 = 117.6256）", () => {
+  /**
+   * 🔴 BE 的 required 与前端下界**不同**时，必须以 BE 为准（下界只算 completion 段，
+   * BE 的精确值还含提示词那一段，恒 ≥ 下界）。变异：`required` 仍用 `minReservationCredits` → 本条红。
+   */
+  it("BE 的 required 高于前端下界 → 显示 BE 的（下界只是 completion 段，不含提示词）", () => {
+    const v = shortfallView("high", 20, { ...DETAIL, required_credits: 300, shortfall_credits: 280 });
+    expect(v.required).toBe(300);
+    expect(v.required).toBeGreaterThan(minReservationCredits("high"));
+  });
+
+  /** 防御：BE 若给出 shortfall=0（不该发生），也不许显示「还差 0 积分」。 */
+  it("BE 的 shortfall 为 0 → 不给差额（绝不显示「还差 0 积分」）", () => {
+    const v = shortfallView("high", 20, { ...DETAIL, shortfall_credits: 0 });
+    expect(v.shortfall).toBeUndefined();
+  });
+});
+
+describe("shortfallView · 回退态（BE 没给 detail / 形状不符）", () => {
+  /**
+   * 🔴 FIX1 点名要钉的回退：detail 缺失时退回下界 + exact=false。
+   * 变异：去掉 `shortfallView` 里 `if (parsed)` 之后的整段回退（直接返回 detail 的值）→ 本条红
+   *       （undefined detail 会炸或给出 NaN）。
+   */
+  it("detail 缺失（如预检拦截根本没发请求）→ 回退到下界，exact=false", () => {
     const v = shortfallView("high", 20);
-    expect(v.available).toBe(20);
+    expect(v.exact).toBe(false);
+    expect(v.required).toBeCloseTo(137.6256, 4);
     expect(v.shortfall).toBeCloseTo(117.6256, 4);
   });
 
   /**
-   * 🔴 余额**高于**下界却仍被 402（缺口来自提示词那一段，前端算不出）→ shortfall 必须是 undefined，
-   * 好让 UI 换一句话说。变异：改成 `Math.max(0, minRequired - available)` → 本条红（会得到 0），
-   * 而 UI 就会显示「至少还差 0 积分」这种荒谬值。
+   * 🔴 **半份 detail 不许拼**：BE 若只给了 required 没给 shortfall，拼出来的组合最误导。
+   * 变异：`parseInsufficientDetail` 改成缺字段就用 0 兜底 → 本条红（exact 会变 true）。
    */
-  it("余额高于下界仍被拒 → shortfall 为 undefined（绝不显示「还差 0 积分」）", () => {
+  it("detail 形状不符（缺字段 / 非对象 / 字段非数字）→ 一律当没有，走回退", () => {
+    expect(shortfallView("high", 20, { required_credits: 300 }).exact).toBe(false);
+    expect(shortfallView("high", 20, { required_credits: "300", available_credits: 20, shortfall_credits: 280 }).exact).toBe(false);
+    expect(shortfallView("high", 20, "nonsense").exact).toBe(false);
+    expect(shortfallView("high", 20, null).exact).toBe(false);
+  });
+
+  /**
+   * 🔴 钱包也未加载时**不填 0 冒充**：显示「当前可用 0 积分」而实际有余额，是在对用户撒谎。
+   * 变异：把 `available` 的 undefined 兜底成 0 → 本条红。
+   */
+  it("钱包也未加载 → available/shortfall 均 undefined（不拿 0 冒充「没钱」）", () => {
+    const v = shortfallView("high", undefined);
+    expect(v.available).toBeUndefined();
+    expect(v.shortfall).toBeUndefined();
+  });
+
+  /**
+   * 🔴 回退态下余额**高于**下界却仍被 402（缺口来自提示词那一段，前端算不出）→ shortfall 必须
+   * undefined，好让 UI 换一句话说。变异：改成 `Math.max(0, required - available)` → 本条红（得到 0），
+   * UI 就会显示「至少还差 0 积分」这种荒谬值。
+   */
+  it("回退态余额高于下界仍被拒 → shortfall 为 undefined（绝不显示「还差 0 积分」）", () => {
     const v = shortfallView("high", 500);
     expect(v.available).toBe(500);
     expect(v.shortfall).toBeUndefined();
+  });
+});
+
+describe("outstandingView · 欠费（402 AIBRAIN_OUTSTANDING_BALANCE）", () => {
+  /** BE 真实形状（aibrain.py:564-567）：available 为负、outstanding 为其相反数。 */
+  it("detail 在 → 取 BE 的 outstanding / available（available 是负数）", () => {
+    const v = outstandingView({ available_credits: -42.5, outstanding_credits: 42.5 });
+    expect(v?.outstanding).toBe(42.5);
+    expect(v?.available).toBe(-42.5);
+  });
+
+  /**
+   * 🔴 回退：钱包的 available 现在**可以为负**（BE 删掉了 `next_available < 0` 断言），
+   * 负余额本身就是欠款额，是可靠的第二来源。
+   * 变异：删掉 `outstandingView` 的钱包回退分支 → 本条红。
+   */
+  it("detail 缺失但钱包余额为负 → 用负余额反推欠款额", () => {
+    const v = outstandingView(undefined, -30);
+    expect(v?.outstanding).toBe(30);
+    expect(v?.available).toBe(-30);
+  });
+
+  /**
+   * 🔴 两个来源都没有 → **返回 undefined**，UI 只给定性文案，**不编数字**。
+   * 变异：无来源时兜底成 `{ outstanding: 0 }` → 本条红（UI 会显示「需补齐 0 积分」）。
+   */
+  it("detail 与钱包都拿不到 → undefined（不编数字）", () => {
+    expect(outstandingView(undefined, undefined)).toBeUndefined();
+    expect(outstandingView(null, 0)).toBeUndefined(); // 余额 0 不是欠费
+    expect(outstandingView({ nope: 1 }, 5)).toBeUndefined(); // 正余额也不是欠费
+  });
+});
+
+// 原 `precheck.test.ts` 的两条用例并入此处（那边断言 `precheckSend(-3) → insufficient`，
+// 契约变更后已经是错的）。合并到单点是为了避免同一行为在两个文件里各有一套断言 ——
+// 那种重复迟早会一边改一边不改，剩下的那份就成了给旧契约站岗的门。
+describe("precheckSend · 两种情形要分开（对齐 BE reserve 分支的判定次序）", () => {
+  /**
+   * 🔴 负余额 → outstanding（**不是** insufficient）。BE 把 `available < 0` 判在最前（aibrain.py:557），
+   * 前端照抄次序，否则欠费用户会收到「这是临时预留、结束会退回」——他上次的钱早就退不回来了。
+   * 变异：把 `availableCredits < 0` 那条去掉（回到只有 `<= 0` 的单一 insufficient）→ 本条红。
+   */
+  it("余额为负 → reason=outstanding（欠费，不是预留不足）", () => {
+    expect(precheckSend(-1)).toEqual({ ok: false, reason: "outstanding" });
+    expect(precheckSend(-137.6)).toEqual({ ok: false, reason: "outstanding" });
+  });
+
+  it("余额恰为 0 → reason=insufficient（任何正数预留都不满足，必 402）", () => {
+    expect(precheckSend(0)).toEqual({ ok: false, reason: "insufficient" });
+  });
+
+  /** 正余额一律放行——前端算不出精确预留，拿下界去拦会错杀上下文短的用户。 */
+  it("正余额 / 钱包未加载 → 放行，由 BE 裁决", () => {
+    expect(precheckSend(1)).toEqual({ ok: true });
+    expect(precheckSend(500)).toEqual({ ok: true });
+    expect(precheckSend(undefined)).toEqual({ ok: true });
   });
 });
 

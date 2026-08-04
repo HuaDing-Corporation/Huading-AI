@@ -14,7 +14,7 @@ vi.mock("@/lib/aibrain/hooks", () => ({
 import { copy } from "@/lib/copy";
 import { IntensitySelector } from "./intensity-selector";
 import { RechargeDialog } from "./recharge-dialog";
-import { shortfallView } from "@/lib/aibrain/types";
+import { outstandingView, shortfallView } from "@/lib/aibrain/types";
 
 describe("门A · 强度选择器：金额不许裸奔", () => {
   /**
@@ -56,37 +56,58 @@ describe("门A · 强度选择器：金额不许裸奔", () => {
   });
 });
 
-describe("门B · 402 充值窗：把四件事说清楚", () => {
+describe("门B · 402「预留不足」充值窗：把四件事说清楚", () => {
   const dialog = () => screen.getByRole("dialog");
+  const insufficient = (shortfall: ReturnType<typeof shortfallView>) => (
+    <RechargeDialog open onOpenChange={vi.fn()} reason={{ kind: "insufficient", shortfall }} />
+  );
+  /** BE `AIBRAIN_INSUFFICIENT_BALANCE` 的 detail 真实形状（aibrain.py:578-583）。 */
+  const BE_DETAIL = {
+    required_credits: 137.6256,
+    available_credits: 20,
+    shortfall_credits: 117.6256,
+    temporary_reservation: true
+  };
 
   /**
-   * 🔴 §三 的四条要求逐条断言。其中第 4 条（临时预留 ≠ 扣费）是**本包最要紧的一句话**——
-   * 用户会看到 137.6 被"扣住"，不说清楚就会以为一次对话花 137 积分。
+   * 🔴 §三 的四条要求逐条断言（**精确态**：BE 给了 detail → 措辞里没有「至少」）。
+   * 其中第 4 条（临时预留 ≠ 扣费）是这条路径最要紧的一句话——用户会看到 137.6 被"扣住"，
+   * 不说清楚就会以为一次对话花 137 积分。
    * 变异：删掉 ShortfallNotice 里 `insufficientReserveNote` 那一行 → 本条红。
    */
-  it("门B：402 弹窗同时给出「至少需要 / 当前可用 / 至少还差 / 这是临时预留不是扣费」", () => {
-    render(
-      <RechargeDialog open onOpenChange={vi.fn()} shortfall={shortfallView("high", 20)} />
-    );
+  it("门B：精确态 402 → 「需临时预留 / 当前可用 / 还差 / 这是临时预留不是扣费」四件齐全", () => {
+    render(insufficient(shortfallView("high", 20, BE_DETAIL)));
     const d = within(dialog());
-    // ① 需要多少（下界，配「至少」二字）
-    expect(d.getByText(copy.aibrain.insufficientMinRequired("137.6"))).toBeInTheDocument();
-    // ② 当前多少
+    expect(d.getByText(copy.aibrain.insufficientRequired("137.6"))).toBeInTheDocument();
     expect(d.getByText(copy.aibrain.insufficientAvailable("20"))).toBeInTheDocument();
-    // ③ 还差多少
-    expect(d.getByText(copy.aibrain.insufficientShortfall("117.6"))).toBeInTheDocument();
-    // ④ 🔴 这是临时预留、不是扣费，结束即退回
+    expect(d.getByText(copy.aibrain.insufficientShortfallExact("117.6"))).toBeInTheDocument();
     expect(d.getByText(copy.aibrain.insufficientReserveNote)).toBeInTheDocument();
+    // 🔴 精确态**不许**出现「至少」的回退措辞（把精确值说成下界，或反过来，都是错的口径）。
+    expect(d.queryByText(copy.aibrain.insufficientMinRequired("137.6"))).not.toBeInTheDocument();
+    expect(dialog().textContent ?? "").not.toContain("至少");
+  });
+
+  /**
+   * 🔴 FIX1 点名要钉的**回退**：BE 不发 detail 时退回下界 + 「至少」措辞，而不是什么都不显示。
+   * 变异：删掉 `shortfallView` 的回退分支、或让 UI 在 `exact=false` 时不渲染 → 本条红。
+   * 这一条与上一条**同守一个组件、判据相反**，构成 exact 两态的完整覆盖。
+   */
+  it("门B1b：回退态（BE 未发 detail）→ 仍显示金额，但措辞带「至少」", () => {
+    render(insufficient(shortfallView("high", 20)));
+    const d = within(dialog());
+    expect(d.getByText(copy.aibrain.insufficientMinRequired("137.6"))).toBeInTheDocument();
+    expect(d.getByText(copy.aibrain.insufficientShortfall("117.6"))).toBeInTheDocument();
+    expect(d.getByText(copy.aibrain.insufficientReserveNote)).toBeInTheDocument();
+    // 回退态**不许**用精确措辞（那等于告诉用户「充这么多就够」，而实际还要加提示词那一段）。
+    expect(d.queryByText(copy.aibrain.insufficientRequired("137.6"))).not.toBeInTheDocument();
   });
 
   /**
    * 🔴 钱包未加载 → 只说下界，**不显示「当前可用 0 积分」**（那是谎话）。
    * 变异：把 available 的 undefined 兜底成 0 → 本条红。
    */
-  it("门B2：钱包未加载 → 不显示「当前可用」「还差」，但「临时预留」的解释照给", () => {
-    render(
-      <RechargeDialog open onOpenChange={vi.fn()} shortfall={shortfallView("low", undefined)} />
-    );
+  it("门B2：detail 与钱包都没有 → 不显示「当前可用」「还差」，但「临时预留」的解释照给", () => {
+    render(insufficient(shortfallView("low", undefined)));
     const d = within(dialog());
     expect(d.getByText(copy.aibrain.insufficientMinRequired("27.5"))).toBeInTheDocument();
     expect(d.queryByText(copy.aibrain.insufficientAvailable("0"))).not.toBeInTheDocument();
@@ -94,25 +115,84 @@ describe("门B · 402 充值窗：把四件事说清楚", () => {
   });
 
   /**
-   * 🔴 余额高于下界仍被拒 → 换一句话说清方向，**不显示「至少还差 0 积分」**。
-   * 变异：`shortfallView` 改用 `Math.max(0, …)` → 本条红。
+   * 🔴 回退态余额高于下界仍被拒 → 换一句话说清方向，**不显示「至少还差 0 积分」**。
+   * 变异：`shortfallView` 回退分支改用 `Math.max(0, …)` → 本条红。
    */
-  it("门B3：余额高于下界仍被拒 → 给出「上下文较长」的解释，不出现「还差 0 积分」", () => {
-    render(
-      <RechargeDialog open onOpenChange={vi.fn()} shortfall={shortfallView("high", 500)} />
-    );
+  it("门B3：回退态余额高于下界仍被拒 → 给出「上下文较长」的解释，不出现「还差 0 积分」", () => {
+    render(insufficient(shortfallView("high", 500)));
     const d = within(dialog());
     expect(d.getByText(copy.aibrain.insufficientContextHint)).toBeInTheDocument();
     expect(d.queryByText(copy.aibrain.insufficientShortfall("0"))).not.toBeInTheDocument();
   });
 
-  /** 🔴 门C：主动充值（非 402）→ 一个缺口数字都不出现。变异：无条件渲染 ShortfallNotice → 本条红。 */
-  it("门C：用户主动点「充值」（无 shortfall）→ 不出现任何缺口说明", () => {
+  /** 🔴 门C：主动充值（非 402）→ 一个缺口数字都不出现。变异：无条件渲染说明块 → 本条红。 */
+  it("门C：用户主动点「充值」（无 reason）→ 不出现任何缺口/欠费说明", () => {
     render(<RechargeDialog open onOpenChange={vi.fn()} />);
     const d = within(dialog());
     expect(d.queryByText(copy.aibrain.insufficientTitle)).not.toBeInTheDocument();
     expect(d.queryByText(copy.aibrain.insufficientReserveNote)).not.toBeInTheDocument();
+    expect(d.queryByText(copy.aibrain.outstandingTitle)).not.toBeInTheDocument();
     // 充值本身的功能不受影响。
     expect(d.getByRole("button", { name: copy.aibrain.rechargeConfirm })).toBeInTheDocument();
+  });
+});
+
+// ── FIX1 · 402 之二：欠费 AIBRAIN_OUTSTANDING_BALANCE ───────────────────────────────────────
+// 🔴 这组门的核心是**两种 402 的话术不许串**。欠费用户的上一次对话是**成功交付**的，那笔钱
+//    真花掉了；对他说「这是临时预留、结束后差额会退回」是彻头彻尾的错误信息。
+describe("门D · 402「欠费」充值窗：与「预留不足」明确区分", () => {
+  const dialog = () => screen.getByRole("dialog");
+  const outstanding = (o?: ReturnType<typeof outstandingView>) => (
+    <RechargeDialog open onOpenChange={vi.fn()} reason={{ kind: "outstanding", outstanding: o }} />
+  );
+  /** BE `AIBRAIN_OUTSTANDING_BALANCE` 的 detail 真实形状（aibrain.py:564-567）。 */
+  const BE_DETAIL = { available_credits: -42.5, outstanding_credits: 42.5 };
+
+  /**
+   * 🔴 变异：把 `aibrain-chat.tsx` 的欠费分流删掉（让 OUTSTANDING 落到 `err.status === 402` 的
+   *    insufficient 兜底）→ 本条红（欠费文案不出现、反而出现「临时预留」那句）。
+   */
+  it("门D：欠费弹窗给出「需补齐 X / 当前余额 −X / 上次已交付、差额记成欠款」", () => {
+    render(outstanding(outstandingView(BE_DETAIL)));
+    const d = within(dialog());
+    expect(d.getByText(copy.aibrain.outstandingTitle)).toBeInTheDocument();
+    expect(d.getByText(copy.aibrain.outstandingNote)).toBeInTheDocument();
+    expect(d.getByText(copy.aibrain.outstandingAmount("42.5"))).toBeInTheDocument();
+    expect(d.getByText(copy.aibrain.outstandingBalance("-42.5"))).toBeInTheDocument();
+  });
+
+  /**
+   * 🔴🔴 **本组最要紧的一条**：欠费弹窗里**绝不许出现**「预留不足」那套话术。
+   * 变异：把 ShortfallNotice 与 OutstandingNotice 合并成一个组件、共用 `insufficientReserveNote`
+   *       → 本条红。（这正是我把两者拆成两个组件的原因。）
+   */
+  it("门D2：欠费弹窗**不出现**「临时预留」那套话术——那笔钱已经花掉了", () => {
+    render(outstanding(outstandingView(BE_DETAIL)));
+    const text = dialog().textContent ?? "";
+    expect(text).not.toContain(copy.aibrain.insufficientReserveNote);
+    expect(text).not.toContain(copy.aibrain.insufficientTitle);
+    // ⚠️ 断言「临时预留」这四个字，**不是**笼统的「退回」——弹窗里本来就有一句必须保留的
+    //    `rechargeIrreversible`「充值后不可退回余额」（D4 的硬要求），那是讲充值不可退，
+    //    与「预留会退回」是两回事。按「退回」笼统排除会误杀它（初版这条就是这么写红的）。
+    expect(text).not.toContain("临时预留");
+  });
+
+  /**
+   * 🔴 detail 与钱包都拿不到数 → 只给定性文案，**不编数字**。
+   * 变异：`outstandingView` 无来源时兜底 `{ outstanding: 0 }` → 本条红（会出现「需补齐 0 积分」）。
+   */
+  it("门D3：拿不到欠款额 → 只给定性说明，一个数字都不编", () => {
+    render(outstanding(undefined));
+    const d = within(dialog());
+    expect(d.getByText(copy.aibrain.outstandingUnknown)).toBeInTheDocument();
+    expect(d.queryByText(copy.aibrain.outstandingAmount("0"))).not.toBeInTheDocument();
+  });
+
+  /** 回退：detail 缺失但钱包余额为负 → 用负余额反推，仍能给出准确数字。 */
+  it("门D4：detail 缺失但钱包为负 → 用负余额反推欠款额", () => {
+    render(outstanding(outstandingView(undefined, -30)));
+    const d = within(dialog());
+    expect(d.getByText(copy.aibrain.outstandingAmount("30"))).toBeInTheDocument();
+    expect(d.getByText(copy.aibrain.outstandingBalance("-30"))).toBeInTheDocument();
   });
 });

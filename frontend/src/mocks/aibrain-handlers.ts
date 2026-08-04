@@ -8,16 +8,23 @@
 // ── PRICING-UI-0001 §四 · 计费口径重写（对齐 PR #239 `codex/pricing-c3c4-be`）────────────────────
 // 旧 mock 是 flat `min(200, available)` 预留 + `min(typical, reservation)` 结算，与真实逻辑已完全脱节
 //（真实是**动态预留**：提示词估算 × 1.25 + 完整 completion 配额）。mock 比 BE 宽松 = 前端测试的绿是假绿。
-// 现在逐条镜像 `backend/app/services/aibrain.py`：
+// 现在逐条镜像 `backend/app/services/aibrain.py`（**契约基线 = #239 `e2bc2c02`**）：
 //   预留 `_reservation_credits` = _user_credits(ceil(估算提示词 tokens × 1.25), max_completion_tokens=4096)
 //   估算 `_estimate_prompt_tokens` / `_estimate_text_tokens`（ASCII 每 4 字符 1 token、非 ASCII 每字 1 token、
 //        每条消息 +4、图片附件每张 4096）
-//   预留闸 `_apply_reasoning_wallet_change` reserve 分支：`available < requested` → 402（**不再是 available<=0**）
-//   结算    settle 分支：`available += reserved - charged`（差额**立即退回**），reserved 归零
-//   追加预留 `_expand_reasoning_reservation`：实扣 > 预留时补一笔；补不上 → 402（此时请求已经跑完了）
-// 🔴 **本 mock 不实现「余额为负拒绝新请求」闸门**：BE 三个分支 grep 下来没有这条逻辑、也没有第二个 402 码，
-//    且当前 BE 的 reserve 硬拦 + settle 断言（`requested > reserved` 抛 RuntimeError）使余额**根本无法变负**。
-//    mock 造一个 BE 没有的闸门 = 反方向的不一致（假杀），与假绿同样有害。待 CA 实装透支方案后补。
+//   闸门① `available < 0`         → 402 AIBRAIN_OUTSTANDING_BALANCE（**欠费**，:557，判在最前）
+//   闸门② `available < requested` → 402 AIBRAIN_INSUFFICIENT_BALANCE（预留不足，:570）
+//   两个 402 都带**结构化 detail**（`e2bc2c02` 给 AppError 加了 detail 形参并在 handler 里转发）
+//   结算  settle 分支：`available += reserved - charged`（差额**立即退回**），reserved 归零
+//   透支  实扣 > 预留时 BE **照常交付答案**并按实扣结算，余额**允许变负**（:250-266 + `allow_overdraft`）
+//
+// 🔴🔴 **本文件上一版（PRICING-UI-0001 初版）的两条结论已被 `e2bc2c02` 推翻，别照抄旧注释**：
+//   ✗ 旧：「实扣超预留 → 追加预留失败 → 释放预留 → 402、**不交付**」
+//     新：provider 的钱已经花了 → **交付 + 透支**（那才是 BE 现在做的事，方向整个相反）
+//   ✗ 旧：「本 mock 不实现负余额闸门 —— BE 无此逻辑，造一个是反方向的假杀」
+//     新：BE 有了（透支使余额可为负，闸门① 拦住后续请求）→ **现在必须实现**
+//   那两条结论在 `42db0ecb` 上都是对的；写下它们的理由（不许 mock 与 BE 反向不一致）没变，
+//   变的是 BE。留着这段对照，是为了让下一个人知道"该跟着谁改"，而不是把旧结论当教条。
 
 import { http, HttpResponse } from "msw";
 
@@ -41,15 +48,29 @@ const IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000").replace(/\/$/, "");
 const ok = <T>(data: T, status = 200) =>
   HttpResponse.json({ data, error: null, request_id: "mock-req" }, { status });
-const err = (status: number, code: string, message: string) =>
-  HttpResponse.json({ data: null, error: { code, message, request_id: "mock-req" }, request_id: "mock-req" }, { status });
+/**
+ * BE `_error_response`（core/exceptions.py）的形态：`error.detail` 是**可选**的结构化载荷。
+ * 🔴 FIX1：`e2bc2c02` 给 `AppError` 加了 `detail` 形参并在 `app_error_handler` 里转发（:24/:94）——
+ *    此前 detail 恒为 null。两类 402 的数字现在都在 detail 里，mock 必须照发，否则前端读 detail 的
+ *    那条路径在 mock 下永远走不到（等于没测）。BE 不发 detail 时该字段缺席（不是 null 键），此处同形。
+ */
+const err = (status: number, code: string, message: string, detail?: unknown) =>
+  HttpResponse.json(
+    {
+      data: null,
+      error: { code, message, request_id: "mock-req", ...(detail === undefined ? {} : { detail }) },
+      request_id: "mock-req"
+    },
+    { status }
+  );
 
 /** content 含此串 → 模拟上游失败（测 502 分流）。 */
 const PROVIDER_FAIL_MARKER = "__mock_provider_fail__";
 /**
- * content 含此串 → 模拟「答完才发现实扣超出预留、**追加预留**时余额不够」→ 402
- * （BE `_expand_reasoning_reservation`，PR #239 新增分支）。这条路径的特别之处：**请求已经跑完了**才被拒，
- * 消息落 failed、预留全额释放，用户看到的是「花了时间、没拿到答案、也没扣钱」。
+ * content 含此串 → 模拟「答完才发现实扣超出预留」→ **透支交付**
+ * （BE `e2bc2c02` aibrain.py:250-266 + `allow_overdraft`）。这条路径的特别之处：答案**照常交付**
+ * （上游的钱已经花了，不能白花），差额记成欠款让余额变负，随后由闸门① 拦住一切新的付费请求。
+ * ⚠️ 这与本 mock 上一版的方向**完全相反**（旧版是「不交付 + 释放预留」），别按旧印象改。
  */
 const RESERVE_OVERRUN_MARKER = "__mock_reserve_overrun__";
 
@@ -278,7 +299,18 @@ export function aibrainHandlers() {
       const attachments = resolved.attachments;
       const tier = body.tier;
 
-      // ── 路径①/② 预留（BE `_reservation_credits` + `_apply_reasoning_wallet_change` 的 reserve 分支）──
+      // ── 闸门① 负余额（欠费）→ 402 OUTSTANDING（BE reserve 分支 :557，**判在最前**）───────────
+      // 🔴 FIX1：上一版 mock 没有这条，理由是「BE 无此逻辑，造一个是反方向的假杀」——`e2bc2c02` 之后
+      //    BE 有了：结算允许透支（见下方路径③），余额可为负，随后一切新的付费请求被这道闸门拦住。
+      if (available < 0)
+        return err(
+          402,
+          AIBRAIN_ERROR.OUTSTANDING_BALANCE,
+          "Pay the outstanding AIBRAIN balance before starting new work.",
+          { available_credits: available, outstanding_credits: quantizeCredits(-available) }
+        );
+
+      // ── 闸门② 预留不足 → 402 INSUFFICIENT（BE reserve 分支 :570）─────────────────────────────
       // 🔴 闸门是 `available < requested`（**不是旧 mock 的 available<=0**）：账上有钱但不够这次预留，
       //    照样 402 —— 这正是 §三 要向用户解释清楚的那个 402。
       const promptTokens = estimatePromptTokens(conv.messages, content, attachments.length);
@@ -287,10 +319,14 @@ export function aibrainHandlers() {
         return err(
           402,
           AIBRAIN_ERROR.INSUFFICIENT_BALANCE,
-          // 镜像 BE 的 message 形态（英文自由文本、required/available 只在这句话里，无结构化字段）。
-          // 🔴 前端**不解析这句话**（见 lib/aibrain/types.ts `ShortfallView` 的注释）；mock 照抄形态是为了
-          //    让「前端不该依赖它」这件事在 mock 层面也成立 —— 谁要是写了解析，这里一改措辞就该红。
-          `Insufficient reasoning balance for this request (required ${reservation}, available ${available}).`
+          // message 仍是英文自由文本（BE 没改这句）；**数字现在也在 detail 里**，前端读 detail。
+          `Insufficient reasoning balance for this request (required ${reservation}, available ${available}).`,
+          {
+            required_credits: reservation,
+            available_credits: available,
+            shortfall_credits: quantizeCredits(reservation - available),
+            temporary_reservation: true
+          }
         );
       available = quantizeCredits(available - reservation); // 预留：available → reserved
 
@@ -309,34 +345,26 @@ export function aibrainHandlers() {
       const completionTokens = estimateTextTokens(answer);
       let charged = userCredits(tier, promptTokens, completionTokens);
 
-      // ── 路径③ 追加预留（BE `_expand_reasoning_reservation`）──────────────────────────────
-      // 实扣 > 预留 → 补一笔；补不上 → 402，且**请求已经跑完了**：消息落 failed、预留全额释放。
+      // ── 路径③ 实扣超预留 → **透支交付**（BE `e2bc2c02` `_expand_reasoning_reservation` + :250-266）──
+      // 🔴🔴 FIX1 **方向整个反过来了**。上一版 mock 是「追加失败 → 释放预留 → 402、不交付」；
+      //     `e2bc2c02` 之后 BE 的行为是：
+      //       provider 已经把答案生成出来了（钱已经花在上游了）→ 追加预留失败**不再拒绝**，
+      //       而是 `overdraft_authorized = True` → **照常交付答案** → settle 时 `allow_overdraft=True`
+      //       → 钱包**允许变负**（BE 同时删掉了 `next_available < 0` 的 RuntimeError 断言）
+      //       → 随后由上面的闸门① 拦住一切新的付费请求，直到用户补齐。
+      //     旧 mock 那个方向会让前端测试建立在「超支就不交付」的假象上，正是 CB 指出的第 3 点。
       // ⚠️ 倍数 5 是**测试钩子的放大量**，不是对 BE 的建模：真实世界里 `charged > reservation` 只可能
       //    因为提示词估算低估了（completion 那头被 `max_completion_tokens` 硬顶住，超不了）。而 prompt
       //    费率只有输出的 1/6，要靠堆 token 把实扣顶过预留，得几万个 token —— 在 mock 里造那种输入
-      //    只会让用例难读。取 ×5 是为了**稳定命中这条分支**，行为形态（补一笔 / 补不上就全额释放）是真的。
+      //    只会让用例难读。取 ×5 是为了**稳定命中这条分支**，行为形态（交付 + 透支）是真的。
       if (content.includes(RESERVE_OVERRUN_MARKER)) charged = quantizeCredits(reservation * 5);
-      if (charged > reservation) {
-        const additional = quantizeCredits(charged - reservation);
-        if (available < additional) {
-          // ⚠️ message 里的 available 必须是**释放预留之前**的值：BE 是先在 `_apply_reasoning_wallet_change`
-          //    里抛 402（那时预留还挂着），`_fail_chat_message` 才释放。先释放再取值会报出一个更大的、
-          //    与拒绝时刻不符的数。前端虽然不解析这句话，mock 也得照实说。
-          const availableAtRejection = available;
-          available = quantizeCredits(available + reservation); // 释放预留：不扣用户一分钱
-          return err(
-            402,
-            AIBRAIN_ERROR.INSUFFICIENT_BALANCE,
-            `Insufficient reasoning balance for this request (required ${additional}, available ${availableAtRejection}).`
-          );
-        }
-        available = quantizeCredits(available - additional);
-      }
 
       // ── 结算（BE settle 分支：`available += reserved - charged`）──────────────────────────
       // 🔴 差额**立即退回**：available 净减少的只有 charged，那个吓人的预留额一秒都不多占。
       //    这正是 §三 第 4 条要向用户讲清的事实，mock 必须真的这么行为，否则测试没法钉住它。
-      available = quantizeCredits(available + Math.max(0, reservation - charged));
+      // 🔴 `charged > reservation` 时这个式子自然得到**负余额** —— 不加 `Math.max(0, …)` 夹逼，
+      //    因为 BE 就是允许它变负的（那正是欠费的来源）。
+      available = quantizeCredits(available + reservation - charged);
       totalSpent = quantizeCredits(totalSpent + charged);
 
       const userMsg: ChatMessage = {

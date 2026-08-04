@@ -1511,15 +1511,32 @@ export const copy = {
     // 此前 402 只是**默默弹开充值窗**，用户看不到任何解释；而新预留逻辑会锁住一个远大于实际花费的数
     //（高速档光 completion 就 137.6），不解释清楚会被当成「一次对话要花 137 积分」。
     insufficientTitle: "推理积分不足，本次没有发送",
-    /** 🔴 §三 第 4 条 —— 本包最要紧的一句话：预留 ≠ 扣费。 */
+    /** 🔴 §三 第 4 条 —— 这条路径最要紧的一句话：预留 ≠ 扣费。 */
     insufficientReserveNote:
       "这是「临时预留」，不是实际扣费：发送时按「最长回答」先锁住一笔积分，对话结束立即按实际用量结算，差额当场退回余额。",
+    // 🔴 FIX1：BE `e2bc2c02` 起 402 带结构化 detail → 能给**精确值**，措辞里的「至少」随之去掉。
+    //    回退措辞（`…MinRequired`）保留给 detail 缺失的情形——把下界说成精确值等于告诉用户
+    //    「充这么多就够」，而实际还要加提示词那一段，充完照样发不出去。
+    insufficientRequired: (credits: string) => `本次需临时预留 ${credits} 积分`,
     insufficientMinRequired: (credits: string) => `本次至少需临时预留 ${credits} 积分`,
     insufficientAvailable: (credits: string) => `当前可用 ${credits} 积分`,
+    insufficientShortfallExact: (credits: string) => `还差 ${credits} 积分`,
     insufficientShortfall: (credits: string) => `至少还差 ${credits} 积分`,
-    /** 余额 ≥ 下界却仍被拒：缺口来自提示词那一段（前端算不出精确值，故换一句话说清方向）。 */
+    /** 回退态下余额 ≥ 下界却仍被拒：缺口来自提示词那一段（前端算不出精确值，故换一句话说清方向）。 */
     insufficientContextHint:
       "余额高于这个下限仍被拒，通常是本次对话的上下文较长或带了图片——提示词也要计入预留。可新建对话或精简内容后重试。",
+    // ── 402 之二：欠费 AIBRAIN_OUTSTANDING_BALANCE（§三 · FIX1）────────────────────────────
+    // 🔴 与「预留不足」是两回事，话术相反，别混用：
+    //    预留不足 = 这笔钱只是临时锁住、结束会退回；
+    //    欠费     = 上一次对话**已经答完并交付**，实际用量超出了当时的预留，差额记成了欠款。
+    //    所以这里**绝不能**出现「会退回」三个字——那笔钱是真花掉了。
+    outstandingTitle: "有未结清的推理积分，暂时无法继续",
+    outstandingNote:
+      "上一次对话已经答完并交付，实际用量超出了当时的预留，差额记成了欠款。补齐后即可继续对话。",
+    outstandingAmount: (credits: string) => `需补齐 ${credits} 积分`,
+    outstandingBalance: (credits: string) => `当前余额 ${credits} 积分`,
+    /** detail 与钱包都拿不到数时只给定性说明——**不编数字**。 */
+    outstandingUnknown: "补齐欠款后即可继续；具体金额请在充值后查看余额。",
     /** 409：答完要追加预留时，这条消息已不在等待中（并发发送 / 超时回收）。 */
     requestExpired: "这条消息已超时或被其他操作打断，未计费。请重新发送。",
     // 附件（一期只图片；文档解析是 BE 增量 3，本期不提供入口）

@@ -2213,20 +2213,27 @@ export const handlers = [
     if (body.mode === "auto") {
       const n = Math.min(5, Math.max(1, body.n ?? 3));
       return ok({
-        results: Array.from({ length: n }, (_, i) => ({ text: `【版本 ${i + 1}】${base}（mock 改写，可编辑）` }))
+        results: Array.from({ length: n }, (_, i) => ({ text: `【版本 ${i + 1}】${base}（mock 改写，可编辑）` })),
+        outcome: { operation: "rewrite", status: "succeeded" }
       });
     }
-    return ok({ results: [{ text: `${base}（mock 改写，可编辑）` }] });
+    return ok({ results: [{ text: `${base}（mock 改写，可编辑）` }], outcome: { operation: "rewrite", status: "succeeded" } });
   }),
   http.post(`${BASE}/api/v1/copy/titles`, async ({ request }) => {
     const body = (await request.json()) as { n?: number };
     const n = body.n ?? 5;
-    return ok({ titles: Array.from({ length: n }, (_, i) => `mock 标题候选 ${i + 1}`) });
+    return ok({
+      titles: Array.from({ length: n }, (_, i) => `mock 标题候选 ${i + 1}`),
+      outcome: { operation: "titles", status: "succeeded" }
+    });
   }),
   http.post(`${BASE}/api/v1/copy/topics`, async ({ request }) => {
     const body = (await request.json()) as { n?: number };
     const n = body.n ?? 5;
-    return ok({ topics: Array.from({ length: n }, (_, i) => `#mock话题${i + 1}`) });
+    return ok({
+      topics: Array.from({ length: n }, (_, i) => `#mock话题${i + 1}`),
+      outcome: { operation: "topics", status: "succeeded" }
+    });
   }),
   http.post(`${BASE}/api/v1/copy/drafts`, async ({ request }) => {
     const body = (await request.json()) as Record<string, unknown>;

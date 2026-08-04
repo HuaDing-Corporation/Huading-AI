@@ -11,37 +11,46 @@ import { Button } from "@/components/ui/button";
 import { useConversation, useCreateConversation, useSendMessage, useWallet } from "@/lib/aibrain/hooks";
 import {
   AIBRAIN_ERROR,
+  outstandingView,
   shortfallView,
   type IntensityTier,
-  type SendMessageRequest,
-  type ShortfallView
+  type SendMessageRequest
 } from "@/lib/aibrain/types";
 import { ConversationList } from "@/components/aibrain/conversation-list";
 import { MessageStream } from "@/components/aibrain/message-stream";
 import { Composer } from "@/components/aibrain/composer";
 import { WalletBalance } from "@/components/aibrain/wallet-balance";
-import { RechargeDialog } from "@/components/aibrain/recharge-dialog";
+import { RechargeDialog, type RechargeReason } from "@/components/aibrain/recharge-dialog";
 
 export function AibrainChat() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [tier, setTier] = useState<IntensityTier>("mid");
   const [rechargeOpen, setRechargeOpen] = useState(false);
-  // 🔴 402 弹开充值窗时**同时**带上缺口说明（§三）；用户主动点顶部「充值」时为 undefined（无缺口可言）。
-  const [shortfall, setShortfall] = useState<ShortfallView | undefined>(undefined);
+  // 🔴 402 弹开充值窗时**同时**带上说明（§三）；用户主动点顶部「充值」时为 undefined（无缺口可言）。
+  //    FIX1：从单一 ShortfallView 换成判别式联合——「预留不足」与「欠费」是两种情形、两套话术。
+  const [reason, setReason] = useState<RechargeReason | undefined>(undefined);
   const [sendError, setSendError] = useState<string | null>(null);
 
   const { data: wallet } = useWallet();
   // 🔴 钱包未加载/加载失败时余额是 undefined（**不是 0**）——否则 available<=0 的预检会把有余额的用户也锁死（CR#2）。
   const balance = wallet?.available_credits;
 
-  /** 顶部余额条的「充值」：用户主动来充，**不带**缺口说明（没有被拒的操作，凭空给数字只会吓人）。 */
+  /** 顶部余额条的「充值」：用户主动来充，**不带**说明块（没有被拒的操作，凭空给数字只会吓人）。 */
   const openRecharge = () => {
-    setShortfall(undefined);
+    setReason(undefined);
     setRechargeOpen(true);
   };
-  /** 因余额不足被拦/被拒：带缺口说明。预检拦截（`available<=0`）与 BE 402 是同一件事的两个发生点，走同一出口。 */
-  const openRechargeWithShortfall = () => {
-    setShortfall(shortfallView(tier, balance));
+  /**
+   * 因余额问题被拦/被拒 → 弹充值窗并说清是哪一种。
+   * 预检拦截与 BE 402 是同一件事的两个发生点，走同一出口；区别只在预检时**没有响应体**
+   * （`detail` 为 undefined）→ `shortfallView` 自动落到下界回退、`outstandingView` 自动落到钱包回退。
+   */
+  const openRechargeFor = (kind: "insufficient" | "outstanding", detail?: unknown) => {
+    setReason(
+      kind === "outstanding"
+        ? { kind, outstanding: outstandingView(detail, balance) }
+        : { kind, shortfall: shortfallView(tier, balance, detail) }
+    );
     setRechargeOpen(true);
   };
 
@@ -69,12 +78,17 @@ export function AibrainChat() {
         setSendError(copy.aibrain.error);
         return false;
       }
-      // 🔴 402 余额不足 → 弹充值窗，**并带上缺口说明**（§三）。此前只是默默弹窗，用户看不到
-      //    「要多少 / 有多少 / 差多少 / 这是临时预留不是扣费」四件事中的任何一件。
-      // ⚠️ 目前 402 只有 AIBRAIN_INSUFFICIENT_BALANCE 一个码。用户已拍板的「余额为负时拒绝新请求」
-      //    闸门在 BE 三个分支（#237/#238/#239）里**都还没有实现**，也没有第二个错误码——本包不臆造。
-      //    CA 定下码之后，在此处按 code 分出第二条 else-if 即可（缺口说明块换一句「上次透支需补齐」）。
-      if (err.status === 402 || err.code === AIBRAIN_ERROR.INSUFFICIENT_BALANCE) openRechargeWithShortfall();
+      // 🔴 402 有**两种情形**（BE PR #239 `e2bc2c02`），必须分开，因为两套话术是相反的：
+      //    · OUTSTANDING_BALANCE → 上次已答完并交付、实际用量超预留 → 欠款，**那笔钱花掉了**
+      //    · INSUFFICIENT_BALANCE → 这次预留不够 → 充值即可，**这笔钱只是临时锁住**
+      //    欠费判在前（与 BE reserve 分支的判定次序一致），否则欠费用户会收到一句不相干的
+      //    「结束后差额会退回」——他上次的钱早就退不回来了。
+      // ⚠️ `err.status === 402` 的兜底放在**最后**：新码（如 #239 还在加的「租户级聚合在途敞口」
+      //    闸门，`e2bc2c02` 里尚未实现）会落到这里，按「预留不足」展示——那是较温和的一种说法，
+      //    不会把没欠费的人说成欠费。
+      if (err.code === AIBRAIN_ERROR.OUTSTANDING_BALANCE) openRechargeFor("outstanding", err.detail);
+      else if (err.code === AIBRAIN_ERROR.INSUFFICIENT_BALANCE || err.status === 402)
+        openRechargeFor("insufficient", err.detail);
       else if (err.code === AIBRAIN_ERROR.REQUEST_EXPIRED) setSendError(copy.aibrain.requestExpired);
       else if (err.code === AIBRAIN_ERROR.REQUEST_LIMIT_EXCEEDED) setSendError(copy.aibrain.reqLimit);
       else if (err.code === AIBRAIN_ERROR.PROVIDER_FAILED) setSendError(copy.aibrain.providerFailed);
@@ -120,13 +134,13 @@ export function AibrainChat() {
               balance={balance}
               sending={busy}
               onSend={handleSend}
-              onInsufficient={openRechargeWithShortfall}
+              onInsufficient={openRechargeFor}
             />
           </div>
         </div>
       </div>
 
-      <RechargeDialog open={rechargeOpen} onOpenChange={setRechargeOpen} shortfall={shortfall} />
+      <RechargeDialog open={rechargeOpen} onOpenChange={setRechargeOpen} reason={reason} />
     </section>
   );
 }

@@ -209,7 +209,13 @@ export interface TopupRequest {
  *  - 502 上游失败 → friendly「服务暂不可用，请重试」。
  */
 export const AIBRAIN_ERROR = {
-  INSUFFICIENT_BALANCE: "AIBRAIN_INSUFFICIENT_BALANCE", // 402
+  INSUFFICIENT_BALANCE: "AIBRAIN_INSUFFICIENT_BALANCE", // 402 · 预留不足（充值即可）
+  // 🔴 PR #239 `e2bc2c02` 新增：**欠费**。与上一个是**两种不同情形**，文案必须能区分。
+  //    产生路径（BE aibrain.py:250-266）：答案已经生成出来了（provider 的钱已经花了），此时才发现
+  //    实扣超预留且追不上 → BE **照常交付答案**并按实际用量结算，允许钱包**变负**；随后
+  //    reserve 分支最前面的 `available < 0` 闸门（:557）拦住一切新的付费请求，直到补齐。
+  //    所以用户看到它时：上一次对话是**成功拿到答案**的，欠的是那一次的差额。
+  OUTSTANDING_BALANCE: "AIBRAIN_OUTSTANDING_BALANCE", // 402 · 欠费（需先补齐）
   // ⚠️ PR #239 起 BE **不再发这个码**（`_max_completion_tokens` 连同那条 422 一起被删——预留改为动态、
   //    答不下就追加预留而不是拒绝）。分流保留：#239 上线前的 BE 仍会发，删掉会让那段时间漏分流；
   //    #239 之后它永不触发，留着无害。确认全环境升级完毕后可摘。
@@ -225,53 +231,146 @@ export const AIBRAIN_ERROR = {
   IDEMPOTENCY_KEY_REUSED: "AIBRAIN_IDEMPOTENCY_KEY_REUSED" // 409
 } as const;
 
-export type SendPrecheck = { ok: true } | { ok: false; reason: "insufficient" };
+/** 预检拦下的两种情形——与 BE 的两个 402 码一一对应，文案不同，别合并。 */
+export type SendPrecheck = { ok: true } | { ok: false; reason: "insufficient" | "outstanding" };
 
 /**
- * 🔴 发送前预检（承重核心）—— 只拦「**账上一分钱都没有**」这一种必然失败。
+ * 🔴 发送前预检（承重核心）—— 只拦「**账上必然发不出**」的两种情形，且要分清是哪一种。
  *
- * BE 口径（PR #239 `_apply_reasoning_wallet_change` 的 reserve 分支）：`available < requested` → 402。
+ * BE 口径（PR #239 `e2bc2c02` `_apply_reasoning_wallet_change` 的 reserve 分支，逐条对齐）：
+ *   :557  `available < 0`                 → 402 `AIBRAIN_OUTSTANDING_BALANCE`（**欠费**，先补齐）
+ *   :570  `available < requested`         → 402 `AIBRAIN_INSUFFICIENT_BALANCE`（预留不够，充值即可）
+ * 两条的**次序**也照抄：负余额先判，否则欠费用户会被当成普通的「余额不足」，看到一句不相干的
+ * 「这是临时预留、结束会退回」——他上一次的钱早就花掉了，退不回来。
+ *
  * requested 是动态预留（提示词估算 × 1.25 + 完整 completion 配额），**前端算不出**（见
- * `minReservationCredits` 的注释：prompt 段要复刻 BE 的 token 估算 + 20 轮上下文拼装）。
- * 故前端唯一能**零误判**预判的仍是 `available <= 0`：此时任何正数 requested 都不满足，必 402。
- * ⚠️ `available > 0` 但不够预留的情形**故意放行**，由 BE 的 402 权威裁决 —— 前端拿下界去拦会把
- *    「上下文短、实际只需几十积分」的用户误锁在门外（宁可多一次往返，不可错杀）。
+ * `minReservationCredits` 的注释）。故 `available === 0` 之外的正余额一律**故意放行**，由 BE 裁决：
+ * 前端拿下界去拦会把「上下文短、实际只需几十积分」的用户误锁在门外（宁可多一次往返，不可错杀）。
  * ⚠️ `available` 为 `undefined`（钱包**未加载/加载失败**）同样不预拦（CR#2），理由同上。
  */
 export function precheckSend(availableCredits: number | undefined): SendPrecheck {
-  if (typeof availableCredits === "number" && availableCredits <= 0) return { ok: false, reason: "insufficient" };
+  if (typeof availableCredits !== "number") return { ok: true };
+  if (availableCredits < 0) return { ok: false, reason: "outstanding" };
+  if (availableCredits === 0) return { ok: false, reason: "insufficient" };
   return { ok: true };
 }
 
+// ── 402 的结构化 detail（PR #239 `e2bc2c02`）─────────────────────────────────────────────────
+// 🔴 契约变更史（别删，这段解释了为什么下面有两条并存的取数路径）：
+//    · `42db0ecb` 时 `app_error_handler` **只转发 code + message**，required/available 仅存在于
+//      那句英文自由文本里。当时前端**故意不解析它**（BE 改措辞就会静默失效，且没有测试会红），
+//      改用可验证的下界 + 「至少」措辞。
+//    · `e2bc2c02` 给 `AppError` 加了 `detail` 形参并在 handler 里转发（core/exceptions.py:24/94），
+//      两类 402 各自带上了结构化字段。**现在能给精确值了**，措辞里的「至少」随之去掉。
+//    · 下界那条路径**保留为回退**：BE 哪天不发 detail（回滚 / 新增第三种 402 忘了带），UI 退回
+//      「至少 X」而不是什么都不显示。承重里专门有一条钉住这个回退。
+
+/** `AIBRAIN_INSUFFICIENT_BALANCE` 的 detail（BE aibrain.py:578-583，逐字段）。 */
+export interface InsufficientBalanceDetail {
+  required_credits: number;
+  available_credits: number;
+  shortfall_credits: number;
+  /** BE 恒发 `true`——「这是临时预留」这件事由 BE 自己标注，不是前端猜的。 */
+  temporary_reservation: boolean;
+}
+
+/** `AIBRAIN_OUTSTANDING_BALANCE` 的 detail（BE aibrain.py:564-567，逐字段）。 */
+export interface OutstandingBalanceDetail {
+  /** 当前可用——**负数**（就是欠的那部分）。 */
+  available_credits: number;
+  /** 欠款额 = `-available_credits`，正数。 */
+  outstanding_credits: number;
+}
+
+/** `detail` 过来的是 `unknown`（JSON 任意值）→ 逐字段校验后再用，形状不符一律当没有。 */
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+export function parseInsufficientDetail(detail: unknown): InsufficientBalanceDetail | undefined {
+  if (typeof detail !== "object" || detail === null) return undefined;
+  const d = detail as Record<string, unknown>;
+  const required = finiteNumber(d.required_credits);
+  const available = finiteNumber(d.available_credits);
+  const shortfall = finiteNumber(d.shortfall_credits);
+  // required 是这条路径的最小充分信息；缺它就退回下界，**不拼半份数据**（拼出来的组合最误导）。
+  if (required === undefined || available === undefined || shortfall === undefined) return undefined;
+  return {
+    required_credits: required,
+    available_credits: available,
+    shortfall_credits: shortfall,
+    temporary_reservation: d.temporary_reservation === true
+  };
+}
+
+export function parseOutstandingDetail(detail: unknown): OutstandingBalanceDetail | undefined {
+  if (typeof detail !== "object" || detail === null) return undefined;
+  const d = detail as Record<string, unknown>;
+  const available = finiteNumber(d.available_credits);
+  const outstanding = finiteNumber(d.outstanding_credits);
+  if (available === undefined || outstanding === undefined) return undefined;
+  return { available_credits: available, outstanding_credits: outstanding };
+}
+
 /**
- * 402 余额不足时，向用户交代清楚的三个数（PRICING-UI-0001 §三 的第 1/2/3 条；第 4 条「临时预留、
- * 结束即退」是文案，见 `copy.aibrain.insufficientReserveNote`）。
- *
- * 🔴 **为什么不从 402 响应体里取 required / available**：BE 把这两个数**只写在英文 message 自由文本里**
- *    （"Insufficient reasoning balance for this request (required X, available Y)."），而
- *    `app_error_handler`（core/exceptions.py）转发 AppError 时**只传 code + message，detail 恒为 null**。
- *    要拿到就得正则解析那句英文 —— BE 一改措辞前端就静默退化成「什么都不显示」，且没有任何测试会红。
- *    本项目在价格上已经栽过一次这种静默漂移（本包 §二 修的就是它），不再栽第二次。
- *    → 已写进回执请 CA 在 402 里补结构化字段；**字段名定下来之前不写解析代码**（写了也永远不生效，
- *      却让人以为已经生效 —— 假绿）。
- * 🔴 故 `minRequired` 用**可验证的下界**（completion 段 = 4096 × 输出费率），文案配「至少」二字。
+ * 402「预留不足」要向用户交代的数（§三 第 1/2/3 条；第 4 条是文案 `insufficientReserveNote`）。
+ * `exact` 决定文案说「需要 X」还是「至少需要 X」—— 这不是措辞洁癖：把下界说成精确值，
+ * 等于告诉用户「充这么多就够了」，而实际还要加上提示词那一段，充完照样发不出去。
  */
 export interface ShortfallView {
-  /** 本次**至少**会被临时预留的积分（下界，见 `minReservationCredits`）。 */
-  minRequired: number;
-  /** 当前可用积分；钱包未加载/加载失败时为 undefined（**不填 0**，0 是一个会误导的谎）。 */
+  /** 需要多少（`exact=true` 时是 BE 的精确值，否则是 `minReservationCredits` 的下界）。 */
+  required: number;
+  /** true = 来自 BE 的结构化 detail；false = 前端算的下界，文案须配「至少」。 */
+  exact: boolean;
+  /** 当前可用积分；BE 未给且钱包未加载时 undefined（**不填 0**，0 是一个会误导的谎）。 */
   available?: number;
   /**
-   * 至少还差多少。仅当余额已知**且确实低于下界**时给出；
-   * `available >= minRequired` 却仍被 402，说明缺口来自提示词那一段（上下文长 / 图片多）——
-   * 此时差额前端算不出，给 undefined 让 UI 换一句话说，**不显示「还差 0 积分」这种荒谬值**。
+   * 还差多少。精确态取 BE 的 `shortfall_credits`；回退态仅当余额已知**且低于下界**时给出
+   * （`available >= 下界` 却仍被 402 说明缺口在提示词那一段，前端算不出 → undefined，
+   * 让 UI 换一句话说，**不显示「还差 0 积分」这种荒谬值**）。
    */
   shortfall?: number;
 }
 
-export function shortfallView(tier: IntensityTier, availableCredits: number | undefined): ShortfallView {
-  const minRequired = minReservationCredits(tier);
+export function shortfallView(
+  tier: IntensityTier,
+  availableCredits: number | undefined,
+  detail?: unknown
+): ShortfallView {
+  const parsed = parseInsufficientDetail(detail);
+  if (parsed) {
+    return {
+      required: parsed.required_credits,
+      exact: true,
+      available: parsed.available_credits,
+      shortfall: parsed.shortfall_credits > 0 ? parsed.shortfall_credits : undefined
+    };
+  }
+  // ── 回退：BE 没给 detail（旧版本 / 回滚 / 预检拦截根本没发请求）→ 下界 + 「至少」措辞 ──
+  const required = minReservationCredits(tier);
   const available = typeof availableCredits === "number" ? availableCredits : undefined;
-  const shortfall = available !== undefined && available < minRequired ? minRequired - available : undefined;
-  return { minRequired, available, shortfall };
+  const shortfall = available !== undefined && available < required ? required - available : undefined;
+  return { required, exact: false, available, shortfall };
+}
+
+/**
+ * 402「欠费」要交代的数。与 `ShortfallView` **刻意不合并**：两者的话术相反 ——
+ * 一个是「这笔钱只是临时锁住、结束会退」，另一个是「上次那笔已经花掉了、要补上」。
+ * @returns detail 与钱包都拿不到数时返回 undefined → UI 只给定性文案，不编数字。
+ */
+export interface OutstandingView {
+  /** 欠款额（正数）。 */
+  outstanding: number;
+  /** 当前余额（负数）。 */
+  available?: number;
+}
+
+export function outstandingView(detail: unknown, availableCredits?: number): OutstandingView | undefined {
+  const parsed = parseOutstandingDetail(detail);
+  if (parsed) return { outstanding: parsed.outstanding_credits, available: parsed.available_credits };
+  // 回退：钱包的 available 现在**可以是负数**（BE 去掉了 `next_available < 0` 的断言），
+  // 负余额本身就等于欠款额，是可靠的第二来源。
+  if (typeof availableCredits === "number" && availableCredits < 0)
+    return { outstanding: -availableCredits, available: availableCredits };
+  return undefined;
 }

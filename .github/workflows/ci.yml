@@ -118,3 +118,24 @@ jobs:
       # （Bug B 主承重在 client.test.ts base=/api 单测；见 e2e spec 头注）。
       - name: Interactive smoke (电商视频历史 · 运行时 #130 白屏门)
         run: pnpm test:e2e
+
+      # 🔴 PRICING-UI-0001-FIX1 §六：**失败时保留 Playwright 产物**。
+      # 起因：本地 verify:full 出现过一次 aibrain smoke 失败，重跑三次全绿，而失败快照已被成功的
+      # 重跑覆盖 → 无法归因，只能猜。error-context.md / trace / 截图 是唯一能把"偶发"变成"可诊断"的
+      # 东西，猜十次不如留一次现场。
+      # 🔴 条件是 `always()` 而**不是** `failure()`，这一点是本包踩过的坑：CI 上 `retries: 1`，
+      # 「第一次失败、重试成功」的 flaky 会被判成 **pass**，job 不失败 —— 用 `failure()` 的话，
+      # 恰恰是最难归因的那一类（本包遇到的正是它）永远拿不到产物。`always()` + 下面的
+      # `if-no-files-found: ignore` 组合：绿的时候 test-results/ 几乎是空的，artifact 极小；
+      # 一旦有失败（含 flaky 的首次失败）就必定留下 trace + 截图。
+      # `if-no-files-found: ignore` —— e2e 之前的步骤失败时该目录不存在，别再叠一个红。
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            frontend/test-results/
+            frontend/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 14
