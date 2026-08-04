@@ -922,7 +922,7 @@ def test_postgres_inflight_exposure_authorization_is_atomic_before_provider(
     assert isinstance(errors[0], AppError)
     assert errors[0].code == "AIBRAIN_INFLIGHT_EXPOSURE_LIMIT"
     assert errors[0].status_code == 402
-    assert errors[0].detail["in_flight_requests"] == 2
+    assert errors[0].detail["in_flight_request_count"] == 2
     assert errors[0].detail["retryable"] is True
 
     with factory() as db:
@@ -1175,7 +1175,7 @@ def test_postgres_external_cancellation_keeps_live_provider_exposure_authorized(
                         storage=object(),
                     )
                 assert blocked.value.code == "AIBRAIN_INFLIGHT_EXPOSURE_LIMIT"
-                assert blocked.value.detail["in_flight_requests"] == 2
+                assert blocked.value.detail["in_flight_request_count"] == 2
                 db.rollback()
             assert len(provider.calls) == 2
         finally:

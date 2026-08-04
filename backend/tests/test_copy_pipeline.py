@@ -1,6 +1,7 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import get_args
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,6 +10,23 @@ from sqlalchemy import func, select
 from app.db.models import CopyDraft, Subscription, UsageRecord, VideoTask
 from app.main import app
 from app.schemas.copy import CopyRewriteRequest
+from app.schemas.response import OperationOutcome
+
+
+def test_operation_outcome_contract_is_frozen() -> None:
+    fields = OperationOutcome.model_fields
+    assert set(fields) == {"operation", "status"}
+    assert fields["operation"].annotation is str
+    assert get_args(fields["status"].annotation) == ("succeeded", "failed")
+    assert all(field.is_required() for field in fields.values())
+    assert OperationOutcome(operation="rewrite", status="succeeded").model_dump() == {
+        "operation": "rewrite",
+        "status": "succeeded",
+    }
+    assert OperationOutcome(operation="topics", status="failed").model_dump() == {
+        "operation": "topics",
+        "status": "failed",
+    }
 
 
 def _register_tenant(client: TestClient, slug: str) -> dict:

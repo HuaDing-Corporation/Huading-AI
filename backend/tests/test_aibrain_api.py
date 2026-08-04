@@ -1046,6 +1046,12 @@ def test_insufficient_reasoning_balance_never_calls_provider_or_reserves(
     assert response.status_code == 402
     error = response.json()["error"]
     assert error["code"] == "AIBRAIN_INSUFFICIENT_BALANCE"
+    assert set(error["detail"]) == {
+        "required_credits",
+        "available_credits",
+        "shortfall_credits",
+        "temporary_reservation",
+    }
     assert error["detail"]["available_credits"] == 0.0
     assert error["detail"]["required_credits"] > 0
     assert error["detail"]["shortfall_credits"] == error["detail"]["required_credits"]
@@ -1334,13 +1340,21 @@ def test_inflight_exposure_limit_returns_structured_402_before_provider(
         "Too much AIBRAIN work is already in progress. "
         "Wait for an existing request to finish before retrying."
     )
+    assert set(error["detail"]) == {
+        "in_flight_exposure_credits",
+        "requested_exposure_credits",
+        "exposure_limit_credits",
+        "excess_credits",
+        "in_flight_request_count",
+        "retryable",
+    }
     assert error["detail"]["in_flight_exposure_credits"] == 10_601.6512
     assert error["detail"]["requested_exposure_credits"] == 5_300.8256
     assert error["detail"]["exposure_limit_credits"] == 10_601.6512
     assert error["detail"]["excess_credits"] == error["detail"][
         "requested_exposure_credits"
     ]
-    assert error["detail"]["in_flight_requests"] == 2
+    assert error["detail"]["in_flight_request_count"] == 2
     assert error["detail"]["retryable"] is True
     assert error["details"] is None
     assert provider.calls == []

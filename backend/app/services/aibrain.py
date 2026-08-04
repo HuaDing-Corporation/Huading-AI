@@ -1414,7 +1414,7 @@ def _authorize_inflight_exposure(
             "requested_exposure_credits": float(requested_exposure),
             "exposure_limit_credits": float(limit),
             "excess_credits": float(_reasoning_credits(next_exposure - limit)),
-            "in_flight_requests": current.requests,
+            "in_flight_request_count": current.requests,
             "retryable": True,
         },
     )
