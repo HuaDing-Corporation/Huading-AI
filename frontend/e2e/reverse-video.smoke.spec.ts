@@ -53,9 +53,9 @@ test("提示词反推·视频：切视频→上传→计费门→轮询→视频
   await page.getByTestId("panel-reverse_prompt").locator('input[type="file"]').setInputFiles(VIDEO_FIXTURE);
   await expect(page.getByText("已上传，可反推")).toBeVisible({ timeout: 20_000 });
 
-  // 计费门：反推 → 弹窗显示 **estimate 返回的**金额（3s fixture → video_short 档 = 100）→ 确认扣费反推。
+  // 计费门：反推 → 弹窗显示 **estimate 返回的**金额（3s fixture → video_short 档 = 150）→ 确认扣费反推。
   await page.getByRole("button", { name: "反推视频提示词" }).click();
-  await expect(page.getByText(/一次性扣除 100 积分/)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText(/一次性扣除 150 积分/)).toBeVisible({ timeout: 15_000 });
   await page.getByRole("button", { name: "确认扣费反推" }).click();
 
   // 202 + 轮询 → 结果：视频分析（video_analysis）在上 + Seedance 提示词。

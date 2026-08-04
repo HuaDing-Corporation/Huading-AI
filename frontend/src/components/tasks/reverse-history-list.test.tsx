@@ -272,7 +272,7 @@ describe("ReverseHistoryList (提示词反推历史)", () => {
     expect(fromResultView.mock.calls[0][0]).toEqual(fromHistory.mock.calls[0][0]);
   });
 
-  // 🔴 防二次扣费：视频「重新反推」100 积分/次且历史场景无计费门 → 详情弹窗必须隐藏该入口。
+  // 🔴 防二次扣费：视频「重新反推」短档 150 积分/次且历史场景无计费门 → 详情弹窗必须隐藏该入口。
   it("详情弹窗隐藏「重新反推」（防二次扣费），但保留「保存到历史」", async () => {
     mocks.jobs.mockReturnValue(listOf(IMG_ITEM));
     mocks.job.mockReturnValue(jobOf());

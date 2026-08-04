@@ -24,14 +24,14 @@ const baseInput = (over?: Partial<EcomReplicatePlanInput>): EcomReplicatePlanInp
 });
 
 describe("planEcomReplicate · POST /replicate（201，规划表，不扣费）", () => {
-  it("主图：5 张 planned + total_credits 75(=5×15) + 1024x1024/1:1 + credit_rate 15", async () => {
+  it("主图：5 张 planned + total_credits 650(=5×130) + 1024x1024/1:1 + credit_rate 130", async () => {
     const job = await planEcomReplicate(baseInput({ output_mode: "main" }));
     expect(job.job_id).toBeTruthy();
     expect(job.status).toBe("plan_ready");
     expect(job.output_mode).toBe("main");
     expect(job.output_count).toBe(5);
-    expect(job.total_credits).toBe(75);
-    expect(job.credit_rate).toBe(15);
+    expect(job.total_credits).toBe(650);
+    expect(job.credit_rate).toBe(130);
     expect(job.requested_size).toBe("1024x1024");
     expect(job.requested_aspect).toBe("1:1");
     expect(job.plan.outputs).toHaveLength(5);
@@ -43,10 +43,10 @@ describe("planEcomReplicate · POST /replicate（201，规划表，不扣费）"
     expect(typeof job.plan.outputs[0].theme).toBe("string");
   });
 
-  it("详情页：12 张 + total 180 + 768x1024/3:4", async () => {
+  it("详情页：12 张 + total 1560 + 768x1024/3:4", async () => {
     const job = await planEcomReplicate(baseInput({ output_mode: "detail" }));
     expect(job.output_count).toBe(12);
-    expect(job.total_credits).toBe(180);
+    expect(job.total_credits).toBe(1560);
     expect(job.requested_size).toBe("768x1024");
     expect(job.requested_aspect).toBe("3:4");
     expect(job.plan.outputs).toHaveLength(12);
@@ -88,7 +88,7 @@ describe("两阶段：confirm(minimal) → GET 轮询 → 结果", () => {
     expect(confirmed.job_id).toBe(job.job_id);
     expect(confirmed.status).toBe("generating");
     expect(confirmed.output_count).toBe(5);
-    expect(confirmed.total_credits).toBe(75);
+    expect(confirmed.total_credits).toBe(650);
     expect((confirmed as unknown as Record<string, unknown>).plan).toBeUndefined();
     // 幂等
     const again = await confirmEcomReplicate(job.job_id);

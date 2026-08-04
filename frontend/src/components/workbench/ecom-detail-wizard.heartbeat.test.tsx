@@ -61,8 +61,8 @@ function planJob(): EcomReplicateJob {
     heartbeat_at: null,
     output_mode: "main",
     output_count: 5,
-    total_credits: 75,
-    credit_rate: 15,
+    total_credits: 650,
+    credit_rate: 130,
     requested_size: "1024x1024",
     requested_aspect: "1:1",
     plan: {
@@ -77,7 +77,7 @@ const confirmMinimal: EcomReplicateConfirmAccepted = {
   job_id: "job-1",
   status: "generating",
   output_count: 5,
-  total_credits: 75
+  total_credits: 650
 };
 /** 生成中的轮询响应；heartbeat_at 由各用例给（含 null = BE 降级）。 */
 function generatingJob(heartbeat_at: string | null): EcomReplicateJob {

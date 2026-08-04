@@ -251,7 +251,7 @@ const REVERSE_RESULT_LEGACY = {
 // 轮询第 2 次起 → succeeded + result（video_analysis **内嵌于 result**）。图片源仍同步 succeeded（零回归）。
 // 对齐 backend/app/schemas/reverse_prompt.py：pacing=Literal["slow","medium","fast","variable"]（枚举，非中文串）；
 // 每个 shot 必含 index(≥0)；shot 字段 index/start_sec/end_sec/visual/camera/motion/transition；
-// credits=provider 引擎成本（非 100；租户固定 100 走 UsageRecord，此处不体现）。
+// credits=provider 引擎成本（非短档 150；租户档位扣费走 UsageRecord，此处不体现）。
 const REVERSE_VIDEO_ANALYSIS = {
   duration_sec: 18,
   pacing: "fast", // 合法枚举（前端映射为「快」显示）
@@ -437,7 +437,7 @@ const mkReverseJob = (
  * ✅ FIX2 真联调**已核**（BE #219 已合入 develop）——三档金额取自 TestClient 真实响应体：
  *   POST /api/v1/reverse-prompt/estimate
  *     图片资产            → {"credits": 30,  "duration_sec": null,   "tier": "image"}
- *     视频 duration=60_000ms → {"credits": 100, "duration_sec": 60.0,   "tier": "video_short"}
+ *     视频 duration=60_000ms → {"credits": 150, "duration_sec": 60.0,   "tier": "video_short"}
  *     视频 duration=60_001ms → {"credits": 250, "duration_sec": 60.001, "tier": "video_long"}
  *（BE 自测同样逐字钉死：backend/tests/test_reverse_prompt_pipeline.py:1311-1323）
  *
@@ -451,7 +451,7 @@ const mkReverseJob = (
  *    上一版注释把短档说成 config 常量，方向反了，一并订正。
  */
 const REVERSE_ESTIMATE_IMAGE_CREDITS = 30;
-const REVERSE_ESTIMATE_VIDEO_SHORT_CREDITS = 100;
+const REVERSE_ESTIMATE_VIDEO_SHORT_CREDITS = 150;
 const REVERSE_ESTIMATE_VIDEO_LONG_CREDITS = 250;
 /**
  * D9 档位阈值：`duration_ms <= 60_000` → 短档，其上 → 长档（quota.py:38 `_REVERSE_PROMPT_VIDEO_SHORT_MAX_DURATION_MS`
@@ -619,7 +619,7 @@ const reverseJobRead = (j: MockReverseJob) => ({
   model: "gemini-2.5-flash",
   prompt_tokens: j.source_kind === "video" ? 0 : 1200,
   completion_tokens: j.source_kind === "video" ? 0 : 480,
-  credits: j.source_kind === "video" ? 6 : 0, // provider 引擎成本；租户固定 100 走 UsageRecord
+  credits: j.source_kind === "video" ? 6 : 0, // provider 引擎成本；租户短档 150 走 UsageRecord
   cost_cents: j.source_kind === "video" ? 0 : 3,
   created_at: j.created_at,
   updated_at: j.created_at,
@@ -1308,7 +1308,7 @@ function adminConsoleHandlers() {
     }),
     // 重跑（202）：回执三态（FIX1 冻结，**无 estimate_basis**）。按任务类型（镜像 BE，字段名 task_family 不变）：
     //   job-f1 released avatar_talk → charged:true, credits=原预留 1501, is_estimate:true（唯一 estimate）
-    //   job-f3 released 反推固定价  → charged:true, credits=100, is_estimate:false
+    //   job-f3 released 视频反推短档 → charged:true, credits=150, is_estimate:false
     //   job-f2 电商复刻（确认已扣） → charged:false, credits=0, is_estimate:false
     http.post(`${C}/tasks/:id/retry`, ({ params }) => {
       const g = guard();
@@ -1318,7 +1318,7 @@ function adminConsoleHandlers() {
       if (!t.retryable) return err(409, "TASK_NOT_RETRYABLE", "Only failed tasks can be retried.");
       const RETRY_RECEIPT: Record<string, { charged: boolean; credits: number; is_estimate: boolean }> = {
         "job-f1": { charged: true, credits: 1501, is_estimate: true },
-        "job-f3": { charged: true, credits: 100, is_estimate: false },
+        "job-f3": { charged: true, credits: 150, is_estimate: false },
         "job-f2": { charged: false, credits: 0, is_estimate: false }
       };
       const receipt = RETRY_RECEIPT[t.id] ?? { charged: false, credits: 0, is_estimate: false };
@@ -1349,7 +1349,7 @@ function adminConsoleHandlers() {
 // ── 电商详情图·强制复刻 (ECOM-REPLICATE-UI-0001 · FIX1) mock ── 镜像真实 BE PR #140 + FIX2 GET 契约：
 // POST /replicate(201, plan_ready, plan.outputs 全 planned, 不扣) → confirm(202, minimal, generating, 幂等一次扣) →
 // GET /replicate/{id}(轮询推进逐张 succeeded 带 actual_w/h + download_url) → outputs/{index}/retry(202, 单张, 不重复扣)。
-const ECOM_REPLICATE_RATE = 15; // credit/张（= BE engine_ecom_replicate_credits_per_image；前端从 total_credits 取，不硬编码）
+const ECOM_REPLICATE_RATE = 130; // credit/张（= BE engine_ecom_replicate_credits_per_image；前端从 total_credits 取，不硬编码）
 // BE theme 为机器枚举键（backend services/ecom_replicate.py _MAIN_THEMES/_DETAIL_THEMES）——mock 忠实返原键，UI 本地化。
 const ECOM_MAIN_THEMES = ["layout_match", "color_match", "campaign_match", "social_match", "white_background"];
 const ECOM_DETAIL_THEMES = ["hero", "material", "function", "size", "scenario", "detail", "comparison", "packing", "care", "selling_point", "white_background", "closing"];

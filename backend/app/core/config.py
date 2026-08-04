@@ -228,10 +228,10 @@ class Settings(BaseSettings):
     # costing and observability must use app.services.apimart_token_pricing.
     engine_apimart_reverse_prompt_input_credits_per_m: float = 16.0
     engine_apimart_reverse_prompt_output_credits_per_m: float = 96.0
-    engine_reverse_prompt_video_credits: float = Field(default=100.0, gt=0)
+    engine_reverse_prompt_video_credits: float = Field(default=150.0, gt=0)
     engine_reverse_prompt_video_long_credits: float = Field(default=250.0, gt=0)
     engine_ecom_replicate_enabled: bool = True
-    engine_ecom_replicate_credits_per_image: float = 15.0
+    engine_ecom_replicate_credits_per_image: float = 130.0
     # Legacy operational fallbacks, not official list prices. Provider-reported
     # credits/cost always take precedence in e-commerce replicate accounting.
     engine_ecom_replicate_analysis_cny_per_call: float = 0.14

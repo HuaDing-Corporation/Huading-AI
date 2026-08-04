@@ -64,7 +64,7 @@ const RESULT = {
     ecom_model: { extra_prompt: "白底" }
   }
 };
-// FIX1③：初始 queued（BE 202 queued，非 running）；④ credits=provider 引擎成本（非租户 100 扣费）。
+// FIX1③：初始 queued（BE 202 queued，非 running）；④ credits=provider 引擎成本（非租户短档 150 扣费）。
 const queuedJob = (): ReversePromptJobRead => ({
   id: "rpv-1", status: "queued", source_kind: "video", target_format: "seedance_2_0", result: null,
   error_code: null, error_message: null, prompt_tokens: 0, completion_tokens: 0, credits: 6, cost_cents: 0,
@@ -79,7 +79,7 @@ const estimateReset = vi.fn();
 /**
  * 计费预估的可变桩态（§八 M4）。**用 mockImplementation 每次渲染重新读**，这样测试中途改档位/改成失败态
  * 都能被下一次渲染看到 —— 若用 mockReturnValue 会把首帧那个对象钉死，「估算失败」这类用例根本进不去。
- * 默认：短档 100 积分（对齐 mock 里 3s 视频的 video_short）。
+ * 默认：短档 150 积分（对齐 mock 里 3s 视频的 video_short）。
  */
 const estimateState: {
   data: ReversePromptEstimate | undefined;
@@ -88,7 +88,7 @@ const estimateState: {
   isPending: boolean;
   isError: boolean;
 } = {
-  data: { credits: 100, duration_sec: 3, tier: "video_short" },
+  data: { credits: 150, duration_sec: 3, tier: "video_short" },
   variables: { source_asset_id: "video-asset-1" },
   isPending: false,
   isError: false
@@ -123,7 +123,7 @@ async function switchToVideoAndUpload() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  estimateState.data = { credits: 100, duration_sec: 3, tier: "video_short" }; // 每条用例回到默认短档
+  estimateState.data = { credits: 150, duration_sec: 3, tier: "video_short" }; // 每条用例回到默认短档
   estimateState.variables = { source_asset_id: "video-asset-1" }; // 与 useUploadReverseVideo 桩返回的 asset 一致
   estimateState.isPending = false;
   estimateState.isError = false;
@@ -158,10 +158,10 @@ describe("ReversePromptForm · 视频反推路径", () => {
     expect(uploadVid.mutateAsync).not.toHaveBeenCalled();
   });
 
-  it("计费门：反推 → 确认弹窗(100 积分)；取消 → 不发 reverse、不扣费", async () => {
+  it("计费门：反推 → 确认弹窗(150 积分)；取消 → 不发 reverse、不扣费", async () => {
     await switchToVideoAndUpload();
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
-    expect(await screen.findByText(copy.reverse.videoChargeMessage(100))).toBeInTheDocument();
+    expect(await screen.findByText(copy.reverse.videoChargeMessage(150))).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: copy.common.cancel }));
     // 🔴 NEGATIVE-ASSERT-SWEEP-UI-0001：推进到静止点再断言（资金路径）。裸同步断言只看得见点击当下那一帧 ——
     //    「取消时仍在微任务后把反推发出去」这种实现会溜过去（实测：变异后本条照样绿）。
@@ -201,11 +201,11 @@ describe("ReversePromptForm · 视频反推路径", () => {
   // ══ REVERSE-DEEP-UI-0001-FIX1 · 承重门 9–11 ═══════════════════════════════════════════════
   // 承重门9「报价与实扣同源」：弹窗金额必须是 estimate 返回的那个数。
   // 🔴 变异点就在 reverse-prompt-form.tsx 的 `message={estimate.data ? videoChargeMessage(estimate.data.credits) : …}`：
-  //    把它改回写死 100，本条（长档 250）立刻红 —— 这正是「报价 100、实扣 250」事故的护栏。
+  //    把它改回写死 150，本条（长档 250）立刻红 —— 这正是「报价 150、实扣 250」事故的护栏。
   it("🔴 承重门9 延伸 · 上一条视频的报价不许沿用到当前素材（Code Review 自审 P1）", async () => {
     // TanStack mutation 重跑时不清 data → 若判据只看「有 data」，换视频后新报价回来之前会显示旧金额。
-    // 这里模拟那一帧：data 还是旧的 100，但它是给 video-asset-OLD 估的，而当前素材是 video-asset-1。
-    estimateState.data = { credits: 100, duration_sec: 3, tier: "video_short" };
+    // 这里模拟那一帧：data 还是旧的 150，但它是给 video-asset-OLD 估的，而当前素材是 video-asset-1。
+    estimateState.data = { credits: 150, duration_sec: 3, tier: "video_short" };
     estimateState.variables = { source_asset_id: "video-asset-OLD" };
     await switchToVideoAndUpload();
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
@@ -215,7 +215,7 @@ describe("ReversePromptForm · 视频反推路径", () => {
     expect(within(dialog).getByRole("button", { name: copy.reverse.chargeConfirm })).toBeDisabled();
   });
 
-  it("承重门9 · 报价与实扣同源：长档显示 estimate 返回的 250，不是写死的 100", async () => {
+  it("承重门9 · 报价与实扣同源：长档显示 estimate 返回的 250，不是写死的 150", async () => {
     estimateState.data = { credits: 250, duration_sec: 180, tier: "video_long" };
     estimateState.variables = { source_asset_id: "video-asset-1" }; // 就是当前这条素材的报价
     await switchToVideoAndUpload();
@@ -223,7 +223,7 @@ describe("ReversePromptForm · 视频反推路径", () => {
     // 打开计费门就必须去 BE 取价（而且带的是本次这条资产，不是随便一个 id）
     await waitFor(() => expect(estimateMut).toHaveBeenCalledWith({ source_asset_id: "video-asset-1" }));
     expect(await screen.findByText(copy.reverse.videoChargeMessage(250))).toBeInTheDocument();
-    expect(screen.queryByText(copy.reverse.videoChargeMessage(100))).not.toBeInTheDocument();
+    expect(screen.queryByText(copy.reverse.videoChargeMessage(150))).not.toBeInTheDocument();
   });
 
   // 承重门10「estimate 失败不猜数」：不显示任何金额、且挡住提交（宁可挡住也不能报错价）。
@@ -234,7 +234,7 @@ describe("ReversePromptForm · 视频反推路径", () => {
     fireEvent.click(screen.getByRole("button", { name: copy.reverse.videoAnalyze }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText(copy.errors.reverseEstimateFailed)).toBeInTheDocument();
-    // 🔴 断的是「整个弹窗里没有任何数字」，而不是「没有 100」——兜底猜一个 88 也必须红。
+    // 🔴 断的是「整个弹窗里没有任何数字」，而不是「没有 150」——兜底猜一个 88 也必须红。
     expect(dialog.textContent ?? "").not.toMatch(/\d/);
     const confirm = within(dialog).getByRole("button", { name: copy.reverse.chargeConfirm });
     expect(confirm).toBeDisabled();
