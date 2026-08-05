@@ -108,10 +108,14 @@ export function AibrainChat() {
         setSendError(inflightExposureText(err.detail));
       // 422：输入太长（BE 在建消息、动钱包**之前**就拦了）——用户可自行解决，讲清怎么做。
       else if (err.code === AIBRAIN_ERROR.PROMPT_LIMIT_EXCEEDED) setSendError(copy.aibrain.promptLimitExceeded);
-      // 502：上游返回了但用量越界 / 没给用量 → 都是 fail-closed 不交付。
-      // ⚠️ 前者的**结算性质 CB 仍在判定**，故文案中性、不提扣费（详见 copy.ts 的注释）。
-      else if (err.code === AIBRAIN_ERROR.PROVIDER_USAGE_LIMIT_EXCEEDED)
-        setSendError(copy.aibrain.providerUsageLimit);
+      // 🔴 503 用量异常冷却（FIX3 第五个码）：**冷却**，与余额、并发都无关 —— 单独一条分流、
+      //    单独一套文案。BE 把它判在最前（连提示词闸都在它之后），前端也放在 502 前面，
+      //    免得将来有人图省事把它并进 502 那支。
+      else if (err.code === AIBRAIN_ERROR.PROVIDER_USAGE_ANOMALY_COOLDOWN)
+        setSendError(copy.aibrain.usageAnomalyCooldown);
+      // 502：上游用量不可信 → fail-closed 不交付。**零扣费已由源码证实**（见 copy.ts 注释）。
+      else if (err.code === AIBRAIN_ERROR.PROVIDER_USAGE_INVALID)
+        setSendError(copy.aibrain.providerUsageInvalid);
       else if (err.code === AIBRAIN_ERROR.REQUEST_EXPIRED) setSendError(copy.aibrain.requestExpired);
       else if (err.code === AIBRAIN_ERROR.REQUEST_LIMIT_EXCEEDED) setSendError(copy.aibrain.reqLimit);
       // USAGE_MISSING 与 PROVIDER_FAILED 对用户是同一件事（这次没成、可重试）→ 共用文案。

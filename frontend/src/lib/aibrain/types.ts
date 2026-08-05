@@ -225,11 +225,22 @@ export const AIBRAIN_ERROR = {
   // FIX2 新增：提示词超过**本地**硬上限（BE `_prompt_token_upper_bound` > `engine_aibrain_max_prompt_tokens`）。
   // 发生在建消息、预留**之前**（aibrain.py:379）→ 未建消息、未动钱包。属于用户可自行解决的一类。
   PROMPT_LIMIT_EXCEEDED: "AIBRAIN_PROMPT_LIMIT_EXCEEDED", // 422
-  // FIX2 新增：上游**已返回**，但用量超出预授权安全信封 → fail-closed，不交付（aibrain.py:511-542）。
-  PROVIDER_USAGE_LIMIT_EXCEEDED: "AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED", // 502
-  // 🔴 FIX2 **任务包未提、我从源码里捡到的第四个新码**（aibrain.py:502-509）：上游返回了内容但
-  //    没给计费用量 → 同样 fail-closed。与 PROVIDER_FAILED 对用户是同一件事（这次没成），故共用文案。
+  // 🔴🔴 FIX3 · `fbe8420d` **契约变更**：FIX2 里接的 `AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED`
+  //    （连同它那 7 个 detail 字段）**已被删除**，替换为下面这个 `..._USAGE_INVALID`，且**不带 detail**。
+  //    同时「合法但超 envelope」不再报错 —— 改成 `min(reported, 上限)` **封顶扣费并正常交付**
+  //    （aibrain.py:567-575）。所以现在这个 502 只在**上报本身不可信**时出现：
+  //      · `_usage_contract_valid is False`（provider 用量契约校验没过）
+  //      · `total_tokens != prompt + completion`（自相矛盾）
+  //      · `total_tokens > 999_999_999`（超出 UsageRecord 可持久化范围）
+  //      · 计价时抛 `APIMartTokenPricingError`（含溢出/越界，:1519-1551）
+  PROVIDER_USAGE_INVALID: "AIBRAIN_PROVIDER_USAGE_INVALID", // 502
+  // 🔴 FIX2 我从源码里捡到的那个码（任务包当时未列，aibrain.py:505-514），FIX3 仍在。
   USAGE_MISSING: "AIBRAIN_USAGE_MISSING", // 502
+  // 🔴 FIX3 新增（第五个码）：**用量异常冷却**。同租户在冷却窗口内出现过 USAGE_MISSING /
+  //    USAGE_INVALID 的失败消息 → 新请求直接 503（aibrain.py:1293-1318，**判在最前**，
+  //    比提示词闸和一切钱包闸都早）。窗口 = `engine_aibrain_usage_anomaly_cooldown_seconds`，
+  //    默认 60s、范围 [1,300]。**无 detail、无 Retry-After 头**——见 copy 里对"约一分钟"的说明。
+  PROVIDER_USAGE_ANOMALY_COOLDOWN: "AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN", // 503
   // ⚠️ PR #239 起 BE **不再发这个码**（`_max_completion_tokens` 连同那条 422 一起被删——预留改为动态、
   //    答不下就追加预留而不是拒绝）。分流保留：#239 上线前的 BE 仍会发，删掉会让那段时间漏分流；
   //    #239 之后它永不触发，留着无害。确认全环境升级完毕后可摘。

@@ -270,32 +270,44 @@ describe("422 提示词超限 / 502 上游用量越界 / 502 缺用量", () => {
   });
 
   /**
-   * 🔴 502 用量越界：**文案暂按中性定稿**（任务包 §六.3 明令，CB 尚未判定其结算性质）。
-   * 本条钉住的是「**不承诺任何结算事实**」——「未扣费」「已扣费」都不许出现，
-   * 因为在 CB 判定之前这两句话都可能是错的，而这是钱的事。
-   * 变异：把文案改成「本次未扣费，请重试」→ 本条红。
+   * 🔴🔴 FIX3 · **502 定稿**（本条上一版断言的是「中性、不许出现『扣费』二字」）。
+   *
+   * FIX2 时 CB 尚未判定结算性质，写错任何一边都是拿钱说假话，故保持中性——那是对的做法。
+   * `fbe8420d` 之后源码给了确定答案：本码与 `USAGE_MISSING`、`PROVIDER_FAILED` **共用**
+   * `_fail_chat_message` → `entry_type="release"` 释放全额预留 + `UsageRecord(credits=0)`，
+   * **零扣费是代码写死的事实**。所以现在必须**明确告诉用户未扣费**——用户此刻最想知道的就是这个。
+   * ⚠️ 码也变了：`..._USAGE_LIMIT_EXCEEDED` 已被 BE 删除（「合法但超上限」改成封顶扣费 + 正常交付，
+   *    不再是错误路径），替换为 `..._USAGE_INVALID` 且**不带 detail**。
+   * 变异：把文案改回中性（去掉「未扣费」）→ 本条红。
    */
-  it("🔴 PROVIDER_USAGE_LIMIT_EXCEEDED(502) → 中性文案，**不说扣没扣费**（等 CB 判定）", async () => {
+  it("🔴 PROVIDER_USAGE_INVALID(502) → 明确告知**未扣费**（源码证实零扣费，不再中性）", async () => {
     hooks.sendMutateAsync.mockRejectedValue(
-      new ApiError("envelope", "AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED", 502, {
-        reported_prompt_tokens: 922_001,
-        max_prompt_tokens: 922_000
-      })
+      new ApiError("AIBRAIN provider returned invalid billing usage.", "AIBRAIN_PROVIDER_USAGE_INVALID", 502)
     );
     renderChat();
     await typeAndSend();
 
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.providerUsageLimit));
-    const text = screen.getByRole("alert").textContent ?? "";
-    expect(text).not.toContain("未扣费");
-    expect(text).not.toContain("已扣费");
-    expect(text).not.toContain("扣费");
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.providerUsageInvalid));
+    expect(screen.getByRole("alert").textContent ?? "").toContain("未扣费");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   /**
+   * 🔴 FIX3：`AIBRAIN_PROVIDER_FAILED` 走的是同一个 `_fail_chat_message` → 同样零扣费。
+   * 任务包 §一 把「PROVIDER_FAILED 扣不扣费」列为待判定的三条追问之一，源码答案是明确的。
+   * 变异：把 `providerFailed` 改回不含「未扣费」→ 本条红。
+   */
+  it("🔴 PROVIDER_FAILED(502) → 同样明确告知未扣费（与另外两个 502 共用同一释放路径）", async () => {
+    hooks.sendMutateAsync.mockRejectedValue(new ApiError("boom", "AIBRAIN_PROVIDER_FAILED", 502));
+    renderChat();
+    await typeAndSend();
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.providerFailed));
+    expect(screen.getByRole("alert").textContent ?? "").toContain("未扣费");
+  });
+
+  /**
    * 🔴 `AIBRAIN_USAGE_MISSING`(502) 是**任务包没列、我从源码里捡到的第四个新码**
-   * （aibrain.py:502-509）。对用户与 PROVIDER_FAILED 是同一件事 → 共用文案。
+   * （aibrain.py:505-514）。对用户与 PROVIDER_FAILED 是同一件事 → 共用文案。
    * 变异：把它从分流里删掉 → 本条红（会落到 `err.message` 的英文原文）。
    */
   it("🔴 USAGE_MISSING(502)（任务包未列）→ 走 providerFailed 文案，不落英文原文", async () => {
@@ -307,6 +319,70 @@ describe("422 提示词超限 / 502 上游用量越界 / 502 缺用量", () => {
 
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.providerFailed));
     expect(screen.getByRole("alert").textContent ?? "").not.toContain("no billing usage");
+  });
+});
+
+// ══ FIX3 · 第五个码：503 用量异常冷却 ═══════════════════════════════════════════════════════
+// 🔴 这是**冷却**——既不是余额问题（402 那两个），也不是并发太多（敞口那个）。三者的处置完全不同：
+//    充值 / 等前面答完 / 等冷却过去。文案串味就等于给了错的指引。
+describe("🔴 503 用量异常冷却（第五个码）", () => {
+  const COOLDOWN = new ApiError(
+    "AIBRAIN provider billing usage is temporarily unavailable. Try again later.",
+    "AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN",
+    503
+  );
+
+  /**
+   * 变异：把它从分流里删掉（落到 `err.message` 兜底）→ 本条红（会显示英文原文）。
+   * 变异：把它并进 502 那支 → 也红（文案变成「未扣费，请重试」，没说要等）。
+   */
+  it("🔴 503 → 冷却文案（说清要等约一分钟），不落英文原文、不弹充值窗", async () => {
+    hooks.sendMutateAsync.mockRejectedValue(COOLDOWN);
+    renderChat();
+    await typeAndSend();
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.usageAnomalyCooldown));
+    const text = screen.getByRole("alert").textContent ?? "";
+    expect(text).toContain("一分钟"); // 用户唯一能做的事：等多久
+    expect(text).not.toContain("temporarily unavailable"); // 不落英文
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  /**
+   * 🔴 **三个"被拦下"的码互不串味**（对标门D2 钉住「欠费不提临时预留」的做法）：
+   * 冷却 ≠ 余额不足 ≠ 敞口打满。变异：把冷却文案换成任意另外两条 → 本条红。
+   */
+  it("🔴 冷却文案不与另外四个码串味：无「充值 / 余额 / 同时进行的对话太多 / 未扣费」", async () => {
+    hooks.sendMutateAsync.mockRejectedValue(COOLDOWN);
+    renderChat();
+    await typeAndSend();
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    const text = screen.getByRole("alert").textContent ?? "";
+    expect(text).not.toContain("充值");
+    expect(text).not.toContain("余额");
+    expect(text).not.toContain(copy.aibrain.inflightExposureNote);
+    // 🔴 冷却本身**不涉及这一次的扣费**（这次压根没发出去）——不该顺口说「未扣费」，
+    //    那是 502 那条路径（已经调用了上游、需要澄清）才需要的话。
+    expect(text).not.toContain("未扣费");
+  });
+
+  /**
+   * ⚠️ **「租户级」故意不说**（任务包 §二.2 让我判断）。冷却可由同租户任何人触发，但用户
+   * 既无法知道是谁、也无法据此做任何事——他唯一能做的就是等。说了只会引出「凭什么因为别人」
+   * 的困惑。真正需要知道这件事的是管理员，那属于后台可观测性。
+   * 本条把这个决定钉住：文案里不出现「团队 / 其他人 / 租户」这类归因说法。
+   */
+  it("文案不做「租户级」归因（用户无法理解也无法行动，说了只添困惑）", async () => {
+    hooks.sendMutateAsync.mockRejectedValue(COOLDOWN);
+    renderChat();
+    await typeAndSend();
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    const text = screen.getByRole("alert").textContent ?? "";
+    expect(text).not.toContain("团队");
+    expect(text).not.toContain("其他人");
+    expect(text).not.toContain("租户");
   });
 });
 

@@ -1556,13 +1556,27 @@ export const copy = {
     //    "conservative"），比真实 token 数大不少；把「你用了 95 万 token / 上限 92.2 万」摆给用户，
     //    既看不懂也据此行动不了，还是个虚高的数。只讲**能做的三件事**。
     promptLimitExceeded: "本次输入太长，没有发送。可以新建对话（历史消息也计入长度）、缩短输入内容，或减少图片后重试。",
-    // ── 502：上游用量超预授权信封 AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED（FIX2）──────────────
-    // 🔴🔴 **暂按中性定稿，等 CB 判定后再改**（任务包 §三.3 明令）。
-    //    刻意**不写**「未扣费」也不写「已扣费」：这条 502 发生在上游已返回、交付与结算之前的
-    //    fail-closed 校验上，它的结算性质 CB 还在判。写错任何一边都是对用户说假话，而这是钱的事。
-    //    ⚠️ 源码事实（已写进回执供 CB 判定，**但不作为文案依据**）：该路径走 `_fail_chat_message`
-    //       → `entry_type="release"` 释放全额预留 + `UsageRecord.credits=0`。CB 定了性质再来改这句。
-    providerUsageLimit: "本次生成未能完成，请重试；如果反复出现，请联系我们。",
+    // ── 502：上游用量不可信 AIBRAIN_PROVIDER_USAGE_INVALID（FIX3 定稿）──────────────────────
+    // 🔴 **「未扣费」现在可以说了**，依据是源码而不是回执：本码与 `AIBRAIN_USAGE_MISSING`、
+    //    `AIBRAIN_PROVIDER_FAILED` 三者**共用** `_fail_chat_message`（aibrain.py:487/:511/:534/:558/:633），
+    //    该函数 `entry_type="release"` 释放**全额**预留，并落 `UsageRecord(credits=Decimal("0"),
+    //    status="released")` —— 对用户**零扣费**是代码写死的事实，不是承诺。
+    //    FIX2 时我按 §六.3 保持中性（当时 CB 未判定，写错任何一边都是拿钱说假话）；现在判定有了。
+    // ⚠️ FIX2 的 `AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED` 已在 `fbe8420d` 删除：「合法但超上限」
+    //    改成封顶扣费 + 正常交付，不再是错误路径。所以这句话的适用范围也窄了——只剩"上报不可信"。
+    providerUsageInvalid: "本次生成未能完成，未扣费，请重试；如果反复出现，请联系我们。",
+    // ── 503：用量异常冷却 AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN（FIX3 · 第五个码）──────────
+    // 🔴 这是**冷却**，既不是余额问题也不是并发太多 —— 三者的处置完全不同，文案不许串味：
+    //    绝不出现「充值」「余额不足」「同时进行的对话太多」。
+    // 🔴 「约一分钟」是**硬编码的默认值**，来源是 BE config `engine_aibrain_usage_anomaly_cooldown_seconds`
+    //    的 `default=60`（范围 [1,300]，**租户/环境可覆写**）。BE **既没有在 detail 里给剩余秒数，
+    //    也没有发 `Retry-After` 头**（`app_error_handler` 只传 code/message/detail，全仓无 retry-after）
+    //    —— 所以这个"一分钟"前端**无法核实**，只能按默认值说个"约"。已写进回执请 CA 补字段；
+    //    补上之后这句改成真值即可（届时 `default=60` 这行注释就是该删的）。
+    // ⚠️ **不说「这是租户级的」**：冷却由同租户任何人触发的用量异常引起，但用户既无法知道是谁触发的、
+    //    也无法据此做任何事（他唯一能做的就是等）。说了只会引出"凭什么因为别人？"的困惑而毫无帮助。
+    //    真正需要知道这件事的是管理员，那属于后台可观测性，不是聊天框里的一行提示。
+    usageAnomalyCooldown: "AI 服务的用量统计暂时异常，已暂停新对话以免计费出错。请约一分钟后重试。",
     /**
      * 🔴 未知 402 的**中性**兜底（FIX2 · 方向从「引导充值」翻转）。
      * 上一轮的兜底是「按预留不足展示」，理由是「把没欠费的人说成欠费更糟」——那在只有两个码时成立。
@@ -1597,7 +1611,10 @@ export const copy = {
     idempotencyReuse: "充值请求状态异常，请关闭弹窗后重新发起。",
     // 发送错误分流（对齐 BE status/code）
     reqLimit: "本次问答超过单次上限或余额不足以作答，请精简内容或充值后重试。",
-    providerFailed: "AI 服务暂时不可用，请稍后重试。",
+    // FIX3：同样补上「未扣费」—— `AIBRAIN_PROVIDER_FAILED` 与另外两个 502 走的是同一个
+    // `_fail_chat_message`（release 全额预留 + `UsageRecord.credits=0`），零扣费是源码事实。
+    // 任务包 §一 把「PROVIDER_FAILED 扣不扣费」列为待 CB 判定的三条追问之一，源码里答案是明确的。
+    providerFailed: "AI 服务暂时不可用，未扣费，请稍后重试。",
     attachmentRejected: "附件无效或已失效，请移除后重新上传。",
     // 通用错误
     error: "出错了，请重试"

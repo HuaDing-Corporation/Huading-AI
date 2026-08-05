@@ -8,23 +8,28 @@
 // ── PRICING-UI-0001 §四 · 计费口径重写（对齐 PR #239 `codex/pricing-c3c4-be`）────────────────────
 // 旧 mock 是 flat `min(200, available)` 预留 + `min(typical, reservation)` 结算，与真实逻辑已完全脱节
 //（真实是**动态预留**：提示词估算 × 1.25 + 完整 completion 配额）。mock 比 BE 宽松 = 前端测试的绿是假绿。
-// 现在逐条镜像 `backend/app/services/aibrain.py`（**契约基线 = #239 `e2bc2c02`**）：
+// 现在逐条镜像 `backend/app/services/aibrain.py`（**契约基线 = #239 `fbe8420d`**）：
 //   预留 `_reservation_credits` = _user_credits(ceil(估算提示词 tokens × 1.25), max_completion_tokens=4096)
 //   估算 `_estimate_prompt_tokens` / `_estimate_text_tokens`（ASCII 每 4 字符 1 token、非 ASCII 每字 1 token、
 //        每条消息 +4、图片附件每张 4096）
-//   闸门① `available < 0`         → 402 AIBRAIN_OUTSTANDING_BALANCE（**欠费**，:557，判在最前）
-//   闸门② `available < requested` → 402 AIBRAIN_INSUFFICIENT_BALANCE（预留不足，:570）
-//   两个 402 都带**结构化 detail**（`e2bc2c02` 给 AppError 加了 detail 形参并在 handler 里转发）
+//   闸门⁻¹ 用量异常冷却         → 503 AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN（**判在最前**）
+//   闸门⓪ 提示词超本地硬上限     → 422 AIBRAIN_PROMPT_LIMIT_EXCEEDED（建消息与动钱包之前）
+//   闸门① `available < 0`      → 402 AIBRAIN_OUTSTANDING_BALANCE（**欠费**）
+//   闸门② `available < requested` → 402 AIBRAIN_INSUFFICIENT_BALANCE（预留不足）
+//   闸门③ 在途敞口打满           → 402 AIBRAIN_INFLIGHT_EXPOSURE_LIMIT（**与余额无关，充值无效**）
 //   结算  settle 分支：`available += reserved - charged`（差额**立即退回**），reserved 归零
-//   透支  实扣 > 预留时 BE **照常交付答案**并按实扣结算，余额**允许变负**（:250-266 + `allow_overdraft`）
+//   透支  实扣 > 预留时 BE **照常交付答案**并按实扣结算，余额**允许变负**（`allow_overdraft`）
 //
-// 🔴🔴 **本文件上一版（PRICING-UI-0001 初版）的两条结论已被 `e2bc2c02` 推翻，别照抄旧注释**：
-//   ✗ 旧：「实扣超预留 → 追加预留失败 → 释放预留 → 402、**不交付**」
-//     新：provider 的钱已经花了 → **交付 + 透支**（那才是 BE 现在做的事，方向整个相反）
-//   ✗ 旧：「本 mock 不实现负余额闸门 —— BE 无此逻辑，造一个是反方向的假杀」
-//     新：BE 有了（透支使余额可为负，闸门① 拦住后续请求）→ **现在必须实现**
-//   那两条结论在 `42db0ecb` 上都是对的；写下它们的理由（不许 mock 与 BE 反向不一致）没变，
-//   变的是 BE。留着这段对照，是为了让下一个人知道"该跟着谁改"，而不是把旧结论当教条。
+// 🔴🔴 **本文件历代结论被 BE 推翻过三次，别照抄旧注释——每次都要回源码核**：
+//   ✗ `42db0ecb` 时：「实扣超预留 → 释放预留 → 402、**不交付**」
+//     → `e2bc2c02` 改成：provider 的钱已经花了 → **交付 + 透支**（方向整个相反）
+//   ✗ `42db0ecb` 时：「不实现负余额闸门 —— BE 无此逻辑，造一个是反方向的假杀」
+//     → `e2bc2c02` 改成：BE 有了（透支使余额可为负）→ **必须实现**
+//   ✗ `2a98b5d0` 时：「`..._USAGE_LIMIT_EXCEEDED` 502 带 7 个 detail 字段」
+//     → `fbe8420d` 改成：该码**删除**；「合法但超上限」转为 `min(reported, 上限)` **封顶扣费 + 正常交付**，
+//       只剩「上报不可信」走 `..._USAGE_INVALID`（**无 detail**），且会让本租户进入 503 冷却
+//   每一条在写下时都是对的；写它们的理由（不许 mock 与 BE 不一致，两个方向都不许）没变，变的是 BE。
+//   留着这份对照，是让下一个人知道"该跟着谁改"，而不是把旧结论当教条。
 
 import { http, HttpResponse } from "msw";
 
@@ -81,8 +86,15 @@ const RESERVE_OVERRUN_MARKER = "__mock_reserve_overrun__";
  *    根本无法自然发生。marker 换来的是这条分支在前端侧可测；行为形态（402 + 6 个 detail 字段）是真的。
  */
 const INFLIGHT_EXPOSURE_MARKER = "__mock_inflight_exposure__";
-/** content 含此串 → 模拟上游用量越界 502（BE aibrain.py:511-542，fail-closed 不交付）。 */
-const PROVIDER_USAGE_LIMIT_MARKER = "__mock_usage_limit__";
+/**
+ * content 含此串 → 模拟**上游用量不可信** 502 `AIBRAIN_PROVIDER_USAGE_INVALID`
+ * （BE `fbe8420d` aibrain.py:519-541，fail-closed 不交付、**无 detail**）。
+ * ⚠️ FIX2 的 `..._USAGE_LIMIT_EXCEEDED` 连同它 7 个 detail 字段已被 BE 删除——「合法但超上限」
+ *    改成封顶扣费 + 正常交付，不再是错误路径。marker 名保留不变，语义已换。
+ * 🔴 触发它会让本租户进入**用量异常冷却**（见下），下一次请求得 503 —— 这条因果链是 BE 的真实行为，
+ *    mock 必须照做，否则前端测「冷却」时得自己伪造状态，那就测不到"异常之后才冷却"这件事。
+ */
+const PROVIDER_USAGE_INVALID_MARKER = "__mock_usage_limit__";
 /** content 含此串 → 强制触发提示词硬上限 422（免得测试要造 922KB 输入；真实字节数超限同样会触发）。 */
 const PROMPT_LIMIT_MARKER = "__mock_prompt_limit__";
 
@@ -167,6 +179,17 @@ interface MockConversation extends Conversation {
 const conversations = new Map<string, MockConversation>();
 let convSeq = 0;
 let msgSeq = 0;
+/**
+ * 🔴 FIX3 · **用量异常冷却**（BE `_raise_if_provider_usage_anomaly_cooldown`，aibrain.py:1293-1318）。
+ * BE 的判据是「本租户在 `cooldown_seconds` 窗口内有 status=failed 且 error_code ∈
+ * {USAGE_MISSING, PROVIDER_USAGE_INVALID} 的 user 消息」。
+ * ⚠️ mock 用一个**布尔标志**而不是时间窗：同步 handler 里没有真实时钟推进，用真时间窗会让测试
+ *    要么必须等 60 秒、要么得注入假时钟 —— 两者都比这个标志更脆。被守的行为（**出过用量异常之后，
+ *    下一次请求被 503 拦下**）是真的；"窗口过期后自动解除"这一段 mock **不表达**，诚实标注在此。
+ * 🔴 它是**租户级**的：BE 的查询按 tenant_id 过滤、不限会话——所以此处也是模块级单例，
+ *    换个会话照样被拦（前端测试正是靠这一点验证"换会话逃不掉"）。
+ */
+let usageAnomalyCooldown = false;
 // 钱包（BE 新租户从 0 起）。reserved 在同步 handler 里 reserve+settle 原子完成，故读时恒 0。
 let available = 0;
 let totalTopup = 0;
@@ -184,6 +207,7 @@ export function resetAibrain(): void {
   totalTopup = 0;
   totalSpent = 0;
   topupIdempotency.clear();
+  usageAnomalyCooldown = false;
   resetMockAssets();
 }
 
@@ -335,6 +359,17 @@ export function aibrainHandlers() {
       const attachments = resolved.attachments;
       const tier = body.tier;
 
+      // ── 闸门⁻¹ 用量异常冷却 → 503（BE `_raise_if_provider_usage_anomaly_cooldown`，:365）────────
+      // 🔴 判在**最前**（BE 里紧跟 conversation_or_404，连提示词闸都在它之后）。次序照抄：
+      //    冷却期内一切请求直接回绝，不做任何校验、不碰钱包。**无 detail、无 Retry-After 头**
+      //    （BE 那条 AppError 只有 message/code/status；全仓无 retry-after）。
+      if (usageAnomalyCooldown)
+        return err(
+          503,
+          AIBRAIN_ERROR.PROVIDER_USAGE_ANOMALY_COOLDOWN,
+          "AIBRAIN provider billing usage is temporarily unavailable. Try again later."
+        );
+
       // ── 闸门⓪ 提示词超本地硬上限 → 422（BE aibrain.py:379，在**建消息与动钱包之前**）─────────
       // 次序照抄 BE：这一条比任何钱包闸门都早 —— 输入太长时消息压根不落库、钱包一分不动。
       // 真实条件（UTF-8 字节数 > 922000）在 mock 里也**真的**会触发；marker 只是让测试不必造 922KB 输入。
@@ -411,25 +446,21 @@ export function aibrainHandlers() {
         return err(502, AIBRAIN_ERROR.PROVIDER_FAILED, "AI 服务暂时不可用，请稍后重试");
       }
 
-      // 上游用量越界 → 502 fail-closed（BE aibrain.py:511-542）。同样在预留之后，故同样释放预留。
-      // ⚠️ BE 走的是 `_fail_chat_message` → `entry_type="release"` + `UsageRecord.credits=0`，
-      //    即**对用户不计积分**；但该路径的结算性质 CB 仍在判定，故前端文案保持中性（见 copy.ts）。
-      //    mock 忠实照做 BE 现在的行为：释放全额预留。
-      if (content.includes(PROVIDER_USAGE_LIMIT_MARKER)) {
+      // 上游用量不可信 → 502 fail-closed（BE `fbe8420d` aibrain.py:519-541）。在预留之后，故释放预留。
+      // 🔴 FIX3 三处变化，逐条对齐：
+      //   ① 码 `..._USAGE_LIMIT_EXCEEDED` → **`..._USAGE_INVALID`**
+      //   ② **detail 整个去掉**（原来那 7 个字段在 BE 里已不存在——别再发，发了就是 mock 比 BE 富）
+      //   ③ 触发后**本租户进入用量异常冷却**，下一次请求得 503（BE 靠"窗口内有 failed 且 error_code
+      //      ∈ {USAGE_MISSING, USAGE_INVALID} 的消息"判定，mock 用标志位表达，见其定义处的说明）
+      // 资金：`_fail_chat_message` → release 全额预留 + `UsageRecord.credits=0` → **零扣费**，
+      //      这已是源码事实（FIX3 §一 定稿），前端文案据此写「未扣费」。
+      if (content.includes(PROVIDER_USAGE_INVALID_MARKER)) {
         available = quantizeCredits(available + reservation);
+        usageAnomalyCooldown = true;
         return err(
           502,
-          AIBRAIN_ERROR.PROVIDER_USAGE_LIMIT_EXCEEDED,
-          "AIBRAIN provider usage exceeded the pre-authorized safety envelope.",
-          {
-            reported_prompt_tokens: MAX_PROMPT_TOKENS + 1,
-            authorized_prompt_tokens: MAX_PROMPT_TOKENS,
-            max_prompt_tokens: MAX_PROMPT_TOKENS,
-            reported_completion_tokens: MAX_COMPLETION_TOKENS,
-            max_completion_tokens: MAX_COMPLETION_TOKENS,
-            reported_total_tokens: MAX_PROMPT_TOKENS + 1 + MAX_COMPLETION_TOKENS,
-            max_total_tokens: MAX_PROMPT_TOKENS + MAX_COMPLETION_TOKENS
-          }
+          AIBRAIN_ERROR.PROVIDER_USAGE_INVALID,
+          "AIBRAIN provider returned invalid billing usage."
         );
       }
 

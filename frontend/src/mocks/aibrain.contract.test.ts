@@ -11,7 +11,7 @@ beforeEach(() => resetAibrain());
 const PROVIDER_FAIL = "__mock_provider_fail__"; // 与 mock 内约定一致
 const OVERRUN = "__mock_reserve_overrun__"; // 触发「实扣超预留 → 追加预留」路径（同上，与 mock 内约定一致）
 const EXPOSURE = "__mock_inflight_exposure__"; // FIX2：在途敞口打满 402
-const USAGE_LIMIT = "__mock_usage_limit__"; // FIX2：上游用量越界 502
+const USAGE_INVALID = "__mock_usage_limit__"; // FIX3：上游用量不可信 502（marker 名不变，语义已换）
 const PROMPT_LIMIT = "__mock_prompt_limit__"; // FIX2：提示词超本地硬上限 422
 // idempotency_key 是 BE 必填 UUID → 测试用真 UUID（每次唯一，避免跨用例串键）。
 const topup = (amount: number, key = crypto.randomUUID()) => topupWallet({ amount, idempotency_key: key });
@@ -296,20 +296,65 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
   });
 
   /**
-   * 🔴 502 上游用量越界：BE 走 `_fail_chat_message` → `entry_type="release"` 释放**全额**预留
-   * + `UsageRecord.credits=0`。mock 忠实照做。
-   * ⚠️ 这条断言的是**钱包行为**（源码事实），不是用户文案 —— 该码的结算性质 CB 仍在判定，
-   *    前端文案因此保持中性（见 copy.ts）。行为可以钉，说法先不定稿。
+   * 🔴🔴 FIX3 · 502 契约**三处都变了**（本条上一版断言的是「码 = ..._LIMIT_EXCEEDED、detail 七字段」）：
+   *   ① 码换成 `AIBRAIN_PROVIDER_USAGE_INVALID`
+   *   ② **detail 整个没了** —— 断言它缺席，否则 mock 会比 BE 富（发一份 BE 根本不发的载荷，
+   *      前端若据此写逻辑，真接口下必然拿不到）
+   *   ③ 触发后本租户进入冷却（见下一条）
+   * 资金行为不变且已定稿：`_fail_chat_message` → release 全额预留 + `UsageRecord.credits=0` → 零扣费。
    */
-  it("🔴 502 用量越界：detail 七字段 + 预留全额释放（余额一分未动）", async () => {
+  it("🔴 502 用量不可信：码=USAGE_INVALID、**无 detail**、预留全额释放（零扣费）", async () => {
     await topup(2000);
     const conv = await createConversation();
-    const err = await sendMessage(conv.id, { content: `${USAGE_LIMIT} 你好`, tier: "low", attachment_asset_ids: [] }).catch((e) => e);
+    const err = await sendMessage(conv.id, { content: `${USAGE_INVALID} 你好`, tier: "low", attachment_asset_ids: [] }).catch((e) => e);
     expect(err.status).toBe(502);
-    expect(err.code).toBe("AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED");
-    expect(Object.keys(err.detail)).toHaveLength(7);
-    expect(err.detail.reported_prompt_tokens).toBeGreaterThan(err.detail.max_prompt_tokens);
-    expect((await getWallet()).available_credits).toBe(2000); // 预留释放干净
+    expect(err.code).toBe("AIBRAIN_PROVIDER_USAGE_INVALID");
+    expect(err.detail).toBeUndefined(); // 🔴 BE 这条 AppError 不带 detail
+    expect((await getWallet()).available_credits).toBe(2000); // 预留释放干净 = 零扣费
+  });
+
+  /**
+   * 🔴 FIX3 · **因果链**：用量异常之后本租户进入冷却，下一次请求得 503
+   * （BE `_raise_if_provider_usage_anomaly_cooldown`，判在最前）。
+   * 变异：mock 触发 502 时不置冷却标志 → 本条红（第二次请求会正常返回）。
+   */
+  it("🔴 503 冷却：出过用量异常之后，下一次请求被 503 拦下（无 detail、无 Retry-After）", async () => {
+    await topup(2000);
+    const conv = await createConversation();
+    await sendMessage(conv.id, { content: `${USAGE_INVALID} 你好`, tier: "low", attachment_asset_ids: [] }).catch(() => {});
+
+    const err = await sendMessage(conv.id, { content: "再问一句", tier: "low", attachment_asset_ids: [] }).catch((e) => e);
+    expect(err.status).toBe(503);
+    expect(err.code).toBe("AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN");
+    // 🔴 BE 既没给 detail 也没发 Retry-After 头 → 前端只能按 config 默认值说「约一分钟」。
+    //    哪天 CA 补了字段，本条会红，那正是去接真值的时刻（同 FIX1 那条 detail 门的用法）。
+    expect(err.detail).toBeUndefined();
+  });
+
+  /**
+   * 🔴 冷却是**租户级**的（BE 查询按 tenant_id 过滤、不限会话）→ 换个会话照样被拦。
+   * 变异：mock 把冷却标志挂到会话上 → 本条红。
+   */
+  it("🔴 冷却是租户级：换一个会话照样 503（不是按会话隔离的）", async () => {
+    await topup(2000);
+    const a = await createConversation();
+    const b = await createConversation();
+    await sendMessage(a.id, { content: `${USAGE_INVALID} 你好`, tier: "low", attachment_asset_ids: [] }).catch(() => {});
+
+    const err = await sendMessage(b.id, { content: "换个会话问", tier: "low", attachment_asset_ids: [] }).catch((e) => e);
+    expect(err.status).toBe(503);
+    expect(err.code).toBe("AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN");
+  });
+
+  /** 冷却判在**最前**（BE 里紧跟会话校验，连提示词闸都在它之后）→ 提示词超限时也应报 503。 */
+  it("🔴 闸门次序：冷却期内即使提示词超限也报 503（冷却判在提示词闸之前）", async () => {
+    await topup(2000);
+    const conv = await createConversation();
+    await sendMessage(conv.id, { content: `${USAGE_INVALID} 你好`, tier: "low", attachment_asset_ids: [] }).catch(() => {});
+
+    const err = await sendMessage(conv.id, { content: `${PROMPT_LIMIT} x`, tier: "low", attachment_asset_ids: [] }).catch((e) => e);
+    expect(err.status).toBe(503);
+    expect(err.code).toBe("AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN");
   });
 
   /** 闸门次序照抄 BE：提示词硬上限比任何钱包闸门都早 —— 余额为 0 也应报 422 而不是 402。 */
