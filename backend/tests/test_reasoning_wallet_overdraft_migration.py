@@ -29,12 +29,13 @@ def _load_migration():
     return migration
 
 
-def test_reasoning_wallet_overdraft_revision_is_the_only_alembic_head() -> None:
+def test_reasoning_wallet_overdraft_revision_precedes_user_cooldowns() -> None:
     backend_root = Path(__file__).resolve().parents[1]
     config = Config(str(backend_root / "alembic.ini"))
     config.set_main_option("script_location", str(backend_root / "alembic"))
 
-    assert ScriptDirectory.from_config(config).get_heads() == ["20260805_0033"]
+    script = ScriptDirectory.from_config(config)
+    assert script.get_revision("20260805_0033").nextrev == {"20260805_0034"}
 
 
 def test_upgrade_allows_reasoning_wallet_available_balance_to_be_negative() -> None:

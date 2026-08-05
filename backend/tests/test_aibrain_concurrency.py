@@ -15,6 +15,7 @@ from sqlalchemy.orm import sessionmaker
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.db.models import (
+    AIBrainUserCooldown,
     Base,
     ChatConversation,
     ChatMessage,
@@ -27,6 +28,7 @@ from app.db.models import (
     User,
 )
 from app.db.reasoning_wallet_guard import allow_reasoning_wallet_mutation
+from app.providers.chat.apimart_gpt56 import APIMartGPT56ChatError
 from app.services import aibrain
 
 _WALLET_MONETARY_FIELDS = {
@@ -683,7 +685,27 @@ class _InvalidCostChatProvider:
         }
 
 
-def test_postgres_invalid_provider_cost_releases_and_opens_tenant_cooldown(
+class _OversizedUsageErrorChatProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def chat(self, payload: dict[str, object]) -> dict[str, object]:
+        self.calls.append(payload)
+        prompt_tokens = 10**40
+        raise APIMartGPT56ChatError(
+            "mock HTTP 500 with oversized token counters",
+            usage_result={
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": 1,
+                "total_tokens": prompt_tokens + 1,
+            },
+            request_may_have_been_accepted=True,
+            raw_usage_present=True,
+            usage_contract_valid=True,
+        )
+
+
+def test_postgres_invalid_provider_cost_releases_and_opens_user_cooldown(
     postgres_session_factory,
     monkeypatch,
 ) -> None:
@@ -753,6 +775,7 @@ def test_postgres_invalid_provider_cost_releases_and_opens_tenant_cooldown(
             )
         assert replay_error.value.code == "AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN"
         assert replay_error.value.status_code == 503
+        assert replay_error.value.detail["retry_after_seconds"] > 0
 
     assert len(provider.calls) == 1
     with factory() as db:
@@ -780,6 +803,390 @@ def test_postgres_invalid_provider_cost_releases_and_opens_tenant_cooldown(
         assert usage_records[0].status == "released"
         assert usage_records[0].credits == Decimal("0")
         assert usage_records[0].cost_cents == 0
+
+
+def test_postgres_http_error_with_oversized_usage_cannot_abort_release_or_cooldown(
+    postgres_session_factory,
+    monkeypatch,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id = str(uuid4())
+    with factory() as db:
+        tenant = Tenant(
+            id=tenant_id,
+            slug=f"aibrain-oversized-usage-{uuid4().hex[:8]}",
+            name="AIBRAIN Oversized Usage",
+        )
+        user = User(
+            tenant_id=tenant_id,
+            email=f"oversized-usage-{uuid4().hex[:8]}@example.com",
+            password_hash="not-used-by-test",
+        )
+        conversations = [
+            ChatConversation(tenant_id=tenant_id, title=f"Oversized usage {index}")
+            for index in range(2)
+        ]
+        db.add(tenant)
+        db.flush([tenant])
+        db.add_all([user, *conversations])
+        db.flush([user, *conversations])
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=tenant_id,
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+            operation_key=f"seed:{tenant_id}",
+        )
+        user_id = user.id
+        conversation_ids = [conversation.id for conversation in conversations]
+        db.commit()
+
+    provider = _OversizedUsageErrorChatProvider()
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    with factory() as db:
+        user = db.get(User, user_id)
+        with pytest.raises(AppError) as first_error:
+            asyncio.run(
+                aibrain.send_chat_message(
+                    db,
+                    user=user,
+                    conversation_id=conversation_ids[0],
+                    content="Reject oversized error usage safely",
+                    tier="low",
+                    attachment_asset_ids=[],
+                    storage=object(),
+                )
+            )
+        assert first_error.value.code == "AIBRAIN_PROVIDER_USAGE_INVALID"
+
+    with factory() as db:
+        user = db.get(User, user_id)
+        with pytest.raises(AppError) as replay_error:
+            asyncio.run(
+                aibrain.send_chat_message(
+                    db,
+                    user=user,
+                    conversation_id=conversation_ids[1],
+                    content="Do not replay oversized error usage",
+                    tier="low",
+                    attachment_asset_ids=[],
+                    storage=object(),
+                )
+            )
+        assert replay_error.value.code == "AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN"
+        assert replay_error.value.status_code == 503
+
+    assert len(provider.calls) == 1
+    with factory() as db:
+        wallet = db.get(ReasoningWallet, tenant_id)
+        failed_message = db.scalar(
+            select(ChatMessage).where(
+                ChatMessage.tenant_id == tenant_id,
+                ChatMessage.status == "failed",
+            )
+        )
+        usage = db.scalar(
+            select(UsageRecord).where(
+                UsageRecord.tenant_id == tenant_id,
+                UsageRecord.capability == "chat",
+            )
+        )
+        cooldown = db.scalar(
+            select(AIBrainUserCooldown).where(AIBrainUserCooldown.user_id == user_id)
+        )
+        assert wallet.available_credits == Decimal("100")
+        assert wallet.reserved_credits == Decimal("0")
+        assert wallet.total_spent_credits == Decimal("0")
+        assert failed_message.error_code == "AIBRAIN_PROVIDER_USAGE_INVALID"
+        assert failed_message.prompt_tokens == 0
+        assert failed_message.completion_tokens == 0
+        assert failed_message.total_tokens == 0
+        assert usage.status == "released"
+        assert usage.quantity == Decimal("0")
+        assert usage.credits == Decimal("0")
+        assert usage.cost_cents == 0
+        assert usage.provider_cost_usd == Decimal("0")
+        assert cooldown.reason == "AIBRAIN_PROVIDER_USAGE_INVALID"
+
+
+def test_postgres_user_cooldown_renewal_never_moves_expiry_backwards(
+    postgres_session_factory,
+    monkeypatch,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id = str(uuid4())
+    with factory() as db:
+        tenant = Tenant(
+            id=tenant_id,
+            slug=f"aibrain-cooldown-{uuid4().hex[:8]}",
+            name="AIBRAIN Cooldown",
+        )
+        user = User(
+            tenant_id=tenant_id,
+            email=f"cooldown-{uuid4().hex[:8]}@example.com",
+            password_hash="not-used-by-test",
+        )
+        conversation = ChatConversation(tenant_id=tenant_id, title="Cooldown")
+        db.add(tenant)
+        db.flush([tenant])
+        db.add_all([user, conversation])
+        db.flush([user, conversation])
+        newer_message = ChatMessage(
+            tenant_id=tenant_id,
+            conversation_id=conversation.id,
+            role="user",
+            content="newer anomaly",
+            status="failed",
+        )
+        stale_message = ChatMessage(
+            tenant_id=tenant_id,
+            conversation_id=conversation.id,
+            role="user",
+            content="stale anomaly",
+            status="failed",
+        )
+        db.add_all([newer_message, stale_message])
+        db.flush([newer_message, stale_message])
+        user_id = user.id
+        newer_message_id = newer_message.id
+        stale_message_id = stale_message.id
+        db.commit()
+
+    clock = {"now": datetime(2026, 8, 5, 12, 1, tzinfo=UTC)}
+
+    class _ControlledDateTime:
+        @classmethod
+        def now(cls, timezone=None):
+            value = clock["now"]
+            return value if timezone is None else value.astimezone(timezone)
+
+    monkeypatch.setattr(aibrain, "datetime", _ControlledDateTime)
+    with factory() as newer_db:
+        aibrain._open_provider_usage_anomaly_cooldown(
+            newer_db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            reason="newer-anomaly",
+            source_message_id=newer_message_id,
+        )
+        newer_db.commit()
+
+    # Simulate an older event that calculated its deadline first but only reached
+    # the unique-user upsert after the newer transaction committed.
+    clock["now"] = datetime(2026, 8, 5, 12, 0, tzinfo=UTC)
+    with factory() as stale_db:
+        aibrain._open_provider_usage_anomaly_cooldown(
+            stale_db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            reason="stale-anomaly",
+            source_message_id=stale_message_id,
+        )
+        stale_db.commit()
+
+    with factory() as db:
+        cooldown = db.scalar(
+            select(AIBrainUserCooldown).where(
+                AIBrainUserCooldown.user_id == user_id,
+            )
+        )
+        expected_expiry = datetime(2026, 8, 5, 12, 1, tzinfo=UTC) + timedelta(
+            seconds=settings.engine_aibrain_usage_anomaly_cooldown_seconds
+        )
+        assert cooldown.expires_at == expected_expiry
+        assert cooldown.reason == "newer-anomaly"
+        assert cooldown.source_message_id == newer_message_id
+
+
+class _CooldownRaceChatProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def chat(self, payload: dict[str, object]) -> dict[str, object]:
+        self.calls.append(payload)
+        return {
+            "content": "provider must not run after the cooldown race",
+            "model": "gpt-5.6-luna",
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+        }
+
+
+def test_postgres_cooldown_rechecked_after_wallet_lock_before_provider(
+    postgres_session_factory,
+    monkeypatch,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id = str(uuid4())
+    with factory() as db:
+        tenant = Tenant(
+            id=tenant_id,
+            slug=f"aibrain-cooldown-race-{uuid4().hex[:8]}",
+            name="AIBRAIN Cooldown Race",
+        )
+        user = User(
+            tenant_id=tenant_id,
+            email=f"cooldown-race-{uuid4().hex[:8]}@example.com",
+            password_hash="not-used-by-test",
+        )
+        conversation = ChatConversation(
+            tenant_id=tenant_id,
+            title="Cooldown race",
+        )
+        db.add(tenant)
+        db.flush([tenant])
+        db.add_all([user, conversation])
+        db.flush([user, conversation])
+        db.add(
+            AIBrainUserCooldown(
+                tenant_id=tenant_id,
+                user_id=user.id,
+                reason="expired-before-race",
+                expires_at=datetime.now(UTC) - timedelta(minutes=5),
+            )
+        )
+        aibrain._apply_reasoning_wallet_change(
+            db,
+            tenant_id=tenant_id,
+            entry_type="topup",
+            amount_credits=Decimal("100"),
+            operation_key=f"seed:{tenant_id}",
+        )
+        user_id = user.id
+        conversation_id = conversation.id
+        db.commit()
+
+    provider = _CooldownRaceChatProvider()
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    original_cooldown_gate = aibrain._raise_if_provider_usage_anomaly_cooldown
+    initial_cooldown_gate_passed = threading.Event()
+
+    def observed_cooldown_gate(*args, **kwargs) -> None:
+        original_cooldown_gate(*args, **kwargs)
+        initial_cooldown_gate_passed.set()
+
+    monkeypatch.setattr(
+        aibrain,
+        "_raise_if_provider_usage_anomaly_cooldown",
+        observed_cooldown_gate,
+    )
+
+    sender_thread_id: int | None = None
+    wallet_lock_attempted = threading.Event()
+    bound_engine = factory.kw["bind"]
+
+    def observe_wallet_lock(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        normalized = statement.upper()
+        if (
+            threading.get_ident() == sender_thread_id
+            and "REASONING_WALLETS" in normalized
+            and "FOR UPDATE" in normalized
+        ):
+            wallet_lock_attempted.set()
+
+    errors: list[BaseException] = []
+
+    def send() -> None:
+        nonlocal sender_thread_id
+        sender_thread_id = threading.get_ident()
+        try:
+            with factory() as db:
+                user = db.get(User, user_id)
+                asyncio.run(
+                    aibrain.send_chat_message(
+                        db,
+                        user=user,
+                        conversation_id=conversation_id,
+                        content="Do not call the provider after my cooldown starts",
+                        tier="low",
+                        attachment_asset_ids=[],
+                        storage=object(),
+                    )
+                )
+        except BaseException as exc:  # noqa: BLE001 - thread failures are evidence.
+            errors.append(exc)
+
+    locker = factory()
+    sender = threading.Thread(target=send, daemon=True)
+    sender_started = False
+    event.listen(bound_engine, "before_cursor_execute", observe_wallet_lock)
+    try:
+        locked_wallet = locker.scalar(
+            select(ReasoningWallet).where(ReasoningWallet.tenant_id == tenant_id).with_for_update()
+        )
+        assert locked_wallet is not None
+        sender.start()
+        sender_started = True
+        assert initial_cooldown_gate_passed.wait(timeout=5)
+        assert wallet_lock_attempted.wait(timeout=5)
+        assert sender.is_alive()
+
+        with factory() as cooldown_db:
+            cooldown_db.execute(
+                update(AIBrainUserCooldown)
+                .where(AIBrainUserCooldown.user_id == user_id)
+                .values(
+                    reason="provider-usage-race",
+                    expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            cooldown_db.commit()
+    finally:
+        locker.rollback()
+        locker.close()
+        if sender_started:
+            sender.join(timeout=5)
+        event.remove(bound_engine, "before_cursor_execute", observe_wallet_lock)
+
+    assert not sender.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], AppError)
+    assert errors[0].code == "AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN"
+    assert errors[0].status_code == 503
+    assert errors[0].detail["retry_after_seconds"] > 0
+    assert provider.calls == []
+
+    with factory() as db:
+        wallet = db.get(ReasoningWallet, tenant_id)
+        reserve_entries = list(
+            db.scalars(
+                select(ReasoningLedgerEntry).where(
+                    ReasoningLedgerEntry.tenant_id == tenant_id,
+                    ReasoningLedgerEntry.entry_type == "reserve",
+                )
+            )
+        )
+        usage_records = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.tenant_id == tenant_id,
+                    UsageRecord.capability == "chat",
+                )
+            )
+        )
+        raced_messages = list(
+            db.scalars(
+                select(ChatMessage).where(
+                    ChatMessage.tenant_id == tenant_id,
+                    ChatMessage.content == "Do not call the provider after my cooldown starts",
+                )
+            )
+        )
+        assert wallet.available_credits == Decimal("100")
+        assert wallet.reserved_credits == Decimal("0")
+        assert wallet.total_spent_credits == Decimal("0")
+        assert reserve_entries == []
+        assert usage_records == []
+        assert raced_messages == []
 
 
 def _start_reservation(factory, *, tenant_id: str, operation_key: str):

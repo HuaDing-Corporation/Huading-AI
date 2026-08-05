@@ -2,6 +2,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import requests
 
 from app.core.config import settings
 from app.db.models import ProviderConfig
@@ -22,6 +23,13 @@ class _FakeResponse:
 
     def json(self) -> dict:
         return self._payload
+
+
+class _InvalidJSONResponse:
+    status_code = 200
+
+    def json(self) -> dict:
+        raise ValueError("invalid JSON")
 
 
 class _FakeSession:
@@ -48,6 +56,31 @@ class _FakeSession:
             }
         )
         return self.response
+
+
+class _RaisingSession:
+    def __init__(self, error: requests.RequestException) -> None:
+        self.error = error
+
+    def post(self, *args, **kwargs):
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    "usage_result",
+    [
+        {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
+        {"credits": Decimal("0.5")},
+        {"cost_cents": 35},
+    ],
+)
+def test_apimart_gpt56_chat_error_infers_cost_evidence_for_existing_callers(
+    usage_result: dict[str, object],
+) -> None:
+    error = APIMartGPT56ChatError("provider failed", usage_result=usage_result)
+
+    assert error.has_cost_evidence is True
+    assert error.request_may_have_been_accepted is True
 
 
 @pytest.mark.asyncio
@@ -183,7 +216,7 @@ async def test_apimart_gpt56_chat_rejects_models_outside_the_fixed_allowlist() -
     session = _FakeSession(_FakeResponse({}))
     provider = APIMartGPT56ChatProvider(api_key="unit-test-key", session=session)
 
-    with pytest.raises(APIMartGPT56ChatError, match="Unsupported"):
+    with pytest.raises(APIMartGPT56ChatError, match="Unsupported") as error:
         await provider.chat(
             {
                 "model": "gpt-5.6-unknown",
@@ -192,6 +225,120 @@ async def test_apimart_gpt56_chat_rejects_models_outside_the_fixed_allowlist() -
         )
 
     assert session.calls == []
+    assert error.value.request_may_have_been_accepted is False
+    assert error.value.has_cost_evidence is False
+
+
+@pytest.mark.parametrize("max_completion_tokens", [float("inf"), float("-inf")])
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_rejects_infinite_max_completion_tokens_before_dispatch(
+    max_completion_tokens: float,
+) -> None:
+    session = _FakeSession(_FakeResponse({}))
+    provider = APIMartGPT56ChatProvider(api_key="unit-test-key", session=session)
+
+    with pytest.raises(APIMartGPT56ChatError, match="positive integer") as error:
+        await provider.chat(
+            {
+                "model": "gpt-5.6-luna",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_completion_tokens": max_completion_tokens,
+            }
+        )
+
+    assert session.calls == []
+    assert error.value.request_may_have_been_accepted is False
+
+
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_marks_connect_timeout_as_not_accepted() -> None:
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=_RaisingSession(requests.ConnectTimeout("connect timed out")),
+    )
+
+    with pytest.raises(APIMartGPT56ChatError, match="connect") as error:
+        await provider.chat(
+            {
+                "model": "gpt-5.6-luna",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+
+    assert error.value.request_may_have_been_accepted is False
+    assert error.value.has_cost_evidence is False
+    assert error.value.raw_usage_present is False
+    assert error.value.raw_cost_present is False
+
+
+@pytest.mark.parametrize(
+    "request_error",
+    [
+        requests.ReadTimeout("read timed out"),
+        requests.ConnectionError("connection dropped after send"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_marks_ambiguous_network_failure_as_maybe_accepted(
+    request_error: requests.RequestException,
+) -> None:
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=_RaisingSession(request_error),
+    )
+
+    with pytest.raises(APIMartGPT56ChatError) as error:
+        await provider.chat(
+            {
+                "model": "gpt-5.6-luna",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+
+    assert error.value.request_may_have_been_accepted is True
+    assert error.value.has_cost_evidence is False
+    assert error.value.raw_usage_present is False
+    assert error.value.raw_cost_present is False
+
+
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_marks_generic_request_failure_as_maybe_accepted() -> None:
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=_RaisingSession(requests.RequestException("request failed")),
+    )
+
+    with pytest.raises(APIMartGPT56ChatError) as error:
+        await provider.chat(
+            {
+                "model": "gpt-5.6-luna",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+
+    assert error.value.request_may_have_been_accepted is True
+    assert error.value.has_cost_evidence is False
+
+
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_marks_invalid_json_as_maybe_accepted() -> None:
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=_FakeSession(_InvalidJSONResponse()),
+    )
+
+    with pytest.raises(APIMartGPT56ChatError, match="invalid JSON") as error:
+        await provider.chat(
+            {
+                "model": "gpt-5.6-luna",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+
+    assert error.value.request_may_have_been_accepted is True
+    assert error.value.has_cost_evidence is False
+    assert error.value.raw_usage_present is False
+    assert error.value.raw_cost_present is False
 
 
 @pytest.mark.asyncio
@@ -224,6 +371,314 @@ async def test_apimart_gpt56_chat_preserves_usage_from_an_error_response() -> No
         "completion_tokens": 5,
         "total_tokens": 75,
     }
+    assert error.value.raw_usage_present is True
+    assert error.value.usage_contract_valid is True
+    assert error.value.has_cost_evidence is True
+    assert error.value.request_may_have_been_accepted is True
+
+
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_marks_http_error_with_provider_cost_as_accepted() -> None:
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=_FakeSession(
+            _FakeResponse(
+                {
+                    "error": {"message": "upstream failed after billing"},
+                    "usage": {
+                        "prompt_tokens": 70,
+                        "completion_tokens": 5,
+                        "total_tokens": 75,
+                    },
+                    "credits": "0.5",
+                    "cost_cents": 35,
+                },
+                status_code=502,
+            )
+        ),
+    )
+
+    with pytest.raises(APIMartGPT56ChatError) as error:
+        await provider.chat(
+            {
+                "model": "gpt-5.6-sol",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+
+    assert error.value.usage_result == {
+        "prompt_tokens": 70,
+        "completion_tokens": 5,
+        "total_tokens": 75,
+        "credits": Decimal("0.5"),
+        "cost_cents": 35,
+    }
+    assert error.value.raw_usage_present is True
+    assert error.value.raw_cost_present is True
+    assert error.value.usage_contract_valid is True
+    assert error.value.cost_contract_valid is True
+    assert error.value.has_cost_evidence is True
+    assert error.value.request_may_have_been_accepted is True
+
+
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_preserves_cost_only_error_evidence() -> None:
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=_FakeSession(
+            _FakeResponse(
+                {
+                    "error": {"message": "billed without token usage"},
+                    "cost_cents": 35,
+                },
+                status_code=402,
+            )
+        ),
+    )
+
+    with pytest.raises(APIMartGPT56ChatError) as error:
+        await provider.chat(
+            {
+                "model": "gpt-5.6-sol",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+
+    assert error.value.usage_result == {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "_usage_contract_missing": True,
+        "_usage_contract_valid": False,
+        "cost_cents": 35,
+    }
+    assert error.value.raw_usage_present is False
+    assert error.value.raw_cost_present is True
+    assert error.value.usage_contract_valid is False
+    assert error.value.cost_contract_valid is True
+    assert error.value.has_cost_evidence is True
+    assert error.value.request_may_have_been_accepted is True
+
+
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_does_not_treat_empty_usage_mapping_as_cost_evidence() -> None:
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=_FakeSession(
+            _FakeResponse(
+                {"error": {"message": "request rejected"}},
+                status_code=400,
+            )
+        ),
+    )
+
+    with pytest.raises(APIMartGPT56ChatError) as error:
+        await provider.chat(
+            {
+                "model": "gpt-5.6-sol",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+
+    assert error.value.usage_result == {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "_usage_contract_missing": True,
+        "_usage_contract_valid": False,
+    }
+    assert bool(error.value.usage_result) is True
+    assert error.value.raw_usage_present is False
+    assert error.value.raw_cost_present is False
+    assert error.value.has_cost_evidence is False
+    assert error.value.request_may_have_been_accepted is False
+
+
+@pytest.mark.parametrize("malformed_usage", [None, {}, "not-an-object"])
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_distinguishes_malformed_from_missing_raw_usage(
+    malformed_usage: object,
+) -> None:
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=_FakeSession(
+            _FakeResponse(
+                {
+                    "error": {"message": "malformed usage"},
+                    "usage": malformed_usage,
+                },
+                status_code=400,
+            )
+        ),
+    )
+
+    with pytest.raises(APIMartGPT56ChatError) as error:
+        await provider.chat(
+            {
+                "model": "gpt-5.6-sol",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+
+    assert error.value.raw_usage_present is True
+    assert "_usage_contract_missing" not in error.value.usage_result
+    assert error.value.usage_contract_valid is False
+    assert error.value.has_cost_evidence is False
+    assert error.value.request_may_have_been_accepted is False
+
+
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_preserves_malformed_raw_cost_presence() -> None:
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=_FakeSession(
+            _FakeResponse(
+                {
+                    "error": {"message": "malformed provider cost"},
+                    "usage": {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                    },
+                    "credits": "not-a-number",
+                },
+                status_code=400,
+            )
+        ),
+    )
+
+    with pytest.raises(APIMartGPT56ChatError) as error:
+        await provider.chat(
+            {
+                "model": "gpt-5.6-sol",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+
+    assert error.value.raw_usage_present is True
+    assert error.value.usage_contract_valid is True
+    assert error.value.raw_cost_present is True
+    assert error.value.cost_contract_valid is False
+    assert error.value.has_cost_evidence is False
+
+
+@pytest.mark.parametrize("status_code", [408, 500, 503])
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_marks_ambiguous_http_failure_as_maybe_accepted(
+    status_code: int,
+) -> None:
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=_FakeSession(
+            _FakeResponse(
+                {"error": {"message": "ambiguous upstream failure"}},
+                status_code=status_code,
+            )
+        ),
+    )
+
+    with pytest.raises(APIMartGPT56ChatError) as error:
+        await provider.chat(
+            {
+                "model": "gpt-5.6-sol",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+
+    assert error.value.has_cost_evidence is False
+    assert error.value.request_may_have_been_accepted is True
+    assert error.value.usage_result["_usage_contract_missing"] is True
+
+
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_treats_nonnumeric_api_code_as_an_error() -> None:
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=_FakeSession(
+            _FakeResponse(
+                {
+                    "code": "UPSTREAM_ERROR",
+                    "message": "provider unavailable",
+                    "usage": {
+                        "prompt_tokens": 70,
+                        "completion_tokens": 5,
+                        "total_tokens": 75,
+                    },
+                }
+            )
+        ),
+    )
+
+    with pytest.raises(APIMartGPT56ChatError, match="provider unavailable") as error:
+        await provider.chat(
+            {
+                "model": "gpt-5.6-sol",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+
+    assert error.value.has_cost_evidence is True
+    assert error.value.request_may_have_been_accepted is True
+
+
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_preserves_usage_when_2xx_response_has_no_content() -> None:
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=_FakeSession(
+            _FakeResponse(
+                {
+                    "choices": [{"message": {"content": ""}}],
+                    "usage": {
+                        "prompt_tokens": 70,
+                        "completion_tokens": 5,
+                        "total_tokens": 75,
+                    },
+                }
+            )
+        ),
+    )
+
+    with pytest.raises(APIMartGPT56ChatError, match="no message content") as error:
+        await provider.chat(
+            {
+                "model": "gpt-5.6-sol",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+
+    assert error.value.usage_result == {
+        "prompt_tokens": 70,
+        "completion_tokens": 5,
+        "total_tokens": 75,
+    }
+    assert error.value.raw_usage_present is True
+    assert error.value.usage_contract_valid is True
+    assert error.value.has_cost_evidence is True
+    assert error.value.request_may_have_been_accepted is True
+
+
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_leaves_costless_2xx_empty_content_retryable() -> None:
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=_FakeSession(_FakeResponse({"choices": [{"message": {"content": ""}}]})),
+    )
+
+    with pytest.raises(APIMartGPT56ChatError, match="no message content") as error:
+        await provider.chat(
+            {
+                "model": "gpt-5.6-sol",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+
+    assert bool(error.value.usage_result) is True
+    assert error.value.usage_result["_usage_contract_missing"] is True
+    assert error.value.raw_usage_present is False
+    assert error.value.raw_cost_present is False
+    assert error.value.has_cost_evidence is False
+    assert error.value.request_may_have_been_accepted is False
 
 
 @pytest.mark.parametrize(
@@ -233,6 +688,21 @@ async def test_apimart_gpt56_chat_preserves_usage_from_an_error_response() -> No
         {"prompt_tokens": 1, "completion_tokens": 1},
         {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 0},
         {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 3},
+        {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "prompt_tokens_details": {"cached_tokens": 1},
+        },
+        {
+            "prompt_tokens": 1,
+            "completion_tokens": 0,
+            "total_tokens": 1,
+            "prompt_tokens_details": {
+                "cached_tokens": 1,
+                "cache_write_tokens": 1,
+            },
+        },
     ],
 )
 @pytest.mark.asyncio
@@ -259,6 +729,63 @@ async def test_apimart_gpt56_chat_marks_untrusted_usage_contracts(
     )
 
     assert result["_usage_contract_valid"] is False
+    assert "_usage_contract_missing" not in result
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {
+            "prompt_tokens": float("inf"),
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        },
+        {
+            "prompt_tokens": 0,
+            "completion_tokens": float("inf"),
+            "total_tokens": 0,
+        },
+        {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": float("inf"),
+        },
+        {
+            "prompt_tokens": 1,
+            "completion_tokens": 0,
+            "total_tokens": 1,
+            "prompt_tokens_details": {"cached_tokens": float("inf")},
+        },
+    ],
+)
+@pytest.mark.asyncio
+async def test_apimart_gpt56_chat_marks_infinite_usage_on_ambiguous_http_error_untrusted(
+    usage: dict[str, object],
+) -> None:
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=_FakeSession(
+            _FakeResponse(
+                {
+                    "error": {"message": "upstream failed after dispatch"},
+                    "usage": usage,
+                },
+                status_code=503,
+            )
+        ),
+    )
+
+    with pytest.raises(APIMartGPT56ChatError) as error:
+        await provider.chat(
+            {
+                "model": "gpt-5.6-luna",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+
+    assert error.value.usage_result["_usage_contract_valid"] is False
+    assert error.value.usage_contract_valid is False
+    assert error.value.request_may_have_been_accepted is True
 
 
 @pytest.mark.parametrize(
@@ -411,9 +938,5 @@ def test_aibrain_six_user_rates_equal_140_credits_per_apimart_credit(
     provider_rate = apimart_token_rate(model=model)
     conversion = Decimal("140") / Decimal("1000")
 
-    assert pricing.input_credits_per_1k == (
-        provider_rate.input_credits_per_m * conversion
-    )
-    assert pricing.output_credits_per_1k == (
-        provider_rate.output_credits_per_m * conversion
-    )
+    assert pricing.input_credits_per_1k == (provider_rate.input_credits_per_m * conversion)
+    assert pricing.output_credits_per_1k == (provider_rate.output_credits_per_m * conversion)

@@ -10,7 +10,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.api.deps import get_object_storage
+from app.core.security import create_access_token
 from app.db.models import (
+    AIBrainUserCooldown,
     Asset,
     ChatConversation,
     ChatMessage,
@@ -22,6 +24,10 @@ from app.db.models import (
     User,
 )
 from app.main import app
+from app.providers.chat.apimart_gpt56 import (
+    APIMartGPT56ChatError,
+    APIMartGPT56ChatProvider,
+)
 from app.services import aibrain
 
 
@@ -41,7 +47,67 @@ class _FailingChatProvider:
 
     async def chat(self, payload: dict) -> dict:
         self.calls.append(payload)
-        raise RuntimeError("mock upstream failure")
+        raise APIMartGPT56ChatError(
+            "mock request rejected before provider acceptance",
+            request_may_have_been_accepted=False,
+        )
+
+
+class _CostBearingFailingChatProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def chat(self, payload: dict) -> dict:
+        self.calls.append(payload)
+        raise APIMartGPT56ChatError(
+            "mock billed upstream failure",
+            usage_result={
+                "prompt_tokens": 100,
+                "completion_tokens": 1,
+                "total_tokens": 101,
+                "credits": Decimal("0.25"),
+            },
+        )
+
+
+class _UnknownDispatchFailingChatProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def chat(self, payload: dict) -> dict:
+        self.calls.append(payload)
+        raise APIMartGPT56ChatError(
+            "mock response lost after dispatch",
+            request_may_have_been_accepted=True,
+        )
+
+
+class _UnexpectedFailingChatProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def chat(self, payload: dict) -> dict:
+        self.calls.append(payload)
+        raise RuntimeError("mock unexpected provider integration failure")
+
+
+class _FakeAPIMartResponse:
+    def __init__(self, payload: dict[str, object], *, status_code: int) -> None:
+        self.payload = payload
+        self.status_code = status_code
+
+    def json(self) -> dict[str, object]:
+        return self.payload
+
+
+class _FakeAPIMartSession:
+    def __init__(self, response: _FakeAPIMartResponse) -> None:
+        self.response = response
+        self.calls: list[dict[str, object]] = []
+
+    def post(self, _url: str, **kwargs) -> _FakeAPIMartResponse:
+        self.calls.append(kwargs)
+        return self.response
 
 
 class _CancelledChatProvider:
@@ -919,10 +985,12 @@ def test_message_provider_cost_uses_cache_read_and_write_rates(
         {"cached_prompt_tokens": 80, "cache_write_tokens": 30},
         {"credits": "NaN"},
         {"credits": "Infinity"},
+        {"credits": Decimal("28")},
+        {"cost_cents": 2_000},
         {"credits": "100000000000"},
     ],
 )
-def test_invalid_provider_cost_usage_opens_tenant_cooldown_without_charge(
+def test_invalid_provider_cost_usage_opens_user_cooldown_without_charge(
     auth_context,
     auth_db,
     monkeypatch,
@@ -1144,20 +1212,22 @@ def test_prompt_hard_limit_rejects_before_provider_or_reservation(
     (
         "prompt_tokens",
         "completion_tokens",
+        "configured_max_prompt_tokens",
         "expected_charge",
         "expected_provider_cost_usd",
     ),
     [
-        (922_001, 1, Decimal("1032.646720"), Decimal("1.47520880")),
-        (1, 4_097, Decimal("27.526240"), Decimal("0.01966640")),
+        (1_001, 1, 1_000, Decimal("1.127840"), Decimal("0.00080560")),
+        (1, 4_097, 922_000, Decimal("27.532960"), Decimal("0.01966640")),
     ],
 )
-def test_provider_usage_above_pre_authorized_envelope_delivers_with_capped_charge(
+def test_provider_usage_above_configured_envelope_charges_full_usage_and_cools_down(
     auth_context,
     auth_db,
     monkeypatch,
     prompt_tokens: int,
     completion_tokens: int,
+    configured_max_prompt_tokens: int,
     expected_charge: Decimal,
     expected_provider_cost_usd: Decimal,
 ) -> None:
@@ -1181,10 +1251,21 @@ def test_provider_usage_above_pre_authorized_envelope_delivers_with_capped_charg
     }
     provider = _FakeChatProvider(provider_result)
     monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(
+        aibrain.settings,
+        "engine_aibrain_max_prompt_tokens",
+        configured_max_prompt_tokens,
+    )
+    url = f"/api/v1/aibrain/conversations/{conversation_id}/messages"
 
     response = client.post(
-        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        url,
         json={"content": "Keep provider usage inside the authorization", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+    replay_response = client.post(
+        url,
+        json={"content": "Do not immediately replay gross usage", "tier": "low"},
         headers=auth_context["headers"],
     )
 
@@ -1193,6 +1274,11 @@ def test_provider_usage_above_pre_authorized_envelope_delivers_with_capped_charg
         "provider answer remains deliverable"
     )
     assert len(provider.calls) == 1
+    assert replay_response.status_code == 503
+    assert replay_response.json()["error"]["code"] == (
+        "AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN"
+    )
+    assert replay_response.json()["error"]["detail"]["retry_after_seconds"] > 0
     with auth_db() as db:
         wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
         user_message = db.scalar(
@@ -1239,11 +1325,11 @@ def test_provider_usage_above_pre_authorized_envelope_delivers_with_capped_charg
             "reserve",
             "settle",
         ]
-        assert settle_entry.details["billable_prompt_tokens"] == min(prompt_tokens, 922_000)
-        assert settle_entry.details["billable_completion_tokens"] == min(
-            completion_tokens,
-            4_096,
-        )
+        assert "usage_charge_capped" not in settle_entry.details
+        assert "billable_prompt_tokens" not in settle_entry.details
+        assert "billable_completion_tokens" not in settle_entry.details
+        assert settle_entry.details["prompt_tokens"] == prompt_tokens
+        assert settle_entry.details["completion_tokens"] == completion_tokens
         assert settle_entry.details["reported_prompt_tokens"] == prompt_tokens
         assert settle_entry.details["reported_completion_tokens"] == completion_tokens
         assert usage.status == "settled"
@@ -1257,10 +1343,12 @@ def test_provider_usage_above_pre_authorized_envelope_delivers_with_capped_charg
     [
         (1, 1, 3, None),
         (1, 1, 2, False),
-        (999_999_999, 1, 1_000_000_000, None),
+        pytest.param(0, 0, 0, False, id="adapter-normalized-infinity"),
+        (922_001, 1, 922_002, None),
+        (1, 128_001, 128_002, None),
     ],
 )
-def test_malformed_provider_usage_opens_tenant_cooldown_before_replay(
+def test_untrusted_provider_usage_opens_user_cooldown_before_replay(
     auth_context,
     auth_db,
     monkeypatch,
@@ -1356,10 +1444,14 @@ def test_malformed_provider_usage_opens_tenant_cooldown_before_replay(
         assert len(usage_records) == 1
         assert usage_records[0].status == "released"
         assert usage_records[0].credits == Decimal("0")
-        assert usage_records[0].provider_cost_usd > 0
+        assert usage_records[0].quantity == Decimal("0")
+        assert usage_records[0].provider_cost_usd == Decimal("0")
+        assert messages[0].prompt_tokens == 0
+        assert messages[0].completion_tokens == 0
+        assert messages[0].total_tokens == 0
 
 
-def test_provider_usage_at_configured_hard_bound_settles_normally(
+def test_provider_usage_at_public_hard_bound_settles_then_cools_down(
     auth_context,
     auth_db,
     monkeypatch,
@@ -1377,23 +1469,31 @@ def test_provider_usage_at_configured_hard_bound_settles_normally(
     ).json()["data"]["id"]
     provider = _FakeChatProvider(
         {
-            "content": "usage exactly at the configured safety envelope",
+            "content": "usage exactly at the public provider boundary",
             "model": "gpt-5.6-luna",
             "prompt_tokens": 922_000,
-            "completion_tokens": 4_096,
-            "total_tokens": 926_096,
+            "completion_tokens": 128_000,
+            "total_tokens": 1_050_000,
         }
     )
     monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
 
+    url = f"/api/v1/aibrain/conversations/{conversation_id}/messages"
     response = client.post(
-        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        url,
         json={"content": "Accept the exact provider boundary", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+    replay_response = client.post(
+        url,
+        json={"content": "Do not replay the boundary-sized response", "tier": "low"},
         headers=auth_context["headers"],
     )
 
     assert response.status_code == 200
-    assert response.json()["data"]["assistant_message"]["charged_credits"] == 1060.16512
+    assert response.json()["data"]["assistant_message"]["charged_credits"] == 1892.8
+    assert replay_response.status_code == 503
+    assert replay_response.json()["error"]["detail"]["retry_after_seconds"] > 0
     assert len(provider.calls) == 1
     with auth_db() as db:
         wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
@@ -1403,11 +1503,12 @@ def test_provider_usage_at_configured_hard_bound_settles_normally(
                 UsageRecord.capability == "chat",
             )
         )
-        assert wallet.available_credits == Decimal("939.834880")
+        assert wallet.available_credits == Decimal("107.200000")
         assert wallet.reserved_credits == Decimal("0")
-        assert wallet.total_spent_credits == Decimal("1060.165120")
+        assert wallet.total_spent_credits == Decimal("1892.800000")
         assert usage.status == "settled"
-        assert usage.quantity == Decimal("926096")
+        assert usage.quantity == Decimal("1050000")
+        assert usage.provider_cost_usd == Decimal("2.39680000")
 
 
 def test_inflight_exposure_limit_returns_structured_402_before_provider(
@@ -1921,15 +2022,23 @@ def test_provider_failure_releases_reservation_without_user_charge(
     provider = _FailingChatProvider()
     monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
 
+    url = f"/api/v1/aibrain/conversations/{conversation_id}/messages"
     response = client.post(
-        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        url,
         json={"content": "Fail upstream", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+    retry_response = client.post(
+        url,
+        json={"content": "Retry an explicitly unaccepted request", "tier": "low"},
         headers=auth_context["headers"],
     )
 
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "AIBRAIN_PROVIDER_FAILED"
-    assert len(provider.calls) == 1
+    assert retry_response.status_code == 502
+    assert retry_response.json()["error"]["code"] == "AIBRAIN_PROVIDER_FAILED"
+    assert len(provider.calls) == 2
     with auth_db() as db:
         wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
         entries = list(
@@ -1939,15 +2048,286 @@ def test_provider_failure_releases_reservation_without_user_charge(
                 .order_by(ReasoningLedgerEntry.created_at.asc())
             )
         )
-        usage = db.scalar(select(UsageRecord).where(UsageRecord.capability == "chat"))
-        failed_message = db.scalar(select(ChatMessage).where(ChatMessage.status == "failed"))
+        usage_records = list(
+            db.scalars(select(UsageRecord).where(UsageRecord.capability == "chat"))
+        )
+        failed_messages = list(
+            db.scalars(select(ChatMessage).where(ChatMessage.status == "failed"))
+        )
         assert wallet.available_credits == Decimal("500")
         assert wallet.reserved_credits == Decimal("0")
-        assert [entry.entry_type for entry in entries] == ["topup", "reserve", "release"]
+        assert [entry.entry_type for entry in entries] == [
+            "topup",
+            "reserve",
+            "release",
+            "reserve",
+            "release",
+        ]
+        assert len(usage_records) == 2
+        assert all(usage.status == "released" for usage in usage_records)
+        assert all(usage.credits == Decimal("0") for usage in usage_records)
+        assert all(usage.quantity == Decimal("0") for usage in usage_records)
+        assert all(usage.provider_cost_usd == Decimal("0") for usage in usage_records)
+        assert all(usage.cost_cents == 0 for usage in usage_records)
+        assert len(failed_messages) == 2
+        assert all(
+            message.error_code == "AIBRAIN_PROVIDER_FAILED"
+            for message in failed_messages
+        )
+        assert all(message.prompt_tokens == 0 for message in failed_messages)
+        assert all(message.completion_tokens == 0 for message in failed_messages)
+        assert all(message.total_tokens == 0 for message in failed_messages)
+
+
+@pytest.mark.parametrize(
+    ("status_code", "provider_payload", "expects_prompt_cost_estimate"),
+    [
+        pytest.param(
+            500,
+            {
+                "error": {"message": "oversized usage"},
+                "usage": {
+                    "prompt_tokens": 10**40,
+                    "completion_tokens": 1,
+                    "total_tokens": 10**40 + 1,
+                },
+            },
+            False,
+            id="public-token-bound-exceeded",
+        ),
+        pytest.param(
+            400,
+            {"error": {"message": "malformed usage"}, "usage": None},
+            False,
+            id="usage-null",
+        ),
+        pytest.param(
+            400,
+            {
+                "error": {"message": "infinite usage"},
+                "usage": {
+                    "prompt_tokens": float("inf"),
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+            },
+            False,
+            id="usage-infinity",
+        ),
+        pytest.param(
+            400,
+            {
+                "error": {"message": "cache usage exceeds prompt"},
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                    "prompt_tokens_details": {"cached_tokens": 1},
+                },
+            },
+            False,
+            id="cache-only-usage",
+        ),
+        pytest.param(
+            400,
+            {
+                "error": {"message": "unbounded cost"},
+                "cost_cents": "1e5000",
+            },
+            True,
+            id="unbounded-cost-cents",
+        ),
+    ],
+)
+def test_http_error_with_untrusted_usage_is_sanitized_before_persistence(
+    auth_context,
+    auth_db,
+    monkeypatch,
+    status_code: int,
+    provider_payload: dict[str, object],
+    expects_prompt_cost_estimate: bool,
+) -> None:
+    client = TestClient(app)
+    client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=_topup_payload(500),
+        headers=auth_context["headers"],
+    )
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    session = _FakeAPIMartSession(
+        _FakeAPIMartResponse(provider_payload, status_code=status_code)
+    )
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=session,
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    url = f"/api/v1/aibrain/conversations/{conversation_id}/messages"
+
+    first_response = client.post(
+        url,
+        json={"content": "Return an oversized usage error", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+    replay_response = client.post(
+        url,
+        json={"content": "Do not replay malformed usage", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert first_response.status_code == 502
+    assert first_response.json()["error"]["code"] == "AIBRAIN_PROVIDER_USAGE_INVALID"
+    assert replay_response.status_code == 503
+    assert replay_response.json()["error"]["detail"]["retry_after_seconds"] > 0
+    assert len(session.calls) == 1
+    with auth_db() as db:
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        failed_message = db.scalar(
+            select(ChatMessage).where(ChatMessage.status == "failed")
+        )
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.capability == "chat"))
+        cooldown = db.scalar(
+            select(AIBrainUserCooldown).where(
+                AIBrainUserCooldown.user_id == auth_context["user_id"]
+            )
+        )
+        assert wallet.available_credits == Decimal("500")
+        assert wallet.reserved_credits == Decimal("0")
+        assert wallet.total_spent_credits == Decimal("0")
+        assert failed_message.error_code == "AIBRAIN_PROVIDER_USAGE_INVALID"
         assert usage.status == "released"
         assert usage.credits == Decimal("0")
-        assert usage.provider_cost_usd > 0
-        assert failed_message.error_code == "AIBRAIN_PROVIDER_FAILED"
+        assert cooldown.reason == "AIBRAIN_PROVIDER_USAGE_INVALID"
+        if expects_prompt_cost_estimate:
+            assert failed_message.prompt_tokens > 0
+            assert failed_message.completion_tokens == 0
+            assert failed_message.total_tokens == failed_message.prompt_tokens
+            assert usage.quantity == Decimal(failed_message.total_tokens)
+            assert 0 <= usage.cost_cents < 2_000
+            assert usage.provider_cost_usd > 0
+        else:
+            assert failed_message.prompt_tokens == 0
+            assert failed_message.completion_tokens == 0
+            assert failed_message.total_tokens == 0
+            assert usage.quantity == Decimal("0")
+            assert usage.cost_cents == 0
+            assert usage.provider_cost_usd == Decimal("0")
+
+
+@pytest.mark.parametrize(
+    "provider_factory",
+    [_UnknownDispatchFailingChatProvider, _UnexpectedFailingChatProvider],
+    ids=["adapter-marks-dispatch-unknown", "unexpected-provider-exception"],
+)
+def test_unknown_dispatch_failure_opens_replay_guard_without_user_charge(
+    auth_context,
+    auth_db,
+    monkeypatch,
+    provider_factory,
+) -> None:
+    client = TestClient(app)
+    client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=_topup_payload(500),
+        headers=auth_context["headers"],
+    )
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    provider = provider_factory()
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    url = f"/api/v1/aibrain/conversations/{conversation_id}/messages"
+
+    first_response = client.post(
+        url,
+        json={"content": "Lose the response after dispatch", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+    replay_response = client.post(
+        url,
+        json={"content": "Do not duplicate unknown dispatch", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert first_response.status_code == 502
+    assert first_response.json()["error"]["code"] == "AIBRAIN_PROVIDER_REPLAY_GUARD"
+    assert replay_response.status_code == 503
+    assert replay_response.json()["error"]["detail"]["retry_after_seconds"] > 0
+    assert len(provider.calls) == 1
+    with auth_db() as db:
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.capability == "chat"))
+        assert wallet.available_credits == Decimal("500")
+        assert wallet.reserved_credits == Decimal("0")
+        assert wallet.total_spent_credits == Decimal("0")
+        assert usage.status == "released"
+        assert usage.credits == Decimal("0")
+
+
+def test_cost_bearing_provider_failure_opens_replay_guard_without_user_charge(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=_topup_payload(500),
+        headers=auth_context["headers"],
+    )
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    provider = _CostBearingFailingChatProvider()
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    url = f"/api/v1/aibrain/conversations/{conversation_id}/messages"
+
+    first_response = client.post(
+        url,
+        json={"content": "Fail after provider billing", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+    replay_response = client.post(
+        url,
+        json={"content": "Do not replay billed failure", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert first_response.status_code == 502
+    assert first_response.json()["error"] == {
+        "code": "AIBRAIN_PROVIDER_REPLAY_GUARD",
+        "message": "AIBRAIN provider request may have incurred cost.",
+        "request_id": first_response.headers["X-Request-ID"],
+        "detail": None,
+        "details": None,
+    }
+    assert replay_response.status_code == 503
+    assert replay_response.json()["error"]["code"] == (
+        "AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN"
+    )
+    assert replay_response.json()["error"]["detail"]["retry_after_seconds"] > 0
+    assert len(provider.calls) == 1
+    with auth_db() as db:
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        failed_message = db.scalar(
+            select(ChatMessage).where(ChatMessage.status == "failed")
+        )
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.capability == "chat"))
+        assert wallet.available_credits == Decimal("500")
+        assert wallet.reserved_credits == Decimal("0")
+        assert wallet.total_spent_credits == Decimal("0")
+        assert failed_message.error_code == "AIBRAIN_PROVIDER_REPLAY_GUARD"
+        assert usage.status == "released"
+        assert usage.credits == Decimal("0")
+        assert usage.provider_cost_usd == Decimal("0.02500000")
 
 
 def test_empty_answer_failure_preserves_authoritative_provider_cost(
@@ -1978,13 +2358,23 @@ def test_empty_answer_failure_preserves_authoritative_provider_cost(
     )
     monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
 
+    url = f"/api/v1/aibrain/conversations/{conversation_id}/messages"
     response = client.post(
-        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        url,
         json={"content": "Return an empty answer", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+    replay_response = client.post(
+        url,
+        json={"content": "Do not replay an empty billed answer", "tier": "low"},
         headers=auth_context["headers"],
     )
 
     assert response.status_code == 502
+    assert response.json()["error"]["code"] == "AIBRAIN_PROVIDER_REPLAY_GUARD"
+    assert replay_response.status_code == 503
+    assert replay_response.json()["error"]["detail"]["retry_after_seconds"] > 0
+    assert len(provider.calls) == 1
     with auth_db() as db:
         usage = db.scalar(
             select(UsageRecord).where(
@@ -2021,6 +2411,8 @@ def test_missing_usage_releases_reservation_without_a_second_provider_call(
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
+            "_usage_contract_valid": False,
+            "_usage_contract_missing": True,
         }
     )
     monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
@@ -2044,6 +2436,7 @@ def test_missing_usage_releases_reservation_without_a_second_provider_call(
     assert replay_response.json()["error"]["code"] == (
         "AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN"
     )
+    assert replay_response.json()["error"]["detail"]["retry_after_seconds"] > 0
     assert len(provider.calls) == 1
     with auth_db() as db:
         wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
@@ -2121,15 +2514,13 @@ def test_provider_usage_anomaly_cooldown_expires_and_allows_a_later_attempt(
     )
     assert first_response.status_code == 502
     with auth_db() as db:
-        failed_message = db.scalar(
-            select(ChatMessage).where(
-                ChatMessage.tenant_id == auth_context["tenant_id"],
-                ChatMessage.error_code == "AIBRAIN_USAGE_MISSING",
+        cooldown = db.scalar(
+            select(AIBrainUserCooldown).where(
+                AIBrainUserCooldown.user_id == auth_context["user_id"]
             )
         )
-        failed_message.updated_at = datetime.now(UTC) - timedelta(
-            seconds=aibrain.settings.engine_aibrain_usage_anomaly_cooldown_seconds + 1
-        )
+        assert cooldown.reason == "AIBRAIN_USAGE_MISSING"
+        cooldown.expires_at = datetime.now(UTC) - timedelta(seconds=1)
         db.commit()
 
     provider.result = {
@@ -2152,8 +2543,9 @@ def test_provider_usage_anomaly_cooldown_expires_and_allows_a_later_attempt(
     assert len(provider.calls) == 2
 
 
-def test_provider_usage_anomaly_cooldown_is_tenant_scoped(
+def test_provider_usage_anomaly_cooldown_tracks_caller_not_conversation_creator(
     auth_context,
+    auth_db,
     monkeypatch,
 ) -> None:
     client = TestClient(app)
@@ -2169,7 +2561,7 @@ def test_provider_usage_anomaly_cooldown_is_tenant_scoped(
     ).json()["data"]["id"]
     provider = _FakeChatProvider(
         {
-            "content": "Tenant A missing usage",
+            "content": "User A missing usage",
             "model": "gpt-5.6-luna",
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -2180,36 +2572,37 @@ def test_provider_usage_anomaly_cooldown_is_tenant_scoped(
 
     first_response = client.post(
         f"/api/v1/aibrain/conversations/{first_conversation_id}/messages",
-        json={"content": "Open tenant A cooldown", "tier": "low"},
+        json={"content": "Open user A cooldown", "tier": "low"},
         headers=auth_context["headers"],
     )
     assert first_response.status_code == 502
 
-    suffix = uuid4().hex[:8]
-    registration = client.post(
-        "/api/v1/auth/register-tenant",
-        json={
-            "tenant_slug": f"cooldown-{suffix}",
-            "tenant_name": "Cooldown Isolation",
-            "email": f"cooldown-{suffix}@example.com",
-            "password": "secret-pass",
-        },
+    user_a_replay = client.post(
+        f"/api/v1/aibrain/conversations/{first_conversation_id}/messages",
+        json={"content": "User A remains blocked", "tier": "low"},
+        headers=auth_context["headers"],
     )
-    assert registration.status_code == 201
-    second_token = registration.json()["data"]["token"]["access_token"]
+    assert user_a_replay.status_code == 503
+    assert user_a_replay.json()["error"]["detail"]["retry_after_seconds"] > 0
+
+    with auth_db() as db:
+        second_user = User(
+            tenant_id=auth_context["tenant_id"],
+            email=f"cooldown-{uuid4().hex[:8]}@example.com",
+            password_hash="not-used-by-test",
+            role="creator",
+        )
+        db.add(second_user)
+        db.commit()
+        second_user_id = second_user.id
+    second_token = create_access_token(
+        user_id=second_user_id,
+        tenant_id=auth_context["tenant_id"],
+        role="creator",
+    )
     second_headers = {"Authorization": f"Bearer {second_token}"}
-    client.post(
-        "/api/v1/aibrain/wallet/topup",
-        json=_topup_payload(100),
-        headers=second_headers,
-    )
-    second_conversation_id = client.post(
-        "/api/v1/aibrain/conversations",
-        json={},
-        headers=second_headers,
-    ).json()["data"]["id"]
     provider.result = {
-        "content": "Tenant B remains available",
+        "content": "The actual caller remains available",
         "model": "gpt-5.6-luna",
         "prompt_tokens": 1,
         "completion_tokens": 1,
@@ -2217,14 +2610,14 @@ def test_provider_usage_anomaly_cooldown_is_tenant_scoped(
     }
 
     second_response = client.post(
-        f"/api/v1/aibrain/conversations/{second_conversation_id}/messages",
-        json={"content": "Tenant B is isolated", "tier": "low"},
+        f"/api/v1/aibrain/conversations/{first_conversation_id}/messages",
+        json={"content": "User B writes to user A's conversation", "tier": "low"},
         headers=second_headers,
     )
 
     assert second_response.status_code == 200
     assert second_response.json()["data"]["assistant_message"]["content"] == (
-        "Tenant B remains available"
+        "The actual caller remains available"
     )
     assert len(provider.calls) == 2
 

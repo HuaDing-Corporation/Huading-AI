@@ -3,6 +3,94 @@ from decimal import Decimal
 import pytest
 
 
+def test_gpt56_models_share_verified_public_usage_limits() -> None:
+    from app.services.apimart_token_pricing import (
+        APIMART_GPT56_USAGE_LIMITS,
+        apimart_token_usage_limits,
+    )
+
+    for model in ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"):
+        assert apimart_token_usage_limits(model=model) is APIMART_GPT56_USAGE_LIMITS
+
+    assert APIMART_GPT56_USAGE_LIMITS.max_prompt_tokens == 922_000
+    assert APIMART_GPT56_USAGE_LIMITS.max_completion_tokens == 128_000
+    assert APIMART_GPT56_USAGE_LIMITS.max_total_tokens == 1_050_000
+
+
+@pytest.mark.parametrize(
+    ("prompt_tokens", "completion_tokens", "total_tokens", "expected"),
+    [
+        (922_000, 128_000, 1_050_000, True),
+        (922_001, 0, 922_001, False),
+        (0, 128_001, 128_001, False),
+        (922_000, 128_000, 1_050_001, False),
+        (1, 1, 3, False),
+        (-1, 1, 0, False),
+    ],
+)
+def test_gpt56_usage_reports_must_be_self_consistent_and_within_public_limits(
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+    expected: bool,
+) -> None:
+    from app.services.apimart_token_pricing import (
+        apimart_token_usage_is_within_limits,
+    )
+
+    assert (
+        apimart_token_usage_is_within_limits(
+            model="gpt-5.6-sol",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    "raw_usage",
+    [
+        {"prompt_tokens_details": {"cached_tokens": float("inf")}},
+        {"prompt_tokens_details": {"cache_write_tokens": float("inf")}},
+        {"claude_cache_creation_5_m_tokens": float("inf")},
+        {"cache_creation": {"ephemeral_1h_input_tokens": float("inf")}},
+    ],
+)
+def test_cache_usage_marks_infinite_provider_counters_invalid(
+    raw_usage: dict[str, object],
+) -> None:
+    from app.services.apimart_token_pricing import apimart_cache_token_usage
+
+    cache_usage = apimart_cache_token_usage(raw_usage)
+
+    assert cache_usage.contract_valid is False
+
+
+@pytest.mark.parametrize(
+    ("field", "expected_prompt_tokens", "expected_completion_tokens"),
+    [
+        ("prompt_tokens", 0, 1),
+        ("completion_tokens", 1, 0),
+    ],
+)
+def test_token_pricing_safely_normalizes_infinite_token_counts(
+    field: str,
+    expected_prompt_tokens: int,
+    expected_completion_tokens: int,
+) -> None:
+    from app.services.apimart_token_pricing import apimart_token_usage_cost
+
+    counts = {"prompt_tokens": 1, "completion_tokens": 1}
+    counts[field] = float("inf")
+
+    cost = apimart_token_usage_cost(model="gpt-5.6-luna", **counts)
+
+    assert cost.prompt_tokens == expected_prompt_tokens
+    assert cost.completion_tokens == expected_completion_tokens
+
+
 def test_luna_low_tier_uses_apimart_discounted_token_rates(monkeypatch) -> None:
     from app.services import apimart_costs
     from app.services.apimart_token_pricing import apimart_token_usage_cost

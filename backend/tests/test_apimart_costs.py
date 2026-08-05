@@ -86,6 +86,21 @@ def test_apimart_usage_metadata_does_not_double_discount_usd_cost(monkeypatch) -
     assert "cost_cents" not in metadata
 
 
+@pytest.mark.parametrize("cost_cents", ["1e5000", "1e1000000", float("inf")])
+def test_apimart_usage_metadata_rejects_unbounded_cost_cents_before_int_conversion(
+    cost_cents: object,
+) -> None:
+    from app.services.apimart_costs import (
+        apimart_usage_metadata,
+        apimart_usage_metadata_contract_valid,
+    )
+
+    payload = {"cost_cents": cost_cents}
+
+    assert apimart_usage_metadata_contract_valid(payload) is False
+    assert apimart_usage_metadata(payload) == {}
+
+
 def test_apimart_price_table_fallback_uses_provider_credits_not_tenant_credits(
     monkeypatch,
 ) -> None:

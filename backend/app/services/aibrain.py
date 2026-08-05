@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import queue
 import threading
@@ -12,7 +13,7 @@ from decimal import ROUND_CEILING, Decimal
 from typing import Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import case, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -21,6 +22,7 @@ from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
 from app.db.models import (
+    AIBrainUserCooldown,
     Asset,
     ChatConversation,
     ChatMessage,
@@ -48,6 +50,8 @@ from app.services.apimart_token_pricing import (
     APIMartTokenPricingError,
     APIMartTokenUsageCost,
     apimart_token_usage_cost,
+    apimart_token_usage_is_within_limits,
+    apimart_token_usage_limits,
 )
 from app.services.storage.base import ObjectStorage
 from app.services.storage.keys import presign_tenant_storage_key
@@ -75,12 +79,11 @@ _INFLIGHT_HEARTBEAT_QUEUE_CAPACITY = 256
 _INFLIGHT_HEARTBEAT_QUEUE_RETRY_SECONDS = 0.05
 _INFLIGHT_HEARTBEAT_LOCK_TIMEOUT_MILLISECONDS = 1_000
 _INFLIGHT_HEARTBEAT_STATEMENT_TIMEOUT_MILLISECONDS = 5_000
-_PROVIDER_USAGE_ANOMALY_ERROR_CODES = {
+_USER_COOLDOWN_ERROR_CODES = {
+    "AIBRAIN_PROVIDER_REPLAY_GUARD",
     "AIBRAIN_PROVIDER_USAGE_INVALID",
     "AIBRAIN_USAGE_MISSING",
 }
-# UsageRecord.quantity is Numeric(12, 3); larger counters cannot be persisted safely.
-_MAX_PERSISTABLE_TOTAL_TOKENS = 999_999_999
 _MAX_PERSISTABLE_PROVIDER_COST_USD = Decimal("9999999999.99999999")
 _MAX_PERSISTABLE_COST_CENTS = 2_147_483_647
 _IMAGE_ASSET_TYPES = {"avatar_image", "product_image", "generated_image", "cover"}
@@ -362,7 +365,11 @@ async def send_chat_message(
         tenant_id=user.tenant_id,
         conversation_id=conversation_id,
     )
-    _raise_if_provider_usage_anomaly_cooldown(db, tenant_id=user.tenant_id)
+    _raise_if_provider_usage_anomaly_cooldown(
+        db,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+    )
     pricing = tier_pricing(tier)
     historical_messages = _context_messages(
         db,
@@ -425,6 +432,7 @@ async def send_chat_message(
     reservation = _apply_reasoning_wallet_change(
         db,
         tenant_id=user.tenant_id,
+        cooldown_user_id=user.id,
         entry_type="reserve",
         amount_credits=requested_reservation,
         chat_message_id=user_message.id,
@@ -475,23 +483,67 @@ async def send_chat_message(
             heartbeat.stop()
             raise
         except Exception as exc:
-            usage_result = exc.usage_result if isinstance(exc, APIMartGPT56ChatError) else {}
+            provider_error = (
+                exc if isinstance(exc, APIMartGPT56ChatError) else None
+            )
+            usage_result = provider_error.usage_result if provider_error else {}
+            provider_usage_invalid = bool(
+                provider_error
+                and _provider_error_usage_is_invalid(pricing, provider_error)
+            )
+            if provider_usage_invalid:
+                replay_guard = True
+            elif provider_error is None:
+                replay_guard = True
+            else:
+                replay_guard = bool(
+                    getattr(
+                        provider_error,
+                        "request_may_have_been_accepted",
+                        False,
+                    )
+                    or getattr(provider_error, "has_cost_evidence", False)
+                    or _provider_result_has_cost_evidence(usage_result)
+                )
+            error_code = (
+                "AIBRAIN_PROVIDER_USAGE_INVALID"
+                if provider_usage_invalid
+                else (
+                    "AIBRAIN_PROVIDER_REPLAY_GUARD"
+                    if replay_guard
+                    else "AIBRAIN_PROVIDER_FAILED"
+                )
+            )
             _fail_chat_message(
                 db,
                 tenant_id=user.tenant_id,
+                user_id=user.id,
                 user_message_id=user_message.id,
                 pricing=pricing,
                 reservation=reservation,
                 provider_messages=provider_messages,
                 usage_result=usage_result,
-                error_code="AIBRAIN_PROVIDER_FAILED",
+                error_code=error_code,
                 heartbeat=heartbeat,
+                provider_cost_possible=replay_guard,
             )
             if request_cancelled:
                 raise asyncio.CancelledError from exc
+            if provider_usage_invalid:
+                raise AppError(
+                    "AIBRAIN provider returned invalid billing usage.",
+                    code=error_code,
+                    status_code=502,
+                ) from exc
+            if replay_guard:
+                raise AppError(
+                    "AIBRAIN provider request may have incurred cost.",
+                    code=error_code,
+                    status_code=502,
+                ) from exc
             raise AppError(
                 "AIBRAIN provider request failed.",
-                code="AIBRAIN_PROVIDER_FAILED",
+                code=error_code,
                 status_code=502,
             ) from exc
 
@@ -499,10 +551,45 @@ async def send_chat_message(
     completion_tokens = _nonnegative_int(result.get("completion_tokens"))
     component_total_tokens = prompt_tokens + completion_tokens
     total_tokens = _nonnegative_int(result.get("total_tokens")) or component_total_tokens
+    usage_contract_missing = (
+        total_tokens <= 0 and result.get("_usage_contract_missing") is True
+    )
+    if not usage_contract_missing and (
+        result.get("_usage_contract_valid", True) is False
+        or not (
+            apimart_token_usage_is_within_limits(
+                model=pricing.model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            )
+        )
+    ):
+        _fail_chat_message(
+            db,
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            user_message_id=user_message.id,
+            pricing=pricing,
+            reservation=reservation,
+            provider_messages=provider_messages,
+            # The failure boundary keeps economic evidence while clearing
+            # untrusted, potentially overflowing provider counters.
+            usage_result=dict(result),
+            error_code="AIBRAIN_PROVIDER_USAGE_INVALID",
+            heartbeat=heartbeat,
+        )
+        raise AppError(
+            "AIBRAIN provider returned invalid billing usage.",
+            code="AIBRAIN_PROVIDER_USAGE_INVALID",
+            status_code=502,
+        )
+
     if total_tokens <= 0:
         _fail_chat_message(
             db,
             tenant_id=user.tenant_id,
+            user_id=user.id,
             user_message_id=user_message.id,
             pricing=pricing,
             reservation=reservation,
@@ -517,34 +604,17 @@ async def send_chat_message(
             status_code=502,
         )
 
-    if (
-        result.get("_usage_contract_valid", True) is False
-        or total_tokens != component_total_tokens
-        or total_tokens > _MAX_PERSISTABLE_TOTAL_TOKENS
-    ):
-        _fail_chat_message(
-            db,
-            tenant_id=user.tenant_id,
-            user_message_id=user_message.id,
-            pricing=pricing,
-            reservation=reservation,
-            provider_messages=provider_messages,
-            # Do not persist untrusted, potentially overflowing provider counters.
-            usage_result={},
-            error_code="AIBRAIN_PROVIDER_USAGE_INVALID",
-            heartbeat=heartbeat,
-        )
-        raise AppError(
-            "AIBRAIN provider returned invalid billing usage.",
-            code="AIBRAIN_PROVIDER_USAGE_INVALID",
-            status_code=502,
-        )
-
     answer = str(result.get("content") or "").strip()
     if not answer:
+        error_code = (
+            "AIBRAIN_PROVIDER_REPLAY_GUARD"
+            if _provider_result_has_cost_evidence(result)
+            else "AIBRAIN_PROVIDER_FAILED"
+        )
         _fail_chat_message(
             db,
             tenant_id=user.tenant_id,
+            user_id=user.id,
             user_message_id=user_message.id,
             pricing=pricing,
             reservation=reservation,
@@ -555,25 +625,29 @@ async def send_chat_message(
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
             },
-            error_code="AIBRAIN_PROVIDER_FAILED",
+            error_code=error_code,
             heartbeat=heartbeat,
         )
+        if error_code == "AIBRAIN_PROVIDER_REPLAY_GUARD":
+            raise AppError(
+                "AIBRAIN provider request may have incurred cost.",
+                code=error_code,
+                status_code=502,
+            )
         raise AppError(
             "AIBRAIN provider returned no answer.",
-            code="AIBRAIN_PROVIDER_FAILED",
+            code=error_code,
             status_code=502,
         )
 
-    billable_prompt_tokens = min(prompt_tokens, max_prompt_tokens)
-    billable_completion_tokens = min(completion_tokens, max_completion_tokens)
-    usage_charge_capped = (
-        billable_prompt_tokens != prompt_tokens
-        or billable_completion_tokens != completion_tokens
+    gross_usage_anomaly = (
+        prompt_tokens > max_prompt_tokens
+        or completion_tokens > max_completion_tokens
     )
     charged_credits = _user_credits(
         pricing,
-        billable_prompt_tokens,
-        billable_completion_tokens,
+        prompt_tokens,
+        completion_tokens,
     )
     overdraft_authorized = False
     try:
@@ -600,6 +674,7 @@ async def send_chat_message(
             _fail_chat_message(
                 db,
                 tenant_id=user.tenant_id,
+                user_id=user.id,
                 user_message_id=user_message.id,
                 pricing=pricing,
                 reservation=reservation,
@@ -625,6 +700,7 @@ async def send_chat_message(
         _fail_chat_message(
             db,
             tenant_id=user.tenant_id,
+            user_id=user.id,
             user_message_id=user_message.id,
             pricing=pricing,
             reservation=reservation,
@@ -690,13 +766,10 @@ async def send_chat_message(
         details={
             "tier": tier,
             "model": pricing.model,
-            "prompt_tokens": billable_prompt_tokens,
-            "completion_tokens": billable_completion_tokens,
-            "billable_prompt_tokens": billable_prompt_tokens,
-            "billable_completion_tokens": billable_completion_tokens,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
             "reported_prompt_tokens": prompt_tokens,
             "reported_completion_tokens": completion_tokens,
-            "usage_charge_capped": usage_charge_capped,
         },
     )
     db.add(
@@ -716,6 +789,14 @@ async def send_chat_message(
             settled_at=datetime.now(UTC),
         )
     )
+    if gross_usage_anomaly:
+        _open_provider_usage_anomaly_cooldown(
+            db,
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            reason="AIBRAIN_PROVIDER_USAGE_GROSS_ANOMALY",
+            source_message_id=persisted_user_message.id,
+        )
     db.commit()
     heartbeat.stop()
     if request_cancelled:
@@ -836,6 +917,7 @@ def _apply_reasoning_wallet_change(
     db: Session,
     *,
     tenant_id: str,
+    cooldown_user_id: str | None = None,
     entry_type: Literal["topup", "reserve", "settle", "release"],
     amount_credits: Decimal,
     subscription_id: str | None = None,
@@ -882,6 +964,17 @@ def _apply_reasoning_wallet_change(
     )
     if wallet is None:  # pragma: no cover - protected by the tenant FK and upsert.
         raise RuntimeError("Reasoning wallet could not be initialized.")
+
+    # The public preflight check can race while this request waits for the
+    # tenant wallet lock. Recheck after acquiring the lock so a preceding
+    # cost-bearing/invalid provider result can commit its user cooldown before
+    # this request creates a reservation or dispatches another provider call.
+    if entry_type == "reserve" and cooldown_user_id is not None:
+        _raise_if_provider_usage_anomaly_cooldown(
+            db,
+            tenant_id=tenant_id,
+            user_id=cooldown_user_id,
+        )
 
     if operation_key:
         existing_entry = db.scalar(
@@ -1294,28 +1387,121 @@ def _raise_if_provider_usage_anomaly_cooldown(
     db: Session,
     *,
     tenant_id: str,
+    user_id: str,
 ) -> None:
-    cutoff = datetime.now(UTC) - timedelta(
-        seconds=settings.engine_aibrain_usage_anomaly_cooldown_seconds
-    )
-    recent_anomaly_id = db.scalar(
-        select(ChatMessage.id)
+    now = datetime.now(UTC)
+    expires_at = db.scalar(
+        select(AIBrainUserCooldown.expires_at)
         .where(
-            ChatMessage.tenant_id == tenant_id,
-            ChatMessage.role == "user",
-            ChatMessage.status == "failed",
-            ChatMessage.error_code.in_(_PROVIDER_USAGE_ANOMALY_ERROR_CODES),
-            ChatMessage.updated_at >= cutoff,
+            AIBrainUserCooldown.tenant_id == tenant_id,
+            AIBrainUserCooldown.user_id == user_id,
         )
         .limit(1)
     )
-    if recent_anomaly_id is None:
+    if expires_at is None:
+        return
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    else:
+        expires_at = expires_at.astimezone(UTC)
+    remaining_seconds = (expires_at - now).total_seconds()
+    if remaining_seconds <= 0:
         return
     raise AppError(
         "AIBRAIN provider billing usage is temporarily unavailable. Try again later.",
         code="AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN",
         status_code=503,
+        detail={"retry_after_seconds": max(1, math.ceil(remaining_seconds))},
     )
+
+
+def _open_provider_usage_anomaly_cooldown(
+    db: Session,
+    *,
+    tenant_id: str,
+    user_id: str,
+    reason: str,
+    source_message_id: str,
+) -> None:
+    now = datetime.now(UTC)
+    values = {
+        "id": str(uuid4()),
+        "tenant_id": tenant_id,
+        "user_id": user_id,
+        "reason": reason,
+        "source_message_id": source_message_id,
+        "expires_at": now
+        + timedelta(
+            seconds=settings.engine_aibrain_usage_anomaly_cooldown_seconds
+        ),
+        "created_at": now,
+        "updated_at": now,
+    }
+    python_update_values = {
+        key: value
+        for key, value in values.items()
+        if key not in {"id", "created_at"}
+    }
+    dialect_name = db.get_bind().dialect.name
+    if dialect_name == "postgresql":
+        insert_statement = postgresql_insert(AIBrainUserCooldown).values(**values)
+        statement = insert_statement.on_conflict_do_update(
+            index_elements=[AIBrainUserCooldown.user_id],
+            set_=_monotonic_cooldown_update_values(insert_statement),
+        )
+        db.execute(statement)
+        return
+    if dialect_name == "sqlite":
+        insert_statement = sqlite_insert(AIBrainUserCooldown).values(**values)
+        statement = insert_statement.on_conflict_do_update(
+            index_elements=[AIBrainUserCooldown.user_id],
+            set_=_monotonic_cooldown_update_values(insert_statement),
+        )
+        db.execute(statement)
+        return
+
+    existing = db.scalar(
+        select(AIBrainUserCooldown).where(
+            AIBrainUserCooldown.user_id == user_id,
+        )
+    )
+    if existing is None:
+        db.add(AIBrainUserCooldown(**values))
+        return
+    existing_expires_at = existing.expires_at
+    if existing_expires_at.tzinfo is None:
+        existing_expires_at = existing_expires_at.replace(tzinfo=UTC)
+    if existing_expires_at > values["expires_at"]:
+        return
+    for key, value in python_update_values.items():
+        setattr(existing, key, value)
+
+
+def _monotonic_cooldown_update_values(insert_statement) -> dict[str, object]:
+    incoming = insert_statement.excluded
+    incoming_is_newer = incoming.expires_at >= AIBrainUserCooldown.expires_at
+    return {
+        "tenant_id": case(
+            (incoming_is_newer, incoming.tenant_id),
+            else_=AIBrainUserCooldown.tenant_id,
+        ),
+        "reason": case(
+            (incoming_is_newer, incoming.reason),
+            else_=AIBrainUserCooldown.reason,
+        ),
+        "source_message_id": case(
+            (incoming_is_newer, incoming.source_message_id),
+            else_=AIBrainUserCooldown.source_message_id,
+        ),
+        "expires_at": case(
+            (incoming_is_newer, incoming.expires_at),
+            else_=AIBrainUserCooldown.expires_at,
+        ),
+        "updated_at": case(
+            (incoming_is_newer, incoming.updated_at),
+            else_=AIBrainUserCooldown.updated_at,
+        ),
+    }
 
 
 def _user_credits(
@@ -1509,6 +1695,124 @@ def _expand_reasoning_reservation(
     return expanded
 
 
+def _finite_decimal_or_none(value: object) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (ArithmeticError, ValueError) as exc:
+        raise APIMartTokenPricingError(
+            "APIMart provider billing metadata is invalid.",
+            error_type="invalid_usage_metadata",
+        ) from exc
+    if not parsed.is_finite() or parsed < 0:
+        raise APIMartTokenPricingError(
+            "APIMart provider billing metadata is invalid.",
+            error_type="invalid_usage_metadata",
+        )
+    return parsed
+
+
+def _provider_result_has_cost_evidence(
+    usage_result: Mapping[str, object],
+) -> bool:
+    for key in (
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_prompt_tokens",
+        "cache_write_tokens",
+        "credits",
+        "cost_cents",
+    ):
+        try:
+            value = _finite_decimal_or_none(usage_result.get(key))
+        except APIMartTokenPricingError:
+            continue
+        if value is not None and value > 0:
+            return True
+    return False
+
+
+def _provider_error_usage_is_invalid(
+    pricing: TierPricing,
+    provider_error: APIMartGPT56ChatError,
+) -> bool:
+    if (
+        provider_error.raw_usage_present
+        and not provider_error.usage_contract_valid
+    ) or (
+        provider_error.raw_cost_present
+        and not provider_error.cost_contract_valid
+    ):
+        return True
+
+    usage_result = provider_error.usage_result
+    token_keys = ("prompt_tokens", "completion_tokens", "total_tokens")
+    usage_contract_missing = usage_result.get("_usage_contract_missing") is True and all(
+        type(usage_result.get(key)) is int and usage_result.get(key) == 0
+        for key in token_keys
+    )
+    if not usage_contract_missing and any(key in usage_result for key in token_keys):
+        token_counts = {key: usage_result.get(key) for key in token_keys}
+        if not all(
+            type(value) is int and value >= 0 for value in token_counts.values()
+        ) or not apimart_token_usage_is_within_limits(
+            model=pricing.model,
+            prompt_tokens=token_counts["prompt_tokens"],
+            completion_tokens=token_counts["completion_tokens"],
+            total_tokens=token_counts["total_tokens"],
+        ):
+            return True
+
+        cache_values: list[int] = []
+        for key in ("cached_prompt_tokens", "cache_write_tokens"):
+            if key not in usage_result:
+                continue
+            value = usage_result[key]
+            if type(value) is not int or value < 0:
+                return True
+            cache_values.append(value)
+        if sum(cache_values) > token_counts["prompt_tokens"]:
+            return True
+
+    try:
+        maximum_trusted_cost = _maximum_trusted_provider_usage_cost(pricing.model)
+        reported_credits = _finite_decimal_or_none(usage_result.get("credits"))
+        reported_cost_cents = _finite_decimal_or_none(
+            usage_result.get("cost_cents")
+        )
+    except APIMartTokenPricingError:
+        return True
+    return bool(
+        (
+            reported_credits is not None
+            and reported_credits > maximum_trusted_cost.credits
+        )
+        or (
+            reported_cost_cents is not None
+            and reported_cost_cents > maximum_trusted_cost.cost_cents
+        )
+    )
+
+
+def _maximum_trusted_provider_usage_cost(model: str) -> APIMartTokenUsageCost:
+    limits = apimart_token_usage_limits(model=model)
+    if limits is None:  # pragma: no cover - tiers are a fixed GPT-5.6 allowlist.
+        raise APIMartTokenPricingError(
+            "APIMart provider model has no verified usage limits.",
+            error_type="unknown_model",
+        )
+    return apimart_token_usage_cost(
+        model=model,
+        prompt_tokens=limits.max_prompt_tokens,
+        completion_tokens=limits.max_completion_tokens,
+        cached_prompt_tokens=0,
+        # Cache write is the highest input rate in the published price table.
+        cache_write_tokens=limits.max_prompt_tokens,
+    )
+
+
 def _provider_usage_cost(
     pricing: TierPricing,
     *,
@@ -1536,6 +1840,19 @@ def _provider_usage_cost(
             "APIMart provider billing usage is invalid.",
             error_type="invalid_usage_metadata",
         ) from exc
+    maximum_trusted_cost = _maximum_trusted_provider_usage_cost(pricing.model)
+    reported_cost_cents = _finite_decimal_or_none(usage_result.get("cost_cents"))
+    if (
+        cost.credits > maximum_trusted_cost.credits
+        or (
+            reported_cost_cents is not None
+            and reported_cost_cents > maximum_trusted_cost.cost_cents
+        )
+    ):
+        raise APIMartTokenPricingError(
+            "APIMart provider billing usage exceeds public economic bounds.",
+            error_type="invalid_usage_metadata",
+        )
     if (
         not cost.credits.is_finite()
         or not cost.cost_usd.is_finite()
@@ -1576,10 +1893,73 @@ def _chat_message_for_update(
     )
 
 
+def _sanitize_failed_provider_usage(
+    pricing: TierPricing,
+    usage_result: Mapping[str, object],
+) -> tuple[dict[str, object], bool]:
+    """Keep only failure metadata that is safe to persist or price.
+
+    Provider exceptions are allowed to carry the raw response usage. That path
+    must not trust adapter coercion: a malformed or public-limit-exceeding
+    counter could otherwise overflow PostgreSQL columns while the reservation
+    and cooldown are being released. Cost fields remain available for the
+    independent economic-boundary check in ``_provider_usage_cost``.
+
+    The boolean reports whether a provider token claim was present but
+    untrusted. Missing usage may still be estimated for replay-guard auditing;
+    an untrusted claim must stay at zero rather than being replaced by an
+    estimate that looks like reported usage.
+    """
+
+    sanitized = {
+        key: usage_result[key]
+        for key in ("credits", "cost_cents")
+        if key in usage_result
+    }
+    token_keys = ("prompt_tokens", "completion_tokens", "total_tokens")
+    if usage_result.get("_usage_contract_missing") is True and all(
+        type(usage_result.get(key)) is int and usage_result.get(key) == 0
+        for key in token_keys
+    ):
+        return sanitized, False
+    token_claim_present = any(key in usage_result for key in token_keys) or (
+        usage_result.get("_usage_contract_valid", True) is False
+    )
+    token_counts = {key: usage_result.get(key) for key in token_keys}
+    token_contract_valid = (
+        usage_result.get("_usage_contract_valid", True) is not False
+        and all(type(value) is int and value >= 0 for value in token_counts.values())
+        and apimart_token_usage_is_within_limits(
+            model=pricing.model,
+            prompt_tokens=token_counts["prompt_tokens"],
+            completion_tokens=token_counts["completion_tokens"],
+            total_tokens=token_counts["total_tokens"],
+        )
+    )
+    if not token_contract_valid:
+        return sanitized, token_claim_present
+
+    sanitized.update(token_counts)
+    cache_values: dict[str, int] = {}
+    cache_contract_valid = True
+    for key in ("cached_prompt_tokens", "cache_write_tokens"):
+        if key not in usage_result:
+            continue
+        value = usage_result[key]
+        if type(value) is not int or value < 0:
+            cache_contract_valid = False
+            break
+        cache_values[key] = value
+    if cache_contract_valid and sum(cache_values.values()) <= token_counts["prompt_tokens"]:
+        sanitized.update(cache_values)
+    return sanitized, False
+
+
 def _fail_chat_message(
     db: Session,
     *,
     tenant_id: str,
+    user_id: str,
     user_message_id: str,
     pricing: TierPricing,
     reservation: Decimal,
@@ -1587,6 +1967,7 @@ def _fail_chat_message(
     usage_result: Mapping[str, object],
     error_code: str,
     heartbeat: InflightMessageHeartbeat,
+    provider_cost_possible: bool = True,
 ) -> None:
     user_message = _chat_message_for_update(
         db,
@@ -1599,32 +1980,44 @@ def _fail_chat_message(
     if user_message.status != "pending":
         heartbeat.stop()
         return
-    prompt_tokens = _nonnegative_int(usage_result.get("prompt_tokens"))
-    completion_tokens = _nonnegative_int(usage_result.get("completion_tokens"))
-    if prompt_tokens + completion_tokens == 0:
+    safe_usage_result, token_claim_invalid = _sanitize_failed_provider_usage(
+        pricing,
+        usage_result if provider_cost_possible else {},
+    )
+    prompt_tokens = _nonnegative_int(safe_usage_result.get("prompt_tokens"))
+    completion_tokens = _nonnegative_int(safe_usage_result.get("completion_tokens"))
+    if (
+        provider_cost_possible
+        and not token_claim_invalid
+        and prompt_tokens + completion_tokens == 0
+    ):
         prompt_tokens = _estimate_prompt_tokens(provider_messages)
-    total_tokens = _nonnegative_int(usage_result.get("total_tokens")) or (
+    total_tokens = _nonnegative_int(safe_usage_result.get("total_tokens")) or (
         prompt_tokens + completion_tokens
     )
-    try:
-        provider_usage_cost = _provider_usage_cost(
-            pricing,
-            usage_result=usage_result,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-        )
-    except APIMartTokenPricingError as exc:
-        logger.warning(
-            "aibrain_provider_cost_unavailable",
-            provider=_CHAT_PROVIDER,
-            model=pricing.model,
-            error_type=exc.error_type,
-        )
+    if not provider_cost_possible:
         estimated_cost_usd = Decimal("0")
         provider_cost_cents = 0
     else:
-        estimated_cost_usd = provider_usage_cost.cost_usd
-        provider_cost_cents = provider_usage_cost.cost_cents
+        try:
+            provider_usage_cost = _provider_usage_cost(
+                pricing,
+                usage_result=safe_usage_result,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+        except APIMartTokenPricingError as exc:
+            logger.warning(
+                "aibrain_provider_cost_unavailable",
+                provider=_CHAT_PROVIDER,
+                model=pricing.model,
+                error_type=exc.error_type,
+            )
+            estimated_cost_usd = Decimal("0")
+            provider_cost_cents = 0
+        else:
+            estimated_cost_usd = provider_usage_cost.cost_usd
+            provider_cost_cents = provider_usage_cost.cost_cents
     user_message.status = "failed"
     user_message.error_code = error_code
     user_message.provider = _CHAT_PROVIDER
@@ -1643,7 +2036,10 @@ def _fail_chat_message(
         reserved_credits=reservation,
         chat_message_id=user_message.id,
         operation_key=f"release:{user_message.id}",
-        details={"error_code": error_code, "estimated_cost": True},
+        details={
+            "error_code": error_code,
+            "estimated_cost": provider_cost_possible,
+        },
     )
     db.add(
         UsageRecord(
@@ -1662,6 +2058,14 @@ def _fail_chat_message(
             settled_at=datetime.now(UTC),
         )
     )
+    if error_code in _USER_COOLDOWN_ERROR_CODES:
+        _open_provider_usage_anomaly_cooldown(
+            db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            reason=error_code,
+            source_message_id=user_message.id,
+        )
     db.commit()
     heartbeat.stop()
 
@@ -1711,7 +2115,7 @@ def _conversation_title(content: str, *, has_attachments: bool) -> str:
 def _nonnegative_int(value: object) -> int:
     try:
         return max(0, int(value or 0))
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         return 0
 
 

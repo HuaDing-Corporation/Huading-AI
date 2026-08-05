@@ -800,6 +800,32 @@ class ChatMessage(TenantScopedMixin, Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class AIBrainUserCooldown(TenantScopedMixin, Base):
+    __tablename__ = "aibrain_user_cooldowns"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_aibrain_user_cooldowns_user_id"),
+        Index(
+            "ix_aibrain_user_cooldowns_tenant_expires",
+            "tenant_id",
+            "expires_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE")
+    )
+    reason: Mapped[str] = mapped_column(String(64))
+    source_message_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("chat_messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class ReasoningLedgerEntry(TenantScopedMixin, Base):
     __tablename__ = "reasoning_ledger_entries"
     __table_args__ = (
