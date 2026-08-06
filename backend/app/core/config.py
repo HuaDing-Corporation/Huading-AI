@@ -219,6 +219,13 @@ class Settings(BaseSettings):
     engine_aibrain_mid_output_credits_per_1k: Decimal = Decimal("16.80")
     engine_aibrain_high_input_credits_per_1k: Decimal = Decimal("5.60")
     engine_aibrain_high_output_credits_per_1k: Decimal = Decimal("33.60")
+    # GPT-5.6 input pricing moves to its second tier above 272K prompt tokens.
+    engine_aibrain_low_above_272k_input_credits_per_1k: Decimal = Decimal("2.24")
+    engine_aibrain_low_above_272k_output_credits_per_1k: Decimal = Decimal("10.08")
+    engine_aibrain_mid_above_272k_input_credits_per_1k: Decimal = Decimal("5.60")
+    engine_aibrain_mid_above_272k_output_credits_per_1k: Decimal = Decimal("25.20")
+    engine_aibrain_high_above_272k_input_credits_per_1k: Decimal = Decimal("11.20")
+    engine_aibrain_high_above_272k_output_credits_per_1k: Decimal = Decimal("50.40")
     # Compatibility snapshots of APIMart discounted low-context provider rates.
     # Provider cost accounting uses apimart_token_pricing.py instead.
     engine_aibrain_low_input_provider_credits_per_m: Decimal = Decimal("8")

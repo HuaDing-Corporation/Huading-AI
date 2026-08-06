@@ -49,6 +49,30 @@ ENGINE_USD_CNY_RATE=7.0
 Updating an example does not overwrite an existing `infra/.env`. Confirm these
 values on the production host instead of copying the example over secrets.
 
+AIBRAIN user pricing has separate prompt-token tiers at `272000` tokens.
+Existing production `infra/.env` files that already override the original six
+rates will not pick up new example values automatically. Keep the complete
+twelve-key set explicit before deployment:
+
+```dotenv
+ENGINE_AIBRAIN_LOW_INPUT_CREDITS_PER_1K=1.12
+ENGINE_AIBRAIN_LOW_OUTPUT_CREDITS_PER_1K=6.72
+ENGINE_AIBRAIN_LOW_ABOVE_272K_INPUT_CREDITS_PER_1K=2.24
+ENGINE_AIBRAIN_LOW_ABOVE_272K_OUTPUT_CREDITS_PER_1K=10.08
+ENGINE_AIBRAIN_MID_INPUT_CREDITS_PER_1K=2.80
+ENGINE_AIBRAIN_MID_OUTPUT_CREDITS_PER_1K=16.80
+ENGINE_AIBRAIN_MID_ABOVE_272K_INPUT_CREDITS_PER_1K=5.60
+ENGINE_AIBRAIN_MID_ABOVE_272K_OUTPUT_CREDITS_PER_1K=25.20
+ENGINE_AIBRAIN_HIGH_INPUT_CREDITS_PER_1K=5.60
+ENGINE_AIBRAIN_HIGH_OUTPUT_CREDITS_PER_1K=33.60
+ENGINE_AIBRAIN_HIGH_ABOVE_272K_INPUT_CREDITS_PER_1K=11.20
+ENGINE_AIBRAIN_HIGH_ABOVE_272K_OUTPUT_CREDITS_PER_1K=50.40
+```
+
+Requests with up to `272000` prompt tokens use the original rates; requests
+above that boundary use the `ABOVE_272K` rates. Do not replace the real env file
+with an example because the real file also contains deployment credentials.
+
 Overall generation waits in `infra/.env` must be `1500` seconds for Seedance,
 OmniHuman, APIMart image/video, the image-provider wrapper, and OpenAI image.
 Keep per-request HTTP timeouts and polling intervals at their shorter template
