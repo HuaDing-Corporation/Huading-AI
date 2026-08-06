@@ -862,7 +862,7 @@ def test_message_reserves_then_settles_exact_token_usage(
         assert Decimal("11.200000") <= entries[1].amount_credits < Decimal("200")
         assert entries[2].amount_credits == Decimal("11.200000")
         assert usage.credits == Decimal("11.200000")
-        assert usage.provider_cost_usd == Decimal("0.00800000")
+        assert usage.provider_cost_usd == Decimal("0.00640000")
         assert usage.chat_message_id == assistant.id
         assert assistant.input_rate == Decimal("2.800000")
         assert assistant.output_rate == Decimal("16.800000")
@@ -976,8 +976,8 @@ def test_message_provider_cost_uses_cache_read_and_write_rates(
                 UsageRecord.capability == "chat",
             )
         )
-        assert usage.provider_cost_usd == Decimal("0.07240000")
-        assert usage.cost_cents == 51
+        assert usage.provider_cost_usd == Decimal("0.01448000")
+        assert usage.cost_cents == 10
 
 
 @pytest.mark.parametrize(
@@ -1218,8 +1218,8 @@ def test_prompt_hard_limit_rejects_before_provider_or_reservation(
         "expected_provider_cost_usd",
     ),
     [
-        (1_001, 1, 1_000, Decimal("1.127840"), Decimal("0.00080560")),
-        (1, 4_097, 922_000, Decimal("27.532960"), Decimal("0.01966640")),
+        (1_001, 1, 1_000, Decimal("1.127840"), Decimal("0.00016112")),
+        (1, 4_097, 922_000, Decimal("27.532960"), Decimal("0.00393328")),
     ],
 )
 def test_provider_usage_above_configured_envelope_charges_full_usage_and_cools_down(
@@ -1510,7 +1510,7 @@ def test_provider_usage_at_public_hard_bound_settles_then_cools_down(
         assert wallet.total_spent_credits == Decimal("1892.800000")
         assert usage.status == "settled"
         assert usage.quantity == Decimal("1050000")
-        assert usage.provider_cost_usd == Decimal("2.39680000")
+        assert usage.provider_cost_usd == Decimal("0.47936000")
 
 
 def test_inflight_exposure_limit_returns_structured_402_before_provider(

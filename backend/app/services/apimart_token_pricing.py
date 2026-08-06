@@ -10,7 +10,9 @@ from app.core.config import settings
 from app.services.apimart_costs import apimart_cost_cents_from_credits
 
 APIMART_TOKEN_PRICING_SOURCE_URL = "https://apib.ai/zh/pricing"
-APIMART_TOKEN_PRICING_VERIFIED_ON = "2026-07-30"
+APIMART_TOKEN_PRICING_VERIFIED_ON = "2026-08-06"
+APIMART_TOKEN_PRICING_COLUMN_LABEL = "我们的价格"
+_APIMART_PUBLIC_PRICE_FACTOR = Decimal("0.8")
 OPENAI_GPT56_LIMITS_SOURCE_URL = "https://developers.openai.com/api/docs/models/gpt-5.6"
 APIMART_GPT56_USAGE_LIMITS_VERIFIED_ON = "2026-08-05"
 _TOKENS_PER_MILLION = Decimal("1000000")
@@ -48,6 +50,35 @@ class _TokenRateTier:
     cached_input_credits_per_m: Decimal | None
     cache_write_credits_per_m: Decimal | None
     output_credits_per_m: Decimal
+
+
+def _gpt56_public_rate_tier(
+    *,
+    name: str,
+    max_input_tokens: int | None,
+    official_input_credits_per_m: str,
+    official_cached_input_credits_per_m: str,
+    official_cache_write_credits_per_m: str,
+    official_output_credits_per_m: str,
+) -> _TokenRateTier:
+    return _TokenRateTier(
+        name=name,
+        max_input_tokens=max_input_tokens,
+        input_credits_per_m=(
+            Decimal(official_input_credits_per_m) * _APIMART_PUBLIC_PRICE_FACTOR
+        ),
+        cached_input_credits_per_m=(
+            Decimal(official_cached_input_credits_per_m)
+            * _APIMART_PUBLIC_PRICE_FACTOR
+        ),
+        cache_write_credits_per_m=(
+            Decimal(official_cache_write_credits_per_m)
+            * _APIMART_PUBLIC_PRICE_FACTOR
+        ),
+        output_credits_per_m=(
+            Decimal(official_output_credits_per_m) * _APIMART_PUBLIC_PRICE_FACTOR
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -114,8 +145,9 @@ _TOKEN_USAGE_LIMITS_BY_MODEL = dict.fromkeys(
 )
 
 
-# APIMart effective rates after its 0.8 price factor, represented as
-# provider Credits per 1M tokens. Official list prices are intentionally absent.
+# APIMart's public page, captured 2026-08-06, labels the billed column
+# "我们的价格" beside "官方价格" and "节省 20%". GPT-5.6 rates below derive the
+# billed provider Credits/M from the official column instead of duplicating both.
 _TOKEN_RATE_TIERS_BY_MODEL: dict[str, tuple[_TokenRateTier, ...]] = {
     "gemini-3.1-pro-preview": (
         _TokenRateTier(
@@ -158,57 +190,57 @@ _TOKEN_RATE_TIERS_BY_MODEL: dict[str, tuple[_TokenRateTier, ...]] = {
         ),
     ),
     "gpt-5.6-luna": (
-        _TokenRateTier(
+        _gpt56_public_rate_tier(
             name="up_to_272k",
             max_input_tokens=272_000,
-            input_credits_per_m=Decimal("8"),
-            cached_input_credits_per_m=Decimal("0.8"),
-            cache_write_credits_per_m=Decimal("10"),
-            output_credits_per_m=Decimal("48"),
+            official_input_credits_per_m="2",
+            official_cached_input_credits_per_m="0.2",
+            official_cache_write_credits_per_m="2.5",
+            official_output_credits_per_m="12",
         ),
-        _TokenRateTier(
+        _gpt56_public_rate_tier(
             name="above_272k",
             max_input_tokens=None,
-            input_credits_per_m=Decimal("16"),
-            cached_input_credits_per_m=Decimal("1.6"),
-            cache_write_credits_per_m=Decimal("20"),
-            output_credits_per_m=Decimal("72"),
+            official_input_credits_per_m="4",
+            official_cached_input_credits_per_m="0.4",
+            official_cache_write_credits_per_m="5",
+            official_output_credits_per_m="18",
         ),
     ),
     "gpt-5.6-terra": (
-        _TokenRateTier(
+        _gpt56_public_rate_tier(
             name="up_to_272k",
             max_input_tokens=272_000,
-            input_credits_per_m=Decimal("20"),
-            cached_input_credits_per_m=Decimal("2"),
-            cache_write_credits_per_m=Decimal("25"),
-            output_credits_per_m=Decimal("120"),
+            official_input_credits_per_m="20",
+            official_cached_input_credits_per_m="2",
+            official_cache_write_credits_per_m="25",
+            official_output_credits_per_m="120",
         ),
-        _TokenRateTier(
+        _gpt56_public_rate_tier(
             name="above_272k",
             max_input_tokens=None,
-            input_credits_per_m=Decimal("40"),
-            cached_input_credits_per_m=Decimal("4"),
-            cache_write_credits_per_m=Decimal("50"),
-            output_credits_per_m=Decimal("180"),
+            official_input_credits_per_m="40",
+            official_cached_input_credits_per_m="4",
+            official_cache_write_credits_per_m="50",
+            official_output_credits_per_m="180",
         ),
     ),
     "gpt-5.6-sol": (
-        _TokenRateTier(
+        _gpt56_public_rate_tier(
             name="up_to_272k",
             max_input_tokens=272_000,
-            input_credits_per_m=Decimal("40"),
-            cached_input_credits_per_m=Decimal("4"),
-            cache_write_credits_per_m=Decimal("50"),
-            output_credits_per_m=Decimal("240"),
+            official_input_credits_per_m="50",
+            official_cached_input_credits_per_m="5",
+            official_cache_write_credits_per_m="62.5",
+            official_output_credits_per_m="300",
         ),
-        _TokenRateTier(
+        _gpt56_public_rate_tier(
             name="above_272k",
             max_input_tokens=None,
-            input_credits_per_m=Decimal("80"),
-            cached_input_credits_per_m=Decimal("8"),
-            cache_write_credits_per_m=Decimal("100"),
-            output_credits_per_m=Decimal("360"),
+            official_input_credits_per_m="100",
+            official_cached_input_credits_per_m="10",
+            official_cache_write_credits_per_m="125",
+            official_output_credits_per_m="450",
         ),
     ),
 }
