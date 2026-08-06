@@ -13,6 +13,7 @@ const OVERRUN = "__mock_reserve_overrun__"; // 触发「实扣超预留 → 追�
 const EXPOSURE = "__mock_inflight_exposure__"; // FIX2：在途敞口打满 402
 const USAGE_INVALID = "__mock_usage_limit__"; // FIX3：上游用量不可信 502（marker 名不变，语义已换）
 const PROMPT_LIMIT = "__mock_prompt_limit__"; // FIX2：提示词超本地硬上限 422
+const REPLAY_GUARD = "__mock_replay_guard__"; // FIX4：上游可能已产生成本 502（零扣费但开冷却）
 // idempotency_key 是 BE 必填 UUID → 测试用真 UUID（每次唯一，避免跨用例串键）。
 const topup = (amount: number, key = crypto.randomUUID()) => topupWallet({ amount, idempotency_key: key });
 
@@ -318,7 +319,14 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
    * （BE `_raise_if_provider_usage_anomaly_cooldown`，判在最前）。
    * 变异：mock 触发 502 时不置冷却标志 → 本条红（第二次请求会正常返回）。
    */
-  it("🔴 503 冷却：出过用量异常之后，下一次请求被 503 拦下（无 detail、无 Retry-After）", async () => {
+  /**
+   * 🔴🔴 FIX4 · **这道门是上一轮埋的，这次自己报警了**。
+   * FIX3 时它断言 `detail === undefined`，并写明「CA 一旦补上字段该门就红，那正是去接真值的时刻」。
+   * `b91e2188` 补上了 `retry_after_seconds` → 门**改写而不是删除**：
+   * 职责从「**标记未实现**」变成「**锁定已实现**」——断言字段在场且为正整数。
+   * 变异：mock 的 503 不发 detail → 本条红（前端会静默退回「约一分钟」而无人知）。
+   */
+  it("🔴 503 冷却：出过用量异常之后被拦下，且 detail 带正整数 retry_after_seconds", async () => {
     await topup(2000);
     const conv = await createConversation();
     await sendMessage(conv.id, { content: `${USAGE_INVALID} 你好`, tier: "low", attachment_asset_ids: [] }).catch(() => {});
@@ -326,9 +334,39 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
     const err = await sendMessage(conv.id, { content: "再问一句", tier: "low", attachment_asset_ids: [] }).catch((e) => e);
     expect(err.status).toBe(503);
     expect(err.code).toBe("AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN");
-    // 🔴 BE 既没给 detail 也没发 Retry-After 头 → 前端只能按 config 默认值说「约一分钟」。
-    //    哪天 CA 补了字段，本条会红，那正是去接真值的时刻（同 FIX1 那条 detail 门的用法）。
+    expect(err.detail.retry_after_seconds).toBeGreaterThan(0);
+    expect(Number.isInteger(err.detail.retry_after_seconds)).toBe(true); // BE `max(1, ceil(...))`
+  });
+
+  /**
+   * 🔴 FIX4 第六个码：`REPLAY_GUARD` 零扣费但**开冷却** —— 与 `PROVIDER_FAILED` 的分水岭就在这里。
+   * 变异：mock 触发 REPLAY_GUARD 时不置冷却标志 → 后半段红（第二次请求会正常返回）。
+   */
+  it("🔴 502 REPLAY_GUARD：无 detail + 零扣费 + **开冷却**（下一次请求 503）", async () => {
+    await topup(2000);
+    const conv = await createConversation();
+    const err = await sendMessage(conv.id, { content: `${REPLAY_GUARD} 你好`, tier: "low", attachment_asset_ids: [] }).catch((e) => e);
+    expect(err.status).toBe(502);
+    expect(err.code).toBe("AIBRAIN_PROVIDER_REPLAY_GUARD");
     expect(err.detail).toBeUndefined();
+    expect((await getWallet()).available_credits).toBe(2000); // 零扣费
+
+    const next = await sendMessage(conv.id, { content: "再问一句", tier: "low", attachment_asset_ids: [] }).catch((e) => e);
+    expect(next.status).toBe(503); // 🔴 立刻重试必撞冷却
+  });
+
+  /**
+   * 🔴 `PROVIDER_FAILED` 是三个 502 里**唯一不开冷却**的（不在 BE 的 `_USER_COOLDOWN_ERROR_CODES` 里）。
+   * 这条与上一条**互为对照**：同是 502、同是零扣费，冷却与否是它们唯一的差别，也正是前端
+   * 必须给两套文案的原因。变异：mock 让 PROVIDER_FAILED 也置冷却 → 本条红。
+   */
+  it("🔴 502 PROVIDER_FAILED **不开冷却**（与 REPLAY_GUARD 的唯一差别）", async () => {
+    await topup(2000);
+    const conv = await createConversation();
+    await sendMessage(conv.id, { content: `${PROVIDER_FAIL} 你好`, tier: "low", attachment_asset_ids: [] }).catch(() => {});
+
+    const next = await sendMessage(conv.id, { content: "再问一句", tier: "low", attachment_asset_ids: [] });
+    expect(next.assistant_message.status).toBe("completed"); // 照常可发
   });
 
   /**

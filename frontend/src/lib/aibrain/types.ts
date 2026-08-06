@@ -234,8 +234,16 @@ export const AIBRAIN_ERROR = {
   //      · `total_tokens > 999_999_999`（超出 UsageRecord 可持久化范围）
   //      · 计价时抛 `APIMartTokenPricingError`（含溢出/越界，:1519-1551）
   PROVIDER_USAGE_INVALID: "AIBRAIN_PROVIDER_USAGE_INVALID", // 502
-  // 🔴 FIX2 我从源码里捡到的那个码（任务包当时未列，aibrain.py:505-514），FIX3 仍在。
+  // 🔴 FIX2 我从源码里捡到的那个码（任务包当时未列），FIX3/FIX4 仍在。
   USAGE_MISSING: "AIBRAIN_USAGE_MISSING", // 502
+  // 🔴 FIX4 新增（第六个码，`b91e2188`）：**上游可能已经产生成本**却没给出可用结果。
+  //    判据（aibrain.py:486-512）：provider 异常带 `request_may_have_been_accepted` /
+  //    `has_cost_evidence`，或响应里有非零的 token/credits/cost 证据，或异常根本不是
+  //    APIMart 类型（无从判断 → 保守当作已接单）。答案为空时同理（:628-632）。
+  // ⚠️ 与 `PROVIDER_FAILED` 对用户**看起来是同一件事**（都没生成出来、都零扣费），但**后果不同**：
+  //    本码在 `_USER_COOLDOWN_ERROR_CODES` 里（:82-86）→ **一定会开用户冷却**，立刻重试必撞 503。
+  //    所以文案不许说「请重试」，见 `copy.aibrain.providerReplayGuard`。
+  PROVIDER_REPLAY_GUARD: "AIBRAIN_PROVIDER_REPLAY_GUARD", // 502
   // 🔴 FIX3 新增（第五个码）：**用量异常冷却**。同租户在冷却窗口内出现过 USAGE_MISSING /
   //    USAGE_INVALID 的失败消息 → 新请求直接 503（aibrain.py:1293-1318，**判在最前**，
   //    比提示词闸和一切钱包闸都早）。窗口 = `engine_aibrain_usage_anomaly_cooldown_seconds`，
@@ -420,6 +428,33 @@ export interface InflightExposureView {
   inFlightRequests?: number;
   /** 是否可重试。BE 目前恒发 `true`；detail 缺失时按 true 处理（重试最坏只是再看到同一条提示）。 */
   retryable: boolean;
+}
+
+/**
+ * 503 用量异常冷却的 detail（FIX4 · BE `b91e2188` aibrain.py:1408）。
+ *
+ * 🔴 **这个字段是我上一轮那道门等来的**：FIX3 时 BE 不发 detail，我在 mock 契约门里断言
+ *    `detail === undefined` 并写明「CA 一旦补上字段该门就红，那正是去接真值的时刻」。补上了，接。
+ *    那道门本轮**改写而非删除** —— 职责从「标记未实现」变成「锁定已实现」（断言字段在且为正）。
+ * 🔴 **回退保留**：字段缺失/非法时仍走「约一分钟」的硬编码默认值（config `default=60`），
+ *    理由与 402 那次一模一样 —— BE 哪天不发，UI 会**静默**退化成什么都不说。回退也有门。
+ * ⚠️ BE 仍**没有**发 `Retry-After` 头（全仓 grep 无），秒数只在这个 detail 里。
+ */
+export interface CooldownDetail {
+  /** 还要等多少秒（BE `max(1, ceil(remaining))` → 正整数）。 */
+  retry_after_seconds: number;
+}
+
+export interface CooldownView {
+  /** BE 给的真值；缺失/非法时 undefined → 文案回落到「约一分钟」。 */
+  retryAfterSeconds?: number;
+}
+
+export function cooldownView(detail: unknown): CooldownView {
+  if (typeof detail !== "object" || detail === null) return {};
+  const seconds = finiteNumber((detail as Record<string, unknown>).retry_after_seconds);
+  // 非正数当拿不到：BE 保证 `>= 1`，出现 0/负数说明契约坏了，此时说「约一分钟」比说「请 0 秒后重试」强。
+  return seconds !== undefined && seconds > 0 ? { retryAfterSeconds: Math.ceil(seconds) } : {};
 }
 
 export function inflightExposureView(detail: unknown): InflightExposureView {

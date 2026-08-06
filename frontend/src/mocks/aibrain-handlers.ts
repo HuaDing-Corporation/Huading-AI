@@ -8,11 +8,12 @@
 // ── PRICING-UI-0001 §四 · 计费口径重写（对齐 PR #239 `codex/pricing-c3c4-be`）────────────────────
 // 旧 mock 是 flat `min(200, available)` 预留 + `min(typical, reservation)` 结算，与真实逻辑已完全脱节
 //（真实是**动态预留**：提示词估算 × 1.25 + 完整 completion 配额）。mock 比 BE 宽松 = 前端测试的绿是假绿。
-// 现在逐条镜像 `backend/app/services/aibrain.py`（**契约基线 = #239 `fbe8420d`**）：
+// 现在逐条镜像 `backend/app/services/aibrain.py`（**契约基线 = #239 `b91e2188`**）：
 //   预留 `_reservation_credits` = _user_credits(ceil(估算提示词 tokens × 1.25), max_completion_tokens=4096)
 //   估算 `_estimate_prompt_tokens` / `_estimate_text_tokens`（ASCII 每 4 字符 1 token、非 ASCII 每字 1 token、
 //        每条消息 +4、图片附件每张 4096）
-//   闸门⁻¹ 用量异常冷却         → 503 AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN（**判在最前**）
+//   闸门⁻¹ 用量异常冷却         → 503 AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN（**判在最前**，
+//          FIX4 起是**用户级**（新表 `AIBrainUserCooldown`）且带 `detail.retry_after_seconds`）
 //   闸门⓪ 提示词超本地硬上限     → 422 AIBRAIN_PROMPT_LIMIT_EXCEEDED（建消息与动钱包之前）
 //   闸门① `available < 0`      → 402 AIBRAIN_OUTSTANDING_BALANCE（**欠费**）
 //   闸门② `available < requested` → 402 AIBRAIN_INSUFFICIENT_BALANCE（预留不足）
@@ -20,7 +21,7 @@
 //   结算  settle 分支：`available += reserved - charged`（差额**立即退回**），reserved 归零
 //   透支  实扣 > 预留时 BE **照常交付答案**并按实扣结算，余额**允许变负**（`allow_overdraft`）
 //
-// 🔴🔴 **本文件历代结论被 BE 推翻过三次，别照抄旧注释——每次都要回源码核**：
+// 🔴🔴 **本文件历代结论被 BE 推翻过四次，别照抄旧注释——每次都要回源码核**：
 //   ✗ `42db0ecb` 时：「实扣超预留 → 释放预留 → 402、**不交付**」
 //     → `e2bc2c02` 改成：provider 的钱已经花了 → **交付 + 透支**（方向整个相反）
 //   ✗ `42db0ecb` 时：「不实现负余额闸门 —— BE 无此逻辑，造一个是反方向的假杀」
@@ -28,6 +29,11 @@
 //   ✗ `2a98b5d0` 时：「`..._USAGE_LIMIT_EXCEEDED` 502 带 7 个 detail 字段」
 //     → `fbe8420d` 改成：该码**删除**；「合法但超上限」转为 `min(reported, 上限)` **封顶扣费 + 正常交付**，
 //       只剩「上报不可信」走 `..._USAGE_INVALID`（**无 detail**），且会让本租户进入 503 冷却
+//   ✗ `fbe8420d` 时：「503 冷却**无 detail**，前端只能按 config 默认值说"约一分钟"」+「冷却是**租户级**」
+//     → `b91e2188` 改成：补上 `detail.retry_after_seconds`（前端接真值、回退保留）；
+//       冷却改用**用户级**独立表 `AIBrainUserCooldown`；并新增第六个码 `..._REPLAY_GUARD`
+//       （零扣费但**开冷却**，与 `PROVIDER_FAILED` 的唯一差别就在这里）；
+//       同期 `usage_charge_capped`/封顶扣费整个作废——改成 reported 全额扣、可负余额、成功后开冷却。
 //   每一条在写下时都是对的；写它们的理由（不许 mock 与 BE 不一致，两个方向都不许）没变，变的是 BE。
 //   留着这份对照，是让下一个人知道"该跟着谁改"，而不是把旧结论当教条。
 
@@ -97,6 +103,11 @@ const INFLIGHT_EXPOSURE_MARKER = "__mock_inflight_exposure__";
 const PROVIDER_USAGE_INVALID_MARKER = "__mock_usage_limit__";
 /** content 含此串 → 强制触发提示词硬上限 422（免得测试要造 922KB 输入；真实字节数超限同样会触发）。 */
 const PROMPT_LIMIT_MARKER = "__mock_prompt_limit__";
+/**
+ * content 含此串 → 模拟 **502 `AIBRAIN_PROVIDER_REPLAY_GUARD`**（FIX4 第六个码，`b91e2188`）：
+ * 上游可能已经产生成本却没给出可用结果 → 零扣费但**开用户冷却**。**无 detail**。
+ */
+const REPLAY_GUARD_MARKER = "__mock_replay_guard__";
 
 // ── 提示词本地硬上限（BE `_prompt_token_upper_bound` vs `engine_aibrain_max_prompt_tokens`）──
 /** BE config 默认值（`engine_aibrain_max_prompt_tokens`，config.py:227，上界也是 922_000）。 */
@@ -180,16 +191,21 @@ const conversations = new Map<string, MockConversation>();
 let convSeq = 0;
 let msgSeq = 0;
 /**
- * 🔴 FIX3 · **用量异常冷却**（BE `_raise_if_provider_usage_anomaly_cooldown`，aibrain.py:1293-1318）。
- * BE 的判据是「本租户在 `cooldown_seconds` 窗口内有 status=failed 且 error_code ∈
- * {USAGE_MISSING, PROVIDER_USAGE_INVALID} 的 user 消息」。
- * ⚠️ mock 用一个**布尔标志**而不是时间窗：同步 handler 里没有真实时钟推进，用真时间窗会让测试
- *    要么必须等 60 秒、要么得注入假时钟 —— 两者都比这个标志更脆。被守的行为（**出过用量异常之后，
- *    下一次请求被 503 拦下**）是真的；"窗口过期后自动解除"这一段 mock **不表达**，诚实标注在此。
- * 🔴 它是**租户级**的：BE 的查询按 tenant_id 过滤、不限会话——所以此处也是模块级单例，
- *    换个会话照样被拦（前端测试正是靠这一点验证"换会话逃不掉"）。
+ * 🔴 **用量异常冷却**（BE `_raise_if_provider_usage_anomaly_cooldown`）。
+ * FIX3 引入、**FIX4 契约变了两处**：
+ *   ① 判据从「窗口内有 failed 消息」换成**独立的冷却表** `AIBrainUserCooldown`（`b91e2188`）
+ *   ② 粒度从**租户级**变成**用户级**（该表按 `user_id` 唯一索引，查询带 tenant_id + user_id）
+ *   ③ 触发码多了一个 `AIBRAIN_PROVIDER_REPLAY_GUARD`（`_USER_COOLDOWN_ERROR_CODES` 三个码）
+ *   ④ 503 现在**带 detail**：`{retry_after_seconds}`（`max(1, ceil(剩余秒))`）
+ * ⚠️ mock 用**标志 + 固定秒数**而不是真时间窗：同步 handler 里没有真实时钟推进，用真时间窗会让
+ *    测试要么等 60 秒、要么注入假时钟 —— 两者都比这个更脆。被守的行为（**出过用量异常之后，
+ *    下一次请求被 503 拦下、且带得出剩余秒数**）是真的；"窗口过期后自动解除"这一段 mock **不表达**。
+ * ⚠️ mock 是单用户环境（单租户 token），**用户级与租户级在此无法区分** —— 换会话仍被拦这一点
+ *    两种粒度下都成立，故既有的"跨会话"门在 FIX4 之后依然有效，只是它证明不了粒度本身。诚实标注。
  */
 let usageAnomalyCooldown = false;
+/** mock 的冷却剩余秒数 = BE config `default=60`（真实实现里是按 expires_at 算的剩余量）。 */
+const COOLDOWN_RETRY_AFTER_SECONDS = 60;
 // 钱包（BE 新租户从 0 起）。reserved 在同步 handler 里 reserve+settle 原子完成，故读时恒 0。
 let available = 0;
 let totalTopup = 0;
@@ -367,7 +383,10 @@ export function aibrainHandlers() {
         return err(
           503,
           AIBRAIN_ERROR.PROVIDER_USAGE_ANOMALY_COOLDOWN,
-          "AIBRAIN provider billing usage is temporarily unavailable. Try again later."
+          "AIBRAIN provider billing usage is temporarily unavailable. Try again later.",
+          // 🔴 FIX4：BE `b91e2188` 补上了这个字段（此前无 detail）。mock 必须照发，
+          //    否则前端读真值那条路径在 mock 下永远走不到，只会一直命中"约一分钟"的回退。
+          { retry_after_seconds: COOLDOWN_RETRY_AFTER_SECONDS }
         );
 
       // ── 闸门⓪ 提示词超本地硬上限 → 422（BE aibrain.py:379，在**建消息与动钱包之前**）─────────
@@ -441,9 +460,24 @@ export function aibrainHandlers() {
       available = quantizeCredits(available - reservation); // 预留：available → reserved
 
       // 上游失败（测 502 分流）——发生在预留之后，故要**把预留还回去**（BE `_fail_chat_message` 释放预留）。
+      // ⚠️ `PROVIDER_FAILED` 是三个 502 里**唯一不开冷却**的（不在 `_USER_COOLDOWN_ERROR_CODES` 里）
+      //    —— 这正是它与 REPLAY_GUARD 的分水岭，故此处**不**置冷却标志。
       if (content.includes(PROVIDER_FAIL_MARKER)) {
         available = quantizeCredits(available + reservation);
         return err(502, AIBRAIN_ERROR.PROVIDER_FAILED, "AI 服务暂时不可用，请稍后重试");
+      }
+
+      // 🔴 FIX4 第六个码：上游**可能已经产生成本**却没给出可用结果（BE aibrain.py:486-512/:628-632）。
+      //    零扣费（同样 release 全额预留），但**会开用户冷却** —— 这是它与 PROVIDER_FAILED 的唯一
+      //    但关键的区别：用户立刻重试必撞 503。detail 为空（BE 只给 code+message）。
+      if (content.includes(REPLAY_GUARD_MARKER)) {
+        available = quantizeCredits(available + reservation);
+        usageAnomalyCooldown = true;
+        return err(
+          502,
+          AIBRAIN_ERROR.PROVIDER_REPLAY_GUARD,
+          "AIBRAIN provider request may have incurred cost."
+        );
       }
 
       // 上游用量不可信 → 502 fail-closed（BE `fbe8420d` aibrain.py:519-541）。在预留之后，故释放预留。

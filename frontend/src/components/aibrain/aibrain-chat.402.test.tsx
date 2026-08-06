@@ -333,19 +333,45 @@ describe("🔴 503 用量异常冷却（第五个码）", () => {
   );
 
   /**
-   * 变异：把它从分流里删掉（落到 `err.message` 兜底）→ 本条红（会显示英文原文）。
-   * 变异：把它并进 502 那支 → 也红（文案变成「未扣费，请重试」，没说要等）。
+   * 🔴🔴 FIX4 · **接真值**（本条上一版断言的是硬编码的「约一分钟」）。
+   * `b91e2188` 给 503 补上了 `detail.retry_after_seconds` —— 这正是我上一轮埋在 mock 契约门里
+   * 那句「CA 一旦补上字段该门就红，那正是去接真值的时刻」等来的东西。
+   * 变异：`cooldownText` 忽略 detail（回到只用硬编码那版）→ 本条红（会说「约一分钟」而不是「85 秒」）。
    */
-  it("🔴 503 → 冷却文案（说清要等约一分钟），不落英文原文、不弹充值窗", async () => {
-    hooks.sendMutateAsync.mockRejectedValue(COOLDOWN);
+  it("🔴 503 → 用 detail 里的**真实秒数**（不再是硬编码的「约一分钟」）", async () => {
+    hooks.sendMutateAsync.mockRejectedValue(
+      new ApiError("cooldown", "AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN", 503, { retry_after_seconds: 85 })
+    );
     renderChat();
     await typeAndSend();
 
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.usageAnomalyCooldown));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.usageAnomalyCooldownRetryIn(85))
+    );
     const text = screen.getByRole("alert").textContent ?? "";
-    expect(text).toContain("一分钟"); // 用户唯一能做的事：等多久
+    expect(text).toContain("85 秒");
+    expect(text).not.toContain("约一分钟"); // 有真值就不许再说那个含糊的默认值
     expect(text).not.toContain("temporarily unavailable"); // 不落英文
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  /**
+   * 🔴 **回退门**（FIX4 §二.2 明确要求）：`detail` 缺失/字段非法时仍说「约一分钟」。
+   * 没有这道门，BE 哪天不发这个字段，UI 会**静默**退化成不说等多久 —— 而"等多久"正是这条提示
+   * 唯一有用的信息。理由与 402 那次的 `exact` 分叉一模一样。
+   * 变异：删掉 `cooldownText` 的回退分支（直接用 detail 的值）→ 本条红。
+   */
+  it("🔴 503 回退：detail 缺失/非法 → 仍说「约一分钟」，不会退化成不说等多久", async () => {
+    for (const detail of [undefined, null, "nonsense", { retry_after_seconds: 0 }, { retry_after_seconds: "85" }]) {
+      const view = renderChat();
+      hooks.sendMutateAsync.mockRejectedValue(
+        new ApiError("cooldown", "AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN", 503, detail)
+      );
+      await typeAndSend();
+      await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.usageAnomalyCooldown));
+      expect(screen.getByRole("alert").textContent ?? "").toContain("约一分钟");
+      view.unmount();
+    }
   });
 
   /**
@@ -383,6 +409,57 @@ describe("🔴 503 用量异常冷却（第五个码）", () => {
     expect(text).not.toContain("团队");
     expect(text).not.toContain("其他人");
     expect(text).not.toContain("租户");
+  });
+});
+
+// ══ FIX4 · 第六个码：502 REPLAY_GUARD ═══════════════════════════════════════════════════════
+// 🔴 它与 `PROVIDER_FAILED` 对用户**看起来是同一件事**（都没生成出来、都零扣费），但**后果不同**：
+//    它在 BE 的 `_USER_COOLDOWN_ERROR_CODES` 里 → **一定会开用户冷却**。说「请重试」等于明知
+//    会失败还引导用户去做——他立刻重试必撞 503，体验是连着两次失败。
+describe("🔴 502 REPLAY_GUARD（第六个码）：与 PROVIDER_FAILED 不串味", () => {
+  const REPLAY = new ApiError(
+    "AIBRAIN provider request may have incurred cost.",
+    "AIBRAIN_PROVIDER_REPLAY_GUARD",
+    502
+  );
+
+  /** 变异：把它从分流里删掉（落到 `err.message`）→ 本条红（显示英文原文）。 */
+  it("🔴 REPLAY_GUARD → 「未扣费」+「稍等片刻再发送」，**不说「请重试」**", async () => {
+    hooks.sendMutateAsync.mockRejectedValue(REPLAY);
+    renderChat();
+    await typeAndSend();
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.providerReplayGuard));
+    const text = screen.getByRole("alert").textContent ?? "";
+    expect(text).toContain("未扣费"); // 零扣费同样要说
+    expect(text).toContain("稍等片刻"); // 🔴 引导等待，而不是立刻重试
+    expect(text).not.toContain("请重试"); // 🔴 说了他就会去撞 503
+    expect(text).not.toContain("may have incurred cost"); // 不落英文
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  /**
+   * 🔴🔴 **本组最要紧的一条**：两个 502 的文案必须**不同**。
+   * 变异：把 REPLAY_GUARD 并进 `PROVIDER_FAILED` 那条 `||` → 本条红（两者文案变成同一句）。
+   */
+  it("🔴 REPLAY_GUARD 与 PROVIDER_FAILED 文案不同（后者可以立刻重试，前者不能）", async () => {
+    const first = renderChat();
+    hooks.sendMutateAsync.mockRejectedValue(REPLAY);
+    await typeAndSend();
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    const replayText = screen.getByRole("alert").textContent ?? "";
+    first.unmount();
+
+    hooks.sendMutateAsync.mockRejectedValue(new ApiError("boom", "AIBRAIN_PROVIDER_FAILED", 502));
+    renderChat();
+    await typeAndSend();
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    const failedText = screen.getByRole("alert").textContent ?? "";
+
+    expect(replayText).not.toBe(failedText);
+    // PROVIDER_FAILED 不开冷却 → 它**可以**说「请稍后重试」；REPLAY_GUARD 不行。
+    expect(failedText).toContain("请稍后重试");
+    expect(replayText).not.toContain("请稍后重试");
   });
 });
 
