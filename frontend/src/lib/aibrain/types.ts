@@ -19,11 +19,41 @@ export type IntensityTier = "low" | "mid" | "high";
  * ⚠️ 费率是**租户可覆写**的（BE `CreditRate` 表优先于 config 默认值）。此处的值是 config 默认值，
  *    仅用于「发送前给用户一个预期」；**实际扣费一律以 BE 返回的 `charged_credits` 为准**，前端不参与算账。
  */
-export interface TierRate {
+export interface TierRateBand {
   /** 输入（prompt）积分 / 千 token。 */
   inputPer1k: number;
   /** 输出（completion）积分 / 千 token。 */
   outputPer1k: number;
+}
+
+/**
+ * 🔴 PRICING-UI-0002：**一档 = 两个区间**，按本次请求的 prompt token 数选。
+ *
+ * 做成「一个对象里装两个区间 + 一个选择函数」而**不是**「两个独立 TierRate 让调用方挑」——
+ * 后者等于把档位判据（`> 272,000`）复制到每个调用点，迟早有人漏掉一处，而漏掉的表现就是
+ * 「显示 1.12、实扣 2.24」。判据只允许存在于 `rateForPromptTokens` 一个地方。
+ */
+export interface TierRate {
+  /** ≤ 阈值（绝大多数会话走这一档）。 */
+  standard: TierRateBand;
+  /** > 阈值。 */
+  extended: TierRateBand;
+}
+
+/**
+ * 区间阈值：**prompt tokens 严格大于**这个数才进高区间（BE `_TokenRateTier.max_input_tokens`
+ * 语义：`up_to_272k` 的上界是 272_000，超过才落到 `above_272k`）。
+ * 🔴 显式命名常量，不许把 272000 散落在判断里 —— 那正是「魔数漂移」的经典形态。
+ */
+export const PROMPT_RATE_TIER_THRESHOLD_TOKENS = 272_000;
+
+/**
+ * 🔴 **档位判据的唯一实现**。任何需要费率的地方都走这里，不许自己拿 prompt 数跟阈值比。
+ * 对齐 BE 的 `apimart_token_rate(model, prompt_tokens)`（售价侧与成本侧复用同一判据）。
+ */
+export function rateForPromptTokens(tier: IntensityTier, promptTokens: number): TierRateBand {
+  const { standard, extended } = TIERS[tier].rate;
+  return promptTokens > PROMPT_RATE_TIER_THRESHOLD_TOKENS ? extended : standard;
 }
 
 /** 一档的展示元信息。价格只以 `rate` 表达——**不许再出现无说明的裸整数**。 */
@@ -54,11 +84,52 @@ export const MAX_COMPLETION_TOKENS = 4096;
 export const TYPICAL_PROMPT_TOKENS = 500;
 export const TYPICAL_COMPLETION_TOKENS = 500;
 
-/** 三档（模型标识 = BE services/aibrain.py `_TIER_MODELS`；费率见 `TierRate` 契约注释）。 */
+/**
+ * 三档 × 两区间 = 十二格（模型标识 = BE services/aibrain.py `_TIER_MODELS`）。
+ *
+ * 🔴🔴 **`extended` 这六格目前没有售价侧源码可核，逐格标注在此**（承重要求：明确标注没查出来的）：
+ *   · BE `config.py` 的 `engine_aibrain_*_credits_per_1k` **仍是单值**，没有 >272K 那一组；
+ *   · 任务包说的分支 `codex/pricing-aibrain-tier` **在远端不存在**，develop 上也没有
+ *     —— 即 `PRICING-AIBRAIN-TIER-0001` 这个后端包**尚未落地**。
+ * ✅ 但这六个数**不是猜的**，有两重交叉验证：
+ *   ① BE **成本侧**（`apimart_token_pricing.py`，已在 develop 上）的 272K 双区间比例逐档可核：
+ *      luna 输入 8→16、输出 48→72；terra 20→40、120→180；sol 40→80、240→360
+ *      → **三档一律「输入 ×2、输出 ×1.5」**；
+ *   ② `standard` 六格乘上该比例，与任务包给的表格**十二格逐格相符**
+ *      （1.12×2=2.24、6.72×1.5=10.08、2.8×2=5.6、16.8×1.5=25.2、5.6×2=11.2、33.6×1.5=50.4）。
+ *   `PRICING-AIBRAIN-TIER-0001` 的正确性判据是「每档两区间加价率相等」，×2/×1.5 正满足它。
+ * 🔴 **注意比例不是整体翻倍**：输入 ×2、输出 **×1.5**。照「双倍」写会把输出多算 33%。
+ *    这一点有专门的门钉住（pricing.test.ts「十二格 / 比例」组）。
+ * ⚠️ 售价侧落地后请回来逐格核对；`standard` 六格来自 #239 `config.py:211-216`（已核）。
+ */
 export const TIERS: Record<IntensityTier, TierMeta> = {
-  low: { tier: "low", label: "低", model: "gpt-5.6-luna", rate: { inputPer1k: 1.12, outputPer1k: 6.72 } },
-  mid: { tier: "mid", label: "中", model: "gpt-5.6-terra", rate: { inputPer1k: 2.8, outputPer1k: 16.8 } },
-  high: { tier: "high", label: "高", model: "gpt-5.6-sol", rate: { inputPer1k: 5.6, outputPer1k: 33.6 } }
+  low: {
+    tier: "low",
+    label: "低",
+    model: "gpt-5.6-luna",
+    rate: {
+      standard: { inputPer1k: 1.12, outputPer1k: 6.72 },
+      extended: { inputPer1k: 2.24, outputPer1k: 10.08 }
+    }
+  },
+  mid: {
+    tier: "mid",
+    label: "中",
+    model: "gpt-5.6-terra",
+    rate: {
+      standard: { inputPer1k: 2.8, outputPer1k: 16.8 },
+      extended: { inputPer1k: 5.6, outputPer1k: 25.2 }
+    }
+  },
+  high: {
+    tier: "high",
+    label: "高",
+    model: "gpt-5.6-sol",
+    rate: {
+      standard: { inputPer1k: 5.6, outputPer1k: 33.6 },
+      extended: { inputPer1k: 11.2, outputPer1k: 50.4 }
+    }
+  }
 };
 
 /**
@@ -67,7 +138,10 @@ export const TIERS: Record<IntensityTier, TierMeta> = {
  * 🔴 展示这个数时**必须带口径**（`copy.aibrain.intensityRateHint`），不许单独出现。
  */
 export function typicalCredits(tier: IntensityTier): number {
-  const { inputPer1k, outputPer1k } = TIERS[tier].rate;
+  // 🔴 走 `rateForPromptTokens` 而不是直接取 `standard`：区间选择只有一个判据，这里也不例外。
+  //    500 输入远小于 272,000 → 必落 `standard` → 扩区间**不改变**这三个值（4 / 10 / 20）。
+  //    有专门的门钉住"没被意外改动"（pricing.test.ts 门2 + 十二格组）。
+  const { inputPer1k, outputPer1k } = rateForPromptTokens(tier, TYPICAL_PROMPT_TOKENS);
   return Math.round((TYPICAL_PROMPT_TOKENS * inputPer1k + TYPICAL_COMPLETION_TOKENS * outputPer1k) / 1000);
 }
 
@@ -82,7 +156,13 @@ export function typicalCredits(tier: IntensityTier): number {
  * 现费率下 → low 27.5 · mid 68.8 · high 137.6。
  */
 export function minReservationCredits(tier: IntensityTier): number {
-  return (TIERS[tier].rate.outputPer1k * MAX_COMPLETION_TOKENS) / 1000;
+  // 🔴 下界**取 `standard` 区间**（PRICING-UI-0002）：这个函数的语义是「**至少**会被预留多少」，
+  //    而 `standard` 的输出费率恒低于 `extended`（×1.5）→ 用它才是真下界；用 `extended` 会高估，
+  //    把一个上界说成「至少」是对用户报错价。
+  //    真跑进 >272K 区间时实际预留会更高，那正是「至少」二字兜住的部分（文案本就带「至少」）。
+  // ⚠️ 故此处**故意不走** `rateForPromptTokens` —— 它按「本次 prompt 数」选区间，而这里根本没有
+  //    "本次"可言（下界是对所有请求成立的常量）。这不是漏了判据，是判据不适用。
+  return (TIERS[tier].rate.standard.outputPer1k * MAX_COMPLETION_TOKENS) / 1000;
 }
 
 // ══ 积分展示：**两个语义明确的函数，不许混用**（FIX6 · P1-1）══════════════════════════════

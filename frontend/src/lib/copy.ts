@@ -1527,9 +1527,21 @@ export const copy = {
     //    口径行是常驻文本而非 hover tooltip，因为触屏上 hover 不可达（等于没有说明）。
     intensityCost: (n: number) => `约 ${n} 积分/次`,
     intensityAria: (label: string, cost: number) => `智能强度 ${label}，约 ${cost} 积分每次（按典型对话估算）`,
-    /** 常驻口径行：真实费率 + 「约 N 积分」是怎么估出来的。 */
+    /**
+     * 常驻口径行：真实费率 + 「约 N 积分」是怎么估出来的。
+     * 🔴 PRICING-UI-0002：费率现在有**两个区间**（≤272K / >272K）。常驻行**只写低区间**——
+     *    那是绝大多数会话的实际口径，一行里塞四个数没人看得下去；高区间放进下面的展开说明。
+     *    但**必须点明"还有另一档"**（`intensityRateTierNote`），否则用户会以为只有一个费率，
+     *    真跑进长上下文之后就是「显示 1.12、实扣 2.24」——与 A1 那次「显示 30 实扣 100」同形态。
+     */
     intensityRateHint: (input: string, output: string, promptTokens: number, completionTokens: number) =>
       `按输入 ${input} / 输出 ${output} 积分每千 token 计费；「约 N 积分/次」是按 ${promptTokens} 输入 + ${completionTokens} 输出 token 的典型对话估算，实际以本次用量结算。`,
+    /** 常驻的一句提示：还有一档更贵的，点开看具体数。 */
+    intensityRateTierNote: (thresholdK: number) => `超长上下文（输入超过 ${thresholdK} 万 token）另有更高费率。`,
+    /** 展开后的高区间明细——点开才看到，不占常驻行。 */
+    intensityRateTierToggle: "查看超长上下文费率",
+    intensityRateTierDetail: (thresholdK: number, input: string, output: string) =>
+      `输入超过 ${thresholdK} 万 token 的部分，本档按输入 ${input} / 输出 ${output} 积分每千 token 计费。`,
     // ── 402 余额不足（§三）────────────────────────────────────────────────
     // 此前 402 只是**默默弹开充值窗**，用户看不到任何解释；而新预留逻辑会锁住一个远大于实际花费的数
     //（高速档光 completion 就 137.6），不解释清楚会被当成「一次对话要花 137 积分」。

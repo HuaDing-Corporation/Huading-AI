@@ -129,19 +129,23 @@ export function AibrainChat() {
       // 502：上游用量不可信 → fail-closed 不交付。**零扣费已由源码证实**（见 copy.ts 注释）。
       else if (err.code === AIBRAIN_ERROR.PROVIDER_USAGE_INVALID)
         setSendError(copy.aibrain.providerUsageInvalid);
-      // 🔴 502 REPLAY_GUARD（FIX4 第六个码）：与 PROVIDER_FAILED **必须分开**——它会开用户冷却，
-      //    说「请重试」等于引导用户立刻去撞 503。放在 PROVIDER_FAILED **之前**，免得被那条 `||` 吞掉。
-      else if (err.code === AIBRAIN_ERROR.PROVIDER_REPLAY_GUARD)
+      // 🔴 **会开用户冷却的两个 502**（BE `_USER_COOLDOWN_ERROR_CODES` 里除 USAGE_INVALID 外的两个）：
+      //    `REPLAY_GUARD` 与 `USAGE_MISSING`。它们与 `PROVIDER_FAILED` 的分水岭只有一条 ——
+      //    **一定会开冷却** → 立刻重试必撞 503。所以文案不许说「请重试」，一律引导等待。
+      //    ⚠️ PRICING-UI-0002 §四：`USAGE_MISSING` 是我在 FIX4 回执里标注待判的那条，判定是「改」，
+      //       沿用 REPLAY_GUARD 的措辞形态。两者放在 PROVIDER_FAILED **之前**，免得被那条 `||` 吞掉。
+      //    ⚠️ 两者语义仍有别（一个"可能已花钱"、一个"上游没给用量"），但对用户可做的事完全相同
+      //       （都是零扣费 + 都要等），故共用一句；真要分开时把 copy 拆成两条即可，门已按"都不含
+      //       『请重试』、都含『稍等片刻』"写，拆分不会让门失效。
+      else if (
+        err.code === AIBRAIN_ERROR.PROVIDER_REPLAY_GUARD ||
+        err.code === AIBRAIN_ERROR.USAGE_MISSING
+      )
         setSendError(copy.aibrain.providerReplayGuard);
       else if (err.code === AIBRAIN_ERROR.REQUEST_EXPIRED) setSendError(copy.aibrain.requestExpired);
       else if (err.code === AIBRAIN_ERROR.REQUEST_LIMIT_EXCEEDED) setSendError(copy.aibrain.reqLimit);
-      // USAGE_MISSING 与 PROVIDER_FAILED 对用户是同一件事（这次没成、可重试）→ 共用文案。
-      // ⚠️ USAGE_MISSING 其实**也会开冷却**（在 BE 的 `_USER_COOLDOWN_ERROR_CODES` 里），
-      //    但它的语义是"上游没给用量"而非"可能已花钱"，且 FIX3 起就共用此文案、CB 未提出异议；
-      //    本轮不动它，只把 FIX4 明确点名要区分的 REPLAY_GUARD 拆出来。已写进回执供 CB 判定
-      //    是否要把 USAGE_MISSING 也改成"稍等片刻"（它同样会让用户立刻重试撞 503）。
-      else if (err.code === AIBRAIN_ERROR.PROVIDER_FAILED || err.code === AIBRAIN_ERROR.USAGE_MISSING)
-        setSendError(copy.aibrain.providerFailed);
+      // `PROVIDER_FAILED` 是三个 502 里**唯一不开冷却**的 → 只有它可以说「请稍后重试」。
+      else if (err.code === AIBRAIN_ERROR.PROVIDER_FAILED) setSendError(copy.aibrain.providerFailed);
       else if (err.code === AIBRAIN_ERROR.ATTACHMENT_NOT_FOUND || err.code === AIBRAIN_ERROR.ATTACHMENT_INVALID)
         setSendError(copy.aibrain.attachmentRejected);
       // 🔴 未知 402 的兜底**从「引导充值」翻转为中性**（FIX2）：三个已知 402 里已经有一个是

@@ -154,6 +154,39 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
   });
 
   /**
+   * 🔴🔴 PRICING-UI-0002：**双区间在计费里真的生效**。
+   * 构造一个 prompt token 数跨过 272,000 阈值的请求，其**每 token 单价**必须高于低区间的请求。
+   * 这是 mock 里唯一按"本次用量"计费的地方（`userCredits` → `rateForPromptTokens`），
+   * 也就是双区间唯一能被观察到的地方；写死 `standard` 会让这条红。
+   *
+   * ⚠️ 怎么把 prompt 顶过 272K：靠**图片附件**（每张按 4096 token 计，BE `_IMAGE_PROMPT_TOKEN_ESTIMATE`）
+   *    造不出 27 万；靠文本要 27 万字符，测试里生成一次约 0.5MB 字符串 —— 可行且比图片路径更直接。
+   *    ⚠️ 但那样会先撞**提示词硬上限 422**（UTF-8 字节 > 922,000）——中文每字 3 字节，27.2 万字
+   *    就是 81.6 万字节，仍在限内；用 ASCII 更安全（1 字节/字符）。故用 ASCII 'x'。
+   *    ASCII 的 token 估算是「每 4 字符 1 token」→ 要 272K token 需 ~109 万字符，那会超字节上限。
+   *    → 改用**非 ASCII**（每字 1 token、3 字节）：27.3 万字 = 27.3 万 token、81.9 万字节，两头都过。
+   */
+  it("🔴 PRICING-UI-0002：prompt 跨过 272K 阈值 → 单位 token 单价更高（双区间真的生效）", async () => {
+    await topup(2000);
+    const low = await createConversation();
+    const high = await createConversation();
+
+    const shortRes = await sendMessage(low.id, { content: "你好", tier: "low", attachment_asset_ids: [] });
+    // 27.3 万个非 ASCII 字符 → ~27.3 万 prompt token（> 272,000），且 81.9 万字节（< 922,000）。
+    const longRes = await sendMessage(high.id, {
+      content: "国".repeat(273_000),
+      tier: "low",
+      attachment_asset_ids: []
+    });
+
+    const unit = (r: typeof shortRes) =>
+      (r.assistant_message.charged_credits ?? 0) / (r.assistant_message.total_tokens || 1);
+    // 🔴 高区间的每 token 单价必须更高 —— 低区间输入 1.12、高区间 2.24。
+    expect(unit(longRes)).toBeGreaterThan(unit(shortRes));
+    expect(longRes.assistant_message.prompt_tokens ?? 0).toBeGreaterThan(272_000);
+  });
+
+  /**
    * 🔴 门③：预留额**分档不同**（高档预留 ≫ 低档），即预留确实按费率算 —— §三 表格里 27.5/68.8/137.6 的来源。
    * 变异：`reservationCredits` 忽略 tier（写死用某一档费率）→ 本条红。
    */

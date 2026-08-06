@@ -306,19 +306,56 @@ describe("422 提示词超限 / 502 上游用量越界 / 502 缺用量", () => {
   });
 
   /**
-   * 🔴 `AIBRAIN_USAGE_MISSING`(502) 是**任务包没列、我从源码里捡到的第四个新码**
-   * （aibrain.py:505-514）。对用户与 PROVIDER_FAILED 是同一件事 → 共用文案。
-   * 变异：把它从分流里删掉 → 本条红（会落到 `err.message` 的英文原文）。
+   * 🔴🔴 PRICING-UI-0002 §四 · **判定是「改」**（本条上一版断言它走 `providerFailed`）。
+   * 我在 FIX4 回执里标注了这条待判：`USAGE_MISSING` **也在** BE 的 `_USER_COOLDOWN_ERROR_CODES` 里
+   * → 一定会开冷却 → 说「请重试」等于引导用户立刻去撞 503，连着两次失败。
+   * 判定下来与 `REPLAY_GUARD` 同理，故沿用同一句「稍等片刻再发送」。
+   * 变异：把它挪回 `PROVIDER_FAILED` 那支 → 本条红。
    */
-  it("🔴 USAGE_MISSING(502)（任务包未列）→ 走 providerFailed 文案，不落英文原文", async () => {
+  it("🔴 USAGE_MISSING(502) → 与 REPLAY_GUARD 同款「稍等片刻」，**不说「请重试」**（它会开冷却）", async () => {
     hooks.sendMutateAsync.mockRejectedValue(
       new ApiError("AIBRAIN provider returned no billing usage.", "AIBRAIN_USAGE_MISSING", 502)
     );
     renderChat();
     await typeAndSend();
 
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.providerFailed));
-    expect(screen.getByRole("alert").textContent ?? "").not.toContain("no billing usage");
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.providerReplayGuard));
+    const text = screen.getByRole("alert").textContent ?? "";
+    expect(text).toContain("稍等片刻");
+    expect(text).not.toContain("请重试");
+    expect(text).not.toContain("no billing usage"); // 不落英文原文
+  });
+
+  /**
+   * 🔴🔴 §四 点名要的**三方不串味**门：按「会不会开冷却」分成两组，组间文案必须不同。
+   *   会开冷却（不许说「请重试」）：`REPLAY_GUARD` · `USAGE_MISSING`
+   *   不开冷却（唯一可以说「请稍后重试」）：`PROVIDER_FAILED`
+   * 变异：把任一个会开冷却的码挪回 `PROVIDER_FAILED` 那支 → 本条红。
+   * 这条比逐个断言更强：它钉住的是**分组关系**，加第七个码时只要归错组就会红。
+   */
+  it("🔴 三方不串味：REPLAY_GUARD / USAGE_MISSING 都要等，只有 PROVIDER_FAILED 可立即重试", async () => {
+    const texts: Record<string, string> = {};
+    for (const code of ["AIBRAIN_PROVIDER_REPLAY_GUARD", "AIBRAIN_USAGE_MISSING", "AIBRAIN_PROVIDER_FAILED"]) {
+      const view = renderChat();
+      hooks.sendMutateAsync.mockRejectedValue(new ApiError("x", code, 502));
+      await typeAndSend();
+      await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+      texts[code] = screen.getByRole("alert").textContent ?? "";
+      view.unmount();
+    }
+
+    // 两个会开冷却的：都说「稍等片刻」、都不说「请重试」。
+    for (const code of ["AIBRAIN_PROVIDER_REPLAY_GUARD", "AIBRAIN_USAGE_MISSING"]) {
+      expect(texts[code]).toContain("稍等片刻");
+      expect(texts[code]).not.toContain("请重试");
+    }
+    // 唯一不开冷却的：可以、也应该说「请稍后重试」。
+    expect(texts.AIBRAIN_PROVIDER_FAILED).toContain("请稍后重试");
+    expect(texts.AIBRAIN_PROVIDER_FAILED).not.toContain("稍等片刻");
+    // 🔴 组间文案确实不同（不是三句一模一样蒙混过关）。
+    expect(texts.AIBRAIN_PROVIDER_REPLAY_GUARD).not.toBe(texts.AIBRAIN_PROVIDER_FAILED);
+    // 三个 502 都要说清零扣费——这一点是共同的，不因分组而丢。
+    for (const code of Object.keys(texts)) expect(texts[code]).toContain("未扣费");
   });
 });
 

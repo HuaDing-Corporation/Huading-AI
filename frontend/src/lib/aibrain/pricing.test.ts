@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   MAX_COMPLETION_TOKENS,
+  PROMPT_RATE_TIER_THRESHOLD_TOKENS,
   TIERS,
+  TIER_ORDER,
   TYPICAL_COMPLETION_TOKENS,
   TYPICAL_PROMPT_TOKENS,
   formatCreditsExact,
@@ -11,6 +13,7 @@ import {
   minReservationCredits,
   outstandingView,
   precheckSend,
+  rateForPromptTokens,
   shortfallView,
   typicalCredits
 } from "./types";
@@ -35,10 +38,56 @@ describe("智脑分档费率（价格真源，镜像 BE config.py）", () => {
    *    「发送之前」给用户预期就只能镜像一份。故这条门的职责是：BE 改费率时逼前端一起改，而不是
    *    让前端自己算出费率。已写进回执建议 CA 把费率随钱包一起下发，届时这条门可以换成"读接口"。
    */
-  it("门1：三档费率逐个等于 BE config 的值（1.12/6.72 · 2.80/16.80 · 5.60/33.60）", () => {
-    expect(TIERS.low.rate).toEqual({ inputPer1k: 1.12, outputPer1k: 6.72 });
-    expect(TIERS.mid.rate).toEqual({ inputPer1k: 2.8, outputPer1k: 16.8 });
-    expect(TIERS.high.rate).toEqual({ inputPer1k: 5.6, outputPer1k: 33.6 });
+  it("门1：三档**低区间**费率逐个等于 BE config 的值（1.12/6.72 · 2.80/16.80 · 5.60/33.60）", () => {
+    expect(TIERS.low.rate.standard).toEqual({ inputPer1k: 1.12, outputPer1k: 6.72 });
+    expect(TIERS.mid.rate.standard).toEqual({ inputPer1k: 2.8, outputPer1k: 16.8 });
+    expect(TIERS.high.rate.standard).toEqual({ inputPer1k: 5.6, outputPer1k: 33.6 });
+  });
+
+  // ══ PRICING-UI-0002 · 十二格 + 区间判据 ═════════════════════════════════════════════════
+  // §三 的要求：断言前端费率表与后端契约**逐格一致**；做不到（前端拿不到后端费率、且售价侧
+  // 双区间尚未落地）就**至少断言两个区间存在且高区间 = 低区间的「输入 ×2 / 输出 ×1.5」**。
+  // 🔴 这个比例**不是整体翻倍** —— 照"双倍"写会把输出多算 33%。这正是下面那条门存在的理由。
+  // ✅ 比例本身有源码依据：BE **成本侧** `apimart_token_pricing.py`（已在 develop）的 272K 双区间，
+  //    三档一律 输入 8→16 / 20→40 / 40→80（×2）、输出 48→72 / 120→180 / 240→360（×1.5）。
+
+  /**
+   * 🔴 十二格逐格钉死。变异：任意一格写错 → 本条红。
+   * 断言**字面量**而不是 `standard.x * 2`：后者会跟着实现一起漂（把 extended 写成
+   * `standard×2` 的派生值时，期望也变成同一个错值，测试自我抵消 —— 本项目在 #228 栽过这个坑）。
+   */
+  it("🔴 门1b：十二格逐格钉死（高区间 2.24/10.08 · 5.60/25.20 · 11.20/50.40）", () => {
+    expect(TIERS.low.rate.extended).toEqual({ inputPer1k: 2.24, outputPer1k: 10.08 });
+    expect(TIERS.mid.rate.extended).toEqual({ inputPer1k: 5.6, outputPer1k: 25.2 });
+    expect(TIERS.high.rate.extended).toEqual({ inputPer1k: 11.2, outputPer1k: 50.4 });
+  });
+
+  /**
+   * 🔴🔴 §三 点名的那道门：**输入 ×2、输出 ×1.5**，逐档验证。
+   * 变异：把任一档的 extended 写成"整体翻倍"（输出也 ×2）→ 本条红。
+   * 与门1b 职责分离：1b 管"值对不对"，本条管"两区间的**关系**对不对"——后者才是
+   * `PRICING-AIBRAIN-TIER-0001` 的正确性判据（每档两区间加价率相等）在前端的投影。
+   */
+  it("🔴 门1c：高区间 = 低区间的「输入 ×2 / 输出 ×1.5」（**不是整体翻倍**）", () => {
+    for (const tier of TIER_ORDER) {
+      const { standard, extended } = TIERS[tier].rate;
+      expect(extended.inputPer1k).toBeCloseTo(standard.inputPer1k * 2, 6);
+      expect(extended.outputPer1k).toBeCloseTo(standard.outputPer1k * 1.5, 6);
+      // 🔴 显式否掉"输出也翻倍"这个最容易犯的错。
+      expect(extended.outputPer1k).not.toBeCloseTo(standard.outputPer1k * 2, 6);
+    }
+  });
+
+  /**
+   * 🔴 区间判据只有一个实现，且边界是**严格大于**（BE `up_to_272k` 的上界含 272,000）。
+   * 变异：把 `>` 写成 `>=` → 本条红（阈值那一格会跳到高区间）。
+   */
+  it("🔴 门1d：阈值 272,000 是显式常量，且恰在阈值上仍走低区间（严格大于才进高区间）", () => {
+    expect(PROMPT_RATE_TIER_THRESHOLD_TOKENS).toBe(272_000);
+    expect(rateForPromptTokens("low", 0)).toEqual(TIERS.low.rate.standard);
+    expect(rateForPromptTokens("low", 272_000)).toEqual(TIERS.low.rate.standard); // 恰在阈值 → 低区间
+    expect(rateForPromptTokens("low", 272_001)).toEqual(TIERS.low.rate.extended); // 超一个 token → 高区间
+    expect(rateForPromptTokens("high", 500_000)).toEqual(TIERS.high.rate.extended);
   });
 
   /**
@@ -62,6 +111,32 @@ describe("智脑分档费率（价格真源，镜像 BE config.py）", () => {
   it("门2b：口径常量就是「500 输入 + 500 输出」——展示这个数时必须能说清它是怎么来的", () => {
     expect(TYPICAL_PROMPT_TOKENS).toBe(500);
     expect(TYPICAL_COMPLETION_TOKENS).toBe(500);
+  });
+
+  /**
+   * 🔴🔴 PRICING-UI-0002 §二.2 的硬要求：**扩区间不许意外改动这两个推导值**。
+   * 这是本包最容易出的错——给 `TierRate` 加一层之后顺手把 `typicalCredits` 改成读 `extended`，
+   * 或把 `minReservationCredits` 改成取两区间的最大值，用户看到的数字就全变了。
+   * 变异A：`typicalCredits` 改读 `extended` → 前半段红（会变成 6/15/30 —— 恰好是本包一开始
+   *        修掉的那三个旧数字，讽刺但真实：2.24×0.5+10.08×0.5 = 6.16 ≈ 6）。
+   * 变异B：`minReservationCredits` 改读 `extended` → 后半段红（27.5→41.3 / 68.8→103.2 / 137.6→206.4）。
+   */
+  it("🔴 门2c：扩区间后 typicalCredits / minReservationCredits **值一个都没变**", () => {
+    // 500 输入远小于 272,000 → 必落低区间 → 仍是 4 / 10 / 20。
+    expect([typicalCredits("low"), typicalCredits("mid"), typicalCredits("high")]).toEqual([4, 10, 20]);
+    // 下界按低区间算（语义是「至少」，用高区间会把上界说成下界）→ 仍是 27.5 / 68.8 / 137.6。
+    expect(formatCredits(minReservationCredits("low"))).toBe("27.5");
+    expect(formatCredits(minReservationCredits("mid"))).toBe("68.8");
+    expect(formatCredits(minReservationCredits("high"))).toBe("137.6");
+  });
+
+  /**
+   * 🔴 `typicalCredits` 的口径（500 输入）**必须落在低区间**——这是上一条"值不变"的**原因**，
+   * 单独钉一条：万一哪天阈值被调到 500 以下，上一条会红但看不出为什么，这条直接指出原因。
+   */
+  it("门2d：典型对话的 500 输入落在低区间（这是 4/10/20 不变的原因）", () => {
+    expect(TYPICAL_PROMPT_TOKENS).toBeLessThanOrEqual(PROMPT_RATE_TIER_THRESHOLD_TOKENS);
+    expect(rateForPromptTokens("low", TYPICAL_PROMPT_TOKENS)).toEqual(TIERS.low.rate.standard);
   });
 
   /**

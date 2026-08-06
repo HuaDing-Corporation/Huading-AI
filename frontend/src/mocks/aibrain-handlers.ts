@@ -43,6 +43,7 @@ import {
   AIBRAIN_ERROR,
   MAX_COMPLETION_TOKENS,
   SINGLE_REQUEST_LIMIT,
+  rateForPromptTokens,
   TIERS,
   TOPUP_OPTIONS,
   type ChatAttachment,
@@ -152,9 +153,14 @@ const CREDIT_QUANTUM = 1_000_000; // BE `_REASONING_CREDIT_QUANTUM = Decimal("0.
 /** BE `_reasoning_credits`：量化到 6 位小数（浮点误差不许渗进钱包数字）。 */
 const quantizeCredits = (value: number) => Math.round(value * CREDIT_QUANTUM) / CREDIT_QUANTUM;
 
-/** BE `_user_credits`：prompt × 输入费率 + completion × 输出费率，再量化。 */
+/**
+ * BE `_user_credits`：prompt × 输入费率 + completion × 输出费率，再量化。
+ * 🔴 PRICING-UI-0002：费率**按本次 prompt token 数选区间**（`rateForPromptTokens`，阈值 272K）。
+ *    这是 mock 里唯一按"本次用量"计费的地方，也就是双区间**唯一必须生效**的地方 ——
+ *    写死 `standard` 会让 >272K 的请求在 mock 下算出偏低的扣费，前端测试就永远看不到高区间。
+ */
 function userCredits(tier: IntensityTier, promptTokens: number, completionTokens: number): number {
-  const { inputPer1k, outputPer1k } = TIERS[tier].rate;
+  const { inputPer1k, outputPer1k } = rateForPromptTokens(tier, promptTokens);
   return quantizeCredits((promptTokens * inputPer1k + completionTokens * outputPer1k) / 1000);
 }
 

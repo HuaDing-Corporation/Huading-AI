@@ -22,14 +22,41 @@ describe("门A · 强度选择器：金额不许裸奔", () => {
    *    （即回到本包修复前「只有三个裸整数」的状态）→ 本条红。
    */
   it("门A：显示「约 N 积分/次」的同时，同屏给出费率与估算口径", () => {
-    render(<IntensitySelector value="low" onChange={vi.fn()} />);
+    const { container } = render(<IntensitySelector value="low" onChange={vi.fn()} />);
     expect(screen.getByText(copy.aibrain.intensityCost(4))).toBeInTheDocument();
-    // 口径行：真实费率 + 「500 输入 + 500 输出」的估算依据，都得在页面上。
-    const hint = screen.getByText(/积分每千 token/);
-    expect(hint).toBeInTheDocument();
-    expect(hint.textContent ?? "").toContain("1.12");
-    expect(hint.textContent ?? "").toContain("6.72");
-    expect(hint.textContent ?? "").toContain("500");
+    // 口径行：**低区间**真实费率 + 「500 输入 + 500 输出」的估算依据，都得在页面上。
+    const text = container.textContent ?? "";
+    expect(text).toContain("1.12");
+    expect(text).toContain("6.72");
+    expect(text).toContain("500");
+  });
+
+  /**
+   * 🔴🔴 PRICING-UI-0002 §二.3：费率有两个区间之后，**不许让用户以为只有一个**。
+   * 常驻行只写低区间（一行塞四个数没人看），但**必须常驻点明"还有一档"**；
+   * 高区间的具体数放在折叠里（原生 `<details>`：键盘/读屏/触屏都可达，不是 hover tooltip）。
+   * 变异A：删掉 `intensityRateTierNote` 那句 → 前半段红（用户会以为 1.12/6.72 是唯一费率）。
+   * 变异B：删掉 `<details>` 整块 → 后半段红（高区间的数字无处可查）。
+   */
+  it("🔴 门A1b：常驻点明「还有更高费率」，且高区间数字可展开查到（2.24 / 10.08）", () => {
+    const { container } = render(<IntensitySelector value="low" onChange={vi.fn()} />);
+    const text = container.textContent ?? "";
+    // 常驻：必须让用户知道存在第二档，且说清判据（超长上下文 / 27.2 万 token）。
+    expect(text).toContain(copy.aibrain.intensityRateTierNote(27.2));
+    expect(text).toContain("27.2");
+    // 折叠里：高区间的两个数确实在 DOM 里（<details> 收起时内容仍在，可被读屏/展开查到）。
+    expect(text).toContain("2.24");
+    expect(text).toContain("10.08");
+    expect(screen.getByText(copy.aibrain.intensityRateTierToggle)).toBeInTheDocument();
+  });
+
+  /** 高区间明细跟随档位切换（high 档要给 high 的高区间 11.20 / 50.40，不能永远显示 low 的）。 */
+  it("门A1c：切到 high 档 → 折叠里的高区间换成 11.20 / 50.40", () => {
+    const { container } = render(<IntensitySelector value="high" onChange={vi.fn()} />);
+    const text = container.textContent ?? "";
+    expect(text).toContain("11.20");
+    expect(text).toContain("50.40");
+    expect(text).not.toContain("2.24"); // 不许串到 low 的高区间
   });
 
   /**
@@ -48,11 +75,11 @@ describe("门A · 强度选择器：金额不许裸奔", () => {
   });
 
   /** 口径跟随档位切换（high 档要显示 high 的费率，不能永远显示 low 的）。 */
-  it("门A3：切到 high 档 → 口径行换成 high 的费率 5.60 / 33.60", () => {
-    render(<IntensitySelector value="high" onChange={vi.fn()} />);
-    const hint = screen.getByText(/积分每千 token/);
-    expect(hint.textContent ?? "").toContain("5.60");
-    expect(hint.textContent ?? "").toContain("33.60");
+  it("门A3：切到 high 档 → 口径行换成 high 的**低区间**费率 5.60 / 33.60", () => {
+    const { container } = render(<IntensitySelector value="high" onChange={vi.fn()} />);
+    const text = container.textContent ?? "";
+    expect(text).toContain("5.60");
+    expect(text).toContain("33.60");
   });
 });
 
