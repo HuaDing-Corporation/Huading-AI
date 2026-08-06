@@ -49,7 +49,12 @@ class Settings(BaseSettings):
     celery_task_always_eager: bool = False
     engine_admin_retry_stale_seconds: int = Field(default=60, ge=0)
     engine_orphan_task_stale_seconds: float = Field(default=1800.0, gt=0)
-    engine_orphan_recovery_interval_seconds: float = Field(default=60.0, ge=0)
+    engine_orphan_recovery_interval_seconds: float = Field(
+        default=60.0,
+        ge=1.0,
+        le=300.0,
+        allow_inf_nan=False,
+    )
     engine_gen_heartbeat_interval_seconds: float = Field(
         default=15.0,
         ge=1.0,
@@ -208,12 +213,12 @@ class Settings(BaseSettings):
     engine_apimart_scene_prompt_input_usd_per_m: float = 0.8
     engine_apimart_scene_prompt_output_usd_per_m: float = 4.8
     # AIBRAIN user rates are product charges per 1K tokens, not upstream prices.
-    engine_aibrain_low_input_credits_per_1k: Decimal = Decimal("1.73")
-    engine_aibrain_low_output_credits_per_1k: Decimal = Decimal("10.37")
-    engine_aibrain_mid_input_credits_per_1k: Decimal = Decimal("4.32")
-    engine_aibrain_mid_output_credits_per_1k: Decimal = Decimal("25.92")
-    engine_aibrain_high_input_credits_per_1k: Decimal = Decimal("8.64")
-    engine_aibrain_high_output_credits_per_1k: Decimal = Decimal("51.84")
+    engine_aibrain_low_input_credits_per_1k: Decimal = Decimal("1.12")
+    engine_aibrain_low_output_credits_per_1k: Decimal = Decimal("6.72")
+    engine_aibrain_mid_input_credits_per_1k: Decimal = Decimal("2.80")
+    engine_aibrain_mid_output_credits_per_1k: Decimal = Decimal("16.80")
+    engine_aibrain_high_input_credits_per_1k: Decimal = Decimal("5.60")
+    engine_aibrain_high_output_credits_per_1k: Decimal = Decimal("33.60")
     # Compatibility snapshots of APIMart discounted low-context provider rates.
     # Provider cost accounting uses apimart_token_pricing.py instead.
     engine_aibrain_low_input_provider_credits_per_m: Decimal = Decimal("8")
@@ -222,8 +227,18 @@ class Settings(BaseSettings):
     engine_aibrain_mid_output_provider_credits_per_m: Decimal = Decimal("120")
     engine_aibrain_high_input_provider_credits_per_m: Decimal = Decimal("40")
     engine_aibrain_high_output_provider_credits_per_m: Decimal = Decimal("240")
+    # APIMart's published Sol input ceiling. Local preflight uses a conservative
+    # UTF-8/token upper bound and never permits a higher configured value.
+    engine_aibrain_max_prompt_tokens: int = Field(default=922_000, ge=1, le=922_000)
     engine_aibrain_max_completion_tokens: int = Field(default=4096, ge=1, le=16384)
+    # Two maximum-size Sol requests may be in provider flight per tenant.
+    engine_aibrain_inflight_exposure_multiplier: int = Field(default=2, ge=1, le=3)
     engine_aibrain_reservation_stale_minutes: int = Field(default=30, ge=1)
+    engine_aibrain_usage_anomaly_cooldown_seconds: int = Field(
+        default=60,
+        ge=1,
+        le=300,
+    )
     # Compatibility-only snapshots accepted from older deployments. Production
     # costing and observability must use app.services.apimart_token_pricing.
     engine_apimart_reverse_prompt_input_credits_per_m: float = 16.0

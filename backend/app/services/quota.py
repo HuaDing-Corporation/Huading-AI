@@ -573,21 +573,35 @@ def charge_copy_quota(
     model: str | None = None,
     llm_usage: provider_costs.DeepSeekUsageCost | None = None,
 ) -> UsageRecord:
+    reservation = reserve_copy_quota(
+        db,
+        tenant_id=tenant_id,
+        provider=provider,
+        model=model,
+    )
+    return settle_copy_quota(
+        db,
+        tenant_id=tenant_id,
+        usage_record_id=reservation.usage_record.id,
+        provider=provider,
+        model=model,
+        llm_usage=llm_usage,
+    )
+
+
+def reserve_copy_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    provider: str,
+    model: str | None = None,
+) -> Reservation:
     estimate = estimate_copy_quota(db, tenant_id=tenant_id)
-    subscription = consume_active_quota(
+    subscription = _reserve_active_quota(
         db,
         tenant_id=tenant_id,
         credits=estimate.reservation_units,
     )
-    unit = "call"
-    quantity = Decimal("1.000")
-    cost_cents = 0
-    if llm_usage is not None:
-        provider = llm_usage.provider
-        model = llm_usage.model or model
-        unit = "token"
-        quantity = Decimal(llm_usage.total_tokens)
-        cost_cents = llm_usage.cost_cents
     usage_record = UsageRecord(
         tenant_id=tenant_id,
         subscription_id=subscription.id,
@@ -595,15 +609,166 @@ def charge_copy_quota(
         capability="llm",
         provider=provider,
         model=model,
-        unit=unit,
-        quantity=quantity,
+        unit="call",
+        quantity=Decimal("1.000"),
         credits=estimate.estimated_credits,
-        cost_cents=cost_cents,
-        status="settled",
-        settled_at=datetime.now(UTC),
+        cost_cents=0,
+        status="reserved",
     )
     db.add(usage_record)
-    return usage_record
+    db.flush([subscription, usage_record])
+    return Reservation(
+        subscription=subscription,
+        usage_record=usage_record,
+        estimated_seconds=estimate.estimated_seconds,
+        estimated_credits=estimate.estimated_credits,
+    )
+
+
+def _copy_reservation_for_update(
+    db: Session,
+    *,
+    tenant_id: str,
+    usage_record_id: str,
+) -> UsageRecord | None:
+    return db.scalar(
+        select(UsageRecord)
+        .where(
+            UsageRecord.id == usage_record_id,
+            UsageRecord.tenant_id == tenant_id,
+            UsageRecord.capability == "llm",
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
+def _set_copy_usage_details(
+    record: UsageRecord,
+    *,
+    provider: str,
+    model: str | None,
+    llm_usage: provider_costs.DeepSeekUsageCost | None,
+) -> None:
+    if llm_usage is not None:
+        provider = llm_usage.provider
+        model = llm_usage.model or model
+        record.unit = "token"
+        record.quantity = Decimal(llm_usage.total_tokens)
+        record.cost_cents = llm_usage.cost_cents
+    record.provider = provider
+    record.model = model
+
+
+def settle_copy_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    usage_record_id: str,
+    provider: str,
+    model: str | None = None,
+    llm_usage: provider_costs.DeepSeekUsageCost | None = None,
+) -> UsageRecord:
+    record = _copy_reservation_for_update(
+        db,
+        tenant_id=tenant_id,
+        usage_record_id=usage_record_id,
+    )
+    if record is None:
+        raise RuntimeError("Copy quota reservation not found.")
+    if record.status != "reserved":
+        return record
+    if record.subscription_id is None:
+        raise RuntimeError("Copy quota reservation has no subscription.")
+    subscription = _subscription_for_update(db, record.subscription_id)
+    if subscription is None:
+        raise RuntimeError("Copy quota reservation subscription not found.")
+    reserved_units = _credit_units(Decimal(record.credits))
+    subscription.quota_credits_reserved = max(
+        0,
+        subscription.quota_credits_reserved - reserved_units,
+    )
+    subscription.quota_credits_used += reserved_units
+    _set_copy_usage_details(
+        record,
+        provider=provider,
+        model=model,
+        llm_usage=llm_usage,
+    )
+    record.status = "settled"
+    record.settled_at = datetime.now(UTC)
+    db.flush([subscription, record])
+    return record
+
+
+def release_copy_quota(
+    db: Session,
+    *,
+    tenant_id: str,
+    usage_record_id: str,
+    provider: str,
+    model: str | None = None,
+    llm_usage: provider_costs.DeepSeekUsageCost | None = None,
+    released_at: datetime | None = None,
+) -> UsageRecord | None:
+    record = _copy_reservation_for_update(
+        db,
+        tenant_id=tenant_id,
+        usage_record_id=usage_record_id,
+    )
+    if record is None or record.status != "reserved":
+        return record
+    if record.subscription_id is None:
+        raise RuntimeError("Copy quota reservation has no subscription.")
+    subscription = _subscription_for_update(db, record.subscription_id)
+    if subscription is None:
+        raise RuntimeError("Copy quota reservation subscription not found.")
+    subscription.quota_credits_reserved = max(
+        0,
+        subscription.quota_credits_reserved - _credit_units(Decimal(record.credits)),
+    )
+    _set_copy_usage_details(
+        record,
+        provider=provider,
+        model=model,
+        llm_usage=llm_usage,
+    )
+    record.status = "released"
+    record.settled_at = released_at or datetime.now(UTC)
+    db.flush([subscription, record])
+    return record
+
+
+def recover_stale_copy_quota_reservations(
+    db: Session,
+    *,
+    cutoff: datetime,
+    recovered_at: datetime,
+) -> int:
+    records = list(
+        db.scalars(
+            select(UsageRecord)
+            .where(
+                UsageRecord.capability == "llm",
+                UsageRecord.status == "reserved",
+                UsageRecord.video_task_id.is_(None),
+                UsageRecord.reverse_prompt_job_id.is_(None),
+                UsageRecord.chat_message_id.is_(None),
+                UsageRecord.created_at <= cutoff,
+            )
+            .with_for_update(skip_locked=True)
+        )
+    )
+    for record in records:
+        release_copy_quota(
+            db,
+            tenant_id=record.tenant_id,
+            usage_record_id=record.id,
+            provider=record.provider,
+            model=record.model,
+            released_at=recovered_at,
+        )
+    return len(records)
 
 
 def charge_reverse_prompt_quota(

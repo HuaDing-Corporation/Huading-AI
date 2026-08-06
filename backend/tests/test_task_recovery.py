@@ -146,6 +146,62 @@ def test_stale_aibrain_reservation_is_released_once_without_touching_live_or_com
     assert repeated.aibrain_reservations == 0
 
 
+def test_stale_copy_reservation_is_released_once_without_touching_live_record(
+    auth_db,
+    auth_context,
+) -> None:
+    from app.services import quota
+    from app.services.task_recovery import recover_orphaned_image_queue_tasks
+
+    now = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    stale_at = now - timedelta(seconds=1901)
+    fresh_at = now - timedelta(seconds=30)
+    with auth_db() as db:
+        stale = quota.reserve_copy_quota(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            provider="deepseek",
+            model="deepseek-v4-flash",
+        ).usage_record
+        fresh = quota.reserve_copy_quota(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            provider="deepseek",
+            model="deepseek-v4-flash",
+        ).usage_record
+        stale.created_at = stale_at
+        fresh.created_at = fresh_at
+        stale_id = stale.id
+        fresh_id = fresh.id
+        db.commit()
+
+    result = recover_orphaned_image_queue_tasks(
+        session_factory=auth_db,
+        now=now,
+        stale_after_seconds=1800,
+        aibrain_stale_after_seconds=1800,
+    )
+    repeated = recover_orphaned_image_queue_tasks(
+        session_factory=auth_db,
+        now=now,
+        stale_after_seconds=1800,
+        aibrain_stale_after_seconds=1800,
+    )
+
+    with auth_db() as db:
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        assert db.get(UsageRecord, stale_id).status == "released"
+        assert db.get(UsageRecord, fresh_id).status == "reserved"
+        assert subscription.quota_credits_reserved == 1
+
+    assert result.copy_reservations == 1
+    assert repeated.copy_reservations == 0
+
+
 def test_stale_running_photo_becomes_failed_and_releases_reserved_quota(
     auth_db,
     auth_context,

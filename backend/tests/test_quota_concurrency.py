@@ -43,6 +43,11 @@ _ALLOWED_RUNTIME_WRITES_BY_FUNCTION = {
             "quota_credits_reserved",
         },
         "release_reserved_quota": {"quota_credits_reserved"},
+        "release_copy_quota": {"quota_credits_reserved"},
+        "settle_copy_quota": {
+            "quota_credits_used",
+            "quota_credits_reserved",
+        },
         "settle_reserved_quota": {
             "quota_credits_used",
             "quota_credits_reserved",
@@ -467,6 +472,69 @@ def test_postgres_concurrent_copy_charges_preserve_both_increments(
         assert subscription.quota_credits_used == 2
         assert len(records) == 2
         assert sum(record.credits for record in records) == Decimal("2")
+
+
+def test_postgres_three_copy_reservations_with_one_credit_allow_exactly_one(
+    postgres_session_factory,
+) -> None:
+    factory = postgres_session_factory
+    subscription_id, tenant_id = _seed_postgres_subscription(
+        factory,
+        total=3,
+        used=2,
+    )
+    start = threading.Event()
+    done = [threading.Event() for _ in range(3)]
+    errors: list[BaseException] = []
+    reservation_ids: list[str] = []
+
+    def reserve(index: int) -> None:
+        try:
+            assert start.wait(timeout=5)
+            with factory() as db:
+                reservation = quota.reserve_copy_quota(
+                    db,
+                    tenant_id=tenant_id,
+                    provider="deepseek",
+                )
+                reservation_ids.append(reservation.usage_record.id)
+                db.commit()
+        except BaseException as exc:  # noqa: BLE001 - thread failures are evidence.
+            errors.append(exc)
+        finally:
+            done[index].set()
+
+    threads = [threading.Thread(target=reserve, args=(index,), daemon=True) for index in range(3)]
+    for thread in threads:
+        thread.start()
+    start.set()
+    for event_ in done:
+        assert event_.wait(timeout=5)
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(reservation_ids) == 1
+    assert len(errors) == 2
+    assert all(isinstance(error, AppError) for error in errors)
+    assert {error.code for error in errors if isinstance(error, AppError)} == {
+        "TENANT_QUOTA_EXCEEDED"
+    }
+    with factory() as db:
+        subscription = db.get(Subscription, subscription_id)
+        records = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.tenant_id == tenant_id,
+                    UsageRecord.capability == "llm",
+                )
+            )
+        )
+        assert subscription.quota_credits_used == 2
+        assert subscription.quota_credits_reserved == 1
+        assert len(records) == 1
+        assert records[0].id == reservation_ids[0]
+        assert records[0].status == "reserved"
 
 
 def test_postgres_concurrent_image_reservations_allow_exactly_one_order(

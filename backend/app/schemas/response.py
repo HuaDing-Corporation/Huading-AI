@@ -1,9 +1,14 @@
-from typing import Generic, TypeVar
+from typing import Generic, Literal, TypeVar
 
 from fastapi import Request
 from pydantic import BaseModel
 
 T = TypeVar("T")
+
+
+class OperationOutcome(BaseModel):
+    operation: str
+    status: Literal["succeeded", "failed"]
 
 
 class ErrorDetail(BaseModel):
@@ -12,6 +17,7 @@ class ErrorDetail(BaseModel):
     request_id: str | None = None
     detail: object | None = None
     details: list[object] | None = None
+    outcome: OperationOutcome | None = None
 
 
 class ApiResponse(BaseModel, Generic[T]):

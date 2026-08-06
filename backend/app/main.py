@@ -70,6 +70,7 @@ async def _run_orphan_recovery_loop() -> None:
                     result.reverse_prompt_jobs,
                     result.ecom_replicate_jobs,
                     result.aibrain_reservations,
+                    result.copy_reservations,
                 )
             ):
                 logger.warning(
@@ -79,6 +80,7 @@ async def _run_orphan_recovery_loop() -> None:
                     reverse_prompt_jobs=result.reverse_prompt_jobs,
                     ecom_replicate_jobs=result.ecom_replicate_jobs,
                     aibrain_reservations=result.aibrain_reservations,
+                    copy_reservations=result.copy_reservations,
                 )
         except asyncio.CancelledError:
             raise
@@ -100,16 +102,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             storage=create_object_storage(settings),
         )
         logger.info("bgm.seeded")
-    recovery_task = None
-    if settings.engine_orphan_recovery_interval_seconds > 0:
-        recovery_task = asyncio.create_task(_run_orphan_recovery_loop())
+    recovery_task = asyncio.create_task(_run_orphan_recovery_loop())
     try:
         yield
     finally:
-        if recovery_task is not None:
-            recovery_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await recovery_task
+        recovery_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await recovery_task
         logger.info("app.stopping")
 
 

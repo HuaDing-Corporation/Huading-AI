@@ -118,3 +118,4 @@ class ChatMessageCreateResponse(BaseModel):
     user_message: ChatMessageRead
     assistant_message: ChatMessageRead
     wallet: ReasoningWalletRead
+    cooldown_retry_after_seconds: int | None = Field(default=None, ge=1)

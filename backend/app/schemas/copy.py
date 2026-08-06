@@ -3,10 +3,17 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.schemas.response import OperationOutcome
+
 CopyRewriteMode = Literal["smart", "custom", "auto"]
 CopyVideoMode = Literal["avatar_talk", "seedance_i2v"]
 CopyTargetPlatform = Literal["douyin", "xiaohongshu"]
 CopyTitleStyle = Literal["短句", "长句"]
+CopyGenerationOperation = Literal["rewrite", "titles", "topics"]
+
+
+class CopyGenerationOutcome(OperationOutcome):
+    operation: CopyGenerationOperation
 
 
 class CopyRewriteRequest(BaseModel):
@@ -46,6 +53,7 @@ class CopyRewriteResult(BaseModel):
 
 class CopyRewriteResponse(BaseModel):
     results: list[CopyRewriteResult]
+    outcome: CopyGenerationOutcome
 
 
 class CopyTitlesRequest(BaseModel):
@@ -71,6 +79,7 @@ class CopyTitlesRequest(BaseModel):
 
 class CopyTitlesResponse(BaseModel):
     titles: list[str]
+    outcome: CopyGenerationOutcome
 
 
 class CopyTopicsRequest(BaseModel):
@@ -95,6 +104,7 @@ class CopyTopicsRequest(BaseModel):
 
 class CopyTopicsResponse(BaseModel):
     topics: list[str]
+    outcome: CopyGenerationOutcome
 
 
 class CopyDraftCreateRequest(BaseModel):

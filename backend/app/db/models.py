@@ -704,10 +704,6 @@ class ReasoningWallet(Base):
     __tablename__ = "reasoning_wallets"
     __table_args__ = (
         CheckConstraint(
-            "available_credits >= 0",
-            name="ck_reasoning_wallets_available_nonnegative",
-        ),
-        CheckConstraint(
             "reserved_credits >= 0",
             name="ck_reasoning_wallets_reserved_nonnegative",
         ),
@@ -800,6 +796,32 @@ class ChatMessage(TenantScopedMixin, Base):
         Numeric(18, 8), default=None
     )
     error_code: Mapped[str | None] = mapped_column(String(64), default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class AIBrainUserCooldown(TenantScopedMixin, Base):
+    __tablename__ = "aibrain_user_cooldowns"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_aibrain_user_cooldowns_user_id"),
+        Index(
+            "ix_aibrain_user_cooldowns_tenant_expires",
+            "tenant_id",
+            "expires_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE")
+    )
+    reason: Mapped[str] = mapped_column(String(64))
+    source_message_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("chat_messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 

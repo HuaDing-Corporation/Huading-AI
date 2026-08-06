@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -10,7 +11,27 @@ from app.services.apimart_costs import apimart_cost_cents_from_credits
 
 APIMART_TOKEN_PRICING_SOURCE_URL = "https://apib.ai/zh/pricing"
 APIMART_TOKEN_PRICING_VERIFIED_ON = "2026-07-30"
+OPENAI_GPT56_LIMITS_SOURCE_URL = "https://developers.openai.com/api/docs/models/gpt-5.6"
+APIMART_GPT56_USAGE_LIMITS_VERIFIED_ON = "2026-08-05"
 _TOKENS_PER_MILLION = Decimal("1000000")
+_CACHE_READ_TOKEN_KEYS = (
+    "cached_tokens",
+    "cache_read_tokens",
+    "cache_read_input_tokens",
+)
+_CACHE_WRITE_TOKEN_KEYS = (
+    "cache_write_tokens",
+    "cache_creation_tokens",
+    "cache_creation_input_tokens",
+)
+_CACHE_WRITE_5M_TOKEN_KEYS = (
+    "claude_cache_creation_5_m_tokens",
+    "ephemeral_5m_input_tokens",
+)
+_CACHE_WRITE_1H_TOKEN_KEYS = (
+    "claude_cache_creation_1_h_tokens",
+    "ephemeral_1h_input_tokens",
+)
 
 
 class APIMartTokenPricingError(ValueError):
@@ -64,6 +85,33 @@ class APIMartTokenRate:
 class APIMartCacheTokenUsage:
     cached_prompt_tokens: int | None
     cache_write_tokens: int | None
+    contract_valid: bool = True
+
+
+@dataclass(frozen=True)
+class APIMartTokenUsageLimits:
+    max_prompt_tokens: int
+    max_completion_tokens: int
+    max_total_tokens: int
+
+
+# OpenAI publishes a 1,050,000-token context window and 128,000 maximum output;
+# APIMart publishes the derived 922,000 maximum input and the same 128,000
+# output limit for every GPT-5.6 tier on APIMART_TOKEN_PRICING_SOURCE_URL.
+APIMART_GPT56_USAGE_LIMITS = APIMartTokenUsageLimits(
+    max_prompt_tokens=922_000,
+    max_completion_tokens=128_000,
+    max_total_tokens=1_050_000,
+)
+_APIMART_GPT56_MODELS = (
+    "gpt-5.6-luna",
+    "gpt-5.6-terra",
+    "gpt-5.6-sol",
+)
+_TOKEN_USAGE_LIMITS_BY_MODEL = dict.fromkeys(
+    _APIMART_GPT56_MODELS,
+    APIMART_GPT56_USAGE_LIMITS,
+)
 
 
 # APIMart effective rates after its 0.8 price factor, represented as
@@ -166,6 +214,36 @@ _TOKEN_RATE_TIERS_BY_MODEL: dict[str, tuple[_TokenRateTier, ...]] = {
 }
 
 
+def apimart_token_usage_limits(*, model: str) -> APIMartTokenUsageLimits | None:
+    """Return APIMart's verified public token limits for ``model`` when known."""
+
+    return _TOKEN_USAGE_LIMITS_BY_MODEL.get(str(model or "").strip().lower())
+
+
+def apimart_token_usage_is_within_limits(
+    *,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+) -> bool:
+    """Return whether a self-consistent usage report fits public model limits."""
+
+    limits = apimart_token_usage_limits(model=model)
+    token_counts = (prompt_tokens, completion_tokens, total_tokens)
+    if limits is None or any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in token_counts
+    ):
+        return False
+    return (
+        total_tokens == prompt_tokens + completion_tokens
+        and prompt_tokens <= limits.max_prompt_tokens
+        and completion_tokens <= limits.max_completion_tokens
+        and total_tokens <= limits.max_total_tokens
+    )
+
+
 def apimart_cache_token_usage(
     raw_usage: Mapping[str, Any],
 ) -> APIMartCacheTokenUsage:
@@ -179,34 +257,24 @@ def apimart_cache_token_usage(
     cached_prompt_tokens = _first_optional_nonnegative_int(
         prompt_details,
         raw_usage,
-        keys=("cached_tokens", "cache_read_tokens", "cache_read_input_tokens"),
+        keys=_CACHE_READ_TOKEN_KEYS,
     )
     generic_write_tokens = _first_optional_nonnegative_int(
         prompt_details,
         raw_usage,
-        keys=(
-            "cache_write_tokens",
-            "cache_creation_tokens",
-            "cache_creation_input_tokens",
-        ),
+        keys=_CACHE_WRITE_TOKEN_KEYS,
     )
     ttl_5m_tokens = _first_optional_nonnegative_int(
         raw_usage,
         prompt_details,
         cache_creation,
-        keys=(
-            "claude_cache_creation_5_m_tokens",
-            "ephemeral_5m_input_tokens",
-        ),
+        keys=_CACHE_WRITE_5M_TOKEN_KEYS,
     )
     ttl_1h_tokens = _first_optional_nonnegative_int(
         raw_usage,
         prompt_details,
         cache_creation,
-        keys=(
-            "claude_cache_creation_1_h_tokens",
-            "ephemeral_1h_input_tokens",
-        ),
+        keys=_CACHE_WRITE_1H_TOKEN_KEYS,
     )
     ttl_write_tokens = (ttl_5m_tokens or 0) + (ttl_1h_tokens or 0)
     if ttl_write_tokens > 0:
@@ -221,6 +289,38 @@ def apimart_cache_token_usage(
     return APIMartCacheTokenUsage(
         cached_prompt_tokens=cached_prompt_tokens,
         cache_write_tokens=cache_write_tokens,
+        contract_valid=_cache_usage_contract_valid(
+            raw_usage=raw_usage,
+            prompt_details=prompt_details,
+            cache_creation=cache_creation,
+        ),
+    )
+
+
+def _cache_usage_contract_valid(
+    *,
+    raw_usage: Mapping[str, Any],
+    prompt_details: Mapping[str, Any],
+    cache_creation: Mapping[str, Any],
+) -> bool:
+    recognized_fields = (
+        ((prompt_details, raw_usage), _CACHE_READ_TOKEN_KEYS),
+        ((prompt_details, raw_usage), _CACHE_WRITE_TOKEN_KEYS),
+        (
+            (raw_usage, prompt_details, cache_creation),
+            _CACHE_WRITE_5M_TOKEN_KEYS,
+        ),
+        (
+            (raw_usage, prompt_details, cache_creation),
+            _CACHE_WRITE_1H_TOKEN_KEYS,
+        ),
+    )
+    return all(
+        _optional_nonnegative_integer_is_valid(mapping[key])
+        for mappings, keys in recognized_fields
+        for mapping in mappings
+        for key in keys
+        if key in mapping
     )
 
 
@@ -377,8 +477,25 @@ def _special_token_credits(
 def _nonnegative_int(value: Any) -> int:
     try:
         return max(0, int(value or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
+
+
+def _optional_nonnegative_integer_is_valid(value: Any) -> bool:
+    if value in (None, ""):
+        return True
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value >= 0
+    if isinstance(value, float):
+        return math.isfinite(value) and value >= 0 and value.is_integer()
+    if isinstance(value, str):
+        try:
+            return int(value.strip()) >= 0
+        except (TypeError, ValueError, OverflowError):
+            return False
+    return False
 
 
 def _optional_nonnegative_int(value: Any) -> int | None:
@@ -404,9 +521,15 @@ def _optional_decimal(
     if value in (None, ""):
         return None
     try:
-        return Decimal(str(value))
+        parsed = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
         raise APIMartTokenPricingError(
             "APIMart provider credits are invalid.",
             error_type="invalid_usage_metadata",
         ) from exc
+    if not parsed.is_finite():
+        raise APIMartTokenPricingError(
+            "APIMart provider credits are invalid.",
+            error_type="invalid_usage_metadata",
+        )
+    return parsed

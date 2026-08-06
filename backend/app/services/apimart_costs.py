@@ -15,6 +15,7 @@ _CREDIT_KEYS = {
     "credits_cost",
 }
 _COST_CENTS_KEYS = {"cost_cents", "cny_cost_cents", "cost_cent"}
+_MAX_PERSISTABLE_COST_CENTS = Decimal("2147483647")
 # APIMart provider price-table fallbacks, in discounted provider Credits.
 # Source: https://apib.ai/zh/pricing, verified 2026-07-30.
 _IMAGE_CREDITS_BY_MODEL_PREFIX = {
@@ -58,6 +59,17 @@ def apimart_usage_metadata(payload: Mapping[str, Any]) -> dict[str, Any]:
     if cost_cents is not None:
         metadata["cost_cents"] = cost_cents
     return metadata
+
+
+def apimart_usage_metadata_contract_valid(payload: Mapping[str, Any]) -> bool:
+    """Return whether explicitly reported provider cost fields are usable."""
+    raw_credits = _first_nested_value(payload, _CREDIT_KEYS)
+    if raw_credits not in (None, "") and not _is_finite_nonnegative_decimal(raw_credits):
+        return False
+    raw_cost_cents = _first_nested_value(payload, _COST_CENTS_KEYS)
+    return raw_cost_cents in (None, "") or _cost_cents_contract_valid(
+        raw_cost_cents
+    )
 
 
 def apimart_cost_cents_from_result(result: Mapping[str, Any] | None) -> int:
@@ -157,10 +169,37 @@ def _decimal_or_none(value: Any) -> Decimal | None:
         return None
 
 
+def _is_finite_nonnegative_decimal(value: Any) -> bool:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return False
+    return parsed.is_finite() and parsed >= 0
+
+
+def _cost_cents_contract_valid(value: Any) -> bool:
+    try:
+        parsed = Decimal(str(value))
+    except (ArithmeticError, ValueError):
+        return False
+    return (
+        parsed.is_finite()
+        and parsed >= 0
+        and parsed <= _MAX_PERSISTABLE_COST_CENTS
+    )
+
+
 def _int_or_none(value: Any) -> int | None:
     if value in (None, ""):
         return None
     try:
-        return int(Decimal(str(value)).to_integral_value(rounding=ROUND_HALF_UP))
-    except (InvalidOperation, ValueError):
+        parsed = Decimal(str(value))
+    except (ArithmeticError, ValueError):
         return None
+    if (
+        not parsed.is_finite()
+        or parsed < 0
+        or parsed > _MAX_PERSISTABLE_COST_CENTS
+    ):
+        return None
+    return int(parsed.to_integral_value(rounding=ROUND_HALF_UP))

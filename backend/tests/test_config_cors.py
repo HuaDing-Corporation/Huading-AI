@@ -103,6 +103,57 @@ def test_generation_heartbeat_interval_rejects_unsafe_values(
         Settings(_env_file=None, jwt_secret_key=_JWT)
 
 
+@pytest.mark.parametrize("raw", ["1e-12", "1e300", "inf", "NaN", "0", "-1"])
+def test_orphan_recovery_interval_rejects_values_that_disable_fund_recovery(
+    monkeypatch,
+    raw: str,
+) -> None:
+    monkeypatch.setenv("ENGINE_ORPHAN_RECOVERY_INTERVAL_SECONDS", raw)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, jwt_secret_key=_JWT)
+
+
+def test_aibrain_usage_anomaly_cooldown_defaults_and_reads_env(monkeypatch) -> None:
+    monkeypatch.delenv("ENGINE_AIBRAIN_USAGE_ANOMALY_COOLDOWN_SECONDS", raising=False)
+    assert (
+        Settings(_env_file=None, jwt_secret_key=_JWT)
+        .engine_aibrain_usage_anomaly_cooldown_seconds
+        == 60
+    )
+
+    monkeypatch.setenv("ENGINE_AIBRAIN_USAGE_ANOMALY_COOLDOWN_SECONDS", "45")
+    assert (
+        Settings(_env_file=None, jwt_secret_key=_JWT)
+        .engine_aibrain_usage_anomaly_cooldown_seconds
+        == 45
+    )
+
+
+@pytest.mark.parametrize("raw", ["0", "301"])
+def test_aibrain_usage_anomaly_cooldown_cannot_be_disabled(
+    monkeypatch,
+    raw: str,
+) -> None:
+    monkeypatch.setenv("ENGINE_AIBRAIN_USAGE_ANOMALY_COOLDOWN_SECONDS", raw)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, jwt_secret_key=_JWT)
+
+
+def test_aibrain_usage_anomaly_cooldown_is_in_every_env_example() -> None:
+    repository_root = Path(__file__).parents[2]
+    examples = (
+        repository_root / "backend" / ".env.example",
+        repository_root / "infra" / ".env.example",
+        repository_root / "infra" / ".env.prod.example",
+    )
+
+    for example in examples:
+        contents = example.read_text(encoding="utf-8")
+        assert "ENGINE_AIBRAIN_USAGE_ANOMALY_COOLDOWN_SECONDS=60" in contents
+
+
 def test_engine_cors_origins_override_legacy_cors_env(monkeypatch) -> None:
     monkeypatch.setenv("CORS_ORIGINS", "http://localhost:3000")
     monkeypatch.setenv(
