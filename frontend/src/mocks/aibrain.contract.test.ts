@@ -14,6 +14,7 @@ const EXPOSURE = "__mock_inflight_exposure__"; // FIX2：在途敞口打满 402
 const USAGE_INVALID = "__mock_usage_limit__"; // FIX3：上游用量不可信 502（marker 名不变，语义已换）
 const PROMPT_LIMIT = "__mock_prompt_limit__"; // FIX2：提示词超本地硬上限 422
 const REPLAY_GUARD = "__mock_replay_guard__"; // FIX4：上游可能已产生成本 502（零扣费但开冷却）
+const GROSS_USAGE = "__mock_gross_usage__"; // 0003：答成功但超 envelope → 200 带预告 + 开冷却
 // idempotency_key 是 BE 必填 UUID → 测试用真 UUID（每次唯一，避免跨用例串键）。
 const topup = (amount: number, key = crypto.randomUUID()) => topupWallet({ amount, idempotency_key: key });
 
@@ -372,6 +373,45 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
     expect(err.code).toBe("AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN");
     expect(err.detail.retry_after_seconds).toBeGreaterThan(0);
     expect(Number.isInteger(err.detail.retry_after_seconds)).toBe(true); // BE `max(1, ceil(...))`
+  });
+
+  /**
+   * 🔴🔴 PRICING-UI-0003 · **冷却预告的因果链**（BE `76d5bb3` + aibrain.py:792-803）。
+   * 与所有错误路径不同：这是 **200 成功**，答案照常交付，BE 只是同时开了用户冷却，
+   * 并把时长放进 `cooldown_retry_after_seconds` 让前端能预告。
+   * 三段一起断言，缺一段这个功能就没意义：
+   *   ① 200 且**真的有答案**（不是错误伪装成成功）
+   *   ② 响应带正整数 `cooldown_retry_after_seconds`
+   *   ③ **下一次请求真的撞 503** —— 只发字段不开冷却等于演戏，预告的价值恰恰在"之后真会被拦"
+   * 变异：mock 只发字段不置冷却标志 → 第③段红。
+   */
+  it("🔴 gross_usage_anomaly：200 交付 + 带 cooldown_retry_after_seconds + 下一次撞 503", async () => {
+    await topup(2000);
+    const conv = await createConversation();
+    const res = await sendMessage(conv.id, { content: `${GROSS_USAGE} 你好`, tier: "low", attachment_asset_ids: [] });
+
+    // ① 成功交付（这条路径不是错误）
+    expect(res.assistant_message.status).toBe("completed");
+    expect(res.assistant_message.content.length).toBeGreaterThan(0);
+    // ② 预告字段
+    expect(res.cooldown_retry_after_seconds).toBeGreaterThan(0);
+    expect(Number.isInteger(res.cooldown_retry_after_seconds)).toBe(true);
+    // ③ 因果链：下一次撞 503
+    const next = await sendMessage(conv.id, { content: "再问一句", tier: "low", attachment_asset_ids: [] }).catch((e) => e);
+    expect(next.status).toBe(503);
+    expect(next.code).toBe("AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN");
+  });
+
+  /**
+   * 🔴 **正常路径不带预告**（绝大多数情况）。BE 恒发这个键但值为 null。
+   * 变异：mock 无条件发秒数 → 本条红（每次正常对话都会挂一句冷却提示）。
+   */
+  it("🔴 正常成功响应：cooldown_retry_after_seconds 为 null（不是每次都预告）", async () => {
+    await topup(2000);
+    const conv = await createConversation();
+    const res = await sendMessage(conv.id, { content: "你好", tier: "low", attachment_asset_ids: [] });
+    expect(res.assistant_message.status).toBe("completed");
+    expect(res.cooldown_retry_after_seconds).toBeNull();
   });
 
   /**

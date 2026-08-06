@@ -87,20 +87,23 @@ export const TYPICAL_COMPLETION_TOKENS = 500;
 /**
  * 三档 × 两区间 = 十二格（模型标识 = BE services/aibrain.py `_TIER_MODELS`）。
  *
- * 🔴🔴 **`extended` 这六格目前没有售价侧源码可核，逐格标注在此**（承重要求：明确标注没查出来的）：
- *   · BE `config.py` 的 `engine_aibrain_*_credits_per_1k` **仍是单值**，没有 >272K 那一组；
- *   · 任务包说的分支 `codex/pricing-aibrain-tier` **在远端不存在**，develop 上也没有
- *     —— 即 `PRICING-AIBRAIN-TIER-0001` 这个后端包**尚未落地**。
- * ✅ 但这六个数**不是猜的**，有两重交叉验证：
- *   ① BE **成本侧**（`apimart_token_pricing.py`，已在 develop 上）的 272K 双区间比例逐档可核：
- *      luna 输入 8→16、输出 48→72；terra 20→40、120→180；sol 40→80、240→360
- *      → **三档一律「输入 ×2、输出 ×1.5」**；
- *   ② `standard` 六格乘上该比例，与任务包给的表格**十二格逐格相符**
- *      （1.12×2=2.24、6.72×1.5=10.08、2.8×2=5.6、16.8×1.5=25.2、5.6×2=11.2、33.6×1.5=50.4）。
- *   `PRICING-AIBRAIN-TIER-0001` 的正确性判据是「每档两区间加价率相等」，×2/×1.5 正满足它。
+ * ✅ **十二格已逐格核实**（2026-08-07，PRICING-UI-0003）——权威来源是**售价侧** BE 源码：
+ *    PR #243 `codex/pricing-aibrain-tier` @ `0caaddd` 的 `config.py`：
+ *      `engine_aibrain_{low,mid,high}_credits_per_1k`              → standard 六格
+ *      `engine_aibrain_{low,mid,high}_above_272k_*_credits_per_1k` → extended 六格
+ *    区间判据同样已核：`user_token_rates()` 调 `apimart_token_rate(model, prompt_tokens)`，
+ *    后者的 `_rate_tier` 用 **`prompt_tokens <= tier.max_input_tokens`** → **恰在 272,000 归低区间**，
+ *    与本文件 `rateForPromptTokens` 的「严格大于才进高区间」一致（pricing.test.ts 门1d 钉住）。
+ *
+ * 📝 **方法留痕**（这段值得留，是"没有直接源码时如何不靠猜"的可复用例子）：
+ *    写下这六格时售价侧尚未落地，我没有照任务包的表格抄，而是用 BE **成本侧**
+ *    （`apimart_token_pricing.py`）的 272K 双区间**比例**做交叉验证 —— 三档一律
+ *    「输入 ×2、输出 ×1.5」，乘上 standard 六格，得到的十二格与后来的售价侧源码**全部命中**。
+ *    ⚠️ 但那条交叉验证**现在已是冗余**，且成本侧的绝对值已被 #244 校准过（改成
+ *    `official × 0.8`，值变了、比例没变）—— 所以**权威来源只认上面的售价侧**，别再指向成本侧表，
+ *    否则 #244 合并后注释指的那张表就变了，下一个人会困惑。
  * 🔴 **注意比例不是整体翻倍**：输入 ×2、输出 **×1.5**。照「双倍」写会把输出多算 33%。
  *    这一点有专门的门钉住（pricing.test.ts「十二格 / 比例」组）。
- * ⚠️ 售价侧落地后请回来逐格核对；`standard` 六格来自 #239 `config.py:211-216`（已核）。
  */
 export const TIERS: Record<IntensityTier, TierMeta> = {
   low: {
@@ -314,6 +317,21 @@ export interface SendMessageResponse {
   user_message: ChatMessage;
   assistant_message: ChatMessage;
   wallet: ReasoningWallet;
+  /**
+   * 🔴 PRICING-UI-0003：**冷却预告**（BE `76d5bb3` schemas/aibrain.py:121，
+   * `cooldown_retry_after_seconds: int | None = Field(default=None, ge=1)`）。
+   *
+   * 这一条**只在 200 成功响应里**出现，且只在 `gross_usage_anomaly` 时非空
+   * （aibrain.py:792-803：本次回答成功交付，但 provider 上报的 token 数超出了 config envelope
+   * → 按 reported 全额扣费 + **开用户冷却**）。值 = `engine_aibrain_usage_anomaly_cooldown_seconds`
+   * 的完整时长（冷却刚开，剩余即全长），默认 60。
+   *
+   * 🔴 它的意义：**用户刚拿到一个正常回答，下一条就会撞 503**。有了这个字段就能在答完时预告，
+   *    而不是让他撞一个莫名其妙的错误。这是我在 FIX4 §四 提的后端请求，CA 采纳了第二方案。
+   * ⚠️ 绝大多数情况是 `null`（provider 遵守 `max_completion_tokens=4096` 时不会触发）——
+   *    **null 时什么都不显示**，有专门的门守着，否则会退化成"永远显示"而无人察觉。
+   */
+  cooldown_retry_after_seconds?: number | null;
 }
 
 /**

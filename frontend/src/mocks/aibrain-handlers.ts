@@ -120,6 +120,18 @@ const PROMPT_LIMIT_MARKER = "__mock_prompt_limit__";
  * 上游可能已经产生成本却没给出可用结果 → 零扣费但**开用户冷却**。**无 detail**。
  */
 const REPLAY_GUARD_MARKER = "__mock_replay_guard__";
+/**
+ * content 含此串 → 模拟 **`gross_usage_anomaly`：答成功了，但 provider 上报的 token 超出 config
+ * envelope**（BE `b91e2188`+ aibrain.py:769-803）。行为：
+ *   · 200 **正常交付答案**（不是错误路径）
+ *   · 按 reported 全额扣费（不封顶，余额可负）
+ *   · **开用户冷却** → 响应带 `cooldown_retry_after_seconds`，且**下一次请求撞 503**
+ * 🔴 这条因果链必须是真的（同 FIX3 对 502→冷却 的做法）：前端的「预告」只有在
+ *    "预告之后真的会被拦"时才有意义，mock 只发字段不开冷却等于在演戏。
+ * ⚠️ 真实触发条件是 provider 违反请求参数（BE 请求体里明写了 `max_completion_tokens=4096`），
+ *    mock 无法自然复现，故用 marker。行为形态是真的。
+ */
+const GROSS_USAGE_ANOMALY_MARKER = "__mock_gross_usage__";
 
 // ── 提示词本地硬上限（BE `_prompt_token_upper_bound` vs `engine_aibrain_max_prompt_tokens`）──
 /** BE config 默认值（`engine_aibrain_max_prompt_tokens`，config.py:227，上界也是 922_000）。 */
@@ -578,7 +590,21 @@ export function aibrainHandlers() {
       conv.updated_at = assistantMsg.created_at;
       if (conv.title === "新对话" && content) conv.title = content.slice(0, 20);
 
-      return ok({ user_message: userMsg, assistant_message: assistantMsg, wallet: walletView() });
+      // ── `gross_usage_anomaly`：**答成功了但开冷却**（BE aibrain.py:792-803）───────────────
+      // 🔴 与所有错误路径不同：这是 **200**，答案照常交付。BE 只是同时开了用户冷却，
+      //    并把时长放进 `cooldown_retry_after_seconds` 让前端能**预告**。
+      // 🔴 因果链照做：置冷却标志 → **下一次请求真的撞 503**。只发字段不开冷却等于演戏，
+      //    前端的「预告」也就无从验证（预告的价值恰恰在于"之后真的会被拦"）。
+      const grossUsageAnomaly = content.includes(GROSS_USAGE_ANOMALY_MARKER);
+      if (grossUsageAnomaly) usageAnomalyCooldown = true;
+
+      return ok({
+        user_message: userMsg,
+        assistant_message: assistantMsg,
+        wallet: walletView(),
+        // BE 恒发这个键（`int | None`）；非 anomaly 时是 null，前端据此**什么都不显示**。
+        cooldown_retry_after_seconds: grossUsageAnomaly ? COOLDOWN_RETRY_AFTER_SECONDS : null
+      });
     })
   ];
 }

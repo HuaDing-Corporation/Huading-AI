@@ -61,6 +61,12 @@ export function AibrainChat() {
   //    FIX1：从单一 ShortfallView 换成判别式联合——「预留不足」与「欠费」是两种情形、两套话术。
   const [reason, setReason] = useState<RechargeReason | undefined>(undefined);
   const [sendError, setSendError] = useState<string | null>(null);
+  /**
+   * 🔴 冷却预告（PRICING-UI-0003）：成功答完但 BE 已开冷却时的秒数；null = 不显示。
+   * **与 `sendError` 分开两个状态**：那是错误态（红底 + `role="alert"`），这是提示态——
+   * 用户刚拿到一个**正常的回答**，把它渲染成错误会让他以为回答有问题。
+   */
+  const [cooldownAhead, setCooldownAhead] = useState<number | null>(null);
 
   const { data: wallet } = useWallet();
   // 🔴 钱包未加载/加载失败时余额是 undefined（**不是 0**）——否则 available<=0 的预检会把有余额的用户也锁死（CR#2）。
@@ -94,6 +100,7 @@ export function AibrainChat() {
   // 🔴 P1-1：返回是否**发送成功**——composer 据此决定清不清空（失败保留文字/附件/预览）。
   const handleSend = async (body: SendMessageRequest): Promise<boolean> => {
     setSendError(null);
+    setCooldownAhead(null);
     try {
       // 建会话与发消息**同在 try 内**：首条消息若建会话失败，也走错误分流、不静默丢消息（CR#1）。
       let convId = activeId;
@@ -102,7 +109,15 @@ export function AibrainChat() {
         convId = conv.id;
         setActiveId(conv.id);
       }
-      await send.mutateAsync({ conversationId: convId, body });
+      const res = await send.mutateAsync({ conversationId: convId, body });
+      // 🔴 PRICING-UI-0003 · **冷却预告**：这次答成功了，但 BE 同时开了用户冷却
+      //    （`gross_usage_anomaly`：provider 上报的 token 超出 config envelope）。
+      //    提前说一句，用户就不会在下一条撞一个莫名其妙的 503。
+      //    ⚠️ 绝大多数情况该字段是 null → **什么都不显示**（有专门的门守着，防止退化成"永远显示"）。
+      //    ⚠️ 走 `>= 1` 的正数判断而不是 `!= null`：BE 声明了 `ge=1`，0/负数属于契约坏了，
+      //       那种情况说「0 秒后才能发下一条」不如不说。
+      const ahead = res?.cooldown_retry_after_seconds;
+      if (typeof ahead === "number" && ahead >= 1) setCooldownAhead(Math.ceil(ahead));
       return true;
     } catch (err) {
       if (!(err instanceof ApiError)) {
@@ -184,6 +199,15 @@ export function AibrainChat() {
           {sendError ? (
             <p role="alert" className="mt-2 rounded-field bg-error-bg px-3 py-2 text-[12.5px] leading-relaxed text-error-fg">
               {sendError}
+            </p>
+          ) : null}
+
+          {/* 🔴 冷却预告（PRICING-UI-0003）：**提示态，不是错误态** —— 回答已经拿到了，
+              只是提醒下一条要等。故用中性底色 + `role="status"`（礼貌播报，不打断读屏），
+              而不是 `sendError` 那条的 error-bg + `role="alert"`。 */}
+          {cooldownAhead !== null ? (
+            <p role="status" className="mt-2 rounded-field bg-glass-fill px-3 py-2 text-[12.5px] leading-relaxed text-ink-soft">
+              {copy.aibrain.cooldownAhead(cooldownAhead)}
             </p>
           ) : null}
 
