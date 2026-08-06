@@ -1537,11 +1537,14 @@ export const copy = {
     intensityRateHint: (input: string, output: string, promptTokens: number, completionTokens: number) =>
       `按输入 ${input} / 输出 ${output} 积分每千 token 计费；「约 N 积分/次」是按 ${promptTokens} 输入 + ${completionTokens} 输出 token 的典型对话估算，实际以本次用量结算。`,
     /** 常驻的一句提示：还有一档更贵的，点开看具体数。 */
-    intensityRateTierNote: (thresholdK: number) => `超长上下文（输入超过 ${thresholdK} 万 token）另有更高费率。`,
+    intensityRateTierNote: (thresholdWan: number) => `超长上下文（输入超过 ${thresholdWan} 万 token）另有更高费率。`,
     /** 展开后的高区间明细——点开才看到，不占常驻行。 */
     intensityRateTierToggle: "查看超长上下文费率",
-    intensityRateTierDetail: (thresholdK: number, input: string, output: string) =>
-      `输入超过 ${thresholdK} 万 token 的部分，本档按输入 ${input} / 输出 ${output} 积分每千 token 计费。`,
+    // ⚠️ 参数名是 thresholdWan（**万**）而不是 thresholdK（千）：传进来的是 27.2，不是 272。
+    //    叫 K 会让下一个人按「千」去传，那就成了「输入超过 272 万 token」—— 错一个数量级，
+    //    而这是**价格档位的判据**，错了用户就不知道自己什么时候会跳到高费率。
+    intensityRateTierDetail: (thresholdWan: number, input: string, output: string) =>
+      `输入超过 ${thresholdWan} 万 token 的部分，本档按输入 ${input} / 输出 ${output} 积分每千 token 计费。`,
     // ── 402 余额不足（§三）────────────────────────────────────────────────
     // 此前 402 只是**默默弹开充值窗**，用户看不到任何解释；而新预留逻辑会锁住一个远大于实际花费的数
     //（高速档光 completion 就 137.6），不解释清楚会被当成「一次对话要花 137 积分」。
