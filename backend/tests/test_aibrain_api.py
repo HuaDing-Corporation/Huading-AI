@@ -828,6 +828,7 @@ def test_message_reserves_then_settles_exact_token_usage(
     assert data["assistant_message"]["prompt_tokens"] == 1000
     assert data["assistant_message"]["completion_tokens"] == 500
     assert data["assistant_message"]["charged_credits"] == 11.2
+    assert data["cooldown_retry_after_seconds"] is None
     assert data["wallet"]["available_credits"] == 488.8
     assert data["wallet"]["reserved_credits"] == 0
     assert len(provider.calls) == 1
@@ -1273,6 +1274,7 @@ def test_provider_usage_above_configured_envelope_charges_full_usage_and_cools_d
     assert response.json()["data"]["assistant_message"]["content"] == (
         "provider answer remains deliverable"
     )
+    assert response.json()["data"]["cooldown_retry_after_seconds"] > 0
     assert len(provider.calls) == 1
     assert replay_response.status_code == 503
     assert replay_response.json()["error"]["code"] == (
@@ -2266,6 +2268,68 @@ def test_unknown_dispatch_failure_opens_replay_guard_without_user_charge(
         assert wallet.available_credits == Decimal("500")
         assert wallet.reserved_credits == Decimal("0")
         assert wallet.total_spent_credits == Decimal("0")
+        assert usage.status == "released"
+        assert usage.credits == Decimal("0")
+
+
+def test_costless_2xx_structural_failure_opens_replay_guard_before_retry(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=_topup_payload(500),
+        headers=auth_context["headers"],
+    )
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    session = _FakeAPIMartSession(
+        _FakeAPIMartResponse(
+            {"choices": [{"message": {"content": ""}}]},
+            status_code=200,
+        )
+    )
+    provider = APIMartGPT56ChatProvider(
+        api_key="unit-test-key",
+        session=session,
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    url = f"/api/v1/aibrain/conversations/{conversation_id}/messages"
+
+    first_response = client.post(
+        url,
+        json={"content": "Return a structurally incomplete result", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+    replay_response = client.post(
+        url,
+        json={"content": "Do not replay the accepted request", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert first_response.status_code == 502
+    assert first_response.json()["error"]["code"] == "AIBRAIN_PROVIDER_REPLAY_GUARD"
+    assert replay_response.status_code == 503
+    assert replay_response.json()["error"]["code"] == (
+        "AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN"
+    )
+    assert replay_response.json()["error"]["detail"]["retry_after_seconds"] > 0
+    assert len(session.calls) == 1
+    with auth_db() as db:
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        failed_message = db.scalar(
+            select(ChatMessage).where(ChatMessage.status == "failed")
+        )
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.capability == "chat"))
+        assert wallet.available_credits == Decimal("500")
+        assert wallet.reserved_credits == Decimal("0")
+        assert wallet.total_spent_credits == Decimal("0")
+        assert failed_message.error_code == "AIBRAIN_PROVIDER_REPLAY_GUARD"
         assert usage.status == "released"
         assert usage.credits == Decimal("0")
 

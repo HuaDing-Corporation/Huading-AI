@@ -789,6 +789,7 @@ async def send_chat_message(
             settled_at=datetime.now(UTC),
         )
     )
+    cooldown_retry_after_seconds: int | None = None
     if gross_usage_anomaly:
         _open_provider_usage_anomaly_cooldown(
             db,
@@ -796,6 +797,9 @@ async def send_chat_message(
             user_id=user.id,
             reason="AIBRAIN_PROVIDER_USAGE_GROSS_ANOMALY",
             source_message_id=persisted_user_message.id,
+        )
+        cooldown_retry_after_seconds = (
+            settings.engine_aibrain_usage_anomaly_cooldown_seconds
         )
     db.commit()
     heartbeat.stop()
@@ -816,6 +820,7 @@ async def send_chat_message(
         ),
         assistant_message=message_to_read(assistant_message),
         wallet=wallet_to_read(settlement.wallet),
+        cooldown_retry_after_seconds=cooldown_retry_after_seconds,
     )
 
 

@@ -659,7 +659,7 @@ async def test_apimart_gpt56_chat_preserves_usage_when_2xx_response_has_no_conte
 
 
 @pytest.mark.asyncio
-async def test_apimart_gpt56_chat_leaves_costless_2xx_empty_content_retryable() -> None:
+async def test_apimart_gpt56_chat_guards_replay_for_2xx_empty_content() -> None:
     provider = APIMartGPT56ChatProvider(
         api_key="unit-test-key",
         session=_FakeSession(_FakeResponse({"choices": [{"message": {"content": ""}}]})),
@@ -678,7 +678,7 @@ async def test_apimart_gpt56_chat_leaves_costless_2xx_empty_content_retryable() 
     assert error.value.raw_usage_present is False
     assert error.value.raw_cost_present is False
     assert error.value.has_cost_evidence is False
-    assert error.value.request_may_have_been_accepted is False
+    assert error.value.request_may_have_been_accepted is True
 
 
 @pytest.mark.parametrize(

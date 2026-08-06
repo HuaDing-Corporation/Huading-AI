@@ -166,7 +166,11 @@ class APIMartGPT56ChatProvider:
             raise _error_with_usage_evidence(
                 str(exc),
                 usage_evidence,
-                request_may_have_been_accepted=usage_evidence.has_cost_evidence,
+                # A successful HTTP/API status is itself evidence that the
+                # upstream accepted the request. Missing content or usage must
+                # therefore guard against replay even when no cost metadata was
+                # returned with the structurally invalid response.
+                request_may_have_been_accepted=True,
             ) from exc
         return {
             "content": content,
