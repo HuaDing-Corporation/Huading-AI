@@ -310,7 +310,10 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
     const err = await sendMessage(conv.id, { content: `${USAGE_INVALID} 你好`, tier: "low", attachment_asset_ids: [] }).catch((e) => e);
     expect(err.status).toBe(502);
     expect(err.code).toBe("AIBRAIN_PROVIDER_USAGE_INVALID");
-    expect(err.detail).toBeUndefined(); // 🔴 BE 这条 AppError 不带 detail
+    // 🔴 FIX5 · P2：BE 这条 AppError 不带 detail，但响应里这个键**恒在、值为 null**
+    //    （`_error_response` 的 `model_dump` 没有 `exclude_none`）。此前断言 `toBeUndefined`
+    //    锁的是 mock 自己省略该键的旧形状 —— 比 BE 松。
+    expect(err.detail).toBeNull();
     expect((await getWallet()).available_credits).toBe(2000); // 预留释放干净 = 零扣费
   });
 
@@ -348,7 +351,7 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
     const err = await sendMessage(conv.id, { content: `${REPLAY_GUARD} 你好`, tier: "low", attachment_asset_ids: [] }).catch((e) => e);
     expect(err.status).toBe(502);
     expect(err.code).toBe("AIBRAIN_PROVIDER_REPLAY_GUARD");
-    expect(err.detail).toBeUndefined();
+    expect(err.detail).toBeNull(); // 同上：键恒在、值为 null（FIX5 · P2）
     expect((await getWallet()).available_credits).toBe(2000); // 零扣费
 
     const next = await sendMessage(conv.id, { content: "再问一句", tier: "low", attachment_asset_ids: [] }).catch((e) => e);

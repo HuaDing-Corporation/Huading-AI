@@ -60,16 +60,27 @@ const BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000").r
 const ok = <T>(data: T, status = 200) =>
   HttpResponse.json({ data, error: null, request_id: "mock-req" }, { status });
 /**
- * BE `_error_response`（core/exceptions.py）的形态：`error.detail` 是**可选**的结构化载荷。
+ * BE `_error_response`（core/exceptions.py）的形态：`error.detail` 是结构化载荷，**键恒在**。
  * 🔴 FIX1：`e2bc2c02` 给 `AppError` 加了 `detail` 形参并在 `app_error_handler` 里转发（:24/:94）——
  *    此前 detail 恒为 null。两类 402 的数字现在都在 detail 里，mock 必须照发，否则前端读 detail 的
- *    那条路径在 mock 下永远走不到（等于没测）。BE 不发 detail 时该字段缺席（不是 null 键），此处同形。
+ *    那条路径在 mock 下永远走不到（等于没测）。
+ * 🔴 FIX5 · P2 **订正上一版这里写错的一句**：曾写「BE 不发 detail 时该字段缺席（不是 null 键）」——
+ *    错的。`model_dump(mode="json")` **没有 `exclude_none`**，全字段照发；handler 里唯一被显式
+ *    pop 的是 `outcome`（:79-80）。所以真实响应里 `detail` 键**永远在**，无详情时值为 `null`。
  */
-const err = (status: number, code: string, message: string, detail?: unknown) =>
+const err = (status: number, code: string, message: string, detail: unknown = null) =>
   HttpResponse.json(
     {
       data: null,
-      error: { code, message, request_id: "mock-req", ...(detail === undefined ? {} : { detail }) },
+      // 🔴 FIX5 · P2：无详情时发 **`detail: null`**，不是省略这个键。
+      //    BE `_error_response` 走 `payload.model_dump(mode="json")` 且**没有 `exclude_none`**
+      //    （core/exceptions.py:78）—— 全字段照发，`ErrorDetail.detail` 声明为 `object | None`，
+      //    所以真实响应里这个键**恒在**，值为 null。整个 handler 里唯一被显式 pop 的是 `outcome`（:79-80）。
+      //    此前 mock 省略该键 = **mock 比 BE 松**，违反本文件一贯的原则。
+      // ⚠️ 运行时两者都被前端当"没有"处理（`parseInsufficientDetail` / `cooldownView` 都先判
+      //    `detail === null`），所以这不是修 bug，是修**契约忠实度** —— 松的 mock 迟早会放过一个
+      //    "只在 null 与缺席之间有区别"的实现。
+      error: { code, message, request_id: "mock-req", detail },
       request_id: "mock-req"
     },
     { status }

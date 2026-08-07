@@ -251,12 +251,37 @@ describe("CopywritingForm (文案仿写 + 标题/话题)", () => {
    * 变异：删掉那行 `copy.workbench.copyPriceDisclosure` → 本条红。
    * 🔴 顺带钉住「不扣费」三个字**不许**再出现在这个界面上（那是本包修掉的谎）。
    */
-  it("🔴 §五.1/2 界面上有扣费披露（3 积分 / 各 1 积分），且不再出现「不扣费」", () => {
+  /**
+   * 🔴🔴 FIX5 · P1-1：**本条上一版在给缺陷站岗**（本项目第六次）。
+   *
+   * 它断言披露里含「3 积分」「1 积分」—— 把一个**写死的价格**锁进了测试。而 BE `_rate()`
+   * （quota.py:224-245）是**三级解析**：租户级 `CreditRate` → 平台级 `CreditRate` → 代码默认
+   * `Decimal("1.0000")`。前两级是运营可改的数据，租户一覆写，界面上那句话就是错价，
+   * 而这条测试会**继续绿**——正是「测试锁死错误行为」的标准形态。
+   *
+   * 🔴 新断言锁**行为**不锁**数值**：
+   *   ① 披露在场且讲清结构性事实（三项、按三次计费、失败不计）
+   *   ② **不出现任何硬编码金额**——这是本条的核心，也是变异能杀死的那一点
+   *   ③ 「不扣费」那个谎仍不许回来
+   * ⚠️ 为什么不改成「断言金额来自 estimate 返回值」（CB 给的另一种写法）：**文案模块没有 estimate
+   *    端点**（`routes/copy.py` 只有 rewrite/titles/topics/drafts，`estimate_copy_quota` 未暴露 HTTP）。
+   *    已写进回执请 CA 补；补上之后本条应改成那种更强的形态。
+   */
+  it("🔴 §五.1/2 FIX5：披露讲清计费结构，且**不出现任何硬编码金额**", () => {
     const { container } = render(<CopywritingForm />);
     const disclosure = screen.getByText(copy.workbench.copyPriceDisclosure);
     expect(disclosure).toBeInTheDocument();
-    expect(disclosure.textContent ?? "").toContain("3 积分");
-    expect(disclosure.textContent ?? "").toContain("1 积分");
+
+    const text = disclosure.textContent ?? "";
+    // ① 结构性事实（这些是可核查的，与费率无关）
+    expect(text).toContain("三项");
+    expect(text).toContain("不计费"); // 失败的那一项
+    // ② 🔴 一个硬编码金额都不许有 —— 「N 积分」这种承诺前端给不出权威值。
+    expect(text).not.toMatch(/\d+\s*积分/);
+    // 顺带否掉最容易复发的那两个具体值。
+    expect(text).not.toContain("3 积分");
+    expect(text).not.toContain("1 积分");
+    // ③ 「不扣费」的谎不许回来。
     expect(container.textContent ?? "").not.toContain("不扣费");
   });
 });

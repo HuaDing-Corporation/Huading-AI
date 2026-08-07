@@ -125,6 +125,30 @@ describe("门B · 402「预留不足」充值窗：把四件事说清楚", () =>
     expect(d.queryByText(copy.aibrain.insufficientShortfall("0"))).not.toBeInTheDocument();
   });
 
+  /**
+   * 🔴🔴 FIX5 · P1-2 **在渲染层**的门（CB 报的缺陷是「弹窗上显示『还差 0 积分』」，
+   * 所以除了 `formatCredits` 的单元门，这一层也必须钉住 —— 两者互不塌缩：
+   * 那边守"函数不返回 0"，这边守"用户真的看不到 0"）。
+   * 变异：`formatCredits` 改回固定 `toFixed(1)` → 本条红（会渲染出「还差 0 积分」）。
+   */
+  it("🔴 小额正缺口（0.02）→ 弹窗显示「还差 0.02 积分」，**绝不出现「还差 0 积分」**", () => {
+    render(
+      insufficient(
+        shortfallView("low", 27.5, {
+          required_credits: 27.52,
+          available_credits: 27.5,
+          shortfall_credits: 0.02,
+          temporary_reservation: true
+        })
+      )
+    );
+    const d = within(dialog());
+    expect(d.getByText(copy.aibrain.insufficientShortfallExact("0.02"))).toBeInTheDocument();
+    // 🔴 用户绝不能看到「还差 0 积分」——那会让他以为不用充。
+    expect(d.queryByText(copy.aibrain.insufficientShortfallExact("0"))).not.toBeInTheDocument();
+    expect(dialog().textContent ?? "").not.toMatch(/还差\s*0\s*积分/);
+  });
+
   /** 🔴 门C：主动充值（非 402）→ 一个缺口数字都不出现。变异：无条件渲染说明块 → 本条红。 */
   it("门C：用户主动点「充值」（无 reason）→ 不出现任何缺口/欠费说明", () => {
     render(<RechargeDialog open onOpenChange={vi.fn()} />);
@@ -194,5 +218,20 @@ describe("门D · 402「欠费」充值窗：与「预留不足」明确区分",
     const d = within(dialog());
     expect(d.getByText(copy.aibrain.outstandingAmount("30"))).toBeInTheDocument();
     expect(d.getByText(copy.aibrain.outstandingBalance("-30"))).toBeInTheDocument();
+  });
+
+  /**
+   * 🔴🔴 FIX5 · P1-2：**欠费路径同款**（CB 报的两处之一是「需补齐 0 积分」）。
+   * 与上面那条 shortfall 的门分开写：两条路径走的是不同组件、不同 copy 键，
+   * 只修一处、只测一处正是本项目「修一处、同类还在」的老教训。
+   * 变异：`formatCredits` 改回固定 `toFixed(1)` → 本条红。
+   */
+  it("🔴 小额欠款（0.02）→ 显示「需补齐 0.02 积分」，**绝不出现「需补齐 0 积分」**", () => {
+    render(outstanding(outstandingView({ available_credits: -0.02, outstanding_credits: 0.02 })));
+    const d = within(dialog());
+    expect(d.getByText(copy.aibrain.outstandingAmount("0.02"))).toBeInTheDocument();
+    expect(d.getByText(copy.aibrain.outstandingBalance("-0.02"))).toBeInTheDocument();
+    expect(d.queryByText(copy.aibrain.outstandingAmount("0"))).not.toBeInTheDocument();
+    expect(dialog().textContent ?? "").not.toMatch(/需补齐\s*0\s*积分/);
   });
 });

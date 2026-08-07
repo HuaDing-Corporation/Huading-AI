@@ -7,7 +7,7 @@ import { Coins, Plus, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { copy } from "@/lib/copy";
 import { useWallet } from "@/lib/aibrain/hooks";
-import { minReservationCredits } from "@/lib/aibrain/types";
+import { formatCredits, minReservationCredits } from "@/lib/aibrain/types";
 
 /**
  * 低余额阈值 = **最低档一次请求的预留下界**（27.5）。
@@ -28,7 +28,7 @@ export function WalletBalance({ onRecharge }: { onRecharge: () => void }) {
       <Coins size={15} strokeWidth={1.8} className="text-gold-deep" aria-hidden />
       <span className="text-[12px] text-ink-soft">{copy.aibrain.balanceLabel}</span>
       <span className="text-[13px] font-semibold tabular-nums text-ink" aria-live="polite">
-        {wallet ? balance : "—"}
+        {wallet ? formatCredits(balance) : "—"}
       </span>
       {low && (
         <span className="inline-flex items-center gap-0.5 text-[11.5px] text-error-fg" role="status">

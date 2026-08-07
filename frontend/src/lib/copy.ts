@@ -281,15 +281,25 @@ export const copy = {
     copyTopicsLabel: "话题候选（点击复制）",
     copyEmptyTitles: "本次未生成标题候选",
     copyEmptyTopics: "本次未生成话题候选",
-    // ── 计费披露 + 部分失败（PRICING-UI-0001 §五）─────────────────────────────
+    // ── 计费披露 + 部分失败（PRICING-UI-0001 §五 · FIX5 P1-1 改写）─────────────────────────
     // 🔴 这个模块此前在注释里自称「不扣费」，界面上**一个字的价格披露都没有**。而 BE PR #239
     //   （services/copy.py `_generate_billed_copy`）给 rewrite / titles / topics 三个端点各自加了
-    //    reserve→settle，单价 = `estimate_copy_quota` 的 `capability="llm" unit="call"` 费率（默认 1 积分/次）。
-    //    「生成文案」按钮是前端并发打这三个端点（copywriting-form `Promise.allSettled`）→ 合计 3 积分。
-    // 🔴 「未成功的那一项不计费」不是安慰话，是可核查的事实：`_generate_billed_copy` 的 except 分支
-    //    调 `quota.release_copy_quota` 把预留原额释放，不落 settled。
+    //    reserve→settle，单价取 `estimate_copy_quota` 的 `capability="llm" unit="call"` 费率。
+    //
+    // 🔴🔴 **FIX5：删掉「各 1 积分，合计 3 积分」这个写死的金额。**
+    //    `1 积分` 只是 BE `_rate()`（quota.py:224-245）**三级解析的最后一级**：
+    //      租户级 `CreditRate` → 平台级 `CreditRate` → 代码默认 `Decimal("1.0000")`
+    //    前两级是**运营可改的数据**，租户覆写之后前端这句话就是错价 —— 与本包一开始修掉的
+    //    智脑 `6/15/30` **是同一个毛病**：一个看不出怎么来的裸整数，过期了也没人发现。
+    //    （那个毛病和这处新造是在同一个 PR 里发生的，值得记一笔。）
+    // ⚠️ **本该走 estimate**（图片/视频/反推都读 `POST /*/estimate` 拿权威金额），但文案模块
+    //    **没有这样的端点** —— `routes/copy.py` 只有 rewrite/titles/topics/drafts，
+    //    `estimate_copy_quota` 只是 services 内部函数、未暴露 HTTP。已写进回执请 CA 补。
+    //    在那之前：**只说可核查的结构性事实（三项各计一次、失败不计），不承诺任何具体数字**。
+    // 🔴 「未成功的那一项不计费」是可核查的：`_generate_billed_copy` 的 except 分支调
+    //    `quota.release_copy_quota` 把预留原额释放，不落 settled。
     copyPriceDisclosure:
-      "计费：「生成文案」会同时生成改写 / 标题 / 话题三项，各 1 积分，合计 3 积分；未成功的那一项不计费。",
+      "计费：「生成文案」会同时生成改写 / 标题 / 话题三项，按三次计费（每项各计一次）；未成功的那一项不计费。实际单价以你的套餐费率为准。",
     /** 部分失败必须看得见——否则用户只会看到「少了话题」而不知为何，更不知道为什么只扣了 2 分。 */
     copyPartFailed: (part: string, reason: string) => `${part}生成失败（该项未计费）：${reason}`,
     copyPartTitles: "标题",
@@ -1488,7 +1498,9 @@ export const copy = {
     copied: "已复制",
     thinking: "正在思考…",
     imageAttachment: "图片",
-    costLabel: (n: number) => `本次消耗 ${n} 积分`,
+    // FIX5：改收**已格式化的字符串**（`formatCredits`）。此前裸插值 `${n}`，
+    // 一次典型对话的实扣是 0.24192 这种长尾，直接摊在气泡上既难读、也与弹窗里的口径不一致。
+    costLabel: (credits: string) => `本次消耗 ${credits} 积分`,
     // 输入框
     inputPlaceholder: "输入问题…（Enter 发送，Shift+Enter 换行）",
     send: "发送",
