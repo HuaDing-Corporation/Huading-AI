@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
-from app.db.models import CopyDraft, Subscription, UsageRecord, VideoTask
+from app.db.models import CopyDraft, CreditRate, Subscription, UsageRecord, VideoTask
 from app.main import app
 from app.schemas.copy import CopyRewriteRequest
 from app.schemas.response import OperationOutcome
@@ -64,6 +64,81 @@ def _patch_copy_llm(monkeypatch, results: list[str], payloads: list[dict]) -> No
         lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
         raising=False,
     )
+
+
+def test_copy_estimate_uses_tenant_rate_and_returns_auditable_breakdown(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        db.add_all(
+            [
+                CreditRate(
+                    tenant_id=None,
+                    capability="llm",
+                    unit="call",
+                    credits_per_unit=Decimal("5.0000"),
+                ),
+                CreditRate(
+                    tenant_id=auth_context["tenant_id"],
+                    capability="llm",
+                    unit="call",
+                    credits_per_unit=Decimal("7.0000"),
+                ),
+            ]
+        )
+        db.commit()
+
+    response = TestClient(app).post(
+        "/api/v1/copy/estimate",
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "estimated_credits": 21,
+        "unit": "credits",
+        "note": (
+            "Estimate for one rewrite, titles, and topics request; "
+            "failed operations are not charged."
+        ),
+        "breakdown": [
+            {"operation": "rewrite", "estimated_credits": 7},
+            {"operation": "titles", "estimated_credits": 7},
+            {"operation": "topics", "estimated_credits": 7},
+        ],
+    }
+
+
+def test_copy_estimate_is_read_only(
+    auth_context,
+    auth_db,
+) -> None:
+    def snapshot() -> dict[str, object]:
+        with auth_db() as db:
+            subscription = db.scalar(
+                select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+            )
+            return {
+                "quota_used": subscription.quota_credits_used,
+                "quota_reserved": subscription.quota_credits_reserved,
+                "usage_records": db.scalar(select(func.count()).select_from(UsageRecord)),
+                "video_tasks": db.scalar(select(func.count()).select_from(VideoTask)),
+                "copy_drafts": db.scalar(select(func.count()).select_from(CopyDraft)),
+            }
+
+    before = snapshot()
+
+    response = TestClient(app).post(
+        "/api/v1/copy/estimate",
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["estimated_credits"] == sum(
+        item["estimated_credits"] for item in response.json()["data"]["breakdown"]
+    )
+    assert snapshot() == before
 
 
 @pytest.mark.parametrize(
