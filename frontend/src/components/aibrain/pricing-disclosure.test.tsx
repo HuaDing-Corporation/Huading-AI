@@ -78,12 +78,12 @@ describe("门B · 402「预留不足」充值窗：把四件事说清楚", () =>
   it("门B：精确态 402 → 「需临时预留 / 当前可用 / 还差 / 这是临时预留不是扣费」四件齐全", () => {
     render(insufficient(shortfallView("high", 20, BE_DETAIL)));
     const d = within(dialog());
-    expect(d.getByText(copy.aibrain.insufficientRequired("137.6"))).toBeInTheDocument();
+    expect(d.getByText(copy.aibrain.insufficientRequired("137.7"))).toBeInTheDocument();
     expect(d.getByText(copy.aibrain.insufficientAvailable("20"))).toBeInTheDocument();
-    expect(d.getByText(copy.aibrain.insufficientShortfallExact("117.6"))).toBeInTheDocument();
+    expect(d.getByText(copy.aibrain.insufficientShortfallExact("117.7"))).toBeInTheDocument();
     expect(d.getByText(copy.aibrain.insufficientReserveNote)).toBeInTheDocument();
     // 🔴 精确态**不许**出现「至少」的回退措辞（把精确值说成下界，或反过来，都是错的口径）。
-    expect(d.queryByText(copy.aibrain.insufficientMinRequired("137.6"))).not.toBeInTheDocument();
+    expect(d.queryByText(copy.aibrain.insufficientMinRequired("137.7"))).not.toBeInTheDocument();
     expect(dialog().textContent ?? "").not.toContain("至少");
   });
 
@@ -95,11 +95,11 @@ describe("门B · 402「预留不足」充值窗：把四件事说清楚", () =>
   it("门B1b：回退态（BE 未发 detail）→ 仍显示金额，但措辞带「至少」", () => {
     render(insufficient(shortfallView("high", 20)));
     const d = within(dialog());
-    expect(d.getByText(copy.aibrain.insufficientMinRequired("137.6"))).toBeInTheDocument();
-    expect(d.getByText(copy.aibrain.insufficientShortfall("117.6"))).toBeInTheDocument();
+    expect(d.getByText(copy.aibrain.insufficientMinRequired("137.7"))).toBeInTheDocument();
+    expect(d.getByText(copy.aibrain.insufficientShortfall("117.7"))).toBeInTheDocument();
     expect(d.getByText(copy.aibrain.insufficientReserveNote)).toBeInTheDocument();
     // 回退态**不许**用精确措辞（那等于告诉用户「充这么多就够」，而实际还要加提示词那一段）。
-    expect(d.queryByText(copy.aibrain.insufficientRequired("137.6"))).not.toBeInTheDocument();
+    expect(d.queryByText(copy.aibrain.insufficientRequired("137.7"))).not.toBeInTheDocument();
   });
 
   /**
@@ -109,7 +109,7 @@ describe("门B · 402「预留不足」充值窗：把四件事说清楚", () =>
   it("门B2：detail 与钱包都没有 → 不显示「当前可用」「还差」，但「临时预留」的解释照给", () => {
     render(insufficient(shortfallView("low", undefined)));
     const d = within(dialog());
-    expect(d.getByText(copy.aibrain.insufficientMinRequired("27.5"))).toBeInTheDocument();
+    expect(d.getByText(copy.aibrain.insufficientMinRequired("27.6"))).toBeInTheDocument();
     expect(d.queryByText(copy.aibrain.insufficientAvailable("0"))).not.toBeInTheDocument();
     expect(d.getByText(copy.aibrain.insufficientReserveNote)).toBeInTheDocument();
   });
@@ -131,7 +131,7 @@ describe("门B · 402「预留不足」充值窗：把四件事说清楚", () =>
    * 那边守"函数不返回 0"，这边守"用户真的看不到 0"）。
    * 变异：`formatCredits` 改回固定 `toFixed(1)` → 本条红（会渲染出「还差 0 积分」）。
    */
-  it("🔴 小额正缺口（0.02）→ 弹窗显示「还差 0.02 积分」，**绝不出现「还差 0 积分」**", () => {
+  it("🔴 小额正缺口（0.02）→ 弹窗显示「还差 0.1 积分」（向上），**绝不出现「还差 0 积分」**", () => {
     render(
       insufficient(
         shortfallView("low", 27.5, {
@@ -143,7 +143,9 @@ describe("门B · 402「预留不足」充值窗：把四件事说清楚", () =>
       )
     );
     const d = within(dialog());
-    expect(d.getByText(copy.aibrain.insufficientShortfallExact("0.02"))).toBeInTheDocument();
+    // 🔴 FIX6：缺口类**向上取整**到 1 位 → 0.02 显示成 0.1。数值上夸大了 5 倍，但方向安全：
+    //    「还差」语义下宁可让用户多充 0.08，也不能让他以为不用充。**把非零说成零才是不可接受的那种错。**
+    expect(d.getByText(copy.aibrain.insufficientShortfallExact("0.1"))).toBeInTheDocument();
     // 🔴 用户绝不能看到「还差 0 积分」——那会让他以为不用充。
     expect(d.queryByText(copy.aibrain.insufficientShortfallExact("0"))).not.toBeInTheDocument();
     expect(dialog().textContent ?? "").not.toMatch(/还差\s*0\s*积分/);
@@ -226,10 +228,13 @@ describe("门D · 402「欠费」充值窗：与「预留不足」明确区分",
    * 只修一处、只测一处正是本项目「修一处、同类还在」的老教训。
    * 变异：`formatCredits` 改回固定 `toFixed(1)` → 本条红。
    */
-  it("🔴 小额欠款（0.02）→ 显示「需补齐 0.02 积分」，**绝不出现「需补齐 0 积分」**", () => {
+  it("🔴 小额欠款（0.02）→ 显示「需补齐 0.1 积分」（向上），余额仍如实显示 -0.02", () => {
     render(outstanding(outstandingView({ available_credits: -0.02, outstanding_credits: 0.02 })));
     const d = within(dialog());
-    expect(d.getByText(copy.aibrain.outstandingAmount("0.02"))).toBeInTheDocument();
+    // 🔴🔴 **同一个弹窗里两类并存**，正好演示分叉的意义：
+    //    「需补齐」是缺口类 → 向上（0.02 → 0.1，宁可多补）
+    //    「当前余额」是余额类 → 如实（-0.02 原样，这是已经发生的事实）
+    expect(d.getByText(copy.aibrain.outstandingAmount("0.1"))).toBeInTheDocument();
     expect(d.getByText(copy.aibrain.outstandingBalance("-0.02"))).toBeInTheDocument();
     expect(d.queryByText(copy.aibrain.outstandingAmount("0"))).not.toBeInTheDocument();
     expect(dialog().textContent ?? "").not.toMatch(/需补齐\s*0\s*积分/);

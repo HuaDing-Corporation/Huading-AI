@@ -5,6 +5,7 @@ import { Copy, RefreshCw, Sparkles } from "lucide-react";
 
 import { copyToClipboard } from "@/lib/clipboard";
 import { errorText } from "@/lib/api/error-text";
+import { copyFailureBilling } from "@/lib/api/copy-billing";
 import { useGenerateTitles, useGenerateTopics, useRewriteCopy, useSaveCopyDraft } from "@/lib/api/hooks";
 import type { CopyMode, CopyPlatform, CopyRewriteRequest, CopyRewriteResult } from "@/lib/api/types";
 import { Button } from "@/components/ui/button";
@@ -153,13 +154,24 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
     setTitles(ti.status === "fulfilled" ? ti.value.titles ?? [] : []);
     setTopics(to.status === "fulfilled" ? to.value.topics ?? [] : []);
     // 失败的那几路逐条列出（含各自原因——可能一路 502 上游失败、另一路 403 配额不足）。
+    // 🔴 FIX6 · P1-2：措辞按 `copyFailureBilling` 分流 —— **rejection 不等于"服务端没扣钱"**。
+    //    拿到服务端自己生成的 failed outcome 才说「未计费」；没拿到响应就只说没完成、指向用量记录。
+    //    变异：把下面这行换成恒用 `copyPartFailedReleased` → `copywriting-form.billing.test.tsx`
+    //          的「网络中断不许承诺未计费」会红。
     setPartFailures(
       [
         [copy.workbench.copyPartTitles, ti] as const,
         [copy.workbench.copyPartTopics, to] as const
       ]
         .filter(([, r]) => r.status === "rejected")
-        .map(([part, r]) => copy.workbench.copyPartFailed(part, errorText((r as PromiseRejectedResult).reason)))
+        .map(([part, r]) => {
+          const reason = (r as PromiseRejectedResult).reason;
+          const say =
+            copyFailureBilling(reason) === "released"
+              ? copy.workbench.copyPartFailedReleased
+              : copy.workbench.copyPartFailedUnknown;
+          return say(part, errorText(reason));
+        })
     );
   };
 

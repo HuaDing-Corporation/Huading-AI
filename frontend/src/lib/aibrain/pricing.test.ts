@@ -5,7 +5,8 @@ import {
   TIERS,
   TYPICAL_COMPLETION_TOKENS,
   TYPICAL_PROMPT_TOKENS,
-  formatCredits,
+  formatCreditsExact,
+  formatCreditsUp,
   formatRate,
   minReservationCredits,
   outstandingView,
@@ -68,11 +69,18 @@ describe("智脑分档费率（价格真源，镜像 BE config.py）", () => {
    * 这个数是 402 提示的核心（用户会看到它被"扣住"），算错就等于对用户报错价。
    * 变异：把 `MAX_COMPLETION_TOKENS` 改成别的、或下界改用输入费率 → 本条红。
    */
-  it("门3：预留下界 = 4096 × 输出费率 → low 27.5 · mid 68.8 · high 137.6", () => {
+  it("门3：预留下界 = 4096 × 输出费率 → 真值 27.52512 / 68.8128 / 137.6256，展示 27.6 / 68.9 / 137.7", () => {
     expect(MAX_COMPLETION_TOKENS).toBe(4096);
-    expect(formatCredits(minReservationCredits("low"))).toBe("27.5");
-    expect(formatCredits(minReservationCredits("mid"))).toBe("68.8");
-    expect(formatCredits(minReservationCredits("high"))).toBe("137.6");
+    // 🔴 先钉**真值**（费率推导的结果），再钉展示值 —— 两者分开，格式化换实现时不会连累费率门。
+    expect(minReservationCredits("low")).toBeCloseTo(27.52512, 5);
+    expect(minReservationCredits("mid")).toBeCloseTo(68.8128, 4);
+    expect(minReservationCredits("high")).toBeCloseTo(137.6256, 4);
+    // 🔴🔴 下界是**缺口类**（"至少得留住这么多"）→ `formatCreditsUp`。
+    //    FIX6 之前这三个位置显示的是 27.5 / 68.8 / 137.6 —— 任务包 §三 那张表抄的就是这组**低报值**，
+    //    用户照着 27.5 充值仍然凑不齐 27.52512 的预留。这是本轮方向修复**真实改变界面数字**的地方。
+    expect(formatCreditsUp(minReservationCredits("low"))).toBe("27.6");
+    expect(formatCreditsUp(minReservationCredits("mid"))).toBe("68.9");
+    expect(formatCreditsUp(minReservationCredits("high"))).toBe("137.7");
   });
 
   /** 🔴 §三 的用户体验前提：被扣住的数**远大于**实际花费——这正是必须解释「临时预留」的原因。 */
@@ -89,8 +97,9 @@ describe("智脑分档费率（价格真源，镜像 BE config.py）", () => {
  * 变异：改回按 high 档取（137.6）→ 本条红（只用低档的用户会长期看到告警）。
  */
 describe("低余额阈值", () => {
-  it("低余额阈值 = 最低档的预留下界（27.5），不是高档的（137.6）也不是旧的典型值（30）", () => {
-    expect(formatCredits(minReservationCredits("low"))).toBe("27.5");
+  it("低余额阈值 = 最低档的预留下界（27.52512），不是高档的也不是旧的典型值（30）", () => {
+    // ⚠️ 这里是**数值比较**的阈值（wallet-balance 的 LOW_BALANCE），不是展示值 —— 用真值断言。
+    expect(minReservationCredits("low")).toBeCloseTo(27.52512, 5);
     expect(minReservationCredits("low")).toBeLessThan(minReservationCredits("high"));
     expect(minReservationCredits("low")).not.toBe(30);
   });
@@ -244,52 +253,116 @@ describe("precheckSend · 两种情形要分开（对齐 BE reserve 分支的判
   });
 });
 
-describe("积分 / 费率的展示格式", () => {
-  it("积分最多 1 位小数、整数不带 .0", () => {
-    expect(formatCredits(137.6256)).toBe("137.6");
-    expect(formatCredits(27.52)).toBe("27.5");
-    expect(formatCredits(20)).toBe("20");
-  });
+// ══ FIX6 · P1-1：格式化按语义**分成两个函数**，各守各的性质 ════════════════════════════════
+// 演进：① 固定 toFixed(1)（0.02→"0"，FIX5 修）→ ② 逐级提升精度（守住"非零"，**没守住方向**）
+//      → ③ 现在：缺口类向上、实扣类如实。
+//
+// 🔴 FIX5 那条 `formatCredits(137.6256) === "137.6"` 是**第七次「测试给缺陷站岗」**：
+//    它是我为了修"显示零"而**新写**的门，正确地钉住了"不显示零"，却在同一处放过了"方向"
+//    —— 137.6256 的真实语义是"至少需要"，显示 137.6 会让用户充 137.6 之后**仍然发不出去**。
+//    **一道门只能守它断言的那件事。** 写门时要问的是「我漏掉了这个值的哪个属性」。
+//    下面因此拆成两组断言：**性质门（非零 / 符号）** 与 **方向门（≥ / ==）**，互不塌缩。
 
-  // ══ FIX5 · P1-2：**通用判据 —— 格式化不得把一个非零的金额显示为零** ═══════════════════════
-  // 原缺陷：固定 `toFixed(1)` → `0.02` 变成 `"0"` → 界面上出现「还差 0 积分」「需补齐 0 积分」，
-  // 用户据此认为**不差**，充值时就会充不够。这是**方向性错误**，比数字不精确严重得多。
-  // 这条判据比"保留几位小数"更本质：小数位是表现，"非零不能变零"是语义。
-
+describe("展示格式 · 缺口类 formatCreditsUp（还得再拿出多少）", () => {
   /**
-   * 🔴🔴 本包的核心门。变异：把 `formatCredits` 改回 `credits.toFixed(1).replace(/\.0$/,"")`
-   *      → 前四个断言全红（0.02/0.001/0.004/1e-7 都会变 "0"）。
+   * 🔴🔴 **方向门**（本轮新增，FIX5 缺的就是它）：显示值恒 **≥** 真实值。
+   * 变异：把 `Math.ceil` 改成 `Math.round` 或 `Math.floor` → 本条红
+   *       （137.6256→"137.6" / 27.52512→"27.5"，低报"至少需要"）。
+   * 变异：把这里改回调用 `formatCreditsExact` → 本条仍绿（如实展示也 ≥ 真实值），
+   *       但下一条"进位到 1 位"会红 —— 两条合起来才钉死实现。
    */
-  it("🔴 任何非零金额都不许显示为零（0.02 / 0.001 / 0.05 / 1e-7）", () => {
-    // 任务包点名的三个小额值
-    expect(formatCredits(0.02)).toBe("0.02");
-    expect(formatCredits(0.001)).toBe("0.001");
-    // 四舍五入边界：0.05 → "0.1"。数值上夸大一倍，但方向安全（「还差」语义下宁可多充）。
-    expect(formatCredits(0.05)).toBe("0.1");
-    // 比 1 位小数的进位点还小 → 自动提升精度，而不是回落到 "0"
-    expect(formatCredits(0.004)).toBe("0.004");
-    // BE 把积分量化到 1e-6；比它还小的值（契约坏了/前端自算）也**不许**显示为零
-    expect(formatCredits(1e-7)).toBe("0.000001");
-  });
-
-  /**
-   * 🔴 判据本身用一组值批量守住 —— 逐个 `toBe` 只能覆盖写下的那几个，
-   * 这条覆盖的是「**任意**非零输入」这个性质，将来有人换实现也逃不掉。
-   */
-  it("🔴 判据：任意非零输入 → 输出不是 \"0\"（正负都测）", () => {
-    const samples = [0.02, 0.001, 0.05, 0.004, 0.0001, 1e-6, 1e-7, 0.09, 0.049, 137.6256, 27.52, 20];
+  it("🔴 方向：任意正缺口的显示值 ≥ 真实值（宁可多说，用户照着充一定够）", () => {
+    const samples = [137.6256, 27.52512, 117.6256, 0.24192, 0.02, 0.001, 0.004, 1e-7, 27.5, 68.8, 20, 0.05];
     for (const value of samples) {
-      expect(formatCredits(value)).not.toBe("0");
-      expect(Number(formatCredits(value))).not.toBe(0);
-      // 负数同理（欠费路径的 `available_credits` 是负的）
-      expect(formatCredits(-value)).not.toBe("0");
-      expect(Number(formatCredits(-value))).not.toBe(0);
+      expect(Number(formatCreditsUp(value))).toBeGreaterThanOrEqual(value);
     }
   });
 
-  /** 真正的零仍显示 "0" —— 判据是"非零不许变零"，不是"什么都不许是零"。 */
-  it("零仍然显示为 0（判据只管非零值）", () => {
-    expect(formatCredits(0)).toBe("0");
+  /**
+   * 🔴 CB 点名的两个具体值（**这是被重写的那条断言**：`137.6256` 原来锁 `"137.6"`）。
+   * 变异：任何非向上的舍入 → 本条红。
+   */
+  it("🔴 137.6256 → \"137.7\"（不是 \"137.6\"）· 27.52512 → \"27.6\"（不是 \"27.5\"）", () => {
+    expect(formatCreditsUp(137.6256)).toBe("137.7");
+    expect(formatCreditsUp(27.52512)).toBe("27.6");
+    // 恰好落在 1 位小数上的值不被推高（否则每个整洁的数都会凭空 +0.1）
+    expect(formatCreditsUp(27.5)).toBe("27.5");
+    expect(formatCreditsUp(68.8)).toBe("68.8");
+    expect(formatCreditsUp(20)).toBe("20");
+  });
+
+  /**
+   * 🔴 **浮点噪声不许把显示值推高一档**。
+   * ⚠️ 这条门第一版写错了：我拿 `68.8 / 137.6 / 1.1` 当样本，以为 `x * 10` 会有尾差 ——
+   *    实测**任何 1 位小数 × 10 都精确**（0.1..200 全扫一遍，零命中），所以那一版删掉
+   *    `toFixed(6)` 也**不会红**，等于给一段没人守的代码写了张假证明。
+   *    真正的来路是**减法**：`0.4 - 0.1 === 0.30000000000000004` → `*10` 得 3.0000000000000004
+   *    → `Math.ceil` 得 4 → 显示 `0.4`，凭空多报 0.1。
+   * 🔴 而这条减法路径是**真实存在**的：`shortfallView` 回退态就是 `required - available`
+   *    （见本文件「回退态余额高于下界」那组门）。
+   * 变异：删掉 `Number((credits * 10).toFixed(6))` 里的 `toFixed(6)` → 本条红。
+   */
+  it("🔴 浮点噪声：减法产生的 0.30000000000000004 显示 0.3，不许被推成 0.4", () => {
+    expect(0.4 - 0.1).not.toBe(0.3); // 先证明噪声真的在（否则这条门什么也没守）
+    expect(formatCreditsUp(0.4 - 0.1)).toBe("0.3");
+    expect(formatCreditsUp(0.30000000000000004)).toBe("0.3");
+    // 常规值不受影响
+    expect(formatCreditsUp(68.8)).toBe("68.8");
+    expect(formatCreditsUp(137.6)).toBe("137.6");
+    expect(formatCreditsUp(1.1)).toBe("1.1");
+  });
+
+  /** 🔴 FIX5 的性质门在这一类仍然有效（向上取整天然保证，但要钉住它不被绕过）。 */
+  it("🔴 非零不许显示为零（0.02 / 0.001 / 0.004 / 1e-7 一律进位到 0.1）", () => {
+    expect(formatCreditsUp(0.02)).toBe("0.1");
+    expect(formatCreditsUp(0.001)).toBe("0.1");
+    expect(formatCreditsUp(0.004)).toBe("0.1");
+    expect(formatCreditsUp(1e-7)).toBe("0.1");
+  });
+
+  it("零仍然显示 0（判据只管非零值）", () => {
+    expect(formatCreditsUp(0)).toBe("0");
+  });
+});
+
+describe("展示格式 · 实扣/余额类 formatCreditsExact（实际发生 / 现在有多少）", () => {
+  /**
+   * 🔴🔴 **方向门**：显示值 **等于**真实值（BE 精度六位以内）。
+   * 变异：把实现改成 `toFixed(1)` 或改成调用 `formatCreditsUp` → 本条红
+   *       （0.24192 会变 "0.2"/"0.3"，都不等于真值）。
+   */
+  it("🔴 方向：六位以内的值原样还原（不许舍入 —— 这是已发生的事实，不是估计）", () => {
+    const samples = [137.6256, 0.24192, 27.52512, 0.02, 0.001, 0.000001, 20, 27.5, -42.5, -0.02];
+    for (const value of samples) {
+      expect(Number(formatCreditsExact(value))).toBe(value);
+    }
+  });
+
+  /** 🔴 CB 点名的两处：`message-bubble` 的实扣、`wallet-balance` 的余额。 */
+  it("🔴 0.24192 → \"0.24192\"（不是 \"0.2\"）· 137.6256 → \"137.6256\"", () => {
+    expect(formatCreditsExact(0.24192)).toBe("0.24192");
+    expect(formatCreditsExact(137.6256)).toBe("137.6256");
+  });
+
+  /** 去尾零：六位精度不该让「20 积分」显示成「20.000000」。 */
+  it("去尾零：20 / 27.5 / 0.02 不带多余的零", () => {
+    expect(formatCreditsExact(20)).toBe("20");
+    expect(formatCreditsExact(27.5)).toBe("27.5");
+    expect(formatCreditsExact(0.02)).toBe("0.02");
+    expect(formatCreditsExact(1000)).toBe("1000"); // 尾零正则不许吃掉整数部分的 0
+  });
+
+  /**
+   * 🔴 FIX5 的性质门在这一类**仍然必要**：比 BE 量化精度（1e-6）还小的值去尾零后会变 "0"，
+   * 必须兜到最小可表示单位。变异：删掉 `formatCreditsExact` 末行的兜底 → 本条红。
+   */
+  it("🔴 比 1e-6 还小的非零值不许显示为零（契约坏了/前端自算的极小值）", () => {
+    expect(formatCreditsExact(1e-7)).toBe("0.000001");
+    expect(formatCreditsExact(-1e-7)).toBe("-0.000001");
+  });
+
+  it("零仍然显示 0（判据只管非零值）", () => {
+    expect(formatCreditsExact(0)).toBe("0");
   });
 
   /**
@@ -297,10 +370,39 @@ describe("积分 / 费率的展示格式", () => {
    * 显示成正数会把「欠 42.5」说成「有 42.5」。
    */
   it("负数保留符号（欠费路径的余额是负的）", () => {
-    expect(formatCredits(-42.5)).toBe("-42.5");
-    expect(formatCredits(-0.02)).toBe("-0.02");
+    expect(formatCreditsExact(-42.5)).toBe("-42.5");
+    expect(formatCreditsExact(-0.02)).toBe("-0.02");
+  });
+});
+
+describe("展示格式 · 两类之间的关系（这两条防止有人把分叉合并回去）", () => {
+  /**
+   * 🔴 **分叉必须真的有差别**：存在一个值，两个函数给出不同结果。
+   * 变异：把 `formatCreditsUp` 实现成 `return formatCreditsExact(credits)`（合并回一个函数）→ 本条红。
+   * 这是本轮 P1-1 的"分叉存在性"门 —— CB 判「分叉收益不足不成立」，这条钉住它不会被悄悄撤回。
+   */
+  it("🔴 同一个值两类给出不同结果（27.52512 → \"27.6\" vs \"27.52512\"）", () => {
+    expect(formatCreditsUp(27.52512)).not.toBe(formatCreditsExact(27.52512));
+    expect(formatCreditsUp(27.52512)).toBe("27.6");
+    expect(formatCreditsExact(27.52512)).toBe("27.52512");
   });
 
+  /**
+   * 🔴 **共同判据**（两类都必须满足）：任意非零输入 → 输出不是 "0"。
+   * 这条覆盖的是「**任意**非零输入」这个性质，将来有人换任一实现都逃不掉。
+   */
+  it("🔴 共同判据：任意非零输入 → 两类输出都不是 \"0\"（正负都测）", () => {
+    const samples = [0.02, 0.001, 0.05, 0.004, 0.0001, 1e-6, 1e-7, 0.09, 0.049, 137.6256, 27.52, 20];
+    for (const value of samples) {
+      for (const shown of [formatCreditsUp(value), formatCreditsExact(value), formatCreditsUp(-value), formatCreditsExact(-value)]) {
+        expect(shown).not.toBe("0");
+        expect(Number(shown)).not.toBe(0);
+      }
+    }
+  });
+});
+
+describe("费率的展示格式", () => {
   /** 费率固定 2 位：抹掉末位会把 1.12 显示成 1.1，那是**另一个价格**。 */
   it("费率固定 2 位小数（1.12 不许显示成 1.1）", () => {
     expect(formatRate(1.12)).toBe("1.12");

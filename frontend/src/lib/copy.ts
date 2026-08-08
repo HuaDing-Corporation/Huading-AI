@@ -296,12 +296,23 @@ export const copy = {
     //    **没有这样的端点** —— `routes/copy.py` 只有 rewrite/titles/topics/drafts，
     //    `estimate_copy_quota` 只是 services 内部函数、未暴露 HTTP。已写进回执请 CA 补。
     //    在那之前：**只说可核查的结构性事实（三项各计一次、失败不计），不承诺任何具体数字**。
-    // 🔴 「未成功的那一项不计费」是可核查的：`_generate_billed_copy` 的 except 分支调
-    //    `quota.release_copy_quota` 把预留原额释放，不落 settled。
+    // 🔴🔴 FIX6 · P1-2：这里原来写「未成功的那一项**不计费**」，**删掉了**。
+    //    依据（`_generate_billed_copy` 的 except 分支 release）成立于**服务端的观测范围**，
+    //    而这句话展示在**客户端的观测范围** —— 前端只知道"我的请求失败了"，不知道"服务端没扣我钱"。
+    //    响应在网络里丢失时（服务端已 settle），这句话就是**假的**。
+    //    判据下沉到 `api/copy-billing.ts`，按**有没有服务端 outcome** 分流，见 `copyPartFailed*`。
     copyPriceDisclosure:
-      "计费：「生成文案」会同时生成改写 / 标题 / 话题三项，按三次计费（每项各计一次）；未成功的那一项不计费。实际单价以你的套餐费率为准。",
-    /** 部分失败必须看得见——否则用户只会看到「少了话题」而不知为何，更不知道为什么只扣了 2 分。 */
-    copyPartFailed: (part: string, reason: string) => `${part}生成失败（该项未计费）：${reason}`,
+      "计费：「生成文案」会同时生成改写 / 标题 / 话题三项，按三次计费（每项各计一次）。实际单价以你的套餐费率为准。",
+    /**
+     * 部分失败必须看得见——否则用户只会看到「少了话题」而不知为何。
+     * 🔴 **两句措辞，按前端到底知不知道分流**（`copyFailureBilling`）：
+     *   `Released`：拿到了服务端自己生成的 failed outcome → 服务端明确失败，可据实说未计费
+     *   `Unknown` ：没拿到响应 / 没有 outcome（网络中断、网关超时、反代 5xx）
+     *               → **一个字的资金承诺都不给**，只说没完成 + 指向账单这个权威来源
+     */
+    copyPartFailedReleased: (part: string, reason: string) => `${part}生成失败（该项未计费）：${reason}`,
+    copyPartFailedUnknown: (part: string, reason: string) =>
+      `${part}没有完成：${reason}。这次请求没能拿到服务端的结果，是否计费请以用量记录为准。`,
     copyPartTitles: "标题",
     copyPartTopics: "话题",
     copyCopy: "复制",

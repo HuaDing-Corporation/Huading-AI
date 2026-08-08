@@ -15,7 +15,8 @@ import { useTopup } from "@/lib/aibrain/hooks";
 import {
   AIBRAIN_ERROR,
   TOPUP_OPTIONS,
-  formatCredits,
+  formatCreditsExact,
+  formatCreditsUp,
   type OutstandingView,
   type ShortfallView
 } from "@/lib/aibrain/types";
@@ -43,15 +44,15 @@ function ShortfallNotice({ shortfall }: { shortfall: ShortfallView }) {
       <ul className="mt-2 space-y-0.5 text-[12.5px] tabular-nums text-ink-soft">
         <li>
           {exact
-            ? copy.aibrain.insufficientRequired(formatCredits(required))
-            : copy.aibrain.insufficientMinRequired(formatCredits(required))}
+            ? copy.aibrain.insufficientRequired(formatCreditsUp(required))
+            : copy.aibrain.insufficientMinRequired(formatCreditsUp(required))}
         </li>
-        {available !== undefined && <li>{copy.aibrain.insufficientAvailable(formatCredits(available))}</li>}
+        {available !== undefined && <li>{copy.aibrain.insufficientAvailable(formatCreditsExact(available))}</li>}
         {gap !== undefined && (
           <li className="text-ink">
             {exact
-              ? copy.aibrain.insufficientShortfallExact(formatCredits(gap))
-              : copy.aibrain.insufficientShortfall(formatCredits(gap))}
+              ? copy.aibrain.insufficientShortfallExact(formatCreditsUp(gap))
+              : copy.aibrain.insufficientShortfall(formatCreditsUp(gap))}
           </li>
         )}
       </ul>
@@ -79,9 +80,9 @@ function OutstandingNotice({ outstanding }: { outstanding?: OutstandingView }) {
       <p className="mt-1.5 text-[12.5px] leading-relaxed text-error-fg">{copy.aibrain.outstandingNote}</p>
       {outstanding ? (
         <ul className="mt-2 space-y-0.5 text-[12.5px] tabular-nums text-ink-soft">
-          <li className="text-ink">{copy.aibrain.outstandingAmount(formatCredits(outstanding.outstanding))}</li>
+          <li className="text-ink">{copy.aibrain.outstandingAmount(formatCreditsUp(outstanding.outstanding))}</li>
           {outstanding.available !== undefined && (
-            <li>{copy.aibrain.outstandingBalance(formatCredits(outstanding.available))}</li>
+            <li>{copy.aibrain.outstandingBalance(formatCreditsExact(outstanding.available))}</li>
           )}
         </ul>
       ) : (

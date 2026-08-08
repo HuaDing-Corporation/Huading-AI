@@ -2,7 +2,10 @@
 
 export interface ApiResponse<T> {
   data: T | null;
-  error: { code: string; message: string; request_id?: string; detail?: unknown; details?: unknown } | null;
+  // `outcome`：BE `ErrorEnvelope` 的可选字段，由服务端异常处理挂上（文案三端点见
+  // `core/exceptions.py:_copy_generation_error_outcome`）。前端据「有没有它」判断请求是否到达应用层
+  // —— 见 `client.ts ApiError.outcome` 与 `copy-billing.ts`。
+  error: { code: string; message: string; request_id?: string; detail?: unknown; details?: unknown; outcome?: unknown } | null;
   request_id: string | null;
 }
 

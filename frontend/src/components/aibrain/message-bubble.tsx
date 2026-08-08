@@ -9,7 +9,7 @@ import { Check, Copy, Image as ImageIcon } from "lucide-react";
 
 import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
-import { formatCredits, type ChatMessage } from "@/lib/aibrain/types";
+import { formatCreditsExact, type ChatMessage } from "@/lib/aibrain/types";
 
 export function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user";
@@ -78,7 +78,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
             {copied ? copy.aibrain.copied : copy.aibrain.copy}
           </button>
           {message.charged_credits != null ? (
-            <span className="text-[11px] text-ink-faint tabular-nums">{copy.aibrain.costLabel(formatCredits(message.charged_credits))}</span>
+            <span className="text-[11px] text-ink-faint tabular-nums">{copy.aibrain.costLabel(formatCreditsExact(message.charged_credits))}</span>
           ) : null}
         </div>
       ) : null}

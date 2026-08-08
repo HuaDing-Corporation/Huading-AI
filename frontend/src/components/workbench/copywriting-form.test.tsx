@@ -186,7 +186,12 @@ describe("CopywritingForm (文案仿写 + 标题/话题)", () => {
   it("🔴 §五.3 标题端点失败 → 显式告知「标题生成失败（该项未计费）」，文案与话题照出", async () => {
     // 用 BE 真实会发的错误（502 COPY_GEN_FAILED，services/copy.py `_generate_billed_copy` 的兜底）——
     // 而不是裸 Error：裸 Error 走 errorText 的通用兜底，测不出"原因有没有带给用户"。
-    titlesMock.mutateAsync.mockRejectedValue(new ApiError("Copy generation failed.", "COPY_GEN_FAILED", 502));
+    // 🔴 FIX6：BE 的 502 会**带 outcome**（`core/exceptions.py:_copy_generation_error_outcome`
+    //    按 URL 后缀生成），所以这一路是"服务端明确失败" → 允许说「未计费」。
+    //    ⚠️ 少了这个 outcome，措辞会退到不承诺那句 —— 这正是下面 billing 那组门要证的事。
+    titlesMock.mutateAsync.mockRejectedValue(
+      new ApiError("Copy generation failed.", "COPY_GEN_FAILED", 502, null, { operation: "titles", status: "failed" })
+    );
     render(<CopywritingForm />);
     typeSource("原文");
     fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
@@ -213,7 +218,10 @@ describe("CopywritingForm (文案仿写 + 标题/话题)", () => {
    */
   it("🔴 §五.4 话题端点配额不足(403 TENANT_QUOTA_EXCEEDED) → 显示中文额度提示，不是英文原文", async () => {
     topicsMock.mutateAsync.mockRejectedValue(
-      new ApiError("Insufficient tenant quota.", "TENANT_QUOTA_EXCEEDED", 403)
+      new ApiError("Insufficient tenant quota.", "TENANT_QUOTA_EXCEEDED", 403, null, {
+        operation: "topics",
+        status: "failed"
+      })
     );
     render(<CopywritingForm />);
     typeSource("原文");
@@ -226,6 +234,7 @@ describe("CopywritingForm (文案仿写 + 标题/话题)", () => {
 
   /** 两路同时失败 → 两条都要列出来（不是只报第一条）。变异：只取首个失败 → 本条红。 */
   it("🔴 §五.3 标题与话题同时失败 → 两条失败各自列出", async () => {
+    // 裸 Error（没有服务端 outcome）→ FIX6 起走**不承诺**那句「没有完成」。
     titlesMock.mutateAsync.mockRejectedValue(new Error("titles boom"));
     topicsMock.mutateAsync.mockRejectedValue(new Error("topics boom"));
     render(<CopywritingForm />);
@@ -233,8 +242,90 @@ describe("CopywritingForm (文案仿写 + 标题/话题)", () => {
     fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
 
     expect(await screen.findByDisplayValue("改写后的文案")).toBeInTheDocument();
-    expect(screen.getByText(/标题生成失败/)).toBeInTheDocument();
-    expect(screen.getByText(/话题生成失败/)).toBeInTheDocument();
+    expect(screen.getByText(/标题没有完成/)).toBeInTheDocument();
+    expect(screen.getByText(/话题没有完成/)).toBeInTheDocument();
+  });
+
+  // ══ FIX6 · P1-2 · 界面上到底说了哪句话 ════════════════════════════════════════════════════
+  // `copy-billing.test.ts` 证的是**判据本身**；这一组证的是**判据接进了 UI**。
+  // 🔴 分成两处的理由和 FIX1 的 M5 教训一样：纯函数门绿着，组件里根本没调用它，照样全绿。
+  //    （那次是 `pricing-disclosure.test.tsx` 只测弹窗渲染、没测 `aibrain-chat` 的路由。）
+
+  /**
+   * 🔴🔴 **任务包点名的那个变异**：「把'无响应'也走成'未计费'」。
+   * 变异：`copywriting-form.tsx` 里恒用 `copyPartFailedReleased` → 本条红。
+   * 这里断言的是**否定式**：不出现「未计费」「不计费」这类承诺 —— 因为安全的说法有很多种，
+   * 而危险的说法只有"承诺了"这一种，钉死后者才不会被换个措辞绕过。
+   */
+  it("🔴 网络中断（NETWORK_ERROR，无响应）→ 文案绝不出现「未计费 / 不计费」这类资金承诺", async () => {
+    titlesMock.mutateAsync.mockRejectedValue(
+      new ApiError("网络连接失败，请检查后端服务是否在线。", "NETWORK_ERROR", 0)
+    );
+    const { container } = render(<CopywritingForm />);
+    typeSource("原文");
+    fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
+
+    const failure = await screen.findByText(/标题没有完成/);
+    const text = failure.textContent ?? "";
+    expect(text).not.toContain("未计费");
+    expect(text).not.toContain("不计费");
+    expect(text).not.toContain("不扣费");
+    // 说清没完成 + 指向权威来源（用量记录），不替服务端下资金结论。
+    expect(text).toContain("以用量记录为准");
+    // 整页也不许有这三个词从别处冒出来。
+    expect(container.textContent ?? "").not.toMatch(/未计费|不计费|不扣费/);
+  });
+
+  /**
+   * 🔴 网关 504：**有** HTTP 状态、**没有** outcome —— 服务端可能已经跑完并 settle。
+   * 变异：判据换成 `err.status === 0 ? unknown : released`（只防"没状态码"那一种）→ 本条红。
+   */
+  it("🔴 网关 504（有状态码但无服务端 outcome）→ 同样不承诺", async () => {
+    topicsMock.mutateAsync.mockRejectedValue(new ApiError("请求失败（504）", "HTTP_ERROR", 504));
+    render(<CopywritingForm />);
+    typeSource("原文");
+    fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
+
+    const failure = await screen.findByText(/话题没有完成/);
+    expect(failure.textContent ?? "").not.toMatch(/未计费|不计费/);
+  });
+
+  /**
+   * 🔴 对照组（**分流真的分了**，不是一律降级成"不承诺"）：
+   * 带服务端 failed outcome 的业务失败 → 仍然据实说「未计费」。
+   * 变异：`copyFailureBilling` 恒返回 "unknown"（等于全走路 A，把 B 那一路也砍了）→ 本条红。
+   */
+  it("🔴 有服务端 outcome 的业务失败 → 据实说「未计费」（分流两侧都要活着）", async () => {
+    topicsMock.mutateAsync.mockRejectedValue(
+      new ApiError("Copy generation failed.", "COPY_GEN_FAILED", 502, null, { operation: "topics", status: "failed" })
+    );
+    render(<CopywritingForm />);
+    typeSource("原文");
+    fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
+
+    const failure = await screen.findByText(/话题生成失败/);
+    expect(failure.textContent ?? "").toContain("未计费");
+  });
+
+  /**
+   * 🔴 500 未处理异常**带着 outcome** —— 唯一"看起来像业务失败、实际可能已扣费"的形态
+   * （`_generate_billed_copy` 的 except 覆盖不到 `return` 之后）。
+   * 变异：去掉 `copyFailureBilling` 里的 `status === 500` 排除 → 本条红。
+   * ⚠️ 与 `copy-billing.test.ts` 那条 500 门断言的是同一规则的**两个层次**：那条证判据，这条证 UI。
+   */
+  it("🔴 500 + outcome（settle 之后出错也长这样）→ 界面同样不承诺", async () => {
+    titlesMock.mutateAsync.mockRejectedValue(
+      new ApiError("Internal server error.", "INTERNAL_SERVER_ERROR", 500, null, {
+        operation: "titles",
+        status: "failed"
+      })
+    );
+    render(<CopywritingForm />);
+    typeSource("原文");
+    fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
+
+    const failure = await screen.findByText(/标题没有完成/);
+    expect(failure.textContent ?? "").not.toMatch(/未计费|不计费/);
   });
 
   /** 全成 → 一条失败提示都不出现（防止把提示写成常驻）。 */
@@ -275,7 +366,11 @@ describe("CopywritingForm (文案仿写 + 标题/话题)", () => {
     const text = disclosure.textContent ?? "";
     // ① 结构性事实（这些是可核查的，与费率无关）
     expect(text).toContain("三项");
-    expect(text).toContain("不计费"); // 失败的那一项
+    // 🔴 FIX6 · P1-2：「未成功的那一项**不计费**」已从披露里**删除** ——
+    //    那是前端保证不了的资金事实（响应丢失时服务端可能已 settle）。
+    //    失败项的措辞下沉到逐条提示，按 `copyFailureBilling` 分流。
+    expect(text).not.toContain("不计费");
+    expect(text).toContain("三次计费"); // 结构性事实（可核查）保留
     // ② 🔴 一个硬编码金额都不许有 —— 「N 积分」这种承诺前端给不出权威值。
     expect(text).not.toMatch(/\d+\s*积分/);
     // 顺带否掉最容易复发的那两个具体值。

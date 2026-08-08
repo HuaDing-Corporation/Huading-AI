@@ -107,10 +107,10 @@ describe("402 分流：欠费 vs 预留不足（CB 第 1 点）", () => {
 
     await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
     const d = within(dialog());
-    expect(d.getByText(copy.aibrain.insufficientRequired("137.6"))).toBeInTheDocument();
+    expect(d.getByText(copy.aibrain.insufficientRequired("137.7"))).toBeInTheDocument();
     // 🔴 取 BE 的 20，**不是**钱包里的 500 —— 402 时钱包快照可能已经过时。
     expect(d.getByText(copy.aibrain.insufficientAvailable("20"))).toBeInTheDocument();
-    expect(d.getByText(copy.aibrain.insufficientShortfallExact("117.6"))).toBeInTheDocument();
+    expect(d.getByText(copy.aibrain.insufficientShortfallExact("117.7"))).toBeInTheDocument();
     expect(d.getByText(copy.aibrain.insufficientReserveNote)).toBeInTheDocument();
     // 精确态不带「至少」。
     expect(dialog().textContent ?? "").not.toContain("至少");
@@ -489,7 +489,7 @@ describe("预检拦截：不发请求，但也要说对是哪一种", () => {
     expect(hooks.sendMutateAsync).not.toHaveBeenCalled();
     const d = within(dialog());
     expect(d.getByText(copy.aibrain.insufficientTitle)).toBeInTheDocument();
-    expect(d.getByText(copy.aibrain.insufficientMinRequired("68.8"))).toBeInTheDocument();
+    expect(d.getByText(copy.aibrain.insufficientMinRequired("68.9"))).toBeInTheDocument();
     expect(d.queryByText(copy.aibrain.outstandingTitle)).not.toBeInTheDocument();
   });
 

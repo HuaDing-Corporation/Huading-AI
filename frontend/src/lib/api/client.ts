@@ -19,13 +19,25 @@ export class ApiError extends Error {
   code: string;
   status: number;
   detail?: unknown;
+  /**
+   * 服务端在**自己的异常处理里**挂上的 per-endpoint 成败结论（BE `schemas/response.py OperationOutcome`；
+   * 文案三端点由 `core/exceptions.py:_copy_generation_error_outcome` 生成）。
+   *
+   * 🔴 **它的价值不在字段内容，而在"它出现了"**（FIX6 · P1-2）：
+   *    带 outcome  ⇒ 请求**到达了应用层**、走完了后端的异常分支（那条分支里做了 release）
+   *    不带 outcome ⇒ 网络中断 / 网关超时 / 代理 5xx —— 后端做没做完，**前端无从知道**
+   *    这就是"能不能对用户陈述资金事实"的分界线。见 `copyFailureBilling`。
+   * ⚠️ 故意是 `unknown`：不在传输层假设形状，由消费方运行时窄化（与 `detail` 同一约定）。
+   */
+  outcome?: unknown;
 
-  constructor(message: string, code: string, status: number, detail?: unknown) {
+  constructor(message: string, code: string, status: number, detail?: unknown, outcome?: unknown) {
     super(message);
     this.name = "ApiError";
     this.code = code;
     this.status = status;
     this.detail = detail;
+    this.outcome = outcome;
   }
 }
 
@@ -93,7 +105,8 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
       err?.message ?? `请求失败（${res.status}）`,
       err?.code ?? "HTTP_ERROR",
       res.status,
-      err?.detail
+      err?.detail,
+      err?.outcome
     );
   }
 
@@ -135,7 +148,8 @@ export async function multipartFetch<T>(path: string, form: FormData, opts: Mult
       err?.message ?? `${opts.defaultErrorMessage ?? "请求失败"}（${res.status}）`,
       err?.code ?? opts.defaultErrorCode ?? "HTTP_ERROR",
       res.status,
-      err?.detail
+      err?.detail,
+      err?.outcome
     );
   }
 
