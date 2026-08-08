@@ -12,14 +12,101 @@ import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
 import { ApiError } from "@/lib/api/client";
 import { useTopup } from "@/lib/aibrain/hooks";
-import { AIBRAIN_ERROR, TOPUP_OPTIONS } from "@/lib/aibrain/types";
+import {
+  AIBRAIN_ERROR,
+  TOPUP_OPTIONS,
+  formatCreditsExact,
+  formatCreditsUp,
+  type OutstandingView,
+  type ShortfallView
+} from "@/lib/aibrain/types";
+
+/**
+ * 余额不足说明块（PRICING-UI-0001 §三）—— 只在**因 402 `AIBRAIN_INSUFFICIENT_BALANCE` 而弹开**时渲染。
+ *
+ * 🔴 §三 要求交代四件事，这里逐条落位：
+ *   1 需要多少 → `insufficientRequired`（BE 精确值）/ `insufficientMinRequired`（回退下界 +「至少」）
+ *   2 当前多少 → `insufficientAvailable`（拿不到则整行不渲染，**不填 0 冒充**）
+ *   3 还差多少 → `insufficientShortfallExact` / `insufficientShortfall`
+ *   4 这是临时预留、不是扣费 → `insufficientReserveNote`（**四条里最要紧的一条**：高速档光 completion
+ *     就预留 137.6，不说清楚会被当成「一次对话花 137 积分」而吓退用户）
+ * 🔴 第 4 条放在**最前面**且用 error 语义色 —— 用户此刻正在看一个被拒的操作，先解释"这笔钱不是花掉了"，
+ *    再给数字，顺序反了数字就先造成误解了。
+ * 🔴 `exact` 分叉不是措辞洁癖：回退态给的是**下界**，把它说成精确值等于告诉用户「充这么多就够」，
+ *    而实际还要加上提示词那一段，充完照样发不出去。
+ */
+function ShortfallNotice({ shortfall }: { shortfall: ShortfallView }) {
+  const { required, exact, available, shortfall: gap } = shortfall;
+  return (
+    <div className="mb-4 rounded-field border border-line-gold bg-glass-fill px-3 py-2.5">
+      <p className="text-[13px] font-medium text-ink">{copy.aibrain.insufficientTitle}</p>
+      <p className="mt-1.5 text-[12.5px] leading-relaxed text-error-fg">{copy.aibrain.insufficientReserveNote}</p>
+      <ul className="mt-2 space-y-0.5 text-[12.5px] tabular-nums text-ink-soft">
+        <li>
+          {exact
+            ? copy.aibrain.insufficientRequired(formatCreditsUp(required))
+            : copy.aibrain.insufficientMinRequired(formatCreditsUp(required))}
+        </li>
+        {available !== undefined && <li>{copy.aibrain.insufficientAvailable(formatCreditsExact(available))}</li>}
+        {gap !== undefined && (
+          <li className="text-ink">
+            {exact
+              ? copy.aibrain.insufficientShortfallExact(formatCreditsUp(gap))
+              : copy.aibrain.insufficientShortfall(formatCreditsUp(gap))}
+          </li>
+        )}
+      </ul>
+      {/* 回退态特有：余额 ≥ 下界却仍被拒 → 缺口在提示词那一段，前端算不出，换一句话说清方向。
+          精确态不会走到这里（BE 的 shortfall 必 > 0）。 */}
+      {!exact && available !== undefined && gap === undefined && (
+        <p className="mt-2 text-[12px] leading-relaxed text-ink-faint">{copy.aibrain.insufficientContextHint}</p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * **欠费**说明块（402 `AIBRAIN_OUTSTANDING_BALANCE`，PR #239 `e2bc2c02` 新增）。
+ *
+ * 🔴 与 `ShortfallNotice` **刻意分成两个组件**，因为话术是相反的：
+ *    那边说「这笔钱只是临时锁住、结束会退回」，这边**绝不能出现「会退回」** —— 用户上一次的对话
+ *    已经答完并交付了，实际用量超出当时的预留，差额是**真花掉的钱**，现在记成欠款。
+ *    把两者合并成一个带 if 的组件，迟早会有人把「临时预留」那句话漏给欠费用户看。
+ */
+function OutstandingNotice({ outstanding }: { outstanding?: OutstandingView }) {
+  return (
+    <div className="mb-4 rounded-field border border-line-gold bg-glass-fill px-3 py-2.5">
+      <p className="text-[13px] font-medium text-ink">{copy.aibrain.outstandingTitle}</p>
+      <p className="mt-1.5 text-[12.5px] leading-relaxed text-error-fg">{copy.aibrain.outstandingNote}</p>
+      {outstanding ? (
+        <ul className="mt-2 space-y-0.5 text-[12.5px] tabular-nums text-ink-soft">
+          <li className="text-ink">{copy.aibrain.outstandingAmount(formatCreditsUp(outstanding.outstanding))}</li>
+          {outstanding.available !== undefined && (
+            <li>{copy.aibrain.outstandingBalance(formatCreditsExact(outstanding.available))}</li>
+          )}
+        </ul>
+      ) : (
+        // detail 与钱包都拿不到数 → 只给定性说明，**不编一个数字出来**。
+        <p className="mt-2 text-[12px] leading-relaxed text-ink-faint">{copy.aibrain.outstandingUnknown}</p>
+      )}
+    </div>
+  );
+}
+
+/** 402 弹开充值窗时携带的说明——**判别式联合**，逼调用方明确说出是哪一种情形。 */
+export type RechargeReason =
+  | { kind: "insufficient"; shortfall: ShortfallView }
+  | { kind: "outstanding"; outstanding?: OutstandingView };
 
 export function RechargeDialog({
   open,
-  onOpenChange
+  onOpenChange,
+  reason
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** 由 402 / 预检拦截弹开时传入；用户主动点「充值」时不传（那时没有缺口可言，别凭空吓人）。 */
+  reason?: RechargeReason;
 }) {
   const recharge = useTopup();
   const [amount, setAmount] = useState<number>(TOPUP_OPTIONS[1]);
@@ -67,6 +154,9 @@ export function RechargeDialog({
             </Button>
           </DialogClose>
         </div>
+
+        {reason?.kind === "insufficient" && <ShortfallNotice shortfall={reason.shortfall} />}
+        {reason?.kind === "outstanding" && <OutstandingNotice outstanding={reason.outstanding} />}
 
         <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label={copy.aibrain.rechargeTitle}>
           {TOPUP_OPTIONS.map((tier) => {

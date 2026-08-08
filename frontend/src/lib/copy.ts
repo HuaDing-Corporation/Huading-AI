@@ -281,6 +281,40 @@ export const copy = {
     copyTopicsLabel: "话题候选（点击复制）",
     copyEmptyTitles: "本次未生成标题候选",
     copyEmptyTopics: "本次未生成话题候选",
+    // ── 计费披露 + 部分失败（PRICING-UI-0001 §五 · FIX5 P1-1 改写）─────────────────────────
+    // 🔴 这个模块此前在注释里自称「不扣费」，界面上**一个字的价格披露都没有**。而 BE PR #239
+    //   （services/copy.py `_generate_billed_copy`）给 rewrite / titles / topics 三个端点各自加了
+    //    reserve→settle，单价取 `estimate_copy_quota` 的 `capability="llm" unit="call"` 费率。
+    //
+    // 🔴🔴 **FIX5：删掉「各 1 积分，合计 3 积分」这个写死的金额。**
+    //    `1 积分` 只是 BE `_rate()`（quota.py:224-245）**三级解析的最后一级**：
+    //      租户级 `CreditRate` → 平台级 `CreditRate` → 代码默认 `Decimal("1.0000")`
+    //    前两级是**运营可改的数据**，租户覆写之后前端这句话就是错价 —— 与本包一开始修掉的
+    //    智脑 `6/15/30` **是同一个毛病**：一个看不出怎么来的裸整数，过期了也没人发现。
+    //    （那个毛病和这处新造是在同一个 PR 里发生的，值得记一笔。）
+    // ⚠️ **本该走 estimate**（图片/视频/反推都读 `POST /*/estimate` 拿权威金额），但文案模块
+    //    **没有这样的端点** —— `routes/copy.py` 只有 rewrite/titles/topics/drafts，
+    //    `estimate_copy_quota` 只是 services 内部函数、未暴露 HTTP。已写进回执请 CA 补。
+    //    在那之前：**只说可核查的结构性事实（三项各计一次、失败不计），不承诺任何具体数字**。
+    // 🔴🔴 FIX6 · P1-2：这里原来写「未成功的那一项**不计费**」，**删掉了**。
+    //    依据（`_generate_billed_copy` 的 except 分支 release）成立于**服务端的观测范围**，
+    //    而这句话展示在**客户端的观测范围** —— 前端只知道"我的请求失败了"，不知道"服务端没扣我钱"。
+    //    响应在网络里丢失时（服务端已 settle），这句话就是**假的**。
+    //    判据下沉到 `api/copy-billing.ts`，按**有没有服务端 outcome** 分流，见 `copyPartFailed*`。
+    copyPriceDisclosure:
+      "计费：「生成文案」会同时生成改写 / 标题 / 话题三项，按三次计费（每项各计一次）。实际单价以你的套餐费率为准。",
+    /**
+     * 部分失败必须看得见——否则用户只会看到「少了话题」而不知为何。
+     * 🔴 **两句措辞，按前端到底知不知道分流**（`copyFailureBilling`）：
+     *   `Released`：拿到了服务端自己生成的 failed outcome → 服务端明确失败，可据实说未计费
+     *   `Unknown` ：没拿到响应 / 没有 outcome（网络中断、网关超时、反代 5xx）
+     *               → **一个字的资金承诺都不给**，只说没完成 + 指向账单这个权威来源
+     */
+    copyPartFailedReleased: (part: string, reason: string) => `${part}生成失败（该项未计费）：${reason}`,
+    copyPartFailedUnknown: (part: string, reason: string) =>
+      `${part}没有完成：${reason}。这次请求没能拿到服务端的结果，是否计费请以用量记录为准。`,
+    copyPartTitles: "标题",
+    copyPartTopics: "话题",
     copyCopy: "复制",
     copyCopied: "已复制",
     copySave: "保存到历史",
@@ -1475,7 +1509,9 @@ export const copy = {
     copied: "已复制",
     thinking: "正在思考…",
     imageAttachment: "图片",
-    costLabel: (n: number) => `本次消耗 ${n} 积分`,
+    // FIX5：改收**已格式化的字符串**（`formatCredits`）。此前裸插值 `${n}`，
+    // 一次典型对话的实扣是 0.24192 这种长尾，直接摊在气泡上既难读、也与弹窗里的口径不一致。
+    costLabel: (credits: string) => `本次消耗 ${credits} 积分`,
     // 输入框
     inputPlaceholder: "输入问题…（Enter 发送，Shift+Enter 换行）",
     send: "发送",
@@ -1485,8 +1521,109 @@ export const copy = {
     intensityLow: "低",
     intensityMid: "中",
     intensityHigh: "高",
+    // 🔴 PRICING-UI-0001 §二：「约 N 积分/次」是**估算**，不是价目。它此前作为裸整数出现（6/15/30），
+    //    没人知道那是「500 输入 + 500 输出 token」的估值，于是 BE 降价 35% 之后 UI 静默错价了三个月。
+    //    现在这个数由费率推导（`typicalCredits`），且**必须与 `intensityRateHint` 同屏出现**——
+    //    口径行是常驻文本而非 hover tooltip，因为触屏上 hover 不可达（等于没有说明）。
     intensityCost: (n: number) => `约 ${n} 积分/次`,
-    intensityAria: (label: string, cost: number) => `智能强度 ${label}，约 ${cost} 积分每次`,
+    intensityAria: (label: string, cost: number) => `智能强度 ${label}，约 ${cost} 积分每次（按典型对话估算）`,
+    /** 常驻口径行：真实费率 + 「约 N 积分」是怎么估出来的。 */
+    intensityRateHint: (input: string, output: string, promptTokens: number, completionTokens: number) =>
+      `按输入 ${input} / 输出 ${output} 积分每千 token 计费；「约 N 积分/次」是按 ${promptTokens} 输入 + ${completionTokens} 输出 token 的典型对话估算，实际以本次用量结算。`,
+    // ── 402 余额不足（§三）────────────────────────────────────────────────
+    // 此前 402 只是**默默弹开充值窗**，用户看不到任何解释；而新预留逻辑会锁住一个远大于实际花费的数
+    //（高速档光 completion 就 137.6），不解释清楚会被当成「一次对话要花 137 积分」。
+    insufficientTitle: "推理积分不足，本次没有发送",
+    /** 🔴 §三 第 4 条 —— 这条路径最要紧的一句话：预留 ≠ 扣费。 */
+    insufficientReserveNote:
+      "这是「临时预留」，不是实际扣费：发送时按「最长回答」先锁住一笔积分，对话结束立即按实际用量结算，差额当场退回余额。",
+    // 🔴 FIX1：BE `e2bc2c02` 起 402 带结构化 detail → 能给**精确值**，措辞里的「至少」随之去掉。
+    //    回退措辞（`…MinRequired`）保留给 detail 缺失的情形——把下界说成精确值等于告诉用户
+    //    「充这么多就够」，而实际还要加提示词那一段，充完照样发不出去。
+    insufficientRequired: (credits: string) => `本次需临时预留 ${credits} 积分`,
+    insufficientMinRequired: (credits: string) => `本次至少需临时预留 ${credits} 积分`,
+    insufficientAvailable: (credits: string) => `当前可用 ${credits} 积分`,
+    insufficientShortfallExact: (credits: string) => `还差 ${credits} 积分`,
+    insufficientShortfall: (credits: string) => `至少还差 ${credits} 积分`,
+    /** 回退态下余额 ≥ 下界却仍被拒：缺口来自提示词那一段（前端算不出精确值，故换一句话说清方向）。 */
+    insufficientContextHint:
+      "余额高于这个下限仍被拒，通常是本次对话的上下文较长或带了图片——提示词也要计入预留。可新建对话或精简内容后重试。",
+    // ── 402 之二：欠费 AIBRAIN_OUTSTANDING_BALANCE（§三 · FIX1）────────────────────────────
+    // 🔴 与「预留不足」是两回事，话术相反，别混用：
+    //    预留不足 = 这笔钱只是临时锁住、结束会退回；
+    //    欠费     = 上一次对话**已经答完并交付**，实际用量超出了当时的预留，差额记成了欠款。
+    //    所以这里**绝不能**出现「会退回」三个字——那笔钱是真花掉了。
+    outstandingTitle: "有未结清的推理积分，暂时无法继续",
+    outstandingNote:
+      "上一次对话已经答完并交付，实际用量超出了当时的预留，差额记成了欠款。补齐后即可继续对话。",
+    outstandingAmount: (credits: string) => `需补齐 ${credits} 积分`,
+    outstandingBalance: (credits: string) => `当前余额 ${credits} 积分`,
+    /** detail 与钱包都拿不到数时只给定性说明——**不编数字**。 */
+    outstandingUnknown: "补齐欠款后即可继续；具体金额请在充值后查看余额。",
+    // ── 402 之三：在途敞口打满 AIBRAIN_INFLIGHT_EXPOSURE_LIMIT（FIX2）────────────────────────
+    // 🔴🔴 本组文案的**硬要求**：说清这不是余额问题、充值不解决。
+    //    上限是 config 常量（单请求最大敞口 × 2），钱包余额不在那个式子里 —— 用户充了钱照样发不出去，
+    //    那比说错「欠费」更糟：他花了钱还是解决不了。故这里**不许**出现「余额」「充值」「积分不足」
+    //    任何字样，也不许弹充值窗（分流在 aibrain-chat.tsx，门在 aibrain-chat.402.test.tsx）。
+    // 🔴 「不是余额问题」这句是**主动澄清**，不是废话：用户刚被一个 402 拦下，默认联想就是没钱，
+    //    不说破他就会去充值。
+    inflightExposureTitle: "同时进行的对话太多，本次没有发送",
+    inflightExposureNote: "这不是余额问题，充值不会解决——请等前面的对话答完再发。",
+    /** 有 `in_flight_request_count` 时给出条数（用户据此知道要等几条）。 */
+    inflightExposureCount: (n: number) => `当前有 ${n} 条对话正在进行中。`,
+    /** `retryable` 为真（BE 目前恒真）→ 明确告诉用户重试就行，不必做别的。 */
+    inflightExposureRetry: "稍后重试即可。",
+    // ── 422：提示词超本地硬上限 AIBRAIN_PROMPT_LIMIT_EXCEEDED（FIX2）────────────────────────
+    // 🔴 **故意不展示 detail 里的两个 token 数**（`prompt_token_upper_bound` / `max_prompt_tokens`）：
+    //    前者是 BE 按 UTF-8 **字节数**算的保守上界（`_prompt_token_upper_bound` 的 docstring 自陈
+    //    "conservative"），比真实 token 数大不少；把「你用了 95 万 token / 上限 92.2 万」摆给用户，
+    //    既看不懂也据此行动不了，还是个虚高的数。只讲**能做的三件事**。
+    promptLimitExceeded: "本次输入太长，没有发送。可以新建对话（历史消息也计入长度）、缩短输入内容，或减少图片后重试。",
+    // ── 502：上游用量不可信 AIBRAIN_PROVIDER_USAGE_INVALID（FIX3 定稿）──────────────────────
+    // 🔴 **「未扣费」现在可以说了**，依据是源码而不是回执：本码与 `AIBRAIN_USAGE_MISSING`、
+    //    `AIBRAIN_PROVIDER_FAILED` 三者**共用** `_fail_chat_message`（aibrain.py:487/:511/:534/:558/:633），
+    //    该函数 `entry_type="release"` 释放**全额**预留，并落 `UsageRecord(credits=Decimal("0"),
+    //    status="released")` —— 对用户**零扣费**是代码写死的事实，不是承诺。
+    //    FIX2 时我按 §六.3 保持中性（当时 CB 未判定，写错任何一边都是拿钱说假话）；现在判定有了。
+    // ⚠️ FIX2 的 `AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED` 已在 `fbe8420d` 删除：「合法但超上限」
+    //    改成封顶扣费 + 正常交付，不再是错误路径。所以这句话的适用范围也窄了——只剩"上报不可信"。
+    providerUsageInvalid: "本次生成未能完成，未扣费，请重试；如果反复出现，请联系我们。",
+    // ── 503：用量异常冷却 AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN（FIX3 第五个码 · FIX4 接真值）──
+    // 🔴 这是**冷却**，既不是余额问题也不是并发太多 —— 三者的处置完全不同，文案不许串味：
+    //    绝不出现「充值」「余额不足」「同时进行的对话太多」。
+    // 🔴 FIX4：BE `b91e2188` 补上了 `detail.retry_after_seconds`（正整数），**「约一分钟」的硬编码
+    //    换成真值**。回退那一支保留：字段缺失/非法时仍说「约一分钟」（来源是 config `default=60`，
+    //    范围 [1,300] 可覆写）—— BE 哪天不发，UI 会**静默**退化成什么都不说，回退与它的门都不能省。
+    // ⚠️ BE 仍**没有**发 `Retry-After` 头（全仓 grep 无），秒数只在 detail 里。
+    // ⚠️ **秒数直接说秒，不换算成分钟**：范围只有 1–300，"85 秒后"完全可读；换算要处理取整
+    //    （89 秒说"约 1 分钟"会让用户早退回来再撞一次）而没有任何实际收益。
+    // ⚠️ **不说「这是用户级/租户级的」**：FIX3 时它是租户级，我判断不说（用户既不知道是谁触发、
+    //    也无法据此行动）；FIX4 把它改成了**用户级**（BE 新表 `AIBrainUserCooldown` 按 user_id 唯一），
+    //    "别人触发"这件事**更加不成立**了 —— 现在冷却就是他自己那次异常造成的，归因说明毫无必要。
+    usageAnomalyCooldownRetryIn: (seconds: number) =>
+      `AI 服务的用量统计暂时异常，已暂停新对话以免计费出错。请 ${seconds} 秒后重试。`,
+    /** 回退：拿不到 `retry_after_seconds` 时按 config 默认值说个「约」。 */
+    usageAnomalyCooldown: "AI 服务的用量统计暂时异常，已暂停新对话以免计费出错。请约一分钟后重试。",
+    // ── 502 之三：REPLAY_GUARD AIBRAIN_PROVIDER_REPLAY_GUARD（FIX4 · 第六个码）─────────────────
+    // 🔴 对用户来说它和 `PROVIDER_FAILED` **看起来是同一件事**（都没生成出来、都零扣费），
+    //    但**后果不同**：本码在 BE 的 `_USER_COOLDOWN_ERROR_CODES` 里 → **一定会开用户冷却**。
+    //    所以文案里**不许说「请重试」**——那是明知会失败还引导用户去做：他立刻重试必撞 503，
+    //    体验就是连着两次失败。改说「稍等片刻再发送」。
+    // ⚠️ 不说具体等多久：本码的 502 **没有 detail**（BE 只给 code+message），秒数拿不到。
+    //    真去重试撞上 503 时才有精确秒数——那时 `usageAnomalyCooldownRetryIn` 会说清楚。
+    //    这样两条文案是自洽的：这里说"稍等片刻"，撞上了说"还要 N 秒"。
+    // ⚠️ 「未扣费」照说：本码同样走 `_fail_chat_message` → release 全额预留 + `UsageRecord.credits=0`。
+    providerReplayGuard: "本次生成未能完成，未扣费。为避免重复计费，请稍等片刻再发送。",
+    /**
+     * 🔴 未知 402 的**中性**兜底（FIX2 · 方向从「引导充值」翻转）。
+     * 上一轮的兜底是「按预留不足展示」，理由是「把没欠费的人说成欠费更糟」——那在只有两个码时成立。
+     * 敞口码出现后不成立了：它是「充值无效」，把用户往充值上引 = 让他花了钱还解决不了。
+     * 代价不对称是关键：猜错方向让用户白花钱（不可逆），而中性最多让他多点一次顶部的充值入口
+     * （那个入口一直都在，从未消失）。理由与判断写进了回执。
+     */
+    unknownPaymentIssue: "本次未能发送，请稍后重试。",
+    /** 409：答完要追加预留时，这条消息已不在等待中（并发发送 / 超时回收）。 */
+    requestExpired: "这条消息已超时或被其他操作打断，未计费。请重新发送。",
     // 附件（一期只图片；文档解析是 BE 增量 3，本期不提供入口）
     attachImage: "上传图片",
     attachRemove: "移除附件",
@@ -1511,7 +1648,10 @@ export const copy = {
     idempotencyReuse: "充值请求状态异常，请关闭弹窗后重新发起。",
     // 发送错误分流（对齐 BE status/code）
     reqLimit: "本次问答超过单次上限或余额不足以作答，请精简内容或充值后重试。",
-    providerFailed: "AI 服务暂时不可用，请稍后重试。",
+    // FIX3：同样补上「未扣费」—— `AIBRAIN_PROVIDER_FAILED` 与另外两个 502 走的是同一个
+    // `_fail_chat_message`（release 全额预留 + `UsageRecord.credits=0`），零扣费是源码事实。
+    // 任务包 §一 把「PROVIDER_FAILED 扣不扣费」列为待 CB 判定的三条追问之一，源码里答案是明确的。
+    providerFailed: "AI 服务暂时不可用，未扣费，请稍后重试。",
     attachmentRejected: "附件无效或已失效，请移除后重新上传。",
     // 通用错误
     error: "出错了，请重试"

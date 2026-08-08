@@ -53,7 +53,24 @@ describe("NewVideoForm error display (P2)", () => {
     );
   });
 
-  it("keeps the friendly localized copy for tenant_quota_exceeded", async () => {
+  // 🔴 PRICING-UI-0001：本条**此前在给 bug 站岗** —— 它用小写 `tenant_quota_exceeded` 造 ApiError，
+  //    恰好喂中了 error-text.ts 里同样写成小写的判断，于是"绿"了。而 BE 实际发的是**大写**
+  //    `TENANT_QUOTA_EXCEEDED`（services/quota.py:174/:530），真实链路上这条友好文案从未出现过，
+  //    用户看到的一直是英文 "Insufficient tenant quota."。
+  //    现在按 BE 的真实大写断言（并保留小写一条，因为映射改成了大小写不敏感）。
+  //    变异：把 error-text.ts 改回 `err.code === "tenant_quota_exceeded"` → 大写这条红。
+  it("keeps the friendly localized copy for TENANT_QUOTA_EXCEEDED (BE 真实大写)", async () => {
+    taskMocks.createAndTrack.mockRejectedValueOnce(
+      new ApiError("Insufficient tenant quota.", "TENANT_QUOTA_EXCEEDED", 403)
+    );
+    render(<NewVideoForm />);
+    await fillAndSubmit();
+    await waitFor(() =>
+      expect(screen.getByText("额度不足，无法生成，请充值或精简任务")).toBeInTheDocument()
+    );
+  });
+
+  it("小写 tenant_quota_exceeded 同样命中（映射大小写不敏感，防 BE 改回来又失效）", async () => {
     taskMocks.createAndTrack.mockRejectedValueOnce(
       new ApiError("Insufficient tenant quota.", "tenant_quota_exceeded", 403)
     );

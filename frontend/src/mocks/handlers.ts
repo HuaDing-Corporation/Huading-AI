@@ -8,8 +8,15 @@ import { getMockAssetForTenant, registerMockAsset } from "./asset-registry";
 // what apiFetch requests (avoids a latent "mock silently bypassed" footgun).
 const BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000").replace(/\/$/, "");
 const ok = <T>(data: T) => HttpResponse.json({ data, error: null, request_id: "mock-req" });
-const err = (status: number, code: string, message: string) =>
-  HttpResponse.json({ data: null, error: { code, message, request_id: "mock-req" }, request_id: "mock-req" }, { status });
+// PRICING-UI-0001-FIX6 · P1-2：`outcome` 可选。BE `core/exceptions.py:_error_response` 对
+// `/copy/{rewrite,titles,topics}` 的**任何**错误都挂 `error.outcome`（`_copy_generation_error_outcome`
+// 只按 URL 后缀判断，不看错误性质），其余路径 pop 掉该键。mock 不比 BE 松 —— 文案端点的错误必须照发，
+// 否则前端会误判成"没拿到服务端结论"，走成不承诺那一路，e2e 假绿。
+const err = (status: number, code: string, message: string, outcome?: { operation: string; status: "failed" }) =>
+  HttpResponse.json(
+    { data: null, error: { code, message, request_id: "mock-req", ...(outcome ? { outcome } : {}) }, request_id: "mock-req" },
+    { status }
+  );
 
 // ECOM-VIDEO-SCENE-DURATION-FIX-UI-0001 · FIX1（CB P1）：真 BE duration_sec 是 int（ScenePromptRequest /
 // VideoGenerateRequest 皆然），拒绝小数(5.5/5.4)与字符串("5.5")。mock 不比 BE 宽松、不四舍五入放行——present 且
@@ -449,8 +456,22 @@ const mkReverseJob = (
  *    而 `_credit_units` 是 **ROUND_CEILING 取整**（quota.py:273-274）→ 响应里恒为 int（schema `credits: int`）。
  * ⚠️ 短档可被租户 CreditRate 覆盖（quota.py:494-500 走 `_rate`），**长档不能**（:502-504 直接读 settings）——
  *    上一版注释把短档说成 config 常量，方向反了，一并订正。
+ *
+ * ── PRICING-UI-0001 §六 · image 档 30 → 100 ──────────────────────────────────────────────
+ * PR #237（`codex/pricing-rollout-ab-0001`）在本文件把视频短档 100→150、电商复刻 15→130 都改了，
+ * **唯独漏了 image 档**，故归本包。
+ * 🔴🔴 **这个 100 我没能从源码核实，按任务包指令写入**（承重要求第 4 条要求明确标注）。已核到的事实是：
+ *    · BE `estimate_reverse_prompt_quota` 的函数默认值是 `Decimal("1.0000")`（三个分支一致，均非 100）；
+ *    · BE 测试 fixture 里播的 `credits_per_unit` 仍是 **30**（test_reverse_prompt_pipeline.py:120，#237 未改）；
+ *    · `config.py` 里**没有**图片反推的积分常量（只有 video / video_long），#237 也没新增。
+ *    → 即：图片反推价格纯由数据库 `CreditRate` 行决定，源码里根本不存在「100」这个数。它只能来自生产库的
+ *      费率播种，而那份播种我在仓库里查不到。**请 CA 在 #237 回执里确认 100 的出处**；若实际不是 100，
+ *      改这一行即可（前端产品代码没有任何地方硬编码它，见下）。
+ * ✅ 为什么改错了也炸不到用户：图片/视频反推的金额**全程走 `POST /reverse-prompt/estimate` 的返回值**
+ *    （计费门 `reverse-prompt-form.tsx`，承重见 `reverse-prompt-form.charge.test.tsx` 门1——那条用 47 这个
+ *    故意非档位的桩值断言，硬编码任何档位价都会红）。此处这个数只决定 mock 自己回什么。
  */
-const REVERSE_ESTIMATE_IMAGE_CREDITS = 30;
+const REVERSE_ESTIMATE_IMAGE_CREDITS = 100;
 const REVERSE_ESTIMATE_VIDEO_SHORT_CREDITS = 150;
 const REVERSE_ESTIMATE_VIDEO_LONG_CREDITS = 250;
 /**
@@ -1639,7 +1660,8 @@ export const handlers = [
     }
     // FIX2（CB P1 · 机制）：BE ScriptGenerateRequest.duration_sec 是 int——小数 → 422。此前 scripts mock 没读该字段 =
     // 「AI生成文案」发小数悄悄假绿的根因。任何接受 duration_sec 的 mock 都拒绝非整数，未加门的路径即在测试里响亮失败。
-    if (badDuration(body.duration_sec)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
+    if (badDuration(body.duration_sec))
+      return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数", { operation: "rewrite", status: "failed" });
     // 字数档位（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.5）：可选，present 时须 short/medium/long（镜像 BE Literal，
     // mock 不比 BE 宽松——非法枚举即 422，守住前端只发合法档位）。反映到 mock 文案长度供承重区分档位真接线。
     if (body.length_tier !== undefined && !["short", "medium", "long"].includes(body.length_tier)) {
@@ -1658,7 +1680,8 @@ export const handlers = [
       return err(422, "VALIDATION_ERROR", "product_image_keys 至少 1 张");
     }
     // FIX1（CB P1）：duration_sec 是 int——小数/字符串 → 422（镜像 BE，不四舍五入放行；此前 round 5.5→6 是假绿，线上真 422）。
-    if (badDuration(body.duration_sec)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
+    if (badDuration(body.duration_sec))
+      return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数", { operation: "rewrite", status: "failed" });
     // SCENE-DURATION-FIX：duration_sec 可选整数，镜像 BE ScenePromptRequest._clamp_duration 夹取 [5,120]（不 reject 越界，仅夹取）。
     // 把生效时长回写进 scene_prompt 秒数——真 BE 由 luna 据时长写节奏，mock 以此如实反映「秒数随所选时长变化」（此前恒「约15秒」即原 bug）。
     const seconds =
@@ -1965,7 +1988,8 @@ export const handlers = [
     if (body.resolution !== undefined && !VIDEO_GEN_RESOLUTIONS.includes(body.resolution)) {
       return err(422, "VALIDATION_ERROR", "resolution 非法");
     }
-    if (badDuration(body.duration_sec)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数"); // FIX1：estimate 用同一 VideoGenerateRequest(int)
+    if (badDuration(body.duration_sec))
+      return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数", { operation: "rewrite", status: "failed" }); // FIX1：estimate 用同一 VideoGenerateRequest(int)
     if (body.video_mode === "seedance_i2v") {
       const keys = body.product_image_keys ?? [];
       if (!Array.isArray(keys) || keys.length < 1 || keys.length > 9) {
@@ -2038,7 +2062,8 @@ export const handlers = [
     }
     // FIX1（CB P1 · 提交路径核查）：VideoGenerateRequest.duration_sec 也是 int——小数 → 422（前端 isValidDuration 已从源头拦，
     // 此为 mock 防漂移把关，不比 BE 宽松；提交路径此前也能漏小数，属既有 bug，一并堵住）。
-    if (badDuration(body.duration_sec)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
+    if (badDuration(body.duration_sec))
+      return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数", { operation: "rewrite", status: "failed" });
     // 提示词 2000 字墙（VIDEO-GEN-PARAMS-UI-0001 需求2/D4）：逐字镜像 BE schemas/videos.py:307-312——**所有非 photo 模式**
     // 的 topic 超 2000 → 422（video_gen 把 prompt 同时发作 topic，故超 2000 在此拦；photo 自有 20000 上界，走下方分支）。
     // Code Review：按**码点**计数（Array.from）对齐 Python len()——JS .length 是 UTF-16 码元，增补面 emoji 记 2 会比 BE 严（误杀）。
@@ -2194,25 +2219,33 @@ export const handlers = [
     const body = (await request.json()) as { source_text: string; mode: string; n?: number; duration_sec?: number };
     // FIX3（CB P2-1 · 机制按"接受方"算）：CopyRewriteRequest.duration_sec 是 int（copy.py，extra=forbid）——小数 → 422。
     // 该端点当前无发送方，但类型支持该字段；凡**接受** duration_sec 的 mock 一律拒非整数，堵住"将来有人发就假绿"。
-    if (badDuration(body.duration_sec)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
+    if (badDuration(body.duration_sec))
+      return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数", { operation: "rewrite", status: "failed" });
     const base = (body.source_text ?? "").trim();
     if (body.mode === "auto") {
       const n = Math.min(5, Math.max(1, body.n ?? 3));
       return ok({
-        results: Array.from({ length: n }, (_, i) => ({ text: `【版本 ${i + 1}】${base}（mock 改写，可编辑）` }))
+        results: Array.from({ length: n }, (_, i) => ({ text: `【版本 ${i + 1}】${base}（mock 改写，可编辑）` })),
+        outcome: { operation: "rewrite", status: "succeeded" }
       });
     }
-    return ok({ results: [{ text: `${base}（mock 改写，可编辑）` }] });
+    return ok({ results: [{ text: `${base}（mock 改写，可编辑）` }], outcome: { operation: "rewrite", status: "succeeded" } });
   }),
   http.post(`${BASE}/api/v1/copy/titles`, async ({ request }) => {
     const body = (await request.json()) as { n?: number };
     const n = body.n ?? 5;
-    return ok({ titles: Array.from({ length: n }, (_, i) => `mock 标题候选 ${i + 1}`) });
+    return ok({
+      titles: Array.from({ length: n }, (_, i) => `mock 标题候选 ${i + 1}`),
+      outcome: { operation: "titles", status: "succeeded" }
+    });
   }),
   http.post(`${BASE}/api/v1/copy/topics`, async ({ request }) => {
     const body = (await request.json()) as { n?: number };
     const n = body.n ?? 5;
-    return ok({ topics: Array.from({ length: n }, (_, i) => `#mock话题${i + 1}`) });
+    return ok({
+      topics: Array.from({ length: n }, (_, i) => `#mock话题${i + 1}`),
+      outcome: { operation: "topics", status: "succeeded" }
+    });
   }),
   http.post(`${BASE}/api/v1/copy/drafts`, async ({ request }) => {
     const body = (await request.json()) as Record<string, unknown>;

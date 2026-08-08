@@ -15,7 +15,12 @@ export default defineConfig({
   reporter: process.env.CI ? "list" : "list",
   use: {
     baseURL: "http://localhost:3100",
-    trace: "on-first-retry"
+    // 🔴 PRICING-UI-0001-FIX1 §六：`on-first-retry` 有个正中要害的盲区 —— 它只在**重试**时录，
+    //    而本地 `retries: 0`，于是「第一次就失败、没有重试」这条最常见的路径**什么都不录**。
+    //    本包就栽在这上面：一次 aibrain smoke 失败，重跑三次全绿，手里只有一份 error-context.md，
+    //    无法归因。改成 retain-on-failure：只要失败就留 trace，CI 与本地都覆盖，绿的时候不产生文件。
+    trace: "retain-on-failure",
+    screenshot: "only-on-failure"
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {

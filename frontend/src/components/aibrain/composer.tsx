@@ -33,7 +33,8 @@ export function Composer({
   /** 🔴 返回是否**发送成功**（P1-1）：只有 true 才清空输入/附件/revoke 预览；失败则原样保留，用户不必重打重传。 */
   onSend: (body: SendMessageRequest) => Promise<boolean>;
   /** 余额不足 → 让父层弹充值窗（不是普通报错）。 */
-  onInsufficient: () => void;
+  /** 预检拦下时通知外层弹充值窗，并**说明是哪一种**（欠费 vs 预留不足，文案相反）。 */
+  onInsufficient: (reason: "insufficient" | "outstanding") => void;
 }) {
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
@@ -64,10 +65,11 @@ export function Composer({
     if (!canSend) return; // 与按钮 disabled 同一判据；此处兜住 Enter 提交路径
     const content = text.trim();
     setInlineError(null);
-    // 🔴 发送前预检（拦在开答前，对齐 BE 402 口径：available<=0 才是「压根发不了」）。
+    // 🔴 发送前预检（拦在开答前）。FIX1：BE `e2bc2c02` 把 402 分成了两种（负余额=欠费 / 预留不足），
+    //    预检也照样分——把 reason 透传出去，弹窗才能说对话（欠费用户不该看到「结束后会退回」）。
     const check = precheckSend(balance);
     if (!check.ok) {
-      onInsufficient(); // 弹充值窗、**不发请求**
+      onInsufficient(check.reason); // 弹充值窗、**不发请求**
       return;
     }
     // 发送瞬间快照：原始文字 + 这一批附件（用于成功后「比较再清空」，见下）。
