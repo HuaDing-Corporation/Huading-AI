@@ -35,9 +35,7 @@ from app.services.quota import estimate_copy_quota
 
 router = APIRouter()
 _COPY_ESTIMATE_OPERATIONS = ("rewrite", "titles", "topics")
-_COPY_ESTIMATE_NOTE = (
-    "Estimate for one rewrite, titles, and topics request; failed operations are not charged."
-)
+_COPY_ESTIMATE_NOTE = "本报价包含文案改写、标题和话题三项。"
 
 
 @router.post("/estimate", response_model=ApiResponse[CopyEstimateResponse])
