@@ -26,7 +26,7 @@ import {
 // 所以这里的门必须同时钉住三样东西，缺一样都能被"改一个常量"绕过：
 //   门1 费率**逐个对齐 BE config**（价格的真源）
 //   门2 展示值是**新费率下的值**，且**旧值不许再出现**（防止有人为了让测试绿而把常量改回去）
-//   门3 预留下界 = 4096 × 输出费率（§三 表格 27.5/68.8/137.6 的出处）
+//   门3 预留下界 = 4096 × 输出费率（真值 27.52512 / 68.8128 / 137.6256；§三 表格里写的是它们被舍入的低报版）
 // 三条落在不同断言上，互不塌缩。
 
 describe("智脑分档费率（价格真源，镜像 BE config.py）", () => {
@@ -119,15 +119,20 @@ describe("智脑分档费率（价格真源，镜像 BE config.py）", () => {
    * 或把 `minReservationCredits` 改成取两区间的最大值，用户看到的数字就全变了。
    * 变异A：`typicalCredits` 改读 `extended` → 前半段红（会变成 6/15/30 —— 恰好是本包一开始
    *        修掉的那三个旧数字，讽刺但真实：2.24×0.5+10.08×0.5 = 6.16 ≈ 6）。
-   * 变异B：`minReservationCredits` 改读 `extended` → 后半段红（27.5→41.3 / 68.8→103.2 / 137.6→206.4）。
+   * 变异B：`minReservationCredits` 改读 `extended` → 后半段红
+   *       （27.52512→41.28768 / 68.8128→103.2192 / 137.6256→206.4384；旧注释写的 27.5→41.3 两边都是舍入值）。
    */
   it("🔴 门2c：扩区间后 typicalCredits / minReservationCredits **值一个都没变**", () => {
     // 500 输入远小于 272,000 → 必落低区间 → 仍是 4 / 10 / 20。
     expect([typicalCredits("low"), typicalCredits("mid"), typicalCredits("high")]).toEqual([4, 10, 20]);
-    // 下界按低区间算（语义是「至少」，用高区间会把上界说成下界）→ 仍是 27.5 / 68.8 / 137.6。
-    expect(formatCredits(minReservationCredits("low"))).toBe("27.5");
-    expect(formatCredits(minReservationCredits("mid"))).toBe("68.8");
-    expect(formatCredits(minReservationCredits("high"))).toBe("137.6");
+    // 下界按低区间算（语义是「至少」，用高区间会把上界说成下界）→ 仍是 27.52512 / 68.8128 / 137.6256。
+    // 🔴 这里钉的是**真值**不是展示值：本条门的语义是"扩区间后值没变"，那是数值的性质；
+    //    展示值怎么格式化由 §展示格式 那一节守，两者不该纠缠在一条门里。
+    // ⚠️ 这条断言原本写的是 `formatCredits(...) === "27.5"` —— 既用了 FIX6 已删除的函数，
+    //    又把**低报的展示值**当成了"值"。27.5 不是下界，27.52512 才是（差额让用户充完仍发不出去）。
+    expect(minReservationCredits("low")).toBeCloseTo(27.52512, 5);
+    expect(minReservationCredits("mid")).toBeCloseTo(68.8128, 4);
+    expect(minReservationCredits("high")).toBeCloseTo(137.6256, 4);
   });
 
   /**
@@ -140,7 +145,8 @@ describe("智脑分档费率（价格真源，镜像 BE config.py）", () => {
   });
 
   /**
-   * 🔴 门3：预留下界 = `max_completion_tokens × 输出费率`，即 §三 表格里的 27.5 / 68.8 / 137.6。
+   * 🔴 门3：预留下界 = `max_completion_tokens × 输出费率` = **27.52512 / 68.8128 / 137.6256**。
+   * ⚠️ §三 表格里写的是 27.5 / 68.8 / 137.6 —— **那是舍入后的低报值，不是下界**。
    * 这个数是 402 提示的核心（用户会看到它被"扣住"），算错就等于对用户报错价。
    * 变异：把 `MAX_COMPLETION_TOKENS` 改成别的、或下界改用输入费率 → 本条红。
    */
@@ -159,7 +165,7 @@ describe("智脑分档费率（价格真源，镜像 BE config.py）", () => {
   });
 
   /** 🔴 §三 的用户体验前提：被扣住的数**远大于**实际花费——这正是必须解释「临时预留」的原因。 */
-  it("门3b：预留下界 ≫ 典型消耗（high 档 137.6 vs 20，约 7 倍）——不解释清楚会被当成一次对话的花费", () => {
+  it("门3b：预留下界 ≫ 典型消耗（high 档 137.6256 vs 20，约 7 倍）——不解释清楚会被当成一次对话的花费", () => {
     expect(minReservationCredits("high")).toBeGreaterThan(typicalCredits("high") * 5);
     expect(minReservationCredits("low")).toBeGreaterThan(typicalCredits("low") * 5);
   });
@@ -167,9 +173,9 @@ describe("智脑分档费率（价格真源，镜像 BE config.py）", () => {
 
 /**
  * 「余额偏低」的阈值（wallet-balance.tsx `LOW_BALANCE`）此前是 `TIERS.high.typical`（30）——
- * 一个估算值；本包换成 `minReservationCredits("low")`（27.5），对应一条**硬边界**：低于它，
+ * 一个估算值；本包换成 `minReservationCredits("low")`（**27.52512**），对应一条**硬边界**：低于它，
  * 连最低档都凑不齐一次预留、发送必被 402 拒。数值相近（视觉几乎不变），含义从"估算"变"事实"。
- * 变异：改回按 high 档取（137.6）→ 本条红（只用低档的用户会长期看到告警）。
+ * 变异：改回按 high 档取（137.6256）→ 本条红（只用低档的用户会长期看到告警）。
  */
 describe("低余额阈值", () => {
   it("低余额阈值 = 最低档的预留下界（27.52512），不是高档的也不是旧的典型值（30）", () => {

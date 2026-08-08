@@ -118,7 +118,7 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
   /**
    * 🔴 路径① 正常预留 → 结算 → **差额立即退回**（§三 第 4 条要向用户保证的那件事）。
    * 变异A：把结算行 `available += max(0, reservation - charged)` 删掉（即预留全额扣走）
-   *        → 「available 净减 = 实扣」这条红（净减会变成 27.5 而不是 0.24）。
+   *        → 「available 净减 = 实扣」这条红（净减会变成一整笔预留 ≥27.52512 而不是 0.24）。
    * 变异B：把预留改回 flat `min(200, available)` → 「预留 ≫ 实扣」仍绿，但**门②**会红（见下）。
    */
   it("路径①：预留 → 结算 → 差额立即退回（available 净减 = 实扣，而非预留额）", async () => {
@@ -188,7 +188,7 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
   });
 
   /**
-   * 🔴 门③：预留额**分档不同**（高档预留 ≫ 低档），即预留确实按费率算 —— §三 表格里 27.5/68.8/137.6 的来源。
+   * 🔴 门③：预留额**分档不同**（高档预留 ≫ 低档），即预留确实按费率算 —— §三 表格里那三个下界的来源（真值 27.52512 / 68.8128 / 137.6256 —— 任务包表格抄的是被舍入的 27.5/68.8/137.6，别跟着抄）。
    * 变异：`reservationCredits` 忽略 tier（写死用某一档费率）→ 本条红。
    */
   it("门③：同一句话在 high 档的预留显著高于 low 档（预留按档位费率算）", async () => {
@@ -205,7 +205,7 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
    * 变异：把闸门改回 `available <= 0` → 本条红（账上 10 分会被放行）。
    */
   it("路径②：账上有钱但不够本次预留 → 402（闸门是 available < 预留，不是 available<=0）", async () => {
-    await topup(100); // 100 分，够 low（≈27.5）但远不够 high（≈137.6）
+    await topup(100); // 100 分，够 low（下界 27.52512，且 mock 预留是动态的、恒高于下界）但远不够 high（137.6256）
     const conv = await createConversation();
     await expect(
       sendMessage(conv.id, { content: "你好", tier: "high", attachment_asset_ids: [] })

@@ -97,7 +97,7 @@ describe("402 分流：欠费 vs 预留不足（CB 第 1 点）", () => {
 
   /**
    * 🔴 预留不足走另一套，且数字取自 **BE 的 detail**（不是前端下界）。
-   * 变异：`openRechargeFor` 不把 `err.detail` 传下去 → 本条红（会退回下界 137.6 但措辞带「至少」，
+   * 变异：`openRechargeFor` 不把 `err.detail` 传下去 → 本条红（会退回下界、展示 137.7 但措辞带「至少」，
    *       且 available 会变成钱包的 500 而不是 BE 说的 20）。
    */
   it("🔴 INSUFFICIENT 402 → 预留不足说明，数字取自 BE detail（不是前端下界、不是钱包余额）", async () => {
@@ -492,10 +492,16 @@ describe("🔴 冷却预告（成功响应）", () => {
       { cooldown_retry_after_seconds: 0 } // 契约坏了（BE 声明 ge=1）→ 宁可不说
     ]) {
       const view = renderChat();
+      // 🔴 **每轮先清调用记录**（PRICING-UI-0003 复查补）：`vi.clearAllMocks()` 只在 beforeEach，
+      //    不在循环体内。第一轮之后 `toHaveBeenCalled()` 恒为真，下面那句 waitFor 在第 2、3 轮
+      //    **是立即通过的空断言** —— 而恰恰是第 2、3 轮（`{}` 与 `0`）在杀「无条件 setCooldownAhead」
+      //    那个变异。当时能绿全靠 RTL 在 act 退出时顺手排空了微任务队列，不是靠这句等待。
+      //    **一道门只能守它断言的那件事**：这句 waitFor 声称"等到请求发出"，那就得真的每轮都等。
+      hooks.sendMutateAsync.mockClear();
       hooks.sendMutateAsync.mockResolvedValue(payload);
       await typeAndSend();
       // 推进到静止点再断言"没有"——否则只看得见点击当下那一帧（NEGATIVE-ASSERT-SWEEP 的教训）。
-      await waitFor(() => expect(hooks.sendMutateAsync).toHaveBeenCalled());
+      await waitFor(() => expect(hooks.sendMutateAsync).toHaveBeenCalledTimes(1));
       // 同上：按文本断言"没有"，避免被壳里其他 status 元素干扰成假红/假绿。
       expect(screen.queryByText(/秒后才能发下一条/)).not.toBeInTheDocument();
       view.unmount();

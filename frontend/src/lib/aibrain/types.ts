@@ -10,7 +10,8 @@ export type IntensityTier = "low" | "mid" | "high";
  * 一档的**计费费率**（积分 / 千 token），按输入、输出分别计价。
  *
  * 🔴 契约源 = BE `app/core/config.py` 的 `engine_aibrain_{low,mid,high}_{input,output}_credits_per_1k`
- *    （PR #239 `codex/pricing-c3c4-be`，config.py:211-216）。**BE 是唯一权威，此处是镜像**。
+ *    （PR #239 `codex/pricing-c3c4-be`，已入 develop）。**BE 是唯一权威，此处是镜像**。
+ *    ⚠️ **不写行号**：这六格在 config.py 里已从 211-216 漂到 216-221（#243 插入六行后还会再漂）。按字段名搜。
  * 🔴 为什么必须是费率、而不是一个「典型值」整数（PRICING-UI-0001 §二）：本文件此前写死
  *    `typical: 6/15/30`，那是**旧费率**下 500 输入 + 500 输出的估算值，可没有一个字说明这一点。
  *    BE 把费率降了 35%（1.73/10.37 → 1.12/6.72）之后，UI 仍然展示 6/15/30 —— 无人察觉，因为
@@ -74,7 +75,9 @@ export interface TierMeta {
  */
 export const SINGLE_REQUEST_LIMIT = 200;
 
-/** BE 单次回答的 completion 上限（`engine_aibrain_max_completion_tokens`，config.py:225）。预留下界按它算。 */
+/** BE 单次回答的 completion 上限（`engine_aibrain_max_completion_tokens`）。预留下界按它算。
+ *  ⚠️ 原注释写的 `config.py:225` 已失效 —— develop 上是 233 行，#243 头上是 240 行；
+ *  而 0caaddd 的 225 行恰好是一个**费率字段**，照旧行号跳过去会读到完全不相干的东西。 */
 export const MAX_COMPLETION_TOKENS = 4096;
 
 /**
@@ -87,21 +90,34 @@ export const TYPICAL_COMPLETION_TOKENS = 500;
 /**
  * 三档 × 两区间 = 十二格（模型标识 = BE services/aibrain.py `_TIER_MODELS`）。
  *
- * ✅ **十二格已逐格核实**（2026-08-07，PRICING-UI-0003）——权威来源是**售价侧** BE 源码：
- *    PR #243 `codex/pricing-aibrain-tier` @ `0caaddd` 的 `config.py`：
- *      `engine_aibrain_{low,mid,high}_credits_per_1k`              → standard 六格
- *      `engine_aibrain_{low,mid,high}_above_272k_*_credits_per_1k` → extended 六格
- *    区间判据同样已核：`user_token_rates()` 调 `apimart_token_rate(model, prompt_tokens)`，
- *    后者的 `_rate_tier` 用 **`prompt_tokens <= tier.max_input_tokens`** → **恰在 272,000 归低区间**，
+ * ⚠️🔴 **extended 六格的来源 PR #243 至今未合并**（2026-08-08 复核：`state=OPEN`、`mergedAt=null`）。
+ *    `origin/develop` 的 `config.py` 里 `above_272k` **零命中** —— 那六个字段只存在于 PR 头
+ *    `0caaddd`。**所以下面 extended 那六格是"对着一个未合并分支核的"，不是既成事实。**
+ *    #243 合并前若改值，前端会静默漂移，而**没有任何前端的门能发现**（门只能守前端自己）。
+ *    → #243 合并那天必须重核一遍这六格。这句话就是复核触发点，别删。
+ *    （上一版这里写的是「✅ 十二格已逐格核实」的完成态，读者会以为 develop 已落地。数字是对的，
+ *      叙述不对 —— 这两件事要分开判，别因为"十二格全中"就认为注释没问题。）
+ *
+ * 权威来源是**售价侧** BE 源码：
+ *    standard 六格 → `origin/develop` 的 `config.py`（已落地，随 #239 进的）：
+ *      `engine_aibrain_{low,mid,high}_{input,output}_credits_per_1k`
+ *    extended 六格 → **PR #243 `codex/pricing-aibrain-tier` @ `0caaddd`**（未合并，见上）：
+ *      `engine_aibrain_{low,mid,high}_above_272k_{input,output}_credits_per_1k`
+ *    ⚠️ 不写行号：config.py 的行号在 #243/#244 之间已经漂过两次（standard 六格从 211-216 漂到
+ *       216-221，`max_completion_tokens` 从 225 漂到 233/240）。**按字段名搜，别按行号跳。**
+ *    区间判据同样已核（这条读的是 develop，已落地）：`user_token_rates()` 调
+ *    `apimart_token_rate(model, prompt_tokens)`，后者的 `_rate_tier` 用
+ *    **`prompt_tokens <= tier.max_input_tokens`** → **恰在 272,000 归低区间**，
  *    与本文件 `rateForPromptTokens` 的「严格大于才进高区间」一致（pricing.test.ts 门1d 钉住）。
  *
  * 📝 **方法留痕**（这段值得留，是"没有直接源码时如何不靠猜"的可复用例子）：
  *    写下这六格时售价侧尚未落地，我没有照任务包的表格抄，而是用 BE **成本侧**
  *    （`apimart_token_pricing.py`）的 272K 双区间**比例**做交叉验证 —— 三档一律
  *    「输入 ×2、输出 ×1.5」，乘上 standard 六格，得到的十二格与后来的售价侧源码**全部命中**。
- *    ⚠️ 但那条交叉验证**现在已是冗余**，且成本侧的绝对值已被 #244 校准过（改成
- *    `official × 0.8`，值变了、比例没变）—— 所以**权威来源只认上面的售价侧**，别再指向成本侧表，
- *    否则 #244 合并后注释指的那张表就变了，下一个人会困惑。
+ *    ⚠️ 但那条交叉验证**现在已是冗余**。成本侧的绝对值在 **PR #244（同样 `state=OPEN`、未合并）**
+ *    里被改成 `official × 0.8` —— 复核结论：**比例（输入 ×2 / 输出 ×1.5）不变**，绝对值只有
+ *    luna / terra 变了，**sol 三档乘完 0.8 与 develop 现值完全相同**（50/300→100/450 ×0.8
+ *    = 40/240→80/360）。所以**权威来源只认上面的售价侧**，别再指向成本侧表。
  * 🔴 **注意比例不是整体翻倍**：输入 ×2、输出 **×1.5**。照「双倍」写会把输出多算 33%。
  *    这一点有专门的门钉住（pricing.test.ts「十二格 / 比例」组）。
  */
@@ -156,7 +172,11 @@ export function typicalCredits(tier: IntensityTier): number {
  *    不依赖任何 token 估算，前端算得出且不会错。而 prompt 段要复刻 BE 的 `_estimate_text_tokens`
  *    （ASCII 四字符一 token、非 ASCII 一字一 token）**加上最近 20 轮上下文的拼装**才能得到 —— 前端
  *    复刻它必然与 BE 漂移，算错了显示给用户比不显示更糟。故此处给**可验证的下界**，不猜完整值。
- * 现费率下 → low 27.5 · mid 68.8 · high 137.6。
+ * 现费率下 → low **27.52512** · mid **68.8128** · high **137.6256**。
+ * ⚠️🔴 **不要写成 27.5 / 68.8 / 137.6** —— 那是这组数字被向下舍入后的低报版本，曾经在任务包、
+ *    代码注释、测试标题里传了很多轮。用户照着 27.5 充值仍然发不出去（差 0.02512）。
+ *    展示这个值时走 `formatCreditsUp` → 27.6 / 68.9 / 137.7（向上，宁可多说）。
+ *    这一行是这组数字在前端的**源头**，它错了下游会跟着一路错下去。
  */
 export function minReservationCredits(tier: IntensityTier): number {
   // 🔴 下界**取 `standard` 区间**（PRICING-UI-0002）：这个函数的语义是「**至少**会被预留多少」，

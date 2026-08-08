@@ -1509,7 +1509,7 @@ export const copy = {
     copied: "已复制",
     thinking: "正在思考…",
     imageAttachment: "图片",
-    // FIX5：改收**已格式化的字符串**（`formatCredits`）。此前裸插值 `${n}`，
+    // FIX5：改收**已格式化的字符串**（FIX6 起是 `formatCreditsExact` —— 实扣是"已经发生的事"，如实展示）。此前裸插值 `${n}`，
     // 一次典型对话的实扣是 0.24192 这种长尾，直接摊在气泡上既难读、也与弹窗里的口径不一致。
     costLabel: (credits: string) => `本次消耗 ${credits} 积分`,
     // 输入框
@@ -1547,7 +1547,7 @@ export const copy = {
       `输入超过 ${thresholdWan} 万 token 的部分，本档按输入 ${input} / 输出 ${output} 积分每千 token 计费。`,
     // ── 402 余额不足（§三）────────────────────────────────────────────────
     // 此前 402 只是**默默弹开充值窗**，用户看不到任何解释；而新预留逻辑会锁住一个远大于实际花费的数
-    //（高速档光 completion 就 137.6），不解释清楚会被当成「一次对话要花 137 积分」。
+    //（高速档光 completion 就 137.6256），不解释清楚会被当成「一次对话要花 137 积分」。
     insufficientTitle: "推理积分不足，本次没有发送",
     /** 🔴 §三 第 4 条 —— 这条路径最要紧的一句话：预留 ≠ 扣费。 */
     insufficientReserveNote:

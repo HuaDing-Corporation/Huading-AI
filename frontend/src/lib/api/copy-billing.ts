@@ -49,9 +49,23 @@
 /** 失败项的计费可陈述性。`released` = 服务端明确失败、可说未计费；`unknown` = 不许承诺。 */
 export type CopyFailureBilling = "released" | "unknown";
 
+/**
+ * BE `schemas/copy.py`：`CopyGenerationOperation = Literal["rewrite", "titles", "topics"]`，
+ * 且 `CopyGenerationOutcome.operation` 是**必填**。
+ * 🔴 校验它而不只校验 status（PRICING-UI-0003 · CB P2-2）：这是一条**资金判据**，
+ *    形状校验就该覆盖 BE schema 保证的**全部**约束，而不是只覆盖"我这次用得到的那个字段"。
+ *    真实链路上 operation 恒合法，所以补它当前不改变任何行为 —— 但判据的防御面不该按
+ *    "当前会不会出问题"来划，该按"BE 承诺了什么"来划。少验一个字段，就是给
+ *    `{ status: "failed" }` 这种半份 outcome 开了一道能说出「未计费」的门。
+ *    （同一条纪律在 402 那边叫「半份 detail 不许拼」，见 `aibrain/types.ts:parseInsufficientDetail`。）
+ */
+const COPY_OPERATIONS = ["rewrite", "titles", "topics"] as const;
+
 function hasFailedOutcome(outcome: unknown): boolean {
   if (typeof outcome !== "object" || outcome === null) return false;
-  const status = (outcome as { status?: unknown }).status;
+  const { operation, status } = outcome as { operation?: unknown; status?: unknown };
+  // operation 必须是 BE 承诺的三个字面量之一 —— 缺失 / 拼错 / 是别的端点，一律不认。
+  if (typeof operation !== "string" || !(COPY_OPERATIONS as readonly string[]).includes(operation)) return false;
   // 只认 "failed"。"succeeded" 却走到失败分支属于契约异常，按"说不准"处理而不是当成未计费。
   return status === "failed";
 }

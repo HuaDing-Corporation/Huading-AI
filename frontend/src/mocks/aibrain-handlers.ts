@@ -206,7 +206,7 @@ function estimatePromptTokens(history: ChatMessage[], content: string, attachmen
 /**
  * BE `_reservation_credits`：**动态预留** = 提示词估算 × 1.25（向上取整到整 token）+ 完整 completion 配额。
  * 🔴 这就是 §三 那个「用户看到一个远大于实际花费的数字被扣住」的来源：光 completion 段
- *    （4096 token）在 high 档就是 137.6 积分，而一次典型对话实扣不到 20。
+ *    （4096 token）在 high 档就是 137.6256 积分，而一次典型对话实扣不到 20。
  */
 function reservationCredits(tier: IntensityTier, promptTokens: number): number {
   return userCredits(tier, Math.ceil(promptTokens * PROMPT_RESERVATION_MULTIPLIER), MAX_COMPLETION_TOKENS);
@@ -406,8 +406,10 @@ export function aibrainHandlers() {
 
       // ── 闸门⁻¹ 用量异常冷却 → 503（BE `_raise_if_provider_usage_anomaly_cooldown`，:365）────────
       // 🔴 判在**最前**（BE 里紧跟 conversation_or_404，连提示词闸都在它之后）。次序照抄：
-      //    冷却期内一切请求直接回绝，不做任何校验、不碰钱包。**无 detail、无 Retry-After 头**
-      //    （BE 那条 AppError 只有 message/code/status；全仓无 retry-after）。
+      //    冷却期内一切请求直接回绝，不做任何校验、不碰钱包。
+      // ⚠️ 上一版这里写「**无 detail**、无 Retry-After 头」—— 前半句自 FIX4 起就不成立了
+      //    （BE `b91e2188` 补了 `retry_after_seconds`，下面几行正在发它），却和下面的注释并排放了三轮。
+      //    现在只有「**无 Retry-After 响应头**」还成立（全仓 grep 无该头，前端读的是 detail 里的字段）。
       if (usageAnomalyCooldown)
         return err(
           503,
