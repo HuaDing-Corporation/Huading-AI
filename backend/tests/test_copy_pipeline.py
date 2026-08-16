@@ -1,11 +1,14 @@
 import asyncio
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import get_args
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import event, func, select
+from sqlalchemy import func, select, text
 
 from app.db.models import CopyDraft, CreditRate, Subscription, UsageRecord, VideoTask
 from app.main import app
@@ -64,6 +67,32 @@ def _patch_copy_llm(monkeypatch, results: list[str], payloads: list[dict]) -> No
         lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
         raising=False,
     )
+
+
+@contextmanager
+def _capture_sqlite_dml(auth_db) -> Iterator[list[str]]:
+    dml_action_names = {
+        sqlite3.SQLITE_INSERT: "INSERT",
+        sqlite3.SQLITE_UPDATE: "UPDATE",
+        sqlite3.SQLITE_DELETE: "DELETE",
+    }
+    operations: list[str] = []
+
+    def authorize(action_code, table_name, _column, _database, _trigger):
+        operation = dml_action_names.get(action_code)
+        if operation is not None:
+            operations.append(f"{operation} {table_name}")
+        return sqlite3.SQLITE_OK
+
+    engine = auth_db.kw["bind"]
+    with engine.connect() as connection:
+        driver_connection = connection.connection.driver_connection
+        driver_connection.set_authorizer(authorize)
+
+    try:
+        yield operations
+    finally:
+        driver_connection.set_authorizer(None)
 
 
 def test_copy_estimate_matches_decimal_tenant_rate_and_actual_charges(
@@ -175,30 +204,87 @@ def test_copy_estimate_is_read_only(
                 "copy_drafts": db.scalar(select(func.count()).select_from(CopyDraft)),
             }
 
-    dml_statements: list[str] = []
-
-    def capture_dml(_conn, _cursor, statement, _parameters, _context, _executemany):
-        verb = statement.lstrip().split(maxsplit=1)[0].upper()
-        if verb in {"INSERT", "UPDATE", "DELETE"}:
-            dml_statements.append(statement)
-
     before = snapshot()
-    engine = auth_db.kw["bind"]
-    event.listen(engine, "before_cursor_execute", capture_dml)
-    try:
+    with _capture_sqlite_dml(auth_db) as dml_operations:
         response = TestClient(app).post(
             "/api/v1/copy/estimate",
             headers=auth_context["headers"],
         )
-    finally:
-        event.remove(engine, "before_cursor_execute", capture_dml)
 
     assert response.status_code == 200
     assert response.json()["data"]["estimated_credits"] == sum(
         item["estimated_credits"] for item in response.json()["data"]["breakdown"]
     )
-    assert dml_statements == []
+    assert dml_operations == []
     assert snapshot() == before
+
+
+@pytest.mark.parametrize(
+    ("statement", "expected_operation"),
+    [
+        (
+            """
+            WITH target AS (
+                SELECT id
+                FROM subscriptions
+                WHERE tenant_id = :tenant_id
+            )
+            UPDATE subscriptions
+            SET quota_credits_used = quota_credits_used
+            WHERE id IN (SELECT id FROM target)
+            """,
+            "UPDATE subscriptions",
+        ),
+        (
+            """
+            WITH source AS (
+                SELECT :tenant_id AS id
+                WHERE 0
+            )
+            INSERT INTO subscriptions (id)
+            SELECT id FROM source
+            """,
+            "INSERT subscriptions",
+        ),
+        (
+            """
+            WITH target AS (
+                SELECT id
+                FROM subscriptions
+                WHERE tenant_id = :tenant_id AND 0
+            )
+            DELETE FROM subscriptions
+            WHERE id IN (SELECT id FROM target)
+            """,
+            "DELETE subscriptions",
+        ),
+    ],
+    ids=["update", "insert", "delete"],
+)
+def test_copy_read_only_guard_detects_cte_dml(
+    statement: str,
+    expected_operation: str,
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import copy as copy_routes
+
+    estimate_without_mutation = copy_routes.estimate_copy_quota
+
+    def estimate_with_cte_dml(db, *, tenant_id, count):
+        db.execute(text(statement), {"tenant_id": tenant_id})
+        return estimate_without_mutation(db, tenant_id=tenant_id, count=count)
+
+    monkeypatch.setattr(copy_routes, "estimate_copy_quota", estimate_with_cte_dml)
+    with _capture_sqlite_dml(auth_db) as dml_operations:
+        response = TestClient(app).post(
+            "/api/v1/copy/estimate",
+            headers=auth_context["headers"],
+        )
+
+    assert response.status_code == 200
+    assert expected_operation in dml_operations
 
 
 @pytest.mark.parametrize(
