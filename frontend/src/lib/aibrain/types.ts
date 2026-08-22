@@ -1,6 +1,7 @@
 // 华鼎AI智脑 · 前端类型 + 契约常量（AIBRAIN-UI-0001 · FIX1：按 BE 增量 1 真实源码逐字段对齐）。
 //
-// 🔴 契约源 = BE `f2e9a2e0`（schemas/aibrain.py · routes/aibrain.py · services/aibrain.py）。**以 BE 为准**。
+// 🔴 契约源 = 已合并 BE；售价双区间锁定 develop@2371a210 / #243 head 4827a328
+// （core/config.py · services/aibrain.py）。**以 BE 为准**。
 // 独立 `lib/aibrain/` 目录，不碰共享 types.ts（避让电商线）。
 
 /** 「智能强度」三档（BE `_TIER_MODELS`）。**前端只传档位**（服务端固定 allowlist）。 */
@@ -9,16 +10,19 @@ export type IntensityTier = "low" | "mid" | "high";
 /**
  * 一档的**计费费率**（积分 / 千 token），按输入、输出分别计价。
  *
- * 🔴 契约源 = BE `app/core/config.py` 的 `engine_aibrain_{low,mid,high}_{input,output}_credits_per_1k`
- *    （PR #239 `codex/pricing-c3c4-be`，已入 develop）。**BE 是唯一权威，此处是镜像**。
- *    ⚠️ **不写行号**：这六格在 config.py 里已从 211-216 漂到 216-221（#243 插入六行后还会再漂）。按字段名搜。
+ * 🔴 契约源 = BE `app/core/config.py` 的
+ *    `engine_aibrain_{low,mid,high}_{input,output}_credits_per_1k` 与
+ *    `engine_aibrain_{low,mid,high}_above_272k_{input,output}_credits_per_1k`
+ *    （develop@2371a210 / #243 head 4827a328）。**BE 是唯一权威，此处是镜像**。
+ *    ⚠️ 不写行号：按字段名搜，避免后续配置项插入造成假引用。
  * 🔴 为什么必须是费率、而不是一个「典型值」整数（PRICING-UI-0001 §二）：本文件此前写死
  *    `typical: 6/15/30`，那是**旧费率**下 500 输入 + 500 输出的估算值，可没有一个字说明这一点。
  *    BE 把费率降了 35%（1.73/10.37 → 1.12/6.72）之后，UI 仍然展示 6/15/30 —— 无人察觉，因为
  *    一个裸整数看不出它是怎么来的。改成费率之后，展示的每个数字都由 `typicalCredits()` /
  *    `minReservationCredits()` **从费率推导**，费率一改全部跟着走，且口径能对用户讲清楚。
- * ⚠️ 费率是**租户可覆写**的（BE `CreditRate` 表优先于 config 默认值）。此处的值是 config 默认值，
- *    仅用于「发送前给用户一个预期」；**实际扣费一律以 BE 返回的 `charged_credits` 为准**，前端不参与算账。
+ * ⚠️ 这些默认值可由部署环境覆写；当前 AIBRAIN `tier_pricing()` 直接读取 `Settings`，不查
+ *    `CreditRate` 租户表。前端只镜像默认值、用于发送前预期；**实际扣费一律以 BE 返回的
+ *    `charged_credits` 为准**，前端不参与算账。
  */
 export interface TierRateBand {
   /** 输入（prompt）积分 / 千 token。 */
@@ -42,15 +46,17 @@ export interface TierRate {
 }
 
 /**
- * 区间阈值：**prompt tokens 严格大于**这个数才进高区间（BE `_TokenRateTier.max_input_tokens`
- * 语义：`up_to_272k` 的上界是 272_000，超过才落到 `above_272k`）。
+ * 区间阈值：**prompt tokens 严格大于**这个数才进高区间。售价侧 BE
+ * `_AIBRAIN_USER_RATE_PROMPT_TOKEN_BOUNDARY = 272_000`，`user_token_rates()` 用 `<=` 留在
+ * standard，超过才落到 extended。
  * 🔴 显式命名常量，不许把 272000 散落在判断里 —— 那正是「魔数漂移」的经典形态。
  */
 export const PROMPT_RATE_TIER_THRESHOLD_TOKENS = 272_000;
 
 /**
- * 🔴 **档位判据的唯一实现**。任何需要费率的地方都走这里，不许自己拿 prompt 数跟阈值比。
- * 对齐 BE 的 `apimart_token_rate(model, prompt_tokens)`（售价侧与成本侧复用同一判据）。
+ * 🔴 **前端售价档位判据的唯一实现**。任何需要售价费率的地方都走这里，不许自己拿 prompt 数跟阈值比。
+ * 对齐 BE `user_token_rates()`；售价阈值与 provider 成本阈值是两个独立产品契约的镜像，
+ * 前端不得把 `apimart_token_rate()` 的成本域结果当成用户售价。
  */
 export function rateForPromptTokens(tier: IntensityTier, promptTokens: number): TierRateBand {
   const { standard, extended } = TIERS[tier].rate;
@@ -76,8 +82,7 @@ export interface TierMeta {
 export const SINGLE_REQUEST_LIMIT = 200;
 
 /** BE 单次回答的 completion 上限（`engine_aibrain_max_completion_tokens`）。预留下界按它算。
- *  ⚠️ 原注释写的 `config.py:225` 已失效 —— develop 上是 233 行，#243 头上是 240 行；
- *  而 0caaddd 的 225 行恰好是一个**费率字段**，照旧行号跳过去会读到完全不相干的东西。 */
+ *  ⚠️ 配置文件持续插入新字段，按字段名核对，不引用易漂移的行号。 */
 export const MAX_COMPLETION_TOKENS = 4096;
 
 /**
@@ -90,34 +95,18 @@ export const TYPICAL_COMPLETION_TOKENS = 500;
 /**
  * 三档 × 两区间 = 十二格（模型标识 = BE services/aibrain.py `_TIER_MODELS`）。
  *
- * ⚠️🔴 **extended 六格的来源 PR #243 至今未合并**（2026-08-08 复核：`state=OPEN`、`mergedAt=null`）。
- *    `origin/develop` 的 `config.py` 里 `above_272k` **零命中** —— 那六个字段只存在于 PR 头
- *    `0caaddd`。**所以下面 extended 那六格是"对着一个未合并分支核的"，不是既成事实。**
- *    #243 合并前若改值，前端会静默漂移，而**没有任何前端的门能发现**（门只能守前端自己）。
- *    → #243 合并那天必须重核一遍这六格。这句话就是复核触发点，别删。
- *    （上一版这里写的是「✅ 十二格已逐格核实」的完成态，读者会以为 develop 已落地。数字是对的，
- *      叙述不对 —— 这两件事要分开判，别因为"十二格全中"就认为注释没问题。）
- *
- * 权威来源是**售价侧** BE 源码：
- *    standard 六格 → `origin/develop` 的 `config.py`（已落地，随 #239 进的）：
+ * 权威来源是已合并的**用户售价域**源码（2026-08-22 复核；develop@2371a210 / #243 head 4827a328）：
+ *    standard 六格 → `core/config.py`
  *      `engine_aibrain_{low,mid,high}_{input,output}_credits_per_1k`
- *    extended 六格 → **PR #243 `codex/pricing-aibrain-tier` @ `0caaddd`**（未合并，见上）：
+ *    extended 六格 → `core/config.py`
  *      `engine_aibrain_{low,mid,high}_above_272k_{input,output}_credits_per_1k`
- *    ⚠️ 不写行号：config.py 的行号在 #243/#244 之间已经漂过两次（standard 六格从 211-216 漂到
- *       216-221，`max_completion_tokens` 从 225 漂到 233/240）。**按字段名搜，别按行号跳。**
- *    区间判据同样已核（这条读的是 develop，已落地）：`user_token_rates()` 调
- *    `apimart_token_rate(model, prompt_tokens)`，后者的 `_rate_tier` 用
- *    **`prompt_tokens <= tier.max_input_tokens`** → **恰在 272,000 归低区间**，
- *    与本文件 `rateForPromptTokens` 的「严格大于才进高区间」一致（pricing.test.ts 门1d 钉住）。
+ *    区间判据 → `services/aibrain.py` 的 `_AIBRAIN_USER_RATE_PROMPT_TOKEN_BOUNDARY` 与
+ *      `user_token_rates()`：`prompt_tokens <= 272_000` 走 standard，272_001 起走 extended。
  *
- * 📝 **方法留痕**（这段值得留，是"没有直接源码时如何不靠猜"的可复用例子）：
- *    写下这六格时售价侧尚未落地，我没有照任务包的表格抄，而是用 BE **成本侧**
- *    （`apimart_token_pricing.py`）的 272K 双区间**比例**做交叉验证 —— 三档一律
- *    「输入 ×2、输出 ×1.5」，乘上 standard 六格，得到的十二格与后来的售价侧源码**全部命中**。
- *    ⚠️ 但那条交叉验证**现在已是冗余**。成本侧的绝对值在 **PR #244（同样 `state=OPEN`、未合并）**
- *    里被改成 `official × 0.8` —— 复核结论：**比例（输入 ×2 / 输出 ×1.5）不变**，绝对值只有
- *    luna / terra 变了，**sol 三档乘完 0.8 与 develop 现值完全相同**（50/300→100/450 ×0.8
- *    = 40/240→80/360）。所以**权威来源只认上面的售价侧**，别再指向成本侧表。
+ * 🔴 #244 的 `apimart_token_pricing.py` 属 provider **成本域**。它有自己的 272K 产品阈值，
+ *    但既不提供这里的十二格售价，也不参与 `user_token_rates()`；前后端只是分别镜像两个独立契约。
+ *    前端展示只能认上面的售价字段。`pricing.test.ts` 的跨层门会直接读取这些已合并字段与售价选择器，
+ *    防止以后任一侧改值或改边界后另一侧静默漂移。
  * 🔴 **注意比例不是整体翻倍**：输入 ×2、输出 **×1.5**。照「双倍」写会把输出多算 33%。
  *    这一点有专门的门钉住（pricing.test.ts「十二格 / 比例」组）。
  */
@@ -173,7 +162,7 @@ export function typicalCredits(tier: IntensityTier): number {
  *    （ASCII 四字符一 token、非 ASCII 一字一 token）**加上最近 20 轮上下文的拼装**才能得到 —— 前端
  *    复刻它必然与 BE 漂移，算错了显示给用户比不显示更糟。故此处给**可验证的下界**，不猜完整值。
  * 现费率下 → low **27.52512** · mid **68.8128** · high **137.6256**。
- * ⚠️🔴 **不要写成 27.5 / 68.8 / 137.6** —— 那是这组数字被向下舍入后的低报版本，曾经在任务包、
+ * ⚠️🔴 **不要写成一位小数的低报版** —— 那是这组数字被向下舍入后的错误版本，曾经在任务包、
  *    代码注释、测试标题里传了很多轮。用户照着 27.5 充值仍然发不出去（差 0.02512）。
  *    展示这个值时走 `formatCreditsUp` → 27.6 / 68.9 / 137.7（向上，宁可多说）。
  *    这一行是这组数字在前端的**源头**，它错了下游会跟着一路错下去。

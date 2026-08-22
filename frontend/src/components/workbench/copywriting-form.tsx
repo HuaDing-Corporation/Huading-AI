@@ -141,8 +141,9 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
    *    三个端点是本函数自己用 `Promise.allSettled` 并发调的，`ti.status === "rejected"` 就是
    *    「标题这一路失败了」，原因也在 `ti.reason` 里。此前的代码是 `ti.status === "fulfilled" ? … : []`
    *    ——把失败**当成了空结果**，这才是「降级隐藏」的真身。
-   * 🔴 「该项未计费」是可核查的事实，不是安慰话：BE `_generate_billed_copy` 的 except 分支调
-   *    `quota.release_copy_quota` 把预留原额释放（不落 settled），所以失败的那一路确实不进账单。
+   * 🔴 Promise rejection 只证明客户端没拿到结果，不证明服务端没扣费：服务端业务失败且回传
+   *    failed outcome 时，`copyFailureBilling` 才允许说「未计费」；网络中断、网关错误或无法判定的
+   *    5xx 一律不作资金承诺，以用量记录为准。
    */
   const onGenerate = async () => {
     const source = sourceText.trim();
@@ -225,6 +226,8 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
   // 估价回答「这次大概要准备多少」，方向风险与缺口相同：宁可略高、不可低报，故归入向上格式化类。
   // 当前 BE schema 是 int，现阶段两种格式化显示相同；这里把语义钉住，避免未来小数契约下静默低报。
   // refetch 失败时 React Query 可能仍保留旧 data；错误态不展示缓存报价，避免把过期金额冒充当前报价。
+  // BE 的 note 当前也是安全的中文说明，但它与下方固定披露重复，且不参与 total/breakdown 自验；
+  // 不直接展示可避免服务端自由文本与前端「预计 / 最终以结算为准」语义日后发生双份漂移。
   const verifiedEstimate = estimate.isError ? undefined : verifiedCopyEstimateCredits(estimate.data);
   const priceDisclosure =
     verifiedEstimate !== undefined
@@ -309,7 +312,13 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
 
       <p className="mb-2 text-[12px] text-ink-faint">{copy.workbench.copyCompliance}</p>
       {/* 🔴 §五.1/§五.2：扣费披露 —— 与其它功能（反推计费门 / 视频 estimate）口径一致，在**发起之前**告知。 */}
-      <p className="mb-3 text-[12px] leading-relaxed text-ink-soft">{priceDisclosure}</p>
+      <p
+        className="mb-3 text-[12px] leading-relaxed text-ink-soft"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {priceDisclosure}
+      </p>
 
       {error && (
         <p role="alert" className="mb-3 rounded-field bg-error-bg px-3 py-2 text-[13px] text-error-fg">

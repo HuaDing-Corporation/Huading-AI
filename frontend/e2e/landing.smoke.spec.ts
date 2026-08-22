@@ -76,6 +76,9 @@ test("未登录进站=落地页；登录→控制台；已登录访 /landing=头
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto("/"); // 确保在工作台（TopBar 所在）
   await expect(page.getByRole("button", { name: "生成视频" })).toBeVisible({ timeout: 20_000 });
+  // QuotaBadge 异步请求：必须等 mock 的真实长数字余额落屏后再量宽。少这一步会在余额尚未渲染时
+  // 假绿，只有并行 E2E 稍慢时才偶发抓到 844/1000 把头像推到 x=391 的真实溢出。
+  await expect(page.getByText("余额 844/1000", { exact: true })).toBeVisible();
   // 无横向溢出：文档滚动宽度 = 视口宽度（多 1px 都算溢出）。
   const scrollW = await page.evaluate(() => document.documentElement.scrollWidth);
   expect(scrollW, `已登录 375px 顶栏横向溢出：scrollWidth=${scrollW} > 375`).toBeLessThanOrEqual(375);

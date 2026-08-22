@@ -375,6 +375,36 @@ describe("CopywritingForm (文案仿写 + 标题/话题)", () => {
   });
 
   /**
+   * 🔴 P2：报价由 query 异步到达，视觉文本更新之外还必须礼貌播报；`aria-atomic` 保证整句重读，
+   * 不让读屏只听见孤立的“24”。变异：删除价格披露上的 aria-live → 本条红。
+   */
+  it("🔴 estimate 从等待态异步更新为服务端报价 → 同一披露区以 polite live region 整句播报", () => {
+    estimateMock.isPending = true;
+    const { rerender } = render(<CopywritingForm />);
+
+    const pendingDisclosure = screen.getByText(copy.workbench.copyPriceDisclosure);
+    expect(pendingDisclosure).toHaveAttribute("aria-live", "polite");
+    expect(pendingDisclosure).toHaveAttribute("aria-atomic", "true");
+
+    estimateMock.isPending = false;
+    estimateMock.data = {
+      estimated_credits: 24,
+      unit: "credits",
+      note: "本报价包含文案改写、标题和话题三项。",
+      breakdown: [
+        { operation: "rewrite", estimated_credits: 8 },
+        { operation: "titles", estimated_credits: 8 },
+        { operation: "topics", estimated_credits: 8 }
+      ]
+    };
+    rerender(<CopywritingForm />);
+
+    const quotedDisclosure = screen.getByText(/预计本次生成约 24 积分/);
+    expect(quotedDisclosure).toHaveAttribute("aria-live", "polite");
+    expect(quotedDisclosure).toHaveAttribute("aria-atomic", "true");
+  });
+
+  /**
    * 🔴 生产变异：删掉 total/breakdown 相等校验，直接信 `estimated_credits` → 本条红，会露出 99。
    * 期望只断服务端给出的矛盾 total 不出现，不拿 breakdown 的 24 当替代价格——前端不自行报价。
    */

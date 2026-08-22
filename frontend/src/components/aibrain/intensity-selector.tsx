@@ -56,12 +56,12 @@ export function IntensitySelector({
   const current = TIERS[value];
 
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex w-full min-w-0 flex-col gap-1 sm:w-auto">
       <div
         role="radiogroup"
         aria-label={copy.aibrain.intensityLabel}
         onKeyDown={onKeyDown}
-        className="inline-flex w-fit items-center gap-1 rounded-field border border-line-gold bg-glass-soft p-1"
+        className="grid w-full grid-cols-3 items-center gap-1 rounded-field border border-line-gold bg-glass-soft p-1 sm:inline-flex sm:w-fit"
       >
         {TIER_ORDER.map((tier) => {
           const meta = TIERS[tier];
@@ -77,12 +77,12 @@ export function IntensitySelector({
               disabled={disabled}
               onClick={() => onChange(tier)}
               className={cn(
-                "flex flex-col items-center rounded-chip px-3 py-1 outline-none transition-colors focus-visible:shadow-focus-gold disabled:opacity-50",
+                "flex min-w-0 flex-col items-center rounded-chip px-2 py-1 outline-none transition-colors focus-visible:shadow-focus-gold disabled:opacity-50 sm:px-3",
                 selected ? "bg-chip-sel text-ink shadow-mark" : "text-ink-soft hover:bg-glass-hover"
               )}
             >
               <span className="text-[13px] font-medium leading-tight">{meta.label}</span>
-              <span className="text-[10.5px] leading-tight text-ink-faint tabular-nums">
+              <span className="whitespace-nowrap text-[10.5px] leading-tight text-ink-faint tabular-nums">
                 {copy.aibrain.intensityCost(typicalCredits(tier))}
               </span>
             </button>

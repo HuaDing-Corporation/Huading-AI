@@ -184,8 +184,8 @@ export function Composer({
         </p>
       )}
 
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
           <IntensitySelector value={tier} onChange={onTierChange} disabled={sending} />
 
           <input ref={imageInput} type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={(e) => void onPickImage(e.target.files?.[0])} />
@@ -213,7 +213,7 @@ export function Composer({
           )}
         </div>
 
-        <Button variant="primary" size="sm" onClick={() => void submit()} disabled={!canSend} aria-label={copy.aibrain.send}>
+        <Button className="self-end sm:self-auto" variant="primary" size="sm" onClick={() => void submit()} disabled={!canSend} aria-label={copy.aibrain.send}>
           {sending || uploading ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} strokeWidth={2} />}
           {sending ? copy.aibrain.sending : copy.aibrain.send}
         </Button>

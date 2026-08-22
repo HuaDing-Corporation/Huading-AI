@@ -27,11 +27,14 @@ export function TopBar() {
   const showAdmin = canUseAdminConsole(session);
 
   return (
-    // FIX1：移动端顶栏收缩策略 —— Logo 收成纯 badge（隐字标）+ 动作组允许收缩（min-w-0）+ px 减小。
-    // 加了「开通额度」入口后，375px 顶栏原会横向溢出、退出按钮被挤出首屏（Codex B 实测 scroll 457px）。
-    // 根因是「已登录态移动端从没测过」—— 补的浏览器门禁见 e2e/landing。
+    // 375px 优先保留管理员/余额/开通额度/退出/头像五个关键操作，移动端隐藏装饰性品牌标；
+    // 品牌身份由当前页面标题与导航上下文承接。
+    // 真实 mock 余额 844/1000 会占 107px；若再保留 48px Logo，375px 下动作组会把头像推到 x=391。
+    // e2e/landing 会先等异步 QuotaBadge 落屏再量宽，避免余额尚未出现时假绿。
     <Glass className="col-span-full flex items-center gap-2 rounded-card px-3 py-[15px] sm:gap-[18px] sm:px-6">
-      <Logo hideWordmarkOnMobile className="flex-none" />
+      <div className="hidden flex-none sm:block">
+        <Logo />
+      </div>
 
       <div className="relative mx-2 hidden max-w-[440px] flex-1 sm:block">
         <Search
