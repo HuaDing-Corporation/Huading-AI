@@ -871,6 +871,156 @@ def test_message_reserves_then_settles_exact_token_usage(
         assert wallet.available_credits + wallet.total_spent_credits == wallet.total_topup_credits
 
 
+@pytest.mark.parametrize(
+    (
+        "prompt_tokens",
+        "expected_input_rate",
+        "expected_output_rate",
+        "expected_charge",
+        "expected_provider_cost_usd",
+        "expected_provider_cost_cents",
+    ),
+    [
+        (272_000, "1.12", "6.72", "311.360000", "0.04448000", 31),
+        (272_001, "2.24", "10.08", "619.362240", "0.08848032", 62),
+    ],
+)
+def test_message_at_272k_boundary_settles_and_audits_selected_user_rates(
+    auth_context,
+    auth_db,
+    monkeypatch,
+    prompt_tokens: int,
+    expected_input_rate: str,
+    expected_output_rate: str,
+    expected_charge: str,
+    expected_provider_cost_usd: str,
+    expected_provider_cost_cents: int,
+) -> None:
+    charged_credits = Decimal(expected_charge)
+    client = TestClient(app)
+    assert (
+        client.post(
+            "/api/v1/aibrain/wallet/topup",
+            json=_topup_payload(1000),
+            headers=auth_context["headers"],
+        ).status_code
+        == 200
+    )
+    conversation = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]
+    provider = _FakeChatProvider(
+        {
+            "content": "Boundary-priced answer.",
+            "model": "gpt-5.6-luna",
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": 1_000,
+            "total_tokens": prompt_tokens + 1_000,
+            "cached_prompt_tokens": 0,
+            "cache_write_tokens": 0,
+        }
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider, raising=False)
+
+    response = client.post(
+        f"/api/v1/aibrain/conversations/{conversation['id']}/messages",
+        json={"content": "Price the exact context boundary", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert Decimal(str(data["assistant_message"]["charged_credits"])) == charged_credits
+    assert Decimal(str(data["wallet"]["available_credits"])) == (
+        Decimal("1000") - charged_credits
+    )
+    with auth_db() as db:
+        assistant = db.scalar(
+            select(ChatMessage).where(ChatMessage.id == data["assistant_message"]["id"])
+        )
+        usage = db.scalar(
+            select(UsageRecord).where(UsageRecord.chat_message_id == assistant.id)
+        )
+        settlement = db.scalar(
+            select(ReasoningLedgerEntry).where(
+                ReasoningLedgerEntry.chat_message_id == assistant.id,
+                ReasoningLedgerEntry.entry_type == "settle",
+            )
+        )
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+
+        assert assistant.prompt_tokens == prompt_tokens
+        assert assistant.completion_tokens == 1_000
+        assert assistant.input_rate == Decimal(expected_input_rate)
+        assert assistant.output_rate == Decimal(expected_output_rate)
+        assert assistant.reserved_credits == charged_credits
+        assert assistant.charged_credits == charged_credits
+        assert settlement.amount_credits == charged_credits
+        assert settlement.available_delta == Decimal("0")
+        assert settlement.reserved_delta == -charged_credits
+        assert settlement.details["prompt_tokens"] == prompt_tokens
+        assert settlement.details["completion_tokens"] == 1_000
+        assert usage.credits == charged_credits
+        assert usage.provider_cost_usd == Decimal(expected_provider_cost_usd)
+        assert usage.cost_cents == expected_provider_cost_cents
+        assert wallet.available_credits == Decimal("1000") - charged_credits
+        assert wallet.reserved_credits == Decimal("0")
+        assert wallet.total_spent_credits == charged_credits
+
+
+def test_message_above_272k_failure_audits_the_high_context_user_rates(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    assert (
+        client.post(
+            "/api/v1/aibrain/wallet/topup",
+            json=_topup_payload(1000),
+            headers=auth_context["headers"],
+        ).status_code
+        == 200
+    )
+    conversation = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]
+    provider = _FakeChatProvider(
+        {
+            "content": "Reject invalid provider billing evidence.",
+            "model": "gpt-5.6-luna",
+            "prompt_tokens": 272_001,
+            "completion_tokens": 1_000,
+            "total_tokens": 273_001,
+            "credits": "NaN",
+        }
+    )
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+
+    response = client.post(
+        f"/api/v1/aibrain/conversations/{conversation['id']}/messages",
+        json={"content": "Audit the failed high-context request", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "AIBRAIN_PROVIDER_USAGE_INVALID"
+    with auth_db() as db:
+        failed_message = db.scalar(
+            select(ChatMessage).where(ChatMessage.status == "failed")
+        )
+
+        assert failed_message.prompt_tokens == 272_001
+        assert failed_message.completion_tokens == 1_000
+        assert failed_message.input_rate == Decimal("2.240000")
+        assert failed_message.output_rate == Decimal("10.080000")
+        assert failed_message.charged_credits == Decimal("0")
+
+
 def test_message_provider_cost_prefers_authoritative_apimart_credits(
     auth_context,
     auth_db,
@@ -1062,6 +1212,82 @@ def test_invalid_provider_cost_usage_opens_user_cooldown_without_charge(
         assert usage.status == "released"
         assert usage.credits == Decimal("0")
         assert usage.cost_cents == 0
+
+
+def test_unconfigured_provider_cost_fails_and_releases_after_provider_response(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    client = TestClient(app)
+    client.post(
+        "/api/v1/aibrain/wallet/topup",
+        json=_topup_payload(500),
+        headers=auth_context["headers"],
+    )
+    conversation_id = client.post(
+        "/api/v1/aibrain/conversations",
+        json={},
+        headers=auth_context["headers"],
+    ).json()["data"]["id"]
+    provider = _FakeChatProvider(
+        {
+            "content": "Provider completed before local cost lookup failed.",
+            "model": "gpt-5.6-luna",
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+        }
+    )
+
+    def fail_provider_cost_lookup(**_kwargs):
+        raise aibrain.APIMartTokenPricingError(
+            "provider cost tier unavailable",
+            error_type="cost_tier_unconfigured",
+        )
+
+    monkeypatch.setattr(aibrain, "resolve", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(
+        aibrain,
+        "apimart_token_usage_cost",
+        fail_provider_cost_lookup,
+    )
+
+    response = client.post(
+        f"/api/v1/aibrain/conversations/{conversation_id}/messages",
+        json={"content": "Keep provider cost failure controlled", "tier": "low"},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "AIBRAIN_PROVIDER_USAGE_INVALID"
+    assert len(provider.calls) == 1
+    with auth_db() as db:
+        wallet = db.get(ReasoningWallet, auth_context["tenant_id"])
+        message = db.scalar(select(ChatMessage).where(ChatMessage.status == "failed"))
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.capability == "chat"))
+        ledger_entries = list(
+            db.scalars(
+                select(ReasoningLedgerEntry)
+                .where(ReasoningLedgerEntry.tenant_id == auth_context["tenant_id"])
+                .order_by(ReasoningLedgerEntry.created_at.asc())
+            )
+        )
+
+        assert message.error_code == "AIBRAIN_PROVIDER_USAGE_INVALID"
+        assert message.input_rate == Decimal("1.120000")
+        assert message.output_rate == Decimal("6.720000")
+        assert usage.status == "released"
+        assert usage.credits == Decimal("0")
+        assert usage.cost_cents == 0
+        assert [entry.entry_type for entry in ledger_entries] == [
+            "topup",
+            "reserve",
+            "release",
+        ]
+        assert wallet.available_credits == Decimal("500")
+        assert wallet.reserved_credits == Decimal("0")
+        assert wallet.total_spent_credits == Decimal("0")
 
 
 def test_message_provider_cost_uses_sol_high_tier_above_272k(
@@ -1493,7 +1719,7 @@ def test_provider_usage_at_public_hard_bound_settles_then_cools_down(
     )
 
     assert response.status_code == 200
-    assert response.json()["data"]["assistant_message"]["charged_credits"] == 1892.8
+    assert response.json()["data"]["assistant_message"]["charged_credits"] == 3355.52
     assert replay_response.status_code == 503
     assert replay_response.json()["error"]["detail"]["retry_after_seconds"] > 0
     assert len(provider.calls) == 1
@@ -1505,9 +1731,9 @@ def test_provider_usage_at_public_hard_bound_settles_then_cools_down(
                 UsageRecord.capability == "chat",
             )
         )
-        assert wallet.available_credits == Decimal("107.200000")
+        assert wallet.available_credits == Decimal("-1355.520000")
         assert wallet.reserved_credits == Decimal("0")
-        assert wallet.total_spent_credits == Decimal("1892.800000")
+        assert wallet.total_spent_credits == Decimal("3355.520000")
         assert usage.status == "settled"
         assert usage.quantity == Decimal("1050000")
         assert usage.provider_cost_usd == Decimal("0.47936000")
@@ -1595,9 +1821,9 @@ def test_inflight_exposure_limit_returns_structured_402_before_provider(
         "in_flight_request_count",
         "retryable",
     }
-    assert error["detail"]["in_flight_exposure_credits"] == 10_601.6512
-    assert error["detail"]["requested_exposure_credits"] == 5_300.8256
-    assert error["detail"]["exposure_limit_credits"] == 10_601.6512
+    assert error["detail"]["in_flight_exposure_credits"] == 21_065.6768
+    assert error["detail"]["requested_exposure_credits"] == 10_532.8384
+    assert error["detail"]["exposure_limit_credits"] == 21_065.6768
     assert error["detail"]["excess_credits"] == error["detail"][
         "requested_exposure_credits"
     ]

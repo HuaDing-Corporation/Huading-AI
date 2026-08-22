@@ -13,7 +13,11 @@ from app.providers.chat.apimart_gpt56 import (
     _apimart_gpt56_factory,
 )
 from app.services import aibrain
-from app.services.apimart_token_pricing import apimart_token_rate
+from app.services.apimart_token_pricing import (
+    APIMartTokenPricingError,
+    apimart_token_rate,
+    apimart_token_usage_cost,
+)
 
 
 class _FakeResponse:
@@ -893,6 +897,12 @@ def test_aibrain_rate_defaults_are_declared_in_runtime_and_env_examples() -> Non
         settings.engine_aibrain_mid_output_credits_per_1k,
         settings.engine_aibrain_high_input_credits_per_1k,
         settings.engine_aibrain_high_output_credits_per_1k,
+        settings.engine_aibrain_low_above_272k_input_credits_per_1k,
+        settings.engine_aibrain_low_above_272k_output_credits_per_1k,
+        settings.engine_aibrain_mid_above_272k_input_credits_per_1k,
+        settings.engine_aibrain_mid_above_272k_output_credits_per_1k,
+        settings.engine_aibrain_high_above_272k_input_credits_per_1k,
+        settings.engine_aibrain_high_above_272k_output_credits_per_1k,
     ) == (
         Decimal("1.12"),
         Decimal("6.72"),
@@ -900,6 +910,12 @@ def test_aibrain_rate_defaults_are_declared_in_runtime_and_env_examples() -> Non
         Decimal("16.80"),
         Decimal("5.60"),
         Decimal("33.60"),
+        Decimal("2.24"),
+        Decimal("10.08"),
+        Decimal("5.60"),
+        Decimal("25.20"),
+        Decimal("11.20"),
+        Decimal("50.40"),
     )
     repository_root = Path(__file__).resolve().parents[2]
     expected_lines = {
@@ -909,6 +925,12 @@ def test_aibrain_rate_defaults_are_declared_in_runtime_and_env_examples() -> Non
         "ENGINE_AIBRAIN_MID_OUTPUT_CREDITS_PER_1K=16.80",
         "ENGINE_AIBRAIN_HIGH_INPUT_CREDITS_PER_1K=5.60",
         "ENGINE_AIBRAIN_HIGH_OUTPUT_CREDITS_PER_1K=33.60",
+        "ENGINE_AIBRAIN_LOW_ABOVE_272K_INPUT_CREDITS_PER_1K=2.24",
+        "ENGINE_AIBRAIN_LOW_ABOVE_272K_OUTPUT_CREDITS_PER_1K=10.08",
+        "ENGINE_AIBRAIN_MID_ABOVE_272K_INPUT_CREDITS_PER_1K=5.60",
+        "ENGINE_AIBRAIN_MID_ABOVE_272K_OUTPUT_CREDITS_PER_1K=25.20",
+        "ENGINE_AIBRAIN_HIGH_ABOVE_272K_INPUT_CREDITS_PER_1K=11.20",
+        "ENGINE_AIBRAIN_HIGH_ABOVE_272K_OUTPUT_CREDITS_PER_1K=50.40",
         "ENGINE_AIBRAIN_MAX_PROMPT_TOKENS=922000",
         "ENGINE_AIBRAIN_INFLIGHT_EXPOSURE_MULTIPLIER=2",
         "ENGINE_AIBRAIN_RESERVATION_STALE_MINUTES=30",
@@ -923,6 +945,63 @@ def test_aibrain_rate_defaults_are_declared_in_runtime_and_env_examples() -> Non
 
 
 @pytest.mark.parametrize(
+    (
+        "tier",
+        "prompt_tokens",
+        "expected_input",
+        "expected_output",
+    ),
+    [
+        ("low", 272_000, "1.12", "6.72"),
+        ("low", 272_001, "2.24", "10.08"),
+        ("mid", 272_000, "2.80", "16.80"),
+        ("mid", 272_001, "5.60", "25.20"),
+        ("high", 272_000, "5.60", "33.60"),
+        ("high", 272_001, "11.20", "50.40"),
+    ],
+)
+def test_aibrain_twelve_user_sale_rates_match_product_matrix(
+    tier: str,
+    prompt_tokens: int,
+    expected_input: str,
+    expected_output: str,
+) -> None:
+    rates = aibrain.user_token_rates(
+        aibrain.tier_pricing(tier),
+        prompt_tokens=prompt_tokens,
+    )
+
+    assert rates.input_credits_per_1k == Decimal(expected_input)
+    assert rates.output_credits_per_1k == Decimal(expected_output)
+
+
+@pytest.mark.parametrize(
+    ("prompt_tokens", "expected_tier", "expected_credits", "expected_cost_cents"),
+    [
+        (272_000, "up_to_272k", "0.4448", 31),
+        (272_001, "above_272k", "0.8848032", 62),
+    ],
+)
+def test_provider_cost_boundary_is_frozen_independently_from_user_sale_rates(
+    prompt_tokens: int,
+    expected_tier: str,
+    expected_credits: str,
+    expected_cost_cents: int,
+) -> None:
+    cost = apimart_token_usage_cost(
+        model="gpt-5.6-luna",
+        prompt_tokens=prompt_tokens,
+        completion_tokens=1_000,
+        cached_prompt_tokens=0,
+        cache_write_tokens=0,
+    )
+
+    assert cost.tier == expected_tier
+    assert cost.credits == Decimal(expected_credits)
+    assert cost.cost_cents == expected_cost_cents
+
+
+@pytest.mark.parametrize(
     ("tier", "model", "expected_markup"),
     [
         ("low", "gpt-5.6-luna", "10"),
@@ -930,28 +1009,33 @@ def test_aibrain_rate_defaults_are_declared_in_runtime_and_env_examples() -> Non
         ("high", "gpt-5.6-sol", "2"),
     ],
 )
-def test_aibrain_six_user_rates_preserve_calibrated_provider_markup(
+@pytest.mark.parametrize("prompt_tokens", [272_000, 272_001])
+def test_aibrain_user_sale_markup_policy_is_separate_from_provider_costs(
     tier: str,
     model: str,
     expected_markup: str,
+    prompt_tokens: int,
 ) -> None:
-    pricing = aibrain.tier_pricing(tier)
-    provider_rate = apimart_token_rate(model=model)
-    provider_cost_credits_per_1k = Decimal("0.07")
-
-    input_markup = pricing.input_credits_per_1k / (
-        provider_rate.input_credits_per_m * provider_cost_credits_per_1k
+    user_rate = aibrain.user_token_rates(
+        aibrain.tier_pricing(tier),
+        prompt_tokens=prompt_tokens,
     )
-    output_markup = pricing.output_credits_per_1k / (
-        provider_rate.output_credits_per_m * provider_cost_credits_per_1k
+    provider_rate = apimart_token_rate(model=model, prompt_tokens=prompt_tokens)
+    provider_cost_user_credits_per_1k = (
+        Decimal(str(settings.engine_apimart_credit_usd))
+        * Decimal(str(settings.engine_usd_cny_rate))
+        * Decimal("100")
+        / Decimal("1000")
+    )
+
+    input_markup = user_rate.input_credits_per_1k / (
+        provider_rate.input_credits_per_m * provider_cost_user_credits_per_1k
+    )
+    output_markup = user_rate.output_credits_per_1k / (
+        provider_rate.output_credits_per_m * provider_cost_user_credits_per_1k
     )
 
     assert {input_markup, output_markup} == {Decimal(expected_markup)}
-
-
-def test_aibrain_exposure_limits_remain_decoupled_from_provider_costs() -> None:
-    assert aibrain._max_single_request_exposure_credits() == Decimal("5300.825600")
-    assert aibrain._tenant_inflight_exposure_limit() == Decimal("10601.651200")
 
 
 @pytest.mark.parametrize(
@@ -971,3 +1055,83 @@ def test_aibrain_trusted_provider_cost_bounds_use_calibrated_public_rates(
 
     assert maximum.credits == Decimal(expected_maximum_credits)
     assert maximum.cost_cents == expected_cost_cents
+
+
+def test_aibrain_unknown_product_tier_fails_observably() -> None:
+    with pytest.raises(ValueError, match="Unknown AIBRAIN tier"):
+        aibrain.tier_pricing("future")
+
+
+def test_user_sale_rate_selection_does_not_read_provider_cost_tiers(
+    monkeypatch,
+) -> None:
+    def fail_if_provider_cost_tier_is_read(**_kwargs):
+        raise APIMartTokenPricingError(
+            "provider pricing unavailable",
+            error_type="cost_tier_unconfigured",
+        )
+
+    pricing = aibrain.tier_pricing("low")
+    monkeypatch.setattr(
+        aibrain,
+        "apimart_token_rate",
+        fail_if_provider_cost_tier_is_read,
+        raising=False,
+    )
+
+    standard = aibrain.user_token_rates(pricing, prompt_tokens=272_000)
+    extended = aibrain.user_token_rates(pricing, prompt_tokens=272_001)
+
+    assert (standard.input_credits_per_1k, standard.output_credits_per_1k) == (
+        Decimal("1.12"),
+        Decimal("6.72"),
+    )
+    assert (extended.input_credits_per_1k, extended.output_credits_per_1k) == (
+        Decimal("2.24"),
+        Decimal("10.08"),
+    )
+    assert aibrain._user_credits(pricing, 272_000, 1_000) == Decimal("311.360000")
+    assert aibrain._user_credits(pricing, 272_001, 1_000) == Decimal("619.362240")
+
+
+@pytest.mark.parametrize("prompt_tokens", [-1, True, 1.5])
+def test_user_sale_rate_selection_rejects_invalid_prompt_tokens(
+    prompt_tokens: object,
+) -> None:
+    with pytest.raises(ValueError, match="non-negative integer"):
+        aibrain.user_token_rates(
+            aibrain.tier_pricing("low"),
+            prompt_tokens=prompt_tokens,
+        )
+
+
+@pytest.mark.parametrize(
+    ("estimated_prompt_tokens", "expected_reservation"),
+    [
+        (217_600, Decimal("311.360000")),
+        (217_601, Decimal("619.364480")),
+    ],
+)
+def test_aibrain_reservation_uses_the_buffered_prompt_token_rate_tier(
+    monkeypatch,
+    estimated_prompt_tokens: int,
+    expected_reservation: Decimal,
+) -> None:
+    monkeypatch.setattr(
+        aibrain,
+        "_estimate_prompt_tokens",
+        lambda _messages: estimated_prompt_tokens,
+    )
+
+    reservation = aibrain._reservation_credits(
+        [{"role": "user", "content": "ignored by the patched estimator"}],
+        pricing=aibrain.tier_pricing("low"),
+        max_completion_tokens=1_000,
+    )
+
+    assert reservation == expected_reservation
+
+
+def test_aibrain_exposure_limits_use_high_context_user_sale_rates() -> None:
+    assert aibrain._max_single_request_exposure_credits() == Decimal("10532.838400")
+    assert aibrain._tenant_inflight_exposure_limit() == Decimal("21065.676800")

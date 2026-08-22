@@ -61,6 +61,7 @@ _REASONING_CREDIT_QUANTUM = Decimal("0.000001")
 # Kept in the wallet response for backward compatibility; reservations are dynamic.
 _SINGLE_REQUEST_LIMIT = Decimal("200")
 _PROMPT_RESERVATION_MULTIPLIER = Decimal("1.25")
+_AIBRAIN_USER_RATE_PROMPT_TOKEN_BOUNDARY = 272_000
 _CONTEXT_ROUND_LIMIT = 20
 _CONTEXT_MESSAGE_LIMIT = _CONTEXT_ROUND_LIMIT * 2
 _CHAT_PROVIDER = "apimart"
@@ -94,6 +95,14 @@ logger = get_logger(__name__)
 @dataclass(frozen=True)
 class TierPricing:
     model: str
+    input_credits_per_1k: Decimal
+    output_credits_per_1k: Decimal
+    above_272k_input_credits_per_1k: Decimal
+    above_272k_output_credits_per_1k: Decimal
+
+
+@dataclass(frozen=True)
+class UserTokenRates:
     input_credits_per_1k: Decimal
     output_credits_per_1k: Decimal
 
@@ -644,6 +653,10 @@ async def send_chat_message(
         prompt_tokens > max_prompt_tokens
         or completion_tokens > max_completion_tokens
     )
+    settled_rates = user_token_rates(
+        pricing,
+        prompt_tokens=prompt_tokens,
+    )
     charged_credits = _user_credits(
         pricing,
         prompt_tokens,
@@ -746,8 +759,8 @@ async def send_chat_message(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
-        input_rate=pricing.input_credits_per_1k,
-        output_rate=pricing.output_credits_per_1k,
+        input_rate=settled_rates.input_credits_per_1k,
+        output_rate=settled_rates.output_credits_per_1k,
         reserved_credits=reservation,
         charged_credits=charged_credits,
         provider_cost_usd=provider_cost_usd,
@@ -1126,17 +1139,55 @@ def tier_pricing(tier: AIBrainTier) -> TierPricing:
             model=_TIER_MODELS[tier],
             input_credits_per_1k=settings.engine_aibrain_low_input_credits_per_1k,
             output_credits_per_1k=settings.engine_aibrain_low_output_credits_per_1k,
+            above_272k_input_credits_per_1k=(
+                settings.engine_aibrain_low_above_272k_input_credits_per_1k
+            ),
+            above_272k_output_credits_per_1k=(
+                settings.engine_aibrain_low_above_272k_output_credits_per_1k
+            ),
         )
     if tier == "mid":
         return TierPricing(
             model=_TIER_MODELS[tier],
             input_credits_per_1k=settings.engine_aibrain_mid_input_credits_per_1k,
             output_credits_per_1k=settings.engine_aibrain_mid_output_credits_per_1k,
+            above_272k_input_credits_per_1k=(
+                settings.engine_aibrain_mid_above_272k_input_credits_per_1k
+            ),
+            above_272k_output_credits_per_1k=(
+                settings.engine_aibrain_mid_above_272k_output_credits_per_1k
+            ),
         )
-    return TierPricing(
-        model=_TIER_MODELS[tier],
-        input_credits_per_1k=settings.engine_aibrain_high_input_credits_per_1k,
-        output_credits_per_1k=settings.engine_aibrain_high_output_credits_per_1k,
+    if tier == "high":
+        return TierPricing(
+            model=_TIER_MODELS[tier],
+            input_credits_per_1k=settings.engine_aibrain_high_input_credits_per_1k,
+            output_credits_per_1k=settings.engine_aibrain_high_output_credits_per_1k,
+            above_272k_input_credits_per_1k=(
+                settings.engine_aibrain_high_above_272k_input_credits_per_1k
+            ),
+            above_272k_output_credits_per_1k=(
+                settings.engine_aibrain_high_above_272k_output_credits_per_1k
+            ),
+        )
+    raise ValueError(f"Unknown AIBRAIN tier: {tier!r}")
+
+
+def user_token_rates(pricing: TierPricing, *, prompt_tokens: int) -> UserTokenRates:
+    if (
+        isinstance(prompt_tokens, bool)
+        or not isinstance(prompt_tokens, int)
+        or prompt_tokens < 0
+    ):
+        raise ValueError("AIBRAIN prompt_tokens must be a non-negative integer.")
+    if prompt_tokens <= _AIBRAIN_USER_RATE_PROMPT_TOKEN_BOUNDARY:
+        return UserTokenRates(
+            input_credits_per_1k=pricing.input_credits_per_1k,
+            output_credits_per_1k=pricing.output_credits_per_1k,
+        )
+    return UserTokenRates(
+        input_credits_per_1k=pricing.above_272k_input_credits_per_1k,
+        output_credits_per_1k=pricing.above_272k_output_credits_per_1k,
     )
 
 
@@ -1514,10 +1565,14 @@ def _user_credits(
     prompt_tokens: int,
     completion_tokens: int,
 ) -> Decimal:
+    rates = user_token_rates(
+        pricing,
+        prompt_tokens=prompt_tokens,
+    )
     return _reasoning_credits(
         (
-            Decimal(prompt_tokens) * pricing.input_credits_per_1k
-            + Decimal(completion_tokens) * pricing.output_credits_per_1k
+            Decimal(prompt_tokens) * rates.input_credits_per_1k
+            + Decimal(completion_tokens) * rates.output_credits_per_1k
         )
         / Decimal(1000)
     )
@@ -2000,6 +2055,10 @@ def _fail_chat_message(
     total_tokens = _nonnegative_int(safe_usage_result.get("total_tokens")) or (
         prompt_tokens + completion_tokens
     )
+    failed_rates = user_token_rates(
+        pricing,
+        prompt_tokens=prompt_tokens,
+    )
     if not provider_cost_possible:
         estimated_cost_usd = Decimal("0")
         provider_cost_cents = 0
@@ -2029,8 +2088,8 @@ def _fail_chat_message(
     user_message.prompt_tokens = prompt_tokens
     user_message.completion_tokens = completion_tokens
     user_message.total_tokens = total_tokens
-    user_message.input_rate = pricing.input_credits_per_1k
-    user_message.output_rate = pricing.output_credits_per_1k
+    user_message.input_rate = failed_rates.input_credits_per_1k
+    user_message.output_rate = failed_rates.output_credits_per_1k
     user_message.provider_cost_usd = estimated_cost_usd
     user_message.updated_at = datetime.now(UTC)
     _apply_reasoning_wallet_change(

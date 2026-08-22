@@ -35,6 +35,21 @@ _OVERALL_WAIT_KEYS_BY_EXAMPLE = {
     },
 }
 
+_AIBRAIN_USER_RATE_ENV = {
+    "ENGINE_AIBRAIN_LOW_INPUT_CREDITS_PER_1K": "1.12",
+    "ENGINE_AIBRAIN_LOW_OUTPUT_CREDITS_PER_1K": "6.72",
+    "ENGINE_AIBRAIN_LOW_ABOVE_272K_INPUT_CREDITS_PER_1K": "2.24",
+    "ENGINE_AIBRAIN_LOW_ABOVE_272K_OUTPUT_CREDITS_PER_1K": "10.08",
+    "ENGINE_AIBRAIN_MID_INPUT_CREDITS_PER_1K": "2.80",
+    "ENGINE_AIBRAIN_MID_OUTPUT_CREDITS_PER_1K": "16.80",
+    "ENGINE_AIBRAIN_MID_ABOVE_272K_INPUT_CREDITS_PER_1K": "5.60",
+    "ENGINE_AIBRAIN_MID_ABOVE_272K_OUTPUT_CREDITS_PER_1K": "25.20",
+    "ENGINE_AIBRAIN_HIGH_INPUT_CREDITS_PER_1K": "5.60",
+    "ENGINE_AIBRAIN_HIGH_OUTPUT_CREDITS_PER_1K": "33.60",
+    "ENGINE_AIBRAIN_HIGH_ABOVE_272K_INPUT_CREDITS_PER_1K": "11.20",
+    "ENGINE_AIBRAIN_HIGH_ABOVE_272K_OUTPUT_CREDITS_PER_1K": "50.40",
+}
+
 
 def _prod_compose() -> dict:
     return yaml.safe_load((INFRA / "docker-compose.prod.yml").read_text(encoding="utf-8"))
@@ -83,6 +98,19 @@ def test_prod_env_uses_calibrated_apimart_exchange_rate() -> None:
 
     assert values["ENGINE_APIMART_CREDIT_USD"] == "0.10"
     assert values["ENGINE_USD_CNY_RATE"] == "7.0"
+
+
+def test_aibrain_user_rate_tiers_are_complete_in_env_examples_and_runbook() -> None:
+    for path in _OVERALL_WAIT_KEYS_BY_EXAMPLE:
+        values = _env_values(path)
+        assert {key: values.get(key) for key in _AIBRAIN_USER_RATE_ENV} == (
+            _AIBRAIN_USER_RATE_ENV
+        ), path
+
+    deploy_doc = (INFRA / "DEPLOY.md").read_text(encoding="utf-8")
+    for key, value in _AIBRAIN_USER_RATE_ENV.items():
+        assert f"{key}={value}" in deploy_doc
+    assert "will not pick up new example values automatically" in deploy_doc
 
 
 def test_prod_compose_exposes_only_nginx_and_persists_state() -> None:
