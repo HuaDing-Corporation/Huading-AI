@@ -14,14 +14,16 @@ vi.mock("@/lib/api/scripts", () => ({ generateScript: vi.fn() }));
 vi.mock("@/lib/api/voices", () => ({ listVoices: vi.fn().mockResolvedValue([]) }));
 vi.mock("@/lib/api/avatars", () => ({ listAvatarPresets: vi.fn().mockResolvedValue([]) }));
 vi.mock("@/lib/api/quota", () => ({ getQuota: vi.fn().mockResolvedValue({ total: 0, used: 0, reserved: 0, remaining: 0 }) }));
+vi.mock("@/lib/api/copy", () => ({ estimateCopy: vi.fn() }));
 
-let mockSession: { token: string } | null = { token: "t" };
+let mockSession: { token: string; tenantId: string } | null = { token: "t", tenantId: "ten-a" };
 vi.mock("@/lib/auth/auth-context", () => ({
   useAuth: () => ({ session: mockSession, ready: true, login: vi.fn(), logout: vi.fn() })
 }));
 
 import { listVideos, createVideo } from "@/lib/api/videos";
-import { useVideos, useCreateVideo } from "@/lib/api/hooks";
+import { estimateCopy } from "@/lib/api/copy";
+import { useVideos, useCreateVideo, useEstimateCopy } from "@/lib/api/hooks";
 
 function wrapper({ children }: { children: ReactNode }) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -30,7 +32,7 @@ function wrapper({ children }: { children: ReactNode }) {
 
 afterEach(() => {
   vi.clearAllMocks();
-  mockSession = { token: "t" };
+  mockSession = { token: "t", tenantId: "ten-a" };
 });
 
 describe("useVideos", () => {
@@ -57,5 +59,58 @@ describe("useCreateVideo", () => {
     result.current.mutate({ topic: "hi", voice_id: "v", avatar_asset_id: "a" });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(createVideo).toHaveBeenCalledWith({ topic: "hi", voice_id: "v", avatar_asset_id: "a" });
+  });
+});
+
+describe("useEstimateCopy", () => {
+  /** 生产变异：estimate query key 不带 tenantId → 切到 B 后仍显示 A 的报价，且不会发第二次请求。 */
+  it("切换租户时隔离报价缓存：B 等待新响应期间不得沿用 A 的金额", async () => {
+    let resolveTenantB!: (value: {
+      estimated_credits: number;
+      unit: "credits";
+      note: string | null;
+      breakdown: Array<{ operation: "rewrite" | "titles" | "topics"; estimated_credits: number }>;
+    }) => void;
+    (estimateCopy as Mock)
+      .mockResolvedValueOnce({
+        estimated_credits: 3,
+        unit: "credits",
+        note: null,
+        breakdown: [
+          { operation: "rewrite", estimated_credits: 1 },
+          { operation: "titles", estimated_credits: 1 },
+          { operation: "topics", estimated_credits: 1 }
+        ]
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveTenantB = resolve;
+          })
+      );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const tenantWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    const { result, rerender } = renderHook(() => useEstimateCopy(), { wrapper: tenantWrapper });
+    await waitFor(() => expect(result.current.data?.estimated_credits).toBe(3));
+
+    mockSession = { token: "t-b", tenantId: "ten-b" };
+    rerender();
+
+    await waitFor(() => expect(estimateCopy).toHaveBeenCalledTimes(2));
+    expect(result.current.data).toBeUndefined();
+
+    resolveTenantB({
+      estimated_credits: 6,
+      unit: "credits",
+      note: null,
+      breakdown: [
+        { operation: "rewrite", estimated_credits: 2 },
+        { operation: "titles", estimated_credits: 2 },
+        { operation: "topics", estimated_credits: 2 }
+      ]
+    });
+    await waitFor(() => expect(result.current.data?.estimated_credits).toBe(6));
   });
 });

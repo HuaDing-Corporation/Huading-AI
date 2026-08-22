@@ -281,28 +281,14 @@ export const copy = {
     copyTopicsLabel: "话题候选（点击复制）",
     copyEmptyTitles: "本次未生成标题候选",
     copyEmptyTopics: "本次未生成话题候选",
-    // ── 计费披露 + 部分失败（PRICING-UI-0001 §五 · FIX5 P1-1 改写）─────────────────────────
-    // 🔴 这个模块此前在注释里自称「不扣费」，界面上**一个字的价格披露都没有**。而 BE PR #239
-    //   （services/copy.py `_generate_billed_copy`）给 rewrite / titles / topics 三个端点各自加了
-    //    reserve→settle，单价取 `estimate_copy_quota` 的 `capability="llm" unit="call"` 费率。
-    //
-    // 🔴🔴 **FIX5：删掉「各 1 积分，合计 3 积分」这个写死的金额。**
-    //    `1 积分` 只是 BE `_rate()`（quota.py:224-245）**三级解析的最后一级**：
-    //      租户级 `CreditRate` → 平台级 `CreditRate` → 代码默认 `Decimal("1.0000")`
-    //    前两级是**运营可改的数据**，租户覆写之后前端这句话就是错价 —— 与本包一开始修掉的
-    //    智脑 `6/15/30` **是同一个毛病**：一个看不出怎么来的裸整数，过期了也没人发现。
-    //    （那个毛病和这处新造是在同一个 PR 里发生的，值得记一笔。）
-    // ⚠️ **本该走 estimate**（图片/视频/反推都读 `POST /*/estimate` 拿权威金额），但文案模块
-    //    **没有这样的端点** —— `routes/copy.py` 只有 rewrite/titles/topics/drafts，
-    //    `estimate_copy_quota` 只是 services 内部函数、未暴露 HTTP。已写进回执请 CA 补。
-    //    在那之前：**只说可核查的结构性事实（三项各计一次、失败不计），不承诺任何具体数字**。
-    // 🔴🔴 FIX6 · P1-2：这里原来写「未成功的那一项**不计费**」，**删掉了**。
-    //    依据（`_generate_billed_copy` 的 except 分支 release）成立于**服务端的观测范围**，
-    //    而这句话展示在**客户端的观测范围** —— 前端只知道"我的请求失败了"，不知道"服务端没扣我钱"。
-    //    响应在网络里丢失时（服务端已 settle），这句话就是**假的**。
-    //    判据下沉到 `api/copy-billing.ts`，按**有没有服务端 outcome** 分流，见 `copyPartFailed*`。
+    // ── 计费披露 + 部分失败 ─────────────────────────────────────────────────────────────
+    // estimate 成功且 total/breakdown 自洽时使用 copyPriceEstimate；未返回、失败或契约损坏时
+    // 使用本条无金额回退。回退只说明三个端点各计一次，不复制可变费率，也不猜本次金额。
+    // 全局披露不承诺失败项未计费；逐项失败的资金措辞由 copyFailureBilling 按服务端 outcome 分流。
     copyPriceDisclosure:
       "计费：「生成文案」会同时生成改写 / 标题 / 话题三项，按三次计费（每项各计一次）。实际单价以你的套餐费率为准。",
+    copyPriceEstimate: (credits: string) =>
+      `预计本次生成约 ${credits} 积分，包含文案改写、标题和话题三项；最终以服务端实际结算为准。`,
     /**
      * 部分失败必须看得见——否则用户只会看到「少了话题」而不知为何。
      * 🔴 **两句措辞，按前端到底知不知道分流**（`copyFailureBilling`）：

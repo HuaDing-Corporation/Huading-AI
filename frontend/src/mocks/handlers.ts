@@ -2223,6 +2223,20 @@ export const handlers = [
   }),
 
   // ── 文案仿写 + 标题/话题生成 (COPY-UI-0001) — 同步 REST mock ──
+  // PRICING-UI-0003：真实 BE 按租户 llm/call 费率逐项 ROUND_CEILING；下面 8/8/8 只是 mock 租户
+  // 的完整响应样本，不是前端价格常量。UI 必须读取 estimated_credits，绝不能引用这些 fixture 数字。
+  http.post(`${BASE}/api/v1/copy/estimate`, () =>
+    ok({
+      estimated_credits: 24,
+      unit: "credits" as const,
+      note: "本报价包含文案改写、标题和话题三项。",
+      breakdown: [
+        { operation: "rewrite" as const, estimated_credits: 8 },
+        { operation: "titles" as const, estimated_credits: 8 },
+        { operation: "topics" as const, estimated_credits: 8 }
+      ]
+    })
+  ),
   http.post(`${BASE}/api/v1/copy/rewrite`, async ({ request }) => {
     const body = (await request.json()) as { source_text: string; mode: string; n?: number; duration_sec?: number };
     // FIX3（CB P2-1 · 机制按"接受方"算）：CopyRewriteRequest.duration_sec 是 int（copy.py，extra=forbid）——小数 → 422。

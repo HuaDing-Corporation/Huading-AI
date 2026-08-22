@@ -1,6 +1,32 @@
 import { describe, expect, it } from "vitest";
 
-import { generateTitles, generateTopics, rewriteCopy } from "./copy";
+import { estimateCopy, generateTitles, generateTopics, rewriteCopy } from "./copy";
+
+describe("文案估价 · POST /copy/estimate（apiFetch 真走 MSW）", () => {
+  /**
+   * 🔴 生产变异：删掉 estimateCopy 适配器、漏注册 MSW handler、把 operation 顺序/字段名写错，
+   * 或让 mock 的 total 与 breakdown 不一致 → 本条红。
+   *
+   * 本测走真实适配器与全局 MSW，守的是前端边界契约，不在测试里复算产品价格。
+   */
+  it("返回三项完整报价，breakdown 之和严格等于服务端 total", async () => {
+    const estimate = await estimateCopy();
+    expect(estimate).toMatchObject({
+      unit: "credits",
+      note: "本报价包含文案改写、标题和话题三项。",
+      breakdown: [
+        { operation: "rewrite" },
+        { operation: "titles" },
+        { operation: "topics" }
+      ]
+    });
+
+    expect(Number.isInteger(estimate.estimated_credits)).toBe(true);
+    expect(estimate.estimated_credits).toBeGreaterThanOrEqual(0);
+    expect(estimate.breakdown.every((item) => Number.isInteger(item.estimated_credits) && item.estimated_credits >= 0)).toBe(true);
+    expect(estimate.breakdown.reduce((sum, item) => sum + item.estimated_credits, 0)).toBe(estimate.estimated_credits);
+  });
+});
 
 // ECOM-VIDEO-SCENE-DURATION-FIX-UI-0001 · FIX3（CB P2-1 · 机制按"接受方"算）：/copy/rewrite 的 CopyRewriteRequest
 // 也接受 duration_sec（前端类型 + BE copy.py 皆 int|None）。此前 mock 没读该字段 → duration_sec:5.5 被接受、真 BE 会 422，
