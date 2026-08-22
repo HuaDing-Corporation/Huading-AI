@@ -32,7 +32,7 @@ import {
 import { fetchAnalyticsByProvider, fetchAnalyticsByTenant, fetchAnalyticsOverview, fetchAnalyticsTimeseries, type AnalyticsRange } from "@/lib/api/analytics";
 import { cancelBatch, createBatch, estimateBatch, getBatch, listBatches } from "@/lib/api/batches";
 import { getQuota } from "@/lib/api/quota";
-import { clearCopyDrafts, deleteCopyDraft, generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
+import { clearCopyDrafts, deleteCopyDraft, estimateCopy, generateTitles, generateTopics, listCopyDraftsPage, rewriteCopy, saveCopyDraft } from "@/lib/api/copy";
 import { generateScript } from "@/lib/api/scripts";
 import {
   clearReversePromptJobs,
@@ -390,6 +390,10 @@ export function useDeletePublishRecord() {
   });
 }
 // ── 文案仿写 + 标题/话题生成 (COPY-UI-0001) — 同步 mutation；草稿列表 infinite query ──
+export function useEstimateCopy() {
+  const { session } = useAuth();
+  return useQuery({ queryKey: copyKeys.estimate(session?.tenantId), queryFn: estimateCopy, enabled: !!session?.tenantId });
+}
 export function useRewriteCopy() {
   return useMutation({ mutationFn: (params: CopyRewriteRequest) => rewriteCopy(params) });
 }

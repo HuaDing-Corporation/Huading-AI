@@ -27,13 +27,17 @@ export function TopBar() {
   const showAdmin = canUseAdminConsole(session);
 
   return (
-    // FIX1：移动端顶栏收缩策略 —— Logo 收成纯 badge（隐字标）+ 动作组允许收缩（min-w-0）+ px 减小。
-    // 加了「开通额度」入口后，375px 顶栏原会横向溢出、退出按钮被挤出首屏（Codex B 实测 scroll 457px）。
-    // 根因是「已登录态移动端从没测过」—— 补的浏览器门禁见 e2e/landing。
+    // 窄屏优先保留管理员/余额/开通额度/退出/头像五个关键操作，移动端隐藏装饰性品牌标；
+    // 品牌身份由当前页面标题与导航上下文承接。
+    // 真实 mock 余额 844/1000 会占 107px；320px 下五项动作超过单行可用宽度，因此允许紧凑布局换行。
+    // 完整品牌、搜索、文字与单行布局到 lg 才恢复；若在 sm 一次展开，640–768px 会确定性横溢。
+    // e2e/landing 会先等异步 QuotaBadge 落屏再量断点精确值，避免余额尚未出现时假绿。
     <Glass className="col-span-full flex items-center gap-2 rounded-card px-3 py-[15px] sm:gap-[18px] sm:px-6">
-      <Logo hideWordmarkOnMobile className="flex-none" />
+      <div className="hidden flex-none lg:block">
+        <Logo />
+      </div>
 
-      <div className="relative mx-2 hidden max-w-[440px] flex-1 sm:block">
+      <div className="relative mx-2 hidden max-w-[440px] flex-1 lg:block">
         <Search
           className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-ink-faint"
           size={18}
@@ -46,7 +50,7 @@ export function TopBar() {
         />
       </div>
 
-      <div className="ml-auto flex min-w-0 flex-none items-center gap-2 sm:gap-3">
+      <div className="ml-auto flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2 lg:flex-none lg:flex-nowrap lg:gap-3">
         {showAdmin && (
           <Link
             href="/admin"
@@ -55,7 +59,7 @@ export function TopBar() {
           >
             <ShieldCheck size={15} strokeWidth={1.8} aria-hidden />
             {/* 移动端文字隐藏 + 图标 aria-hidden → 由 aria-label 兜可及名（P2-③） */}
-            <span className="hidden sm:inline">{copy.admin.consoleEntry}</span>
+            <span className="hidden lg:inline">{copy.admin.consoleEntry}</span>
           </Link>
         )}
         <QuotaBadge />
@@ -67,13 +71,13 @@ export function TopBar() {
           className="inline-flex items-center gap-1.5 rounded-field border border-line-gold bg-glass-fill px-3 py-1.5 text-[12.5px] text-gold-deep transition-colors hover:bg-glass-hover focus-visible:shadow-focus-gold"
         >
           <MessageCircle size={15} strokeWidth={1.8} aria-hidden />
-          <span className="hidden sm:inline">{copy.contact.consoleEntry}</span>
+          <span className="hidden lg:inline">{copy.contact.consoleEntry}</span>
         </button>
         <ContactDialog open={contactOpen} onOpenChange={setContactOpen} />
-        <Button variant="icon" size="icon" aria-label="通知" className="hidden sm:flex">
+        <Button variant="icon" size="icon" aria-label="通知" className="hidden lg:flex">
           <Bell size={18} strokeWidth={1.8} />
         </Button>
-        <Button variant="icon" size="icon" aria-label="设置" className="hidden sm:flex">
+        <Button variant="icon" size="icon" aria-label="设置" className="hidden lg:flex">
           <Settings size={18} strokeWidth={1.8} />
         </Button>
         <Button variant="icon" size="icon" aria-label="退出登录" title="退出登录" onClick={logout}>

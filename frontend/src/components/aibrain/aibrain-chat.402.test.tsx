@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // ── PRICING-UI-0001-FIX1 · **402 分流**承重（CB 复审第 1 点：aibrain-chat.tsx 把所有 402 当成
@@ -65,8 +65,10 @@ function renderChat() {
 
 const dialog = () => screen.getByRole("dialog");
 async function typeAndSend(text = "你好") {
-  fireEvent.change(screen.getByPlaceholderText(/输入问题/), { target: { value: text } });
-  fireEvent.click(screen.getByRole("button", { name: copy.aibrain.send }));
+  await act(async () => {
+    fireEvent.change(screen.getByPlaceholderText(/输入问题/), { target: { value: text } });
+    fireEvent.click(screen.getByRole("button", { name: copy.aibrain.send }));
+  });
 }
 
 beforeEach(() => {
@@ -97,7 +99,7 @@ describe("402 分流：欠费 vs 预留不足（CB 第 1 点）", () => {
 
   /**
    * 🔴 预留不足走另一套，且数字取自 **BE 的 detail**（不是前端下界）。
-   * 变异：`openRechargeFor` 不把 `err.detail` 传下去 → 本条红（会退回下界 137.6 但措辞带「至少」，
+   * 变异：`openRechargeFor` 不把 `err.detail` 传下去 → 本条红（会退回下界、展示 137.7 但措辞带「至少」，
    *       且 available 会变成钱包的 500 而不是 BE 说的 20）。
    */
   it("🔴 INSUFFICIENT 402 → 预留不足说明，数字取自 BE detail（不是前端下界、不是钱包余额）", async () => {
@@ -280,7 +282,7 @@ describe("422 提示词超限 / 502 上游用量越界 / 502 缺用量", () => {
    *    不再是错误路径），替换为 `..._USAGE_INVALID` 且**不带 detail**。
    * 变异：把文案改回中性（去掉「未扣费」）→ 本条红。
    */
-  it("🔴 PROVIDER_USAGE_INVALID(502) → 明确告知**未扣费**（源码证实零扣费，不再中性）", async () => {
+  it("🔴 PROVIDER_USAGE_INVALID(502) → 未扣费 + 等待指引，不诱导立即撞下一次 503", async () => {
     hooks.sendMutateAsync.mockRejectedValue(
       new ApiError("AIBRAIN provider returned invalid billing usage.", "AIBRAIN_PROVIDER_USAGE_INVALID", 502)
     );
@@ -288,7 +290,10 @@ describe("422 提示词超限 / 502 上游用量越界 / 502 缺用量", () => {
     await typeAndSend();
 
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.providerUsageInvalid));
-    expect(screen.getByRole("alert").textContent ?? "").toContain("未扣费");
+    const text = screen.getByRole("alert").textContent ?? "";
+    expect(text).toContain("未扣费");
+    expect(text).toContain("稍等片刻");
+    expect(text).not.toContain("请重试");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
@@ -306,19 +311,65 @@ describe("422 提示词超限 / 502 上游用量越界 / 502 缺用量", () => {
   });
 
   /**
-   * 🔴 `AIBRAIN_USAGE_MISSING`(502) 是**任务包没列、我从源码里捡到的第四个新码**
-   * （aibrain.py:505-514）。对用户与 PROVIDER_FAILED 是同一件事 → 共用文案。
-   * 变异：把它从分流里删掉 → 本条红（会落到 `err.message` 的英文原文）。
+   * 🔴🔴 PRICING-UI-0002 §四 · **判定是「改」**（本条上一版断言它走 `providerFailed`）。
+   * 我在 FIX4 回执里标注了这条待判：`USAGE_MISSING` **也在** BE 的 `_USER_COOLDOWN_ERROR_CODES` 里
+   * → 一定会开冷却 → 说「请重试」等于引导用户立刻去撞 503，连着两次失败。
+   * 判定下来与 `REPLAY_GUARD` 同理，故沿用同一句「稍等片刻再发送」。
+   * 变异：把它挪回 `PROVIDER_FAILED` 那支 → 本条红。
    */
-  it("🔴 USAGE_MISSING(502)（任务包未列）→ 走 providerFailed 文案，不落英文原文", async () => {
+  it("🔴 USAGE_MISSING(502) → 与 REPLAY_GUARD 同款「稍等片刻」，**不说「请重试」**（它会开冷却）", async () => {
     hooks.sendMutateAsync.mockRejectedValue(
       new ApiError("AIBRAIN provider returned no billing usage.", "AIBRAIN_USAGE_MISSING", 502)
     );
     renderChat();
     await typeAndSend();
 
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.providerFailed));
-    expect(screen.getByRole("alert").textContent ?? "").not.toContain("no billing usage");
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(copy.aibrain.providerReplayGuard));
+    const text = screen.getByRole("alert").textContent ?? "";
+    expect(text).toContain("稍等片刻");
+    expect(text).not.toContain("请重试");
+    expect(text).not.toContain("no billing usage"); // 不落英文原文
+  });
+
+  /**
+   * 🔴🔴 §四 点名要的**冷却分组不串味**门：按「会不会开冷却」分成两组，组间文案必须不同。
+   *   会开冷却（不许说「请重试」）：`USAGE_INVALID` · `REPLAY_GUARD` · `USAGE_MISSING`
+   *   不开冷却（唯一可以说「请稍后重试」）：`PROVIDER_FAILED`
+   * 变异：把任一个会开冷却的码挪回 `PROVIDER_FAILED` 那支 → 本条红。
+   * 这条比逐个断言更强：它钉住的是**分组关系**，加第七个码时只要归错组就会红。
+   */
+  it("🔴 三种冷却 502 都要等，只有 PROVIDER_FAILED 可立即重试", async () => {
+    const texts: Record<string, string> = {};
+    for (const code of [
+      "AIBRAIN_PROVIDER_USAGE_INVALID",
+      "AIBRAIN_PROVIDER_REPLAY_GUARD",
+      "AIBRAIN_USAGE_MISSING",
+      "AIBRAIN_PROVIDER_FAILED"
+    ]) {
+      const view = renderChat();
+      hooks.sendMutateAsync.mockRejectedValue(new ApiError("x", code, 502));
+      await typeAndSend();
+      await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+      texts[code] = screen.getByRole("alert").textContent ?? "";
+      view.unmount();
+    }
+
+    // 三个会开冷却的：都说「稍等片刻」、都不说「请重试」。
+    for (const code of [
+      "AIBRAIN_PROVIDER_USAGE_INVALID",
+      "AIBRAIN_PROVIDER_REPLAY_GUARD",
+      "AIBRAIN_USAGE_MISSING"
+    ]) {
+      expect(texts[code]).toContain("稍等片刻");
+      expect(texts[code]).not.toContain("请重试");
+    }
+    // 唯一不开冷却的：可以、也应该说「请稍后重试」。
+    expect(texts.AIBRAIN_PROVIDER_FAILED).toContain("请稍后重试");
+    expect(texts.AIBRAIN_PROVIDER_FAILED).not.toContain("稍等片刻");
+    // 🔴 组间文案确实不同（不是三句一模一样蒙混过关）。
+    expect(texts.AIBRAIN_PROVIDER_REPLAY_GUARD).not.toBe(texts.AIBRAIN_PROVIDER_FAILED);
+    // 三个 502 都要说清零扣费——这一点是共同的，不因分组而丢。
+    for (const code of Object.keys(texts)) expect(texts[code]).toContain("未扣费");
   });
 });
 
@@ -409,6 +460,151 @@ describe("🔴 503 用量异常冷却（第五个码）", () => {
     expect(text).not.toContain("团队");
     expect(text).not.toContain("其他人");
     expect(text).not.toContain("租户");
+  });
+});
+
+// ══ PRICING-UI-0003 · 冷却**预告**（200 成功响应带 cooldown_retry_after_seconds）═══════════════
+// 🔴 它与 503 是同一件事的两个时刻：**预告**（回答已拿到，提醒下一条要等）vs **已撞上**（这次没发出去）。
+//    CB 在 PR-REVIEW-RV4 判定「成功后冷却有必要 —— 4097 completion 不是正常回答，因为请求体真实
+//    发送了 max_completion_tokens=4096」，所以这条路径合法、必要、罕见，UI 可以做。
+describe("🔴 冷却预告（成功响应）", () => {
+  /**
+   * 变异：把 `handleSend` 里读 `cooldown_retry_after_seconds` 那段删掉 → 本条红。
+   * 🔴 断言它是**提示态而不是错误态**：用户刚拿到一个正常回答，渲染成红色 alert 会让他
+   *    以为回答有问题。故断言 `role="status"` 且 **`role="alert"` 不存在**。
+   */
+  it("🔴 字段非空 → 显示预告（含真实秒数），且是**提示态**不是错误态", async () => {
+    hooks.sendMutateAsync.mockResolvedValue({ cooldown_retry_after_seconds: 60 });
+    renderChat();
+    await typeAndSend();
+
+    // ⚠️ 用**文本**定位而不是 getByRole("status")：壳里本来就有别的 status
+    //    （MessageStream 的空态、wallet-balance 的低余额徽标），按 role 取会多匹配。
+    const ahead = await screen.findByText(copy.aibrain.cooldownAhead(60));
+    const text = ahead.textContent ?? "";
+    expect(text).toContain("60 秒"); // 真值，不是"约一分钟"
+    // 🔴 提示态：它自己是 status（礼貌播报），且**全页没有 alert**、不弹窗。
+    expect(ahead.closest('[role="status"]')).not.toBeNull();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    // 🔴 措辞要能看出「回答已拿到」，不许用 503 那套「暂停/出错」的词——那会让用户以为刚才的回答有问题。
+    expect(text).toContain("已完成");
+    expect(text).not.toContain("异常");
+    expect(text).not.toContain("暂停");
+  });
+
+  /**
+   * 变异：只把秒数存进 state、没有到期 timer → 推进到服务端时长后本条红（旧提示仍永久挂着）。
+   * 不做逐秒倒计时；这里只守「到期自动撤掉已经过时的承诺」。
+   */
+  it("🔴 预告在服务端时长内可见，到期后自动消失", async () => {
+    vi.useFakeTimers();
+    try {
+      hooks.sendMutateAsync.mockResolvedValue({ cooldown_retry_after_seconds: 2 });
+      renderChat();
+      await typeAndSend();
+
+      expect(screen.getByText(copy.aibrain.cooldownAhead(2))).toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_999);
+      });
+      expect(screen.getByText(copy.aibrain.cooldownAhead(2))).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(screen.queryByText(copy.aibrain.cooldownAhead(2))).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * 变异：新响应沿用旧 timer，旧 timer 到点时无条件清 state → 第二条 90 秒预告在第 30 秒被误清。
+   * 最后再推进到新值自己的截止点，证明它不是被永久保留。
+   */
+  it("🔴 新预告替换旧预告后，旧 timer 不得误清新值", async () => {
+    vi.useFakeTimers();
+    try {
+      hooks.sendMutateAsync
+        .mockResolvedValueOnce({ cooldown_retry_after_seconds: 60 })
+        .mockResolvedValueOnce({ cooldown_retry_after_seconds: 90 });
+      renderChat();
+      await typeAndSend("第一条");
+      expect(screen.getByText(copy.aibrain.cooldownAhead(60))).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      await typeAndSend("第二条");
+      expect(screen.getByText(copy.aibrain.cooldownAhead(90))).toBeInTheDocument();
+
+      // t=60s：第一条的旧 timer 到点；第二条仍应再保留 60s。
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(screen.getByText(copy.aibrain.cooldownAhead(90))).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(screen.queryByText(copy.aibrain.cooldownAhead(90))).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * 🔴🔴 任务包 §一.4 点名的那条：**字段为 null 时什么都不显示**。
+   * 没有这条门，实现退化成「永远显示」不会被发现——而绝大多数请求都是 null，
+   * 那就等于给每一次正常对话都挂一句莫名其妙的冷却提示。
+   * 变异：把判断写成 `if (ahead !== undefined)` 或干脆无条件 setCooldownAhead → 本条红。
+   */
+  it("🔴 字段为 null / 缺席 / 0 → **什么都不显示**（绝大多数情况）", async () => {
+    for (const payload of [
+      { cooldown_retry_after_seconds: null },
+      {}, // 字段缺席
+      { cooldown_retry_after_seconds: 0 } // 契约坏了（BE 声明 ge=1）→ 宁可不说
+    ]) {
+      const view = renderChat();
+      // 🔴 **每轮先清调用记录**（PRICING-UI-0003 复查补）：`vi.clearAllMocks()` 只在 beforeEach，
+      //    不在循环体内。第一轮之后 `toHaveBeenCalled()` 恒为真，下面那句 waitFor 在第 2、3 轮
+      //    **是立即通过的空断言** —— 而恰恰是第 2、3 轮（`{}` 与 `0`）在杀「无条件 setCooldownAhead」
+      //    那个变异。当时能绿全靠 RTL 在 act 退出时顺手排空了微任务队列，不是靠这句等待。
+      //    **一道门只能守它断言的那件事**：这句 waitFor 声称"等到请求发出"，那就得真的每轮都等。
+      hooks.sendMutateAsync.mockClear();
+      hooks.sendMutateAsync.mockResolvedValue(payload);
+      await typeAndSend();
+      // 推进到静止点再断言"没有"——否则只看得见点击当下那一帧（NEGATIVE-ASSERT-SWEEP 的教训）。
+      await waitFor(() => expect(hooks.sendMutateAsync).toHaveBeenCalledTimes(1));
+      // 同上：按文本断言"没有"，避免被壳里其他 status 元素干扰成假红/假绿。
+      expect(screen.queryByText(/秒后才能发下一条/)).not.toBeInTheDocument();
+      view.unmount();
+    }
+  });
+
+  /**
+   * 🔴 预告与 503 的**先后关系**：两者措辞必须能看出是同一件事的两个时刻，而不是两次故障。
+   * 变异：把预告文案换成 503 那句 → 本条红。
+   */
+  it("🔴 预告与 503 措辞不同：预告说「已完成」，503 说「暂停/异常」", async () => {
+    const first = renderChat();
+    hooks.sendMutateAsync.mockResolvedValue({ cooldown_retry_after_seconds: 60 });
+    await typeAndSend();
+    const aheadText = (await screen.findByText(/秒后才能发下一条/)).textContent ?? "";
+    first.unmount();
+
+    hooks.sendMutateAsync.mockRejectedValue(
+      new ApiError("cooldown", "AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN", 503, { retry_after_seconds: 42 })
+    );
+    renderChat();
+    await typeAndSend();
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    const hitText = screen.getByRole("alert").textContent ?? "";
+
+    expect(aheadText).not.toBe(hitText);
+    expect(aheadText).toContain("已完成"); // 预告：回答拿到了
+    expect(hitText).toContain("暂停"); // 已撞上：这次没发出去
   });
 });
 

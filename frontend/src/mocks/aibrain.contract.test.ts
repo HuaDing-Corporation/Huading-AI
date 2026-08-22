@@ -14,6 +14,7 @@ const EXPOSURE = "__mock_inflight_exposure__"; // FIX2：在途敞口打满 402
 const USAGE_INVALID = "__mock_usage_limit__"; // FIX3：上游用量不可信 502（marker 名不变，语义已换）
 const PROMPT_LIMIT = "__mock_prompt_limit__"; // FIX2：提示词超本地硬上限 422
 const REPLAY_GUARD = "__mock_replay_guard__"; // FIX4：上游可能已产生成本 502（零扣费但开冷却）
+const GROSS_USAGE = "__mock_gross_usage__"; // 0003：答成功但超 envelope → 200 带预告 + 开冷却
 // idempotency_key 是 BE 必填 UUID → 测试用真 UUID（每次唯一，避免跨用例串键）。
 const topup = (amount: number, key = crypto.randomUUID()) => topupWallet({ amount, idempotency_key: key });
 
@@ -117,7 +118,7 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
   /**
    * 🔴 路径① 正常预留 → 结算 → **差额立即退回**（§三 第 4 条要向用户保证的那件事）。
    * 变异A：把结算行 `available += max(0, reservation - charged)` 删掉（即预留全额扣走）
-   *        → 「available 净减 = 实扣」这条红（净减会变成 27.5 而不是 0.24）。
+   *        → 「available 净减 = 实扣」这条红（净减会变成一整笔预留 ≥27.52512 而不是 0.24）。
    * 变异B：把预留改回 flat `min(200, available)` → 「预留 ≫ 实扣」仍绿，但**门②**会红（见下）。
    */
   it("路径①：预留 → 结算 → 差额立即退回（available 净减 = 实扣，而非预留额）", async () => {
@@ -154,7 +155,40 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
   });
 
   /**
-   * 🔴 门③：预留额**分档不同**（高档预留 ≫ 低档），即预留确实按费率算 —— §三 表格里 27.5/68.8/137.6 的来源。
+   * 🔴🔴 PRICING-UI-0002：**双区间在计费里真的生效**。
+   * 构造一个 prompt token 数跨过 272,000 阈值的请求，其**每 token 单价**必须高于低区间的请求。
+   * 这是 mock 里唯一按"本次用量"计费的地方（`userCredits` → `rateForPromptTokens`），
+   * 也就是双区间唯一能被观察到的地方；写死 `standard` 会让这条红。
+   *
+   * ⚠️ 怎么把 prompt 顶过 272K：靠**图片附件**（每张按 4096 token 计，BE `_IMAGE_PROMPT_TOKEN_ESTIMATE`）
+   *    造不出 27 万；靠文本要 27 万字符，测试里生成一次约 0.5MB 字符串 —— 可行且比图片路径更直接。
+   *    ⚠️ 但那样会先撞**提示词硬上限 422**（UTF-8 字节 > 922,000）——中文每字 3 字节，27.2 万字
+   *    就是 81.6 万字节，仍在限内；用 ASCII 更安全（1 字节/字符）。故用 ASCII 'x'。
+   *    ASCII 的 token 估算是「每 4 字符 1 token」→ 要 272K token 需 ~109 万字符，那会超字节上限。
+   *    → 改用**非 ASCII**（每字 1 token、3 字节）：27.3 万字 = 27.3 万 token、81.9 万字节，两头都过。
+   */
+  it("🔴 PRICING-UI-0002：prompt 跨过 272K 阈值 → 单位 token 单价更高（双区间真的生效）", async () => {
+    await topup(2000);
+    const low = await createConversation();
+    const high = await createConversation();
+
+    const shortRes = await sendMessage(low.id, { content: "你好", tier: "low", attachment_asset_ids: [] });
+    // 27.3 万个非 ASCII 字符 → ~27.3 万 prompt token（> 272,000），且 81.9 万字节（< 922,000）。
+    const longRes = await sendMessage(high.id, {
+      content: "国".repeat(273_000),
+      tier: "low",
+      attachment_asset_ids: []
+    });
+
+    const unit = (r: typeof shortRes) =>
+      (r.assistant_message.charged_credits ?? 0) / (r.assistant_message.total_tokens || 1);
+    // 🔴 高区间的每 token 单价必须更高 —— 低区间输入 1.12、高区间 2.24。
+    expect(unit(longRes)).toBeGreaterThan(unit(shortRes));
+    expect(longRes.assistant_message.prompt_tokens ?? 0).toBeGreaterThan(272_000);
+  });
+
+  /**
+   * 🔴 门③：预留额**分档不同**（高档预留 ≫ 低档），即预留确实按费率算 —— §三 表格里那三个下界的来源（真值 27.52512 / 68.8128 / 137.6256；任务包表格抄的是一位小数低报版，别跟着抄）。
    * 变异：`reservationCredits` 忽略 tier（写死用某一档费率）→ 本条红。
    */
   it("门③：同一句话在 high 档的预留显著高于 low 档（预留按档位费率算）", async () => {
@@ -171,7 +205,7 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
    * 变异：把闸门改回 `available <= 0` → 本条红（账上 10 分会被放行）。
    */
   it("路径②：账上有钱但不够本次预留 → 402（闸门是 available < 预留，不是 available<=0）", async () => {
-    await topup(100); // 100 分，够 low（≈27.5）但远不够 high（≈137.6）
+    await topup(100); // 100 分，够 low（下界 27.52512，且 mock 预留是动态的、恒高于下界）但远不够 high（137.6256）
     const conv = await createConversation();
     await expect(
       sendMessage(conv.id, { content: "你好", tier: "high", attachment_asset_ids: [] })
@@ -339,6 +373,45 @@ describe("aibrain mock 契约 · 对齐 BE 增量 1", () => {
     expect(err.code).toBe("AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN");
     expect(err.detail.retry_after_seconds).toBeGreaterThan(0);
     expect(Number.isInteger(err.detail.retry_after_seconds)).toBe(true); // BE `max(1, ceil(...))`
+  });
+
+  /**
+   * 🔴🔴 PRICING-UI-0003 · **冷却预告的因果链**（BE `76d5bb3` + aibrain.py:792-803）。
+   * 与所有错误路径不同：这是 **200 成功**，答案照常交付，BE 只是同时开了用户冷却，
+   * 并把时长放进 `cooldown_retry_after_seconds` 让前端能预告。
+   * 三段一起断言，缺一段这个功能就没意义：
+   *   ① 200 且**真的有答案**（不是错误伪装成成功）
+   *   ② 响应带正整数 `cooldown_retry_after_seconds`
+   *   ③ **下一次请求真的撞 503** —— 只发字段不开冷却等于演戏，预告的价值恰恰在"之后真会被拦"
+   * 变异：mock 只发字段不置冷却标志 → 第③段红。
+   */
+  it("🔴 gross_usage_anomaly：200 交付 + 带 cooldown_retry_after_seconds + 下一次撞 503", async () => {
+    await topup(2000);
+    const conv = await createConversation();
+    const res = await sendMessage(conv.id, { content: `${GROSS_USAGE} 你好`, tier: "low", attachment_asset_ids: [] });
+
+    // ① 成功交付（这条路径不是错误）
+    expect(res.assistant_message.status).toBe("completed");
+    expect(res.assistant_message.content.length).toBeGreaterThan(0);
+    // ② 预告字段
+    expect(res.cooldown_retry_after_seconds).toBeGreaterThan(0);
+    expect(Number.isInteger(res.cooldown_retry_after_seconds)).toBe(true);
+    // ③ 因果链：下一次撞 503
+    const next = await sendMessage(conv.id, { content: "再问一句", tier: "low", attachment_asset_ids: [] }).catch((e) => e);
+    expect(next.status).toBe(503);
+    expect(next.code).toBe("AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN");
+  });
+
+  /**
+   * 🔴 **正常路径不带预告**（绝大多数情况）。BE 恒发这个键但值为 null。
+   * 变异：mock 无条件发秒数 → 本条红（每次正常对话都会挂一句冷却提示）。
+   */
+  it("🔴 正常成功响应：cooldown_retry_after_seconds 为 null（不是每次都预告）", async () => {
+    await topup(2000);
+    const conv = await createConversation();
+    const res = await sendMessage(conv.id, { content: "你好", tier: "low", attachment_asset_ids: [] });
+    expect(res.assistant_message.status).toBe("completed");
+    expect(res.cooldown_retry_after_seconds).toBeNull();
   });
 
   /**

@@ -70,28 +70,51 @@ test("未登录进站=落地页；登录→控制台；已登录访 /landing=头
   await page.waitForURL("http://localhost:3100/", { timeout: 30_000 });
   await expect(page.getByRole("button", { name: "生成视频" })).toBeVisible({ timeout: 20_000 });
 
-  // 🔴 LANDING-CONTACT-UI-0001 · FIX1 · P1-2：**已登录 TopBar 在 375px 无横向溢出 + 三入口均可达**。
+  // 🔴 LANDING-CONTACT-UI-0001 · FIX1 · P1-2：已登录 TopBar 在窄屏及响应式恢复边界无横向溢出。
   // 这条路以前从没走过——现有 e2e 只在**退出后**切 375px（下面 ④），已登录顶栏永远没被移动端测过，
   // 于是「加了开通额度入口把顶栏撑爆、退出按钮被挤出首屏」逃过了 CI（Codex B 实测 scroll 457px）。
-  await page.setViewportSize({ width: 375, height: 812 });
-  await page.goto("/"); // 确保在工作台（TopBar 所在）
-  await expect(page.getByRole("button", { name: "生成视频" })).toBeVisible({ timeout: 20_000 });
-  // 无横向溢出：文档滚动宽度 = 视口宽度（多 1px 都算溢出）。
-  const scrollW = await page.evaluate(() => document.documentElement.scrollWidth);
-  expect(scrollW, `已登录 375px 顶栏横向溢出：scrollWidth=${scrollW} > 375`).toBeLessThanOrEqual(375);
-  // 开通额度 / 退出：按钮，可点且整颗在 375 首屏内（这正是 P1-2 被挤出去的那颗）。
-  for (const name of ["开通额度", "退出登录"]) {
-    const btn = page.getByRole("button", { name }).first();
-    await expect(btn).toBeVisible();
-    const box = await btn.boundingBox();
-    expect(box && box.x >= 0 && box.x + box.width <= 375, `「${name}」不在 375 首屏内：${JSON.stringify(box)}`).toBe(true);
+  // 变异：把完整品牌/搜索/动作文字/单行布局提前恢复到 sm(640px) → 640/641/768 的 scrollWidth
+  // 立即大于视口；只测 320/375 与 1280 会漏掉这个断点跳变。
+  for (const width of [320, 360, 375, 639, 640, 641, 768, 1023, 1024, 1025]) {
+    await page.setViewportSize({ width, height: 812 });
+    await page.goto("/"); // 确保在工作台（TopBar 所在）
+    await expect(page.getByRole("button", { name: "生成视频" })).toBeVisible({ timeout: 20_000 });
+    // QuotaBadge 异步请求：必须等 mock 的真实长数字余额落屏后再量宽。少这一步会在余额尚未渲染时
+    // 假绿，只有并行 E2E 稍慢时才偶发抓到 844/1000 把头像推到视口之外。
+    await expect(page.getByText("余额 844/1000", { exact: true })).toBeVisible();
+    // 无横向溢出：文档滚动宽度 = 视口宽度（多 1px 都算溢出）。
+    const scrollW = await page.evaluate(() => document.documentElement.scrollWidth);
+    expect(scrollW, `已登录 ${width}px 顶栏横向溢出：scrollWidth=${scrollW} > ${width}`).toBeLessThanOrEqual(width);
+    // 管理后台 / 开通额度 / 退出均是关键动作：允许紧凑成图标或换行，但必须完整留在视口内。
+    for (const name of ["管理后台", "开通额度", "退出登录"]) {
+      const action = page.getByRole(name === "管理后台" ? "link" : "button", { name }).first();
+      await expect(action).toBeVisible();
+      const box = await action.boundingBox();
+      expect(
+        box && box.x >= 0 && box.x + box.width <= width,
+        `「${name}」不在 ${width}px 首屏内：${JSON.stringify(box)}`
+      ).toBe(true);
+    }
+    // 头像是装饰性 div（金圆标，非按钮），同样必须完整留在当前视口。
+    const avatarBox = await page
+      .locator(".rounded-full.bg-grad-gold")
+      .first()
+      .evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        return { x: r.x, right: r.right };
+      });
+    expect(
+      avatarBox.x >= 0 && avatarBox.right <= width,
+      `头像不在 ${width}px 首屏内：${JSON.stringify(avatarBox)}`
+    ).toBe(true);
+
+    // 1024px 才恢复完整桌面套件；精确边界与 +1 都要钉住，避免以后又在 640px 一次性展开 849px 内容。
+    const desktopTopBar = width >= 1024;
+    await expect(page.getByText("华鼎 AI", { exact: true })).toBeVisible({ visible: desktopTopBar });
+    await expect(page.getByRole("textbox", { name: "搜索" })).toBeVisible({ visible: desktopTopBar });
+    await expect(page.getByRole("button", { name: "通知" })).toBeVisible({ visible: desktopTopBar });
+    await expect(page.getByRole("button", { name: "设置" })).toBeVisible({ visible: desktopTopBar });
   }
-  // 头像：工作台 TopBar 的头像是装饰性 div（金圆标，非按钮）→ 断言它可见且右边界在视口内。
-  const avatarBox = await page
-    .locator(".rounded-full.bg-grad-gold")
-    .first()
-    .evaluate((el) => { const r = el.getBoundingClientRect(); return { x: r.x, right: r.right }; });
-  expect(avatarBox.x >= 0 && avatarBox.right <= 375, `头像不在 375 首屏内：${JSON.stringify(avatarBox)}`).toBe(true);
   await page.setViewportSize({ width: 1280, height: 800 }); // 切回桌面继续 ③
 
   // ③ 已登录显式访问 /landing → 头像态（首字圆标），下拉「进控制台」回 `/`。

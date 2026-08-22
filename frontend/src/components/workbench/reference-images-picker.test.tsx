@@ -66,7 +66,10 @@ describe("ReferenceImagesPicker (参考图 ≤9 承重)", () => {
     await waitFor(() => expect(screen.getAllByRole("img")).toHaveLength(9));
     expect(screen.getByText(copy.workbench.vgRefOverLimit)).toBeInTheDocument();
     expect(uploadMock.mutateAsync).toHaveBeenCalledTimes(9); // 7 + 2，第 8 张起被剩余位拦
-    expect((onChange.mock.calls.at(-1)?.[0] as string[]).length).toBe(9);
+    // items 已渲染不代表上抛 items 的 passive effect 也已执行；全仓高负载下同步读取会偶发停在上一拍的 7。
+    await waitFor(() =>
+      expect(onChange).toHaveBeenLastCalledWith(["a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9"])
+    );
   });
 
   it("上传失败：catch 友好提示，失败项不计入", async () => {

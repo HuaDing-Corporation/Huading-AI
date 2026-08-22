@@ -4,6 +4,7 @@ import type {
   CopyDraft,
   CopyDraftCreateRequest,
   CopyDraftListResponse,
+  CopyEstimateResponse,
   CopyRewriteRequest,
   CopyRewriteResponse,
   CopyTitlesRequest,
@@ -19,6 +20,13 @@ import type {
  * 自动丢 undefined 字段（smart/custom 不发 n、非 custom 不发 instruction）。
  * 错误经 ApiError 抛出，表单用 errorText() 映射（后端按 seam 已友好化 message，不露 JSON）。
  */
+
+/**
+ * 三项文案生成的只读估价。BE 路由无请求体；金额由租户当前 llm/call 费率决定，前端不计算。
+ */
+export function estimateCopy(): Promise<CopyEstimateResponse> {
+  return apiFetch<CopyEstimateResponse>("/api/v1/copy/estimate", { method: "POST" });
+}
 
 /** 文案改写：smart/custom 返 1 条，auto 返 n 条。 */
 export function rewriteCopy(params: CopyRewriteRequest): Promise<CopyRewriteResponse> {

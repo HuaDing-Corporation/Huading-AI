@@ -1,6 +1,7 @@
 // 华鼎AI智脑 · 前端类型 + 契约常量（AIBRAIN-UI-0001 · FIX1：按 BE 增量 1 真实源码逐字段对齐）。
 //
-// 🔴 契约源 = BE `f2e9a2e0`（schemas/aibrain.py · routes/aibrain.py · services/aibrain.py）。**以 BE 为准**。
+// 🔴 契约源 = 已合并 BE；售价双区间锁定 develop@2371a210 / #243 head 4827a328
+// （core/config.py · services/aibrain.py）。**以 BE 为准**。
 // 独立 `lib/aibrain/` 目录，不碰共享 types.ts（避让电商线）。
 
 /** 「智能强度」三档（BE `_TIER_MODELS`）。**前端只传档位**（服务端固定 allowlist）。 */
@@ -9,21 +10,57 @@ export type IntensityTier = "low" | "mid" | "high";
 /**
  * 一档的**计费费率**（积分 / 千 token），按输入、输出分别计价。
  *
- * 🔴 契约源 = BE `app/core/config.py` 的 `engine_aibrain_{low,mid,high}_{input,output}_credits_per_1k`
- *    （PR #239 `codex/pricing-c3c4-be`，config.py:211-216）。**BE 是唯一权威，此处是镜像**。
+ * 🔴 契约源 = BE `app/core/config.py` 的
+ *    `engine_aibrain_{low,mid,high}_{input,output}_credits_per_1k` 与
+ *    `engine_aibrain_{low,mid,high}_above_272k_{input,output}_credits_per_1k`
+ *    （develop@2371a210 / #243 head 4827a328）。**BE 是唯一权威，此处是镜像**。
+ *    ⚠️ 不写行号：按字段名搜，避免后续配置项插入造成假引用。
  * 🔴 为什么必须是费率、而不是一个「典型值」整数（PRICING-UI-0001 §二）：本文件此前写死
  *    `typical: 6/15/30`，那是**旧费率**下 500 输入 + 500 输出的估算值，可没有一个字说明这一点。
  *    BE 把费率降了 35%（1.73/10.37 → 1.12/6.72）之后，UI 仍然展示 6/15/30 —— 无人察觉，因为
  *    一个裸整数看不出它是怎么来的。改成费率之后，展示的每个数字都由 `typicalCredits()` /
  *    `minReservationCredits()` **从费率推导**，费率一改全部跟着走，且口径能对用户讲清楚。
- * ⚠️ 费率是**租户可覆写**的（BE `CreditRate` 表优先于 config 默认值）。此处的值是 config 默认值，
- *    仅用于「发送前给用户一个预期」；**实际扣费一律以 BE 返回的 `charged_credits` 为准**，前端不参与算账。
+ * ⚠️ 这些默认值可由部署环境覆写；当前 AIBRAIN `tier_pricing()` 直接读取 `Settings`，不查
+ *    `CreditRate` 租户表。前端只镜像默认值、用于发送前预期；**实际扣费一律以 BE 返回的
+ *    `charged_credits` 为准**，前端不参与算账。
  */
-export interface TierRate {
+export interface TierRateBand {
   /** 输入（prompt）积分 / 千 token。 */
   inputPer1k: number;
   /** 输出（completion）积分 / 千 token。 */
   outputPer1k: number;
+}
+
+/**
+ * 🔴 PRICING-UI-0002：**一档 = 两个区间**，按本次请求的 prompt token 数选。
+ *
+ * 做成「一个对象里装两个区间 + 一个选择函数」而**不是**「两个独立 TierRate 让调用方挑」——
+ * 后者等于把档位判据（`> 272,000`）复制到每个调用点，迟早有人漏掉一处，而漏掉的表现就是
+ * 「显示 1.12、实扣 2.24」。判据只允许存在于 `rateForPromptTokens` 一个地方。
+ */
+export interface TierRate {
+  /** ≤ 阈值（绝大多数会话走这一档）。 */
+  standard: TierRateBand;
+  /** > 阈值。 */
+  extended: TierRateBand;
+}
+
+/**
+ * 区间阈值：**prompt tokens 严格大于**这个数才进高区间。售价侧 BE
+ * `_AIBRAIN_USER_RATE_PROMPT_TOKEN_BOUNDARY = 272_000`，`user_token_rates()` 用 `<=` 留在
+ * standard，超过才落到 extended。
+ * 🔴 显式命名常量，不许把 272000 散落在判断里 —— 那正是「魔数漂移」的经典形态。
+ */
+export const PROMPT_RATE_TIER_THRESHOLD_TOKENS = 272_000;
+
+/**
+ * 🔴 **前端售价档位判据的唯一实现**。任何需要售价费率的地方都走这里，不许自己拿 prompt 数跟阈值比。
+ * 对齐 BE `user_token_rates()`；售价阈值与 provider 成本阈值是两个独立产品契约的镜像，
+ * 前端不得把 `apimart_token_rate()` 的成本域结果当成用户售价。
+ */
+export function rateForPromptTokens(tier: IntensityTier, promptTokens: number): TierRateBand {
+  const { standard, extended } = TIERS[tier].rate;
+  return promptTokens > PROMPT_RATE_TIER_THRESHOLD_TOKENS ? extended : standard;
 }
 
 /** 一档的展示元信息。价格只以 `rate` 表达——**不许再出现无说明的裸整数**。 */
@@ -44,7 +81,8 @@ export interface TierMeta {
  */
 export const SINGLE_REQUEST_LIMIT = 200;
 
-/** BE 单次回答的 completion 上限（`engine_aibrain_max_completion_tokens`，config.py:225）。预留下界按它算。 */
+/** BE 单次回答的 completion 上限（`engine_aibrain_max_completion_tokens`）。预留下界按它算。
+ *  ⚠️ 配置文件持续插入新字段，按字段名核对，不引用易漂移的行号。 */
 export const MAX_COMPLETION_TOKENS = 4096;
 
 /**
@@ -54,11 +92,52 @@ export const MAX_COMPLETION_TOKENS = 4096;
 export const TYPICAL_PROMPT_TOKENS = 500;
 export const TYPICAL_COMPLETION_TOKENS = 500;
 
-/** 三档（模型标识 = BE services/aibrain.py `_TIER_MODELS`；费率见 `TierRate` 契约注释）。 */
+/**
+ * 三档 × 两区间 = 十二格（模型标识 = BE services/aibrain.py `_TIER_MODELS`）。
+ *
+ * 权威来源是已合并的**用户售价域**源码（2026-08-22 复核；develop@2371a210 / #243 head 4827a328）：
+ *    standard 六格 → `core/config.py`
+ *      `engine_aibrain_{low,mid,high}_{input,output}_credits_per_1k`
+ *    extended 六格 → `core/config.py`
+ *      `engine_aibrain_{low,mid,high}_above_272k_{input,output}_credits_per_1k`
+ *    区间判据 → `services/aibrain.py` 的 `_AIBRAIN_USER_RATE_PROMPT_TOKEN_BOUNDARY` 与
+ *      `user_token_rates()`：`prompt_tokens <= 272_000` 走 standard，272_001 起走 extended。
+ *
+ * 🔴 #244 的 `apimart_token_pricing.py` 属 provider **成本域**。它有自己的 272K 产品阈值，
+ *    但既不提供这里的十二格售价，也不参与 `user_token_rates()`；前后端只是分别镜像两个独立契约。
+ *    前端展示只能认上面的售价字段。`pricing.test.ts` 的跨层门会直接读取这些已合并字段与售价选择器，
+ *    防止以后任一侧改值或改边界后另一侧静默漂移。
+ * 🔴 **注意比例不是整体翻倍**：输入 ×2、输出 **×1.5**。照「双倍」写会把输出多算 33%。
+ *    这一点有专门的门钉住（pricing.test.ts「十二格 / 比例」组）。
+ */
 export const TIERS: Record<IntensityTier, TierMeta> = {
-  low: { tier: "low", label: "低", model: "gpt-5.6-luna", rate: { inputPer1k: 1.12, outputPer1k: 6.72 } },
-  mid: { tier: "mid", label: "中", model: "gpt-5.6-terra", rate: { inputPer1k: 2.8, outputPer1k: 16.8 } },
-  high: { tier: "high", label: "高", model: "gpt-5.6-sol", rate: { inputPer1k: 5.6, outputPer1k: 33.6 } }
+  low: {
+    tier: "low",
+    label: "低",
+    model: "gpt-5.6-luna",
+    rate: {
+      standard: { inputPer1k: 1.12, outputPer1k: 6.72 },
+      extended: { inputPer1k: 2.24, outputPer1k: 10.08 }
+    }
+  },
+  mid: {
+    tier: "mid",
+    label: "中",
+    model: "gpt-5.6-terra",
+    rate: {
+      standard: { inputPer1k: 2.8, outputPer1k: 16.8 },
+      extended: { inputPer1k: 5.6, outputPer1k: 25.2 }
+    }
+  },
+  high: {
+    tier: "high",
+    label: "高",
+    model: "gpt-5.6-sol",
+    rate: {
+      standard: { inputPer1k: 5.6, outputPer1k: 33.6 },
+      extended: { inputPer1k: 11.2, outputPer1k: 50.4 }
+    }
+  }
 };
 
 /**
@@ -67,7 +146,10 @@ export const TIERS: Record<IntensityTier, TierMeta> = {
  * 🔴 展示这个数时**必须带口径**（`copy.aibrain.intensityRateHint`），不许单独出现。
  */
 export function typicalCredits(tier: IntensityTier): number {
-  const { inputPer1k, outputPer1k } = TIERS[tier].rate;
+  // 🔴 走 `rateForPromptTokens` 而不是直接取 `standard`：区间选择只有一个判据，这里也不例外。
+  //    500 输入远小于 272,000 → 必落 `standard` → 扩区间**不改变**这三个值（4 / 10 / 20）。
+  //    有专门的门钉住"没被意外改动"（pricing.test.ts 门2 + 十二格组）。
+  const { inputPer1k, outputPer1k } = rateForPromptTokens(tier, TYPICAL_PROMPT_TOKENS);
   return Math.round((TYPICAL_PROMPT_TOKENS * inputPer1k + TYPICAL_COMPLETION_TOKENS * outputPer1k) / 1000);
 }
 
@@ -79,10 +161,20 @@ export function typicalCredits(tier: IntensityTier): number {
  *    不依赖任何 token 估算，前端算得出且不会错。而 prompt 段要复刻 BE 的 `_estimate_text_tokens`
  *    （ASCII 四字符一 token、非 ASCII 一字一 token）**加上最近 20 轮上下文的拼装**才能得到 —— 前端
  *    复刻它必然与 BE 漂移，算错了显示给用户比不显示更糟。故此处给**可验证的下界**，不猜完整值。
- * 现费率下 → low 27.5 · mid 68.8 · high 137.6。
+ * 现费率下 → low **27.52512** · mid **68.8128** · high **137.6256**。
+ * ⚠️🔴 **不要写成一位小数的低报版** —— 那是这组数字被向下舍入后的错误版本，曾经在任务包、
+ *    代码注释、测试标题里传了很多轮。用户照着 27.5 充值仍然发不出去（差 0.02512）。
+ *    展示这个值时走 `formatCreditsUp` → 27.6 / 68.9 / 137.7（向上，宁可多说）。
+ *    这一行是这组数字在前端的**源头**，它错了下游会跟着一路错下去。
  */
 export function minReservationCredits(tier: IntensityTier): number {
-  return (TIERS[tier].rate.outputPer1k * MAX_COMPLETION_TOKENS) / 1000;
+  // 🔴 下界**取 `standard` 区间**（PRICING-UI-0002）：这个函数的语义是「**至少**会被预留多少」，
+  //    而 `standard` 的输出费率恒低于 `extended`（×1.5）→ 用它才是真下界；用 `extended` 会高估，
+  //    把一个上界说成「至少」是对用户报错价。
+  //    真跑进 >272K 区间时实际预留会更高，那正是「至少」二字兜住的部分（文案本就带「至少」）。
+  // ⚠️ 故此处**故意不走** `rateForPromptTokens` —— 它按「本次 prompt 数」选区间，而这里根本没有
+  //    "本次"可言（下界是对所有请求成立的常量）。这不是漏了判据，是判据不适用。
+  return (TIERS[tier].rate.standard.outputPer1k * MAX_COMPLETION_TOKENS) / 1000;
 }
 
 // ══ 积分展示：**两个语义明确的函数，不许混用**（FIX6 · P1-1）══════════════════════════════
@@ -234,6 +326,21 @@ export interface SendMessageResponse {
   user_message: ChatMessage;
   assistant_message: ChatMessage;
   wallet: ReasoningWallet;
+  /**
+   * 🔴 PRICING-UI-0003：**冷却预告**（BE `76d5bb3` schemas/aibrain.py:121，
+   * `cooldown_retry_after_seconds: int | None = Field(default=None, ge=1)`）。
+   *
+   * 这一条**只在 200 成功响应里**出现，且只在 `gross_usage_anomaly` 时非空
+   * （aibrain.py:792-803：本次回答成功交付，但 provider 上报的 token 数超出了 config envelope
+   * → 按 reported 全额扣费 + **开用户冷却**）。值 = `engine_aibrain_usage_anomaly_cooldown_seconds`
+   * 的完整时长（冷却刚开，剩余即全长），默认 60。
+   *
+   * 🔴 它的意义：**用户刚拿到一个正常回答，下一条就会撞 503**。有了这个字段就能在答完时预告，
+   *    而不是让他撞一个莫名其妙的错误。这是我在 FIX4 §四 提的后端请求，CA 采纳了第二方案。
+   * ⚠️ 绝大多数情况是 `null`（provider 遵守 `max_completion_tokens=4096` 时不会触发）——
+   *    **null 时什么都不显示**，有专门的门守着，否则会退化成"永远显示"而无人察觉。
+   */
+  cooldown_retry_after_seconds?: number | null;
 }
 
 /**

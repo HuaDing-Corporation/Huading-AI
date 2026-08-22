@@ -30,6 +30,7 @@ vi.mock("@/components/tasks/task-list", () => ({ TaskList: () => <div data-testi
 vi.mock("@/components/tasks/generation-history", () => ({ GenerationHistory: () => <div data-testid="history" /> }));
 // mock hooks 层（仅真实三表单 + ConfirmGenerateDialog 用到的）；不真调后端。
 vi.mock("@/lib/api/hooks", () => ({
+  useEstimateCopy: () => ({ data: undefined, isError: false, isPending: true }),
   useRewriteCopy: () => ({ mutateAsync: rewriteMock.mutateAsync, isPending: false }),
   useGenerateTitles: () => ({ mutateAsync: vi.fn().mockResolvedValue({ titles: [] }), isPending: false }),
   useGenerateTopics: () => ({ mutateAsync: vi.fn().mockResolvedValue({ topics: [] }), isPending: false }),

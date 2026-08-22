@@ -10,7 +10,7 @@
 //    而展示发生在**客户端的观测范围**。前端知道的是「**我的请求失败了**」，
 //    不是「**服务端没扣我钱**」。这两件事之间隔着一整条网络。
 //
-// ══ 判据：不看 outcome 的内容，看它**在不在** ══════════════════════════════════════════════
+// ══ 判据：只认属于当前端点的 failed outcome ═══════════════════════════════════════════════
 // 先核过了（这是本轮必须回答的问题）：BE `schemas/response.py`
 //     class OperationOutcome(BaseModel):
 //         operation: str
@@ -34,7 +34,8 @@
 //    所以判据必须再排除 500（`INTERNAL_SERVER_ERROR`，`exceptions.py:unhandled_exception_handler`）。
 //
 // ══ 最终判据 ═════════════════════════════════════════════════════════════════════════════
-//    released ⟸ 有 failed outcome **且** HTTP 状态**不是 5xx-未处理**（即 status !== 500）
+//    released ⟸ 有 failed outcome、operation 与当前请求端点一致，且 HTTP 状态
+//                 **不是 5xx-未处理**（即 status !== 500）
 //               —— 这三类受控异常（AppError / HTTPException / RequestValidationError）
 //                  要么在 reserve 之前抛出，要么由那条 except 在 release 之后重抛。
 //    unknown  ⟸ 其余一切。**默认站在不承诺那一侧**，将来新增没想到的失败形态也自动落到安全侧。
@@ -49,23 +50,42 @@
 /** 失败项的计费可陈述性。`released` = 服务端明确失败、可说未计费；`unknown` = 不许承诺。 */
 export type CopyFailureBilling = "released" | "unknown";
 
-function hasFailedOutcome(outcome: unknown): boolean {
+/**
+ * BE `schemas/copy.py`：`CopyGenerationOperation = Literal["rewrite", "titles", "topics"]`，
+ * 且 `CopyGenerationOutcome.operation` 是**必填**。
+ * 🔴 校验它而不只校验 status（PRICING-UI-0003 · CB P2-2）：这是一条**资金判据**，
+ *    形状校验就该覆盖 BE schema 保证的**全部**约束，而不是只覆盖"我这次用得到的那个字段"。
+ *    真实链路上 operation 恒合法，所以补它当前不改变任何行为 —— 但判据的防御面不该按
+ *    "当前会不会出问题"来划，该按"BE 承诺了什么"来划。少验一个字段，就是给
+ *    `{ status: "failed" }` 这种半份 outcome 开了一道能说出「未计费」的门。
+ *    （同一条纪律在 402 那边叫「半份 detail 不许拼」，见 `aibrain/types.ts:parseInsufficientDetail`。）
+ */
+const COPY_OPERATIONS = ["rewrite", "titles", "topics"] as const;
+
+function hasFailedOutcome(outcome: unknown, expectedOperation: (typeof COPY_OPERATIONS)[number]): boolean {
   if (typeof outcome !== "object" || outcome === null) return false;
-  const status = (outcome as { status?: unknown }).status;
+  const { operation, status } = outcome as { operation?: unknown; status?: unknown };
+  // operation 必须是 BE 承诺的三个字面量之一 —— 缺失 / 拼错 / 是别的端点，一律不认。
+  if (typeof operation !== "string" || !(COPY_OPERATIONS as readonly string[]).includes(operation)) return false;
+  // 还必须与当前请求端点一致；另一路的 failed outcome 不能证明“这一项”未计费。
+  if (operation !== expectedOperation) return false;
   // 只认 "failed"。"succeeded" 却走到失败分支属于契约异常，按"说不准"处理而不是当成未计费。
   return status === "failed";
 }
 
 /**
- * 🔴 唯一判据函数。**故意收得很紧**，两个条件都满足才放行。
+ * 🔴 唯一判据函数。**故意收得很紧**：failed、当前端点 operation、非 500 三项都满足才放行。
  * 变异①：去掉 `status !== 500` → 「500 未处理异常不许说未计费」会红。
  * 变异②：改成 `err.status >= 400 ? "released" : "unknown"` → 「网关 504 不许说未计费」会红。
  * 变异③：整个函数恒返回 "released" → 「网络中断」那条会红（任务包点名的那个变异）。
  */
-export function copyFailureBilling(reason: unknown): CopyFailureBilling {
+export function copyFailureBilling(
+  reason: unknown,
+  expectedOperation: (typeof COPY_OPERATIONS)[number]
+): CopyFailureBilling {
   if (typeof reason !== "object" || reason === null) return "unknown";
   const err = reason as { outcome?: unknown; status?: unknown };
-  if (!hasFailedOutcome(err.outcome)) return "unknown";
+  if (!hasFailedOutcome(err.outcome, expectedOperation)) return "unknown";
   // 500 = `unhandled_exception_handler`，是唯一可能发生在 settle+commit **之后**的类别。
   return err.status === 500 ? "unknown" : "released";
 }

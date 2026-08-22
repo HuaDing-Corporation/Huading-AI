@@ -25,7 +25,7 @@ describe("copyFailureBilling · 只有服务端自己判的失败才允许陈述
    */
   it("有服务端 failed outcome（业务失败，如 502 上游拒绝）→ released，可以说未计费", () => {
     const err = new ApiError("上游失败", "PROVIDER_FAILED", 502, null, { operation: "titles", status: "failed" });
-    expect(copyFailureBilling(err)).toBe("released");
+    expect(copyFailureBilling(err, "titles")).toBe("released");
   });
 
   /**
@@ -36,7 +36,7 @@ describe("copyFailureBilling · 只有服务端自己判的失败才允许陈述
    */
   it("🔴 网络中断（NETWORK_ERROR / status 0，无响应体）→ unknown，一个字的资金承诺都不给", () => {
     const err = new ApiError("网络连接失败，请检查后端服务是否在线。", "NETWORK_ERROR", 0);
-    expect(copyFailureBilling(err)).toBe("unknown");
+    expect(copyFailureBilling(err, "titles")).toBe("unknown");
   });
 
   /**
@@ -47,8 +47,8 @@ describe("copyFailureBilling · 只有服务端自己判的失败才允许陈述
    * 变异：判据换成 `err.status === 0 ? "unknown" : "released"` → 本条红。
    */
   it("🔴 网关 504 / 反代 502（有 status，但没有服务端 outcome）→ unknown", () => {
-    expect(copyFailureBilling(new ApiError("请求失败（504）", "HTTP_ERROR", 504))).toBe("unknown");
-    expect(copyFailureBilling(new ApiError("请求失败（502）", "HTTP_ERROR", 502))).toBe("unknown");
+    expect(copyFailureBilling(new ApiError("请求失败（504）", "HTTP_ERROR", 504), "titles")).toBe("unknown");
+    expect(copyFailureBilling(new ApiError("请求失败（502）", "HTTP_ERROR", 502), "titles")).toBe("unknown");
   });
 
   /**
@@ -64,20 +64,20 @@ describe("copyFailureBilling · 只有服务端自己判的失败才允许陈述
       operation: "titles",
       status: "failed"
     });
-    expect(copyFailureBilling(err)).toBe("unknown");
+    expect(copyFailureBilling(err, "titles")).toBe("unknown");
   });
 
   /** 受控异常（配额 403 在 reserve 之前抛、502 由 except 在 release 之后转抛）→ released。 */
   it("受控异常 403 / 422 带 outcome → released（reserve 之前抛出，压根没预留）", () => {
     const mk = (status: number, code: string) =>
       new ApiError("x", code, status, null, { operation: "topics", status: "failed" });
-    expect(copyFailureBilling(mk(403, "TENANT_QUOTA_EXCEEDED"))).toBe("released");
-    expect(copyFailureBilling(mk(422, "VALIDATION_ERROR"))).toBe("released");
+    expect(copyFailureBilling(mk(403, "TENANT_QUOTA_EXCEEDED"), "topics")).toBe("released");
+    expect(copyFailureBilling(mk(422, "VALIDATION_ERROR"), "topics")).toBe("released");
   });
 
   /** JSON 解析失败（HTML 错误页）→ 同样没有 outcome。 */
   it("响应体不是 JSON（HTML 错误页）→ unknown", () => {
-    expect(copyFailureBilling(new ApiError("请求失败（500）", "HTTP_ERROR", 500))).toBe("unknown");
+    expect(copyFailureBilling(new ApiError("请求失败（500）", "HTTP_ERROR", 500), "titles")).toBe("unknown");
   });
 
   /**
@@ -89,19 +89,52 @@ describe("copyFailureBilling · 只有服务端自己判的失败才允许陈述
     //    用它当载体会让整条门塌缩成"500 → unknown"，测不出 `hasFailedOutcome` 的任何逻辑。
     //    （这正是本轮 CB 指出的那种"门守不到它要守的属性" —— 写完门要反过来问一遍。）
     const mk = (outcome: unknown) => new ApiError("x", "E", 502, null, outcome);
-    expect(copyFailureBilling(mk({ operation: "titles" }))).toBe("unknown");
-    expect(copyFailureBilling(mk({ operation: "titles", status: "succeeded" }))).toBe("unknown");
-    expect(copyFailureBilling(mk("failed"))).toBe("unknown");
-    expect(copyFailureBilling(mk(null))).toBe("unknown");
-    expect(copyFailureBilling(mk(undefined))).toBe("unknown");
+    expect(copyFailureBilling(mk({ operation: "titles" }), "titles")).toBe("unknown");
+    expect(copyFailureBilling(mk({ operation: "titles", status: "succeeded" }), "titles")).toBe("unknown");
+    expect(copyFailureBilling(mk("failed"), "titles")).toBe("unknown");
+    expect(copyFailureBilling(mk(null), "titles")).toBe("unknown");
+    expect(copyFailureBilling(mk(undefined), "titles")).toBe("unknown");
+  });
+
+  /**
+   * 🔴 **operation 也要验**（PRICING-UI-0003 · CB P2-2）。
+   * 补这条之前，`{ status: "failed" }` 这种**半份 outcome** 会被判成 released ——
+   * 前端据此对用户说「这一项没扣钱」，而它根本不是文案端点的服务端结论。
+   * 变异：把 `hasFailedOutcome` 里的 operation 校验删掉 → 本条前三个断言红。
+   * ⚠️ 真实链路上 operation 恒合法，所以这条门守的是**判据的防御面**而不是当前的某个 bug ——
+   *    这一点必须写清楚，否则下一个人会以为它没用而删掉。
+   */
+  it("🔴 operation 缺失 / 拼错 / 不是那三个之一 → unknown（半份 outcome 不许拼）", () => {
+    const mk = (outcome: unknown) => new ApiError("x", "E", 502, null, outcome);
+    expect(copyFailureBilling(mk({ status: "failed" }), "titles")).toBe("unknown"); // 缺 operation
+    expect(copyFailureBilling(mk({ operation: "rewrit", status: "failed" }), "titles")).toBe("unknown"); // 拼错
+    expect(copyFailureBilling(mk({ operation: "videos", status: "failed" }), "titles")).toBe("unknown"); // 别的端点
+    expect(copyFailureBilling(mk({ operation: 1, status: "failed" }), "titles")).toBe("unknown"); // 非字符串
+    // 三个合法值都要放行 —— 否则"收紧"会变成"全都不认"，把 B 那一路整个砍掉而无人察觉。
+    for (const op of ["rewrite", "titles", "topics"] as const) {
+      expect(copyFailureBilling(mk({ operation: op, status: "failed" }), op)).toBe("released");
+    }
+  });
+
+  /**
+   * 🔴 outcome 还必须属于**当前请求的端点**。只验“是三个合法值之一”会把
+   * `/copy/titles` 响应里的 `{ operation: "rewrite" }` 当成标题未计费的凭据。
+   * 变异：忽略 expectedOperation、仍只查 allowlist → 本条红。
+   */
+  it("🔴 failed outcome 的 operation 与当前端点不一致 → unknown，不替另一项下资金结论", () => {
+    const err = new ApiError("上游失败", "PROVIDER_FAILED", 502, null, {
+      operation: "rewrite",
+      status: "failed"
+    });
+    expect(copyFailureBilling(err, "titles")).toBe("unknown");
   });
 
   /** 非 ApiError 的 rejection（组件内抛的 TypeError、abort 等）→ unknown。 */
   it("不是 ApiError 的 rejection → unknown", () => {
-    expect(copyFailureBilling(new TypeError("boom"))).toBe("unknown");
-    expect(copyFailureBilling("boom")).toBe("unknown");
-    expect(copyFailureBilling(undefined)).toBe("unknown");
-    expect(copyFailureBilling(null)).toBe("unknown");
+    expect(copyFailureBilling(new TypeError("boom"), "titles")).toBe("unknown");
+    expect(copyFailureBilling("boom", "titles")).toBe("unknown");
+    expect(copyFailureBilling(undefined, "titles")).toBe("unknown");
+    expect(copyFailureBilling(null, "titles")).toBe("unknown");
   });
 });
 
@@ -145,7 +178,7 @@ describe("client.ts 把 error.outcome 透传到 ApiError（没有这一步，上
     );
     const reason = await apiFetch("/api/v1/copy/titles", { method: "POST", body: {} }).catch((e) => e);
     expect(reason).toBeInstanceOf(ApiError);
-    expect(copyFailureBilling(reason)).toBe("released");
+    expect(copyFailureBilling(reason, "titles")).toBe("released");
   });
 
   /** 🔴 对照：同样 502，响应体**没有** outcome（中间层产生的错误页形态）→ unknown。 */
@@ -160,6 +193,73 @@ describe("client.ts 把 error.outcome 透传到 ApiError（没有这一步，上
       )
     );
     const reason = await apiFetch("/api/v1/copy/titles", { method: "POST", body: {} }).catch((e) => e);
-    expect(copyFailureBilling(reason)).toBe("unknown");
+    expect(copyFailureBilling(reason, "titles")).toBe("unknown");
+  });
+});
+
+// ══ PRICING-UI-0003 · CB P2-1 · mock 挂 outcome 的**范围**必须与 BE 一致 ═══════════════════
+// BE `core/exceptions.py:_error_response` 只在 URL 后缀命中 /rewrite、/titles、/topics 时挂
+// `error.outcome`，其余路径显式 `content["error"].pop("outcome")`。
+//
+// 🔴 事故经过（值得留）：FIX6 给 mock 的 `err()` 加 outcome 参数时，我改的那行
+//    `if (badDuration(...)) return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数")`
+//    在 handlers.ts 里**逐字重复了五次**，我的替换没带 count → 五处一起改了，
+//    其中四处（scripts/generate · videos/scene-prompt · videos/estimate · videos）是非文案端点。
+//    **当时全绿** —— 因为没有任何消费者读这些端点的 outcome，也没有任何门断言它不该在。
+//    这条门就是补上那个断言：mock 松了要红，而不是等下一个人写出一条读它的代码才暴露。
+//
+// ⚠️ 这一组走**真实 msw**（vitest.setup.ts 全局起了 server），不 stub fetch ——
+//    stub 掉就只能测到我自己编的响应，测不到 handlers.ts 里到底写了什么。
+describe("mock 的 outcome 范围 = BE 的范围（非文案端点不许挂）", () => {
+  const BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000").replace(/\/$/, "");
+
+  /** 直接读原始响应体：apiFetch 会把它拆成 ApiError，这里要看的是**封套本身**。 */
+  async function rawError(path: string, body: unknown) {
+    const res = await fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const payload = (await res.json()) as { error?: Record<string, unknown> | null };
+    return { status: res.status, error: payload.error ?? null };
+  }
+
+  /**
+   * 🔴 变异：把这四个端点里任意一个的 `err(...)` 加回第 4 个参数 → 本条红。
+   * 用 `duration_sec: 5.5`（非整数）触发它们共用的那条 422 —— 正是被误改的那一行。
+   */
+  it("🔴 非文案端点的 422 → error 里**没有** outcome 键", async () => {
+    // ⚠️🔴 每个端点的请求体都要**填够必填字段**，否则会在更早的校验分支就 422 出去 ——
+    //    那条 422 当然也没有 outcome，门照样绿，但它守的根本不是被误改的那一行。
+    //    （第一版就栽在这：scripts/generate 只传 duration_sec 会返回「topic is required」，
+    //      scene-prompt 会返回「product_image_keys 至少 1 张」，两个端点的变异都抓不到。
+    //      **一道门只能守它断言的那件事** —— 断言前先确认请求真的走到了那条分支。）
+    const cases: Array<[string, unknown]> = [
+      ["/api/v1/scripts/generate", { topic: "话题", duration_sec: 5.5 }],
+      ["/api/v1/videos/scene-prompt", { product_image_keys: ["uploads/a.png"], duration_sec: 5.5 }],
+      ["/api/v1/videos/estimate", { duration_sec: 5.5 }],
+      ["/api/v1/videos", { duration_sec: 5.5 }]
+    ];
+    for (const [path, body] of cases) {
+      const { status, error } = await rawError(path, body);
+      expect(status, path).toBe(422);
+      // 🔴 先证明**打中了那一行**（就是被误改的那条共用校验），再断言它没有 outcome。
+      expect(error?.message, path).toBe("duration_sec 必须为整数");
+      // 用 `in` 而不是 `?.outcome == null`：BE 是把键**整个 pop 掉**，形状层面就该没有这个键。
+      expect(error && "outcome" in error, path).toBe(false);
+    }
+  });
+
+  /** 🔴 对照：文案端点同一条 422 **必须**带 outcome —— 否则前端会误判成"没拿到服务端结论"。 */
+  it("🔴 /copy/rewrite 的同一条 422 → error 里**有** outcome，且判据认它", async () => {
+    const { status, error } = await rawError("/api/v1/copy/rewrite", {
+      source_text: "x",
+      mode: "smart",
+      duration_sec: 5.5
+    });
+    expect(status).toBe(422);
+    expect(error?.outcome).toEqual({ operation: "rewrite", status: "failed" });
+    // 端到端：这个形状经过 copyFailureBilling 必须判成 released（否则挂了也白挂）
+    expect(copyFailureBilling({ status, outcome: error?.outcome }, "rewrite")).toBe("released");
   });
 });

@@ -14,6 +14,7 @@ export const coverKeys = {
 
 export const copyKeys = {
   all: ["copy"] as const,
+  estimate: (tenantId: string | undefined) => [...copyKeys.all, "estimate", tenantId ?? null] as const,
   drafts: () => [...copyKeys.all, "drafts"] as const
 };
 

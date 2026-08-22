@@ -21,6 +21,7 @@ vi.mock("@/components/layout/sidebar", () => ({ Sidebar: () => <div data-testid=
 vi.mock("@/components/tasks/task-list", () => ({ TaskList: () => <div data-testid="tasklist" /> }));
 vi.mock("@/components/tasks/generation-history", () => ({ GenerationHistory: () => <div data-testid="history" /> }));
 vi.mock("@/lib/api/hooks", () => ({
+  useEstimateCopy: () => ({ data: undefined, isError: false, isPending: true }),
   useRewriteCopy: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useGenerateTitles: () => ({ mutateAsync: vi.fn().mockResolvedValue({ titles: [] }), isPending: false }),
   useGenerateTopics: () => ({ mutateAsync: vi.fn().mockResolvedValue({ topics: [] }), isPending: false }),

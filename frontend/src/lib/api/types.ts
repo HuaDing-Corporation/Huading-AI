@@ -311,6 +311,19 @@ export interface VideoEvent {
 // 同步 REST（不进 Celery/SSE）；内层 data，外层 M2 封套不变。对齐 seam §2。
 export type CopyMode = "smart" | "custom" | "auto";
 export type CopyPlatform = "douyin" | "xiaohongshu";
+export type CopyGenerationOperation = "rewrite" | "titles" | "topics";
+
+// POST /api/v1/copy/estimate（无请求体）
+export interface CopyEstimateBreakdownItem {
+  operation: CopyGenerationOperation;
+  estimated_credits: number; // BE: int >= 0
+}
+export interface CopyEstimateResponse {
+  estimated_credits: number; // BE: int >= 0；三项 breakdown 之和
+  unit: "credits";
+  note: string | null;
+  breakdown: CopyEstimateBreakdownItem[];
+}
 
 // POST /api/v1/copy/rewrite
 export interface CopyRewriteRequest {
@@ -337,7 +350,6 @@ export interface CopyRewriteResult {
  *    outcome 可读**，靠它判会把这些情形漏成"成功"。此处保留它是为了①类型与 BE 契约一致、
  *    ②mock 必须照发（不比 BE 松），③日后若出现"HTTP 200 但业务失败"的端点可直接接。
  */
-export type CopyGenerationOperation = "rewrite" | "titles" | "topics";
 export interface CopyGenerationOutcome {
   operation: CopyGenerationOperation;
   status: "succeeded" | "failed";

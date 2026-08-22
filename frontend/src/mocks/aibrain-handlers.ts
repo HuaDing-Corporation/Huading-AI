@@ -43,6 +43,7 @@ import {
   AIBRAIN_ERROR,
   MAX_COMPLETION_TOKENS,
   SINGLE_REQUEST_LIMIT,
+  rateForPromptTokens,
   TIERS,
   TOPUP_OPTIONS,
   type ChatAttachment,
@@ -119,6 +120,18 @@ const PROMPT_LIMIT_MARKER = "__mock_prompt_limit__";
  * 上游可能已经产生成本却没给出可用结果 → 零扣费但**开用户冷却**。**无 detail**。
  */
 const REPLAY_GUARD_MARKER = "__mock_replay_guard__";
+/**
+ * content 含此串 → 模拟 **`gross_usage_anomaly`：答成功了，但 provider 上报的 token 超出 config
+ * envelope**（BE `b91e2188`+ aibrain.py:769-803）。行为：
+ *   · 200 **正常交付答案**（不是错误路径）
+ *   · 按 reported 全额扣费（不封顶，余额可负）
+ *   · **开用户冷却** → 响应带 `cooldown_retry_after_seconds`，且**下一次请求撞 503**
+ * 🔴 这条因果链必须是真的（同 FIX3 对 502→冷却 的做法）：前端的「预告」只有在
+ *    "预告之后真的会被拦"时才有意义，mock 只发字段不开冷却等于在演戏。
+ * ⚠️ 真实触发条件是 provider 违反请求参数（BE 请求体里明写了 `max_completion_tokens=4096`），
+ *    mock 无法自然复现，故用 marker。行为形态是真的。
+ */
+const GROSS_USAGE_ANOMALY_MARKER = "__mock_gross_usage__";
 
 // ── 提示词本地硬上限（BE `_prompt_token_upper_bound` vs `engine_aibrain_max_prompt_tokens`）──
 /** BE config 默认值（`engine_aibrain_max_prompt_tokens`，config.py:227，上界也是 922_000）。 */
@@ -152,9 +165,14 @@ const CREDIT_QUANTUM = 1_000_000; // BE `_REASONING_CREDIT_QUANTUM = Decimal("0.
 /** BE `_reasoning_credits`：量化到 6 位小数（浮点误差不许渗进钱包数字）。 */
 const quantizeCredits = (value: number) => Math.round(value * CREDIT_QUANTUM) / CREDIT_QUANTUM;
 
-/** BE `_user_credits`：prompt × 输入费率 + completion × 输出费率，再量化。 */
+/**
+ * BE `_user_credits`：prompt × 输入费率 + completion × 输出费率，再量化。
+ * 🔴 PRICING-UI-0002：费率**按本次 prompt token 数选区间**（`rateForPromptTokens`，阈值 272K）。
+ *    这是 mock 里唯一按"本次用量"计费的地方，也就是双区间**唯一必须生效**的地方 ——
+ *    写死 `standard` 会让 >272K 的请求在 mock 下算出偏低的扣费，前端测试就永远看不到高区间。
+ */
 function userCredits(tier: IntensityTier, promptTokens: number, completionTokens: number): number {
-  const { inputPer1k, outputPer1k } = TIERS[tier].rate;
+  const { inputPer1k, outputPer1k } = rateForPromptTokens(tier, promptTokens);
   return quantizeCredits((promptTokens * inputPer1k + completionTokens * outputPer1k) / 1000);
 }
 
@@ -188,7 +206,7 @@ function estimatePromptTokens(history: ChatMessage[], content: string, attachmen
 /**
  * BE `_reservation_credits`：**动态预留** = 提示词估算 × 1.25（向上取整到整 token）+ 完整 completion 配额。
  * 🔴 这就是 §三 那个「用户看到一个远大于实际花费的数字被扣住」的来源：光 completion 段
- *    （4096 token）在 high 档就是 137.6 积分，而一次典型对话实扣不到 20。
+ *    （4096 token）在 high 档就是 137.6256 积分，而一次典型对话实扣不到 20。
  */
 function reservationCredits(tier: IntensityTier, promptTokens: number): number {
   return userCredits(tier, Math.ceil(promptTokens * PROMPT_RESERVATION_MULTIPLIER), MAX_COMPLETION_TOKENS);
@@ -388,8 +406,10 @@ export function aibrainHandlers() {
 
       // ── 闸门⁻¹ 用量异常冷却 → 503（BE `_raise_if_provider_usage_anomaly_cooldown`，:365）────────
       // 🔴 判在**最前**（BE 里紧跟 conversation_or_404，连提示词闸都在它之后）。次序照抄：
-      //    冷却期内一切请求直接回绝，不做任何校验、不碰钱包。**无 detail、无 Retry-After 头**
-      //    （BE 那条 AppError 只有 message/code/status；全仓无 retry-after）。
+      //    冷却期内一切请求直接回绝，不做任何校验、不碰钱包。
+      // ⚠️ 上一版这里写「**无 detail**、无 Retry-After 头」—— 前半句自 FIX4 起就不成立了
+      //    （BE `b91e2188` 补了 `retry_after_seconds`，下面几行正在发它），却和下面的注释并排放了三轮。
+      //    现在只有「**无 Retry-After 响应头**」还成立（全仓 grep 无该头，前端读的是 detail 里的字段）。
       if (usageAnomalyCooldown)
         return err(
           503,
@@ -572,7 +592,21 @@ export function aibrainHandlers() {
       conv.updated_at = assistantMsg.created_at;
       if (conv.title === "新对话" && content) conv.title = content.slice(0, 20);
 
-      return ok({ user_message: userMsg, assistant_message: assistantMsg, wallet: walletView() });
+      // ── `gross_usage_anomaly`：**答成功了但开冷却**（BE aibrain.py:792-803）───────────────
+      // 🔴 与所有错误路径不同：这是 **200**，答案照常交付。BE 只是同时开了用户冷却，
+      //    并把时长放进 `cooldown_retry_after_seconds` 让前端能**预告**。
+      // 🔴 因果链照做：置冷却标志 → **下一次请求真的撞 503**。只发字段不开冷却等于演戏，
+      //    前端的「预告」也就无从验证（预告的价值恰恰在于"之后真的会被拦"）。
+      const grossUsageAnomaly = content.includes(GROSS_USAGE_ANOMALY_MARKER);
+      if (grossUsageAnomaly) usageAnomalyCooldown = true;
+
+      return ok({
+        user_message: userMsg,
+        assistant_message: assistantMsg,
+        wallet: walletView(),
+        // BE 恒发这个键（`int | None`）；非 anomaly 时是 null，前端据此**什么都不显示**。
+        cooldown_retry_after_seconds: grossUsageAnomaly ? COOLDOWN_RETRY_AFTER_SECONDS : null
+      });
     })
   ];
 }

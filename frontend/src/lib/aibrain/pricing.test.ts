@@ -1,8 +1,12 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
   MAX_COMPLETION_TOKENS,
+  PROMPT_RATE_TIER_THRESHOLD_TOKENS,
   TIERS,
+  TIER_ORDER,
   TYPICAL_COMPLETION_TOKENS,
   TYPICAL_PROMPT_TOKENS,
   formatCreditsExact,
@@ -11,9 +15,84 @@ import {
   minReservationCredits,
   outstandingView,
   precheckSend,
+  rateForPromptTokens,
   shortfallView,
   typicalCredits
 } from "./types";
+
+// 直接读已合并后端售价源码，不从前端常量反推期望。这样后端改字段值/阈值而前端没同步时，
+// 前端 job 也会红；这与下面的产品字面量门分工：跨层门抓“两层漂移”，字面量门抓“两层一起改错”。
+const backendConfigSource = readFileSync(
+  resolve(process.cwd(), "..", "backend", "app", "core", "config.py"),
+  "utf8"
+);
+const backendAibrainServiceSource = readFileSync(
+  resolve(process.cwd(), "..", "backend", "app", "services", "aibrain.py"),
+  "utf8"
+);
+
+const BACKEND_SALE_RATE_FIELDS = {
+  low: {
+    standard: {
+      input: "engine_aibrain_low_input_credits_per_1k",
+      output: "engine_aibrain_low_output_credits_per_1k"
+    },
+    extended: {
+      input: "engine_aibrain_low_above_272k_input_credits_per_1k",
+      output: "engine_aibrain_low_above_272k_output_credits_per_1k"
+    }
+  },
+  mid: {
+    standard: {
+      input: "engine_aibrain_mid_input_credits_per_1k",
+      output: "engine_aibrain_mid_output_credits_per_1k"
+    },
+    extended: {
+      input: "engine_aibrain_mid_above_272k_input_credits_per_1k",
+      output: "engine_aibrain_mid_above_272k_output_credits_per_1k"
+    }
+  },
+  high: {
+    standard: {
+      input: "engine_aibrain_high_input_credits_per_1k",
+      output: "engine_aibrain_high_output_credits_per_1k"
+    },
+    extended: {
+      input: "engine_aibrain_high_above_272k_input_credits_per_1k",
+      output: "engine_aibrain_high_above_272k_output_credits_per_1k"
+    }
+  }
+} as const;
+
+function backendDecimal(field: string): number {
+  const match = new RegExp(`${field}:\\s*Decimal\\s*=\\s*Decimal\\("([^"]+)"\\)`).exec(
+    backendConfigSource
+  );
+  if (!match) throw new Error(`Missing backend AIBRAIN sale-rate field: ${field}`);
+  return Number(match[1]);
+}
+
+function backendSaleBand(
+  tier: (typeof TIER_ORDER)[number],
+  band: "standard" | "extended"
+): { inputPer1k: number; outputPer1k: number } {
+  const fields = BACKEND_SALE_RATE_FIELDS[tier][band];
+  return { inputPer1k: backendDecimal(fields.input), outputPer1k: backendDecimal(fields.output) };
+}
+
+function backendSaleBoundary(): number {
+  const match = /_AIBRAIN_USER_RATE_PROMPT_TOKEN_BOUNDARY\s*=\s*([\d_]+)/.exec(
+    backendAibrainServiceSource
+  );
+  if (!match) throw new Error("Missing backend AIBRAIN user-sale boundary");
+  return Number(match[1].replaceAll("_", ""));
+}
+
+function backendSaleSelectorSource(): string {
+  const match = /def user_token_rates\([\s\S]*?(?=\n\ndef )/.exec(backendAibrainServiceSource);
+  if (!match) throw new Error("Missing backend user_token_rates() selector");
+  return match[0];
+}
 
 // ── PRICING-UI-0001 §二/§三 · 智脑价格展示承重 ────────────────────────────────────────────────
 // 本包修的原始缺陷：`TIERS[tier].typical` 是写死的 6/15/30，没有一个字说明它是「500 输入 + 500 输出
@@ -23,22 +102,98 @@ import {
 // 所以这里的门必须同时钉住三样东西，缺一样都能被"改一个常量"绕过：
 //   门1 费率**逐个对齐 BE config**（价格的真源）
 //   门2 展示值是**新费率下的值**，且**旧值不许再出现**（防止有人为了让测试绿而把常量改回去）
-//   门3 预留下界 = 4096 × 输出费率（§三 表格 27.5/68.8/137.6 的出处）
+//   门3 预留下界 = 4096 × 输出费率（真值 27.52512 / 68.8128 / 137.6256；§三 表格里写的是它们被舍入的低报版）
 // 三条落在不同断言上，互不塌缩。
 
 describe("智脑分档费率（价格真源，镜像 BE config.py）", () => {
   /**
    * 🔴 门1：费率**逐字**对齐 `backend/app/core/config.py`
-   * `engine_aibrain_{tier}_{input,output}_credits_per_1k`（PR #239 `codex/pricing-c3c4-be`:211-216）。
+   * `engine_aibrain_{tier}_{input,output}_credits_per_1k`（develop@2371a210 / #243 head 4827a328）。
    * 变异：任意一档费率写错 → 本条红。
    * ⚠️ 这是**镜像**不是推导——BE 没有暴露费率的接口（钱包响应只有余额/预留/充值档位），前端要在
    *    「发送之前」给用户预期就只能镜像一份。故这条门的职责是：BE 改费率时逼前端一起改，而不是
    *    让前端自己算出费率。已写进回执建议 CA 把费率随钱包一起下发，届时这条门可以换成"读接口"。
    */
-  it("门1：三档费率逐个等于 BE config 的值（1.12/6.72 · 2.80/16.80 · 5.60/33.60）", () => {
-    expect(TIERS.low.rate).toEqual({ inputPer1k: 1.12, outputPer1k: 6.72 });
-    expect(TIERS.mid.rate).toEqual({ inputPer1k: 2.8, outputPer1k: 16.8 });
-    expect(TIERS.high.rate).toEqual({ inputPer1k: 5.6, outputPer1k: 33.6 });
+  it("门1：三档**低区间**费率逐个等于 BE config 的值（1.12/6.72 · 2.80/16.80 · 5.60/33.60）", () => {
+    expect(TIERS.low.rate.standard).toEqual({ inputPer1k: 1.12, outputPer1k: 6.72 });
+    expect(TIERS.mid.rate.standard).toEqual({ inputPer1k: 2.8, outputPer1k: 16.8 });
+    expect(TIERS.high.rate.standard).toEqual({ inputPer1k: 5.6, outputPer1k: 33.6 });
+  });
+
+  /**
+   * 🔴 跨层门：不是在测试里再抄一份数字，而是逐字段读取当前 checkout 的后端售价 config。
+   * 后端任一格漂移、字段改名/删除而前端没同步，本条都会红；provider 成本表不参与。
+   */
+  it("🔴 门1a：前端十二格逐格等于已合并后端**用户售价**字段（非 provider 成本）", () => {
+    for (const tier of TIER_ORDER) {
+      expect(TIERS[tier].rate.standard).toEqual(backendSaleBand(tier, "standard"));
+      expect(TIERS[tier].rate.extended).toEqual(backendSaleBand(tier, "extended"));
+    }
+  });
+
+  // ══ PRICING-UI-0002 · 十二格 + 区间判据 ═════════════════════════════════════════════════
+  // §三 的要求：断言前端费率表与后端契约**逐格一致**。#243 已合入售价侧十二格，门1a 直接
+  // 读取售价字段；下面再用产品字面量与区间关系防止“两层一起改错”。
+  // 🔴 这个比例**不是整体翻倍** —— 照"双倍"写会把输出多算 33%。这正是下面那条门存在的理由。
+  // 🔴 售价与 provider 成本是两个独立域；关系门只守售价矩阵本身，不再拿成本侧当售价依据。
+
+  /**
+   * 🔴 十二格逐格钉死。变异：任意一格写错 → 本条红。
+   * 断言**字面量**而不是 `standard.x * 2`：后者会跟着实现一起漂（把 extended 写成
+   * `standard×2` 的派生值时，期望也变成同一个错值，测试自我抵消 —— 本项目在 #228 栽过这个坑）。
+   */
+  it("🔴 门1b：十二格逐格钉死（高区间 2.24/10.08 · 5.60/25.20 · 11.20/50.40）", () => {
+    expect(TIERS.low.rate.extended).toEqual({ inputPer1k: 2.24, outputPer1k: 10.08 });
+    expect(TIERS.mid.rate.extended).toEqual({ inputPer1k: 5.6, outputPer1k: 25.2 });
+    expect(TIERS.high.rate.extended).toEqual({ inputPer1k: 11.2, outputPer1k: 50.4 });
+  });
+
+  /**
+   * 🔴🔴 §三 点名的那道门：**输入 ×2、输出 ×1.5**，逐档验证。
+   * 变异：把任一档的 extended 写成"整体翻倍"（输出也 ×2）→ 本条红。
+   * 与门1b 职责分离：1b 管"值对不对"，本条管"两区间的**关系**对不对"——后者才是
+   * `PRICING-AIBRAIN-TIER-0001` 的正确性判据（每档两区间加价率相等）在前端的投影。
+   */
+  it("🔴 门1c：高区间 = 低区间的「输入 ×2 / 输出 ×1.5」（**不是整体翻倍**）", () => {
+    for (const tier of TIER_ORDER) {
+      const { standard, extended } = TIERS[tier].rate;
+      expect(extended.inputPer1k).toBeCloseTo(standard.inputPer1k * 2, 6);
+      expect(extended.outputPer1k).toBeCloseTo(standard.outputPer1k * 1.5, 6);
+      // 🔴 显式否掉"输出也翻倍"这个最容易犯的错。
+      expect(extended.outputPer1k).not.toBeCloseTo(standard.outputPer1k * 2, 6);
+    }
+  });
+
+  /**
+   * 🔴 区间判据只有一个实现，且边界是**严格大于**（BE `up_to_272k` 的上界含 272,000）。
+   * 变异：把 `>` 写成 `>=` → 本条红（阈值那一格会跳到高区间）。
+   */
+  it("🔴 门1d：阈值 272,000 是显式常量，且恰在阈值上仍走低区间（严格大于才进高区间）", () => {
+    expect(PROMPT_RATE_TIER_THRESHOLD_TOKENS).toBe(272_000);
+    expect(rateForPromptTokens("low", 0)).toEqual(TIERS.low.rate.standard);
+    expect(rateForPromptTokens("low", 272_000)).toEqual(TIERS.low.rate.standard); // 恰在阈值 → 低区间
+    expect(rateForPromptTokens("low", 272_001)).toEqual(TIERS.low.rate.extended); // 超一个 token → 高区间
+    expect(rateForPromptTokens("high", 500_000)).toEqual(TIERS.high.rate.extended);
+  });
+
+  /**
+   * 🔴 跨层 exact/+1：直接读取后端售价边界，并核 `user_token_rates()` 的 `<=` 语义。
+   * 同时否掉旧架构说明：售价选择器不得调用 `apimart_token_rate()` 读取 provider 成本域。
+   */
+  it("🔴 门1e：后端售价边界 exact/+1 与前端一致，且售价选择器独立于 provider 成本", () => {
+    const boundary = backendSaleBoundary();
+    const selectorSource = backendSaleSelectorSource();
+
+    expect(PROMPT_RATE_TIER_THRESHOLD_TOKENS).toBe(boundary);
+    expect(selectorSource).toMatch(
+      /prompt_tokens\s*<=\s*_AIBRAIN_USER_RATE_PROMPT_TOKEN_BOUNDARY/
+    );
+    expect(selectorSource).not.toContain("apimart_token_rate");
+
+    for (const tier of TIER_ORDER) {
+      expect(rateForPromptTokens(tier, boundary)).toEqual(backendSaleBand(tier, "standard"));
+      expect(rateForPromptTokens(tier, boundary + 1)).toEqual(backendSaleBand(tier, "extended"));
+    }
   });
 
   /**
@@ -65,7 +220,39 @@ describe("智脑分档费率（价格真源，镜像 BE config.py）", () => {
   });
 
   /**
-   * 🔴 门3：预留下界 = `max_completion_tokens × 输出费率`，即 §三 表格里的 27.5 / 68.8 / 137.6。
+   * 🔴🔴 PRICING-UI-0002 §二.2 的硬要求：**扩区间不许意外改动这两个推导值**。
+   * 这是本包最容易出的错——给 `TierRate` 加一层之后顺手把 `typicalCredits` 改成读 `extended`，
+   * 或把 `minReservationCredits` 改成取两区间的最大值，用户看到的数字就全变了。
+   * 变异A：`typicalCredits` 改读 `extended` → 前半段红（会变成 6/15/30 —— 恰好是本包一开始
+   *        修掉的那三个旧数字，讽刺但真实：2.24×0.5+10.08×0.5 = 6.16 ≈ 6）。
+   * 变异B：`minReservationCredits` 改读 `extended` → 后半段红
+   *       （27.52512→41.28768 / 68.8128→103.2192 / 137.6256→206.4384；旧注释写的 27.5→41.3 两边都是舍入值）。
+   */
+  it("🔴 门2c：扩区间后 typicalCredits / minReservationCredits **值一个都没变**", () => {
+    // 500 输入远小于 272,000 → 必落低区间 → 仍是 4 / 10 / 20。
+    expect([typicalCredits("low"), typicalCredits("mid"), typicalCredits("high")]).toEqual([4, 10, 20]);
+    // 下界按低区间算（语义是「至少」，用高区间会把上界说成下界）→ 仍是 27.52512 / 68.8128 / 137.6256。
+    // 🔴 这里钉的是**真值**不是展示值：本条门的语义是"扩区间后值没变"，那是数值的性质；
+    //    展示值怎么格式化由 §展示格式 那一节守，两者不该纠缠在一条门里。
+    // ⚠️ 这条断言原本写的是 `formatCredits(...) === "27.5"` —— 既用了 FIX6 已删除的函数，
+    //    又把**低报的展示值**当成了"值"。27.5 不是下界，27.52512 才是（差额让用户充完仍发不出去）。
+    expect(minReservationCredits("low")).toBeCloseTo(27.52512, 5);
+    expect(minReservationCredits("mid")).toBeCloseTo(68.8128, 4);
+    expect(minReservationCredits("high")).toBeCloseTo(137.6256, 4);
+  });
+
+  /**
+   * 🔴 `typicalCredits` 的口径（500 输入）**必须落在低区间**——这是上一条"值不变"的**原因**，
+   * 单独钉一条：万一哪天阈值被调到 500 以下，上一条会红但看不出为什么，这条直接指出原因。
+   */
+  it("门2d：典型对话的 500 输入落在低区间（这是 4/10/20 不变的原因）", () => {
+    expect(TYPICAL_PROMPT_TOKENS).toBeLessThanOrEqual(PROMPT_RATE_TIER_THRESHOLD_TOKENS);
+    expect(rateForPromptTokens("low", TYPICAL_PROMPT_TOKENS)).toEqual(TIERS.low.rate.standard);
+  });
+
+  /**
+   * 🔴 门3：预留下界 = `max_completion_tokens × 输出费率` = **27.52512 / 68.8128 / 137.6256**。
+   * ⚠️ §三 表格里写的是一位小数低报版 —— **那是舍入后的错误值，不是下界**。
    * 这个数是 402 提示的核心（用户会看到它被"扣住"），算错就等于对用户报错价。
    * 变异：把 `MAX_COMPLETION_TOKENS` 改成别的、或下界改用输入费率 → 本条红。
    */
@@ -76,7 +263,7 @@ describe("智脑分档费率（价格真源，镜像 BE config.py）", () => {
     expect(minReservationCredits("mid")).toBeCloseTo(68.8128, 4);
     expect(minReservationCredits("high")).toBeCloseTo(137.6256, 4);
     // 🔴🔴 下界是**缺口类**（"至少得留住这么多"）→ `formatCreditsUp`。
-    //    FIX6 之前这三个位置显示的是 27.5 / 68.8 / 137.6 —— 任务包 §三 那张表抄的就是这组**低报值**，
+    //    FIX6 之前这三个位置显示的是一位小数低报版 —— 任务包 §三 那张表抄的就是这组**错误值**，
     //    用户照着 27.5 充值仍然凑不齐 27.52512 的预留。这是本轮方向修复**真实改变界面数字**的地方。
     expect(formatCreditsUp(minReservationCredits("low"))).toBe("27.6");
     expect(formatCreditsUp(minReservationCredits("mid"))).toBe("68.9");
@@ -84,7 +271,7 @@ describe("智脑分档费率（价格真源，镜像 BE config.py）", () => {
   });
 
   /** 🔴 §三 的用户体验前提：被扣住的数**远大于**实际花费——这正是必须解释「临时预留」的原因。 */
-  it("门3b：预留下界 ≫ 典型消耗（high 档 137.6 vs 20，约 7 倍）——不解释清楚会被当成一次对话的花费", () => {
+  it("门3b：预留下界 ≫ 典型消耗（high 档 137.6256 vs 20，约 7 倍）——不解释清楚会被当成一次对话的花费", () => {
     expect(minReservationCredits("high")).toBeGreaterThan(typicalCredits("high") * 5);
     expect(minReservationCredits("low")).toBeGreaterThan(typicalCredits("low") * 5);
   });
@@ -92,9 +279,9 @@ describe("智脑分档费率（价格真源，镜像 BE config.py）", () => {
 
 /**
  * 「余额偏低」的阈值（wallet-balance.tsx `LOW_BALANCE`）此前是 `TIERS.high.typical`（30）——
- * 一个估算值；本包换成 `minReservationCredits("low")`（27.5），对应一条**硬边界**：低于它，
+ * 一个估算值；本包换成 `minReservationCredits("low")`（**27.52512**），对应一条**硬边界**：低于它，
  * 连最低档都凑不齐一次预留、发送必被 402 拒。数值相近（视觉几乎不变），含义从"估算"变"事实"。
- * 变异：改回按 high 档取（137.6）→ 本条红（只用低档的用户会长期看到告警）。
+ * 变异：改回按 high 档取（137.6256）→ 本条红（只用低档的用户会长期看到告警）。
  */
 describe("低余额阈值", () => {
   it("低余额阈值 = 最低档的预留下界（27.52512），不是高档的也不是旧的典型值（30）", () => {

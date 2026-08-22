@@ -3,7 +3,7 @@
 // 华鼎AI智脑 · 聊天主壳（AIBRAIN-UI-0001 · FIX1）。左会话列表 / 中消息流 / 下输入框 + 顶部余额 + 充值弹窗。
 // 错误分流（对齐 BE 真实 status/code）：402 余额不足 → 弹充值窗；422 超上限 → friendly；502 上游失败 → friendly 重试。
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { copy } from "@/lib/copy";
 import { ApiError } from "@/lib/api/client";
@@ -53,6 +53,11 @@ function cooldownText(detail: unknown): string {
     : copy.aibrain.usageAnomalyCooldown;
 }
 
+type CooldownAheadNotice = {
+  seconds: number;
+  expiresAt: number;
+};
+
 export function AibrainChat() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [tier, setTier] = useState<IntensityTier>("mid");
@@ -61,6 +66,23 @@ export function AibrainChat() {
   //    FIX1：从单一 ShortfallView 换成判别式联合——「预留不足」与「欠费」是两种情形、两套话术。
   const [reason, setReason] = useState<RechargeReason | undefined>(undefined);
   const [sendError, setSendError] = useState<string | null>(null);
+  /**
+   * 🔴 冷却预告（PRICING-UI-0003）：成功答完但 BE 已开冷却时的展示秒数与截止点；null = 不显示。
+   * **与 `sendError` 分开两个状态**：那是错误态（红底 + `role="alert"`），这是提示态——
+   * 用户刚拿到一个**正常的回答**，把它渲染成错误会让他以为回答有问题。
+   * 每个响应创建独立 notice；旧 timer 的闭包只可清自己的对象，不能误清后来到达的新预告。
+   */
+  const [cooldownAhead, setCooldownAhead] = useState<CooldownAheadNotice | null>(null);
+
+  useEffect(() => {
+    if (cooldownAhead === null) return;
+    const notice = cooldownAhead;
+    const timer = window.setTimeout(
+      () => setCooldownAhead((current) => (current === notice ? null : current)),
+      Math.max(0, notice.expiresAt - Date.now())
+    );
+    return () => window.clearTimeout(timer);
+  }, [cooldownAhead]);
 
   const { data: wallet } = useWallet();
   // 🔴 钱包未加载/加载失败时余额是 undefined（**不是 0**）——否则 available<=0 的预检会把有余额的用户也锁死（CR#2）。
@@ -94,6 +116,7 @@ export function AibrainChat() {
   // 🔴 P1-1：返回是否**发送成功**——composer 据此决定清不清空（失败保留文字/附件/预览）。
   const handleSend = async (body: SendMessageRequest): Promise<boolean> => {
     setSendError(null);
+    setCooldownAhead(null);
     try {
       // 建会话与发消息**同在 try 内**：首条消息若建会话失败，也走错误分流、不静默丢消息（CR#1）。
       let convId = activeId;
@@ -102,7 +125,18 @@ export function AibrainChat() {
         convId = conv.id;
         setActiveId(conv.id);
       }
-      await send.mutateAsync({ conversationId: convId, body });
+      const res = await send.mutateAsync({ conversationId: convId, body });
+      // 🔴 PRICING-UI-0003 · **冷却预告**：这次答成功了，但 BE 同时开了用户冷却
+      //    （`gross_usage_anomaly`：provider 上报的 token 超出 config envelope）。
+      //    提前说一句，用户就不会在下一条撞一个莫名其妙的 503。
+      //    ⚠️ 绝大多数情况该字段是 null → **什么都不显示**（有专门的门守着，防止退化成"永远显示"）。
+      //    ⚠️ 走 `>= 1` 的正数判断而不是 `!= null`：BE 声明了 `ge=1`，0/负数属于契约坏了，
+      //       那种情况说「0 秒后才能发下一条」不如不说。
+      const ahead = res?.cooldown_retry_after_seconds;
+      if (typeof ahead === "number" && ahead >= 1) {
+        const seconds = Math.ceil(ahead);
+        setCooldownAhead({ seconds, expiresAt: Date.now() + seconds * 1_000 });
+      }
       return true;
     } catch (err) {
       if (!(err instanceof ApiError)) {
@@ -126,22 +160,27 @@ export function AibrainChat() {
       //    免得将来有人图省事把它并进 502 那支。FIX4 起用 detail 里的真实秒数。
       else if (err.code === AIBRAIN_ERROR.PROVIDER_USAGE_ANOMALY_COOLDOWN)
         setSendError(cooldownText(err.detail));
-      // 502：上游用量不可信 → fail-closed 不交付。**零扣费已由源码证实**（见 copy.ts 注释）。
+      // 502：上游用量不可信 → fail-closed 不交付且开启用户冷却。零扣费已由源码证实；
+      // 文案必须引导等待，不能让用户立即重试并确定性撞上下一次 503。
       else if (err.code === AIBRAIN_ERROR.PROVIDER_USAGE_INVALID)
         setSendError(copy.aibrain.providerUsageInvalid);
-      // 🔴 502 REPLAY_GUARD（FIX4 第六个码）：与 PROVIDER_FAILED **必须分开**——它会开用户冷却，
-      //    说「请重试」等于引导用户立刻去撞 503。放在 PROVIDER_FAILED **之前**，免得被那条 `||` 吞掉。
-      else if (err.code === AIBRAIN_ERROR.PROVIDER_REPLAY_GUARD)
+      // 🔴 **会开用户冷却的另外两个 502**：`REPLAY_GUARD` 与 `USAGE_MISSING`。
+      //    三个冷却码与 `PROVIDER_FAILED` 的分水岭只有一条 ——
+      //    **一定会开冷却** → 立刻重试必撞 503。所以文案不许说「请重试」，一律引导等待。
+      //    ⚠️ PRICING-UI-0002 §四：`USAGE_MISSING` 是我在 FIX4 回执里标注待判的那条，判定是「改」，
+      //       沿用 REPLAY_GUARD 的措辞形态。两者放在 PROVIDER_FAILED **之前**，免得被那条 `||` 吞掉。
+      //    ⚠️ 两者语义仍有别（一个"可能已花钱"、一个"上游没给用量"），但对用户可做的事完全相同
+      //       （都是零扣费 + 都要等），故共用一句；真要分开时把 copy 拆成两条即可，门已按"都不含
+      //       『请重试』、都含『稍等片刻』"写，拆分不会让门失效。
+      else if (
+        err.code === AIBRAIN_ERROR.PROVIDER_REPLAY_GUARD ||
+        err.code === AIBRAIN_ERROR.USAGE_MISSING
+      )
         setSendError(copy.aibrain.providerReplayGuard);
       else if (err.code === AIBRAIN_ERROR.REQUEST_EXPIRED) setSendError(copy.aibrain.requestExpired);
       else if (err.code === AIBRAIN_ERROR.REQUEST_LIMIT_EXCEEDED) setSendError(copy.aibrain.reqLimit);
-      // USAGE_MISSING 与 PROVIDER_FAILED 对用户是同一件事（这次没成、可重试）→ 共用文案。
-      // ⚠️ USAGE_MISSING 其实**也会开冷却**（在 BE 的 `_USER_COOLDOWN_ERROR_CODES` 里），
-      //    但它的语义是"上游没给用量"而非"可能已花钱"，且 FIX3 起就共用此文案、CB 未提出异议；
-      //    本轮不动它，只把 FIX4 明确点名要区分的 REPLAY_GUARD 拆出来。已写进回执供 CB 判定
-      //    是否要把 USAGE_MISSING 也改成"稍等片刻"（它同样会让用户立刻重试撞 503）。
-      else if (err.code === AIBRAIN_ERROR.PROVIDER_FAILED || err.code === AIBRAIN_ERROR.USAGE_MISSING)
-        setSendError(copy.aibrain.providerFailed);
+      // `PROVIDER_FAILED` 是三个 502 里**唯一不开冷却**的 → 只有它可以说「请稍后重试」。
+      else if (err.code === AIBRAIN_ERROR.PROVIDER_FAILED) setSendError(copy.aibrain.providerFailed);
       else if (err.code === AIBRAIN_ERROR.ATTACHMENT_NOT_FOUND || err.code === AIBRAIN_ERROR.ATTACHMENT_INVALID)
         setSendError(copy.aibrain.attachmentRejected);
       // 🔴 未知 402 的兜底**从「引导充值」翻转为中性**（FIX2）：三个已知 402 里已经有一个是
@@ -180,6 +219,15 @@ export function AibrainChat() {
           {sendError ? (
             <p role="alert" className="mt-2 rounded-field bg-error-bg px-3 py-2 text-[12.5px] leading-relaxed text-error-fg">
               {sendError}
+            </p>
+          ) : null}
+
+          {/* 🔴 冷却预告（PRICING-UI-0003）：**提示态，不是错误态** —— 回答已经拿到了，
+              只是提醒下一条要等。故用中性底色 + `role="status"`（礼貌播报，不打断读屏），
+              而不是 `sendError` 那条的 error-bg + `role="alert"`。 */}
+          {cooldownAhead !== null ? (
+            <p role="status" className="mt-2 rounded-field bg-glass-fill px-3 py-2 text-[12.5px] leading-relaxed text-ink-soft">
+              {copy.aibrain.cooldownAhead(cooldownAhead.seconds)}
             </p>
           ) : null}
 

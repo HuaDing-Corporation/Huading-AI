@@ -10,11 +10,11 @@ import { useWallet } from "@/lib/aibrain/hooks";
 import { formatCreditsExact, minReservationCredits } from "@/lib/aibrain/types";
 
 /**
- * 低余额阈值 = **最低档一次请求的预留下界**（27.5）。
+ * 低余额阈值 = **最低档一次请求的预留下界**（**27.52512**，不是被舍入的 27.5）。
  * 🔴 PRICING-UI-0001：此前是 `TIERS.high.typical`（30），一个「典型消耗」估算值——余额低于它只是
  *    「大概只够再聊一次」。换成预留下界之后，这个提示对应一条**硬边界**：低于它，连最低档都凑不齐
- *    一次预留、发送必被 402 拒。数值上两者相近（30 → 27.5，视觉几乎不变），但含义从"估算"变成"事实"。
- * ⚠️ 按 low 档而非 high 档取：high 的下界是 137.6，拿它当阈值会让只用低档的用户长期看到告警。
+ *    一次预留、发送必被 402 拒。数值上两者相近（30 → 27.52512，视觉几乎不变），但含义从"估算"变成"事实"。
+ * ⚠️ 按 low 档而非 high 档取：high 的下界是 137.6256，拿它当阈值会让只用低档的用户长期看到告警。
  */
 const LOW_BALANCE = minReservationCredits("low");
 

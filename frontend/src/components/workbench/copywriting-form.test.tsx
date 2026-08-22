@@ -1,12 +1,26 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const rewriteMock = vi.hoisted(() => ({ mutateAsync: vi.fn() }));
 const titlesMock = vi.hoisted(() => ({ mutateAsync: vi.fn() }));
 const topicsMock = vi.hoisted(() => ({ mutateAsync: vi.fn() }));
 const saveMock = vi.hoisted(() => ({ mutateAsync: vi.fn() }));
+const estimateMock = vi.hoisted(() => ({
+  data: undefined as
+    | {
+        estimated_credits: number;
+        unit: "credits";
+        note: string | null;
+        breakdown: Array<{ operation: "rewrite" | "titles" | "topics"; estimated_credits: number }>;
+      }
+    | undefined,
+  isError: false,
+  isPending: false,
+  isFetching: false
+}));
 
 vi.mock("@/lib/api/hooks", () => ({
+  useEstimateCopy: () => estimateMock,
   useRewriteCopy: () => ({ mutateAsync: rewriteMock.mutateAsync, isPending: false }),
   useGenerateTitles: () => ({ mutateAsync: titlesMock.mutateAsync, isPending: false }),
   useGenerateTopics: () => ({ mutateAsync: topicsMock.mutateAsync, isPending: false }),
@@ -20,6 +34,10 @@ import { ApiError } from "@/lib/api/client";
 const SOURCE = /粘贴你有权使用/;
 
 beforeEach(() => {
+  estimateMock.data = undefined;
+  estimateMock.isError = false;
+  estimateMock.isPending = false;
+  estimateMock.isFetching = false;
   rewriteMock.mutateAsync.mockResolvedValue({ results: [{ text: "改写后的文案" }] });
   titlesMock.mutateAsync.mockResolvedValue({ titles: ["标题A", "标题B"] });
   topicsMock.mutateAsync.mockResolvedValue({ topics: ["#话题A", "#话题B"] });
@@ -179,7 +197,7 @@ describe("CopywritingForm (文案仿写 + 标题/话题)", () => {
   // ══ PRICING-UI-0001 §五 · 扣费披露 + 部分失败可见 ═════════════════════════════════════════
   // 🔴 这条用例的**旧版本在给缺陷站岗**：它叫「标题端点失败时降级不渲染标题区」，断言的全部内容
   //    就是"标题区没渲染"——也就是说，它把 CB 指出的那个缺陷（失败被静默隐藏）当成了正确行为来守护。
-  //    用户看到的是"标题莫名其妙没出来"，且**不知道为什么只扣了 2 分而不是 3 分**。
+  //    用户看到的是"标题莫名其妙没出来"，且无从核对这一路的结果与计费。
   //    现在改成：失败必须**说出来**，且主产出与另一路不受影响。
   // 变异：把 onGenerate 里的 setPartFailures(...) 改回 `ti.status === "fulfilled" ? … : []` 的静默降级
   //      → 本条红（找不到失败提示）。
@@ -206,6 +224,70 @@ describe("CopywritingForm (文案仿写 + 标题/话题)", () => {
     expect(screen.getByText("#话题A")).toBeInTheDocument();
     // 话题这一路成功 → 不许连坐报失败。
     expect(screen.queryByText(/话题生成失败/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * 🔴 rewrite 也是三个独立计费端点之一，不能只把 titles/topics 接进资金判据。
+   * 本门还先产出一版旧结果：第二轮请求一发起，旧 result/candidates/titles/topics 与动作必须一起撤下，
+   * 不能等 rewrite 失败后才清，更不能在等待期间继续复制、保存或带入上一轮内容。
+   */
+  it("🔴 第二轮 in-flight 前撤下全部旧结果；随后 rewrite 502 → 文案改写未计费", async () => {
+    rewriteMock.mutateAsync.mockResolvedValueOnce({
+      results: [{ text: "旧主结果" }, { text: "旧候选" }]
+    });
+    render(<CopywritingForm />);
+    typeSource("原文");
+    fireEvent.click(screen.getByRole("button", { name: "自动多版" }));
+    fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
+    expect(await screen.findByDisplayValue("旧主结果")).toBeInTheDocument();
+    expect(screen.getByText("旧候选")).toBeInTheDocument();
+
+    let rejectSecond!: (reason: unknown) => void;
+    rewriteMock.mutateAsync.mockImplementationOnce(
+      () => new Promise((_, reject) => {
+        rejectSecond = reject;
+      })
+    );
+    fireEvent.change(screen.getByLabelText(copy.workbench.copySourceLabel), {
+      target: { value: "新一轮原文" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
+
+    // 第二轮请求仍在飞：不能等失败落地后才撤旧内容，否则此窗口里仍可复制/保存/带入旧结果。
+    await waitFor(() => expect(screen.queryByDisplayValue("旧主结果")).not.toBeInTheDocument());
+    expect(screen.queryByText("旧候选")).not.toBeInTheDocument();
+    expect(screen.queryByText("标题A")).not.toBeInTheDocument();
+    expect(screen.queryByText("#话题A")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: copy.workbench.copySave })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: copy.workbench.copyUseInAvatar })).not.toBeInTheDocument();
+
+    await act(async () => {
+      rejectSecond(new ApiError("Copy generation failed.", "COPY_GEN_FAILED", 502, null, {
+        operation: "rewrite",
+        status: "failed"
+      }));
+    });
+
+    const failure = await screen.findByText(/文案改写生成失败/);
+    expect(failure.textContent ?? "").toContain("未计费");
+    // rewrite 不再同时落一条通用 error；否则同一失败会重复显示两次。
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+  });
+
+  /** 无响应只能陈述观测事实，不能把 rewrite 特判成“未计费”。 */
+  it("🔴 rewrite 网络中断/无 outcome → 不承诺未计费，指向用量记录", async () => {
+    rewriteMock.mutateAsync.mockRejectedValue(
+      new ApiError("网络连接失败，请检查后端服务是否在线。", "NETWORK_ERROR", 0)
+    );
+    render(<CopywritingForm />);
+    typeSource("原文");
+    fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
+
+    const failure = await screen.findByText(/文案改写没有完成/);
+    const text = failure.textContent ?? "";
+    expect(text).not.toMatch(/未计费|不计费|不扣费/);
+    expect(text).toContain("以用量记录为准");
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
   });
 
   /**
@@ -337,46 +419,193 @@ describe("CopywritingForm (文案仿写 + 标题/话题)", () => {
     expect(screen.queryByText(/生成失败/)).not.toBeInTheDocument();
   });
 
+  /** 生产变异：不读取 estimate、继续常驻无金额回退 → 本条红，服务端的 24 不会出现。 */
+  it("🔴 estimate 成功 → 发起生成前显示服务端 total，并明确是预计金额", () => {
+    estimateMock.data = {
+      estimated_credits: 24,
+      unit: "credits",
+      note: "本报价包含文案改写、标题和话题三项。",
+      breakdown: [
+        { operation: "rewrite", estimated_credits: 8 },
+        { operation: "titles", estimated_credits: 8 },
+        { operation: "topics", estimated_credits: 8 }
+      ]
+    };
+
+    render(<CopywritingForm />);
+
+    const disclosure = screen.getByText(/预计本次生成约 24 积分/);
+    expect(disclosure).toBeInTheDocument();
+    expect(disclosure.textContent ?? "").toContain("改写、标题和话题三项");
+    expect(disclosure.textContent ?? "").not.toContain("将扣费 24");
+  });
+
   /**
-   * 🔴 §五.1/§五.2：扣费披露必须在**发起之前**就在界面上，且说清「一键 3 积分 / 各 1 积分」。
-   * 变异：删掉那行 `copy.workbench.copyPriceDisclosure` → 本条红。
-   * 🔴 顺带钉住「不扣费」三个字**不许**再出现在这个界面上（那是本包修掉的谎）。
+   * 🔴 P2：报价由 query 异步到达，视觉文本更新之外还必须礼貌播报；`aria-atomic` 保证整句重读，
+   * 不让读屏只听见孤立的“24”。变异：删除价格披露上的 aria-live → 本条红。
    */
+  it("🔴 estimate 从等待态异步更新为服务端报价 → 同一披露区以 polite live region 整句播报", () => {
+    estimateMock.isPending = true;
+    const { rerender } = render(<CopywritingForm />);
+
+    const pendingDisclosure = screen.getByText(copy.workbench.copyPriceDisclosure);
+    expect(pendingDisclosure).toHaveAttribute("aria-live", "polite");
+    expect(pendingDisclosure).toHaveAttribute("aria-atomic", "true");
+
+    estimateMock.isPending = false;
+    estimateMock.data = {
+      estimated_credits: 24,
+      unit: "credits",
+      note: "本报价包含文案改写、标题和话题三项。",
+      breakdown: [
+        { operation: "rewrite", estimated_credits: 8 },
+        { operation: "titles", estimated_credits: 8 },
+        { operation: "topics", estimated_credits: 8 }
+      ]
+    };
+    rerender(<CopywritingForm />);
+
+    const quotedDisclosure = screen.getByText(/预计本次生成约 24 积分/);
+    expect(quotedDisclosure).toHaveAttribute("aria-live", "polite");
+    expect(quotedDisclosure).toHaveAttribute("aria-atomic", "true");
+  });
+
   /**
-   * 🔴🔴 FIX5 · P1-1：**本条上一版在给缺陷站岗**（本项目第六次）。
-   *
-   * 它断言披露里含「3 积分」「1 积分」—— 把一个**写死的价格**锁进了测试。而 BE `_rate()`
-   * （quota.py:224-245）是**三级解析**：租户级 `CreditRate` → 平台级 `CreditRate` → 代码默认
-   * `Decimal("1.0000")`。前两级是运营可改的数据，租户一覆写，界面上那句话就是错价，
-   * 而这条测试会**继续绿**——正是「测试锁死错误行为」的标准形态。
-   *
-   * 🔴 新断言锁**行为**不锁**数值**：
-   *   ① 披露在场且讲清结构性事实（三项、按三次计费、失败不计）
-   *   ② **不出现任何硬编码金额**——这是本条的核心，也是变异能杀死的那一点
-   *   ③ 「不扣费」那个谎仍不许回来
-   * ⚠️ 为什么不改成「断言金额来自 estimate 返回值」（CB 给的另一种写法）：**文案模块没有 estimate
-   *    端点**（`routes/copy.py` 只有 rewrite/titles/topics/drafts，`estimate_copy_quota` 未暴露 HTTP）。
-   *    已写进回执请 CA 补；补上之后本条应改成那种更强的形态。
+   * 🔴 生产变异：删掉 total/breakdown 相等校验，直接信 `estimated_credits` → 本条红，会露出 99。
+   * 期望只断服务端给出的矛盾 total 不出现，不拿 breakdown 的 24 当替代价格——前端不自行报价。
    */
-  it("🔴 §五.1/2 FIX5：披露讲清计费结构，且**不出现任何硬编码金额**", () => {
+  it("🔴 breakdown 三项之和与 total 不一致 → 隐藏 total，回退到无金额披露", () => {
+    estimateMock.data = {
+      estimated_credits: 99,
+      unit: "credits",
+      note: "本报价包含文案改写、标题和话题三项。",
+      breakdown: [
+        { operation: "rewrite", estimated_credits: 8 },
+        { operation: "titles", estimated_credits: 8 },
+        { operation: "topics", estimated_credits: 8 }
+      ]
+    };
+
+    render(<CopywritingForm />);
+
+    expect(screen.getByText(copy.workbench.copyPriceDisclosure)).toBeInTheDocument();
+    expect(screen.queryByText(/99\s*积分/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/24\s*积分/)).not.toBeInTheDocument();
+  });
+
+  /** 生产变异：只验 sum、不验三种 operation 各一次 → 本条红（总和仍是 24，形状却已漂移）。 */
+  it("🔴 breakdown 总和虽一致但 operation 重复/缺项 → 仍隐藏 total", () => {
+    estimateMock.data = {
+      estimated_credits: 24,
+      unit: "credits",
+      note: "本报价包含文案改写、标题和话题三项。",
+      breakdown: [
+        { operation: "rewrite", estimated_credits: 8 },
+        { operation: "rewrite", estimated_credits: 8 },
+        { operation: "titles", estimated_credits: 8 }
+      ]
+    };
+
+    render(<CopywritingForm />);
+
+    expect(screen.getByText(copy.workbench.copyPriceDisclosure)).toBeInTheDocument();
+    expect(screen.queryByText(/24\s*积分/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * 🔴 apiFetch 不做运行时 schema 校验；坏响应里的 null item 必须安全降级，不能让整个文案页崩溃。
+   * 变异：直接读取 `item.estimated_credits` 而不先验对象 → 本条因 render 抛 TypeError 而红。
+   */
+  it("🔴 breakdown 含 null 项 → 不崩溃，隐藏 total 并回退无金额披露", () => {
+    estimateMock.data = {
+      estimated_credits: 24,
+      unit: "credits",
+      note: null,
+      breakdown: [
+        null,
+        { operation: "titles", estimated_credits: 8 },
+        { operation: "topics", estimated_credits: 8 }
+      ]
+    } as unknown as typeof estimateMock.data;
+
+    render(<CopywritingForm />);
+
+    expect(screen.getByText(copy.workbench.copyPriceDisclosure)).toBeInTheDocument();
+    expect(screen.queryByText(/24\s*积分/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * 🔴 生产变异：请求失败时仍信 React Query 留下的旧 data → 本条红，会继续展示过期的 24。
+   * 用“error + stale data”而不是 data=undefined，确保本门真正在守失败分支，不是被空值顺手防住。
+   */
+  it("🔴 estimate 请求失败 → 即使缓存残留旧报价也回退，且不出现任何猜测数字", () => {
+    estimateMock.data = {
+      estimated_credits: 24,
+      unit: "credits",
+      note: "本报价包含文案改写、标题和话题三项。",
+      breakdown: [
+        { operation: "rewrite", estimated_credits: 8 },
+        { operation: "titles", estimated_credits: 8 },
+        { operation: "topics", estimated_credits: 8 }
+      ]
+    };
+    estimateMock.isError = true;
+
+    render(<CopywritingForm />);
+
+    const fallback = screen.getByText(copy.workbench.copyPriceDisclosure);
+    expect(fallback).toBeInTheDocument();
+    expect(fallback.textContent ?? "").not.toMatch(/\d+\s*积分/);
+    expect(screen.queryByText(/24\s*积分/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * 🔴 reconnect / 显式 invalidation 或 refetch 等触发后台刷新时，React Query 会保留旧 data；
+   * 新响应尚未落地前不能把旧价冒充当前报价。全局 refetchOnWindowFocus=false，切回窗口不会刷新；
+   * 长期持续挂载页面又无轮询，可无限保留旧报价，仍是明确债项。本门只守“已经开始刷新时隐藏旧值”。
+   */
+  it("🔴 estimate 正在 refetch → 即使缓存有旧报价也先回退，不展示过期金额", () => {
+    estimateMock.data = {
+      estimated_credits: 24,
+      unit: "credits",
+      note: null,
+      breakdown: [
+        { operation: "rewrite", estimated_credits: 8 },
+        { operation: "titles", estimated_credits: 8 },
+        { operation: "topics", estimated_credits: 8 }
+      ]
+    };
+    estimateMock.isFetching = true;
+
+    render(<CopywritingForm />);
+
+    expect(screen.getByText(copy.workbench.copyPriceDisclosure)).toBeInTheDocument();
+    expect(screen.queryByText(/24\s*积分/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * 生产变异：estimate 未返回时写死一个默认金额 → 本条红。
+   * 这与上面的请求失败门分工：本条守“尚无响应”，失败门守“错误态仍残留旧 data”。
+   */
+  it("🔴 estimate 未返回 → 披露计费结构但不猜任何金额", () => {
     const { container } = render(<CopywritingForm />);
     const disclosure = screen.getByText(copy.workbench.copyPriceDisclosure);
     expect(disclosure).toBeInTheDocument();
 
     const text = disclosure.textContent ?? "";
-    // ① 结构性事实（这些是可核查的，与费率无关）
+    // 结构性事实可核查且与租户费率无关。
     expect(text).toContain("三项");
     // 🔴 FIX6 · P1-2：「未成功的那一项**不计费**」已从披露里**删除** ——
     //    那是前端保证不了的资金事实（响应丢失时服务端可能已 settle）。
     //    失败项的措辞下沉到逐条提示，按 `copyFailureBilling` 分流。
     expect(text).not.toContain("不计费");
     expect(text).toContain("三次计费"); // 结构性事实（可核查）保留
-    // ② 🔴 一个硬编码金额都不许有 —— 「N 积分」这种承诺前端给不出权威值。
+    // 没有服务端报价时，一个硬编码金额都不许有。
     expect(text).not.toMatch(/\d+\s*积分/);
     // 顺带否掉最容易复发的那两个具体值。
     expect(text).not.toContain("3 积分");
     expect(text).not.toContain("1 积分");
-    // ③ 「不扣费」的谎不许回来。
+    // 「不扣费」的谎不许回来。
     expect(container.textContent ?? "").not.toContain("不扣费");
   });
 });

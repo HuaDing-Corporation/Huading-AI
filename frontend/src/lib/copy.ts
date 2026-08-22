@@ -281,28 +281,14 @@ export const copy = {
     copyTopicsLabel: "话题候选（点击复制）",
     copyEmptyTitles: "本次未生成标题候选",
     copyEmptyTopics: "本次未生成话题候选",
-    // ── 计费披露 + 部分失败（PRICING-UI-0001 §五 · FIX5 P1-1 改写）─────────────────────────
-    // 🔴 这个模块此前在注释里自称「不扣费」，界面上**一个字的价格披露都没有**。而 BE PR #239
-    //   （services/copy.py `_generate_billed_copy`）给 rewrite / titles / topics 三个端点各自加了
-    //    reserve→settle，单价取 `estimate_copy_quota` 的 `capability="llm" unit="call"` 费率。
-    //
-    // 🔴🔴 **FIX5：删掉「各 1 积分，合计 3 积分」这个写死的金额。**
-    //    `1 积分` 只是 BE `_rate()`（quota.py:224-245）**三级解析的最后一级**：
-    //      租户级 `CreditRate` → 平台级 `CreditRate` → 代码默认 `Decimal("1.0000")`
-    //    前两级是**运营可改的数据**，租户覆写之后前端这句话就是错价 —— 与本包一开始修掉的
-    //    智脑 `6/15/30` **是同一个毛病**：一个看不出怎么来的裸整数，过期了也没人发现。
-    //    （那个毛病和这处新造是在同一个 PR 里发生的，值得记一笔。）
-    // ⚠️ **本该走 estimate**（图片/视频/反推都读 `POST /*/estimate` 拿权威金额），但文案模块
-    //    **没有这样的端点** —— `routes/copy.py` 只有 rewrite/titles/topics/drafts，
-    //    `estimate_copy_quota` 只是 services 内部函数、未暴露 HTTP。已写进回执请 CA 补。
-    //    在那之前：**只说可核查的结构性事实（三项各计一次、失败不计），不承诺任何具体数字**。
-    // 🔴🔴 FIX6 · P1-2：这里原来写「未成功的那一项**不计费**」，**删掉了**。
-    //    依据（`_generate_billed_copy` 的 except 分支 release）成立于**服务端的观测范围**，
-    //    而这句话展示在**客户端的观测范围** —— 前端只知道"我的请求失败了"，不知道"服务端没扣我钱"。
-    //    响应在网络里丢失时（服务端已 settle），这句话就是**假的**。
-    //    判据下沉到 `api/copy-billing.ts`，按**有没有服务端 outcome** 分流，见 `copyPartFailed*`。
+    // ── 计费披露 + 部分失败 ─────────────────────────────────────────────────────────────
+    // estimate 成功且 total/breakdown 自洽时使用 copyPriceEstimate；未返回、失败或契约损坏时
+    // 使用本条无金额回退。回退只说明三个端点各计一次，不复制可变费率，也不猜本次金额。
+    // 全局披露不承诺失败项未计费；逐项失败的资金措辞由 copyFailureBilling 按服务端 outcome 分流。
     copyPriceDisclosure:
       "计费：「生成文案」会同时生成改写 / 标题 / 话题三项，按三次计费（每项各计一次）。实际单价以你的套餐费率为准。",
+    copyPriceEstimate: (credits: string) =>
+      `预计本次生成约 ${credits} 积分，包含文案改写、标题和话题三项；最终以服务端实际结算为准。`,
     /**
      * 部分失败必须看得见——否则用户只会看到「少了话题」而不知为何。
      * 🔴 **两句措辞，按前端到底知不知道分流**（`copyFailureBilling`）：
@@ -313,6 +299,7 @@ export const copy = {
     copyPartFailedReleased: (part: string, reason: string) => `${part}生成失败（该项未计费）：${reason}`,
     copyPartFailedUnknown: (part: string, reason: string) =>
       `${part}没有完成：${reason}。这次请求没能拿到服务端的结果，是否计费请以用量记录为准。`,
+    copyPartRewrite: "文案改写",
     copyPartTitles: "标题",
     copyPartTopics: "话题",
     copyCopy: "复制",
@@ -1509,7 +1496,7 @@ export const copy = {
     copied: "已复制",
     thinking: "正在思考…",
     imageAttachment: "图片",
-    // FIX5：改收**已格式化的字符串**（`formatCredits`）。此前裸插值 `${n}`，
+    // FIX5：改收**已格式化的字符串**（FIX6 起是 `formatCreditsExact` —— 实扣是"已经发生的事"，如实展示）。此前裸插值 `${n}`，
     // 一次典型对话的实扣是 0.24192 这种长尾，直接摊在气泡上既难读、也与弹窗里的口径不一致。
     costLabel: (credits: string) => `本次消耗 ${credits} 积分`,
     // 输入框
@@ -1527,12 +1514,27 @@ export const copy = {
     //    口径行是常驻文本而非 hover tooltip，因为触屏上 hover 不可达（等于没有说明）。
     intensityCost: (n: number) => `约 ${n} 积分/次`,
     intensityAria: (label: string, cost: number) => `智能强度 ${label}，约 ${cost} 积分每次（按典型对话估算）`,
-    /** 常驻口径行：真实费率 + 「约 N 积分」是怎么估出来的。 */
+    /**
+     * 常驻口径行：真实费率 + 「约 N 积分」是怎么估出来的。
+     * 🔴 PRICING-UI-0002：费率现在有**两个区间**（≤272K / >272K）。常驻行**只写低区间**——
+     *    那是绝大多数会话的实际口径，一行里塞四个数没人看得下去；高区间放进下面的展开说明。
+     *    但**必须点明"还有另一档"**（`intensityRateTierNote`），否则用户会以为只有一个费率，
+     *    真跑进长上下文之后就是「显示 1.12、实扣 2.24」——与 A1 那次「显示 30 实扣 100」同形态。
+     */
     intensityRateHint: (input: string, output: string, promptTokens: number, completionTokens: number) =>
       `按输入 ${input} / 输出 ${output} 积分每千 token 计费；「约 N 积分/次」是按 ${promptTokens} 输入 + ${completionTokens} 输出 token 的典型对话估算，实际以本次用量结算。`,
+    /** 常驻的一句提示：还有一档更贵的，点开看具体数。 */
+    intensityRateTierNote: (thresholdWan: number) => `超长上下文（输入超过 ${thresholdWan} 万 token）另有更高费率。`,
+    /** 展开后的高区间明细——点开才看到，不占常驻行。 */
+    intensityRateTierToggle: "查看超长上下文费率",
+    // ⚠️ 参数名是 thresholdWan（**万**）而不是 thresholdK（千）：传进来的是 27.2，不是 272。
+    //    叫 K 会让下一个人按「千」去传，那就成了「输入超过 272 万 token」—— 错一个数量级，
+    //    而这是**价格档位的判据**，错了用户就不知道自己什么时候会跳到高费率。
+    intensityRateTierDetail: (thresholdWan: number, input: string, output: string) =>
+      `输入超过 ${thresholdWan} 万 token 时，本次输入与输出均按高区间费率计费：输入 ${input} / 输出 ${output} 积分每千 token。`,
     // ── 402 余额不足（§三）────────────────────────────────────────────────
     // 此前 402 只是**默默弹开充值窗**，用户看不到任何解释；而新预留逻辑会锁住一个远大于实际花费的数
-    //（高速档光 completion 就 137.6），不解释清楚会被当成「一次对话要花 137 积分」。
+    //（高速档光 completion 就 137.6256），不解释清楚会被当成「一次对话要花 137 积分」。
     insufficientTitle: "推理积分不足，本次没有发送",
     /** 🔴 §三 第 4 条 —— 这条路径最要紧的一句话：预留 ≠ 扣费。 */
     insufficientReserveNote:
@@ -1587,7 +1589,9 @@ export const copy = {
     //    FIX2 时我按 §六.3 保持中性（当时 CB 未判定，写错任何一边都是拿钱说假话）；现在判定有了。
     // ⚠️ FIX2 的 `AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED` 已在 `fbe8420d` 删除：「合法但超上限」
     //    改成封顶扣费 + 正常交付，不再是错误路径。所以这句话的适用范围也窄了——只剩"上报不可信"。
-    providerUsageInvalid: "本次生成未能完成，未扣费，请重试；如果反复出现，请联系我们。",
+    // 🔴 本码同样在 BE `_USER_COOLDOWN_ERROR_CODES` 中：首个 502 已开启用户冷却，立即重试必撞 503。
+    //    因此保留独立语义文案，但处置必须与另外两个冷却 502 一致，只能引导等待。
+    providerUsageInvalid: "本次生成未能完成，未扣费。请稍等片刻再发送；如果反复出现，请联系我们。",
     // ── 503：用量异常冷却 AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN（FIX3 第五个码 · FIX4 接真值）──
     // 🔴 这是**冷却**，既不是余额问题也不是并发太多 —— 三者的处置完全不同，文案不许串味：
     //    绝不出现「充值」「余额不足」「同时进行的对话太多」。
@@ -1604,6 +1608,18 @@ export const copy = {
       `AI 服务的用量统计暂时异常，已暂停新对话以免计费出错。请 ${seconds} 秒后重试。`,
     /** 回退：拿不到 `retry_after_seconds` 时按 config 默认值说个「约」。 */
     usageAnomalyCooldown: "AI 服务的用量统计暂时异常，已暂停新对话以免计费出错。请约一分钟后重试。",
+    /**
+     * 🔴 PRICING-UI-0003 · **冷却预告**（200 成功响应带 `cooldown_retry_after_seconds` 时）。
+     *
+     * 与上面那条 503 是**同一件事的两个时刻**，措辞必须能看出先后，别让用户以为出了两次问题：
+     *   本条（预告）：回答**已经拿到了**，只是提醒「下一条要等一会儿」→ 语气平和、不是错误
+     *   503（已撞上）：这次**没发出去**，告诉他「还要等 N 秒」
+     * 所以本条开头是「本次回答已完成」而不是「异常/失败」，且**不出现「暂停」「出错」**那类词
+     *   —— 那是 503 的措辞，用在这里会让用户以为刚拿到的回答有问题。
+     * ⚠️ 秒数直接说秒（与 503 一致，不换算分钟）。
+     */
+    cooldownAhead: (seconds: number) =>
+      `本次回答已完成。因这次用量较大，${seconds} 秒后才能发下一条。`,
     // ── 502 之三：REPLAY_GUARD AIBRAIN_PROVIDER_REPLAY_GUARD（FIX4 · 第六个码）─────────────────
     // 🔴 对用户来说它和 `PROVIDER_FAILED` **看起来是同一件事**（都没生成出来、都零扣费），
     //    但**后果不同**：本码在 BE 的 `_USER_COOLDOWN_ERROR_CODES` 里 → **一定会开用户冷却**。

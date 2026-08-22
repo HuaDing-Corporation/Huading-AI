@@ -22,14 +22,48 @@ describe("门A · 强度选择器：金额不许裸奔", () => {
    *    （即回到本包修复前「只有三个裸整数」的状态）→ 本条红。
    */
   it("门A：显示「约 N 积分/次」的同时，同屏给出费率与估算口径", () => {
-    render(<IntensitySelector value="low" onChange={vi.fn()} />);
+    const { container } = render(<IntensitySelector value="low" onChange={vi.fn()} />);
     expect(screen.getByText(copy.aibrain.intensityCost(4))).toBeInTheDocument();
-    // 口径行：真实费率 + 「500 输入 + 500 输出」的估算依据，都得在页面上。
-    const hint = screen.getByText(/积分每千 token/);
-    expect(hint).toBeInTheDocument();
-    expect(hint.textContent ?? "").toContain("1.12");
-    expect(hint.textContent ?? "").toContain("6.72");
-    expect(hint.textContent ?? "").toContain("500");
+    // 口径行：**低区间**真实费率 + 「500 输入 + 500 输出」的估算依据，都得在页面上。
+    const text = container.textContent ?? "";
+    expect(text).toContain("1.12");
+    expect(text).toContain("6.72");
+    expect(text).toContain("500");
+  });
+
+  /**
+   * 🔴🔴 PRICING-UI-0002 §二.3：费率有两个区间之后，**不许让用户以为只有一个**。
+   * 常驻行只写低区间（一行塞四个数没人看），但**必须常驻点明"还有一档"**；
+   * 高区间的具体数放在折叠里（原生 `<details>`：键盘/读屏/触屏都可达，不是 hover tooltip）。
+   * 变异A：删掉 `intensityRateTierNote` 那句 → 前半段红（用户会以为 1.12/6.72 是唯一费率）。
+   * 变异B：删掉 `<details>` 整块 → 后半段红（高区间的数字无处可查）。
+   */
+  it("🔴 门A1b：常驻点明「还有更高费率」，且高区间数字可展开查到（2.24 / 10.08）", () => {
+    const { container } = render(<IntensitySelector value="low" onChange={vi.fn()} />);
+    const text = container.textContent ?? "";
+    // 常驻：必须让用户知道存在第二档，且说清判据（超长上下文 / 27.2 万 token）。
+    expect(text).toContain(copy.aibrain.intensityRateTierNote(27.2));
+    // 🔴 独立产品字面量：不能让上面的生产 helper 同时生成实现与期望，否则两边一起把「输入 token」
+    // 误写成「总 token」仍会自洽假绿。变异：copy 改成「总 token」→ 本条红。
+    expect(text).toContain("输入超过 27.2 万 token");
+    expect(text).not.toContain("总 token");
+    // 折叠里：高区间的两个数确实在 DOM 里（<details> 收起时内容仍在，可被读屏/展开查到）。
+    expect(text).toContain("2.24");
+    expect(text).toContain("10.08");
+    // 🔴 高区间是整次切档，不是只给 272K 以上的增量 token 加价。
+    // 变异：文案写成「超过阈值的部分」→ 本条红；期望用产品字面量，不调用 copy helper 自我抵消。
+    expect(text).toContain("本次输入与输出均按高区间费率计费");
+    expect(text).not.toContain("超过 27.2 万 token 的部分");
+    expect(screen.getByText(copy.aibrain.intensityRateTierToggle)).toBeInTheDocument();
+  });
+
+  /** 高区间明细跟随档位切换（high 档要给 high 的高区间 11.20 / 50.40，不能永远显示 low 的）。 */
+  it("门A1c：切到 high 档 → 折叠里的高区间换成 11.20 / 50.40", () => {
+    const { container } = render(<IntensitySelector value="high" onChange={vi.fn()} />);
+    const text = container.textContent ?? "";
+    expect(text).toContain("11.20");
+    expect(text).toContain("50.40");
+    expect(text).not.toContain("2.24"); // 不许串到 low 的高区间
   });
 
   /**
@@ -48,11 +82,11 @@ describe("门A · 强度选择器：金额不许裸奔", () => {
   });
 
   /** 口径跟随档位切换（high 档要显示 high 的费率，不能永远显示 low 的）。 */
-  it("门A3：切到 high 档 → 口径行换成 high 的费率 5.60 / 33.60", () => {
-    render(<IntensitySelector value="high" onChange={vi.fn()} />);
-    const hint = screen.getByText(/积分每千 token/);
-    expect(hint.textContent ?? "").toContain("5.60");
-    expect(hint.textContent ?? "").toContain("33.60");
+  it("门A3：切到 high 档 → 口径行换成 high 的**低区间**费率 5.60 / 33.60", () => {
+    const { container } = render(<IntensitySelector value="high" onChange={vi.fn()} />);
+    const text = container.textContent ?? "";
+    expect(text).toContain("5.60");
+    expect(text).toContain("33.60");
   });
 });
 
@@ -71,7 +105,7 @@ describe("门B · 402「预留不足」充值窗：把四件事说清楚", () =>
 
   /**
    * 🔴 §三 的四条要求逐条断言（**精确态**：BE 给了 detail → 措辞里没有「至少」）。
-   * 其中第 4 条（临时预留 ≠ 扣费）是这条路径最要紧的一句话——用户会看到 137.6 被"扣住"，
+   * 其中第 4 条（临时预留 ≠ 扣费）是这条路径最要紧的一句话——用户会看到 137.7 被"扣住"（真值 137.6256，向上展示），
    * 不说清楚就会以为一次对话花 137 积分。
    * 变异：删掉 ShortfallNotice 里 `insufficientReserveNote` 那一行 → 本条红。
    */
@@ -127,9 +161,9 @@ describe("门B · 402「预留不足」充值窗：把四件事说清楚", () =>
 
   /**
    * 🔴🔴 FIX5 · P1-2 **在渲染层**的门（CB 报的缺陷是「弹窗上显示『还差 0 积分』」，
-   * 所以除了 `formatCredits` 的单元门，这一层也必须钉住 —— 两者互不塌缩：
+   * 所以除了 `formatCreditsUp` 的单元门，这一层也必须钉住 —— 两者互不塌缩：
    * 那边守"函数不返回 0"，这边守"用户真的看不到 0"）。
-   * 变异：`formatCredits` 改回固定 `toFixed(1)` → 本条红（会渲染出「还差 0 积分」）。
+   * 变异：`formatCreditsUp` 改回固定 `toFixed(1)` → 本条红（会渲染出「还差 0 积分」）。
    */
   it("🔴 小额正缺口（0.02）→ 弹窗显示「还差 0.1 积分」（向上），**绝不出现「还差 0 积分」**", () => {
     render(
@@ -226,7 +260,7 @@ describe("门D · 402「欠费」充值窗：与「预留不足」明确区分",
    * 🔴🔴 FIX5 · P1-2：**欠费路径同款**（CB 报的两处之一是「需补齐 0 积分」）。
    * 与上面那条 shortfall 的门分开写：两条路径走的是不同组件、不同 copy 键，
    * 只修一处、只测一处正是本项目「修一处、同类还在」的老教训。
-   * 变异：`formatCredits` 改回固定 `toFixed(1)` → 本条红。
+   * 变异：`formatCreditsUp` 改回固定 `toFixed(1)` → 本条红（「需补齐」是缺口类，走向上那一支）。
    */
   it("🔴 小额欠款（0.02）→ 显示「需补齐 0.1 积分」（向上），余额仍如实显示 -0.02", () => {
     render(outstanding(outstandingView({ available_credits: -0.02, outstanding_credits: 0.02 })));

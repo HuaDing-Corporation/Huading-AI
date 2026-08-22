@@ -6,8 +6,9 @@ import { Copy, RefreshCw, Sparkles } from "lucide-react";
 import { copyToClipboard } from "@/lib/clipboard";
 import { errorText } from "@/lib/api/error-text";
 import { copyFailureBilling } from "@/lib/api/copy-billing";
-import { useGenerateTitles, useGenerateTopics, useRewriteCopy, useSaveCopyDraft } from "@/lib/api/hooks";
-import type { CopyMode, CopyPlatform, CopyRewriteRequest, CopyRewriteResult } from "@/lib/api/types";
+import { useEstimateCopy, useGenerateTitles, useGenerateTopics, useRewriteCopy, useSaveCopyDraft } from "@/lib/api/hooks";
+import type { CopyEstimateResponse, CopyMode, CopyPlatform, CopyRewriteRequest, CopyRewriteResult } from "@/lib/api/types";
+import { formatCreditsUp } from "@/lib/aibrain/types";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
 import { Chip } from "@/components/ui/chip";
@@ -38,6 +39,37 @@ const PLATFORM_OPTIONS: { id: "any" | CopyPlatform; label: string }[] = [
 
 type VideoTarget = "avatar_talk" | "seedance_i2v";
 
+/**
+ * 只把服务端 total 当作展示候选，breakdown 仅用于交叉核验，绝不拿其和替服务端重新报价。
+ * BE 当前声明所有金额均为非负 int；超出 JS 安全整数或任一项非法，同样按契约损坏处理。
+ */
+function verifiedCopyEstimateCredits(estimate: CopyEstimateResponse | undefined): number | undefined {
+  if (!estimate || estimate.unit !== "credits" || !Number.isSafeInteger(estimate.estimated_credits) || estimate.estimated_credits < 0) {
+    return undefined;
+  }
+  if (
+    !Array.isArray(estimate.breakdown) ||
+    estimate.breakdown.some(
+      (item) =>
+        typeof item !== "object" ||
+        item === null ||
+        !Number.isSafeInteger(item.estimated_credits) ||
+        item.estimated_credits < 0
+    )
+  ) {
+    return undefined;
+  }
+  const expectedOperations = new Set(["rewrite", "titles", "topics"]);
+  if (
+    estimate.breakdown.length !== expectedOperations.size ||
+    estimate.breakdown.some((item) => !expectedOperations.delete(item.operation))
+  ) {
+    return undefined;
+  }
+  const breakdownTotal = estimate.breakdown.reduce((sum, item) => sum + item.estimated_credits, 0);
+  return breakdownTotal === estimate.estimated_credits ? estimate.estimated_credits : undefined;
+}
+
 /** label + 候选 chips（点击复制）— 标题区与话题区同构，抽此本地组件消除复制粘贴。 */
 function CopyChipGroup({ label, items, onCopy }: { label: string; items: string[]; onCopy: (text: string) => void }) {
   if (items.length === 0) return null;
@@ -62,17 +94,14 @@ function CopyChipGroup({ label, items, onCopy }: { label: string; items: string[
  * The ONLY hooks caller here；子控件全是 props（AiTextField/SelectableOption/Chip/Select）。
  * 一键串联只种 script（result_text）→ 经 onUseInVideo 回调由 page 层 prefill 目标表单。
  *
- * ── PRICING-UI-0001 §五 ──────────────────────────────────────────────────────────────
- * 🔴 本注释此前写着「**不扣费**」，同时界面上一个字的价格披露都没有。两条都不成立了：
- *    BE PR #239（`services/copy.py` `_generate_billed_copy`）给 rewrite / titles / topics 三个端点
- *    各加了 reserve→settle，单价取 `estimate_copy_quota` 的 `capability="llm" unit="call"` 费率
- *    （函数默认 1 积分/次）。本组件一次「生成文案」并发打三个端点 → **合计 3 积分**。
- * 🔴 「各自独立降级」也从优点变成了缺陷：titles/topics 失败被静默置空，用户看不到失败、
- *    更无从理解为什么只扣了 1 分而不是 3 分。现在失败必须显式列出（`partFailures`）。
- *    注意这**不依赖 BE 返回 per-endpoint 结果**——三个端点是本组件自己 `Promise.allSettled` 并发调的，
- *    每一路的成败在这里当场就知道（详见 onGenerate 的注释）。
+ * ── 文案计费披露 ────────────────────────────────────────────────────────────────────
+ * rewrite / titles / topics 三个端点各自计费；发起前展示的金额只读 `/copy/estimate`，
+ * 并且仅在 total 与完整 breakdown 自洽时采用，前端不复制费率或自行报价。
+ * 三路请求由本组件 `Promise.allSettled` 并发；任一路没完成都显式列入 `partFailures`，
+ * 资金措辞再按服务端是否给出可判定的 outcome 分流（详见 onGenerate 与 copyFailureBilling）。
  */
 export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: VideoTarget, script: string) => void }) {
+  const estimate = useEstimateCopy();
   const rewrite = useRewriteCopy();
   const titlesGen = useGenerateTitles();
   const topicsGen = useGenerateTopics();
@@ -110,14 +139,15 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
   };
 
   /**
-   * 一键三出：rewrite 为主产出（失败则报错），titles/topics 不阻断主产出 —— 但**失败必须说出来**。
+   * 一键三出：rewrite 为主产出，titles/topics 不阻断主产出；三路任一失败都必须逐项说出来。
    *
    * 🔴 §五.3 的实现落点就在这里，且**不需要等 BE 在返回体里带 per-endpoint 结果**：
    *    三个端点是本函数自己用 `Promise.allSettled` 并发调的，`ti.status === "rejected"` 就是
    *    「标题这一路失败了」，原因也在 `ti.reason` 里。此前的代码是 `ti.status === "fulfilled" ? … : []`
    *    ——把失败**当成了空结果**，这才是「降级隐藏」的真身。
-   * 🔴 「该项未计费」是可核查的事实，不是安慰话：BE `_generate_billed_copy` 的 except 分支调
-   *    `quota.release_copy_quota` 把预留原额释放（不落 settled），所以失败的那一路确实不进账单。
+   * 🔴 Promise rejection 只证明客户端没拿到结果，不证明服务端没扣费：服务端业务失败且回传
+   *    failed outcome 时，`copyFailureBilling` 才允许说「未计费」；网络中断、网关错误或无法判定的
+   *    5xx 一律不作资金承诺，以用量记录为准。
    */
   const onGenerate = async () => {
     const source = sourceText.trim();
@@ -129,6 +159,12 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
     setError(null);
     setPartFailures([]);
     setSaved(false);
+    // 第二轮发起即撤下整组旧产出：请求尚在 in-flight 时也不能复制、保存或带入上一轮内容。
+    // 只在 rejection 落地后清理会留下一个真实可操作窗口；四路状态在新结果返回后再分别写回。
+    setResultText("");
+    setCandidates([]);
+    setTitles([]);
+    setTopics([]);
 
     const rewriteReq: CopyRewriteRequest = {
       source_text: source,
@@ -148,8 +184,6 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
       const results = rw.value.results ?? [];
       setCandidates(mode === "auto" ? results : []);
       setResultText(results[0]?.text ?? "");
-    } else {
-      setError(errorText(rw.reason));
     }
     setTitles(ti.status === "fulfilled" ? ti.value.titles ?? [] : []);
     setTopics(to.status === "fulfilled" ? to.value.topics ?? [] : []);
@@ -160,14 +194,15 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
     //          的「网络中断不许承诺未计费」会红。
     setPartFailures(
       [
-        [copy.workbench.copyPartTitles, ti] as const,
-        [copy.workbench.copyPartTopics, to] as const
+        [copy.workbench.copyPartRewrite, "rewrite", rw] as const,
+        [copy.workbench.copyPartTitles, "titles", ti] as const,
+        [copy.workbench.copyPartTopics, "topics", to] as const
       ]
-        .filter(([, r]) => r.status === "rejected")
-        .map(([part, r]) => {
+        .filter(([, , r]) => r.status === "rejected")
+        .map(([part, operation, r]) => {
           const reason = (r as PromiseRejectedResult).reason;
           const say =
-            copyFailureBilling(reason) === "released"
+            copyFailureBilling(reason, operation) === "released"
               ? copy.workbench.copyPartFailedReleased
               : copy.workbench.copyPartFailedUnknown;
           return say(part, errorText(reason));
@@ -197,6 +232,17 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
 
   const hasResult = resultText.trim().length > 0 || titles.length > 0 || topics.length > 0;
   const useDisabled = !resultText.trim();
+  // 估价回答「这次大概要准备多少」，方向风险与缺口相同：宁可略高、不可低报，故归入向上格式化类。
+  // 当前 BE schema 是 int，现阶段两种格式化显示相同；这里把语义钉住，避免未来小数契约下静默低报。
+  // refetch 失败时 React Query 可能仍保留旧 data；错误态不展示缓存报价，避免把过期金额冒充当前报价。
+  // BE 的 note 当前也是安全的中文说明，但它与下方固定披露重复，且不参与 total/breakdown 自验；
+  // 不直接展示可避免服务端自由文本与前端「预计 / 最终以结算为准」语义日后发生双份漂移。
+  const verifiedEstimate =
+    estimate.isError || estimate.isFetching ? undefined : verifiedCopyEstimateCredits(estimate.data);
+  const priceDisclosure =
+    verifiedEstimate !== undefined
+      ? copy.workbench.copyPriceEstimate(formatCreditsUp(verifiedEstimate))
+      : copy.workbench.copyPriceDisclosure;
 
   return (
     <Card animateIn>
@@ -276,7 +322,13 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
 
       <p className="mb-2 text-[12px] text-ink-faint">{copy.workbench.copyCompliance}</p>
       {/* 🔴 §五.1/§五.2：扣费披露 —— 与其它功能（反推计费门 / 视频 estimate）口径一致，在**发起之前**告知。 */}
-      <p className="mb-3 text-[12px] leading-relaxed text-ink-soft">{copy.workbench.copyPriceDisclosure}</p>
+      <p
+        className="mb-3 text-[12px] leading-relaxed text-ink-soft"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {priceDisclosure}
+      </p>
 
       {error && (
         <p role="alert" className="mb-3 rounded-field bg-error-bg px-3 py-2 text-[13px] text-error-fg">
@@ -284,7 +336,7 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
         </p>
       )}
 
-      {/* 🔴 §五.3：部分失败**必须可见**——不然用户只看到「少了话题」，也不知道为什么只扣了 2 分。 */}
+      {/* 部分失败必须可见——不然用户只看到「少了话题」，也无从核对这一路的结果与计费。 */}
       {partFailures.length > 0 && (
         <ul role="alert" className="mb-3 space-y-1 rounded-field bg-error-bg px-3 py-2 text-[12.5px] text-error-fg">
           {partFailures.map((msg) => (
