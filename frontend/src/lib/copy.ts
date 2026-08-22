@@ -299,6 +299,7 @@ export const copy = {
     copyPartFailedReleased: (part: string, reason: string) => `${part}生成失败（该项未计费）：${reason}`,
     copyPartFailedUnknown: (part: string, reason: string) =>
       `${part}没有完成：${reason}。这次请求没能拿到服务端的结果，是否计费请以用量记录为准。`,
+    copyPartRewrite: "文案改写",
     copyPartTitles: "标题",
     copyPartTopics: "话题",
     copyCopy: "复制",
@@ -1530,7 +1531,7 @@ export const copy = {
     //    叫 K 会让下一个人按「千」去传，那就成了「输入超过 272 万 token」—— 错一个数量级，
     //    而这是**价格档位的判据**，错了用户就不知道自己什么时候会跳到高费率。
     intensityRateTierDetail: (thresholdWan: number, input: string, output: string) =>
-      `输入超过 ${thresholdWan} 万 token 的部分，本档按输入 ${input} / 输出 ${output} 积分每千 token 计费。`,
+      `输入超过 ${thresholdWan} 万 token 时，本次输入与输出均按高区间费率计费：输入 ${input} / 输出 ${output} 积分每千 token。`,
     // ── 402 余额不足（§三）────────────────────────────────────────────────
     // 此前 402 只是**默默弹开充值窗**，用户看不到任何解释；而新预留逻辑会锁住一个远大于实际花费的数
     //（高速档光 completion 就 137.6256），不解释清楚会被当成「一次对话要花 137 积分」。
@@ -1588,7 +1589,9 @@ export const copy = {
     //    FIX2 时我按 §六.3 保持中性（当时 CB 未判定，写错任何一边都是拿钱说假话）；现在判定有了。
     // ⚠️ FIX2 的 `AIBRAIN_PROVIDER_USAGE_LIMIT_EXCEEDED` 已在 `fbe8420d` 删除：「合法但超上限」
     //    改成封顶扣费 + 正常交付，不再是错误路径。所以这句话的适用范围也窄了——只剩"上报不可信"。
-    providerUsageInvalid: "本次生成未能完成，未扣费，请重试；如果反复出现，请联系我们。",
+    // 🔴 本码同样在 BE `_USER_COOLDOWN_ERROR_CODES` 中：首个 502 已开启用户冷却，立即重试必撞 503。
+    //    因此保留独立语义文案，但处置必须与另外两个冷却 502 一致，只能引导等待。
+    providerUsageInvalid: "本次生成未能完成，未扣费。请稍等片刻再发送；如果反复出现，请联系我们。",
     // ── 503：用量异常冷却 AIBRAIN_PROVIDER_USAGE_ANOMALY_COOLDOWN（FIX3 第五个码 · FIX4 接真值）──
     // 🔴 这是**冷却**，既不是余额问题也不是并发太多 —— 三者的处置完全不同，文案不许串味：
     //    绝不出现「充值」「余额不足」「同时进行的对话太多」。

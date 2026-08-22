@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const rewriteMock = vi.hoisted(() => ({ mutateAsync: vi.fn() }));
@@ -15,7 +15,8 @@ const estimateMock = vi.hoisted(() => ({
       }
     | undefined,
   isError: false,
-  isPending: false
+  isPending: false,
+  isFetching: false
 }));
 
 vi.mock("@/lib/api/hooks", () => ({
@@ -36,6 +37,7 @@ beforeEach(() => {
   estimateMock.data = undefined;
   estimateMock.isError = false;
   estimateMock.isPending = false;
+  estimateMock.isFetching = false;
   rewriteMock.mutateAsync.mockResolvedValue({ results: [{ text: "改写后的文案" }] });
   titlesMock.mutateAsync.mockResolvedValue({ titles: ["标题A", "标题B"] });
   topicsMock.mutateAsync.mockResolvedValue({ topics: ["#话题A", "#话题B"] });
@@ -222,6 +224,70 @@ describe("CopywritingForm (文案仿写 + 标题/话题)", () => {
     expect(screen.getByText("#话题A")).toBeInTheDocument();
     // 话题这一路成功 → 不许连坐报失败。
     expect(screen.queryByText(/话题生成失败/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * 🔴 rewrite 也是三个独立计费端点之一，不能只把 titles/topics 接进资金判据。
+   * 本门还先产出一版旧结果：第二轮请求一发起，旧 result/candidates/titles/topics 与动作必须一起撤下，
+   * 不能等 rewrite 失败后才清，更不能在等待期间继续复制、保存或带入上一轮内容。
+   */
+  it("🔴 第二轮 in-flight 前撤下全部旧结果；随后 rewrite 502 → 文案改写未计费", async () => {
+    rewriteMock.mutateAsync.mockResolvedValueOnce({
+      results: [{ text: "旧主结果" }, { text: "旧候选" }]
+    });
+    render(<CopywritingForm />);
+    typeSource("原文");
+    fireEvent.click(screen.getByRole("button", { name: "自动多版" }));
+    fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
+    expect(await screen.findByDisplayValue("旧主结果")).toBeInTheDocument();
+    expect(screen.getByText("旧候选")).toBeInTheDocument();
+
+    let rejectSecond!: (reason: unknown) => void;
+    rewriteMock.mutateAsync.mockImplementationOnce(
+      () => new Promise((_, reject) => {
+        rejectSecond = reject;
+      })
+    );
+    fireEvent.change(screen.getByLabelText(copy.workbench.copySourceLabel), {
+      target: { value: "新一轮原文" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
+
+    // 第二轮请求仍在飞：不能等失败落地后才撤旧内容，否则此窗口里仍可复制/保存/带入旧结果。
+    await waitFor(() => expect(screen.queryByDisplayValue("旧主结果")).not.toBeInTheDocument());
+    expect(screen.queryByText("旧候选")).not.toBeInTheDocument();
+    expect(screen.queryByText("标题A")).not.toBeInTheDocument();
+    expect(screen.queryByText("#话题A")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: copy.workbench.copySave })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: copy.workbench.copyUseInAvatar })).not.toBeInTheDocument();
+
+    await act(async () => {
+      rejectSecond(new ApiError("Copy generation failed.", "COPY_GEN_FAILED", 502, null, {
+        operation: "rewrite",
+        status: "failed"
+      }));
+    });
+
+    const failure = await screen.findByText(/文案改写生成失败/);
+    expect(failure.textContent ?? "").toContain("未计费");
+    // rewrite 不再同时落一条通用 error；否则同一失败会重复显示两次。
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+  });
+
+  /** 无响应只能陈述观测事实，不能把 rewrite 特判成“未计费”。 */
+  it("🔴 rewrite 网络中断/无 outcome → 不承诺未计费，指向用量记录", async () => {
+    rewriteMock.mutateAsync.mockRejectedValue(
+      new ApiError("网络连接失败，请检查后端服务是否在线。", "NETWORK_ERROR", 0)
+    );
+    render(<CopywritingForm />);
+    typeSource("原文");
+    fireEvent.click(screen.getByRole("button", { name: /生成文案/ }));
+
+    const failure = await screen.findByText(/文案改写没有完成/);
+    const text = failure.textContent ?? "";
+    expect(text).not.toMatch(/未计费|不计费|不扣费/);
+    expect(text).toContain("以用量记录为准");
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
   });
 
   /**
@@ -447,6 +513,28 @@ describe("CopywritingForm (文案仿写 + 标题/话题)", () => {
   });
 
   /**
+   * 🔴 apiFetch 不做运行时 schema 校验；坏响应里的 null item 必须安全降级，不能让整个文案页崩溃。
+   * 变异：直接读取 `item.estimated_credits` 而不先验对象 → 本条因 render 抛 TypeError 而红。
+   */
+  it("🔴 breakdown 含 null 项 → 不崩溃，隐藏 total 并回退无金额披露", () => {
+    estimateMock.data = {
+      estimated_credits: 24,
+      unit: "credits",
+      note: null,
+      breakdown: [
+        null,
+        { operation: "titles", estimated_credits: 8 },
+        { operation: "topics", estimated_credits: 8 }
+      ]
+    } as unknown as typeof estimateMock.data;
+
+    render(<CopywritingForm />);
+
+    expect(screen.getByText(copy.workbench.copyPriceDisclosure)).toBeInTheDocument();
+    expect(screen.queryByText(/24\s*积分/)).not.toBeInTheDocument();
+  });
+
+  /**
    * 🔴 生产变异：请求失败时仍信 React Query 留下的旧 data → 本条红，会继续展示过期的 24。
    * 用“error + stale data”而不是 data=undefined，确保本门真正在守失败分支，不是被空值顺手防住。
    */
@@ -468,6 +556,30 @@ describe("CopywritingForm (文案仿写 + 标题/话题)", () => {
     const fallback = screen.getByText(copy.workbench.copyPriceDisclosure);
     expect(fallback).toBeInTheDocument();
     expect(fallback.textContent ?? "").not.toMatch(/\d+\s*积分/);
+    expect(screen.queryByText(/24\s*积分/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * 🔴 reconnect / 显式 invalidation 或 refetch 等触发后台刷新时，React Query 会保留旧 data；
+   * 新响应尚未落地前不能把旧价冒充当前报价。全局 refetchOnWindowFocus=false，切回窗口不会刷新；
+   * 长期持续挂载页面又无轮询，可无限保留旧报价，仍是明确债项。本门只守“已经开始刷新时隐藏旧值”。
+   */
+  it("🔴 estimate 正在 refetch → 即使缓存有旧报价也先回退，不展示过期金额", () => {
+    estimateMock.data = {
+      estimated_credits: 24,
+      unit: "credits",
+      note: null,
+      breakdown: [
+        { operation: "rewrite", estimated_credits: 8 },
+        { operation: "titles", estimated_credits: 8 },
+        { operation: "topics", estimated_credits: 8 }
+      ]
+    };
+    estimateMock.isFetching = true;
+
+    render(<CopywritingForm />);
+
+    expect(screen.getByText(copy.workbench.copyPriceDisclosure)).toBeInTheDocument();
     expect(screen.queryByText(/24\s*积分/)).not.toBeInTheDocument();
   });
 

@@ -43,10 +43,17 @@ describe("门A · 强度选择器：金额不许裸奔", () => {
     const text = container.textContent ?? "";
     // 常驻：必须让用户知道存在第二档，且说清判据（超长上下文 / 27.2 万 token）。
     expect(text).toContain(copy.aibrain.intensityRateTierNote(27.2));
-    expect(text).toContain("27.2");
+    // 🔴 独立产品字面量：不能让上面的生产 helper 同时生成实现与期望，否则两边一起把「输入 token」
+    // 误写成「总 token」仍会自洽假绿。变异：copy 改成「总 token」→ 本条红。
+    expect(text).toContain("输入超过 27.2 万 token");
+    expect(text).not.toContain("总 token");
     // 折叠里：高区间的两个数确实在 DOM 里（<details> 收起时内容仍在，可被读屏/展开查到）。
     expect(text).toContain("2.24");
     expect(text).toContain("10.08");
+    // 🔴 高区间是整次切档，不是只给 272K 以上的增量 token 加价。
+    // 变异：文案写成「超过阈值的部分」→ 本条红；期望用产品字面量，不调用 copy helper 自我抵消。
+    expect(text).toContain("本次输入与输出均按高区间费率计费");
+    expect(text).not.toContain("超过 27.2 万 token 的部分");
     expect(screen.getByText(copy.aibrain.intensityRateTierToggle)).toBeInTheDocument();
   });
 

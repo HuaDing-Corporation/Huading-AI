@@ -50,7 +50,11 @@ function verifiedCopyEstimateCredits(estimate: CopyEstimateResponse | undefined)
   if (
     !Array.isArray(estimate.breakdown) ||
     estimate.breakdown.some(
-      (item) => !Number.isSafeInteger(item.estimated_credits) || item.estimated_credits < 0
+      (item) =>
+        typeof item !== "object" ||
+        item === null ||
+        !Number.isSafeInteger(item.estimated_credits) ||
+        item.estimated_credits < 0
     )
   ) {
     return undefined;
@@ -135,7 +139,7 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
   };
 
   /**
-   * 一键三出：rewrite 为主产出（失败则报错），titles/topics 不阻断主产出 —— 但**失败必须说出来**。
+   * 一键三出：rewrite 为主产出，titles/topics 不阻断主产出；三路任一失败都必须逐项说出来。
    *
    * 🔴 §五.3 的实现落点就在这里，且**不需要等 BE 在返回体里带 per-endpoint 结果**：
    *    三个端点是本函数自己用 `Promise.allSettled` 并发调的，`ti.status === "rejected"` 就是
@@ -155,6 +159,12 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
     setError(null);
     setPartFailures([]);
     setSaved(false);
+    // 第二轮发起即撤下整组旧产出：请求尚在 in-flight 时也不能复制、保存或带入上一轮内容。
+    // 只在 rejection 落地后清理会留下一个真实可操作窗口；四路状态在新结果返回后再分别写回。
+    setResultText("");
+    setCandidates([]);
+    setTitles([]);
+    setTopics([]);
 
     const rewriteReq: CopyRewriteRequest = {
       source_text: source,
@@ -174,8 +184,6 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
       const results = rw.value.results ?? [];
       setCandidates(mode === "auto" ? results : []);
       setResultText(results[0]?.text ?? "");
-    } else {
-      setError(errorText(rw.reason));
     }
     setTitles(ti.status === "fulfilled" ? ti.value.titles ?? [] : []);
     setTopics(to.status === "fulfilled" ? to.value.topics ?? [] : []);
@@ -186,14 +194,15 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
     //          的「网络中断不许承诺未计费」会红。
     setPartFailures(
       [
-        [copy.workbench.copyPartTitles, ti] as const,
-        [copy.workbench.copyPartTopics, to] as const
+        [copy.workbench.copyPartRewrite, "rewrite", rw] as const,
+        [copy.workbench.copyPartTitles, "titles", ti] as const,
+        [copy.workbench.copyPartTopics, "topics", to] as const
       ]
-        .filter(([, r]) => r.status === "rejected")
-        .map(([part, r]) => {
+        .filter(([, , r]) => r.status === "rejected")
+        .map(([part, operation, r]) => {
           const reason = (r as PromiseRejectedResult).reason;
           const say =
-            copyFailureBilling(reason) === "released"
+            copyFailureBilling(reason, operation) === "released"
               ? copy.workbench.copyPartFailedReleased
               : copy.workbench.copyPartFailedUnknown;
           return say(part, errorText(reason));
@@ -228,7 +237,8 @@ export function CopywritingForm({ onUseInVideo }: { onUseInVideo?: (target: Vide
   // refetch 失败时 React Query 可能仍保留旧 data；错误态不展示缓存报价，避免把过期金额冒充当前报价。
   // BE 的 note 当前也是安全的中文说明，但它与下方固定披露重复，且不参与 total/breakdown 自验；
   // 不直接展示可避免服务端自由文本与前端「预计 / 最终以结算为准」语义日后发生双份漂移。
-  const verifiedEstimate = estimate.isError ? undefined : verifiedCopyEstimateCredits(estimate.data);
+  const verifiedEstimate =
+    estimate.isError || estimate.isFetching ? undefined : verifiedCopyEstimateCredits(estimate.data);
   const priceDisclosure =
     verifiedEstimate !== undefined
       ? copy.workbench.copyPriceEstimate(formatCreditsUp(verifiedEstimate))

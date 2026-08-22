@@ -3,7 +3,7 @@
 // 华鼎AI智脑 · 聊天主壳（AIBRAIN-UI-0001 · FIX1）。左会话列表 / 中消息流 / 下输入框 + 顶部余额 + 充值弹窗。
 // 错误分流（对齐 BE 真实 status/code）：402 余额不足 → 弹充值窗；422 超上限 → friendly；502 上游失败 → friendly 重试。
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { copy } from "@/lib/copy";
 import { ApiError } from "@/lib/api/client";
@@ -53,6 +53,11 @@ function cooldownText(detail: unknown): string {
     : copy.aibrain.usageAnomalyCooldown;
 }
 
+type CooldownAheadNotice = {
+  seconds: number;
+  expiresAt: number;
+};
+
 export function AibrainChat() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [tier, setTier] = useState<IntensityTier>("mid");
@@ -62,11 +67,22 @@ export function AibrainChat() {
   const [reason, setReason] = useState<RechargeReason | undefined>(undefined);
   const [sendError, setSendError] = useState<string | null>(null);
   /**
-   * 🔴 冷却预告（PRICING-UI-0003）：成功答完但 BE 已开冷却时的秒数；null = 不显示。
+   * 🔴 冷却预告（PRICING-UI-0003）：成功答完但 BE 已开冷却时的展示秒数与截止点；null = 不显示。
    * **与 `sendError` 分开两个状态**：那是错误态（红底 + `role="alert"`），这是提示态——
    * 用户刚拿到一个**正常的回答**，把它渲染成错误会让他以为回答有问题。
+   * 每个响应创建独立 notice；旧 timer 的闭包只可清自己的对象，不能误清后来到达的新预告。
    */
-  const [cooldownAhead, setCooldownAhead] = useState<number | null>(null);
+  const [cooldownAhead, setCooldownAhead] = useState<CooldownAheadNotice | null>(null);
+
+  useEffect(() => {
+    if (cooldownAhead === null) return;
+    const notice = cooldownAhead;
+    const timer = window.setTimeout(
+      () => setCooldownAhead((current) => (current === notice ? null : current)),
+      Math.max(0, notice.expiresAt - Date.now())
+    );
+    return () => window.clearTimeout(timer);
+  }, [cooldownAhead]);
 
   const { data: wallet } = useWallet();
   // 🔴 钱包未加载/加载失败时余额是 undefined（**不是 0**）——否则 available<=0 的预检会把有余额的用户也锁死（CR#2）。
@@ -117,7 +133,10 @@ export function AibrainChat() {
       //    ⚠️ 走 `>= 1` 的正数判断而不是 `!= null`：BE 声明了 `ge=1`，0/负数属于契约坏了，
       //       那种情况说「0 秒后才能发下一条」不如不说。
       const ahead = res?.cooldown_retry_after_seconds;
-      if (typeof ahead === "number" && ahead >= 1) setCooldownAhead(Math.ceil(ahead));
+      if (typeof ahead === "number" && ahead >= 1) {
+        const seconds = Math.ceil(ahead);
+        setCooldownAhead({ seconds, expiresAt: Date.now() + seconds * 1_000 });
+      }
       return true;
     } catch (err) {
       if (!(err instanceof ApiError)) {
@@ -141,11 +160,12 @@ export function AibrainChat() {
       //    免得将来有人图省事把它并进 502 那支。FIX4 起用 detail 里的真实秒数。
       else if (err.code === AIBRAIN_ERROR.PROVIDER_USAGE_ANOMALY_COOLDOWN)
         setSendError(cooldownText(err.detail));
-      // 502：上游用量不可信 → fail-closed 不交付。**零扣费已由源码证实**（见 copy.ts 注释）。
+      // 502：上游用量不可信 → fail-closed 不交付且开启用户冷却。零扣费已由源码证实；
+      // 文案必须引导等待，不能让用户立即重试并确定性撞上下一次 503。
       else if (err.code === AIBRAIN_ERROR.PROVIDER_USAGE_INVALID)
         setSendError(copy.aibrain.providerUsageInvalid);
-      // 🔴 **会开用户冷却的两个 502**（BE `_USER_COOLDOWN_ERROR_CODES` 里除 USAGE_INVALID 外的两个）：
-      //    `REPLAY_GUARD` 与 `USAGE_MISSING`。它们与 `PROVIDER_FAILED` 的分水岭只有一条 ——
+      // 🔴 **会开用户冷却的另外两个 502**：`REPLAY_GUARD` 与 `USAGE_MISSING`。
+      //    三个冷却码与 `PROVIDER_FAILED` 的分水岭只有一条 ——
       //    **一定会开冷却** → 立刻重试必撞 503。所以文案不许说「请重试」，一律引导等待。
       //    ⚠️ PRICING-UI-0002 §四：`USAGE_MISSING` 是我在 FIX4 回执里标注待判的那条，判定是「改」，
       //       沿用 REPLAY_GUARD 的措辞形态。两者放在 PROVIDER_FAILED **之前**，免得被那条 `||` 吞掉。
@@ -207,7 +227,7 @@ export function AibrainChat() {
               而不是 `sendError` 那条的 error-bg + `role="alert"`。 */}
           {cooldownAhead !== null ? (
             <p role="status" className="mt-2 rounded-field bg-glass-fill px-3 py-2 text-[12.5px] leading-relaxed text-ink-soft">
-              {copy.aibrain.cooldownAhead(cooldownAhead)}
+              {copy.aibrain.cooldownAhead(cooldownAhead.seconds)}
             </p>
           ) : null}
 
