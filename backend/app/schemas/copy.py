@@ -16,6 +16,18 @@ class CopyGenerationOutcome(OperationOutcome):
     operation: CopyGenerationOperation
 
 
+class CopyEstimateBreakdownItem(BaseModel):
+    operation: CopyGenerationOperation
+    estimated_credits: int = Field(ge=0)
+
+
+class CopyEstimateResponse(BaseModel):
+    estimated_credits: int = Field(ge=0)
+    unit: Literal["credits"] = "credits"
+    note: str | None = None
+    breakdown: list[CopyEstimateBreakdownItem]
+
+
 class CopyRewriteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

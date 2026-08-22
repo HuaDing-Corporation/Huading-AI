@@ -1,13 +1,16 @@
 import asyncio
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import get_args
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
-from app.db.models import CopyDraft, Subscription, UsageRecord, VideoTask
+from app.db.models import CopyDraft, CreditRate, Subscription, UsageRecord, VideoTask
 from app.main import app
 from app.schemas.copy import CopyRewriteRequest
 from app.schemas.response import OperationOutcome
@@ -64,6 +67,224 @@ def _patch_copy_llm(monkeypatch, results: list[str], payloads: list[dict]) -> No
         lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
         raising=False,
     )
+
+
+@contextmanager
+def _capture_sqlite_dml(auth_db) -> Iterator[list[str]]:
+    dml_action_names = {
+        sqlite3.SQLITE_INSERT: "INSERT",
+        sqlite3.SQLITE_UPDATE: "UPDATE",
+        sqlite3.SQLITE_DELETE: "DELETE",
+    }
+    operations: list[str] = []
+
+    def authorize(action_code, table_name, _column, _database, _trigger):
+        operation = dml_action_names.get(action_code)
+        if operation is not None:
+            operations.append(f"{operation} {table_name}")
+        return sqlite3.SQLITE_OK
+
+    engine = auth_db.kw["bind"]
+    with engine.connect() as connection:
+        driver_connection = connection.connection.driver_connection
+        driver_connection.set_authorizer(authorize)
+
+    try:
+        yield operations
+    finally:
+        driver_connection.set_authorizer(None)
+
+
+def test_copy_estimate_matches_decimal_tenant_rate_and_actual_charges(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        db.add_all(
+            [
+                CreditRate(
+                    tenant_id=None,
+                    capability="llm",
+                    unit="call",
+                    credits_per_unit=Decimal("5.0000"),
+                ),
+                CreditRate(
+                    tenant_id=auth_context["tenant_id"],
+                    capability="llm",
+                    unit="call",
+                    credits_per_unit=Decimal("7.1000"),
+                ),
+            ]
+        )
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        used_before = subscription.quota_credits_used
+        db.commit()
+
+    payloads: list[dict] = []
+    _patch_copy_llm(monkeypatch, ["候选文案"], payloads)
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/copy/estimate",
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "estimated_credits": 24,
+        "unit": "credits",
+        "note": "本报价包含文案改写、标题和话题三项。",
+        "breakdown": [
+            {"operation": "rewrite", "estimated_credits": 8},
+            {"operation": "titles", "estimated_credits": 8},
+            {"operation": "topics", "estimated_credits": 8},
+        ],
+    }
+
+    generation_responses = [
+        client.post(
+            "/api/v1/copy/rewrite",
+            json={"source_text": "卖点", "mode": "smart"},
+            headers=auth_context["headers"],
+        ),
+        client.post(
+            "/api/v1/copy/titles",
+            json={"source_text": "卖点", "n": 1},
+            headers=auth_context["headers"],
+        ),
+        client.post(
+            "/api/v1/copy/topics",
+            json={"source_text": "卖点", "n": 1},
+            headers=auth_context["headers"],
+        ),
+    ]
+
+    assert [item.status_code for item in generation_responses] == [200, 200, 200]
+    assert len(payloads) == 3
+    with auth_db() as db:
+        records = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.tenant_id == auth_context["tenant_id"],
+                    UsageRecord.capability == "llm",
+                )
+            )
+        )
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        assert len(records) == 3
+        assert all(record.status == "settled" for record in records)
+        assert subscription.quota_credits_used - used_before == response.json()["data"][
+            "estimated_credits"
+        ]
+        assert subscription.quota_credits_reserved == 0
+
+
+def test_copy_estimate_is_read_only(
+    auth_context,
+    auth_db,
+) -> None:
+    def snapshot() -> dict[str, object]:
+        with auth_db() as db:
+            subscription = db.scalar(
+                select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
+            )
+            return {
+                "quota_used": subscription.quota_credits_used,
+                "quota_reserved": subscription.quota_credits_reserved,
+                "usage_records": db.scalar(select(func.count()).select_from(UsageRecord)),
+                "video_tasks": db.scalar(select(func.count()).select_from(VideoTask)),
+                "copy_drafts": db.scalar(select(func.count()).select_from(CopyDraft)),
+            }
+
+    before = snapshot()
+    with _capture_sqlite_dml(auth_db) as dml_operations:
+        response = TestClient(app).post(
+            "/api/v1/copy/estimate",
+            headers=auth_context["headers"],
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["estimated_credits"] == sum(
+        item["estimated_credits"] for item in response.json()["data"]["breakdown"]
+    )
+    assert dml_operations == []
+    assert snapshot() == before
+
+
+@pytest.mark.parametrize(
+    ("statement", "expected_operation"),
+    [
+        (
+            """
+            WITH target AS (
+                SELECT id
+                FROM subscriptions
+                WHERE tenant_id = :tenant_id
+            )
+            UPDATE subscriptions
+            SET quota_credits_used = quota_credits_used
+            WHERE id IN (SELECT id FROM target)
+            """,
+            "UPDATE subscriptions",
+        ),
+        (
+            """
+            WITH source AS (
+                SELECT :tenant_id AS id
+                WHERE 0
+            )
+            INSERT INTO subscriptions (id)
+            SELECT id FROM source
+            """,
+            "INSERT subscriptions",
+        ),
+        (
+            """
+            WITH target AS (
+                SELECT id
+                FROM subscriptions
+                WHERE tenant_id = :tenant_id AND 0
+            )
+            DELETE FROM subscriptions
+            WHERE id IN (SELECT id FROM target)
+            """,
+            "DELETE subscriptions",
+        ),
+    ],
+    ids=["update", "insert", "delete"],
+)
+def test_copy_read_only_guard_detects_cte_dml(
+    statement: str,
+    expected_operation: str,
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import copy as copy_routes
+
+    estimate_without_mutation = copy_routes.estimate_copy_quota
+
+    def estimate_with_cte_dml(db, *, tenant_id, count):
+        db.execute(text(statement), {"tenant_id": tenant_id})
+        return estimate_without_mutation(db, tenant_id=tenant_id, count=count)
+
+    monkeypatch.setattr(copy_routes, "estimate_copy_quota", estimate_with_cte_dml)
+    with _capture_sqlite_dml(auth_db) as dml_operations:
+        response = TestClient(app).post(
+            "/api/v1/copy/estimate",
+            headers=auth_context["headers"],
+        )
+
+    assert response.status_code == 200
+    assert expected_operation in dml_operations
 
 
 @pytest.mark.parametrize(
@@ -265,6 +486,13 @@ def test_copy_provider_failure_releases_reserved_quota(
     monkeypatch.setattr(copy_service.settings, "engine_llm_base_url", "https://deepseek.test")
     monkeypatch.setattr(copy_service.settings, "engine_llm_model", "deepseek-v4-flash")
     monkeypatch.setattr(copy_service, "resolve", lambda *_args, **_kwargs: _FailingDeepSeek())
+    with auth_db() as db:
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        used_before = subscription.quota_credits_used
 
     response = TestClient(app).post(
         "/api/v1/copy/rewrite",
@@ -273,12 +501,74 @@ def test_copy_provider_failure_releases_reserved_quota(
     )
 
     assert response.status_code == 502
+    assert response.status_code != 500
     assert response.json()["error"]["outcome"] == {
         "operation": "rewrite",
         "status": "failed",
     }
     assert len(calls) == 1
     _assert_single_released_copy_reservation(auth_db, auth_context["tenant_id"])
+    with auth_db() as db:
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        assert subscription.quota_credits_used == used_before
+
+
+def test_copy_response_failure_after_settlement_keeps_charge_and_returns_failed_outcome(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import copy as copy_routes
+
+    payloads: list[dict] = []
+    _patch_copy_llm(monkeypatch, ["候选标题"], payloads)
+
+    def fail_response(*_args, **_kwargs):
+        raise RuntimeError("response construction failed")
+
+    monkeypatch.setattr(copy_routes, "ok", fail_response)
+    with auth_db() as db:
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        used_before = subscription.quota_credits_used
+
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/api/v1/copy/titles",
+        json={"source_text": "卖点", "n": 1},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 500
+    assert response.json()["error"]["outcome"] == {
+        "operation": "titles",
+        "status": "failed",
+    }
+    assert len(payloads) == 1
+    with auth_db() as db:
+        records = list(
+            db.scalars(
+                select(UsageRecord).where(
+                    UsageRecord.tenant_id == auth_context["tenant_id"],
+                    UsageRecord.capability == "llm",
+                )
+            )
+        )
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        assert len(records) == 1
+        assert records[0].status == "settled"
+        assert subscription.quota_credits_used == used_before + records[0].credits
+        assert subscription.quota_credits_reserved == 0
 
 
 def test_copy_timeout_releases_reserved_quota(
