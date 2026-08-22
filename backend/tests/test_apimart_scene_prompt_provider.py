@@ -209,8 +209,8 @@ async def test_luna_uses_discounted_token_fallback_when_credits_are_missing() ->
         {"image_urls": ["https://storage.test/product.png"]}
     )
 
-    assert result["credits"] == Decimal("0.032")
-    assert result["cost_cents"] == 2
+    assert result["credits"] == Decimal("0.0064")
+    assert result["cost_cents"] == 0
     assert result["cost_source"] == "token_formula"
     assert result["cache_tokens_reported"] is False
     assert result["cache_write_tokens_reported"] is False
@@ -258,7 +258,7 @@ async def test_luna_token_fallback_prices_reported_cache_read_and_write() -> Non
 
     assert result["cached_prompt_tokens"] == 400
     assert result["cache_write_tokens"] == 100
-    assert result["credits"] == Decimal("0.02932")
+    assert result["credits"] == Decimal("0.005864")
     assert result["cost_estimate_uncertain"] is False
 
 
@@ -304,7 +304,7 @@ async def test_luna_uses_apimart_ttl_cache_creation_breakdown_when_generic_is_ze
     )
 
     assert result["cache_write_tokens"] == 1_000
-    assert result["credits"] == Decimal("0.010")
+    assert result["credits"] == Decimal("0.002")
     assert result["cost_estimate_uncertain"] is False
 
 
@@ -368,7 +368,7 @@ def test_scene_prompt_usage_estimates_luna_cost_when_provider_omits_cost_metadat
     assert record.unit == "token"
     assert record.quantity == Decimal("865")
     assert record.credits == Decimal("0")
-    assert record.cost_cents == 1
+    assert record.cost_cents == 0
 
 
 def test_scene_prompt_usage_uses_high_tier_when_total_input_exceeds_272k() -> None:
@@ -387,7 +387,7 @@ def test_scene_prompt_usage_uses_high_tier_when_total_input_exceeds_272k() -> No
     assert record.unit == "token"
     assert record.quantity == Decimal("1000000")
     assert record.credits == Decimal("0")
-    assert record.cost_cents == 1120
+    assert record.cost_cents == 224
 
 
 def test_scene_prompt_usage_skips_results_without_usage_or_cost() -> None:
@@ -670,8 +670,8 @@ async def test_luna_retry_selects_token_tier_per_paid_call_before_aggregation() 
     )
 
     assert result["prompt_tokens"] == 273_001
-    assert result["credits"] == Decimal("4.360016")
-    assert result["cost_cents"] == 305
+    assert result["credits"] == Decimal("0.8720032")
+    assert result["cost_cents"] == 61
 
 
 @pytest.mark.asyncio

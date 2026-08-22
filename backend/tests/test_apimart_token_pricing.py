@@ -3,6 +3,51 @@ from decimal import Decimal
 import pytest
 
 
+@pytest.mark.parametrize(
+    (
+        "model",
+        "prompt_tokens",
+        "official_input",
+        "official_cached",
+        "official_write",
+        "official_output",
+    ),
+    [
+        ("gpt-5.6-luna", 272_000, "2", "0.2", "2.5", "12"),
+        ("gpt-5.6-luna", 272_001, "4", "0.4", "5", "18"),
+        ("gpt-5.6-terra", 272_000, "20", "2", "25", "120"),
+        ("gpt-5.6-terra", 272_001, "40", "4", "50", "180"),
+        ("gpt-5.6-sol", 272_000, "50", "5", "62.5", "300"),
+        ("gpt-5.6-sol", 272_001, "100", "10", "125", "450"),
+    ],
+)
+def test_gpt56_rates_match_apimart_published_our_price_column(
+    model: str,
+    prompt_tokens: int,
+    official_input: str,
+    official_cached: str,
+    official_write: str,
+    official_output: str,
+) -> None:
+    from app.services.apimart_token_pricing import (
+        APIMART_TOKEN_PRICING_COLUMN_LABEL,
+        APIMART_TOKEN_PRICING_SOURCE_URL,
+        APIMART_TOKEN_PRICING_VERIFIED_ON,
+        apimart_token_rate,
+    )
+
+    rate = apimart_token_rate(model=model, prompt_tokens=prompt_tokens)
+    discount = Decimal("0.8")
+
+    assert APIMART_TOKEN_PRICING_SOURCE_URL == "https://apib.ai/zh/pricing"
+    assert APIMART_TOKEN_PRICING_VERIFIED_ON == "2026-08-06"
+    assert APIMART_TOKEN_PRICING_COLUMN_LABEL == "我们的价格"
+    assert rate.input_credits_per_m == Decimal(official_input) * discount
+    assert rate.cached_input_credits_per_m == Decimal(official_cached) * discount
+    assert rate.cache_write_credits_per_m == Decimal(official_write) * discount
+    assert rate.output_credits_per_m == Decimal(official_output) * discount
+
+
 def test_gpt56_models_share_verified_public_usage_limits() -> None:
     from app.services.apimart_token_pricing import (
         APIMART_GPT56_USAGE_LIMITS,
@@ -115,10 +160,10 @@ def test_luna_low_tier_uses_apimart_discounted_token_rates(monkeypatch) -> None:
     )
 
     assert cost.tier == "up_to_272k"
-    assert cost.input_credits_per_m == Decimal("8")
-    assert cost.output_credits_per_m == Decimal("48")
-    assert cost.credits == Decimal("0.01492")
-    assert cost.cost_cents == 1
+    assert cost.input_credits_per_m == Decimal("1.6")
+    assert cost.output_credits_per_m == Decimal("9.6")
+    assert cost.credits == Decimal("0.002984")
+    assert cost.cost_cents == 0
 
 
 def test_luna_switches_rate_tier_only_above_272k_input_tokens() -> None:
@@ -140,11 +185,11 @@ def test_luna_switches_rate_tier_only_above_272k_input_tokens() -> None:
     )
 
     assert low.tier == "up_to_272k"
-    assert low.credits == Decimal("2.224")
+    assert low.credits == Decimal("0.4448")
     assert high.tier == "above_272k"
-    assert high.input_credits_per_m == Decimal("16")
-    assert high.output_credits_per_m == Decimal("72")
-    assert high.credits == Decimal("4.424016")
+    assert high.input_credits_per_m == Decimal("3.2")
+    assert high.output_credits_per_m == Decimal("14.4")
+    assert high.credits == Decimal("0.8848032")
 
 
 @pytest.mark.parametrize(
@@ -157,8 +202,8 @@ def test_luna_switches_rate_tier_only_above_272k_input_tokens() -> None:
         "expected_output",
     ),
     [
-        ("gpt-5.6-terra", 1, "20", "2", "25", "120"),
-        ("gpt-5.6-terra", 272_001, "40", "4", "50", "180"),
+        ("gpt-5.6-terra", 1, "16", "1.6", "20", "96"),
+        ("gpt-5.6-terra", 272_001, "32", "3.2", "40", "144"),
         ("gpt-5.6-sol", 1, "40", "4", "50", "240"),
         ("gpt-5.6-sol", 272_001, "80", "8", "100", "360"),
     ],
@@ -227,7 +272,7 @@ def test_cache_read_and_write_tokens_use_their_own_rates() -> None:
         cache_write_tokens=100,
     )
 
-    assert cost.credits == Decimal("0.02932")
+    assert cost.credits == Decimal("0.005864")
     assert cost.cache_tokens_reported is True
     assert cost.cache_write_tokens_reported is True
     assert cost.cost_estimate_uncertain is False
@@ -242,7 +287,7 @@ def test_missing_cache_metadata_is_explicitly_uncertain() -> None:
         completion_tokens=500,
     )
 
-    assert cost.credits == Decimal("0.032")
+    assert cost.credits == Decimal("0.0064")
     assert cost.cache_tokens_reported is False
     assert cost.cache_write_tokens_reported is False
     assert cost.cost_estimate_uncertain is True

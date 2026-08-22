@@ -923,20 +923,51 @@ def test_aibrain_rate_defaults_are_declared_in_runtime_and_env_examples() -> Non
 
 
 @pytest.mark.parametrize(
-    ("tier", "model"),
+    ("tier", "model", "expected_markup"),
     [
-        ("low", "gpt-5.6-luna"),
-        ("mid", "gpt-5.6-terra"),
-        ("high", "gpt-5.6-sol"),
+        ("low", "gpt-5.6-luna", "10"),
+        ("mid", "gpt-5.6-terra", "2.5"),
+        ("high", "gpt-5.6-sol", "2"),
     ],
 )
-def test_aibrain_six_user_rates_equal_140_credits_per_apimart_credit(
+def test_aibrain_six_user_rates_preserve_calibrated_provider_markup(
     tier: str,
     model: str,
+    expected_markup: str,
 ) -> None:
     pricing = aibrain.tier_pricing(tier)
     provider_rate = apimart_token_rate(model=model)
-    conversion = Decimal("140") / Decimal("1000")
+    provider_cost_credits_per_1k = Decimal("0.07")
 
-    assert pricing.input_credits_per_1k == (provider_rate.input_credits_per_m * conversion)
-    assert pricing.output_credits_per_1k == (provider_rate.output_credits_per_m * conversion)
+    input_markup = pricing.input_credits_per_1k / (
+        provider_rate.input_credits_per_m * provider_cost_credits_per_1k
+    )
+    output_markup = pricing.output_credits_per_1k / (
+        provider_rate.output_credits_per_m * provider_cost_credits_per_1k
+    )
+
+    assert {input_markup, output_markup} == {Decimal(expected_markup)}
+
+
+def test_aibrain_exposure_limits_remain_decoupled_from_provider_costs() -> None:
+    assert aibrain._max_single_request_exposure_credits() == Decimal("5300.825600")
+    assert aibrain._tenant_inflight_exposure_limit() == Decimal("10601.651200")
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_maximum_credits", "expected_cost_cents"),
+    [
+        ("gpt-5.6-luna", "5.5312", 387),
+        ("gpt-5.6-terra", "55.312", 3_872),
+        ("gpt-5.6-sol", "138.28", 9_680),
+    ],
+)
+def test_aibrain_trusted_provider_cost_bounds_use_calibrated_public_rates(
+    model: str,
+    expected_maximum_credits: str,
+    expected_cost_cents: int,
+) -> None:
+    maximum = aibrain._maximum_trusted_provider_usage_cost(model)
+
+    assert maximum.credits == Decimal(expected_maximum_credits)
+    assert maximum.cost_cents == expected_cost_cents
