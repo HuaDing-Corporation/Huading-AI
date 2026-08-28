@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 from datetime import UTC, datetime
 from decimal import Decimal
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import create_engine, event
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -239,10 +241,28 @@ def test_usage_record_enforces_one_billing_item_per_operation(db_session):
     db_session.commit()
     db_session.add_all(
         [
-            make_usage_record(billing_operation_id=operation.id, billing_item_index=0),
-            make_usage_record(billing_operation_id=operation.id, billing_item_index=0),
+            make_usage_record(
+                billing_operation_id=operation.id,
+                billing_item_index=0,
+                billing_pricing_line_index=0,
+            ),
+            make_usage_record(
+                billing_operation_id=operation.id,
+                billing_item_index=0,
+                billing_pricing_line_index=0,
+            ),
         ]
     )
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+def test_linked_usage_record_requires_both_billing_allocation_indexes(db_session):
+    operation = make_billing_operation()
+    db_session.add(operation)
+    db_session.commit()
+
+    db_session.add(make_usage_record(billing_operation_id=operation.id))
     with pytest.raises(IntegrityError):
         db_session.commit()
 
@@ -251,7 +271,13 @@ def test_billing_operation_delete_is_restricted_when_usage_exists(db_session):
     operation = make_billing_operation()
     db_session.add(operation)
     db_session.commit()
-    db_session.add(make_usage_record(billing_operation_id=operation.id, billing_item_index=0))
+    db_session.add(
+        make_usage_record(
+            billing_operation_id=operation.id,
+            billing_item_index=0,
+            billing_pricing_line_index=0,
+        )
+    )
     db_session.commit()
 
     with pytest.raises(IntegrityError):
@@ -304,3 +330,37 @@ def test_billing_core_migration_creates_schema_and_refuses_downgrade_with_rows()
         )
         with pytest.raises(RuntimeError, match="Cannot downgrade 20260829_0036"):
             migration.downgrade()
+
+
+def test_postgresql_schema_path_emits_finite_amount_and_allocation_guards():
+    migration = _load_migration()
+    billing_model_ddl = str(
+        sa.schema.CreateTable(BillingOperation.__table__).compile(
+            dialect=postgresql.dialect()
+        )
+    )
+    usage_model_ddl = str(
+        sa.schema.CreateTable(UsageRecord.__table__).compile(dialect=postgresql.dialect())
+    )
+    output = StringIO()
+    migration.op = Operations(
+        MigrationContext.configure(
+            dialect=postgresql.dialect(),
+            opts={"as_sql": True, "output_buffer": output},
+        )
+    )
+
+    migration.upgrade()
+
+    statements = output.getvalue()
+    assert "JSONB" in billing_model_ddl
+    assert "CAST(requested_credits AS TEXT) NOT IN" in billing_model_ddl
+    assert "billing_operation_id IS NULL" in usage_model_ddl
+    assert "billing_item_index IS NOT NULL" in usage_model_ddl
+    assert "billing_pricing_line_index IS NOT NULL" in usage_model_ddl
+    assert "CAST(requested_credits AS TEXT) NOT IN" in statements
+    assert "CAST(settled_credits AS TEXT) NOT IN" in statements
+    assert "'NaN', 'Infinity', '-Infinity'" in statements
+    assert "billing_operation_id IS NULL" in statements
+    assert "billing_item_index IS NOT NULL" in statements
+    assert "billing_pricing_line_index IS NOT NULL" in statements

@@ -43,6 +43,12 @@ AND
 (completion_kind <> 'succeeded' OR requested_credits = 0 OR settled_credits > 0)
 """
 
+BILLING_FINITE_CHECK = """
+CAST(requested_credits AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')
+AND CAST(settled_credits AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')
+AND CAST(released_credits AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')
+"""
+
 
 def _json_type():
     return sa.JSON().with_variant(JSONB(), "postgresql")
@@ -94,6 +100,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(BILLING_ZERO_CHECK, name="ck_billing_operations_zero_price"),
         sa.CheckConstraint(BILLING_COMPLETION_CHECK, name="ck_billing_operations_completion"),
+        sa.CheckConstraint(BILLING_FINITE_CHECK, name="ck_billing_operations_amounts_finite"),
         sa.CheckConstraint(
             "requested_credits >= 0 AND settled_credits >= 0 AND released_credits >= 0",
             name="ck_billing_operations_amounts_nonnegative",
@@ -124,6 +131,13 @@ def upgrade() -> None:
             "ck_usage_records_billing_pricing_line_index_nonnegative",
             "billing_pricing_line_index IS NULL OR billing_pricing_line_index >= 0",
         )
+        batch_op.create_check_constraint(
+            "ck_usage_records_billing_allocation",
+            "(billing_operation_id IS NULL AND billing_item_index IS NULL "
+            "AND billing_pricing_line_index IS NULL) OR "
+            "(billing_operation_id IS NOT NULL AND billing_item_index IS NOT NULL "
+            "AND billing_pricing_line_index IS NOT NULL)",
+        )
         batch_op.create_unique_constraint(
             "uq_usage_records_billing_operation_item_index",
             ["billing_operation_id", "billing_item_index"],
@@ -144,6 +158,9 @@ def downgrade() -> None:
     with op.batch_alter_table("usage_records") as batch_op:
         batch_op.drop_constraint(
             "uq_usage_records_billing_operation_item_index", type_="unique"
+        )
+        batch_op.drop_constraint(
+            "ck_usage_records_billing_allocation", type_="check"
         )
         batch_op.drop_constraint(
             "ck_usage_records_billing_pricing_line_index_nonnegative", type_="check"
