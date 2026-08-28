@@ -18,6 +18,7 @@ from app.db.models import (
     VideoTask,
 )
 from app.services import provider_costs
+from app.services.pricing import DEFAULT_RATE_CREDITS, PRICING_POLICIES, resolve_rate
 
 _SCRIPT_CPS = Decimal("5")
 _MIN_SECONDS = Decimal("3")
@@ -39,7 +40,6 @@ _IMAGE_RESOLUTION_MULTIPLIERS = {
     "4k": Decimal("2.2500"),
 }
 _COSYVOICE_CLONE_PROVIDER = "cosyvoice-voice-clone"
-_VOICE_CLONE_DEFAULT_CREDITS = Decimal("30000.0000")
 _REVERSE_PROMPT_VIDEO_SHORT_MAX_DURATION_MS = 60_000
 _REVERSE_PROMPT_VIDEO_MAX_DURATION_MS = 180_000
 
@@ -324,14 +324,14 @@ def estimate_avatar_talk_quota(
         tenant_id=tenant_id,
         capability="avatar",
         unit="second",
-        default=Decimal("150.0000"),
+        default=DEFAULT_RATE_CREDITS[("avatar", "second")],
     )
     tts_rate = _rate(
         db,
         tenant_id=tenant_id,
         capability="tts",
         unit="character",
-        default=Decimal("0.1000"),
+        default=DEFAULT_RATE_CREDITS[("tts", "character")],
     )
     credits = (
         Decimal(seconds) * avatar_rate + Decimal(len(script or "")) * tts_rate
@@ -362,14 +362,14 @@ def estimate_seedance_i2v_quota(
         tenant_id=tenant_id,
         capability="video",
         unit="second",
-        default=Decimal("80.0000"),
+        default=DEFAULT_RATE_CREDITS[("video", "second")],
     )
     tts_rate = _rate(
         db,
         tenant_id=tenant_id,
         capability="tts",
         unit="character",
-        default=Decimal("0.1000"),
+        default=DEFAULT_RATE_CREDITS[("tts", "character")],
     )
     credits = (
         Decimal(seconds) * video_rate * _video_resolution_multiplier(resolution)
@@ -405,7 +405,7 @@ def estimate_video_gen_quota(
         tenant_id=tenant_id,
         capability="video_gen",
         unit="second",
-        default=Decimal("80.0000"),
+        default=DEFAULT_RATE_CREDITS[("video_gen", "second")],
     )
     credits = (Decimal(seconds) * video_rate * multiplier).quantize(Decimal("0.01"))
     return QuotaEstimate(
@@ -430,7 +430,7 @@ def estimate_image_generation_quota(
         tenant_id=tenant_id,
         capability="image",
         unit="image",
-        default=Decimal("10.0000"),
+        default=DEFAULT_RATE_CREDITS[("image", "image")],
     )
     credits = (
         Decimal(count) * image_rate * _image_resolution_multiplier(resolution)
@@ -453,13 +453,11 @@ def estimate_voice_clone_quota(
     if provider == _COSYVOICE_CLONE_PROVIDER:
         credits = Decimal("0.00")
     else:
-        clone_rate = _rate(
+        clone_rate = resolve_rate(
             db,
             tenant_id=tenant_id,
-            capability="voice_clone",
-            unit="call",
-            default=_VOICE_CLONE_DEFAULT_CREDITS,
-        )
+            policy=PRICING_POLICIES["doubao_brand_voice_order_create"],
+        ).unit_credits
         credits = clone_rate.quantize(Decimal("0.01"))
     return QuotaEstimate(
         estimated_seconds=1,
@@ -504,7 +502,7 @@ def estimate_reverse_prompt_quota(
         tenant_id=tenant_id,
         capability="reverse_prompt",
         unit="call",
-        default=Decimal("1.0000"),
+        default=DEFAULT_RATE_CREDITS[("reverse_prompt", "call")],
     )
     credits = reverse_prompt_rate.quantize(Decimal("0.01"))
     return QuotaEstimate(
@@ -1290,7 +1288,7 @@ def _settled_componentized_credits(
         tenant_id=tenant_id,
         capability="tts",
         unit="character",
-        default=Decimal("0.1000"),
+        default=DEFAULT_RATE_CREDITS[("tts", "character")],
     )
     tts_credits = Decimal(_script_chars(task)) * tts_rate
     if record.capability == "avatar":
@@ -1299,7 +1297,7 @@ def _settled_componentized_credits(
             tenant_id=tenant_id,
             capability="avatar",
             unit="second",
-            default=Decimal("150.0000"),
+            default=DEFAULT_RATE_CREDITS[("avatar", "second")],
         )
     elif record.capability == "video" and (task.video_mode or task.mode) == "seedance_i2v":
         resolution = str((task.params or {}).get("resolution") or "720p")
@@ -1309,7 +1307,7 @@ def _settled_componentized_credits(
                 tenant_id=tenant_id,
                 capability="video",
                 unit="second",
-                default=Decimal("80.0000"),
+                default=DEFAULT_RATE_CREDITS[("video", "second")],
             )
             * _video_resolution_multiplier(resolution)
         )

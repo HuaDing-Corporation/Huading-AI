@@ -254,6 +254,57 @@ def test_image_generation_quota_scales_by_count_within_a_resolution_tier(
     assert batch.estimated_credits == Decimal("30.00")
 
 
+def test_authoritative_code_fallbacks_replace_legacy_quota_drift(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        image = quota.estimate_image_generation_quota(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            resolution="1k",
+        )
+        avatar = quota.estimate_avatar_talk_quota(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            script="",
+            speed=1,
+        )
+        reverse_prompt = quota.estimate_reverse_prompt_quota(
+            db,
+            tenant_id=auth_context["tenant_id"],
+        )
+
+    assert image.estimated_credits == Decimal("80.00")
+    assert avatar.estimated_credits == Decimal("540.00")
+    assert reverse_prompt.estimated_credits == Decimal("100.00")
+
+
+def test_doubao_quota_fallback_ignores_historic_tenant_voice_clone_rate(
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        db.add(
+            CreditRate(
+                tenant_id=auth_context["tenant_id"],
+                capability="voice_clone",
+                unit="call",
+                credits_per_unit=Decimal("42.0000"),
+            )
+        )
+        db.commit()
+
+        estimate = quota.estimate_voice_clone_quota(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            provider="doubao-voice-clone",
+        )
+
+    assert estimate.estimated_credits == Decimal("30000.00")
+    assert estimate.reservation_units == 30000
+
+
 @pytest.mark.parametrize(
     ("resolution", "expected_credits"),
     [
