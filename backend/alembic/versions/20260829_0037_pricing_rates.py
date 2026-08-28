@@ -249,25 +249,25 @@ def _apply_schema_changes() -> None:
 def _seed_platform_rates() -> None:
     connection = op.get_bind()
     effective_at = datetime.now(UTC)
-    for rate_id, capability, unit, target, _ in _TARGETS:
+    insert_rate = sa.text(
+        "INSERT INTO credit_rates "
+        "(id, tenant_id, capability, unit, credits_per_unit, is_active, effective_at) "
+        "VALUES (:id, NULL, :capability, :unit, :target, TRUE, :effective_at)"
+    ).bindparams(
+        sa.bindparam("target", type_=sa.Numeric(12, 4)),
+        sa.bindparam("effective_at", type_=sa.DateTime(timezone=True)),
+    )
+    for rate_id, capability, unit, target, allowed_values in _TARGETS:
         row = connection.execute(
             sa.text(
-                "SELECT id FROM credit_rates "
+                "SELECT id, credits_per_unit FROM credit_rates "
                 "WHERE tenant_id IS NULL AND capability = :capability AND unit = :unit "
                 "AND is_active IS TRUE"
             ),
             {"capability": capability, "unit": unit},
         ).first()
         if row is None:
-            insert_rate = sa.text(
-                "INSERT INTO credit_rates "
-                "(id, tenant_id, capability, unit, credits_per_unit, is_active, effective_at) "
-                "VALUES (:id, NULL, :capability, :unit, :target, TRUE, :effective_at)"
-            ).bindparams(
-                sa.bindparam("target", type_=sa.Numeric(12, 4)),
-                sa.bindparam("effective_at", type_=sa.DateTime(timezone=True)),
-            )
-            connection.execute(
+            inserted = connection.execute(
                 insert_rate,
                 {
                     "id": rate_id,
@@ -277,15 +277,43 @@ def _seed_platform_rates() -> None:
                     "effective_at": effective_at,
                 },
             )
+            if inserted.rowcount != 1:
+                raise RuntimeError(f"Credit rate insert failed for ID: {rate_id}")
         else:
-            update_rate = sa.text(
-                "UPDATE credit_rates SET credits_per_unit = :target "
-                "WHERE id = :id AND is_active IS TRUE"
-            ).bindparams(sa.bindparam("target", type_=sa.Numeric(12, 4)))
-            connection.execute(
-                update_rate,
-                {"id": row.id, "target": target},
+            current = Decimal(str(row.credits_per_unit))
+            if current not in allowed_values:
+                raise RuntimeError(f"Credit rate CAS found unexpected value for ID: {row.id}")
+            verify_or_deactivate = sa.text(
+                "UPDATE credit_rates SET is_active = :next_active "
+                "WHERE id = :id AND tenant_id IS NULL "
+                "AND capability = :capability AND unit = :unit "
+                "AND is_active IS TRUE AND credits_per_unit = :expected"
+            ).bindparams(sa.bindparam("expected", type_=sa.Numeric(12, 4)))
+            result = connection.execute(
+                verify_or_deactivate,
+                {
+                    "id": row.id,
+                    "capability": capability,
+                    "unit": unit,
+                    "expected": current,
+                    "next_active": current == target,
+                },
             )
+            if result.rowcount != 1:
+                raise RuntimeError(f"Credit rate CAS failed for ID: {row.id}")
+            if current != target:
+                inserted = connection.execute(
+                    insert_rate,
+                    {
+                        "id": rate_id,
+                        "capability": capability,
+                        "unit": unit,
+                        "target": target,
+                        "effective_at": effective_at,
+                    },
+                )
+                if inserted.rowcount != 1:
+                    raise RuntimeError(f"Credit rate insert failed for ID: {rate_id}")
 
 
 def upgrade() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+from datetime import UTC, datetime
 from decimal import Decimal
 from io import StringIO
 from pathlib import Path
@@ -11,6 +12,8 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
+
+from app.db.models import Base, CreditRate, UsageRecord
 
 MIGRATION_PATH = (
     Path(__file__).resolve().parents[1]
@@ -101,14 +104,16 @@ def _seed_rate(connection, **overrides: object) -> None:
         "unit": "image",
         "credits_per_unit": Decimal("10.0000"),
         "is_active": True,
+        "effective_at": datetime(2025, 1, 1, tzinfo=UTC),
     }
     values.update(overrides)
     values["credits_per_unit"] = str(values["credits_per_unit"])
     connection.execute(
         sa.text(
             "INSERT INTO credit_rates "
-            "(id, tenant_id, capability, unit, credits_per_unit, is_active) "
-            "VALUES (:id, :tenant_id, :capability, :unit, :credits_per_unit, :is_active)"
+            "(id, tenant_id, capability, unit, credits_per_unit, is_active, effective_at) "
+            "VALUES (:id, :tenant_id, :capability, :unit, :credits_per_unit, :is_active, "
+            ":effective_at)"
         ),
         values,
     )
@@ -188,6 +193,108 @@ def test_upgrade_seeds_canonical_rates_and_preserves_tenant_and_history(sqlite_e
     assert values["historic-tenant-voice-zero"]["is_active"]
     assert Decimal(str(values["historic-image"]["credits_per_unit"])) == Decimal("7")
     assert not values["historic-image"]["is_active"]
+
+
+@pytest.mark.parametrize(
+    ("old_id", "capability", "unit", "old_price", "target_price"),
+    [
+        ("legacy-platform-image", "image", "image", "10.0000", "80.0000"),
+        (
+            "legacy-platform-voice",
+            "voice_clone",
+            "call",
+            "30.0000",
+            "30000.0000",
+        ),
+    ],
+)
+def test_upgrade_closes_old_platform_rate_and_inserts_new_effective_period(
+    sqlite_engine,
+    old_id: str,
+    capability: str,
+    unit: str,
+    old_price: str,
+    target_price: str,
+) -> None:
+    old_effective_at = datetime(2024, 2, 3, 4, 5, 6, tzinfo=UTC)
+    with sqlite_engine.begin() as connection:
+        _seed_rate(
+            connection,
+            id=old_id,
+            capability=capability,
+            unit=unit,
+            credits_per_unit=Decimal(old_price),
+            effective_at=old_effective_at,
+        )
+
+    _run_upgrade(sqlite_engine)
+
+    with sqlite_engine.begin() as connection:
+        rate_rows = connection.execute(
+            sa.text(
+                "SELECT id, credits_per_unit, is_active, effective_at FROM credit_rates "
+                "WHERE tenant_id IS NULL AND capability = :capability AND unit = :unit "
+                "ORDER BY effective_at, id"
+            ),
+            {"capability": capability, "unit": unit},
+        ).mappings().all()
+
+    assert len(rate_rows) == 2
+    old_row = next(row for row in rate_rows if row["id"] == old_id)
+    new_row = next(row for row in rate_rows if row["id"] != old_id)
+    assert Decimal(str(old_row["credits_per_unit"])) == Decimal(old_price)
+    assert not old_row["is_active"]
+    assert str(old_row["effective_at"]).startswith("2024-02-03")
+    assert Decimal(str(new_row["credits_per_unit"])) == Decimal(target_price)
+    assert new_row["is_active"]
+    assert str(new_row["effective_at"]) != str(old_row["effective_at"])
+
+
+def test_model_metadata_matches_0037_capabilities_units_guards_and_indexes() -> None:
+    credit_checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in CreditRate.__table__.constraints
+        if isinstance(constraint, sa.CheckConstraint)
+    }
+    usage_checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in UsageRecord.__table__.constraints
+        if isinstance(constraint, sa.CheckConstraint)
+    }
+    indexes = {index.name: index for index in CreditRate.__table__.indexes}
+
+    assert "script_generate" in credit_checks["ck_credit_rates_capability"]
+    assert "scene_prompt" in credit_checks["ck_credit_rates_capability"]
+    assert "credits_per_unit >= 0" in credit_checks[
+        "ck_credit_rates_credits_per_unit_valid"
+    ]
+    assert "script_generate" in usage_checks["ck_usage_records_capability"]
+    assert "'char'" in usage_checks["ck_usage_records_unit"]
+    assert "'character'" in usage_checks["ck_usage_records_unit"]
+    assert "quantity >= 0" in usage_checks["ck_usage_records_amounts_valid"]
+    assert "credits >= 0" in usage_checks["ck_usage_records_amounts_valid"]
+    for name in (
+        "uq_credit_rates_platform_active_capability_unit",
+        "uq_credit_rates_tenant_active_capability_unit",
+    ):
+        assert indexes[name].unique
+        assert indexes[name].dialect_options["postgresql"]["where"] is not None
+        assert indexes[name].dialect_options["sqlite"]["where"] is not None
+
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    inspector = sa.inspect(engine)
+    model_credit_checks = " ".join(
+        str(item["sqltext"]) for item in inspector.get_check_constraints("credit_rates")
+    )
+    model_usage_checks = " ".join(
+        str(item["sqltext"]) for item in inspector.get_check_constraints("usage_records")
+    )
+    assert "script_generate" in model_credit_checks
+    assert "scene_prompt" in model_credit_checks
+    assert "script_generate" in model_usage_checks
+    assert "character" in model_usage_checks
+    engine.dispose()
 
 
 def test_upgrade_reports_duplicate_active_ids_and_performs_no_updates(sqlite_engine) -> None:

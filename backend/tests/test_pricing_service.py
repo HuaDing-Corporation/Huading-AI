@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 
 import pytest
 import sqlalchemy as sa
@@ -185,6 +185,7 @@ def test_resolve_rate_excludes_future_rows(db: Session) -> None:
 
 def test_resolve_rate_rejects_duplicate_eligible_active_rows(db: Session) -> None:
     now = datetime.now(UTC)
+    db.execute(sa.text("DROP INDEX uq_credit_rates_platform_active_capability_unit"))
     db.add_all(
         [
             CreditRate(
@@ -382,21 +383,15 @@ def test_candidate_rejects_active_zero_for_positive_policy() -> None:
         )
 
 
-def test_candidate_rejects_newly_active_tenant_voice_clone_but_allows_inactive_history() -> None:
-    validate_credit_rate_candidate(
-        tenant_id="tenant-a",
-        capability="voice_clone",
-        unit="call",
-        credits_per_unit=Decimal("42"),
-        is_active=False,
-    )
+@pytest.mark.parametrize("is_active", [False, True])
+def test_candidate_rejects_every_new_tenant_voice_clone_rate(is_active: bool) -> None:
     with pytest.raises(PricingInvariantError, match="tenant.*voice_clone"):
         validate_credit_rate_candidate(
             tenant_id="tenant-a",
             capability="voice_clone",
             unit="call",
             credits_per_unit=Decimal("42"),
-            is_active=True,
+            is_active=is_active,
         )
 
 
@@ -461,6 +456,51 @@ def test_snapshot_validation_rejects_aggregate_or_line_tampering() -> None:
     tampered_line = {**snapshot["pricing_lines"][0], "subtotal_credits": "0.5"}
     with pytest.raises(PricingInvariantError):
         validate_pricing_snapshot({**snapshot, "pricing_lines": [tampered_line]})
+
+
+@pytest.mark.parametrize(
+    ("pricing_shape", "envelope_operation", "line_operation"),
+    [
+        ("simple", "scene_prompt", "script_generate"),
+        ("composite", "ecom_cutout", "cosyvoice_brand_tts"),
+    ],
+)
+def test_snapshot_rejects_lines_from_another_operation(
+    pricing_shape: str,
+    envelope_operation: str,
+    line_operation: str,
+) -> None:
+    policy = PRICING_POLICIES[line_operation]
+    snapshot = {
+        "operation": envelope_operation,
+        "pricing_shape": pricing_shape,
+        "pricing_lines": [
+            {
+                "operation": line_operation,
+                "capability": policy.capability,
+                "unit": policy.unit,
+                "quantity": "1",
+                "unit_credits": str(policy.default_unit_credits),
+                "subtotal_credits": str(policy.default_unit_credits),
+                "rate_scope": policy.scope.value,
+                "rate_source": RateSource.CODE_DEFAULT.value,
+                "rate_id": None,
+                "effective_at": None,
+                "policy_key": policy.policy_key,
+                "policy_version": policy.policy_version,
+                "label": line_operation,
+            }
+        ],
+        "disclosures": [],
+        "subtotal_credits": str(policy.default_unit_credits),
+        "payable_credits": int(
+            policy.default_unit_credits.to_integral_value(rounding=ROUND_CEILING)
+        ),
+        "rounding": "ROUND_CEILING",
+    }
+
+    with pytest.raises(PricingInvariantError, match="operation"):
+        validate_pricing_snapshot(snapshot)
 
 
 def test_billing_quote_enforces_simple_and_composite_wire_shapes() -> None:

@@ -349,14 +349,36 @@ class CreditRate(Base):
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
             "'publish', 'voice_clone', 'video_gen', 'reverse_prompt', "
-            "'reverse_prompt_video')",
+            "'reverse_prompt_video', 'script_generate', 'scene_prompt')",
             name="ck_credit_rates_capability",
         ),
         CheckConstraint(
             "unit IN ('second', 'call', 'token', 'image', 'character')",
             name="ck_credit_rates_unit",
         ),
+        CheckConstraint(
+            "credits_per_unit >= 0 AND "
+            "CAST(credits_per_unit AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')",
+            name="ck_credit_rates_credits_per_unit_valid",
+        ),
         Index("ix_credit_rates_tenant_capability_unit", "tenant_id", "capability", "unit"),
+        Index(
+            "uq_credit_rates_platform_active_capability_unit",
+            "capability",
+            "unit",
+            unique=True,
+            postgresql_where=text("tenant_id IS NULL AND is_active"),
+            sqlite_where=text("tenant_id IS NULL AND is_active"),
+        ),
+        Index(
+            "uq_credit_rates_tenant_active_capability_unit",
+            "tenant_id",
+            "capability",
+            "unit",
+            unique=True,
+            postgresql_where=text("tenant_id IS NOT NULL AND is_active"),
+            sqlite_where=text("tenant_id IS NOT NULL AND is_active"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
@@ -1024,12 +1046,18 @@ class UsageRecord(Base):
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
             "'publish', 'voice_clone', 'video_gen', 'reverse_prompt', "
-            "'reverse_prompt_video', 'scene_prompt', 'chat')",
+            "'reverse_prompt_video', 'scene_prompt', 'chat', 'script_generate')",
             name="ck_usage_records_capability",
         ),
         CheckConstraint(
-            "unit IN ('second', 'call', 'token', 'image', 'char')",
+            "unit IN ('second', 'call', 'token', 'image', 'char', 'character')",
             name="ck_usage_records_unit",
+        ),
+        CheckConstraint(
+            "quantity >= 0 AND credits >= 0 AND "
+            "CAST(quantity AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity') AND "
+            "CAST(credits AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')",
+            name="ck_usage_records_amounts_valid",
         ),
         CheckConstraint(
             "status IN ('reserved', 'settled', 'released')",

@@ -615,6 +615,15 @@ def validate_pricing_snapshot(snapshot: Mapping[str, object]) -> PricingSnapshot
     )
     if not lines or (shape_value == "simple" and len(lines) != 1):
         raise PricingInvariantError("pricing_shape does not match canonical lines")
+    if operation not in PRICING_POLICIES:
+        raise PricingInvariantError("snapshot operation is not a pricing policy")
+    allowed_line_operations = (
+        {"video_create", "cosyvoice_brand_tts"}
+        if shape_value == "composite" and operation == "video_create"
+        else {operation}
+    )
+    if any(line.operation not in allowed_line_operations for line in lines):
+        raise PricingInvariantError("snapshot lines do not match envelope operation")
     disclosures = tuple(
         _parse_disclosure(value)
         for value in _sequence(snapshot.get("disclosures", ()), field="disclosures")
@@ -659,8 +668,8 @@ def validate_credit_rate_candidate(
         scale=_RATE_SCALE,
         allow_zero=True,
     )
-    if tenant_id is not None and capability == "voice_clone" and unit == "call" and is_active:
-        raise PricingInvariantError("tenant voice_clone/call rates cannot be activated")
+    if tenant_id is not None and capability == "voice_clone" and unit == "call":
+        raise PricingInvariantError("tenant voice_clone/call rates cannot be created or activated")
     positive_pairs = {
         (policy.capability, policy.unit)
         for policy in PRICING_POLICIES.values()
