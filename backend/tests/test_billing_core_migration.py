@@ -1,0 +1,306 @@
+from __future__ import annotations
+
+import importlib.util
+from datetime import UTC, datetime
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+import sqlalchemy as sa
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from sqlalchemy import create_engine, event
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.db.models import Base, BillingOperation, Tenant, UsageRecord, User
+
+
+def _load_migration():
+    migration_path = (
+        Path(__file__).resolve().parents[1]
+        / "alembic"
+        / "versions"
+        / "20260829_0036_billing_core.py"
+    )
+    spec = importlib.util.spec_from_file_location("billing_core_migration", migration_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    return migration
+
+
+@pytest.fixture
+def db_session():
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    Base.metadata.create_all(engine)
+    SessionTesting = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    session = SessionTesting()
+    session.add_all(
+        [
+            Tenant(id="tenant-a", slug="tenant-a", name="Tenant A"),
+            User(
+                id="user-a",
+                tenant_id="tenant-a",
+                email="user-a@example.com",
+                password_hash="hash",
+                role="creator",
+            ),
+        ]
+    )
+    session.commit()
+    try:
+        yield session
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)
+
+
+def make_billing_operation(**overrides: object) -> BillingOperation:
+    values: dict[str, object] = {
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "operation": "scene_prompt",
+        "idempotency_key": "11111111-1111-4111-8111-111111111111",
+        "request_hash": "a" * 64,
+        "quote_hash": "b" * 64,
+        "pricing_snapshot": {"pricing_lines": [{"subtotal_credits": "30.0000"}]},
+        "requested_credits": Decimal("30.0000"),
+        "settled_credits": Decimal("0"),
+        "released_credits": Decimal("0"),
+        "status": "in_progress",
+        "completion_kind": None,
+        "completed_at": None,
+    }
+    values.update(overrides)
+    return BillingOperation(**values)
+
+
+def make_usage_record(**overrides: object) -> UsageRecord:
+    values: dict[str, object] = {
+        "tenant_id": "tenant-a",
+        "capability": "scene_prompt",
+        "provider": "test-provider",
+        "unit": "call",
+        "quantity": Decimal("1"),
+        "credits": Decimal("30.0000"),
+        "cost_cents": 0,
+        "provider_usage": None,
+    }
+    values.update(overrides)
+    return UsageRecord(**values)
+
+
+def test_billing_operation_rejects_completed_without_conservation(db_session):
+    operation = BillingOperation(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        operation="scene_prompt",
+        idempotency_key="11111111-1111-4111-8111-111111111111",
+        request_hash="a" * 64,
+        quote_hash="b" * 64,
+        pricing_snapshot={"pricing_lines": [{"subtotal_credits": "30.0000"}]},
+        requested_credits=30,
+        settled_credits=29,
+        released_credits=0,
+        status="completed",
+        completion_kind="succeeded",
+        completed_at=datetime.now(UTC),
+    )
+    db_session.add(operation)
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+def test_billing_operation_rejects_completed_without_completion_kind(db_session):
+    db_session.add(
+        make_billing_operation(
+            status="completed",
+            completion_kind=None,
+            completed_at=datetime.now(UTC),
+            settled_credits=Decimal("30"),
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+def test_usage_record_keeps_provider_usage_separate_from_billing_allocation(db_session):
+    usage = make_usage_record(
+        unit="call",
+        quantity=Decimal("1"),
+        credits=Decimal("30.0000"),
+        provider_usage={"input_tokens": 41, "output_tokens": 9},
+    )
+    db_session.add(usage)
+    db_session.commit()
+    assert usage.unit == "call"
+    assert usage.quantity == Decimal("1")
+    assert usage.credits == Decimal("30.0000")
+    assert usage.provider_usage == {"input_tokens": 41, "output_tokens": 9}
+
+
+def test_billing_operation_rejects_duplicate_user_scoped_idempotency_key(db_session):
+    db_session.add(make_billing_operation())
+    db_session.commit()
+
+    db_session.add(make_billing_operation(idempotency_key="11111111-1111-4111-8111-111111111111"))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("requested_credits", Decimal("-0.0001")),
+        ("settled_credits", Decimal("-0.0001")),
+        ("released_credits", Decimal("-0.0001")),
+    ],
+)
+def test_billing_operation_rejects_negative_amounts(db_session, field, value):
+    db_session.add(make_billing_operation(**{field: value}))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"completion_kind": "succeeded"},
+        {"completed_at": datetime.now(UTC)},
+        {"settled_credits": Decimal("1")},
+        {"released_credits": Decimal("30")},
+    ],
+)
+def test_billing_operation_rejects_invalid_in_progress_completion_fields(db_session, overrides):
+    db_session.add(make_billing_operation(**overrides))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+def test_billing_operation_allows_only_cosyvoice_zero_price_exception(db_session):
+    db_session.add(
+        make_billing_operation(
+            operation="cosyvoice_brand_voice_create",
+            requested_credits=Decimal("0"),
+        )
+    )
+    db_session.commit()
+
+    db_session.add(
+        make_billing_operation(
+            idempotency_key="22222222-2222-4222-8222-222222222222",
+            operation="scene_prompt",
+            requested_credits=Decimal("0"),
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+def test_billing_operation_rejects_nonzero_cosyvoice_free_operation(db_session):
+    db_session.add(
+        make_billing_operation(operation="cosyvoice_brand_voice_create")
+    )
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+@pytest.mark.parametrize("index", ["billing_item_index", "billing_pricing_line_index"])
+def test_usage_record_rejects_negative_billing_indexes(db_session, index):
+    operation = make_billing_operation()
+    db_session.add(operation)
+    db_session.commit()
+
+    allocation = {
+        "billing_operation_id": operation.id,
+        "billing_item_index": 0,
+        "billing_pricing_line_index": 0,
+    }
+    allocation[index] = -1
+    db_session.add(make_usage_record(**allocation))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+def test_usage_record_enforces_one_billing_item_per_operation(db_session):
+    operation = make_billing_operation()
+    db_session.add(operation)
+    db_session.commit()
+    db_session.add_all(
+        [
+            make_usage_record(billing_operation_id=operation.id, billing_item_index=0),
+            make_usage_record(billing_operation_id=operation.id, billing_item_index=0),
+        ]
+    )
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+def test_billing_operation_delete_is_restricted_when_usage_exists(db_session):
+    operation = make_billing_operation()
+    db_session.add(operation)
+    db_session.commit()
+    db_session.add(make_usage_record(billing_operation_id=operation.id, billing_item_index=0))
+    db_session.commit()
+
+    with pytest.raises(IntegrityError):
+        db_session.execute(
+            sa.delete(BillingOperation).where(BillingOperation.id == operation.id)
+        )
+        db_session.commit()
+
+
+def test_billing_core_migration_creates_schema_and_refuses_downgrade_with_rows():
+    migration = _load_migration()
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(sa.text("PRAGMA foreign_keys=ON"))
+        connection.execute(sa.text("CREATE TABLE tenants (id VARCHAR(36) PRIMARY KEY)"))
+        connection.execute(sa.text("CREATE TABLE users (id VARCHAR(36) PRIMARY KEY)"))
+        connection.execute(sa.text("INSERT INTO tenants (id) VALUES ('tenant-a')"))
+        connection.execute(sa.text("INSERT INTO users (id) VALUES ('user-a')"))
+        connection.execute(
+            sa.text(
+                "CREATE TABLE usage_records ("
+                "id VARCHAR(36) PRIMARY KEY, tenant_id VARCHAR(36) NOT NULL)"
+            )
+        )
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+
+        inspector = sa.inspect(connection)
+        assert "billing_operations" in inspector.get_table_names()
+        assert {
+            "billing_operation_id",
+            "billing_item_index",
+            "billing_pricing_line_index",
+            "provider_usage",
+        } <= {column["name"] for column in inspector.get_columns("usage_records")}
+        foreign_keys = inspector.get_foreign_keys("usage_records")
+        assert any(
+            foreign_key["constrained_columns"] == ["billing_operation_id"]
+            and foreign_key["options"].get("ondelete") == "RESTRICT"
+            for foreign_key in foreign_keys
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO billing_operations ("
+                "id, tenant_id, user_id, operation, idempotency_key, request_hash, quote_hash, "
+                "pricing_snapshot, requested_credits, settled_credits, released_credits, status) "
+                "VALUES ('op-1', 'tenant-a', 'user-a', 'scene_prompt', 'key-1', "
+                "'a', 'b', '{}', 1, 0, 0, 'in_progress')"
+            )
+        )
+        with pytest.raises(RuntimeError, match="Cannot downgrade 20260829_0036"):
+            migration.downgrade()

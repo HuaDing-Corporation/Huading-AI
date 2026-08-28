@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Literal
 from uuid import uuid4
 
 from sqlalchemy import (
@@ -367,6 +368,97 @@ class CreditRate(Base):
     credits_per_unit: Mapped[Decimal] = mapped_column(Numeric(12, 4))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+RESULT_PAYLOAD_MAX_BYTES = 64 * 1024
+ERROR_PAYLOAD_MAX_BYTES = 16 * 1024
+
+
+BILLING_STATE_CHECK = """
+(
+  status = 'in_progress'
+  AND completion_kind IS NULL
+  AND completed_at IS NULL
+  AND settled_credits = 0
+  AND released_credits = 0
+)
+OR
+(
+  status = 'completed'
+  AND completion_kind IN ('succeeded', 'failed', 'rejected')
+  AND completed_at IS NOT NULL
+  AND settled_credits + released_credits = requested_credits
+)
+"""
+
+BILLING_ZERO_CHECK = """
+(operation = 'cosyvoice_brand_voice_create' AND requested_credits = 0)
+OR
+(operation <> 'cosyvoice_brand_voice_create' AND requested_credits > 0)
+"""
+
+BILLING_COMPLETION_CHECK = """
+(completion_kind NOT IN ('failed', 'rejected') OR
+ (settled_credits = 0 AND released_credits = requested_credits))
+AND
+(completion_kind <> 'succeeded' OR requested_credits = 0 OR settled_credits > 0)
+"""
+
+
+class BillingOperation(Base):
+    __tablename__ = "billing_operations"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "user_id",
+            "operation",
+            "idempotency_key",
+            name="uq_billing_operations_tenant_user_operation_idempotency_key",
+        ),
+        CheckConstraint(
+            f"({BILLING_STATE_CHECK}) IS TRUE", name="ck_billing_operations_state"
+        ),
+        CheckConstraint(BILLING_ZERO_CHECK, name="ck_billing_operations_zero_price"),
+        CheckConstraint(BILLING_COMPLETION_CHECK, name="ck_billing_operations_completion"),
+        CheckConstraint(
+            "requested_credits >= 0 AND settled_credits >= 0 AND released_credits >= 0",
+            name="ck_billing_operations_amounts_nonnegative",
+        ),
+        Index("ix_billing_operations_tenant_created_at", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenants.id", ondelete="RESTRICT")
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="RESTRICT")
+    )
+    operation: Mapped[str] = mapped_column(String(64))
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    quote_hash: Mapped[str] = mapped_column(String(64))
+    pricing_snapshot: Mapped[dict[str, object]] = mapped_column(_json_type())
+    requested_credits: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    settled_credits: Mapped[Decimal] = mapped_column(Numeric(18, 6), default=Decimal("0"))
+    released_credits: Mapped[Decimal] = mapped_column(Numeric(18, 6), default=Decimal("0"))
+    status: Mapped[Literal["in_progress", "completed"]] = mapped_column(
+        String(32), default="in_progress"
+    )
+    completion_kind: Mapped[Literal["succeeded", "failed", "rejected"] | None] = (
+        mapped_column(String(32), default=None)
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    result_payload: Mapped[dict[str, object] | None] = mapped_column(
+        _json_type(), default=None
+    )
+    error_payload: Mapped[dict[str, object] | None] = mapped_column(
+        _json_type(), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class Voice(Base):
@@ -936,6 +1028,19 @@ class UsageRecord(Base):
             "status IN ('reserved', 'settled', 'released')",
             name="ck_usage_records_status",
         ),
+        CheckConstraint(
+            "billing_item_index IS NULL OR billing_item_index >= 0",
+            name="ck_usage_records_billing_item_index_nonnegative",
+        ),
+        CheckConstraint(
+            "billing_pricing_line_index IS NULL OR billing_pricing_line_index >= 0",
+            name="ck_usage_records_billing_pricing_line_index_nonnegative",
+        ),
+        UniqueConstraint(
+            "billing_operation_id",
+            "billing_item_index",
+            name="uq_usage_records_billing_operation_item_index",
+        ),
         Index("ix_usage_records_subscription_status", "subscription_id", "status"),
         Index("ix_usage_records_reverse_prompt_status", "reverse_prompt_job_id", "status"),
         Index("ix_usage_records_tenant_created_at", "tenant_id", "created_at"),
@@ -962,6 +1067,13 @@ class UsageRecord(Base):
     chat_message_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True
     )
+    billing_operation_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("billing_operations.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    billing_item_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    billing_pricing_line_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     capability: Mapped[str] = mapped_column(String(32))
     provider: Mapped[str] = mapped_column(String(40))
     model: Mapped[str | None] = mapped_column(String(80), default=None)
@@ -971,6 +1083,9 @@ class UsageRecord(Base):
     cost_cents: Mapped[int] = mapped_column(Integer)
     provider_cost_usd: Mapped[Decimal | None] = mapped_column(
         Numeric(18, 8), default=None
+    )
+    provider_usage: Mapped[dict[str, object] | None] = mapped_column(
+        _json_type(), default=None
     )
     currency: Mapped[str] = mapped_column(String(3), default="CNY")
     status: Mapped[str] = mapped_column(String(32), default="reserved")
