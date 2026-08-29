@@ -338,6 +338,12 @@ export interface BillingLookupResultSchema {
 }
 
 export type BillingLookupResultRegistry = Readonly<Record<string, BillingLookupResultSchema>>;
+export type BillingOperationLookupLike =
+  | BillingOperationLookup
+  | ExtendedBillingOperationLookup;
+export type BillingOperationLookupParser<TLookup extends BillingOperationLookupLike> = (
+  value: unknown
+) => TLookup | null;
 
 function exactPayload(
   value: unknown,
@@ -381,7 +387,9 @@ function parseEcomImageBatch(value: unknown): BillingLookupPayload | null {
         !nonEmptyString(item.source_asset_id) ||
         item.source_asset_id.length > 36 ||
         (item.status !== "done" && item.status !== "failed") ||
-        !(item.asset_id === null || (nonEmptyString(item.asset_id) && item.asset_id.length <= 36))
+        (item.status === "done" &&
+          !(nonEmptyString(item.asset_id) && item.asset_id.length <= 36)) ||
+        (item.status === "failed" && item.asset_id !== null)
       ) {
         return false;
       }
@@ -450,6 +458,20 @@ function parseBrandVoiceOrder(value: unknown): BillingLookupPayload | null {
   return exactPayload(value, BRAND_VOICE_ORDER_KEYS, (payload) => {
     const billing = parseBillingSummary(payload.billing);
     const status = payload.status;
+    const validRefund =
+      status === "rejected"
+        ? (payload.refund_disposition === "source_subscription_released" &&
+            payload.refund_grant_status === null &&
+            payload.refund_applied_at === null) ||
+          (payload.refund_disposition === "current_subscription_credited" &&
+            payload.refund_grant_status === "applied" &&
+            isoDate(payload.refund_applied_at)) ||
+          (payload.refund_disposition === "pending_next_subscription" &&
+            payload.refund_grant_status === "pending" &&
+            payload.refund_applied_at === null)
+        : payload.refund_disposition === "not_applicable" &&
+          payload.refund_grant_status === null &&
+          payload.refund_applied_at === null;
     const common =
       nonEmptyString(payload.id) &&
       nonEmptyString(payload.tenant_id) &&
@@ -477,7 +499,8 @@ function parseBrandVoiceOrder(value: unknown): BillingLookupPayload | null {
       (payload.refund_grant_status === null ||
         payload.refund_grant_status === "pending" ||
         payload.refund_grant_status === "applied") &&
-      nullableIsoDate(payload.refund_applied_at);
+      nullableIsoDate(payload.refund_applied_at) &&
+      validRefund;
     if (!common) return false;
     if (status === "awaiting_fulfillment") {
       return (
@@ -513,6 +536,10 @@ function payloadId(field: string) {
     payload !== null && nonEmptyString(resultId) && payload[field] === resultId;
 }
 
+function billingSummariesEqual(left: BillingSummary, right: BillingSummary): boolean {
+  return SUMMARY_KEYS.every((key) => left[key] === right[key]);
+}
+
 export const defaultBillingLookupResultRegistry: BillingLookupResultRegistry = {
   script_generate_result: {
     operations: ["script_generate"],
@@ -536,7 +563,11 @@ export const defaultBillingLookupResultRegistry: BillingLookupResultRegistry = {
     operations: ["video_create"],
     completionKinds: ["succeeded"],
     parse: parseVideoTask,
-    validateResultId: payloadId("task_id")
+    validateResultId: payloadId("task_id"),
+    validateContext: (payload, lookup) =>
+      lookup.completionKind === null
+        ? payload.status === "queued"
+        : payload.status === "done"
   },
   brand_voice_order: {
     operations: ["doubao_brand_voice_order_create", "doubao_brand_voice_order_renew"],
@@ -547,21 +578,27 @@ export const defaultBillingLookupResultRegistry: BillingLookupResultRegistry = {
       const nestedBilling = parseBillingSummary(payload.billing);
       if (
         !nestedBilling ||
-        nestedBilling.operation_id !== lookup.billing.operation_id ||
-        nestedBilling.idempotency_key !== lookup.billing.idempotency_key
+        !billingSummariesEqual(nestedBilling, lookup.billing)
       ) {
         return false;
       }
+      if (lookup.completionKind === null) return payload.status === "awaiting_fulfillment";
       return lookup.completionKind === "rejected"
         ? payload.status === "rejected"
-        : payload.status === "fulfilled" || payload.status === "awaiting_fulfillment";
+        : payload.status === "fulfilled";
     }
   },
   brand_voice: {
     operations: ["cosyvoice_brand_voice_create"],
     completionKinds: ["succeeded"],
     parse: parseBrandVoice,
-    validateResultId: payloadId("id")
+    validateResultId: payloadId("id"),
+    validateContext: (payload, lookup) =>
+      lookup.completionKind === "succeeded" &&
+      payload.provider === "cosyvoice-voice-clone" &&
+      payload.status === "ready" &&
+      payload.order_status === null &&
+      payload.delivery_status === "active"
   }
 };
 
@@ -588,12 +625,28 @@ function payloadsEqual(left: BillingLookupPayload, right: BillingLookupPayload):
 export function parseBillingOperationLookup(value: unknown): BillingOperationLookup | null;
 export function parseBillingOperationLookup(
   value: unknown,
-  registry: BillingLookupResultRegistry
-): ExtendedBillingOperationLookup | null;
+  extensions: BillingLookupResultRegistry
+): BillingOperationLookupLike | null;
 export function parseBillingOperationLookup(
   value: unknown,
-  registry: BillingLookupResultRegistry = defaultBillingLookupResultRegistry
+  extensions?: BillingLookupResultRegistry
 ): BillingOperationLookup | ExtendedBillingOperationLookup | null {
+  const canonicalOperations = new Set(
+    Object.values(defaultBillingLookupResultRegistry).flatMap((entry) => entry.operations)
+  );
+  if (
+    extensions &&
+    Object.entries(extensions).some(
+      ([resultType, schema]) =>
+        resultType in defaultBillingLookupResultRegistry ||
+        schema.operations.some((operation) => canonicalOperations.has(operation))
+    )
+  ) {
+    return null;
+  }
+  const registry = extensions
+    ? { ...defaultBillingLookupResultRegistry, ...extensions }
+    : defaultBillingLookupResultRegistry;
   if (
     !record(value) ||
     !exactKeys(value, LOOKUP_KEYS) ||
@@ -625,7 +678,14 @@ export function parseBillingOperationLookup(
     ) {
       return null;
     }
-    if (value.result_type === null && (value.result_id !== null || value.resource !== null)) return null;
+    if (value.result_type === null) {
+      const validUnassignedIdentity =
+        (value.result_id === null && value.resource === null) ||
+        (value.operation === "cosyvoice_brand_voice_create" &&
+          nonEmptyString(value.result_id) &&
+          value.resource === null);
+      if (!validUnassignedIdentity) return null;
+    }
     if (schema) {
       const resource = value.resource === null ? null : schema.parse(value.resource);
       if (value.resource !== null && !resource) return null;
@@ -702,11 +762,22 @@ export function parseBillingOperationLookup(
 export async function getBillingOperation(
   operation: string,
   idempotencyKey: string
-): Promise<BillingOperationLookup> {
+): Promise<BillingOperationLookup>;
+export async function getBillingOperation<TLookup extends BillingOperationLookupLike>(
+  operation: string,
+  idempotencyKey: string,
+  parseLookup: BillingOperationLookupParser<TLookup>
+): Promise<TLookup>;
+export async function getBillingOperation(
+  operation: string,
+  idempotencyKey: string,
+  parseLookup: BillingOperationLookupParser<BillingOperationLookupLike> = (value) =>
+    parseBillingOperationLookup(value)
+): Promise<BillingOperationLookupLike> {
   const value = await apiFetch<unknown>(
     `/api/v1/billing/operations/by-idempotency/${encodeURIComponent(operation)}/${encodeURIComponent(idempotencyKey)}`
   );
-  const parsed = parseBillingOperationLookup(value);
+  const parsed = parseLookup(value);
   if (
     !parsed ||
     parsed.operation !== operation ||

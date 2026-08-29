@@ -7,7 +7,9 @@ import {
   getBillingOperation,
   parseBillingOperationLookup,
   parseBillingQuote,
-  parseBillingSummary
+  parseBillingSummary,
+  type BillingOperationLookupLike,
+  type BillingOperationLookupParser
 } from "@/lib/api/billing";
 import { ApiError, isApiError } from "@/lib/api/client";
 import type {
@@ -27,27 +29,42 @@ export type BillingActionPhase =
   | "failed"
   | "expired";
 
-export interface UseBillingActionOptions<TInput, TQuote, TResult> {
+interface UseBillingActionOptionsBase<TInput, TQuote, TResult, TLookup> {
   operation: string;
   input: TInput | null;
   estimate: (input: TInput) => Promise<TQuote>;
   submit: (input: TInput, confirmation: BillingConfirmation) => Promise<TResult>;
-  lookup?: (operation: string, idempotencyKey: string) => Promise<BillingOperationLookup>;
+  lookup?: (operation: string, idempotencyKey: string) => Promise<unknown>;
   fingerprint?: (input: TInput) => string;
   parseQuote?: (quote: TQuote) => BillingQuote | null;
   billingFromResult?: (result: TResult) => BillingSummary | null;
-  resultFromLookup?: (lookup: BillingOperationLookup) => TResult | null;
+  resultFromLookup: (lookup: TLookup) => TResult | null;
   createIdempotencyKey?: () => string;
   now?: () => number;
 }
 
-export interface UseBillingActionResult<TInput, TQuote, TResult> {
+export type UseBillingActionOptions<
+  TInput,
+  TQuote,
+  TResult,
+  TLookup extends BillingOperationLookupLike = BillingOperationLookup
+> = UseBillingActionOptionsBase<TInput, TQuote, TResult, TLookup> &
+  ([TLookup] extends [BillingOperationLookup]
+    ? { parseLookup?: BillingOperationLookupParser<TLookup> }
+    : { parseLookup: BillingOperationLookupParser<TLookup> });
+
+export interface UseBillingActionResult<
+  TInput,
+  TQuote,
+  TResult,
+  TLookup extends BillingOperationLookupLike = BillingOperationLookup
+> {
   phase: BillingActionPhase;
   input: TInput | null;
   quote: TQuote | null;
   billing: BillingSummary | null;
   result: TResult | null;
-  lookup: BillingOperationLookup | null;
+  lookup: TLookup | null;
   error: unknown;
   errorMessage: string | null;
   idempotencyKey: string | null;
@@ -110,24 +127,30 @@ function isUnknownPostResult(error: unknown): boolean {
   );
 }
 
-interface BoundAttempt<TInput, TResult> {
+interface BoundAttempt<TInput, TResult, TLookup extends BillingOperationLookupLike> {
   operation: string;
   input: TInput;
   fingerprint: string;
   fingerprintInput: (input: TInput) => string;
   submit: (input: TInput, confirmation: BillingConfirmation) => Promise<TResult>;
-  lookup: (operation: string, idempotencyKey: string) => Promise<BillingOperationLookup>;
+  lookup: (operation: string, idempotencyKey: string) => Promise<unknown>;
+  parseLookup: BillingOperationLookupParser<TLookup>;
   billingFromResult: (result: TResult) => BillingSummary | null;
-  resultFromLookup?: (lookup: BillingOperationLookup) => TResult | null;
+  resultFromLookup: (lookup: TLookup) => TResult | null;
   now: () => number;
   confirmation: BillingConfirmation;
   replayed: boolean;
   run: number;
 }
 
-export function useBillingAction<TInput, TQuote, TResult>(
-  options: UseBillingActionOptions<TInput, TQuote, TResult>
-): UseBillingActionResult<TInput, TQuote, TResult> {
+export function useBillingAction<
+  TInput,
+  TQuote,
+  TResult,
+  TLookup extends BillingOperationLookupLike = BillingOperationLookup
+>(
+  options: UseBillingActionOptions<TInput, TQuote, TResult, TLookup>
+): UseBillingActionResult<TInput, TQuote, TResult, TLookup> {
   const optionsRef = useRef(options);
   // Deliberately recompute on every render: React state should be immutable, but a
   // billing boundary must also detect an in-place mutation of the same object.
@@ -146,9 +169,11 @@ export function useBillingAction<TInput, TQuote, TResult>(
   const quoteRef = useRef<TQuote | null>(null);
   const parsedQuoteRef = useRef<BillingQuote | null>(null);
   const keyRef = useRef<string | null>(null);
-  const attemptRef = useRef<BoundAttempt<TInput, TResult> | null>(null);
+  const attemptRef = useRef<BoundAttempt<TInput, TResult, TLookup> | null>(null);
   const pollTimers = useRef(new Set<number>());
-  const submitBoundRef = useRef<(attempt: BoundAttempt<TInput, TResult>) => Promise<void>>(
+  const submitBoundRef = useRef<
+    (attempt: BoundAttempt<TInput, TResult, TLookup>) => Promise<void>
+  >(
     async () => undefined
   );
 
@@ -156,7 +181,7 @@ export function useBillingAction<TInput, TQuote, TResult>(
   const [quoteValue, setQuoteValue] = useState<TQuote | null>(null);
   const [billing, setBilling] = useState<BillingSummary | null>(null);
   const [result, setResult] = useState<TResult | null>(null);
-  const [lookupValue, setLookupValue] = useState<BillingOperationLookup | null>(null);
+  const [lookupValue, setLookupValue] = useState<TLookup | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [idempotencyKey, setIdempotencyKey] = useState<string | null>(null);
   const [expiresInSeconds, setExpiresInSeconds] = useState<number | null>(null);
@@ -276,10 +301,10 @@ export function useBillingAction<TInput, TQuote, TResult>(
   }, []);
 
   const applyLookup = useCallback((
-    raw: BillingOperationLookup,
-    attempt: BoundAttempt<TInput, TResult>
+    raw: unknown,
+    attempt: BoundAttempt<TInput, TResult, TLookup>
   ): boolean => {
-    const parsed = parseBillingOperationLookup(raw);
+    const parsed = attempt.parseLookup(raw);
     if (!parsed) return false;
     setLookupValue(parsed);
     setBilling(parsed.billing);
@@ -288,9 +313,14 @@ export function useBillingAction<TInput, TQuote, TResult>(
       return false;
     }
     if (parsed.completion_kind === "succeeded") {
-      const recovered = attempt.resultFromLookup
-        ? attempt.resultFromLookup(parsed)
-        : (parsed.result as TResult);
+      const recovered = attempt.resultFromLookup(parsed);
+      if (recovered === null) {
+        setResult(null);
+        setError(new Error("计费结果无法确认"));
+        setPhase("failed");
+        attemptClosed.current = true;
+        return true;
+      }
       setResult(recovered);
       setError(null);
       setPhase("succeeded");
@@ -315,7 +345,9 @@ export function useBillingAction<TInput, TQuote, TResult>(
     []
   );
 
-  const recoverUnknown = useCallback(async (attempt: BoundAttempt<TInput, TResult>) => {
+  const recoverUnknown = useCallback(async (
+    attempt: BoundAttempt<TInput, TResult, TLookup>
+  ) => {
     if (
       !mounted.current ||
       attempt.run !== runId.current ||
@@ -334,7 +366,7 @@ export function useBillingAction<TInput, TQuote, TResult>(
             attempt.confirmation.idempotency_key
           );
           if (!mounted.current || attempt.run !== runId.current) return;
-          const parsed = parseBillingOperationLookup(raw);
+          const parsed = attempt.parseLookup(raw);
           if (
             !parsed ||
             parsed.operation !== attempt.operation ||
@@ -391,7 +423,9 @@ export function useBillingAction<TInput, TQuote, TResult>(
     }
   }, [applyLookup, clearAttempt, waitForNextLookup]);
 
-  const submitBound = useCallback(async (attempt: BoundAttempt<TInput, TResult>) => {
+  const submitBound = useCallback(async (
+    attempt: BoundAttempt<TInput, TResult, TLookup>
+  ) => {
     if (!mounted.current || attempt.run !== runId.current) return;
     setError(null);
     setPhase("submitting");
@@ -483,13 +517,20 @@ export function useBillingAction<TInput, TQuote, TResult>(
     const confirmation = { idempotency_key: key, quote_token: parsedQuote.quote_token };
     const id = ++runId.current;
     submitOwner.current = id;
-    const attempt: BoundAttempt<TInput, TResult> = {
+    const parseLookup: BillingOperationLookupParser<TLookup> =
+      optionsRef.current.parseLookup ??
+      ((value) => parseBillingOperationLookup(value) as TLookup | null);
+    const attempt: BoundAttempt<TInput, TResult, TLookup> = {
       operation: optionsRef.current.operation,
       input,
       fingerprint: attemptFingerprint,
       fingerprintInput: optionsRef.current.fingerprint ?? normalizedBillingInputFingerprint,
       submit: optionsRef.current.submit,
-      lookup: optionsRef.current.lookup ?? getBillingOperation,
+      lookup:
+        optionsRef.current.lookup ??
+        ((operation, idempotencyKey) =>
+          getBillingOperation(operation, idempotencyKey, parseLookup)),
+      parseLookup,
       billingFromResult: optionsRef.current.billingFromResult ?? defaultBillingFromResult,
       resultFromLookup: optionsRef.current.resultFromLookup,
       now: optionsRef.current.now ?? Date.now,

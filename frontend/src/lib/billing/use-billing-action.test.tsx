@@ -1,8 +1,17 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 
 import { ApiError } from "@/lib/api/client";
-import type { BillingOperationLookup, BillingQuote, BillingSummary } from "@/lib/api/types";
+import {
+  parseBillingOperationLookup,
+  type BillingLookupResultRegistry
+} from "@/lib/api/billing";
+import type {
+  BillingOperationLookup,
+  BillingQuote,
+  BillingSummary,
+  ExtendedBillingOperationLookup
+} from "@/lib/api/types";
 
 import { useBillingAction, type UseBillingActionOptions } from "./use-billing-action";
 
@@ -60,7 +69,7 @@ function completedLookup(
     resource: {
       id: "voice-1",
       name: "品牌音色",
-      provider: "cosyvoice",
+      provider: "cosyvoice-voice-clone",
       status: "ready",
       order_status: null,
       delivery_status: "active",
@@ -69,7 +78,7 @@ function completedLookup(
     result: {
       id: "voice-1",
       name: "品牌音色",
-      provider: "cosyvoice",
+      provider: "cosyvoice-voice-clone",
       status: "ready",
       order_status: null,
       delivery_status: "active",
@@ -114,6 +123,58 @@ const networkError = () => new ApiError("断线", "NETWORK_ERROR", 0);
 
 type TestInput = { text: string };
 type TestResult = { id: string; billing: BillingSummary };
+type CustomLookup = ExtendedBillingOperationLookup & {
+  operation: "custom_operation";
+  state: "completed";
+  completion_kind: "succeeded";
+  result_type: "custom_result";
+  result_id: string;
+  resource: { id: string };
+  result: { id: string };
+};
+
+const customRegistry: BillingLookupResultRegistry = {
+  custom_result: {
+    operations: ["custom_operation"],
+    completionKinds: ["succeeded"],
+    parse: (value) =>
+      typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value) &&
+      Object.keys(value).length === 1 &&
+      typeof (value as { id?: unknown }).id === "string"
+        ? (value as Record<string, unknown>)
+        : null,
+    validateResultId: (resultId, payload) => payload?.id === resultId
+  }
+};
+
+function customLookup(): CustomLookup {
+  return {
+    operation: "custom_operation",
+    idempotency_key: keyA,
+    state: "completed",
+    completion_kind: "succeeded",
+    billing: billing(),
+    result_type: "custom_result",
+    result_id: "custom-1",
+    resource: { id: "custom-1" },
+    result: { id: "custom-1" },
+    failure: null
+  };
+}
+
+function parseCustomLookup(value: unknown): CustomLookup | null {
+  const parsed = parseBillingOperationLookup(value, customRegistry);
+  return parsed?.operation === "custom_operation" &&
+    parsed.state === "completed" &&
+    parsed.completion_kind === "succeeded" &&
+    parsed.result_type === "custom_result" &&
+    typeof parsed.result.id === "string" &&
+    parsed.resource?.id === parsed.result.id
+    ? (parsed as CustomLookup)
+    : null;
+}
 
 function options(
   overrides: Partial<UseBillingActionOptions<TestInput, BillingQuote, TestResult>> = {}
@@ -124,6 +185,15 @@ function options(
     estimate: vi.fn().mockResolvedValue(quote()),
     submit: vi.fn().mockResolvedValue({ id: "voice-1", billing: billing() }),
     lookup: vi.fn().mockResolvedValue(completedLookup()),
+    resultFromLookup: (lookup) =>
+      lookup.state === "completed" &&
+      lookup.completion_kind === "succeeded" &&
+      lookup.operation === "cosyvoice_brand_voice_create" &&
+      lookup.result_type === "brand_voice" &&
+      lookup.result.id === lookup.result_id &&
+      lookup.resource?.id === lookup.result_id
+        ? { id: lookup.result.id, billing: lookup.billing }
+        : null,
     createIdempotencyKey: vi.fn().mockReturnValue(keyA),
     ...overrides
   };
@@ -131,6 +201,7 @@ function options(
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe("useBillingAction", () => {
@@ -309,6 +380,166 @@ describe("useBillingAction", () => {
     expect(lookup).toHaveBeenCalledWith("cosyvoice_brand_voice_create", keyA);
     expect(view.result.current.billing?.status).toBe("settled");
     expect(view.result.current.phase).toBe("succeeded");
+  });
+
+  it("fails closed when the operation-specific lookup result parser returns null", async () => {
+    const view = renderHook(() =>
+      useBillingAction(
+        options({
+          submit: vi.fn().mockRejectedValue(networkError()),
+          lookup: vi.fn().mockResolvedValue(completedLookup()),
+          resultFromLookup: vi.fn().mockReturnValue(null)
+        })
+      )
+    );
+    await act(() => view.result.current.estimate());
+    await act(() => view.result.current.confirm());
+
+    expect(view.result.current.phase).toBe("failed");
+    expect(view.result.current.result).toBeNull();
+    expect(view.result.current.errorMessage).toBe("计费结果无法确认");
+  });
+
+  it("recovers an extended lookup through an explicit typed parser", async () => {
+    const view = renderHook(() =>
+      useBillingAction({
+        operation: "custom_operation",
+        input: { text: "扩展请求" },
+        estimate: vi.fn().mockResolvedValue({ ...quote(), operation: "custom_operation" }),
+        submit: vi.fn().mockRejectedValue(networkError()),
+        lookup: vi.fn().mockResolvedValue(customLookup()),
+        parseLookup: parseCustomLookup,
+        resultFromLookup: (lookup: CustomLookup) => ({
+          id: lookup.result.id,
+          billing: lookup.billing
+        }),
+        createIdempotencyKey: vi.fn().mockReturnValue(keyA)
+      })
+    );
+    await act(() => view.result.current.estimate());
+    await act(() => view.result.current.confirm());
+
+    expect(view.result.current.phase).toBe("succeeded");
+    expect(view.result.current.result?.id).toBe("custom-1");
+    expect(view.result.current.lookup?.result_type).toBe("custom_result");
+    expectTypeOf(view.result.current.lookup).toEqualTypeOf<CustomLookup | null>();
+  });
+
+  it("passes an extended parser through the hook default lookup transport", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({ data: customLookup(), error: null, request_id: "req-1" }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      )
+    );
+    const view = renderHook(() =>
+      useBillingAction({
+        operation: "custom_operation",
+        input: { text: "扩展请求" },
+        estimate: vi.fn().mockResolvedValue({ ...quote(), operation: "custom_operation" }),
+        submit: vi.fn().mockRejectedValue(networkError()),
+        parseLookup: parseCustomLookup,
+        resultFromLookup: (lookup: CustomLookup) => ({
+          id: lookup.result.id,
+          billing: lookup.billing
+        }),
+        createIdempotencyKey: vi.fn().mockReturnValue(keyA)
+      })
+    );
+    await act(() => view.result.current.estimate());
+    await act(() => view.result.current.confirm());
+
+    expect(view.result.current.phase).toBe("succeeded");
+    expect(view.result.current.result?.id).toBe("custom-1");
+  });
+
+  it("rejects a malformed extended lookup before mapping TResult", async () => {
+    const malformed = {
+      ...customLookup(),
+      result: { id: "custom-1", unexpected: true }
+    };
+    const mapResult = vi.fn((lookup: CustomLookup) => ({
+      id: lookup.result.id,
+      billing: lookup.billing
+    }));
+    const view = renderHook(() =>
+      useBillingAction({
+        operation: "custom_operation",
+        input: { text: "扩展请求" },
+        estimate: vi.fn().mockResolvedValue({ ...quote(), operation: "custom_operation" }),
+        submit: vi.fn().mockRejectedValue(networkError()),
+        lookup: vi.fn().mockResolvedValue(malformed),
+        parseLookup: parseCustomLookup,
+        resultFromLookup: mapResult,
+        createIdempotencyKey: vi.fn().mockReturnValue(keyA)
+      })
+    );
+    await act(() => view.result.current.estimate());
+    await act(() => view.result.current.confirm());
+
+    expect(view.result.current.phase).toBe("querying");
+    expect(view.result.current.result).toBeNull();
+    expect(view.result.current.errorMessage).toBe("计费结果确认中");
+    expect(mapResult).not.toHaveBeenCalled();
+  });
+
+  it("keeps the lookup parser and TResult mapper frozen during recovery", async () => {
+    let resolveLookup!: (value: unknown) => void;
+    const lookup = vi.fn(() => new Promise<unknown>((resolve) => (resolveLookup = resolve)));
+    const originalParser = vi.fn(parseCustomLookup);
+    const originalMapper = vi.fn((value: CustomLookup) => ({
+      id: value.result.id,
+      billing: value.billing
+    }));
+    const replacementParser = vi.fn(parseCustomLookup);
+    const replacementMapper = vi.fn((value: CustomLookup) => ({
+      id: `replacement-${value.result.id}`,
+      billing: value.billing
+    }));
+    const view = renderHook(
+      ({ parseLookup, resultFromLookup }) =>
+        useBillingAction({
+          operation: "custom_operation",
+          input: { text: "扩展请求" },
+          estimate: vi.fn().mockResolvedValue({ ...quote(), operation: "custom_operation" }),
+          submit: vi.fn().mockRejectedValue(networkError()),
+          lookup,
+          parseLookup,
+          resultFromLookup,
+          createIdempotencyKey: vi.fn().mockReturnValue(keyA)
+        }),
+      {
+        initialProps: {
+          parseLookup: originalParser,
+          resultFromLookup: originalMapper
+        }
+      }
+    );
+    await act(() => view.result.current.estimate());
+    let confirmation!: Promise<void>;
+    act(() => {
+      confirmation = view.result.current.confirm();
+    });
+    await waitFor(() => expect(lookup).toHaveBeenCalledTimes(1));
+
+    view.rerender({
+      parseLookup: replacementParser,
+      resultFromLookup: replacementMapper
+    });
+    await act(async () => {
+      resolveLookup(customLookup());
+      await confirmation;
+    });
+
+    expect(view.result.current.phase).toBe("succeeded");
+    expect(view.result.current.result?.id).toBe("custom-1");
+    expect(originalParser).toHaveBeenCalled();
+    expect(originalMapper).toHaveBeenCalledTimes(1);
+    expect(replacementParser).not.toHaveBeenCalled();
+    expect(replacementMapper).not.toHaveBeenCalled();
   });
 
   it("queries instead of treating non-terminal billing in an error as a known failure", async () => {

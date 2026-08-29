@@ -983,34 +983,37 @@ export interface BillingScenePromptResult extends BillingLookupPayload {
   negative_prompt: string;
 }
 
-export interface BillingEcomImageBatchItem extends BillingLookupPayload {
+interface BillingEcomImageBatchItemBase extends BillingLookupPayload {
   item_index: number;
   task_id: string;
   source_asset_id: string;
-  status: "done" | "failed";
-  asset_id: string | null;
 }
+
+export type BillingEcomImageBatchItem = BillingEcomImageBatchItemBase &
+  ({ status: "done"; asset_id: string } | { status: "failed"; asset_id: null });
 
 export interface BillingEcomImageBatchResult extends BillingLookupPayload {
   items: BillingEcomImageBatchItem[];
 }
 
-export interface BillingVideoTaskResource extends BillingLookupPayload {
+interface BillingVideoTaskResourceBase extends BillingLookupPayload {
   task_id: string;
-  status: "queued" | "running" | "done" | "failed" | "cancelled";
 }
+
+export type BillingVideoTaskResource = BillingVideoTaskResourceBase &
+  ({ status: "queued" } | { status: "done" });
 
 export interface BillingBrandVoiceResource extends BillingLookupPayload {
   id: string;
   name: string;
-  provider: string;
-  status: string;
-  order_status: "awaiting_fulfillment" | "fulfilled" | "rejected" | null;
-  delivery_status: "awaiting_fulfillment" | "active" | "expired" | "rejected";
+  provider: "cosyvoice-voice-clone";
+  status: "ready";
+  order_status: null;
+  delivery_status: "active";
   created_at: string;
 }
 
-export interface BillingBrandVoiceOrderResource extends BillingLookupPayload {
+interface BillingBrandVoiceOrderBase extends BillingLookupPayload {
   id: string;
   tenant_id: string;
   ordered_by_user_id: string;
@@ -1018,23 +1021,65 @@ export interface BillingBrandVoiceOrderResource extends BillingLookupPayload {
   requested_name: string;
   source_audio_asset_id: string;
   existing_brand_voice_id: string | null;
-  status: "awaiting_fulfillment" | "fulfilled" | "rejected";
-  fulfilled_brand_voice_id: string | null;
-  fulfilled_provider_voice_id: string | null;
-  rejection_reason: string | null;
-  fulfilled_at: string | null;
-  rejected_at: string | null;
   created_at: string;
   updated_at: string;
   billing: BillingSummary;
-  refund_disposition:
-    | "not_applicable"
-    | "source_subscription_released"
-    | "current_subscription_credited"
-    | "pending_next_subscription";
-  refund_grant_status: "pending" | "applied" | null;
-  refund_applied_at: string | null;
 }
+
+export type BillingAwaitingBrandVoiceOrderResource = BillingBrandVoiceOrderBase & {
+  status: "awaiting_fulfillment";
+  fulfilled_brand_voice_id: null;
+  fulfilled_provider_voice_id: null;
+  rejection_reason: null;
+  fulfilled_at: null;
+  rejected_at: null;
+  refund_disposition: "not_applicable";
+  refund_grant_status: null;
+  refund_applied_at: null;
+};
+
+export type BillingFulfilledBrandVoiceOrderResource = BillingBrandVoiceOrderBase & {
+  status: "fulfilled";
+  fulfilled_brand_voice_id: string;
+  fulfilled_provider_voice_id: string;
+  rejection_reason: null;
+  fulfilled_at: string;
+  rejected_at: null;
+  refund_disposition: "not_applicable";
+  refund_grant_status: null;
+  refund_applied_at: null;
+};
+
+type BillingRejectedRefund =
+  | {
+      refund_disposition: "source_subscription_released";
+      refund_grant_status: null;
+      refund_applied_at: null;
+    }
+  | {
+      refund_disposition: "current_subscription_credited";
+      refund_grant_status: "applied";
+      refund_applied_at: string;
+    }
+  | {
+      refund_disposition: "pending_next_subscription";
+      refund_grant_status: "pending";
+      refund_applied_at: null;
+    };
+
+export type BillingRejectedBrandVoiceOrderResource = BillingBrandVoiceOrderBase & {
+  status: "rejected";
+  fulfilled_brand_voice_id: null;
+  fulfilled_provider_voice_id: null;
+  rejection_reason: string;
+  fulfilled_at: null;
+  rejected_at: string;
+} & BillingRejectedRefund;
+
+export type BillingBrandVoiceOrderResource =
+  | BillingAwaitingBrandVoiceOrderResource
+  | BillingFulfilledBrandVoiceOrderResource
+  | BillingRejectedBrandVoiceOrderResource;
 
 export interface BillingLookupPayloadMap {
   script_generate_result: BillingScriptResult;
@@ -1046,6 +1091,29 @@ export interface BillingLookupPayloadMap {
 }
 
 export type BillingKnownResultType = keyof BillingLookupPayloadMap;
+
+interface BillingInProgressPayloadMap {
+  script_generate_result: BillingScriptResult;
+  scene_prompt_result: BillingScenePromptResult;
+  ecom_image_batch: BillingEcomImageBatchResult;
+  video_task: Extract<BillingVideoTaskResource, { status: "queued" }>;
+  brand_voice_order: BillingAwaitingBrandVoiceOrderResource;
+}
+
+interface BillingSucceededPayloadMap {
+  script_generate_result: BillingScriptResult;
+  scene_prompt_result: BillingScenePromptResult;
+  ecom_image_batch: BillingEcomImageBatchResult;
+  video_task: Extract<BillingVideoTaskResource, { status: "done" }>;
+  brand_voice_order: BillingFulfilledBrandVoiceOrderResource;
+  brand_voice: BillingBrandVoiceResource;
+}
+
+type BillingResultId<K extends BillingKnownResultType> =
+  K extends "script_generate_result" | "scene_prompt_result" ? null : string;
+
+type BillingSucceededResource<K extends BillingKnownResultType> =
+  BillingResultId<K> extends null ? null : BillingSucceededPayloadMap[K];
 
 interface BillingOperationLookupBase {
   operation: string;
@@ -1064,24 +1132,36 @@ type BillingInProgressLookup =
       result: null;
       failure: null;
     })
+  | (BillingOperationLookupBase & {
+      operation: "cosyvoice_brand_voice_create";
+      state: "in_progress";
+      completion_kind: null;
+      result_type: null;
+      result_id: string;
+      resource: null;
+      result: null;
+      failure: null;
+    })
   | {
-      [K in BillingKnownResultType]: BillingOperationLookupBase & {
+      [K in keyof BillingInProgressPayloadMap]: BillingOperationLookupBase & {
         state: "in_progress";
         completion_kind: null;
         result_type: K;
-        resource: BillingLookupPayloadMap[K] | null;
+        result_id: BillingResultId<K>;
+        resource: BillingInProgressPayloadMap[K] | null;
         result: null;
         failure: null;
       };
-    }[BillingKnownResultType];
+    }[keyof BillingInProgressPayloadMap];
 
 type BillingSucceededLookup = {
   [K in BillingKnownResultType]: BillingOperationLookupBase & {
     state: "completed";
     completion_kind: "succeeded";
     result_type: K;
-    resource: BillingLookupPayloadMap[K] | null;
-    result: BillingLookupPayloadMap[K];
+    result_id: BillingResultId<K>;
+    resource: BillingSucceededResource<K>;
+    result: BillingSucceededPayloadMap[K];
     failure: null;
   };
 }[BillingKnownResultType];
@@ -1093,7 +1173,8 @@ export type BillingOperationLookup =
       state: "completed";
       completion_kind: "rejected";
       result_type: "brand_voice_order";
-      resource: BillingBrandVoiceOrderResource;
+      result_id: string;
+      resource: BillingRejectedBrandVoiceOrderResource;
       result: null;
       failure: null;
     })
