@@ -11,7 +11,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 import structlog
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -178,8 +178,21 @@ class ScenePromptStoredResult(_BillingModel):
     negative_prompt: str
 
 
+class EcomImageBatchStoredItem(_BillingModel):
+    item_index: int = Field(ge=0, le=19)
+    task_id: str = Field(min_length=1, max_length=36)
+    source_asset_id: str = Field(min_length=1, max_length=36)
+    status: Literal["done", "failed"]
+    asset_id: str | None = Field(default=None, min_length=1, max_length=36)
+
+
+class EcomImageBatchStoredResult(_BillingModel):
+    items: list[EcomImageBatchStoredItem] = Field(min_length=1, max_length=20)
+
+
 register_billing_result_schema("script_generate_result", ScriptGenerateStoredResult)
 register_billing_result_schema("scene_prompt_result", ScenePromptStoredResult)
+register_billing_result_schema("ecom_image_batch", EcomImageBatchStoredResult)
 
 
 def _integer_amount(value: Decimal, *, field: str) -> int:

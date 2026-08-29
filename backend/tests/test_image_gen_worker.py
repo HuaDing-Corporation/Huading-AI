@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import openai
@@ -13,6 +14,7 @@ from sqlalchemy import func, select
 
 from app.db.models import (
     Asset,
+    BillingOperation,
     Plan,
     ProviderConfig,
     Subscription,
@@ -1614,6 +1616,128 @@ def test_image_worker_ecom_transparent_cutout_uses_source_asset_and_keeps_alpha(
     assert asset.metadata_["kind"] == "ecom_cutout"
     assert asset.metadata_["background"] == "transparent"
     assert asset.metadata_["source_asset_id"] == "product-alpha-source"
+
+
+def test_image_worker_settles_billed_ecom_item_through_the_parent_operation(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.services.billing_operations import UsageAllocation, create_reserved_operation
+    from app.services.billing_quotes import VerifiedQuote
+    from app.services.pricing import (
+        PricingLine,
+        PricingSnapshot,
+        RateScope,
+        RateSource,
+        ResolvedRate,
+    )
+
+    task_id = "ecom-parent-billing-unit"
+    source_key = f"tenants/{auth_context['tenant_id']}/uploads/billed-product.png"
+    rate = ResolvedRate(
+        unit_credits=Decimal("80.0000"),
+        source=RateSource.TENANT_RATE,
+        rate_id="ecom-worker-rate",
+        effective_at=datetime(2026, 8, 29, tzinfo=UTC),
+        policy_key=None,
+        policy_version=None,
+    )
+    line = PricingLine(
+        operation="ecom_cutout",
+        capability="image",
+        unit="image",
+        quantity=Decimal("1"),
+        unit_credits=rate.unit_credits,
+        subtotal_credits=Decimal("80"),
+        rate_scope=RateScope.TENANT_OVERRIDABLE,
+        rate=rate,
+        label="ecom_cutout",
+    )
+    quote = VerifiedQuote(
+        snapshot=PricingSnapshot(
+            operation="ecom_cutout",
+            pricing_shape="simple",
+            pricing_lines=(line,),
+            disclosures=(),
+            subtotal_credits=Decimal("80"),
+            payable_credits=80,
+        ),
+        quote_hash="a" * 64,
+        pricing_payload_hash="b" * 64,
+    )
+    with auth_db() as db:
+        task = VideoTask(
+            id=task_id,
+            tenant_id=auth_context["tenant_id"],
+            created_by_user_id=auth_context["user_id"],
+            status="queued",
+            mode="photo",
+            video_mode="photo",
+            progress=0,
+            topic="cut out the product",
+            params={
+                "kind": "ecom_cutout",
+                "background": "transparent",
+                "source_asset_id": "billed-product-source",
+                "source_storage_key": source_key,
+                "image_provider": "apimart",
+                "image_resolution": "1k",
+            },
+        )
+        db.add(task)
+        db.flush()
+        operation = create_reserved_operation(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            user_id=auth_context["user_id"],
+            operation="ecom_cutout",
+            idempotency_key=uuid4(),
+            request_hash="c" * 64,
+            verified_quote=quote,
+            usage_allocations=(
+                UsageAllocation(0, 0, Decimal("1"), Decimal("80"), "apimart", None, task_id),
+            ),
+            result_type="ecom_image_batch",
+            result_id="ecom-worker-batch",
+        )
+        task.params = {
+            **task.params,
+            "billing_operation_id": operation.id,
+            "billing_item_index": 0,
+            "batch_id": "ecom-worker-batch",
+        }
+        db.commit()
+        operation_id = operation.id
+
+    storage = _FakeStorage()
+    storage.saved[source_key] = (b"input-image", "image/png")
+    image_gen = _patch_worker(
+        monkeypatch,
+        auth_db,
+        storage,
+        _MemProgressStore(),
+        _FakeProvider(image_bytes=_png_bytes("transparent")),
+    )
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": "cut out the product",
+        }
+    )
+
+    assert result["status"] == "SUCCESS"
+    with auth_db() as db:
+        operation = db.get(BillingOperation, operation_id)
+        usage = db.scalars(select(UsageRecord).where(UsageRecord.video_task_id == task_id)).one()
+        task_asset = db.scalars(select(TaskAsset).where(TaskAsset.video_task_id == task_id)).one()
+    assert operation.status == "completed"
+    assert operation.settled_credits == 80
+    assert operation.released_credits == 0
+    assert usage.status == "settled"
+    assert task_asset.role == "output_image"
 
 
 def test_image_worker_ecom_model_uses_source_asset_and_stores_model_metadata(

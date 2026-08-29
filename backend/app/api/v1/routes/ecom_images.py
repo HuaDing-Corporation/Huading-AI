@@ -1,22 +1,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 import redis
 from fastapi import APIRouter, Depends, Request, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
+    BillingSubmissionHeaders,
     DbSessionDependency,
     get_object_storage,
     get_progress_store,
+    require_billing_submission_headers,
     require_permission,
     scoped_task_id,
 )
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
-from app.db.models import Asset, User, VideoTask
+from app.db.models import Asset, UsageRecord, User, VideoTask
 from app.providers.base import (
     ImageProviderCapabilitiesError,
     ProviderResolutionError,
@@ -24,6 +29,7 @@ from app.providers.base import (
     resolve_with_name,
     validate_image_provider_request,
 )
+from app.schemas.billing import BillingQuote
 from app.schemas.ecom_images import (
     EcomCutoutAccepted,
     EcomCutoutBatchAccepted,
@@ -50,9 +56,17 @@ from app.schemas.ecom_images import (
 )
 from app.schemas.response import ApiResponse, ok
 from app.services import ecom_replicate
+from app.services.billing_operations import UsageAllocation, create_reserved_operation, find_replay
+from app.services.billing_quotes import issue_quote, verify_quote
+from app.services.ecom_billing import (
+    ecom_pricing_draft,
+    ecom_request_hash,
+    normalize_cutout_items,
+    normalize_model_items,
+    try_finalize_ecom_operation,
+)
 from app.services.history import prune_video_history
 from app.services.progress import ProgressStore
-from app.services.quota import reserve_image_generation_quota
 from app.services.storage.base import ObjectStorage
 from app.workers.image_gen import generate_ecom_replicate_task, generate_image_task
 
@@ -65,9 +79,9 @@ ProgressStoreDependency = Depends(get_progress_store)
 _ECOM_CUTOUT_KIND = "ecom_cutout"
 _ECOM_MODEL_KIND = "ecom_model"
 _ECOM_POSTER_KIND = "ecom_poster"
-_BATCH_LIMIT = 20
 _SOURCE_IMAGE_TYPES = {"avatar_image", "product_image", "generated_image"}
 _SOURCE_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+BillingSubmissionHeadersDependency = Depends(require_billing_submission_headers)
 
 
 @dataclass(frozen=True)
@@ -368,14 +382,6 @@ def _create_cutout_task(
     )
     db.add(task)
     db.flush()
-    reserve_image_generation_quota(
-        db,
-        tenant_id=user.tenant_id,
-        video_task_id=task.id,
-        resolution="1k",
-        n=1,
-        provider=image_provider,
-    )
     return task
 
 
@@ -451,14 +457,6 @@ def _create_model_task(
     )
     db.add(task)
     db.flush()
-    reserve_image_generation_quota(
-        db,
-        tenant_id=user.tenant_id,
-        video_task_id=task.id,
-        resolution="1k",
-        n=1,
-        provider=image_provider,
-    )
     return task
 
 
@@ -515,6 +513,126 @@ def _prune_photo_history_best_effort(
         prune_video_history(db, tenant_id=tenant_id, mode="photo", storage=storage)
     except Exception as exc:  # pragma: no cover - cleanup must not block enqueue
         logger.warning("ecom_image_history_prune_failed", tenant_id=tenant_id, error=str(exc))
+
+
+def _replayed_ecom_tasks(db: Session, *, operation_id: str) -> list[VideoTask]:
+    task_ids = list(
+        db.scalars(
+            select(UsageRecord.video_task_id)
+            .where(UsageRecord.billing_operation_id == operation_id)
+            .order_by(UsageRecord.billing_item_index)
+        )
+    )
+    tasks = [db.get(VideoTask, task_id) for task_id in task_ids]
+    if any(task is None for task in tasks):
+        raise AppError(
+            "E-commerce image billing operation is invalid.",
+            code="BILLING_REPLAY_INVALID",
+            status_code=500,
+        )
+    return [task for task in tasks if task is not None]
+
+
+def _reserve_ecom_tasks(
+    db: Session,
+    *,
+    user: User,
+    operation_name: str,
+    request_hash: str,
+    headers: BillingSubmissionHeaders,
+    item_count: int,
+    provider: str,
+    tasks: list[VideoTask],
+):
+    verified_quote = verify_quote(
+        token=headers.quote_token,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        operation=operation_name,
+        request_hash=request_hash,
+        current_draft=ecom_pricing_draft(
+            db,
+            tenant_id=user.tenant_id,
+            operation=operation_name,
+            quantity=item_count,
+        ),
+    )
+    batch_id = str(uuid4())
+    operation = create_reserved_operation(
+        db,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        operation=operation_name,
+        idempotency_key=headers.idempotency_key,
+        request_hash=request_hash,
+        verified_quote=verified_quote,
+        usage_allocations=tuple(
+            UsageAllocation(
+                item_index=index,
+                pricing_line_index=0,
+                quantity=Decimal("1"),
+                credits=verified_quote.snapshot.pricing_lines[0].unit_credits,
+                provider=provider,
+                model=None,
+                video_task_id=task.id,
+            )
+            for index, task in enumerate(tasks)
+        ),
+        result_type="ecom_image_batch",
+        result_id=batch_id,
+    )
+    reserved_task_ids = set(
+        db.scalars(
+            select(UsageRecord.video_task_id).where(
+                UsageRecord.billing_operation_id == operation.id
+            )
+        )
+    )
+    if reserved_task_ids != {task.id for task in tasks}:
+        # A competing request claimed this idempotency key after the initial replay check.
+        # Roll back the uncommitted local tasks and return the already-reserved parent instead.
+        db.rollback()
+        replay = find_replay(
+            db,
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            operation=operation_name,
+            idempotency_key=headers.idempotency_key,
+            request_hash=request_hash,
+        )
+        if replay is None:  # pragma: no cover - the unique operation row is durable
+            raise AppError(
+                "Billing operation replay was lost.",
+                code="BILLING_REPLAY_INVALID",
+                status_code=500,
+            )
+        return replay.operation, True
+    for index, task in enumerate(tasks):
+        task.params = {
+            **(task.params or {}),
+            "billing_operation_id": operation.id,
+            "billing_item_index": index,
+            "batch_id": batch_id,
+        }
+    db.flush()
+    return operation, False
+
+
+def _enqueue_ecom_tasks(db: Session, *, tasks: list[VideoTask]) -> None:
+    for task in tasks:
+        try:
+            _enqueue_image_task(task)
+        except Exception as exc:  # pragma: no cover - broker errors are integration-specific
+            task.status = "failed"
+            task.error_code = "IMAGE_ENQUEUE_FAILED"
+            task.error_message = str(exc) or "Image queue submission failed."
+            task.error = task.error_message
+            task.finished_at = datetime.now(UTC)
+            operation_id = str((task.params or {})["billing_operation_id"])
+            try_finalize_ecom_operation(db, billing_operation_id=operation_id)
+            # The finalizer commits terminal reservations. A non-final task still needs its state.
+            if db.in_transaction():
+                db.commit()
 
 
 def _poster_disabled() -> None:
@@ -681,6 +799,33 @@ def create_poster_batch(
 
 
 @router.post(
+    "/model/estimate",
+    response_model=ApiResponse[BillingQuote],
+)
+def estimate_model_images(
+    request: Request,
+    payload: EcomModelRequest | EcomModelBatchRequest,
+    user: User = CreateEcomImagePermissionDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[BillingQuote]:
+    items = normalize_model_items(payload)
+    return ok(
+        request,
+        issue_quote(
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            request_hash=ecom_request_hash(operation=_ECOM_MODEL_KIND, items=items),
+            draft=ecom_pricing_draft(
+                db,
+                tenant_id=user.tenant_id,
+                operation=_ECOM_MODEL_KIND,
+                quantity=len(items),
+            ),
+        ),
+    )
+
+
+@router.post(
     "/model",
     response_model=ApiResponse[EcomModelAccepted],
     status_code=status.HTTP_202_ACCEPTED,
@@ -691,14 +836,29 @@ def create_model_image(
     user: User = CreateEcomImagePermissionDependency,
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
+    headers: BillingSubmissionHeaders = BillingSubmissionHeadersDependency,
 ) -> ApiResponse[EcomModelAccepted]:
+    items = normalize_model_items(payload)
+    request_hash = ecom_request_hash(operation=_ECOM_MODEL_KIND, items=items)
+    replay = find_replay(
+        db,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        operation=_ECOM_MODEL_KIND,
+        idempotency_key=headers.idempotency_key,
+        request_hash=request_hash,
+    )
+    if replay is not None:
+        task = _replayed_ecom_tasks(db, operation_id=replay.operation.id)[0]
+        return ok(request, EcomModelAccepted(task_id=task.id))
+    item = items[0]
     product_sources = [
         _source_asset_or_raise(
             db,
             tenant_id=user.tenant_id,
             source_asset_id=asset_id,
         )
-        for asset_id in payload.resolved_product_asset_ids
+        for asset_id in item.resolved_product_asset_ids
     ]
     model_sources = [
         _source_asset_or_raise(
@@ -706,26 +866,37 @@ def create_model_image(
             tenant_id=user.tenant_id,
             source_asset_id=asset_id,
         )
-        for asset_id in (payload.model_asset_ids or [])
+        for asset_id in (item.model_asset_ids or [])
     ]
     selection = _ecom_image_provider_or_raise(
         db,
         tenant_id=user.tenant_id,
-        source_storage_key_groups=[
-            _model_source_storage_keys(product_sources, model_sources)
-        ],
+        source_storage_key_groups=[_model_source_storage_keys(product_sources, model_sources)],
     )
     task = _create_model_task(
         db,
         user=user,
-        payload=payload,
+        payload=item,
         image_provider=selection.name,
         product_sources=product_sources,
         model_sources=model_sources,
     )
+    operation, replayed = _reserve_ecom_tasks(
+        db,
+        user=user,
+        operation_name=_ECOM_MODEL_KIND,
+        request_hash=request_hash,
+        headers=headers,
+        item_count=len(items),
+        provider=selection.name,
+        tasks=[task],
+    )
+    if replayed:
+        task = _replayed_ecom_tasks(db, operation_id=operation.id)[0]
+        return ok(request, EcomModelAccepted(task_id=task.id))
     db.commit()
     _prune_photo_history_best_effort(db, tenant_id=user.tenant_id, storage=storage)
-    _enqueue_image_task(task)
+    _enqueue_ecom_tasks(db, tasks=[task])
     return ok(request, EcomModelAccepted(task_id=task.id))
 
 
@@ -740,8 +911,33 @@ def create_model_image_batch(
     user: User = CreateEcomImagePermissionDependency,
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
+    headers: BillingSubmissionHeaders = BillingSubmissionHeadersDependency,
 ) -> ApiResponse[EcomModelBatchAccepted]:
-    selected_items = payload.items[:_BATCH_LIMIT]
+    selected_items = normalize_model_items(payload)
+    request_hash = ecom_request_hash(operation=_ECOM_MODEL_KIND, items=selected_items)
+    replay = find_replay(
+        db,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        operation=_ECOM_MODEL_KIND,
+        idempotency_key=headers.idempotency_key,
+        request_hash=request_hash,
+    )
+    if replay is not None:
+        tasks = _replayed_ecom_tasks(db, operation_id=replay.operation.id)
+        return ok(
+            request,
+            EcomModelBatchAccepted(
+                batch_id=str(replay.operation.result_id),
+                tasks=[
+                    EcomModelBatchItem(
+                        task_id=task.id,
+                        source_asset_id=str(task.params["source_asset_id"]),
+                    )
+                    for task in tasks
+                ],
+            ),
+        )
     product_source_groups = [
         [
             _source_asset_or_raise(
@@ -777,7 +973,6 @@ def create_model_image_batch(
         tenant_id=user.tenant_id,
         source_storage_key_groups=source_storage_key_groups,
     )
-    batch_id = str(uuid4())
     tasks = [
         _create_model_task(
             db,
@@ -786,7 +981,6 @@ def create_model_image_batch(
             image_provider=selection.name,
             product_sources=product_sources,
             model_sources=model_sources,
-            batch_id=batch_id,
         )
         for item, product_sources, model_sources in zip(
             selected_items,
@@ -795,10 +989,34 @@ def create_model_image_batch(
             strict=True,
         )
     ]
+    operation, replayed = _reserve_ecom_tasks(
+        db,
+        user=user,
+        operation_name=_ECOM_MODEL_KIND,
+        request_hash=request_hash,
+        headers=headers,
+        item_count=len(selected_items),
+        provider=selection.name,
+        tasks=tasks,
+    )
+    if replayed:
+        tasks = _replayed_ecom_tasks(db, operation_id=operation.id)
+        return ok(
+            request,
+            EcomModelBatchAccepted(
+                batch_id=str(operation.result_id),
+                tasks=[
+                    EcomModelBatchItem(
+                        task_id=task.id,
+                        source_asset_id=str(task.params["source_asset_id"]),
+                    )
+                    for task in tasks
+                ],
+            ),
+        )
     db.commit()
     _prune_photo_history_best_effort(db, tenant_id=user.tenant_id, storage=storage)
-    for task in tasks:
-        _enqueue_image_task(task)
+    _enqueue_ecom_tasks(db, tasks=tasks)
 
     response_tasks = [
         EcomModelBatchItem(
@@ -807,7 +1025,37 @@ def create_model_image_batch(
         )
         for task in tasks
     ]
-    return ok(request, EcomModelBatchAccepted(batch_id=batch_id, tasks=response_tasks))
+    return ok(
+        request,
+        EcomModelBatchAccepted(batch_id=str(operation.result_id), tasks=response_tasks),
+    )
+
+
+@router.post(
+    "/cutout/estimate",
+    response_model=ApiResponse[BillingQuote],
+)
+def estimate_cutout_images(
+    request: Request,
+    payload: EcomCutoutRequest | EcomCutoutBatchRequest,
+    user: User = CreateEcomImagePermissionDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[BillingQuote]:
+    items = normalize_cutout_items(payload)
+    return ok(
+        request,
+        issue_quote(
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            request_hash=ecom_request_hash(operation=_ECOM_CUTOUT_KIND, items=items),
+            draft=ecom_pricing_draft(
+                db,
+                tenant_id=user.tenant_id,
+                operation=_ECOM_CUTOUT_KIND,
+                quantity=len(items),
+            ),
+        ),
+    )
 
 
 @router.post(
@@ -821,11 +1069,26 @@ def create_cutout(
     user: User = CreateEcomImagePermissionDependency,
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
+    headers: BillingSubmissionHeaders = BillingSubmissionHeadersDependency,
 ) -> ApiResponse[EcomCutoutAccepted]:
+    items = normalize_cutout_items(payload)
+    request_hash = ecom_request_hash(operation=_ECOM_CUTOUT_KIND, items=items)
+    replay = find_replay(
+        db,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        operation=_ECOM_CUTOUT_KIND,
+        idempotency_key=headers.idempotency_key,
+        request_hash=request_hash,
+    )
+    if replay is not None:
+        task = _replayed_ecom_tasks(db, operation_id=replay.operation.id)[0]
+        return ok(request, EcomCutoutAccepted(task_id=task.id))
+    item = items[0]
     source = _source_asset_or_raise(
         db,
         tenant_id=user.tenant_id,
-        source_asset_id=payload.source_asset_id,
+        source_asset_id=item.source_asset_id,
     )
     selection = _ecom_image_provider_or_raise(
         db,
@@ -835,13 +1098,26 @@ def create_cutout(
     task = _create_cutout_task(
         db,
         user=user,
-        payload=payload,
+        payload=item,
         image_provider=selection.name,
         source=source,
     )
+    operation, replayed = _reserve_ecom_tasks(
+        db,
+        user=user,
+        operation_name=_ECOM_CUTOUT_KIND,
+        request_hash=request_hash,
+        headers=headers,
+        item_count=len(items),
+        provider=selection.name,
+        tasks=[task],
+    )
+    if replayed:
+        task = _replayed_ecom_tasks(db, operation_id=operation.id)[0]
+        return ok(request, EcomCutoutAccepted(task_id=task.id))
     db.commit()
     _prune_photo_history_best_effort(db, tenant_id=user.tenant_id, storage=storage)
-    _enqueue_image_task(task)
+    _enqueue_ecom_tasks(db, tasks=[task])
     return ok(request, EcomCutoutAccepted(task_id=task.id))
 
 
@@ -856,8 +1132,33 @@ def create_cutout_batch(
     user: User = CreateEcomImagePermissionDependency,
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
+    headers: BillingSubmissionHeaders = BillingSubmissionHeadersDependency,
 ) -> ApiResponse[EcomCutoutBatchAccepted]:
-    selected_items = payload.items[:_BATCH_LIMIT]
+    selected_items = normalize_cutout_items(payload)
+    request_hash = ecom_request_hash(operation=_ECOM_CUTOUT_KIND, items=selected_items)
+    replay = find_replay(
+        db,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        operation=_ECOM_CUTOUT_KIND,
+        idempotency_key=headers.idempotency_key,
+        request_hash=request_hash,
+    )
+    if replay is not None:
+        tasks = _replayed_ecom_tasks(db, operation_id=replay.operation.id)
+        return ok(
+            request,
+            EcomCutoutBatchAccepted(
+                batch_id=str(replay.operation.result_id),
+                tasks=[
+                    EcomCutoutBatchItem(
+                        task_id=task.id,
+                        source_asset_id=str(task.params["source_asset_id"]),
+                    )
+                    for task in tasks
+                ],
+            ),
+        )
     sources = [
         _source_asset_or_raise(
             db,
@@ -871,7 +1172,6 @@ def create_cutout_batch(
         tenant_id=user.tenant_id,
         source_storage_key_groups=[[source.storage_key] for source in sources],
     )
-    batch_id = str(uuid4())
     tasks = [
         _create_cutout_task(
             db,
@@ -879,14 +1179,37 @@ def create_cutout_batch(
             payload=item,
             image_provider=selection.name,
             source=source,
-            batch_id=batch_id,
         )
         for item, source in zip(selected_items, sources, strict=True)
     ]
+    operation, replayed = _reserve_ecom_tasks(
+        db,
+        user=user,
+        operation_name=_ECOM_CUTOUT_KIND,
+        request_hash=request_hash,
+        headers=headers,
+        item_count=len(selected_items),
+        provider=selection.name,
+        tasks=tasks,
+    )
+    if replayed:
+        tasks = _replayed_ecom_tasks(db, operation_id=operation.id)
+        return ok(
+            request,
+            EcomCutoutBatchAccepted(
+                batch_id=str(operation.result_id),
+                tasks=[
+                    EcomCutoutBatchItem(
+                        task_id=task.id,
+                        source_asset_id=str(task.params["source_asset_id"]),
+                    )
+                    for task in tasks
+                ],
+            ),
+        )
     db.commit()
     _prune_photo_history_best_effort(db, tenant_id=user.tenant_id, storage=storage)
-    for task in tasks:
-        _enqueue_image_task(task)
+    _enqueue_ecom_tasks(db, tasks=tasks)
 
     response_tasks = [
         EcomCutoutBatchItem(
@@ -895,4 +1218,7 @@ def create_cutout_batch(
         )
         for task in tasks
     ]
-    return ok(request, EcomCutoutBatchAccepted(batch_id=batch_id, tasks=response_tasks))
+    return ok(
+        request,
+        EcomCutoutBatchAccepted(batch_id=str(operation.result_id), tasks=response_tasks),
+    )

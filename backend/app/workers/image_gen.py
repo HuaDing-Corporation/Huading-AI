@@ -34,6 +34,7 @@ from app.providers.base import (
     validate_image_provider_request,
 )
 from app.services.apimart_costs import apimart_cost_cents_from_result
+from app.services.ecom_billing import try_finalize_ecom_operation
 from app.services.ecom_replicate import (
     record_analysis_cost,
     record_render_cost,
@@ -755,7 +756,11 @@ def _mark_failed(
         task.error_code = error_code
         task.error_message = error_message
         task.finished_at = datetime.now(UTC)
-        release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
+        billing_operation_id = str((task.params or {}).get("billing_operation_id") or "")
+        if billing_operation_id:
+            try_finalize_ecom_operation(db, billing_operation_id=billing_operation_id)
+        else:
+            release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
         db.commit()
         prune_video_history_best_effort(
             db,
@@ -1060,7 +1065,8 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
             task.error = None
             task.error_code = None
             task.error_message = None
-            if not ecom_poster:
+            billing_operation_id = str((task.params or {}).get("billing_operation_id") or "")
+            if not ecom_poster and not billing_operation_id:
                 cost_cents = apimart_cost_cents_from_result(result)
                 settle_reserved_quota(
                     db,
@@ -1071,6 +1077,8 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                     provider=str(result.get("provider") or "").strip() or None,
                     model=str(result.get("model") or "").strip() or None,
                 )
+            if billing_operation_id:
+                try_finalize_ecom_operation(db, billing_operation_id=billing_operation_id)
             db.commit()
             prune_video_history_best_effort(
                 db,
