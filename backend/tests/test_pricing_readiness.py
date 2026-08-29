@@ -8,7 +8,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import select, text
 
-from app.db.models import BrandVoice, CreditRate, ProviderConfig
+from app.db.models import BillingOperation, BrandVoice, CreditRate, ProviderConfig, Subscription
 
 
 def _session_scope(session):
@@ -295,3 +295,53 @@ def test_readiness_blocks_historically_corrupt_rate_values(
     assert ("INVALID_CREDIT_RATE", (rate_id,)) in {
         (blocker.code, blocker.record_ids) for blocker in report.blockers
     }
+
+
+def test_readiness_reports_persisted_operation_and_wallet_invariants_without_repair(
+    db_session,
+) -> None:
+    from scripts.ops.pricing_closure_readiness import pricing_closure_readiness
+
+    operation = BillingOperation(
+        id="corrupt-operation",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        operation="video_create",
+        idempotency_key="corrupt-operation",
+        request_hash="a" * 64,
+        quote_hash="b" * 64,
+        pricing_snapshot={},
+        requested_credits=Decimal("0"),
+        settled_credits=Decimal("0"),
+        released_credits=Decimal("0"),
+        status="in_progress",
+    )
+    subscription = db_session.get(Subscription, "subscription-a")
+    subscription.quota_credits_reserved = 7
+    db_session.add(operation)
+    db_session.execute(text("PRAGMA ignore_check_constraints = ON"))
+    db_session.commit()
+    db_session.execute(text("PRAGMA ignore_check_constraints = OFF"))
+    before = (
+        operation.status,
+        operation.pricing_snapshot,
+        subscription.quota_credits_reserved,
+    )
+
+    report = pricing_closure_readiness(db_session, production_mode=True)
+
+    assert report.ready is False
+    assert {
+        (blocker.code, blocker.record_ids) for blocker in report.blockers
+    } >= {
+        ("BILLING_OPERATION_INVARIANT_FAILURE", (operation.id,)),
+        ("BILLING_WALLET_INVARIANT_FAILURE", (subscription.id,)),
+    }
+    db_session.expire_all()
+    after_operation = db_session.get(BillingOperation, operation.id)
+    after_subscription = db_session.get(Subscription, subscription.id)
+    assert (
+        after_operation.status,
+        after_operation.pricing_snapshot,
+        after_subscription.quota_credits_reserved,
+    ) == before
