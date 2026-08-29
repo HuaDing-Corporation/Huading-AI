@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import select, text
 
 from app.db.models import BrandVoice, CreditRate, ProviderConfig
@@ -265,3 +266,32 @@ def test_readiness_cli_unknown_inventory_aborts_without_mutation(
     assert exit_code == 2
     assert payload["unknown_ids"] == ["unknown-cli-id"]
     assert len(db_session.scalars(select(ProviderConfig)).all()) == before
+
+
+@pytest.mark.parametrize(
+    "rate_id, value",
+    [("historic-negative-rate", "-1"), ("historic-nan-rate", "NaN")],
+)
+def test_readiness_blocks_historically_corrupt_rate_values(
+    db_session, rate_id: str, value: str
+) -> None:
+    """SQLite's check bypass models a legacy row written before current constraints."""
+    from scripts.ops.pricing_closure_readiness import pricing_closure_readiness
+
+    db_session.execute(text("PRAGMA ignore_check_constraints = ON"))
+    db_session.execute(
+        text(
+            "INSERT INTO credit_rates "
+            "(id, capability, unit, credits_per_unit, is_active, effective_at) "
+            "VALUES (:id, 'image', 'image', :value, 0, CURRENT_TIMESTAMP)"
+        ),
+        {"id": rate_id, "value": value},
+    )
+    db_session.execute(text("PRAGMA ignore_check_constraints = OFF"))
+    db_session.commit()
+
+    report = pricing_closure_readiness(db_session, production_mode=True)
+
+    assert ("INVALID_CREDIT_RATE", (rate_id,)) in {
+        (blocker.code, blocker.record_ids) for blocker in report.blockers
+    }

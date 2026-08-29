@@ -9,7 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import select
+from sqlalchemy import String, cast, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -114,7 +114,21 @@ def _rate_blockers(
     tuple[RateRow, ...],
     tuple[RateRow, ...],
 ]:
-    rows = list(db.scalars(select(CreditRate).order_by(CreditRate.id)))
+    # Read the numeric value as text: historic corruption such as SQLite's
+    # textual NaN must become a blocker rather than crashing the audit's ORM
+    # numeric result processor before validation can run.
+    rows = list(
+        db.execute(
+            select(
+                CreditRate.id,
+                CreditRate.tenant_id,
+                CreditRate.capability,
+                CreditRate.unit,
+                cast(CreditRate.credits_per_unit, String).label("credits_per_unit"),
+                CreditRate.is_active,
+            ).order_by(CreditRate.id)
+        )
+    )
     blockers: list[PricingReadinessBlocker] = []
     for row in rows:
         try:
@@ -122,7 +136,7 @@ def _rate_blockers(
                 tenant_id=row.tenant_id,
                 capability=row.capability,
                 unit=row.unit,
-                credits_per_unit=Decimal(row.credits_per_unit),
+                credits_per_unit=Decimal(str(row.credits_per_unit)),
                 is_active=bool(row.is_active),
             )
         except (PricingInvariantError, ArithmeticError, ValueError) as exc:
@@ -153,7 +167,9 @@ def _rate_blockers(
             tenant_id=row.tenant_id,
             capability=row.capability,
             unit=row.unit,
-            credits_per_unit=format(Decimal(row.credits_per_unit), "f"),
+            credits_per_unit=format(
+                Decimal(str(row.credits_per_unit)).quantize(Decimal("0.0001")), "f"
+            ),
             active=bool(row.is_active),
         )
         for row in rows
