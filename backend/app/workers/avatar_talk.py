@@ -2208,6 +2208,28 @@ def _precise_billable_seconds(value: object) -> Decimal:
     return max(Decimal("1.000"), seconds.quantize(Decimal("0.001"), rounding=ROUND_CEILING))
 
 
+_BILLING_ACTUAL_SECONDS_PARAM = "billing_actual_seconds"
+
+
+def _persist_billing_actual_seconds(*, task: VideoTask, actual_seconds: Decimal) -> None:
+    """Persist the exact canonical video meter in the settlement transaction."""
+    task.params = {
+        **(task.params or {}),
+        _BILLING_ACTUAL_SECONDS_PARAM: format(_precise_billable_seconds(actual_seconds), "f"),
+    }
+
+
+def _authoritative_billing_actual_seconds(*, task: VideoTask) -> Decimal:
+    """Read the durable worker meter; never infer billable quantity from output duration."""
+    params = task.params or {}
+    if _BILLING_ACTUAL_SECONDS_PARAM not in params:
+        raise BillingInvariantError("billed video task is missing its durable actual meter")
+    value = params[_BILLING_ACTUAL_SECONDS_PARAM]
+    if value is None:
+        raise BillingInvariantError("billed video task has an invalid durable actual meter")
+    return _precise_billable_seconds(value)
+
+
 def _complete_billing_quote_video(
     db: Session,
     *,
@@ -2230,6 +2252,8 @@ def _complete_billing_quote_video(
     if not usages or usages[0].capability != "video":
         raise BillingInvariantError("billed video task is missing its base allocation")
     base_usage = usages[0]
+    if base_usage.unit != "second":
+        raise BillingInvariantError("billed video task has an invalid base allocation unit")
     base_usage.cost_cents = max(0, int(base_cost_cents))
     if base_provider:
         base_usage.provider = base_provider
@@ -2361,6 +2385,7 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
             else:
                 cost_cents = provider_costs.omnihuman_cost_cents(actual_seconds)
             if billed_operation_id is not None:
+                _persist_billing_actual_seconds(task=task, actual_seconds=actual_seconds)
                 _complete_billing_quote_video(
                     db,
                     task=task,
@@ -2516,6 +2541,7 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
                     resolution=_seedance_i2v_resolution(task.params),
                 )
             if billed_operation_id is not None:
+                _persist_billing_actual_seconds(task=task, actual_seconds=actual_seconds)
                 _complete_billing_quote_video(
                     db,
                     task=task,

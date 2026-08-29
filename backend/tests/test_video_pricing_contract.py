@@ -634,7 +634,7 @@ def test_doubao_seedance_brand_video_runs_full_billing_lifecycle(
         "product_image_keys": ["uploads/product.png"],
         "script": "品牌文案",
         "scene_prompt": "产品展示",
-        "duration_sec": 5,
+        "duration_sec": 6,
         "resolution": "480p",
     }
     client = TestClient(app)
@@ -655,8 +655,10 @@ def test_doubao_seedance_brand_video_runs_full_billing_lifecycle(
     assert queued == [task_id]
 
     def fake_step(ctx):
-        ctx.duration_sec = 4
-        ctx.seedance_billable_seconds = 4
+        # Two three-second Seedance scenes render into a two-second final mux;
+        # billing must retain the provider's six seconds, not the output duration.
+        ctx.duration_sec = 2
+        ctx.seedance_billable_seconds = 6
         ctx.provider_cost_cents = 321
         ctx.storage_key = f"tenants/{auth_context['tenant_id']}/videos/{task_id}/final.mp4"
         return ctx
@@ -676,11 +678,12 @@ def test_doubao_seedance_brand_video_runs_full_billing_lifecycle(
         operation = db.query(BillingOperation).filter_by(result_id=task_id).one()
         usage = db.query(UsageRecord).filter_by(billing_operation_id=operation.id).one()
         assert task.status == "done"
+        assert task.params["billing_actual_seconds"] == "6.000"
         assert operation.completion_kind == "succeeded"
-        assert operation.requested_credits == Decimal("500")
-        assert operation.settled_credits == Decimal("400")
-        assert operation.released_credits == Decimal("100")
+        assert operation.requested_credits == Decimal("1000")
+        assert operation.settled_credits == Decimal("600")
+        assert operation.released_credits == Decimal("400")
         assert usage.status == "settled"
-        assert usage.quantity == Decimal("4")
+        assert usage.quantity == Decimal("6")
         assert usage.provider == "apimart"
         assert usage.cost_cents == 321

@@ -4,8 +4,10 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from threading import Event
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from app.db.models import (
     Asset,
@@ -95,6 +97,138 @@ def _financial_snapshot(operation: BillingOperation) -> tuple[object, ...]:
         operation.released_credits,
         operation.completed_at,
     )
+
+
+class _PostgresTransactionFault(Exception):
+    def __init__(self, sqlstate: str) -> None:
+        self.sqlstate = sqlstate
+
+
+def _postgres_transaction_fault(sqlstate: str) -> OperationalError:
+    return OperationalError("select 1", {}, _PostgresTransactionFault(sqlstate))
+
+
+@pytest.mark.parametrize("sqlstate", ["40001", "40P01"])
+def test_recovery_recognizes_psycopg_sqlstate_retry_fault(sqlstate: str) -> None:
+    from app.services.task_recovery import _is_retryable_postgres_transaction_error
+
+    assert _is_retryable_postgres_transaction_error(_postgres_transaction_fault(sqlstate))
+
+
+def _in_progress_manual_operation(*, operation_id: str) -> BillingOperation:
+    created_at = datetime(2025, 7, 1, tzinfo=UTC)
+    return BillingOperation(
+        id=operation_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        operation="doubao_brand_voice_order_renew",
+        idempotency_key=operation_id,
+        request_hash="a" * 64,
+        quote_hash="b" * 64,
+        pricing_snapshot=_manual_order_snapshot("doubao_brand_voice_order_renew"),
+        requested_credits=Decimal("30000"),
+        settled_credits=Decimal("0"),
+        released_credits=Decimal("0"),
+        status="in_progress",
+        created_at=created_at,
+        updated_at=created_at,
+    )
+
+
+@pytest.mark.parametrize("sqlstate", ["40001", "40P01"])
+def test_recovery_retries_psycopg_fault_with_clean_operation_state(
+    db_session,
+    monkeypatch,
+    sqlstate: str,
+) -> None:
+    from app.services import task_recovery
+
+    operation_id = f"retry-clean-state-{sqlstate}"
+    db_session.add(_in_progress_manual_operation(operation_id=operation_id))
+    db_session.commit()
+    attempts = 0
+
+    def recover_once(db, *, now, operation_id=None):
+        nonlocal attempts
+        assert operation_id == f"retry-clean-state-{sqlstate}"
+        attempts += 1
+        operation = db.get(BillingOperation, operation_id)
+        assert operation is not None
+        if attempts == 1:
+            operation.result_id = "must-roll-back"
+            raise _postgres_transaction_fault(sqlstate)
+        assert operation.result_id is None
+        return task_recovery.RecoverySummary(exempt_manual_order_ids=(operation_id,))
+
+    monkeypatch.setattr(task_recovery, "_recover_stale_billing_operations_once", recover_once)
+    monkeypatch.setattr(task_recovery, "sleep", lambda _delay: None)
+    summary = task_recovery.recover_stale_billing_operations(
+        db_session,
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert attempts == 2
+    assert summary.exempt_manual_order_ids == (operation_id,)
+    assert db_session.get(BillingOperation, operation_id).result_id is None
+
+
+@pytest.mark.parametrize("sqlstate", ["40001", "40P01"])
+def test_recovery_exhausts_retryable_psycopg_fault_after_three_attempts(
+    db_session,
+    monkeypatch,
+    sqlstate: str,
+) -> None:
+    from app.services import task_recovery
+
+    operation_id = f"retry-exhaustion-{sqlstate}"
+    db_session.add(_in_progress_manual_operation(operation_id=operation_id))
+    db_session.commit()
+    attempts = 0
+
+    def always_conflict(_db, *, now, operation_id=None):
+        nonlocal attempts
+        attempts += 1
+        raise _postgres_transaction_fault(sqlstate)
+
+    monkeypatch.setattr(task_recovery, "_recover_stale_billing_operations_once", always_conflict)
+    monkeypatch.setattr(task_recovery, "sleep", lambda _delay: None)
+
+    with pytest.raises(OperationalError):
+        task_recovery.recover_stale_billing_operations(
+            db_session,
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+    assert attempts == 3
+    assert db_session.get(BillingOperation, operation_id).status == "in_progress"
+
+
+def test_recovery_reraises_non_retryable_database_fault_without_retry(
+    db_session,
+    monkeypatch,
+) -> None:
+    from app.services import task_recovery
+
+    operation_id = "non-retryable-database-fault"
+    db_session.add(_in_progress_manual_operation(operation_id=operation_id))
+    db_session.commit()
+    attempts = 0
+
+    def invalid_operation(_db, *, now, operation_id=None):
+        nonlocal attempts
+        attempts += 1
+        raise _postgres_transaction_fault("23505")
+
+    monkeypatch.setattr(task_recovery, "_recover_stale_billing_operations_once", invalid_operation)
+
+    with pytest.raises(OperationalError):
+        task_recovery.recover_stale_billing_operations(
+            db_session,
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+    assert attempts == 1
+    assert db_session.get(BillingOperation, operation_id).status == "in_progress"
 
 
 def test_recovery_never_releases_waiting_manual_order(db_session) -> None:
@@ -290,6 +424,279 @@ def test_recovery_releases_video_operation_with_schema_invalid_result(db_session
 
     assert summary.released_operation_ids == (operation.id,)
     assert operation.completion_kind == "failed"
+
+
+def _seed_done_video_recovery_operation(
+    db_session,
+    *,
+    operation_id: str,
+    actual_meter: object | None,
+    duration_sec: float = 1.0,
+    with_deliverable: bool = True,
+    base_unit: str = "second",
+) -> tuple[BillingOperation, VideoTask]:
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    snapshot = _pricing_snapshot(operation="video_create", credits="100.0000")
+    snapshot["pricing_lines"][0]["quantity"] = "8"
+    snapshot["pricing_lines"][0]["subtotal_credits"] = "800.0000"
+    snapshot["subtotal_credits"] = "800.0000"
+    snapshot["payable_credits"] = 800
+    operation = BillingOperation(
+        id=operation_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        operation="video_create",
+        idempotency_key=operation_id,
+        request_hash="v" * 64,
+        quote_hash="w" * 64,
+        pricing_snapshot=snapshot,
+        requested_credits=Decimal("800"),
+        settled_credits=Decimal("0"),
+        released_credits=Decimal("0"),
+        status="in_progress",
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    params: dict[str, object] = {
+        "billing_operation_id": operation.id,
+        "pricing_contract": "billing_quote",
+    }
+    if actual_meter is not None:
+        params["billing_actual_seconds"] = actual_meter
+    task = VideoTask(
+        id=f"{operation_id}-task",
+        tenant_id="tenant-a",
+        status="done",
+        mode="seedance_i2v",
+        video_mode="seedance_i2v",
+        params=params,
+        storage_key=f"tenants/tenant-a/videos/{operation_id}/output.mp4",
+        duration_sec=duration_sec,
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    subscription = db_session.get(Subscription, "subscription-a")
+    subscription.quota_credits_reserved = 800
+    db_session.add_all([operation, task])
+    db_session.flush()
+    db_session.add(
+        UsageRecord(
+            id=f"{operation_id}-usage",
+            tenant_id="tenant-a",
+            subscription_id=subscription.id,
+            video_task_id=task.id,
+            billing_operation_id=operation.id,
+            billing_item_index=0,
+            billing_pricing_line_index=0,
+            capability="video",
+            provider="apimart",
+            unit=base_unit,
+            quantity=Decimal("8"),
+            credits=Decimal("800"),
+            cost_cents=0,
+            status="reserved",
+        )
+    )
+    if with_deliverable:
+        asset = Asset(
+            id=f"{operation_id}-asset",
+            tenant_id="tenant-a",
+            type="video",
+            source="generated",
+            storage_key=task.storage_key,
+            status="ready",
+        )
+        db_session.add(asset)
+        db_session.flush()
+        db_session.add(TaskAsset(video_task_id=task.id, asset_id=asset.id, role="output_video"))
+    db_session.commit()
+    return operation, task
+
+
+def test_recovery_releases_done_video_without_persisted_actual_meter(db_session) -> None:
+    from app.services.task_recovery import recover_stale_billing_operations
+
+    operation, task = _seed_done_video_recovery_operation(
+        db_session,
+        operation_id="done-video-without-meter",
+        actual_meter=None,
+        duration_sec=1.0,
+    )
+
+    summary = recover_stale_billing_operations(
+        db_session,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert summary.released_operation_ids == (operation.id,), (
+        summary,
+        operation.status,
+        operation.completion_kind,
+        task.status,
+    )
+    assert operation.completion_kind == "failed"
+    assert operation.settled_credits == Decimal("0")
+
+
+def test_recovery_settles_done_seedance_video_from_persisted_actual_meter(db_session) -> None:
+    from app.services.task_recovery import recover_stale_billing_operations
+
+    operation, _task = _seed_done_video_recovery_operation(
+        db_session,
+        operation_id="done-seedance-multi-scene-meter",
+        actual_meter="6.000",
+        duration_sec=2.0,
+    )
+
+    summary = recover_stale_billing_operations(
+        db_session,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert summary.settled_operation_ids == (operation.id,), summary
+    db_session.expire_all()
+    stored = db_session.get(BillingOperation, operation.id)
+    usage = db_session.get(UsageRecord, f"{operation.id}-usage")
+    assert stored.completion_kind == "succeeded", (
+        summary,
+        stored.status,
+        stored.completion_kind,
+        usage.status,
+        usage.quantity,
+    )
+    assert stored.settled_credits == Decimal("600")
+    assert usage.quantity == Decimal("6.000")
+
+
+@pytest.mark.parametrize("actual_meter", ["NaN", "-1"])
+def test_recovery_releases_done_video_with_invalid_persisted_actual_meter(
+    db_session,
+    actual_meter: str,
+) -> None:
+    from app.services.task_recovery import recover_stale_billing_operations
+
+    operation, _task = _seed_done_video_recovery_operation(
+        db_session,
+        operation_id=f"done-video-invalid-meter-{actual_meter}",
+        actual_meter=actual_meter,
+    )
+
+    summary = recover_stale_billing_operations(
+        db_session,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert summary.released_operation_ids == (operation.id,), (
+        summary,
+        operation.status,
+        operation.completion_kind,
+    )
+    db_session.expire_all()
+    assert db_session.get(BillingOperation, operation.id).completion_kind == "failed"
+
+
+def test_recovery_releases_done_video_without_persisted_deliverable(db_session) -> None:
+    from app.services.task_recovery import recover_stale_billing_operations
+
+    operation, _task = _seed_done_video_recovery_operation(
+        db_session,
+        operation_id="done-video-without-deliverable",
+        actual_meter="6.000",
+        with_deliverable=False,
+    )
+
+    summary = recover_stale_billing_operations(
+        db_session,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert summary.released_operation_ids == (operation.id,)
+    db_session.expire_all()
+    assert db_session.get(BillingOperation, operation.id).completion_kind == "failed"
+
+
+def test_recovery_releases_done_video_when_pricing_line_is_not_seconds(db_session) -> None:
+    from app.services.task_recovery import recover_stale_billing_operations
+
+    operation, _task = _seed_done_video_recovery_operation(
+        db_session,
+        operation_id="done-video-invalid-pricing-line",
+        actual_meter="6.000",
+        base_unit="image",
+    )
+
+    summary = recover_stale_billing_operations(
+        db_session,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert summary.released_operation_ids == (operation.id,)
+    db_session.expire_all()
+    assert db_session.get(BillingOperation, operation.id).completion_kind == "failed"
+
+
+@pytest.mark.parametrize("terminal_status", ["failed", "cancelled"])
+def test_recovery_releases_explicitly_terminal_video_task(
+    db_session,
+    terminal_status: str,
+) -> None:
+    from app.services.task_recovery import recover_stale_billing_operations
+
+    operation, task = _seed_done_video_recovery_operation(
+        db_session,
+        operation_id=f"terminal-video-{terminal_status}",
+        actual_meter="6.000",
+    )
+    task.status = terminal_status
+    db_session.commit()
+
+    summary = recover_stale_billing_operations(
+        db_session,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert summary.released_operation_ids == (operation.id,)
+    db_session.expire_all()
+    assert db_session.get(BillingOperation, operation.id).completion_kind == "failed"
+
+
+def test_recovery_holds_not_stale_video_task(db_session) -> None:
+    from app.services.task_recovery import recover_stale_billing_operations
+
+    operation, task = _seed_done_video_recovery_operation(
+        db_session,
+        operation_id="not-stale-video-task",
+        actual_meter="6.000",
+    )
+    task.status = "running"
+    db_session.commit()
+
+    summary = recover_stale_billing_operations(
+        db_session,
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert summary.held_operation_ids == (operation.id,)
+    db_session.expire_all()
+    assert db_session.get(BillingOperation, operation.id).status == "in_progress"
+
+
+def test_recovery_is_idempotent_after_releasing_terminal_video_task(db_session) -> None:
+    from app.services.task_recovery import recover_stale_billing_operations
+
+    operation, task = _seed_done_video_recovery_operation(
+        db_session,
+        operation_id="idempotent-terminal-video",
+        actual_meter="6.000",
+    )
+    task.status = "failed"
+    db_session.commit()
+
+    first = recover_stale_billing_operations(db_session, now=datetime(2026, 1, 2, tzinfo=UTC))
+    second = recover_stale_billing_operations(db_session, now=datetime(2026, 1, 3, tzinfo=UTC))
+
+    assert first.released_operation_ids == (operation.id,)
+    assert second == type(second)()
 
 
 def test_recovery_settles_persisted_ecom_output_after_other_item_times_out(

@@ -41,6 +41,7 @@ from app.services.quota import (
     release_reserved_quota,
     release_reverse_prompt_video_quota,
 )
+from app.services.transaction_retry import _RETRYABLE_SQLSTATES, _sqlstate
 
 logger = get_logger(__name__)
 
@@ -240,8 +241,8 @@ def _recover_stale_billing_operations_once(
                     # and completion contract.  Reserved quote quantities are not
                     # evidence of delivered usage.
                     from app.workers.avatar_talk import (
+                        _authoritative_billing_actual_seconds,
                         _complete_billing_quote_video,
-                        _precise_billable_seconds,
                     )
 
                     usages = _usage_for_update(db, operation.id)
@@ -251,7 +252,7 @@ def _recover_stale_billing_operations_once(
                     _complete_billing_quote_video(
                         db,
                         task=task,
-                        actual_seconds=_precise_billable_seconds(task.duration_sec),
+                        actual_seconds=_authoritative_billing_actual_seconds(task=task),
                         base_cost_cents=base_usage.cost_cents,
                         base_provider=base_usage.provider,
                         base_model=base_usage.model,
@@ -312,9 +313,7 @@ def _recover_stale_billing_operations_once(
 
 
 def _is_retryable_postgres_transaction_error(exc: OperationalError) -> bool:
-    return (
-        getattr(exc.orig, "pgcode", None) in {"40001", "40P01"}
-    )
+    return _sqlstate(exc) in _RETRYABLE_SQLSTATES
 
 
 def recover_stale_billing_operations(
