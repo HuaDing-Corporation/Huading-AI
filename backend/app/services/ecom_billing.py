@@ -1,21 +1,27 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from decimal import Decimal
 from typing import TypeAlias
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import TaskAsset, UsageRecord, VideoTask
+from app.db.models import Asset, TaskAsset, VideoTask
+from app.db.session import SessionLocal
 from app.schemas.ecom_images import (
     EcomCutoutBatchRequest,
     EcomCutoutRequest,
     EcomModelBatchRequest,
     EcomModelRequest,
 )
+from app.services import quota
 from app.services.billing_operations import (
     EcomImageBatchStoredItem,
     EcomImageBatchStoredResult,
+    _operation_for_update,
+    _subscription_ids_for_operation,
+    _usage_for_update,
     complete_failed,
     complete_succeeded,
 )
@@ -73,14 +79,14 @@ def _operation_tasks(
 
 def try_finalize_ecom_operation(db: Session, *, billing_operation_id: str):
     """Complete one parent reservation once every e-commerce task is terminal."""
-    expected_item_indexes = set(
-        db.scalars(
-            select(UsageRecord.billing_item_index).where(
-                UsageRecord.billing_operation_id == billing_operation_id
-            )
-        )
-    )
-    tasks = _operation_tasks(db, billing_operation_id=billing_operation_id, for_update=False)
+    subscription_ids = _subscription_ids_for_operation(db, billing_operation_id)
+    operation = _operation_for_update(db, billing_operation_id)
+    if operation.status == "completed":
+        return operation
+    quota.lock_subscriptions_for_billing(db, subscription_ids=subscription_ids)
+    usages = _usage_for_update(db, operation.id)
+    expected_item_indexes = {int(usage.billing_item_index) for usage in usages}
+    tasks = _operation_tasks(db, billing_operation_id=billing_operation_id, for_update=True)
     if not tasks or any(task.status not in {"done", "failed"} for task in tasks):
         return None
 
@@ -101,19 +107,30 @@ def try_finalize_ecom_operation(db: Session, *, billing_operation_id: str):
             http_status=502,
             sanitized_detail=None,
         )
-        _operation_tasks(db, billing_operation_id=billing_operation_id, for_update=True)
         db.commit()
         return operation
 
-    asset_by_task = {
-        task_id: asset_id
-        for task_id, asset_id in db.execute(
-            select(TaskAsset.video_task_id, TaskAsset.asset_id).where(
+    asset_rows = list(
+        db.execute(
+            select(TaskAsset.video_task_id, Asset.id)
+            .join(Asset, Asset.id == TaskAsset.asset_id)
+            .where(
                 TaskAsset.video_task_id.in_([task.id for task in tasks]),
                 TaskAsset.role == "output_image",
+                Asset.status == "ready",
+                Asset.deleted_at.is_(None),
+                Asset.storage_key != "",
             )
         )
-    }
+    )
+    asset_ids_by_task: dict[str, list[str]] = {}
+    for task_id, asset_id in asset_rows:
+        asset_ids_by_task.setdefault(task_id, []).append(asset_id)
+    successful_tasks = [task for task in tasks if task.status == "done"]
+    if any(len(asset_ids_by_task.get(task.id, [])) != 1 for task in successful_tasks):
+        return None
+
+    asset_by_task = {task_id: asset_ids[0] for task_id, asset_ids in asset_ids_by_task.items()}
     stored_items = [
         EcomImageBatchStoredItem(
             item_index=int(task.params["billing_item_index"]),
@@ -122,16 +139,25 @@ def try_finalize_ecom_operation(db: Session, *, billing_operation_id: str):
             status="done" if task.status == "done" else "failed",
             asset_id=asset_by_task.get(task.id),
         )
-        for task in tasks
+        for task in sorted(tasks, key=lambda task: int(task.params["billing_item_index"]))
     ]
     operation = complete_succeeded(
         db,
         operation_id=billing_operation_id,
         actual_quantities=successful,
         result_type="ecom_image_batch",
-        result_id=str(tasks[0].params.get("batch_id") or ""),
+        result_id=operation.result_id,
         result_payload=EcomImageBatchStoredResult(items=stored_items),
     )
-    _operation_tasks(db, billing_operation_id=billing_operation_id, for_update=True)
     db.commit()
     return operation
+
+
+def finalize_ecom_operation(
+    *,
+    billing_operation_id: str,
+    session_factory: Callable[[], Session] = SessionLocal,
+):
+    """Run terminal settlement after an item transaction has committed."""
+    with session_factory() as db:
+        return try_finalize_ecom_operation(db, billing_operation_id=billing_operation_id)

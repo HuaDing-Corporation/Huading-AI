@@ -121,12 +121,13 @@ def _sign_ecom_image_submissions(monkeypatch) -> None:
                 json=json,
                 headers=headers,
             )
-            if estimate.status_code == 200:
-                headers = {
-                    **headers,
-                    "Idempotency-Key": str(uuid4()),
-                    "X-Huading-Quote": estimate.json()["data"]["quote_token"],
-                }
+            if estimate.status_code != 200:
+                return estimate
+            headers = {
+                **headers,
+                "Idempotency-Key": str(uuid4()),
+                "X-Huading-Quote": estimate.json()["data"]["quote_token"],
+            }
         elif (
             path in {"/api/v1/ecom-images/model", "/api/v1/ecom-images/model/batch"}
             and headers is not None
@@ -138,12 +139,13 @@ def _sign_ecom_image_submissions(monkeypatch) -> None:
                 json=json,
                 headers=headers,
             )
-            if estimate.status_code == 200:
-                headers = {
-                    **headers,
-                    "Idempotency-Key": str(uuid4()),
-                    "X-Huading-Quote": estimate.json()["data"]["quote_token"],
-                }
+            if estimate.status_code != 200:
+                return estimate
+            headers = {
+                **headers,
+                "Idempotency-Key": str(uuid4()),
+                "X-Huading-Quote": estimate.json()["data"]["quote_token"],
+            }
         return original_post(self, url, json=json, headers=headers, **kwargs)
 
     monkeypatch.setattr(TestClient, "post", signed_post)

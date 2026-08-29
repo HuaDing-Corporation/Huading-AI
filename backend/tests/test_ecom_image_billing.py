@@ -31,10 +31,37 @@ def test_cutout_batch_rejects_a_twenty_first_item() -> None:
     raise AssertionError("21 e-commerce image items must be rejected")
 
 
-def test_cutout_estimate_prices_every_validated_item(auth_context) -> None:
+def test_cutout_estimate_prices_every_validated_item(auth_context, auth_db) -> None:
     from fastapi.testclient import TestClient
 
+    from app.db.models import Asset, ProviderConfig
     from app.main import app
+
+    with auth_db() as db:
+        db.add(
+            ProviderConfig(
+                tenant_id=None,
+                capability="image",
+                provider="apimart",
+                config={"api_key": "quote-test-key"},
+                is_active=True,
+            )
+        )
+        db.add_all(
+            [
+                Asset(
+                    id=f"cutout-{index}",
+                    tenant_id=auth_context["tenant_id"],
+                    type="product_image",
+                    source="upload",
+                    storage_key=f"tenants/{auth_context['tenant_id']}/uploads/cutout-{index}.png",
+                    mime_type="image/png",
+                    status="ready",
+                )
+                for index in range(20)
+            ]
+        )
+        db.commit()
 
     response = TestClient(app).post(
         "/api/v1/ecom-images/cutout/estimate",
@@ -45,6 +72,21 @@ def test_cutout_estimate_prices_every_validated_item(auth_context) -> None:
     assert response.status_code == 200
     assert response.json()["data"]["quantity"] == "20"
     assert response.json()["data"]["payable_credits"] == 1600
+
+
+def test_cutout_estimate_rejects_an_unowned_source_before_issuing_a_quote(auth_context) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    response = TestClient(app).post(
+        "/api/v1/ecom-images/cutout/estimate",
+        headers=auth_context["headers"],
+        json={"source_asset_id": "not-owned"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "ECOM_SOURCE_ASSET_NOT_FOUND"
 
 
 def test_single_and_one_item_batch_have_the_same_signed_request_hash() -> None:
@@ -60,8 +102,28 @@ def test_single_and_one_item_batch_have_the_same_signed_request_hash() -> None:
     )
 
 
+def test_changing_the_twentieth_item_changes_the_signed_request_hash() -> None:
+    from app.services.ecom_billing import ecom_request_hash, normalize_cutout_items
+
+    original = EcomCutoutBatchRequest(
+        items=[{"source_asset_id": f"source-{index}"} for index in range(20)]
+    )
+    changed = EcomCutoutBatchRequest(
+        items=[
+            {"source_asset_id": "replacement-19" if index == 19 else f"source-{index}"}
+            for index in range(20)
+        ]
+    )
+
+    assert ecom_request_hash(
+        operation="ecom_cutout", items=normalize_cutout_items(original)
+    ) != ecom_request_hash(
+        operation="ecom_cutout", items=normalize_cutout_items(changed)
+    )
+
+
 def test_ecom_partial_success_rounds_the_parent_reservation_once(auth_db, auth_context) -> None:
-    from app.db.models import VideoTask
+    from app.db.models import Asset, TaskAsset, VideoTask
     from app.services.billing_operations import UsageAllocation, create_reserved_operation
     from app.services.billing_quotes import VerifiedQuote
     from app.services.ecom_billing import try_finalize_ecom_operation
@@ -147,15 +209,32 @@ def test_ecom_partial_success_rounds_the_parent_reservation_once(auth_db, auth_c
 
     with auth_db() as db:
         finalized = try_finalize_ecom_operation(db, billing_operation_id=operation_id)
+        assert finalized is None
+        done_tasks = list(
+            db.scalars(
+                select(VideoTask).where(
+                    VideoTask.params["billing_operation_id"].as_string() == operation_id,
+                    VideoTask.status == "done",
+                )
+            )
+        )
+        for task in done_tasks:
+            asset = Asset(
+                tenant_id=auth_context["tenant_id"],
+                type="generated_image",
+                source="generated",
+                storage_key=f"tenants/{auth_context['tenant_id']}/photos/{task.id}/output.png",
+                mime_type="image/png",
+                status="ready",
+            )
+            db.add(asset)
+            db.flush()
+            db.add(TaskAsset(video_task_id=task.id, asset_id=asset.id, role="output_image"))
+        db.commit()
+
+    with auth_db() as db:
+        finalized = try_finalize_ecom_operation(db, billing_operation_id=operation_id)
         assert finalized is not None
         assert finalized.settled_credits == 1
         assert finalized.released_credits == 1
         assert try_finalize_ecom_operation(db, billing_operation_id=operation_id) is not None
-        statuses = list(
-            db.scalars(
-                select(VideoTask.status).where(
-                    VideoTask.params["billing_operation_id"].as_string() == operation_id
-                )
-            )
-        )
-    assert statuses.count("done") == 2

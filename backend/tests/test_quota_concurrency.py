@@ -1127,5 +1127,92 @@ def test_postgres_competing_settle_and_release_use_one_terminal_transition(
         assert stored.completion_kind == "succeeded"
         assert stored.settled_credits == 1
         assert stored.released_credits == 2
-        assert subscription.quota_credits_reserved == 0
-        assert subscription.quota_credits_used == 1
+    assert subscription.quota_credits_reserved == 0
+    assert subscription.quota_credits_used == 1
+
+
+def test_postgres_concurrent_last_ecom_items_finalize_the_parent_once(
+    postgres_session_factory,
+) -> None:
+    from app.services.ecom_billing import try_finalize_ecom_operation
+
+    factory = postgres_session_factory
+    tenant_id, user_id = _seed_postgres_billing_owner(factory)
+    quote = _concurrent_billing_quote()
+    with factory() as db:
+        tasks = [
+            VideoTask(
+                id=str(uuid4()),
+                tenant_id=tenant_id,
+                created_by_user_id=user_id,
+                status="queued",
+                mode="photo",
+                video_mode="photo",
+                topic="ecom",
+                params={"source_asset_id": f"source-{index}"},
+            )
+            for index in range(4)
+        ]
+        db.add_all(tasks)
+        db.flush()
+        operation = create_reserved_operation(
+            db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            operation="ecom_cutout",
+            idempotency_key=uuid4(),
+            request_hash="d" * 64,
+            verified_quote=quote,
+            usage_allocations=tuple(
+                UsageAllocation(index, 0, Decimal("1"), Decimal("0.6"), "apimart", None, task.id)
+                for index, task in enumerate(tasks)
+            ),
+            result_type="ecom_image_batch",
+            result_id="concurrent-ecom",
+        )
+        for index, task in enumerate(tasks):
+            task.params = {
+                **task.params,
+                "billing_operation_id": operation.id,
+                "billing_item_index": index,
+            }
+            task.status = "failed" if index < 2 else "queued"
+        db.commit()
+        operation_id = operation.id
+        final_task_ids = [task.id for task in tasks[2:]]
+
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def finish(task_id: str) -> None:
+        try:
+            with factory() as db:
+                task = db.get(VideoTask, task_id)
+                assert task is not None
+                task.status = "failed"
+                db.commit()
+            barrier.wait(timeout=5)
+            with factory() as db:
+                try_finalize_ecom_operation(db, billing_operation_id=operation_id)
+        except BaseException as exc:  # noqa: BLE001 - concurrency evidence
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=finish, args=(task_id,), daemon=True)
+        for task_id in final_task_ids
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    with factory() as db:
+        stored = db.get(BillingOperation, operation_id)
+        subscription = db.scalar(select(Subscription).where(Subscription.tenant_id == tenant_id))
+    assert stored is not None
+    assert stored.status == "completed"
+    assert stored.completion_kind == "failed"
+    assert stored.released_credits == 3
+    assert subscription.quota_credits_reserved == 0
