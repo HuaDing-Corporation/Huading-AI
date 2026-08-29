@@ -315,6 +315,7 @@ def test_ecom_partial_success_rounds_the_parent_reservation_once(auth_db, auth_c
 
     with auth_db() as db:
         finalized = try_finalize_ecom_operation(db, billing_operation_id=operation_id)
+        db.commit()
         assert finalized is None
         done_tasks = list(
             db.scalars(
@@ -398,9 +399,11 @@ def test_terminal_ecom_finalization_is_idempotent_and_conserves_the_reservation(
         assert [usage.status for usage in usages] == (
             ["settled", "settled"] if successful else ["released", "released"]
         )
+        db.commit()
 
     with auth_db() as db:
         repeated = try_finalize_ecom_operation(db, billing_operation_id=operation_id)
+        db.commit()
         assert repeated is not None
         operation = db.get(BillingOperation, operation_id)
         assert operation is not None

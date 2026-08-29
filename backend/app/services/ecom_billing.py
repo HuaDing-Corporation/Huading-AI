@@ -7,7 +7,7 @@ from typing import TypeAlias
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Asset, TaskAsset, VideoTask
+from app.db.models import Asset, BillingOperation, TaskAsset, Tenant, VideoTask
 from app.db.session import SessionLocal
 from app.schemas.ecom_images import (
     EcomCutoutBatchRequest,
@@ -78,11 +78,17 @@ def _operation_tasks(
 
 
 def try_finalize_ecom_operation(db: Session, *, billing_operation_id: str):
-    """Complete one parent reservation once every e-commerce task is terminal."""
-    subscription_ids = _subscription_ids_for_operation(db, billing_operation_id)
+    """Finalize within the caller's transaction; this function never commits."""
+    tenant_id = db.scalar(
+        select(BillingOperation.tenant_id).where(BillingOperation.id == billing_operation_id)
+    )
+    if tenant_id is None:
+        return None
+    db.scalar(select(Tenant).where(Tenant.id == tenant_id).with_for_update())
     operation = _operation_for_update(db, billing_operation_id)
     if operation.status == "completed":
         return operation
+    subscription_ids = _subscription_ids_for_operation(db, billing_operation_id)
     quota.lock_subscriptions_for_billing(db, subscription_ids=subscription_ids)
     usages = _usage_for_update(db, operation.id)
     expected_item_indexes = {int(usage.billing_item_index) for usage in usages}
@@ -90,7 +96,10 @@ def try_finalize_ecom_operation(db: Session, *, billing_operation_id: str):
     if not tasks or any(task.status not in {"done", "failed"} for task in tasks):
         return None
 
-    task_item_indexes = {int(task.params["billing_item_index"]) for task in tasks}
+    try:
+        task_item_indexes = {int(task.params["billing_item_index"]) for task in tasks}
+    except (KeyError, TypeError, ValueError):
+        return None
     if task_item_indexes != expected_item_indexes or len(tasks) != len(expected_item_indexes):
         return None
 
@@ -107,7 +116,6 @@ def try_finalize_ecom_operation(db: Session, *, billing_operation_id: str):
             http_status=502,
             sanitized_detail=None,
         )
-        db.commit()
         return operation
 
     asset_rows = list(
@@ -149,7 +157,6 @@ def try_finalize_ecom_operation(db: Session, *, billing_operation_id: str):
         result_id=operation.result_id,
         result_payload=EcomImageBatchStoredResult(items=stored_items),
     )
-    db.commit()
     return operation
 
 
@@ -160,4 +167,6 @@ def finalize_ecom_operation(
 ):
     """Run terminal settlement after an item transaction has committed."""
     with session_factory() as db:
-        return try_finalize_ecom_operation(db, billing_operation_id=billing_operation_id)
+        operation = try_finalize_ecom_operation(db, billing_operation_id=billing_operation_id)
+        db.commit()
+        return operation

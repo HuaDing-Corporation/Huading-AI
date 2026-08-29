@@ -2,31 +2,38 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from random import uniform
+from time import sleep
 from typing import Any
 
 from sqlalchemy import exists, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.exceptions import AppError
 from app.core.logging import get_logger
 from app.db.models import (
+    Asset,
     BillingOperation,
+    CreditRefundGrant,
     EcomReplicateJob,
     EcomReplicateOutput,
     ReversePromptJob,
+    TaskAsset,
+    Tenant,
     VideoTask,
 )
 from app.db.session import SessionLocal
-from app.services import ecom_replicate
+from app.services import ecom_replicate, quota
 from app.services.aibrain import recover_stale_reasoning_reservations
 from app.services.batches import refresh_batch_job
 from app.services.billing_operations import (
     BillingInvariantError,
-    VideoTaskBillingResource,
+    _subscription_ids_for_operation,
     _usage_for_update,
     _validate_stored_result,
     complete_failed,
-    complete_succeeded,
 )
 from app.services.ecom_billing import try_finalize_ecom_operation
 from app.services.quota import (
@@ -127,10 +134,30 @@ def _release_stale_operation(db: Session, *, operation_id: str) -> None:
     )
 
 
-def recover_stale_billing_operations(
+def _has_persisted_video_deliverable(db: Session, *, task: VideoTask) -> bool:
+    if not task.storage_key:
+        return False
+    return (
+        db.scalar(
+            select(TaskAsset.id)
+            .join(Asset, Asset.id == TaskAsset.asset_id)
+            .where(
+                TaskAsset.video_task_id == task.id,
+                TaskAsset.role == "output_video",
+                Asset.status == "ready",
+                Asset.deleted_at.is_(None),
+                Asset.storage_key == task.storage_key,
+            )
+        )
+        is not None
+    )
+
+
+def _recover_stale_billing_operations_once(
     db: Session,
     *,
     now: datetime,
+    operation_id: str | None = None,
 ) -> RecoverySummary:
     """Recover only stale, automatic reservations from their durable task state.
 
@@ -141,19 +168,24 @@ def recover_stale_billing_operations(
     """
     if now.tzinfo is None:
         raise ValueError("recovery timestamp must be timezone-aware")
-    candidate_ids = list(
-        db.scalars(
-            select(BillingOperation.id)
-            .where(BillingOperation.status == "in_progress")
-            .order_by(BillingOperation.id)
-        )
+    candidate_statement = (
+        select(BillingOperation.id, BillingOperation.tenant_id)
+        .where(BillingOperation.status == "in_progress")
+        .order_by(BillingOperation.id)
     )
+    if operation_id is not None:
+        candidate_statement = candidate_statement.where(BillingOperation.id == operation_id)
+    candidate_ids = list(db.execute(candidate_statement))
     released: list[str] = []
     settled: list[str] = []
     exempt: list[str] = []
     held: list[str] = []
 
-    for operation_id in candidate_ids:
+    for operation_id, tenant_id in candidate_ids:
+        # Recovery's lock order is Tenant -> BillingOperation -> Subscription ->
+        # UsageRecord -> refund grants -> business task rows.  Completion helpers
+        # re-read these same locked rows but do not introduce a reverse order.
+        db.scalar(select(Tenant).where(Tenant.id == tenant_id).with_for_update())
         operation = db.scalar(
             select(BillingOperation)
             .where(BillingOperation.id == operation_id)
@@ -165,6 +197,18 @@ def recover_stale_billing_operations(
         if operation.operation in _MANUAL_DOUBAO_OPERATIONS:
             exempt.append(operation.id)
             continue
+
+        subscription_ids = _subscription_ids_for_operation(db, operation.id)
+        quota.lock_subscriptions_for_billing(db, subscription_ids=subscription_ids)
+        _usage_for_update(db, operation.id)
+        list(
+            db.scalars(
+                select(CreditRefundGrant)
+                .where(CreditRefundGrant.billing_operation_id == operation.id)
+                .order_by(CreditRefundGrant.id)
+                .with_for_update()
+            )
+        )
 
         tasks = _operation_tasks_for_update(db, operation_id=operation.id)
         if operation.operation in _ECOM_OPERATIONS:
@@ -187,25 +231,34 @@ def recover_stale_billing_operations(
                     released.append(operation.id)
                     continue
             if task.status == "done":
-                usages = _usage_for_update(db, operation.id)
-                try:
-                    complete_succeeded(
-                        db,
-                        operation_id=operation.id,
-                        actual_quantities={
-                            int(usage.billing_item_index): usage.quantity
-                            for usage in usages
-                            if usage.billing_item_index is not None
-                        },
-                        result_type="video_task",
-                        result_id=task.id,
-                        result_payload=VideoTaskBillingResource(
-                            task_id=task.id,
-                            status="done",
-                        ),
-                    )
-                except BillingInvariantError:
+                if not _has_persisted_video_deliverable(db, task=task):
                     _release_stale_operation(db, operation_id=operation.id)
+                    released.append(operation.id)
+                    continue
+                try:
+                    # Reuse the worker's canonical actual-duration, TTS telemetry,
+                    # and completion contract.  Reserved quote quantities are not
+                    # evidence of delivered usage.
+                    from app.workers.avatar_talk import (
+                        _complete_billing_quote_video,
+                        _precise_billable_seconds,
+                    )
+
+                    usages = _usage_for_update(db, operation.id)
+                    base_usage = next(
+                        usage for usage in usages if usage.capability == "video"
+                    )
+                    _complete_billing_quote_video(
+                        db,
+                        task=task,
+                        actual_seconds=_precise_billable_seconds(task.duration_sec),
+                        base_cost_cents=base_usage.cost_cents,
+                        base_provider=base_usage.provider,
+                        base_model=base_usage.model,
+                    )
+                except (BillingInvariantError, AppError, StopIteration):
+                    if operation.status == "in_progress":
+                        _release_stale_operation(db, operation_id=operation.id)
                     released.append(operation.id)
                 else:
                     settled.append(operation.id)
@@ -234,10 +287,74 @@ def recover_stale_billing_operations(
                 task.error = task.error_message
                 task.finished_at = now
                 task.updated_at = now
+        if operation.operation in _ECOM_OPERATIONS:
+            # A timeout changes only unfinished items. Re-run the batch's
+            # canonical finalizer so persisted deliverables settle precisely.
+            db.flush(tasks)
+            finalized = try_finalize_ecom_operation(db, billing_operation_id=operation.id)
+            if finalized is not None and finalized.completion_kind == "succeeded":
+                settled.append(operation.id)
+            elif finalized is not None and finalized.status == "completed":
+                released.append(operation.id)
+            else:
+                held.append(operation.id)
+            continue
         _release_stale_operation(db, operation_id=operation.id)
         released.append(operation.id)
 
     db.flush()
+    return RecoverySummary(
+        released_operation_ids=tuple(released),
+        settled_operation_ids=tuple(settled),
+        exempt_manual_order_ids=tuple(exempt),
+        held_operation_ids=tuple(held),
+    )
+
+
+def _is_retryable_postgres_transaction_error(exc: OperationalError) -> bool:
+    return (
+        getattr(exc.orig, "pgcode", None) in {"40001", "40P01"}
+    )
+
+
+def recover_stale_billing_operations(
+    db: Session,
+    *,
+    now: datetime,
+) -> RecoverySummary:
+    """Run recovery in a bounded retryable transaction with no supplier calls."""
+    candidate_ids = list(
+        db.scalars(
+            select(BillingOperation.id)
+            .where(BillingOperation.status == "in_progress")
+            .order_by(BillingOperation.id)
+        )
+    )
+    # The candidate scan must not become the transaction that settles every
+    # operation.  Each candidate below gets its own root transaction.
+    db.commit()
+    released: list[str] = []
+    settled: list[str] = []
+    exempt: list[str] = []
+    held: list[str] = []
+    for operation_id in candidate_ids:
+        for attempt in range(3):
+            try:
+                with db.begin():
+                    summary = _recover_stale_billing_operations_once(
+                        db,
+                        now=now,
+                        operation_id=operation_id,
+                    )
+                released.extend(summary.released_operation_ids)
+                settled.extend(summary.settled_operation_ids)
+                exempt.extend(summary.exempt_manual_order_ids)
+                held.extend(summary.held_operation_ids)
+                break
+            except OperationalError as exc:
+                if not _is_retryable_postgres_transaction_error(exc) or attempt == 2:
+                    raise
+                sleep(uniform(0.01, 0.05) * (attempt + 1))
     return RecoverySummary(
         released_operation_ids=tuple(released),
         settled_operation_ids=tuple(settled),
@@ -271,6 +388,7 @@ def recover_orphaned_image_queue_tasks(
     recovered_video_gen_batches: set[tuple[str, str]] = set()
     photo_task_count = 0
     video_gen_task_count = 0
+    billing_recovery = RecoverySummary()
 
     with session_factory() as db:
         video_tasks = list(
@@ -391,8 +509,16 @@ def recover_orphaned_image_queue_tasks(
             cutoff=cutoff,
             recovered_at=recovered_at,
         )
-        billing_recovery = recover_stale_billing_operations(db, now=recovered_at)
         db.commit()
+
+    # Billing recovery has its own transaction so it never enters after this
+    # generic orphan scan has locked unrelated business rows.
+    with session_factory() as billing_db:
+        billing_recovery = recover_stale_billing_operations(
+            billing_db,
+            now=recovered_at,
+        )
+        billing_db.commit()
 
     if progress_store is not None:
         for tenant_id, task_id, error_code, error_message in recovered_progress:

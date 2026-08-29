@@ -1473,6 +1473,7 @@ def test_postgres_concurrent_last_ecom_items_finalize_the_parent_once(
             barrier.wait(timeout=5)
             with factory() as db:
                 try_finalize_ecom_operation(db, billing_operation_id=operation_id)
+                db.commit()
         except BaseException as exc:  # noqa: BLE001 - concurrency evidence
             errors.append(exc)
 

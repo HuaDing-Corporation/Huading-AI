@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.db.models import (
+    Asset,
     BatchJob,
     BillingOperation,
     ChatConversation,
@@ -18,6 +19,7 @@ from app.db.models import (
     ReasoningWallet,
     ReversePromptJob,
     Subscription,
+    TaskAsset,
     Tenant,
     UsageRecord,
     VideoTask,
@@ -129,6 +131,39 @@ def test_recovery_never_releases_waiting_manual_order(db_session) -> None:
     assert _financial_snapshot(operation) == before
 
 
+def test_recovery_closes_each_operation_transaction_before_returning(db_session) -> None:
+    """Recovery owns durable per-operation work, not a caller-owned outer transaction."""
+    from app.services.task_recovery import recover_stale_billing_operations
+
+    created_at = datetime(2025, 7, 1, tzinfo=UTC)
+    operation = BillingOperation(
+        id="manual-order-transaction-boundary",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        operation="doubao_brand_voice_order_renew",
+        idempotency_key="manual-order-transaction-boundary",
+        request_hash="q" * 64,
+        quote_hash="r" * 64,
+        pricing_snapshot=_manual_order_snapshot("doubao_brand_voice_order_renew"),
+        requested_credits=Decimal("30000"),
+        settled_credits=Decimal("0"),
+        released_credits=Decimal("0"),
+        status="in_progress",
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    db_session.add(operation)
+    db_session.commit()
+
+    summary = recover_stale_billing_operations(
+        db_session,
+        now=created_at + timedelta(days=400),
+    )
+
+    assert summary.exempt_manual_order_ids == ("manual-order-transaction-boundary",)
+    assert not db_session.in_transaction()
+
+
 def test_recovery_releases_stale_queued_video_operation_after_enqueue_failure(
     db_session,
 ) -> None:
@@ -157,7 +192,7 @@ def test_recovery_releases_stale_queued_video_operation_after_enqueue_failure(
         status="queued",
         mode="video",
         video_mode="video",
-        params={"billing_operation_id": operation.id},
+        params={"billing_operation_id": operation.id, "billing_item_index": 0},
         created_at=created_at,
         updated_at=created_at,
     )
@@ -255,6 +290,125 @@ def test_recovery_releases_video_operation_with_schema_invalid_result(db_session
 
     assert summary.released_operation_ids == (operation.id,)
     assert operation.completion_kind == "failed"
+
+
+def test_recovery_settles_persisted_ecom_output_after_other_item_times_out(
+    db_session,
+) -> None:
+    from app.services.task_recovery import recover_stale_billing_operations
+
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    snapshot = _pricing_snapshot(operation="ecom_cutout")
+    snapshot["pricing_lines"][0]["quantity"] = "2"
+    snapshot["pricing_lines"][0]["subtotal_credits"] = "2.0000"
+    snapshot["subtotal_credits"] = "2.0000"
+    snapshot["payable_credits"] = 2
+    operation = BillingOperation(
+        id="partial-ecom-recovery",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        operation="ecom_cutout",
+        idempotency_key="partial-ecom-recovery",
+        request_hash="g" * 64,
+        quote_hash="h" * 64,
+        pricing_snapshot=snapshot,
+        requested_credits=Decimal("2"),
+        settled_credits=Decimal("0"),
+        released_credits=Decimal("0"),
+        status="in_progress",
+        result_type="ecom_image_batch",
+        result_id="partial-ecom-batch",
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    done_task = VideoTask(
+        id="partial-ecom-done",
+        tenant_id="tenant-a",
+        status="done",
+        mode="photo",
+        video_mode="photo",
+        params={
+            "billing_operation_id": operation.id,
+            "billing_item_index": 0,
+            "source_asset_id": "source-done",
+        },
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    stale_task = VideoTask(
+        id="partial-ecom-stale",
+        tenant_id="tenant-a",
+        status="running",
+        mode="photo",
+        video_mode="photo",
+        params={
+            "billing_operation_id": operation.id,
+            "billing_item_index": 1,
+            "source_asset_id": "source-stale",
+        },
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    subscription = db_session.get(Subscription, "subscription-a")
+    subscription.quota_credits_reserved = 2
+    db_session.add_all([operation, done_task, stale_task])
+    db_session.flush()
+    db_session.add_all(
+        [
+            UsageRecord(
+                id=f"partial-ecom-usage-{index}",
+                tenant_id="tenant-a",
+                subscription_id=subscription.id,
+                video_task_id=task.id,
+                billing_operation_id=operation.id,
+                billing_item_index=index,
+                billing_pricing_line_index=0,
+                capability="image",
+                provider="apimart",
+                unit="image",
+                quantity=Decimal("1"),
+                credits=Decimal("1"),
+                cost_cents=0,
+                status="reserved",
+            )
+            for index, task in enumerate((done_task, stale_task))
+        ]
+    )
+    asset = Asset(
+        id="partial-ecom-output",
+        tenant_id="tenant-a",
+        type="generated_image",
+        source="generated",
+        storage_key="tenants/tenant-a/photos/output.png",
+        status="ready",
+    )
+    db_session.add(asset)
+    db_session.flush()
+    db_session.add(TaskAsset(video_task_id=done_task.id, asset_id=asset.id, role="output_image"))
+    db_session.commit()
+
+    from app.services.task_recovery import _billing_task_timeout_seconds, _task_is_stale
+
+    assert _task_is_stale(
+        stale_task,
+        timeout_seconds=_billing_task_timeout_seconds(operation, stale_task),
+        now=created_at + timedelta(days=2),
+    )
+
+    summary = recover_stale_billing_operations(
+        db_session,
+        now=created_at + timedelta(days=2),
+    )
+
+    assert summary.settled_operation_ids == (operation.id,), (
+        summary,
+        stale_task.status,
+        operation.status,
+        operation.completion_kind,
+    )
+    assert operation.completion_kind == "succeeded"
+    assert operation.settled_credits == Decimal("1")
+    assert operation.released_credits == Decimal("1")
 
 
 class _ProgressStore:

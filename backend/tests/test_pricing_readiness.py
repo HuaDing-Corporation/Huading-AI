@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 
 from sqlalchemy import select, text
@@ -127,3 +128,77 @@ def test_readiness_reports_official_config_registry_mismatch_and_retired_slot_su
     assert [
         (item.surface, item.state) for item in report.legacy_slot_write_surfaces
     ] == [("admin_api:POST /tenants/{tenant_id}/voice-slots", "retired")]
+
+
+def test_readiness_fails_closed_when_policy_default_or_fallback_drifts(
+    db_session,
+    monkeypatch,
+) -> None:
+    from app.services import pricing
+    from scripts.ops.pricing_closure_readiness import pricing_closure_readiness
+
+    monkeypatch.setitem(
+        pricing.PRICING_POLICIES,
+        "script_generate",
+        replace(pricing.PRICING_POLICIES["script_generate"], default_unit_credits=Decimal("2")),
+    )
+    monkeypatch.setitem(pricing.DEFAULT_RATE_CREDITS, ("avatar", "second"), Decimal("999"))
+
+    report = pricing_closure_readiness(db_session, production_mode=False)
+
+    assert ("PRICING_POLICY_DEFAULT_MISMATCH", ("script_generate",)) in {
+        (item.code, item.record_ids) for item in report.blockers
+    }
+    assert ("DEFAULT_RATE_FALLBACK_MISMATCH", ("avatar/second",)) in {
+        (item.code, item.record_ids) for item in report.blockers
+    }
+
+
+def test_readiness_lists_safe_platform_and_tenant_rate_rows(db_session) -> None:
+    from scripts.ops.pricing_closure_readiness import pricing_closure_readiness
+
+    db_session.add_all(
+        [
+            CreditRate(
+                id="platform-rate-row",
+                capability="image",
+                unit="image",
+                credits_per_unit=Decimal("1"),
+                is_active=True,
+            ),
+            CreditRate(
+                id="tenant-rate-row",
+                tenant_id="tenant-a",
+                capability="scene_prompt",
+                unit="call",
+                credits_per_unit=Decimal("2"),
+                is_active=True,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    payload = pricing_closure_readiness(db_session, production_mode=False).as_dict()
+
+    assert payload["platform_rates"] == [
+        {
+            "id": "platform-rate-row",
+            "scope": "platform",
+            "tenant_id": None,
+            "capability": "image",
+            "unit": "image",
+            "credits_per_unit": "1.0000",
+            "active": True,
+        }
+    ]
+    assert payload["tenant_rates"] == [
+        {
+            "id": "tenant-rate-row",
+            "scope": "tenant",
+            "tenant_id": "tenant-a",
+            "capability": "scene_prompt",
+            "unit": "call",
+            "credits_per_unit": "2.0000",
+            "active": True,
+        }
+    ]

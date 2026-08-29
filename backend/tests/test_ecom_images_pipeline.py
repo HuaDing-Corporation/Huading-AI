@@ -243,6 +243,7 @@ def test_terminal_cutout_replay_returns_the_stored_success_without_new_side_effe
         db.commit()
     with auth_db() as db:
         assert try_finalize_ecom_operation(db, billing_operation_id=operation_id) is not None
+        db.commit()
     with auth_db() as db:
         counts_before = (
             db.scalar(select(func.count()).select_from(VideoTask)),
@@ -315,6 +316,7 @@ def test_terminal_cutout_replay_returns_the_stored_failure_without_new_side_effe
         db.commit()
     with auth_db() as db:
         assert try_finalize_ecom_operation(db, billing_operation_id=operation_id) is not None
+        db.commit()
     with auth_db() as db:
         counts_before = (
             db.scalar(select(func.count()).select_from(VideoTask)),

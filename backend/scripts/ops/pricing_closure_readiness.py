@@ -15,8 +15,23 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.models import BillingOperation, CreditRate, Subscription, UsageRecord
 from app.db.session import SessionLocal
-from app.services import billing_operations, brand_voice_orders, provider_voice_registry
+from app.services import billing_operations, brand_voice_orders, pricing, provider_voice_registry
 from app.services.pricing import PricingInvariantError, validate_credit_rate_candidate
+
+_REQUIRED_POLICY_DEFAULTS = {
+    "script_generate": Decimal("1.0000"),
+    "scene_prompt": Decimal("30.0000"),
+    "ecom_cutout": Decimal("80.0000"),
+    "ecom_model": Decimal("80.0000"),
+    "video_create": Decimal("100.0000"),
+}
+_REQUIRED_RATE_FALLBACKS = {
+    ("avatar", "second"): Decimal("180.0000"),
+    ("video", "second"): Decimal("100.0000"),
+    ("video_gen", "second"): Decimal("100.0000"),
+    ("image", "image"): Decimal("80.0000"),
+    ("reverse_prompt", "call"): Decimal("100.0000"),
+}
 
 
 @dataclass(frozen=True)
@@ -32,6 +47,17 @@ class InventoryId:
 
 
 @dataclass(frozen=True)
+class RateRow:
+    id: str
+    scope: str
+    tenant_id: str | None
+    capability: str
+    unit: str
+    credits_per_unit: str
+    active: bool
+
+
+@dataclass(frozen=True)
 class LegacySlotWriteSurface:
     surface: str
     state: str
@@ -43,9 +69,12 @@ class PricingReadinessReport:
     production_mode: bool
     migration_revision: str | None
     generated_at: datetime
+    platform_rates: tuple[RateRow, ...]
+    tenant_rates: tuple[RateRow, ...]
     platform_rate_ids: tuple[str, ...]
     tenant_rate_ids: tuple[str, ...]
     inventory_unknown_ids: tuple[InventoryId, ...]
+    provider_inventory: dict[str, tuple[str, ...]]
     legacy_slot_write_surfaces: tuple[LegacySlotWriteSurface, ...]
     blockers: tuple[PricingReadinessBlocker, ...]
 
@@ -56,9 +85,14 @@ class PricingReadinessReport:
             "production_mode": self.production_mode,
             "migration_revision": self.migration_revision,
             "generated_at": self.generated_at.isoformat(),
+            "platform_rates": [asdict(item) for item in self.platform_rates],
+            "tenant_rates": [asdict(item) for item in self.tenant_rates],
             "platform_rate_ids": list(self.platform_rate_ids),
             "tenant_rate_ids": list(self.tenant_rate_ids),
             "inventory_unknown_ids": [asdict(item) for item in self.inventory_unknown_ids],
+            "provider_inventory": {
+                key: list(value) for key, value in self.provider_inventory.items()
+            },
             "legacy_slot_write_surfaces": [
                 asdict(item) for item in self.legacy_slot_write_surfaces
             ],
@@ -75,7 +109,11 @@ def _migration_revision(db: Session) -> str | None:
 
 def _rate_blockers(
     db: Session,
-) -> tuple[list[PricingReadinessBlocker], tuple[str, ...], tuple[str, ...]]:
+) -> tuple[
+    list[PricingReadinessBlocker],
+    tuple[RateRow, ...],
+    tuple[RateRow, ...],
+]:
     rows = list(db.scalars(select(CreditRate).order_by(CreditRate.id)))
     blockers: list[PricingReadinessBlocker] = []
     for row in rows:
@@ -108,11 +146,48 @@ def _rate_blockers(
                     detail="More than one active rate has the same scope, capability, and unit.",
                 )
             )
+    safe_rows = tuple(
+        RateRow(
+            id=row.id,
+            scope="platform" if row.tenant_id is None else "tenant",
+            tenant_id=row.tenant_id,
+            capability=row.capability,
+            unit=row.unit,
+            credits_per_unit=format(Decimal(row.credits_per_unit), "f"),
+            active=bool(row.is_active),
+        )
+        for row in rows
+    )
     return (
         blockers,
-        tuple(row.id for row in rows if row.tenant_id is None),
-        tuple(row.id for row in rows if row.tenant_id is not None),
+        tuple(row for row in safe_rows if row.scope == "platform"),
+        tuple(row for row in safe_rows if row.scope == "tenant"),
     )
+
+
+def _policy_default_blockers() -> list[PricingReadinessBlocker]:
+    blockers: list[PricingReadinessBlocker] = []
+    for operation, expected in _REQUIRED_POLICY_DEFAULTS.items():
+        policy = pricing.PRICING_POLICIES.get(operation)
+        if policy is None or Decimal(policy.default_unit_credits) != expected:
+            blockers.append(
+                PricingReadinessBlocker(
+                    code="PRICING_POLICY_DEFAULT_MISMATCH",
+                    record_ids=(operation,),
+                    detail="Configured policy default differs from the pricing-closure contract.",
+                )
+            )
+    for (capability, unit), expected in _REQUIRED_RATE_FALLBACKS.items():
+        actual = pricing.DEFAULT_RATE_CREDITS.get((capability, unit))
+        if actual is None or Decimal(actual) != expected:
+            blockers.append(
+                PricingReadinessBlocker(
+                    code="DEFAULT_RATE_FALLBACK_MISMATCH",
+                    record_ids=(f"{capability}/{unit}",),
+                    detail="Configured fallback differs from the pricing-closure contract.",
+                )
+            )
+    return blockers
 
 
 def _billing_blockers(db: Session) -> list[PricingReadinessBlocker]:
@@ -196,12 +271,12 @@ def _inventory_blockers(
     db: Session,
     *,
     production_mode: bool,
-) -> tuple[list[PricingReadinessBlocker], tuple[InventoryId, ...]]:
+) -> tuple[list[PricingReadinessBlocker], tuple[InventoryId, ...], dict[str, tuple[str, ...]]]:
     inventory = provider_voice_registry.provider_voice_inventory(db)
     unknown = tuple(InventoryId(provider_voice_id=value) for value in inventory.unknown_ids)
     blockers: list[PricingReadinessBlocker] = []
     if not production_mode:
-        return blockers, unknown
+        return blockers, unknown, _safe_inventory(inventory)
     if inventory.unknown_ids:
         blockers.append(
             PricingReadinessBlocker(
@@ -244,7 +319,21 @@ def _inventory_blockers(
                 detail=row.reason,
             )
         )
-    return blockers, unknown
+    return blockers, unknown, _safe_inventory(inventory)
+
+
+def _safe_inventory(inventory) -> dict[str, tuple[str, ...]]:
+    return {
+        "official_configured_ids": inventory.official_configured_ids,
+        "legacy_configured_ids": inventory.legacy_configured_ids,
+        "provider_config_ids": inventory.provider_config_ids,
+        "brand_voice_ids": inventory.brand_voice_ids,
+        "active_official_registry_ids": inventory.active_official_registry_ids,
+        "retired_official_registry_ids": inventory.retired_official_registry_ids,
+        "active_customer_registry_ids": inventory.active_customer_registry_ids,
+        "retired_customer_registry_ids": inventory.retired_customer_registry_ids,
+        "registry_blocker_ids": tuple(item.row_id for item in inventory.registry_blockers),
+    }
 
 
 def pricing_closure_readiness(
@@ -253,8 +342,10 @@ def pricing_closure_readiness(
     production_mode: bool,
 ) -> PricingReadinessReport:
     """Audit pricing closure without acquiring locks, mutating rows, or repairing data."""
-    rate_blockers, platform_rate_ids, tenant_rate_ids = _rate_blockers(db)
-    inventory_blockers, unknown = _inventory_blockers(db, production_mode=production_mode)
+    rate_blockers, platform_rates, tenant_rates = _rate_blockers(db)
+    inventory_blockers, unknown, inventory = _inventory_blockers(
+        db, production_mode=production_mode
+    )
     surfaces = _legacy_slot_write_surfaces()
     surface_blockers = [
         PricingReadinessBlocker(
@@ -268,6 +359,7 @@ def pricing_closure_readiness(
     # Unknown IDs lead: operations tooling can safely make a deterministic first decision.
     blockers = tuple(
         inventory_blockers
+        + _policy_default_blockers()
         + rate_blockers
         + _billing_blockers(db)
         + surface_blockers
@@ -277,9 +369,12 @@ def pricing_closure_readiness(
         production_mode=production_mode,
         migration_revision=_migration_revision(db),
         generated_at=datetime.now(UTC),
-        platform_rate_ids=platform_rate_ids,
-        tenant_rate_ids=tenant_rate_ids,
+        platform_rates=platform_rates,
+        tenant_rates=tenant_rates,
+        platform_rate_ids=tuple(item.id for item in platform_rates),
+        tenant_rate_ids=tuple(item.id for item in tenant_rates),
         inventory_unknown_ids=unknown,
+        provider_inventory=inventory,
         legacy_slot_write_surfaces=surfaces,
         blockers=blockers,
     )
@@ -306,6 +401,13 @@ def main(argv: list[str] | None = None) -> int:
             db.rollback()
             return 0 if report.ready else 2
 
+        configured_ids = tuple(settings.engine_doubao_official_voice_ids)
+        provider_voice_registry.lock_provider_voice_registry_snapshot(
+            db,
+            provider_voice_ids=configured_ids,
+        )
+        # Re-read only after the global registry snapshot lock is held.  The
+        # exact-list writer takes the same lock and remains in this transaction.
         inventory = provider_voice_registry.provider_voice_inventory(db)
         if inventory.unknown_ids or inventory.registry_blockers:
             print(
@@ -327,7 +429,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         provider_voice_registry.register_official_provider_voice_ids(
             db,
-            provider_voice_ids=settings.engine_doubao_official_voice_ids,
+            provider_voice_ids=configured_ids,
         )
         db.commit()
         print(json.dumps({"registered_official_ids": list(inventory.official_configured_ids)}))
