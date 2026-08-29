@@ -118,6 +118,48 @@ def test_readiness_reports_invalid_and_duplicate_active_rates_with_record_ids(db
     }
 
 
+def test_readiness_cli_duplicate_rates_emit_json_blocker_with_both_ids(
+    db_session,
+    monkeypatch,
+    capsys,
+) -> None:
+    from scripts.ops import pricing_closure_readiness as readiness
+
+    db_session.execute(text("DROP INDEX uq_credit_rates_platform_active_capability_unit"))
+    db_session.add_all(
+        [
+            CreditRate(
+                id="cli-duplicate-rate-a",
+                capability="avatar",
+                unit="second",
+                credits_per_unit=Decimal("1"),
+                is_active=True,
+            ),
+            CreditRate(
+                id="cli-duplicate-rate-b",
+                capability="avatar",
+                unit="second",
+                credits_per_unit=Decimal("2"),
+                is_active=True,
+            ),
+        ]
+    )
+    db_session.commit()
+    monkeypatch.setattr(readiness, "SessionLocal", _session_scope(db_session))
+
+    exit_code = readiness.main([])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert (
+        "DUPLICATE_ACTIVE_CREDIT_RATE",
+        ("cli-duplicate-rate-a", "cli-duplicate-rate-b"),
+    ) in {
+        (blocker["code"], tuple(blocker["record_ids"]))
+        for blocker in payload["blockers"]
+    }
+
+
 def test_readiness_reports_official_config_registry_mismatch_and_retired_slot_surface(
     db_session,
     monkeypatch,
@@ -216,40 +258,101 @@ def test_readiness_lists_safe_platform_and_tenant_rate_rows(db_session) -> None:
 
 
 def test_readiness_cli_default_audit_emits_json_and_rolls_back(
-    db_session, monkeypatch, capsys
+    db_session,
+    monkeypatch,
+    capsys,
+    pricing_closure_snapshot,
+    seed_pricing_closure_state,
 ) -> None:
     from scripts.ops import pricing_closure_readiness as readiness
 
-    db_session.add(
-        ProviderConfig(
-            capability="voice_clone",
-            provider="doubao-voice-clone",
-            config={"api_key": "cli-audit-secret"},
-            is_active=False,
-        )
-    )
-    db_session.commit()
-    before = db_session.scalar(select(CreditRate.id))
+    sensitive = seed_pricing_closure_state(db_session)
+    before = pricing_closure_snapshot(db_session)
+    assert all(before.values())
     monkeypatch.setattr(readiness, "SessionLocal", _session_scope(db_session))
 
     exit_code = readiness.main([])
 
-    payload = json.loads(capsys.readouterr().out)
-    assert exit_code in {0, 2}
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+    assert exit_code == 2
     assert payload["production_mode"] is True
-    assert "cli-audit-secret" not in json.dumps(payload)
-    assert db_session.scalar(select(CreditRate.id)) == before
+    assert sensitive["secret"] not in output
+    assert sensitive["source_url"] not in output
+    assert "exact-config-content" not in output
+    assert "usage-trace-secret" not in output
+    assert pricing_closure_snapshot(db_session) == before
+
+
+@pytest.mark.parametrize(
+    ("rate_id", "stored_value"),
+    [
+        ("historic-nan-rate-cli", "NaN"),
+        ("historic-infinity-rate-cli", "Infinity"),
+        ("historic-negative-infinity-rate-cli", "-Infinity"),
+        ("historic-negative-rate-cli", "-1"),
+        ("historic-zero-rate-cli", "0"),
+    ],
+)
+def test_readiness_cli_corrupt_rate_emits_machine_readable_blocker(
+    db_session,
+    monkeypatch,
+    capsys,
+    rate_id: str,
+    stored_value: str,
+) -> None:
+    from scripts.ops import pricing_closure_readiness as readiness
+
+    db_session.execute(text("PRAGMA ignore_check_constraints = ON"))
+    db_session.execute(
+        text(
+            "INSERT INTO credit_rates "
+            "(id, capability, unit, credits_per_unit, is_active, effective_at) "
+            "VALUES (:id, 'image', 'image', :value, 0, CURRENT_TIMESTAMP)"
+        ),
+        {"id": rate_id, "value": stored_value},
+    )
+    db_session.execute(text("PRAGMA ignore_check_constraints = OFF"))
+    db_session.commit()
+    monkeypatch.setattr(readiness, "SessionLocal", _session_scope(db_session))
+
+    exit_code = readiness.main([])
+
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+    assert exit_code == 2
+    assert ("INVALID_CREDIT_RATE", (rate_id,)) in {
+        (blocker["code"], tuple(blocker["record_ids"]))
+        for blocker in payload["blockers"]
+    }
+    assert payload["platform_rates"] == [
+        {
+            "id": rate_id,
+            "scope": "platform",
+            "tenant_id": None,
+            "capability": "image",
+            "unit": "image",
+            "credits_per_unit": "invalid",
+            "active": False,
+        }
+    ]
+    if stored_value in {"NaN", "Infinity", "-Infinity"}:
+        assert stored_value not in output
 
 
 def test_readiness_cli_unknown_inventory_aborts_without_mutation(
     db_session,
     monkeypatch,
     capsys,
+    pricing_closure_snapshot,
+    seed_pricing_closure_state,
 ) -> None:
     from scripts.ops import pricing_closure_readiness as readiness
 
+    sensitive = seed_pricing_closure_state(db_session)
     db_session.add(
         ProviderConfig(
+            id="cli-unknown-history-config",
             capability="voice_clone",
             provider="doubao-voice-clone",
             config={"used_speaker_ids": {"unknown-cli-id": "historic"}},
@@ -257,15 +360,106 @@ def test_readiness_cli_unknown_inventory_aborts_without_mutation(
         )
     )
     db_session.commit()
-    before = len(db_session.scalars(select(ProviderConfig)).all())
+    monkeypatch.setattr(
+        readiness.settings,
+        "engine_doubao_official_voice_ids",
+        ["cli-allowed-official-id"],
+    )
+    before = pricing_closure_snapshot(db_session)
+    before_registry_ids = {
+        row[0] for row in before["provider_voice_registry"]
+    }
     monkeypatch.setattr(readiness, "SessionLocal", _session_scope(db_session))
 
     exit_code = readiness.main(["register-official"])
 
-    payload = json.loads(capsys.readouterr().out)
+    output = capsys.readouterr().out
+    payload = json.loads(output)
     assert exit_code == 2
-    assert payload["unknown_ids"] == ["unknown-cli-id"]
-    assert len(db_session.scalars(select(ProviderConfig)).all()) == before
+    assert payload == {"error": "OFFICIAL_REGISTRATION_ABORTED"}
+    assert "unknown-cli-id" not in output
+    assert sensitive["secret"] not in output
+    assert sensitive["source_url"] not in output
+    after = pricing_closure_snapshot(db_session)
+    assert after == before
+    assert {row[0] for row in after["provider_voice_registry"]} == before_registry_ids
+
+
+def test_register_official_cli_exact_list_has_only_expected_delta_and_is_idempotent(
+    db_session,
+    monkeypatch,
+    capsys,
+    pricing_closure_snapshot,
+    seed_pricing_closure_state,
+) -> None:
+    from scripts.ops import pricing_closure_readiness as readiness
+
+    sensitive = seed_pricing_closure_state(db_session)
+    allowed_ids = ("cli-official-a", "cli-official-b")
+    monkeypatch.setattr(
+        readiness.settings,
+        "engine_doubao_official_voice_ids",
+        list(reversed(allowed_ids)),
+    )
+    monkeypatch.setattr(readiness, "SessionLocal", _session_scope(db_session))
+    before = pricing_closure_snapshot(db_session)
+    before_registry = {row[2]: row for row in before["provider_voice_registry"]}
+    assert tuple(before_registry) == (sensitive["customer_provider_id"],)
+
+    first_exit_code = readiness.main(["register-official"])
+
+    first_output = capsys.readouterr().out
+    first_payload = json.loads(first_output)
+    assert first_exit_code == 0
+    assert first_payload == {"registered_official_ids": list(allowed_ids)}
+    for forbidden in (
+        sensitive["secret"],
+        sensitive["source_url"],
+        sensitive["customer_provider_id"],
+        sensitive["other_provider"],
+        "exact-config-content",
+        "usage-trace-secret",
+    ):
+        assert forbidden not in first_output
+
+    after_first = pricing_closure_snapshot(db_session)
+    for table, rows in before.items():
+        if table != "provider_voice_registry":
+            assert after_first[table] == rows
+    after_registry = {
+        row[2]: row for row in after_first["provider_voice_registry"]
+    }
+    assert set(after_registry) == {
+        sensitive["customer_provider_id"],
+        *allowed_ids,
+    }
+    assert after_registry[sensitive["customer_provider_id"]] == before_registry[
+        sensitive["customer_provider_id"]
+    ]
+    for provider_voice_id in allowed_ids:
+        row = after_registry[provider_voice_id]
+        assert row[1:7] == (
+            "doubao-voice-clone",
+            provider_voice_id,
+            "official",
+            None,
+            None,
+            "active",
+        )
+
+    second_exit_code = readiness.main(["register-official"])
+
+    second_output = capsys.readouterr().out
+    assert second_exit_code == 0
+    assert json.loads(second_output) == first_payload
+    assert pricing_closure_snapshot(db_session) == after_first
+    for forbidden in (
+        sensitive["secret"],
+        sensitive["source_url"],
+        sensitive["customer_provider_id"],
+        sensitive["other_provider"],
+    ):
+        assert forbidden not in second_output
 
 
 @pytest.mark.parametrize(

@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
+from contextlib import redirect_stdout
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from io import StringIO
 from pathlib import Path
 
 from alembic.runtime.migration import MigrationContext
@@ -130,21 +132,27 @@ def _rate_blockers(
         )
     )
     blockers: list[PricingReadinessBlocker] = []
+    safe_values: dict[str, str] = {}
     for row in rows:
         try:
+            value = Decimal(str(row.credits_per_unit))
+            if not value.is_finite() or value <= 0:
+                raise PricingInvariantError("stored credit rate must be finite and positive")
             validate_credit_rate_candidate(
                 tenant_id=row.tenant_id,
                 capability=row.capability,
                 unit=row.unit,
-                credits_per_unit=Decimal(str(row.credits_per_unit)),
+                credits_per_unit=value,
                 is_active=bool(row.is_active),
             )
-        except (PricingInvariantError, ArithmeticError, ValueError) as exc:
+            safe_values[row.id] = format(value.quantize(Decimal("0.0001")), "f")
+        except (PricingInvariantError, ArithmeticError, ValueError):
+            safe_values[row.id] = "invalid"
             blockers.append(
                 PricingReadinessBlocker(
                     code="INVALID_CREDIT_RATE",
                     record_ids=(row.id,),
-                    detail=str(exc),
+                    detail="Stored credit rate is invalid.",
                 )
             )
     active_groups: dict[tuple[str | None, str, str], list[str]] = defaultdict(list)
@@ -167,9 +175,7 @@ def _rate_blockers(
             tenant_id=row.tenant_id,
             capability=row.capability,
             unit=row.unit,
-            credits_per_unit=format(
-                Decimal(str(row.credits_per_unit)).quantize(Decimal("0.0001")), "f"
-            ),
+            credits_per_unit=safe_values[row.id],
             active=bool(row.is_active),
         )
         for row in rows
@@ -412,42 +418,34 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     with SessionLocal() as db:
         if args.mode == "audit":
-            report = pricing_closure_readiness(db, production_mode=True)
+            # The CLI reserves stdout for its single machine-readable document.
+            # Some shared invariant validators log diagnostics to stdout; the
+            # report already contains their fixed blocker code and safe row IDs.
+            with redirect_stdout(StringIO()):
+                report = pricing_closure_readiness(db, production_mode=True)
             print(json.dumps(report.as_dict(), ensure_ascii=False, sort_keys=True))
             db.rollback()
             return 0 if report.ready else 2
 
         configured_ids = tuple(settings.engine_doubao_official_voice_ids)
-        provider_voice_registry.lock_provider_voice_registry_snapshot(
-            db,
-            provider_voice_ids=configured_ids,
-        )
-        # Re-read only after the global registry snapshot lock is held.  The
-        # exact-list writer takes the same lock and remains in this transaction.
-        inventory = provider_voice_registry.provider_voice_inventory(db)
-        if inventory.unknown_ids or inventory.registry_blockers:
-            print(
-                json.dumps(
-                    {
-                        "error": (
-                            "official registration aborted: unknown or invalid provider inventory"
-                        ),
-                        "unknown_ids": list(inventory.unknown_ids),
-                        "registry_blocker_ids": [
-                            item.row_id for item in inventory.registry_blockers
-                        ],
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
+        with redirect_stdout(StringIO()):
+            provider_voice_registry.lock_provider_voice_registry_snapshot(
+                db,
+                provider_voice_ids=configured_ids,
             )
+            # Re-read only after the global registry snapshot lock is held.  The
+            # exact-list writer takes the same lock and remains in this transaction.
+            inventory = provider_voice_registry.provider_voice_inventory(db)
+        if inventory.unknown_ids or inventory.registry_blockers:
             db.rollback()
+            print(json.dumps({"error": "OFFICIAL_REGISTRATION_ABORTED"}))
             return 2
-        provider_voice_registry.register_official_provider_voice_ids(
-            db,
-            provider_voice_ids=configured_ids,
-        )
-        db.commit()
+        with redirect_stdout(StringIO()):
+            provider_voice_registry.register_official_provider_voice_ids(
+                db,
+                provider_voice_ids=configured_ids,
+            )
+            db.commit()
         print(json.dumps({"registered_official_ids": list(inventory.official_configured_ids)}))
         return 0
 
