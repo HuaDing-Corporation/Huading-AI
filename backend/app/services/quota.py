@@ -5,14 +5,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.db.models import (
     Asset,
+    BillingOperation,
     CreditRate,
+    CreditRefundGrant,
     ReversePromptJob,
     Subscription,
     UsageRecord,
@@ -60,6 +62,18 @@ class Reservation:
     usage_record: UsageRecord
     estimated_seconds: int
     estimated_credits: Decimal
+
+
+@dataclass(frozen=True)
+class TenantQuotaSnapshot:
+    has_active_subscription: bool
+    active_subscription_id: str | None
+    total: int
+    used: int
+    reserved: int
+    remaining: int
+    manual_fulfillment_held_credits: int
+    pending_refund_credits: int
 
 
 def active_subscription(db: Session, tenant_id: str) -> Subscription:
@@ -288,6 +302,62 @@ def quota_payload(subscription: Subscription) -> dict[str, int]:
         "reserved": subscription.quota_credits_reserved,
         "remaining": remaining_credits(subscription),
     }
+
+
+def tenant_quota_snapshot(db: Session, *, tenant_id: str) -> TenantQuotaSnapshot:
+    now = datetime.now(UTC)
+    subscription = db.scalar(
+        select(Subscription)
+        .where(
+            Subscription.tenant_id == tenant_id,
+            Subscription.status == "active",
+            Subscription.period_start <= now,
+            Subscription.period_end >= now,
+        )
+        .order_by(Subscription.period_end.desc(), Subscription.id)
+        .limit(1)
+    )
+    held_credits = db.scalar(
+        select(func.coalesce(func.sum(BillingOperation.requested_credits), 0)).where(
+            BillingOperation.tenant_id == tenant_id,
+            BillingOperation.status == "in_progress",
+            BillingOperation.operation.in_(
+                (
+                    "doubao_brand_voice_order_create",
+                    "doubao_brand_voice_order_renew",
+                )
+            ),
+            select(UsageRecord.id)
+            .where(
+                UsageRecord.billing_operation_id == BillingOperation.id,
+                UsageRecord.status == "reserved",
+            )
+            .exists(),
+        )
+    )
+    pending_refund_credits = db.scalar(
+        select(func.coalesce(func.sum(CreditRefundGrant.amount_credits), 0)).where(
+            CreditRefundGrant.tenant_id == tenant_id,
+            CreditRefundGrant.status == "pending",
+        )
+    )
+    if subscription is None:
+        total = used = reserved = remaining = 0
+    else:
+        total = int(subscription.quota_credits_total)
+        used = int(subscription.quota_credits_used)
+        reserved = int(subscription.quota_credits_reserved)
+        remaining = total - used - reserved
+    return TenantQuotaSnapshot(
+        has_active_subscription=subscription is not None,
+        active_subscription_id=subscription.id if subscription is not None else None,
+        total=total,
+        used=used,
+        reserved=reserved,
+        remaining=remaining,
+        manual_fulfillment_held_credits=int(held_credits or 0),
+        pending_refund_credits=int(pending_refund_credits or 0),
+    )
 
 
 def _rate(

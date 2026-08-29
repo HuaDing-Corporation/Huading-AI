@@ -46,6 +46,7 @@ from app.schemas.admin_console import (
 )
 from app.services import ecom_replicate, quota, reverse_prompt
 from app.services.plan_access import is_platform_tenant
+from app.services.subscription import lock_tenant_for_subscription_lifecycle
 from app.services.voice_slots import (
     DOUBAO_VOICE_CLONE_PROVIDER,
     speaker_ids,
@@ -237,6 +238,7 @@ def adjust_credits(
     reason: str,
 ) -> AdminCreditsAdjustResponse:
     tenant_item_or_404(db, tenant_id=tenant_id)
+    lock_tenant_for_subscription_lifecycle(db, tenant_id=tenant_id)
     subscription = _active_subscription_for_update(db, tenant_id=tenant_id)
     before = subscription_snapshot(subscription)
     new_total = before.total + delta
@@ -275,6 +277,7 @@ def change_plan(
     reason: str | None,
 ) -> AdminPlanChangeResponse:
     tenant_item_or_404(db, tenant_id=tenant_id)
+    lock_tenant_for_subscription_lifecycle(db, tenant_id=tenant_id)
     subscription = _active_subscription_for_update(db, tenant_id=tenant_id)
     current_plan = db.get(Plan, subscription.plan_id)
     target_plan = db.scalar(
