@@ -17,7 +17,9 @@ from app.db import models
 from app.db.models import (
     AdminAuditLog,
     Asset,
+    BillingOperation,
     BrandVoice,
+    BrandVoiceOrder,
     EcomReplicateJob,
     EcomReplicateOutput,
     Plan,
@@ -30,6 +32,22 @@ from app.db.models import (
     VideoTask,
 )
 from app.main import app
+
+
+class _ManualOrderAudioStorage:
+    def __init__(self) -> None:
+        self.presign_calls: list[tuple[str, int]] = []
+
+    def presign_get_url(
+        self,
+        key: str,
+        *,
+        expires_in: int,
+        download_filename: str | None = None,
+    ) -> str:
+        del download_filename
+        self.presign_calls.append((key, expires_in))
+        return f"https://storage.test/{key}?ttl={expires_in}"
 
 
 @pytest.fixture
@@ -162,6 +180,98 @@ def test_manual_order_resolve_rejects_mixed_action_fields(
     )
 
     assert response.status_code == 422
+
+
+def test_manual_order_audio_url_is_detail_only_and_access_is_audited(
+    auth_context,
+    auth_db,
+    platform_acme,
+) -> None:
+    from app.api.deps import get_object_storage
+
+    now = datetime.now(UTC)
+    storage_key = f"tenants/{auth_context['tenant_id']}/manual-orders/source.wav"
+    with auth_db() as db:
+        db.add(
+            Asset(
+                id="manual-audio-audit-asset",
+                tenant_id=auth_context["tenant_id"],
+                type="audio",
+                source="upload",
+                storage_key=storage_key,
+                mime_type="audio/wav",
+                duration_ms=10_000,
+                status="ready",
+            )
+        )
+        db.add(
+            BillingOperation(
+                id="manual-audio-audit-billing",
+                tenant_id=auth_context["tenant_id"],
+                user_id=auth_context["user_id"],
+                operation="doubao_brand_voice_order_create",
+                idempotency_key="00000000-0000-0000-0000-000000000001",
+                request_hash="a" * 64,
+                quote_hash="b" * 64,
+                pricing_snapshot={},
+                requested_credits=30_000,
+                settled_credits=0,
+                released_credits=0,
+                status="in_progress",
+            )
+        )
+        db.flush()
+        db.add(
+            BrandVoiceOrder(
+                id="manual-audio-audit-order",
+                tenant_id=auth_context["tenant_id"],
+                user_id=auth_context["user_id"],
+                order_type="create",
+                requested_name="Audit voice",
+                source_audio_asset_id="manual-audio-audit-asset",
+                source_metadata_snapshot={},
+                consent_confirmed_at=now,
+                billing_operation_id="manual-audio-audit-billing",
+                status="awaiting_fulfillment",
+            )
+        )
+        db.commit()
+
+    storage = _ManualOrderAudioStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    client = TestClient(app)
+    try:
+        listing = client.get(
+            "/api/v1/admin/console/brand-voice-orders",
+            headers=auth_context["headers"],
+        )
+        assert listing.status_code == 200
+        assert "source_audio_url" not in listing.json()["data"]["items"][0]
+        assert storage.presign_calls == []
+        with auth_db() as db:
+            assert db.scalar(select(func.count()).select_from(AdminAuditLog)) == 0
+
+        detail = client.get(
+            "/api/v1/admin/console/brand-voice-orders/manual-audio-audit-order",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert detail.status_code == 200
+    assert detail.json()["data"]["source_audio_url"].startswith(
+        f"https://storage.test/{storage_key}"
+    )
+    assert len(storage.presign_calls) == 1
+    assert storage.presign_calls[0][0] == storage_key
+    assert 0 < storage.presign_calls[0][1] <= 900
+    with auth_db() as db:
+        audit = db.scalar(select(AdminAuditLog))
+        assert audit.actor_user_id == auth_context["user_id"]
+        assert audit.actor_tenant_id == auth_context["tenant_id"]
+        assert audit.action == "brand_voice_order_audio_access"
+        assert audit.target_tenant_id == auth_context["tenant_id"]
+        assert audit.target_id == "manual-audio-audit-order"
 
 
 @pytest.mark.parametrize("role", ["creator", "ops"])

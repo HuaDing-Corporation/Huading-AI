@@ -19,6 +19,7 @@ from app.db.models import (
 )
 
 DOUBAO_VOICE_CLONE_PROVIDER = "doubao-voice-clone"
+_REGISTRY_GLOBAL_LOCK_ID = "__registry_global__"
 
 
 @dataclass(frozen=True)
@@ -100,8 +101,67 @@ def lock_provider_voice_ids(
         )
 
 
+def lock_provider_voice_registry_snapshot(
+    db: Session,
+    *,
+    provider_voice_ids: Sequence[str] = (),
+) -> None:
+    """Serialize registry readers/writers, then lock dependent rows deterministically."""
+    lock_provider_voice_ids(
+        db,
+        provider=DOUBAO_VOICE_CLONE_PROVIDER,
+        provider_voice_ids=[_REGISTRY_GLOBAL_LOCK_ID],
+    )
+    lock_provider_voice_ids(
+        db,
+        provider=DOUBAO_VOICE_CLONE_PROVIDER,
+        provider_voice_ids=provider_voice_ids,
+    )
+    list(
+        db.scalars(
+            select(BrandVoiceProviderId)
+            .order_by(BrandVoiceProviderId.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    )
+    list(
+        db.scalars(
+            select(ProviderConfig)
+            .order_by(ProviderConfig.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    )
+
+
 def _registry_rows(db: Session) -> list[BrandVoiceProviderId]:
     return list(db.scalars(select(BrandVoiceProviderId)))
+
+
+def _customer_binding_reason(
+    row: BrandVoiceProviderId,
+    *,
+    voice: BrandVoice,
+    order: BrandVoiceOrder,
+) -> str | None:
+    if voice.provider != DOUBAO_VOICE_CLONE_PROVIDER:
+        return "customer_voice_provider_not_canonical"
+    if voice.owner_user_id is None:
+        return "customer_voice_owner_missing"
+    if voice.status != "ready":
+        return "customer_voice_not_ready"
+    if voice.tenant_id != order.tenant_id:
+        return "customer_binding_tenant_mismatch"
+    if voice.owner_user_id != order.user_id:
+        return "customer_binding_user_mismatch"
+    if order.status != "fulfilled":
+        return "customer_order_not_fulfilled"
+    if order.fulfilled_brand_voice_id != voice.id:
+        return "customer_order_voice_mismatch"
+    if order.fulfilled_provider_id != row.id:
+        return "customer_order_provider_mismatch"
+    return None
 
 
 def _registry_blocker_reason(
@@ -109,6 +169,7 @@ def _registry_blocker_reason(
     *,
     voices_by_id: dict[str, BrandVoice],
     orders_by_id: dict[str, BrandVoiceOrder],
+    registry_rows: Sequence[BrandVoiceProviderId],
 ) -> str | None:
     raw_provider_id = str(row.normalized_provider_id)
     if not raw_provider_id.strip() or raw_provider_id != raw_provider_id.strip():
@@ -131,9 +192,35 @@ def _registry_blocker_reason(
     order = orders_by_id.get(row.first_order_id)
     if voice is None or order is None:
         return "customer_binding_target_missing"
-    if voice.tenant_id != order.tenant_id:
-        return "customer_binding_tenant_mismatch"
-    return None
+    binding_reason = _customer_binding_reason(row, voice=voice, order=order)
+    if binding_reason is not None:
+        return binding_reason
+    current_provider_id = str(voice.speaker_id or "")
+    if row.status == "active":
+        if current_provider_id != row.normalized_provider_id:
+            return "active_customer_speaker_mismatch"
+        return None
+    if current_provider_id == row.normalized_provider_id:
+        return "retired_customer_still_current"
+    for active_row in registry_rows:
+        if (
+            active_row.id == row.id
+            or active_row.provider != DOUBAO_VOICE_CLONE_PROVIDER
+            or active_row.kind != "customer"
+            or active_row.status != "active"
+            or active_row.brand_voice_id != voice.id
+            or active_row.normalized_provider_id != current_provider_id
+            or active_row.first_order_id is None
+        ):
+            continue
+        active_order = orders_by_id.get(active_row.first_order_id)
+        if active_order is not None and _customer_binding_reason(
+            active_row,
+            voice=voice,
+            order=active_order,
+        ) is None:
+            return None
+    return "retired_customer_current_binding_missing"
 
 
 def provider_voice_inventory(db: Session) -> ProviderVoiceInventory:
@@ -159,11 +246,13 @@ def provider_voice_inventory(db: Session) -> ProviderVoiceInventory:
         for status in ("active", "retired")
     }
     registry_blockers: list[ProviderVoiceRegistryBlocker] = []
-    for row in _registry_rows(db):
+    registry_rows = _registry_rows(db)
+    for row in registry_rows:
         reason = _registry_blocker_reason(
             row,
             voices_by_id=voices_by_id,
             orders_by_id=orders_by_id,
+            registry_rows=registry_rows,
         )
         if reason is not None:
             registry_blockers.append(
@@ -242,14 +331,19 @@ def _is_valid_customer_row(db: Session, row: BrandVoiceProviderId) -> bool:
         return False
     voice = db.get(BrandVoice, row.brand_voice_id)
     order = db.get(BrandVoiceOrder, row.first_order_id)
-    return bool(
-        row.provider == DOUBAO_VOICE_CLONE_PROVIDER
-        and row.normalized_provider_id == str(row.normalized_provider_id).strip()
-        and row.kind == "customer"
-        and row.status in {"active", "retired"}
-        and voice is not None
-        and order is not None
-        and voice.tenant_id == order.tenant_id
+    if voice is None or order is None:
+        return False
+    orders_by_id = {
+        candidate.id: candidate for candidate in db.scalars(select(BrandVoiceOrder))
+    }
+    return (
+        _registry_blocker_reason(
+            row,
+            voices_by_id={voice.id: voice},
+            orders_by_id=orders_by_id,
+            registry_rows=_registry_rows(db),
+        )
+        is None
     )
 
 
@@ -300,9 +394,8 @@ def claim_customer_provider_voice_id(
         else None
     )
     locked_ids = tuple(sorted({normalized, *([previous] if previous else [])}))
-    lock_provider_voice_ids(
+    lock_provider_voice_registry_snapshot(
         db,
-        provider=DOUBAO_VOICE_CLONE_PROVIDER,
         provider_voice_ids=locked_ids,
     )
 
@@ -367,9 +460,8 @@ def retire_customer_provider_voice_id(
     retired_at: datetime,
 ) -> BrandVoiceProviderId:
     normalized = normalize_provider_voice_id(provider_voice_id)
-    lock_provider_voice_ids(
+    lock_provider_voice_registry_snapshot(
         db,
-        provider=DOUBAO_VOICE_CLONE_PROVIDER,
         provider_voice_ids=[normalized],
     )
     rows = _registry_rows_for_update(db, provider_voice_id=normalized)
@@ -401,9 +493,8 @@ def register_official_provider_voice_ids(
             code="OFFICIAL_PROVIDER_VOICE_IDS_MISMATCH",
             status_code=422,
         )
-    lock_provider_voice_ids(
+    lock_provider_voice_registry_snapshot(
         db,
-        provider=DOUBAO_VOICE_CLONE_PROVIDER,
         provider_voice_ids=requested,
     )
     rows: list[BrandVoiceProviderId] = []
@@ -434,12 +525,20 @@ def register_official_provider_voice_ids(
     return rows
 
 
-def assert_doubao_registry_ready(db: Session) -> None:
+def assert_doubao_registry_ready(
+    db: Session,
+    *,
+    provider_voice_ids: Sequence[str] = (),
+) -> None:
     if str(getattr(settings, "environment", "")).strip().lower() not in {
         "prod",
         "production",
     }:
         return
+    lock_provider_voice_registry_snapshot(
+        db,
+        provider_voice_ids=provider_voice_ids,
+    )
     inventory = provider_voice_inventory(db)
     configured = set(inventory.official_configured_ids)
     registered = set(inventory.active_official_registry_ids)

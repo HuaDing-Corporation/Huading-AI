@@ -104,7 +104,7 @@ def test_aibrain_user_cooldown_model_has_one_row_per_real_user() -> None:
     }
 
 
-def test_aibrain_user_cooldown_revision_precedes_pricing_a1_head() -> None:
+def test_aibrain_user_cooldown_revision_precedes_current_migration_head() -> None:
     migration = _load_migration()
     assert migration.revision == "20260805_0034"
     assert migration.down_revision == "20260805_0033"
@@ -115,7 +115,8 @@ def test_aibrain_user_cooldown_revision_precedes_pricing_a1_head() -> None:
 
     script = ScriptDirectory.from_config(config)
     assert script.get_revision("20260805_0034").nextrev == {"20260806_0035"}
-    assert script.get_heads() == ["20260806_0035"]
+    assert script.get_revision("20260806_0035").nextrev == {"20260829_0036"}
+    assert script.get_heads() == ["20260829_0038"]
 
 
 def test_upgrade_creates_cooldown_contract_and_enforces_one_row_per_user() -> None:

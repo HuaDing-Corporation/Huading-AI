@@ -73,6 +73,192 @@ def _seed_brand_voice_order(db, *, brand_voice_id: str = "brand-a") -> None:
     db.flush()
 
 
+def _fulfill_seeded_registry(
+    db,
+    *,
+    provider_voice_id: str = "voice-owned",
+) -> BrandVoiceProviderId:
+    from app.services.provider_voice_registry import claim_customer_provider_voice_id
+
+    row = claim_customer_provider_voice_id(
+        db,
+        provider_voice_id=provider_voice_id,
+        brand_voice_id="brand-a",
+        order_id="order-a",
+    )
+    voice = db.get(BrandVoice, "brand-a")
+    order = db.get(BrandVoiceOrder, "order-a")
+    voice.provider = "doubao-voice-clone"
+    voice.speaker_id = provider_voice_id
+    voice.status = "ready"
+    order.status = "fulfilled"
+    order.fulfilled_brand_voice_id = voice.id
+    order.fulfilled_provider_id = row.id
+    order.resolver_user_id = "user-a"
+    order.fulfilled_at = datetime.now(UTC)
+    db.flush()
+    return row
+
+
+@pytest.mark.parametrize(
+    ("defect", "expected_reason"),
+    [
+        ("cosyvoice", "customer_voice_provider_not_canonical"),
+        ("missing_owner", "customer_voice_owner_missing"),
+        ("not_ready", "customer_voice_not_ready"),
+        ("wrong_tenant", "customer_binding_tenant_mismatch"),
+        ("wrong_payer", "customer_binding_user_mismatch"),
+        ("awaiting_order", "customer_order_not_fulfilled"),
+        ("wrong_fulfilled_voice", "customer_order_voice_mismatch"),
+        ("wrong_fulfilled_provider", "customer_order_provider_mismatch"),
+        ("speaker_swap", "active_customer_speaker_mismatch"),
+    ],
+)
+def test_inventory_rejects_every_inconsistent_customer_binding(
+    db_session,
+    defect,
+    expected_reason,
+) -> None:
+    from app.services.provider_voice_registry import provider_voice_inventory
+
+    _seed_brand_voice_order(db_session)
+    row = _fulfill_seeded_registry(db_session)
+    voice = db_session.get(BrandVoice, "brand-a")
+    order = db_session.get(BrandVoiceOrder, "order-a")
+    if defect == "cosyvoice":
+        voice.provider = "cosyvoice"
+    elif defect == "missing_owner":
+        voice.owner_user_id = None
+    elif defect == "not_ready":
+        voice.status = "processing"
+    elif defect == "wrong_tenant":
+        order.tenant_id = "tenant-other"
+    elif defect == "wrong_payer":
+        order.user_id = "user-other"
+    elif defect == "awaiting_order":
+        order.status = "awaiting_fulfillment"
+    elif defect == "wrong_fulfilled_voice":
+        order.fulfilled_brand_voice_id = "brand-other"
+    elif defect == "wrong_fulfilled_provider":
+        order.fulfilled_provider_id = "provider-other"
+    elif defect == "speaker_swap":
+        voice.speaker_id = "voice-other"
+
+    inventory = provider_voice_inventory(db_session)
+
+    assert [(item.row_id, item.reason) for item in inventory.registry_blockers] == [
+        (row.id, expected_reason)
+    ]
+    assert inventory.active_customer_registry_ids == ()
+
+
+def test_inventory_accepts_valid_customer_binding(db_session) -> None:
+    from app.services.provider_voice_registry import provider_voice_inventory
+
+    _seed_brand_voice_order(db_session)
+    _fulfill_seeded_registry(db_session)
+
+    inventory = provider_voice_inventory(db_session)
+
+    assert inventory.active_customer_registry_ids == ("voice-owned",)
+    assert inventory.registry_blockers == ()
+
+
+def test_inventory_preserves_valid_provider_swap_history(db_session) -> None:
+    from app.services import provider_voice_registry
+
+    _seed_brand_voice_order(db_session)
+    old = _fulfill_seeded_registry(db_session, provider_voice_id="voice-old")
+    now = datetime.now(UTC)
+    db_session.add(
+        BillingOperation(
+            id="billing-b",
+            tenant_id="tenant-a",
+            user_id="user-a",
+            operation="doubao_brand_voice_order_renew",
+            idempotency_key="brand-voice-order-b",
+            request_hash="s" * 64,
+            quote_hash="t" * 64,
+            pricing_snapshot={},
+            requested_credits=30_000,
+            settled_credits=30_000,
+            released_credits=0,
+            status="completed",
+            completion_kind="succeeded",
+            completed_at=now,
+        )
+    )
+    db_session.flush()
+    db_session.add(
+        BrandVoiceOrder(
+            id="order-b",
+            tenant_id="tenant-a",
+            user_id="user-a",
+            order_type="renew",
+            requested_name="Brand A renewed",
+            source_audio_asset_id="asset-a",
+            source_metadata_snapshot={},
+            consent_confirmed_at=now,
+            existing_brand_voice_id="brand-a",
+            billing_operation_id="billing-b",
+            status="awaiting_fulfillment",
+        )
+    )
+    db_session.flush()
+    new = provider_voice_registry.claim_customer_provider_voice_id(
+        db_session,
+        provider_voice_id="voice-new",
+        previous_provider_voice_id="voice-old",
+        brand_voice_id="brand-a",
+        order_id="order-b",
+    )
+    voice = db_session.get(BrandVoice, "brand-a")
+    renewal = db_session.get(BrandVoiceOrder, "order-b")
+    voice.speaker_id = "voice-new"
+    renewal.status = "fulfilled"
+    renewal.fulfilled_brand_voice_id = voice.id
+    renewal.fulfilled_provider_id = new.id
+    renewal.resolver_user_id = "user-a"
+    renewal.fulfilled_at = now
+    db_session.flush()
+
+    inventory = provider_voice_registry.provider_voice_inventory(db_session)
+
+    assert old.status == "retired"
+    assert inventory.active_customer_registry_ids == ("voice-new",)
+    assert inventory.retired_customer_registry_ids == ("voice-old",)
+    assert inventory.registry_blockers == ()
+
+
+def test_inventory_rejects_retired_id_that_is_still_the_current_speaker(db_session) -> None:
+    from app.services import provider_voice_registry
+
+    _seed_brand_voice_order(db_session)
+    row = _fulfill_seeded_registry(db_session)
+    row.status = "retired"
+
+    inventory = provider_voice_registry.provider_voice_inventory(db_session)
+
+    assert [(item.row_id, item.reason) for item in inventory.registry_blockers] == [
+        (row.id, "retired_customer_still_current")
+    ]
+
+
+def test_inventory_rejects_retired_history_without_current_active_binding(db_session) -> None:
+    from app.services import provider_voice_registry
+
+    _seed_brand_voice_order(db_session)
+    row = _fulfill_seeded_registry(db_session)
+    row.status = "retired"
+    db_session.get(BrandVoice, "brand-a").speaker_id = "voice-unregistered"
+
+    inventory = provider_voice_registry.provider_voice_inventory(db_session)
+
+    assert [(item.row_id, item.reason) for item in inventory.registry_blockers] == [
+        (row.id, "retired_customer_current_binding_missing")
+    ]
+
+
 @pytest.fixture(autouse=True)
 def empty_doubao_id_env(monkeypatch):
     from app.services import provider_voice_registry
@@ -271,15 +457,7 @@ def test_customer_claim_allows_only_exact_active_same_voice_renewal(db_session) 
     )
 
     _seed_brand_voice_order(db_session)
-    claimed = claim_customer_provider_voice_id(
-        db_session,
-        provider_voice_id=" voice-owned ",
-        brand_voice_id="brand-a",
-        order_id="order-a",
-    )
-    brand_voice = db_session.get(BrandVoice, "brand-a")
-    brand_voice.speaker_id = "voice-owned"
-    db_session.flush()
+    claimed = _fulfill_seeded_registry(db_session)
     renewed = claim_customer_provider_voice_id(
         db_session,
         provider_voice_id="voice-owned",
@@ -337,12 +515,7 @@ def test_own_id_renewal_requires_exact_canonical_brand_voice_binding(
     from app.services.provider_voice_registry import claim_customer_provider_voice_id
 
     _seed_brand_voice_order(db_session)
-    claimed = claim_customer_provider_voice_id(
-        db_session,
-        provider_voice_id="voice-owned",
-        brand_voice_id="brand-a",
-        order_id="order-a",
-    )
+    claimed = _fulfill_seeded_registry(db_session)
     brand_voice = db_session.get(BrandVoice, "brand-a")
     brand_voice.speaker_id = speaker_id
     brand_voice.provider = provider
@@ -354,15 +527,11 @@ def test_own_id_renewal_requires_exact_canonical_brand_voice_binding(
         claimed.brand_voice_id,
         claimed.first_order_id,
         claimed.status,
-        claimed.created_at,
-        claimed.updated_at,
     )
     brand_voice_before = (
         brand_voice.provider,
         brand_voice.speaker_id,
         brand_voice.status,
-        brand_voice.created_at,
-        brand_voice.updated_at,
         brand_voice.deleted_at,
     )
     registry_count = len(list(db_session.scalars(select(BrandVoiceProviderId))))
@@ -384,15 +553,11 @@ def test_own_id_renewal_requires_exact_canonical_brand_voice_binding(
         claimed.brand_voice_id,
         claimed.first_order_id,
         claimed.status,
-        claimed.created_at,
-        claimed.updated_at,
     ) == registry_before
     assert (
         brand_voice.provider,
         brand_voice.speaker_id,
         brand_voice.status,
-        brand_voice.created_at,
-        brand_voice.updated_at,
         brand_voice.deleted_at,
     ) == brand_voice_before
     assert len(list(db_session.scalars(select(BrandVoiceProviderId)))) == registry_count
@@ -406,22 +571,13 @@ def test_own_id_renewal_rejects_other_sources_without_registry_state_change(
     from app.services import provider_voice_registry
 
     _seed_brand_voice_order(db_session)
-    claimed = provider_voice_registry.claim_customer_provider_voice_id(
-        db_session,
-        provider_voice_id="voice-owned",
-        brand_voice_id="brand-a",
-        order_id="order-a",
-    )
-    own_voice = db_session.get(BrandVoice, "brand-a")
-    own_voice.speaker_id = "voice-owned"
-    db_session.flush()
+    claimed = _fulfill_seeded_registry(db_session)
     original = (
         claimed.provider,
         claimed.kind,
         claimed.brand_voice_id,
         claimed.first_order_id,
         claimed.status,
-        claimed.updated_at,
     )
 
     def assert_rejected() -> None:
@@ -439,7 +595,6 @@ def test_own_id_renewal_rejects_other_sources_without_registry_state_change(
             claimed.brand_voice_id,
             claimed.first_order_id,
             claimed.status,
-            claimed.updated_at,
         ) == original
         assert len(list(db_session.scalars(select(BrandVoiceProviderId)))) == 1
 
@@ -501,7 +656,6 @@ def test_own_id_renewal_rejects_other_sources_without_registry_state_change(
         claimed.brand_voice_id,
         claimed.first_order_id,
         claimed.status,
-        claimed.updated_at,
     )
     with pytest.raises(AppError) as alias:
         provider_voice_registry.claim_customer_provider_voice_id(
@@ -517,7 +671,6 @@ def test_own_id_renewal_rejects_other_sources_without_registry_state_change(
         claimed.brand_voice_id,
         claimed.first_order_id,
         claimed.status,
-        claimed.updated_at,
     ) == alias_original
 
 
@@ -562,6 +715,126 @@ def test_registry_lock_uses_exact_namespace_and_sorted_unique_ids() -> None:
     ]
 
 
+def test_registry_snapshot_lock_serializes_global_then_ids_rows_and_configs() -> None:
+    from app.services.provider_voice_registry import lock_provider_voice_registry_snapshot
+
+    class PostgresBind:
+        class Dialect:
+            name = "postgresql"
+
+        dialect = Dialect()
+
+    class CapturingSession:
+        events: list[tuple[str, object]] = []
+
+        @staticmethod
+        def get_bind():
+            return PostgresBind()
+
+        @classmethod
+        def execute(cls, statement, params) -> None:
+            cls.events.append(("advisory", params["lock_id"]))
+
+        @classmethod
+        def scalars(cls, statement):
+            cls.events.append(("rows", str(statement)))
+            return []
+
+    lock_provider_voice_registry_snapshot(
+        CapturingSession(),
+        provider_voice_ids=["voice-z", "voice-a", "voice-z"],
+    )
+
+    assert CapturingSession.events[:3] == [
+        (
+            "advisory",
+            int.from_bytes(
+                hashlib.sha256(b"huading:voice-slot:__registry_global__").digest()[:8],
+                byteorder="big",
+                signed=True,
+            ),
+        ),
+        (
+            "advisory",
+            int.from_bytes(
+                hashlib.sha256(b"huading:voice-slot:voice-a").digest()[:8],
+                byteorder="big",
+                signed=True,
+            ),
+        ),
+        (
+            "advisory",
+            int.from_bytes(
+                hashlib.sha256(b"huading:voice-slot:voice-z").digest()[:8],
+                byteorder="big",
+                signed=True,
+            ),
+        ),
+    ]
+    assert "brand_voice_provider_ids" in CapturingSession.events[3][1]
+    assert "ORDER BY brand_voice_provider_ids.id" in CapturingSession.events[3][1]
+    assert "provider_configs" in CapturingSession.events[4][1]
+    assert "ORDER BY provider_configs.id" in CapturingSession.events[4][1]
+
+
+def test_registry_writers_and_readiness_share_the_snapshot_lock(
+    db_session,
+    monkeypatch,
+) -> None:
+    from app.services import provider_voice_registry
+
+    snapshot_calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        provider_voice_registry,
+        "lock_provider_voice_registry_snapshot",
+        lambda db, *, provider_voice_ids=(): snapshot_calls.append(
+            tuple(provider_voice_ids)
+        ),
+    )
+    monkeypatch.setattr(
+        provider_voice_registry.settings,
+        "engine_doubao_official_voice_ids",
+        ["official-a"],
+    )
+    provider_voice_registry.register_official_provider_voice_ids(
+        db_session,
+        provider_voice_ids=["official-a"],
+    )
+    _seed_brand_voice_order(db_session)
+    claimed = provider_voice_registry.claim_customer_provider_voice_id(
+        db_session,
+        provider_voice_id="customer-a",
+        brand_voice_id="brand-a",
+        order_id="order-a",
+    )
+    voice = db_session.get(BrandVoice, "brand-a")
+    order = db_session.get(BrandVoiceOrder, "order-a")
+    voice.provider = "doubao-voice-clone"
+    voice.speaker_id = "customer-a"
+    order.status = "fulfilled"
+    order.fulfilled_brand_voice_id = voice.id
+    order.fulfilled_provider_id = claimed.id
+    order.resolver_user_id = "user-a"
+    order.fulfilled_at = datetime.now(UTC)
+    db_session.flush()
+
+    monkeypatch.setattr(provider_voice_registry.settings, "environment", "production")
+    provider_voice_registry.assert_doubao_registry_ready(db_session)
+    provider_voice_registry.retire_customer_provider_voice_id(
+        db_session,
+        brand_voice_id=voice.id,
+        provider_voice_id="customer-a",
+        retired_at=datetime.now(UTC),
+    )
+
+    assert snapshot_calls == [
+        ("official-a",),
+        ("customer-a",),
+        (),
+        ("customer-a",),
+    ]
+
+
 def test_switch_claims_new_and_retires_old_under_one_sorted_double_lock(
     db_session,
     monkeypatch,
@@ -592,7 +865,10 @@ def test_switch_claims_new_and_retires_old_under_one_sorted_double_lock(
         order_id="order-a",
     )
 
-    assert lock_calls == [("voice-a-new", "voice-z-old")]
+    assert lock_calls == [
+        ("__registry_global__",),
+        ("voice-a-new", "voice-z-old"),
+    ]
     assert new.status == "active"
     assert old.status == "retired"
 

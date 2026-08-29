@@ -20,7 +20,6 @@ from app.db.models import (
     BrandVoiceOrder,
     BrandVoiceProviderId,
     CreditRefundGrant,
-    ProviderConfig,
     Subscription,
     Tenant,
     UsageRecord,
@@ -243,6 +242,12 @@ def validate_brand_voice_order_materials(
             user_id=user.id,
             now=current_time,
         )
+        if renewal.source_audio_asset_id == source.id:
+            raise AppError(
+                "Renewal requires a different source audio asset.",
+                code="BRAND_VOICE_RENEWAL_SOURCE_AUDIO_REUSED",
+                status_code=422,
+            )
         awaiting = db.scalar(
             select(BrandVoiceOrder.id).where(
                 BrandVoiceOrder.existing_brand_voice_id == renewal.id,
@@ -862,29 +867,10 @@ def _lock_provider_stage(
     normalized = sorted(
         {provider_voice_registry.normalize_provider_voice_id(item) for item in identifiers}
     )
-    provider_voice_registry.lock_provider_voice_ids(
+    provider_voice_registry.assert_doubao_registry_ready(
         db,
-        provider=DOUBAO_PROVIDER,
         provider_voice_ids=normalized,
     )
-    list(
-        db.scalars(
-            select(BrandVoiceProviderId)
-            .where(func.trim(BrandVoiceProviderId.normalized_provider_id).in_(normalized))
-            .order_by(BrandVoiceProviderId.id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    )
-    list(
-        db.scalars(
-            select(ProviderConfig)
-            .order_by(ProviderConfig.id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    )
-    provider_voice_registry.assert_doubao_registry_ready(db)
 
 
 def _resolve_in_transaction(
@@ -1149,7 +1135,6 @@ def resolve_brand_voice_order(
     locator = _resolve_locator(db, order_id=order_id)
     actor_id = actor.id
     actor_tenant_id = actor.tenant_id
-    transaction_now = now or datetime.now(UTC)
     bind = db.get_bind()
     db.rollback()
     factory = sessionmaker(
@@ -1168,6 +1153,6 @@ def resolve_brand_voice_order(
             action=action,
             provider_voice_id=provider_voice_id,
             rejection_reason=rejection_reason,
-            transaction_now=transaction_now,
+            transaction_now=now or datetime.now(UTC),
         ),
     )

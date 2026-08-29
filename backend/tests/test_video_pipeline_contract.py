@@ -254,17 +254,21 @@ def test_avatar_talk_schema_accepts_exactly_one_avatar_source() -> None:
 
 def test_quota_returns_current_subscription_totals(auth_context, auth_db) -> None:
     with auth_db() as db:
-        _seed_billing(db, auth_context["tenant_id"])
+        subscription_id = _seed_billing(db, auth_context["tenant_id"]).id
 
     client = TestClient(app)
     resp = client.get("/api/v1/quota", headers=auth_context["headers"])
 
     assert resp.status_code == 200
     assert resp.json()["data"] == {
+        "has_active_subscription": True,
+        "active_subscription_id": subscription_id,
         "total": 100,
         "used": 25,
         "reserved": 5,
         "remaining": 70,
+        "manual_fulfillment_held_credits": 0,
+        "pending_refund_credits": 0,
     }
 
 

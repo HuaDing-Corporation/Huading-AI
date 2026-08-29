@@ -7,7 +7,16 @@ from sqlalchemy import func, select
 
 from app.api.deps import BillingSubmissionHeaders
 from app.core.exceptions import AppError
-from app.db.models import Asset, BrandVoice, BrandVoiceOrder, Plan, Subscription, User
+from app.db.models import (
+    Asset,
+    BillingOperation,
+    BrandVoice,
+    BrandVoiceOrder,
+    Plan,
+    Subscription,
+    UsageRecord,
+    User,
+)
 from app.schemas.brand_voice_orders import BrandVoiceOrderCreateRequest
 from app.services.billing_quotes import VerifiedQuote, _validated_snapshot
 from app.services.pricing import PRICING_POLICIES, build_simple_pricing, resolve_rate
@@ -143,6 +152,140 @@ def test_estimate_returns_fixed_30000_quote(auth_context, auth_db):
     assert response.json()["data"]["payable_credits"] == 30_000
 
 
+def test_renewal_estimate_rejects_reusing_the_voice_source_audio(auth_context, auth_db):
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    now = datetime.now(UTC)
+    with auth_db() as db:
+        subscription = db.scalar(select(Subscription))
+        db.get(Plan, subscription.plan_id).code = "huading"
+        asset = Asset(
+            id="renew-reused-audio",
+            tenant_id=auth_context["tenant_id"],
+            type="audio",
+            source="upload",
+            storage_key=f"tenants/{auth_context['tenant_id']}/uploads/reused.wav",
+            mime_type="audio/wav",
+            duration_ms=10_000,
+            status="ready",
+        )
+        voice = BrandVoice(
+            id="renew-reused-voice",
+            tenant_id=auth_context["tenant_id"],
+            owner_user_id=auth_context["user_id"],
+            name="Expired voice",
+            source_audio_asset_id=asset.id,
+            provider="doubao-voice-clone",
+            speaker_id="renew-reused-provider",
+            status="ready",
+            consent_confirmed=True,
+            expires_at=now - timedelta(days=1),
+        )
+        db.add_all([asset, voice])
+        db.commit()
+
+    response = TestClient(app).post(
+        "/api/v1/brand-voice-orders/estimate",
+        headers=auth_context["headers"],
+        json={
+            "order_type": "renew",
+            "requested_name": "Renewed voice",
+            "source_audio_asset_id": "renew-reused-audio",
+            "consent_confirmed": True,
+            "existing_brand_voice_id": "renew-reused-voice",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "BRAND_VOICE_RENEWAL_SOURCE_AUDIO_REUSED"
+
+
+def test_renewal_submit_revalidates_source_audio_reuse_after_estimate(
+    auth_context,
+    auth_db,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    now = datetime.now(UTC)
+    with auth_db() as db:
+        subscription = db.scalar(select(Subscription))
+        db.get(Plan, subscription.plan_id).code = "huading"
+        subscription.quota_credits_total = 100_000
+        old_asset = Asset(
+            id="renew-old-audio",
+            tenant_id=auth_context["tenant_id"],
+            type="audio",
+            source="upload",
+            storage_key=f"tenants/{auth_context['tenant_id']}/uploads/old.wav",
+            mime_type="audio/wav",
+            duration_ms=10_000,
+            status="ready",
+        )
+        candidate = Asset(
+            id="renew-candidate-audio",
+            tenant_id=auth_context["tenant_id"],
+            type="audio",
+            source="upload",
+            storage_key=f"tenants/{auth_context['tenant_id']}/uploads/candidate.wav",
+            mime_type="audio/wav",
+            duration_ms=10_000,
+            status="ready",
+        )
+        voice = BrandVoice(
+            id="renew-revalidation-voice",
+            tenant_id=auth_context["tenant_id"],
+            owner_user_id=auth_context["user_id"],
+            name="Expired voice",
+            source_audio_asset_id=old_asset.id,
+            provider="doubao-voice-clone",
+            speaker_id="renew-revalidation-provider",
+            status="ready",
+            consent_confirmed=True,
+            expires_at=now - timedelta(days=1),
+        )
+        db.add_all([old_asset, candidate, voice])
+        db.commit()
+
+    client = TestClient(app)
+    payload = {
+        "order_type": "renew",
+        "requested_name": "Renewed voice",
+        "source_audio_asset_id": "renew-candidate-audio",
+        "consent_confirmed": True,
+        "existing_brand_voice_id": "renew-revalidation-voice",
+    }
+    quote = client.post(
+        "/api/v1/brand-voice-orders/estimate",
+        headers=auth_context["headers"],
+        json=payload,
+    )
+    assert quote.status_code == 200
+    with auth_db() as db:
+        db.get(BrandVoice, "renew-revalidation-voice").source_audio_asset_id = (
+            "renew-candidate-audio"
+        )
+        db.commit()
+
+    response = client.post(
+        "/api/v1/brand-voice-orders",
+        headers={
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote.json()["data"]["quote_token"],
+        },
+        json=payload,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "BRAND_VOICE_RENEWAL_SOURCE_AUDIO_REUSED"
+    with auth_db() as db:
+        assert db.scalar(select(func.count()).select_from(BrandVoiceOrder)) == 0
+
+
 def test_submit_creates_awaiting_order_with_reserved_billing(auth_context, auth_db):
     with auth_db() as db:
         subscription = db.scalar(select(Subscription))
@@ -178,23 +321,93 @@ def test_submit_creates_awaiting_order_with_reserved_billing(auth_context, auth_
         json=payload,
     ).json()["data"]
 
+    idempotency_key = str(uuid4())
+    headers = {
+        **auth_context["headers"],
+        "Idempotency-Key": idempotency_key,
+        "X-Huading-Quote": quote["quote_token"],
+    }
     response = client.post(
         "/api/v1/brand-voice-orders",
-        headers={
-            **auth_context["headers"],
-            "Idempotency-Key": str(uuid4()),
-            "X-Huading-Quote": quote["quote_token"],
-        },
+        headers=headers,
+        json=payload,
+    )
+    replay = client.post(
+        "/api/v1/brand-voice-orders",
+        headers=headers,
         json=payload,
     )
 
     assert response.status_code == 201
+    assert replay.status_code == 201
     resource = response.json()["data"]
+    assert replay.json()["data"]["id"] == resource["id"]
     assert resource["status"] == "awaiting_fulfillment"
     assert resource["billing"]["status"] == "reserved"
     assert resource["billing"]["held_credits"] == 30_000
     with auth_db() as db:
         assert db.scalar(select(func.count()).select_from(BrandVoice)) == 0
+        assert db.scalar(select(func.count()).select_from(BrandVoiceOrder)) == 1
+        assert db.scalar(select(func.count()).select_from(BillingOperation)) == 1
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == 1
+        subscription = db.scalar(select(Subscription))
+        assert subscription.quota_credits_reserved == 30_000
+
+
+def test_submit_fails_closed_when_balance_changed_after_quote(auth_context, auth_db):
+    with auth_db() as db:
+        subscription = db.scalar(select(Subscription))
+        db.get(Plan, subscription.plan_id).code = "huading"
+        subscription.quota_credits_total = 29_999
+        db.add(
+            Asset(
+                id="insufficient-audio",
+                tenant_id=auth_context["tenant_id"],
+                type="audio",
+                source="upload",
+                storage_key=f"tenants/{auth_context['tenant_id']}/uploads/insufficient.wav",
+                mime_type="audio/wav",
+                duration_ms=10_000,
+                status="ready",
+            )
+        )
+        db.commit()
+
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    client = TestClient(app)
+    payload = {
+        "order_type": "create",
+        "requested_name": "Insufficient balance",
+        "source_audio_asset_id": "insufficient-audio",
+        "consent_confirmed": True,
+    }
+    quote = client.post(
+        "/api/v1/brand-voice-orders/estimate",
+        headers=auth_context["headers"],
+        json=payload,
+    )
+    assert quote.status_code == 200
+
+    response = client.post(
+        "/api/v1/brand-voice-orders",
+        headers={
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote.json()["data"]["quote_token"],
+        },
+        json=payload,
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "TENANT_QUOTA_EXCEEDED"
+    with auth_db() as db:
+        assert db.scalar(select(func.count()).select_from(BrandVoiceOrder)) == 0
+        assert db.scalar(select(func.count()).select_from(BillingOperation)) == 0
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == 0
+        assert db.scalar(select(Subscription)).quota_credits_reserved == 0
 
 
 def test_fulfill_settles_and_starts_payment_user_voice_for_365_days(db_session):
