@@ -23,6 +23,7 @@ from app.db.models import (
     Subscription,
     UsageRecord,
 )
+from app.schemas.brand_voice_orders import BrandVoiceOrderRead
 from app.services import quota
 from app.services.billing_quotes import VerifiedQuote, canonical_json
 from app.services.pricing import (
@@ -199,6 +200,7 @@ register_billing_result_schema("script_generate_result", ScriptGenerateStoredRes
 register_billing_result_schema("scene_prompt_result", ScenePromptStoredResult)
 register_billing_result_schema("ecom_image_batch", EcomImageBatchStoredResult)
 register_billing_result_schema("video_task", VideoTaskBillingResource)
+register_billing_result_schema("brand_voice_order", BrandVoiceOrderRead)
 
 
 def _integer_amount(value: Decimal, *, field: str) -> int:
@@ -912,6 +914,23 @@ def _validate_stored_result(operation: BillingOperation) -> BaseModel:
     return result
 
 
+def _lookup_resource(db: Session, operation: BillingOperation) -> BaseModel:
+    if operation.result_type == "brand_voice_order":
+        if operation.result_id is None:
+            raise BillingInvariantError("manual order result identifier is missing")
+        # The order is payment-user scoped and its refund grant may change after
+        # the operation became terminal, so never return the stale stored JSON.
+        from app.services.brand_voice_orders import user_brand_voice_order_read
+
+        return user_brand_voice_order_read(
+            db,
+            tenant_id=operation.tenant_id,
+            user_id=operation.user_id,
+            order_id=operation.result_id,
+        )
+    return _validate_stored_result(operation)
+
+
 def _validate_stored_error_payload(operation: BillingOperation) -> _StoredErrorPayload:
     if (
         operation.error_payload is None
@@ -1075,7 +1094,7 @@ def lookup_operation(
     if row.status == "in_progress":
         resource = None
         if row.result_type is not None or row.result_payload is not None:
-            resource = _validate_stored_result(row)
+            resource = _lookup_resource(db, row)
         if row.error_code or row.error_http_status or row.error_payload:
             raise BillingInvariantError("in-progress operation contains an error")
         return BillingInProgressLookup(
@@ -1087,7 +1106,7 @@ def lookup_operation(
     if row.completion_kind == "succeeded":
         if row.error_code or row.error_http_status or row.error_payload:
             raise BillingInvariantError("successful operation contains an error")
-        result = _validate_stored_result(row)
+        result = _lookup_resource(db, row)
         return BillingSucceededLookup(
             **common,
             result_type=row.result_type,
@@ -1098,7 +1117,7 @@ def lookup_operation(
     if row.completion_kind == "rejected":
         if row.error_code or row.error_http_status or row.error_payload:
             raise BillingInvariantError("rejected operation contains an error payload")
-        resource = _validate_stored_result(row)
+        resource = _lookup_resource(db, row)
         return BillingRejectedLookup(
             **common,
             result_type=row.result_type,

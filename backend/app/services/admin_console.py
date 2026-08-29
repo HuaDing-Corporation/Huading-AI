@@ -45,6 +45,7 @@ from app.schemas.admin_console import (
     AdminVoiceSlotsResponse,
 )
 from app.services import ecom_replicate, quota, reverse_prompt
+from app.services.asset_retention import assert_no_awaiting_orders_for_principal
 from app.services.plan_access import is_platform_tenant
 from app.services.subscription import (
     current_active_subscription_for_update,
@@ -77,11 +78,7 @@ def _date_bounds(from_: date | None, to: date | None) -> tuple[datetime | None, 
             status_code=422,
         )
     start = datetime.combine(from_, time.min, tzinfo=UTC) if from_ is not None else None
-    end = (
-        datetime.combine(to + timedelta(days=1), time.min, tzinfo=UTC)
-        if to is not None
-        else None
-    )
+    end = datetime.combine(to + timedelta(days=1), time.min, tzinfo=UTC) if to is not None else None
     return start, end
 
 
@@ -332,6 +329,8 @@ def change_tenant_status(
             code="CANNOT_SUSPEND_PLATFORM_TENANT",
             status_code=422,
         )
+    if not active:
+        assert_no_awaiting_orders_for_principal(db, tenant_id=tenant.id)
     before = {"status": tenant.status}
     tenant.status = "active" if active else "suspended"
     tenant.updated_at = datetime.now(UTC)
@@ -357,9 +356,7 @@ def _is_stale(updated_at: datetime) -> bool:
     value = updated_at
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
-    threshold = datetime.now(UTC) - timedelta(
-        seconds=settings.engine_admin_retry_stale_seconds
-    )
+    threshold = datetime.now(UTC) - timedelta(seconds=settings.engine_admin_retry_stale_seconds)
     return value <= threshold
 
 
@@ -447,9 +444,7 @@ def prepare_task_retry(
     if task is None or task.deleted_at is not None:
         raise AppError("Task not found.", code="TASK_NOT_FOUND", status_code=404)
     stale_queued = (
-        task.status == "queued"
-        and task.started_at is None
-        and _is_stale(task.updated_at)
+        task.status == "queued" and task.started_at is None and _is_stale(task.updated_at)
     )
     if not stale_queued and task.status != "failed":
         raise AppError(
@@ -568,15 +563,11 @@ def resolve_task_family(
         model = models[family]
         if family == "reverse_prompt":
             item = db.scalar(
-                reverse_prompt.select_live_reverse_prompt_jobs(
-                    ReversePromptJob.id == task_id
-                )
+                reverse_prompt.select_live_reverse_prompt_jobs(ReversePromptJob.id == task_id)
             )
         elif family == "ecom_replicate":
             item = db.scalar(
-                ecom_replicate.select_live_ecom_replicate_jobs(
-                    EcomReplicateJob.id == task_id
-                )
+                ecom_replicate.select_live_ecom_replicate_jobs(EcomReplicateJob.id == task_id)
             )
         else:
             item = db.get(model, task_id)
@@ -714,11 +705,7 @@ def compensate_reverse_prompt_retry_enqueue_failure(
     actor: User,
     job_id: str,
 ) -> ReversePromptJob | None:
-    job = db.scalar(
-        select(ReversePromptJob)
-        .where(ReversePromptJob.id == job_id)
-        .with_for_update()
-    )
+    job = db.scalar(select(ReversePromptJob).where(ReversePromptJob.id == job_id).with_for_update())
     if job is None or job.status != "queued":
         return job
     quota.release_reverse_prompt_video_quota(
@@ -788,9 +775,7 @@ def compensate_ecom_replicate_retry_enqueue_failure(
     )
     job.status = "partial_failed" if has_succeeded is not None else "failed"
     job.error_code = (
-        "ECOM_REPLICATE_PARTIAL_FAILED"
-        if has_succeeded is not None
-        else "ECOM_REPLICATE_FAILED"
+        "ECOM_REPLICATE_PARTIAL_FAILED" if has_succeeded is not None else "ECOM_REPLICATE_FAILED"
     )
     job.error_message = "Task retry could not be queued. Please retry."
     job.finished_at = now
@@ -873,9 +858,7 @@ def list_tenants(
     }[sort]
     ordered = sort_expr.asc() if order == "asc" else sort_expr.desc()
     statement = (
-        statement.order_by(ordered, Tenant.id.asc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
+        statement.order_by(ordered, Tenant.id.asc()).offset((page - 1) * page_size).limit(page_size)
     )
     items = [_tenant_item(row) for row in db.execute(statement)]
     return _page(items, total=total, page=page, page_size=page_size)
@@ -1009,9 +992,7 @@ def _task_item(row: Mapping[str, Any]) -> AdminTaskItem:
 
 
 def _task_union():
-    stale_before = datetime.now(UTC) - timedelta(
-        seconds=settings.engine_admin_retry_stale_seconds
-    )
+    stale_before = datetime.now(UTC) - timedelta(seconds=settings.engine_admin_retry_stale_seconds)
     video_stale = (
         (VideoTask.status == "queued")
         & VideoTask.started_at.is_(None)
@@ -1027,9 +1008,7 @@ def _task_union():
             VideoTask.mode.label("mode"),
             VideoTask.topic.label("label"),
             VideoTask.video_mode.label("video_mode"),
-            case((VideoTask.status == "done", "succeeded"), else_=VideoTask.status).label(
-                "status"
-            ),
+            case((VideoTask.status == "done", "succeeded"), else_=VideoTask.status).label("status"),
             VideoTask.progress.label("progress"),
             VideoTask.error_code.label("error_code"),
             func.coalesce(VideoTask.error_message, VideoTask.error).label("error_message"),
@@ -1045,44 +1024,49 @@ def _task_union():
         (ReversePromptJob.status.in_(("succeeded", "saved")), "succeeded"),
         else_=ReversePromptJob.status,
     )
-    reverse_stale = (
-        (ReversePromptJob.status == "queued")
-        & (ReversePromptJob.updated_at <= stale_before)
+    reverse_stale = (ReversePromptJob.status == "queued") & (
+        ReversePromptJob.updated_at <= stale_before
     )
-    reverse = select(
-        ReversePromptJob.id.label("id"),
-        literal("reverse_prompt").label("task_family"),
-        ReversePromptJob.tenant_id.label("tenant_id"),
-        Tenant.slug.label("tenant_slug"),
-        Tenant.name.label("tenant_name"),
-        ReversePromptJob.source_kind.label("mode"),
-        ReversePromptJob.target_format.label("label"),
-        literal(None).label("video_mode"),
-        reverse_status.label("status"),
-        case(
-            (ReversePromptJob.status == "queued", 0),
-            (ReversePromptJob.status == "running", 50),
-            else_=100,
-        ).label("progress"),
-        ReversePromptJob.error_code.label("error_code"),
-        ReversePromptJob.error_message.label("error_message"),
-        ReversePromptJob.created_at.label("created_at"),
-        case(
-            (ReversePromptJob.status.in_(("running", "succeeded", "failed", "saved")),
-             ReversePromptJob.created_at),
-            else_=None,
-        ).label("started_at"),
-        case(
-            (ReversePromptJob.status.in_(("succeeded", "failed", "saved")),
-             ReversePromptJob.updated_at),
-            else_=None,
-        ).label("finished_at"),
-        (
-            (ReversePromptJob.source_kind == "video")
-            & ((ReversePromptJob.status == "failed") | reverse_stale)
-        ).label("retryable"),
-    ).join(Tenant, Tenant.id == ReversePromptJob.tenant_id).where(
-        reverse_prompt.live_reverse_prompt_job_condition()
+    reverse = (
+        select(
+            ReversePromptJob.id.label("id"),
+            literal("reverse_prompt").label("task_family"),
+            ReversePromptJob.tenant_id.label("tenant_id"),
+            Tenant.slug.label("tenant_slug"),
+            Tenant.name.label("tenant_name"),
+            ReversePromptJob.source_kind.label("mode"),
+            ReversePromptJob.target_format.label("label"),
+            literal(None).label("video_mode"),
+            reverse_status.label("status"),
+            case(
+                (ReversePromptJob.status == "queued", 0),
+                (ReversePromptJob.status == "running", 50),
+                else_=100,
+            ).label("progress"),
+            ReversePromptJob.error_code.label("error_code"),
+            ReversePromptJob.error_message.label("error_message"),
+            ReversePromptJob.created_at.label("created_at"),
+            case(
+                (
+                    ReversePromptJob.status.in_(("running", "succeeded", "failed", "saved")),
+                    ReversePromptJob.created_at,
+                ),
+                else_=None,
+            ).label("started_at"),
+            case(
+                (
+                    ReversePromptJob.status.in_(("succeeded", "failed", "saved")),
+                    ReversePromptJob.updated_at,
+                ),
+                else_=None,
+            ).label("finished_at"),
+            (
+                (ReversePromptJob.source_kind == "video")
+                & ((ReversePromptJob.status == "failed") | reverse_stale)
+            ).label("retryable"),
+        )
+        .join(Tenant, Tenant.id == ReversePromptJob.tenant_id)
+        .where(reverse_prompt.live_reverse_prompt_job_condition())
     )
     failed_output_exists = (
         select(EcomReplicateOutput.id)
@@ -1097,8 +1081,7 @@ def _task_union():
         (EcomReplicateJob.status.in_(("partial_failed", "failed")), "failed"),
         (EcomReplicateJob.status == "cancelled", "cancelled"),
         (
-            (EcomReplicateJob.status == "generating")
-            & EcomReplicateJob.started_at.is_(None),
+            (EcomReplicateJob.status == "generating") & EcomReplicateJob.started_at.is_(None),
             "queued",
         ),
         (EcomReplicateJob.status.in_(("planning", "generating")), "running"),
@@ -1109,41 +1092,43 @@ def _task_union():
         & EcomReplicateJob.started_at.is_(None)
         & (EcomReplicateJob.updated_at <= stale_before)
     )
-    replicate = select(
-        EcomReplicateJob.id.label("id"),
-        literal("ecom_replicate").label("task_family"),
-        EcomReplicateJob.tenant_id.label("tenant_id"),
-        Tenant.slug.label("tenant_slug"),
-        Tenant.name.label("tenant_name"),
-        EcomReplicateJob.output_mode.label("mode"),
-        EcomReplicateJob.output_mode.label("label"),
-        literal(None).label("video_mode"),
-        replicate_status.label("status"),
-        case(
-            (EcomReplicateJob.status == "planning", 10),
+    replicate = (
+        select(
+            EcomReplicateJob.id.label("id"),
+            literal("ecom_replicate").label("task_family"),
+            EcomReplicateJob.tenant_id.label("tenant_id"),
+            Tenant.slug.label("tenant_slug"),
+            Tenant.name.label("tenant_name"),
+            EcomReplicateJob.output_mode.label("mode"),
+            EcomReplicateJob.output_mode.label("label"),
+            literal(None).label("video_mode"),
+            replicate_status.label("status"),
+            case(
+                (EcomReplicateJob.status == "planning", 10),
+                (
+                    (EcomReplicateJob.status == "generating")
+                    & EcomReplicateJob.started_at.is_(None),
+                    0,
+                ),
+                (EcomReplicateJob.status == "plan_ready", 25),
+                (EcomReplicateJob.status == "generating", 50),
+                else_=100,
+            ).label("progress"),
+            EcomReplicateJob.error_code.label("error_code"),
+            EcomReplicateJob.error_message.label("error_message"),
+            EcomReplicateJob.created_at.label("created_at"),
+            EcomReplicateJob.started_at.label("started_at"),
+            EcomReplicateJob.finished_at.label("finished_at"),
             (
-                (EcomReplicateJob.status == "generating")
-                & EcomReplicateJob.started_at.is_(None),
-                0,
-            ),
-            (EcomReplicateJob.status == "plan_ready", 25),
-            (EcomReplicateJob.status == "generating", 50),
-            else_=100,
-        ).label("progress"),
-        EcomReplicateJob.error_code.label("error_code"),
-        EcomReplicateJob.error_message.label("error_message"),
-        EcomReplicateJob.created_at.label("created_at"),
-        EcomReplicateJob.started_at.label("started_at"),
-        EcomReplicateJob.finished_at.label("finished_at"),
-        (
-            (
-                EcomReplicateJob.status.in_(("partial_failed", "failed", "completed"))
-                & failed_output_exists
-            )
-            | replicate_stale
-        ).label("retryable"),
-    ).join(Tenant, Tenant.id == EcomReplicateJob.tenant_id).where(
-        ecom_replicate.live_ecom_replicate_job_condition()
+                (
+                    EcomReplicateJob.status.in_(("partial_failed", "failed", "completed"))
+                    & failed_output_exists
+                )
+                | replicate_stale
+            ).label("retryable"),
+        )
+        .join(Tenant, Tenant.id == EcomReplicateJob.tenant_id)
+        .where(ecom_replicate.live_ecom_replicate_job_condition())
     )
     return union_all(video, reverse, replicate).subquery("admin_task_monitor")
 

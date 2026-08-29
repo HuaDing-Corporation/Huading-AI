@@ -4,6 +4,7 @@ import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -89,9 +90,7 @@ def lock_provider_voice_ids(
     provider_voice_ids: Sequence[str],
 ) -> None:
     del provider  # The compatibility lock namespace is intentionally provider-agnostic.
-    normalized_ids = sorted(
-        {normalize_provider_voice_id(value) for value in provider_voice_ids}
-    )
+    normalized_ids = sorted({normalize_provider_voice_id(value) for value in provider_voice_ids})
     if db.get_bind().dialect.name != "postgresql":
         return
     for provider_voice_id in normalized_ids:
@@ -138,12 +137,8 @@ def _registry_blocker_reason(
 
 
 def provider_voice_inventory(db: Session) -> ProviderVoiceInventory:
-    official = _normalized_ids(
-        getattr(settings, "engine_doubao_official_voice_ids", [])
-    )
-    legacy = _normalized_ids(
-        getattr(settings, "engine_doubao_voice_clone_speaker_ids", [])
-    )
+    official = _normalized_ids(getattr(settings, "engine_doubao_official_voice_ids", []))
+    legacy = _normalized_ids(getattr(settings, "engine_doubao_voice_clone_speaker_ids", []))
     config_ids: set[str] = set()
     for config in db.scalars(select(ProviderConfig)):
         values = dict(config.config or {})
@@ -185,8 +180,7 @@ def provider_voice_inventory(db: Session) -> ProviderVoiceInventory:
         registry_groups[(row.kind, row.status)].add(row.normalized_provider_id)
     official_registry = registry_groups[("official", "active")]
     customer_registry = (
-        registry_groups[("customer", "active")]
-        | registry_groups[("customer", "retired")]
+        registry_groups[("customer", "active")] | registry_groups[("customer", "retired")]
     )
     historical = set(legacy) | config_ids | brand_voice_ids
     unknown = historical - set(official) - customer_registry
@@ -196,15 +190,9 @@ def provider_voice_inventory(db: Session) -> ProviderVoiceInventory:
         provider_config_ids=tuple(sorted(config_ids)),
         brand_voice_ids=tuple(sorted(brand_voice_ids)),
         active_official_registry_ids=tuple(sorted(official_registry)),
-        retired_official_registry_ids=tuple(
-            sorted(registry_groups[("official", "retired")])
-        ),
-        active_customer_registry_ids=tuple(
-            sorted(registry_groups[("customer", "active")])
-        ),
-        retired_customer_registry_ids=tuple(
-            sorted(registry_groups[("customer", "retired")])
-        ),
+        retired_official_registry_ids=tuple(sorted(registry_groups[("official", "retired")])),
+        active_customer_registry_ids=tuple(sorted(registry_groups[("customer", "active")])),
+        retired_customer_registry_ids=tuple(sorted(registry_groups[("customer", "retired")])),
         registry_blockers=tuple(
             sorted(
                 registry_blockers,
@@ -242,8 +230,7 @@ def _registry_rows_for_update(
         db.scalars(
             select(BrandVoiceProviderId)
             .where(
-                func.trim(BrandVoiceProviderId.normalized_provider_id)
-                == provider_voice_id,
+                func.trim(BrandVoiceProviderId.normalized_provider_id) == provider_voice_id,
             )
             .with_for_update()
         )
@@ -272,11 +259,7 @@ def _same_voice_renewal_has_other_source(
     provider_voice_id: str,
     brand_voice_id: str,
 ) -> bool:
-    target_voice = db.scalar(
-        select(BrandVoice)
-        .where(BrandVoice.id == brand_voice_id)
-        .with_for_update()
-    )
+    target_voice = db.scalar(select(BrandVoice).where(BrandVoice.id == brand_voice_id))
     if target_voice is None or target_voice.provider != DOUBAO_VOICE_CLONE_PROVIDER:
         return True
     raw_target_provider_id = target_voice.speaker_id
@@ -295,9 +278,7 @@ def _same_voice_renewal_has_other_source(
         return True
     matching_voices = [
         voice
-        for voice in db.scalars(
-            select(BrandVoice).where(BrandVoice.speaker_id.is_not(None))
-        )
+        for voice in db.scalars(select(BrandVoice).where(BrandVoice.speaker_id.is_not(None)))
         if str(voice.speaker_id).strip() == provider_voice_id
     ]
     return any(voice.id != brand_voice_id for voice in matching_voices)
@@ -310,6 +291,7 @@ def claim_customer_provider_voice_id(
     brand_voice_id: str,
     order_id: str,
     previous_provider_voice_id: str | None = None,
+    flush: bool = True,
 ) -> BrandVoiceProviderId:
     normalized = normalize_provider_voice_id(provider_voice_id)
     previous = (
@@ -359,6 +341,7 @@ def claim_customer_provider_voice_id(
         if normalized in _historical_ids(db):
             raise _conflict(normalized)
         claimed = BrandVoiceProviderId(
+            id=str(uuid4()),
             provider=DOUBAO_VOICE_CLONE_PROVIDER,
             normalized_provider_id=normalized,
             kind="customer",
@@ -371,7 +354,8 @@ def claim_customer_provider_voice_id(
     if previous_row is not None:
         previous_row.status = "retired"
         previous_row.updated_at = datetime.now(UTC)
-    db.flush()
+    if flush:
+        db.flush()
     return claimed
 
 
@@ -409,12 +393,8 @@ def register_official_provider_voice_ids(
     *,
     provider_voice_ids: Sequence[str],
 ) -> list[BrandVoiceProviderId]:
-    requested = tuple(
-        sorted({normalize_provider_voice_id(value) for value in provider_voice_ids})
-    )
-    configured = _normalized_ids(
-        getattr(settings, "engine_doubao_official_voice_ids", [])
-    )
+    requested = tuple(sorted({normalize_provider_voice_id(value) for value in provider_voice_ids}))
+    configured = _normalized_ids(getattr(settings, "engine_doubao_official_voice_ids", []))
     if not configured or requested != configured:
         raise AppError(
             "Official provider voice IDs must exactly match the configured signed list.",

@@ -1,4 +1,6 @@
-from typing import Literal
+from datetime import datetime
+from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
@@ -37,27 +39,82 @@ class BrandVoiceOrderCreateRequest(BaseModel):
         return self
 
 
-class BrandVoiceOrderResolveRequest(BaseModel):
+class BrandVoiceOrderFulfillRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["fulfilled", "rejected"]
-    fulfilled_brand_voice_id: str | None = None
-    fulfilled_provider_id: str | None = None
-    rejection_reason: str | None = None
+    action: Literal["fulfill"]
+    provider_voice_id: str = Field(min_length=1)
 
-    @field_validator("fulfilled_brand_voice_id", "fulfilled_provider_id")
+    @field_validator("provider_voice_id")
     @classmethod
-    def normalize_identifiers(cls, value: str | None, info):
-        if value is None:
-            return None
-        return _non_blank(value, info.field_name)
+    def normalize_provider_voice_id(cls, value: str) -> str:
+        return _non_blank(value, "provider_voice_id")
 
-    @model_validator(mode="after")
-    def validate_resolution(self):
-        fulfilled = (self.fulfilled_brand_voice_id, self.fulfilled_provider_id)
-        if self.status == "fulfilled" and all(fulfilled) and self.rejection_reason is None:
-            return self
-        if self.status == "rejected" and not any(fulfilled) and self.rejection_reason:
-            self.rejection_reason = _non_blank(self.rejection_reason, "rejection_reason")
-            return self
-        raise ValueError("resolution fields do not match status")
+
+class BrandVoiceOrderRejectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["reject"]
+    rejection_reason: str = Field(min_length=1)
+
+    @field_validator("rejection_reason")
+    @classmethod
+    def normalize_rejection_reason(cls, value: str) -> str:
+        return _non_blank(value, "rejection_reason")
+
+
+BrandVoiceOrderResolveRequest = Annotated[
+    BrandVoiceOrderFulfillRequest | BrandVoiceOrderRejectRequest,
+    Field(discriminator="action"),
+]
+
+
+RefundDisposition = Literal[
+    "not_applicable",
+    "source_subscription_released",
+    "current_subscription_credited",
+    "pending_next_subscription",
+]
+
+
+class BrandVoiceOrderBillingSummary(BaseModel):
+    operation_id: str
+    idempotency_key: UUID
+    status: Literal["reserved", "settled", "partially_settled", "released"]
+    requested_credits: int
+    held_credits: int
+    settled_credits: int
+    released_credits: int
+
+
+class BrandVoiceOrderRead(BaseModel):
+    id: str
+    tenant_id: str
+    ordered_by_user_id: str
+    order_type: Literal["create", "renew"]
+    requested_name: str
+    source_audio_asset_id: str
+    existing_brand_voice_id: str | None
+    status: Literal["awaiting_fulfillment", "fulfilled", "rejected"]
+    fulfilled_brand_voice_id: str | None
+    fulfilled_provider_voice_id: str | None
+    rejection_reason: str | None
+    fulfilled_at: datetime | None
+    rejected_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    billing: BrandVoiceOrderBillingSummary
+    refund_disposition: RefundDisposition = "not_applicable"
+    refund_grant_status: Literal["pending", "applied"] | None = None
+    refund_applied_at: datetime | None = None
+
+
+class AdminBrandVoiceOrderRead(BrandVoiceOrderRead):
+    source_audio_url: str | None = None
+
+
+class BrandVoiceOrderPage(BaseModel):
+    items: list[BrandVoiceOrderRead]
+    total: int
+    page: int | None = None
+    page_size: int | None = None

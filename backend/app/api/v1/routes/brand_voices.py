@@ -29,6 +29,7 @@ from app.schemas.brand_voices import (
     BrandVoiceUpdateRequest,
 )
 from app.schemas.response import ApiResponse, ok
+from app.services.asset_retention import assert_brand_voice_not_held_by_manual_order
 from app.services.plan_access import require_doubao_voice_clone_access
 from app.services.quota import charge_voice_clone_quota
 from app.services.storage.base import ObjectStorage
@@ -251,7 +252,14 @@ def delete_brand_voice(
     user: User = CurrentUserDependency,
     db: Session = DbSessionDependency,
 ) -> ApiResponse[BrandVoiceDeletedResponse]:
-    brand_voice = _brand_voice_or_404(db, tenant_id=user.tenant_id, brand_voice_id=brand_voice_id)
+    brand_voice = db.scalar(
+        select(BrandVoice)
+        .where(BrandVoice.id == brand_voice_id, BrandVoice.tenant_id == user.tenant_id)
+        .with_for_update()
+    )
+    if brand_voice is None or brand_voice.deleted_at is not None:
+        raise AppError("Brand voice not found.", code="BRAND_VOICE_NOT_FOUND", status_code=404)
+    assert_brand_voice_not_held_by_manual_order(db, brand_voice_id=brand_voice.id)
     provider_name = _voice_clone_provider_name(brand_voice.provider)
     if brand_voice.speaker_id:
         _release_remote_speaker(db, user=user, brand_voice=brand_voice)

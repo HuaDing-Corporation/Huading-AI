@@ -11,7 +11,16 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.exceptions import AppError
-from app.db.models import BillingOperation, CreditRefundGrant, Plan, Subscription, UsageRecord, User
+from app.db.models import (
+    Asset,
+    BillingOperation,
+    BrandVoiceOrder,
+    CreditRefundGrant,
+    Plan,
+    Subscription,
+    UsageRecord,
+    User,
+)
 from app.main import app
 from app.services import admin_console, quota
 from app.services import subscription as subscription_service
@@ -59,9 +68,7 @@ def _decide_refund(
         tenant_id=tenant_id,
     )
     locked_operation = db.scalar(
-        select(BillingOperation)
-        .where(BillingOperation.id == operation_id)
-        .with_for_update()
+        select(BillingOperation).where(BillingOperation.id == operation_id).with_for_update()
     )
     context = subscription_service.refund_subscriptions_for_update(
         db,
@@ -80,6 +87,82 @@ def _decide_refund(
     )
 
 
+def test_rejected_order_read_requeries_pending_grant_after_activation(db_session) -> None:
+    from app.services.brand_voice_orders import brand_voice_order_read
+
+    now = datetime(2026, 8, 29, tzinfo=UTC)
+    source = db_session.get(Subscription, "subscription-a")
+    source.status = "expired"
+    source.period_end = now - timedelta(seconds=1)
+    operation = _billing_operation(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        operation="doubao_brand_voice_order_create",
+        requested_credits=30_000,
+        completed=True,
+    )
+    order_id = str(uuid4())
+    operation.result_type = "brand_voice_order"
+    operation.result_id = order_id
+    operation.result_payload = {}
+    asset = Asset(
+        id="refund-order-audio",
+        tenant_id="tenant-a",
+        type="audio",
+        source="upload",
+        storage_key="tenants/tenant-a/uploads/refund-order.wav",
+        mime_type="audio/wav",
+        status="ready",
+    )
+    db_session.add_all([operation, asset])
+    db_session.flush()
+    order = BrandVoiceOrder(
+        id=order_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        order_type="create",
+        requested_name="Refund order",
+        source_audio_asset_id=asset.id,
+        source_metadata_snapshot={},
+        consent_confirmed_at=now,
+        billing_operation_id=operation.id,
+        status="rejected",
+        resolver_user_id="user-a",
+        rejected_at=now,
+        rejection_reason="not deliverable",
+    )
+    grant = CreditRefundGrant(
+        billing_operation_id=operation.id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        source_subscription_id=source.id,
+        amount_credits=30_000,
+        status="pending",
+    )
+    db_session.add_all([order, grant])
+    db_session.commit()
+
+    pending = brand_voice_order_read(db_session, order=order)
+    assert pending.refund_disposition == "pending_next_subscription"
+    assert pending.refund_grant_status == "pending"
+    assert pending.refund_applied_at is None
+
+    plan = db_session.get(Plan, source.plan_id)
+    activated = activate_subscription(
+        db_session,
+        tenant_id="tenant-a",
+        plan=plan,
+        period_start=now,
+    )
+    db_session.commit()
+    db_session.refresh(order)
+    applied = brand_voice_order_read(db_session, order=order)
+    assert applied.refund_disposition == "current_subscription_credited"
+    assert applied.refund_grant_status == "applied"
+    assert applied.refund_applied_at is not None
+    assert activated.quota_credits_total == plan.quota_credits + 30_000
+
+
 def test_quota_without_active_subscription_still_reports_cross_period_values(
     auth_db,
     auth_context,
@@ -87,9 +170,7 @@ def test_quota_without_active_subscription_still_reports_cross_period_values(
     now = datetime.now(UTC)
     with auth_db() as db:
         subscription = db.scalar(
-            select(Subscription).where(
-                Subscription.tenant_id == auth_context["tenant_id"]
-            )
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
         )
         subscription.status = "expired"
         subscription.period_end = now - timedelta(seconds=1)
@@ -163,9 +244,7 @@ def test_activation_applies_pending_refund_grants_exactly_once(
     now = datetime.now(UTC)
     with auth_db() as db:
         source = db.scalar(
-            select(Subscription).where(
-                Subscription.tenant_id == auth_context["tenant_id"]
-            )
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
         )
         plan = db.get(Plan, source.plan_id)
         source.status = "expired"
@@ -225,9 +304,7 @@ def test_refund_decision_skips_grant_while_source_is_current(
     now = datetime.now(UTC)
     with auth_db() as db:
         source = db.scalar(
-            select(Subscription).where(
-                Subscription.tenant_id == auth_context["tenant_id"]
-            )
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
         )
         total_before = source.quota_credits_total
         operation = _billing_operation(
@@ -274,9 +351,7 @@ def test_refund_decision_creates_pending_grant_without_current_target(
     now = datetime.now(UTC)
     with auth_db() as db:
         source = db.scalar(
-            select(Subscription).where(
-                Subscription.tenant_id == auth_context["tenant_id"]
-            )
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
         )
         source.status = "expired"
         source.period_end = now - timedelta(seconds=1)
@@ -328,9 +403,7 @@ def test_refund_decision_applies_immediately_to_current_target(
     now = datetime.now(UTC)
     with auth_db() as db:
         target = db.scalar(
-            select(Subscription).where(
-                Subscription.tenant_id == auth_context["tenant_id"]
-            )
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
         )
         target_total_before = target.quota_credits_total
         source = Subscription(
@@ -398,9 +471,7 @@ def test_refund_decision_fails_closed_for_ownership_or_amount_mismatch(
     now = datetime.now(UTC)
     with auth_db() as db:
         source = db.scalar(
-            select(Subscription).where(
-                Subscription.tenant_id == auth_context["tenant_id"]
-            )
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
         )
         operation = _billing_operation(
             tenant_id=auth_context["tenant_id"],
@@ -434,9 +505,7 @@ def test_refund_decision_fails_closed_on_conflicting_existing_grant(
     now = datetime.now(UTC)
     with auth_db() as db:
         source = db.scalar(
-            select(Subscription).where(
-                Subscription.tenant_id == auth_context["tenant_id"]
-            )
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
         )
         source.status = "expired"
         operation = _billing_operation(
@@ -482,9 +551,7 @@ def test_refund_decision_replay_returns_same_pending_grant(
     now = datetime.now(UTC)
     with auth_db() as db:
         source = db.scalar(
-            select(Subscription).where(
-                Subscription.tenant_id == auth_context["tenant_id"]
-            )
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
         )
         source.status = "expired"
         operation = _billing_operation(
@@ -520,9 +587,9 @@ def test_refund_decision_replay_returns_same_pending_grant(
         assert replay.kind == "pending"
         assert (
             db.scalar(
-                select(func.count()).select_from(CreditRefundGrant).where(
-                    CreditRefundGrant.billing_operation_id == operation.id
-                )
+                select(func.count())
+                .select_from(CreditRefundGrant)
+                .where(CreditRefundGrant.billing_operation_id == operation.id)
             )
             == 1
         )
@@ -535,9 +602,7 @@ def test_refund_decision_promotes_pending_grant_when_target_appears(
     now = datetime.now(UTC)
     with auth_db() as db:
         source = db.scalar(
-            select(Subscription).where(
-                Subscription.tenant_id == auth_context["tenant_id"]
-            )
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
         )
         source.status = "expired"
         plan = db.get(Plan, source.plan_id)
@@ -598,9 +663,9 @@ def test_refund_decision_promotes_pending_grant_when_target_appears(
         assert target.quota_credits_total == plan.quota_credits + 30_000
         assert (
             db.scalar(
-                select(func.count()).select_from(CreditRefundGrant).where(
-                    CreditRefundGrant.billing_operation_id == operation.id
-                )
+                select(func.count())
+                .select_from(CreditRefundGrant)
+                .where(CreditRefundGrant.billing_operation_id == operation.id)
             )
             == 1
         )
@@ -614,9 +679,7 @@ def test_activation_orchestrator_retries_with_fresh_sessions_and_applies_grant_o
     now = datetime.now(UTC)
     with auth_db() as db:
         source = db.scalar(
-            select(Subscription).where(
-                Subscription.tenant_id == auth_context["tenant_id"]
-            )
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
         )
         source.status = "expired"
         source.period_end = now - timedelta(seconds=1)
@@ -715,9 +778,7 @@ def test_activation_orchestrator_surfaces_third_serialization_failure(
     now = datetime.now(UTC)
     with auth_db() as db:
         plan_id = db.scalar(
-            select(Subscription.plan_id).where(
-                Subscription.tenant_id == auth_context["tenant_id"]
-            )
+            select(Subscription.plan_id).where(Subscription.tenant_id == auth_context["tenant_id"])
         )
 
     attempts: list[int] = []
@@ -779,9 +840,7 @@ def test_active_quota_snapshot_keeps_manual_values_explanatory(
 ) -> None:
     with auth_db() as db:
         subscription = db.scalar(
-            select(Subscription).where(
-                Subscription.tenant_id == auth_context["tenant_id"]
-            )
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
         )
         subscription.quota_credits_used = 11
         subscription.quota_credits_reserved = 30_000
@@ -852,9 +911,7 @@ def test_charging_without_active_subscription_still_fails_closed(
 ) -> None:
     with auth_db() as db:
         subscription = db.scalar(
-            select(Subscription).where(
-                Subscription.tenant_id == auth_context["tenant_id"]
-            )
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
         )
         subscription.status = "expired"
         db.commit()
@@ -876,9 +933,7 @@ def test_admin_credit_adjustment_preserves_cross_period_holds_and_grants(
     now = datetime.now(UTC)
     with auth_db() as db:
         active = db.scalar(
-            select(Subscription).where(
-                Subscription.tenant_id == auth_context["tenant_id"]
-            )
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
         )
         source = Subscription(
             tenant_id=auth_context["tenant_id"],
@@ -960,9 +1015,7 @@ def test_change_plan_preserves_manual_reservation_and_all_refund_grants(
     now = datetime.now(UTC)
     with auth_db() as db:
         active = db.scalar(
-            select(Subscription).where(
-                Subscription.tenant_id == auth_context["tenant_id"]
-            )
+            select(Subscription).where(Subscription.tenant_id == auth_context["tenant_id"])
         )
         free_plan = Plan(
             code="free",
@@ -1096,9 +1149,9 @@ def test_change_plan_preserves_manual_reservation_and_all_refund_grants(
         ) == ("applied", stored_active.id, applied_at)
         assert (
             db.scalar(
-                select(func.count()).select_from(Subscription).where(
-                    Subscription.tenant_id == auth_context["tenant_id"]
-                )
+                select(func.count())
+                .select_from(Subscription)
+                .where(Subscription.tenant_id == auth_context["tenant_id"])
             )
             == 2
         )

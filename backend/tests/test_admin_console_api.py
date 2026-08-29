@@ -89,6 +89,13 @@ _CONSOLE_REQUESTS = (
     ("GET", "/api/v1/admin/console/tasks", None),
     ("POST", "/api/v1/admin/console/tasks/missing/retry", None),
     ("GET", "/api/v1/admin/console/audit-logs", None),
+    ("GET", "/api/v1/admin/console/brand-voice-orders", None),
+    ("GET", "/api/v1/admin/console/brand-voice-orders/missing", None),
+    (
+        "POST",
+        "/api/v1/admin/console/brand-voice-orders/missing/resolve",
+        {"action": "reject", "rejection_reason": "gate probe"},
+    ),
 )
 
 
@@ -126,6 +133,35 @@ def test_admin_console_entitlement_is_derived_only_for_platform_tenant(
 
     assert response.status_code == 200
     assert "admin_console" in response.json()["data"]["permissions"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "action": "fulfill",
+            "provider_voice_id": "customer-voice",
+            "rejection_reason": "must not mix",
+        },
+        {
+            "action": "reject",
+            "rejection_reason": "not deliverable",
+            "provider_voice_id": "must-not-mix",
+        },
+    ],
+)
+def test_manual_order_resolve_rejects_mixed_action_fields(
+    auth_context,
+    platform_acme,
+    payload,
+) -> None:
+    response = TestClient(app).post(
+        "/api/v1/admin/console/brand-voice-orders/missing/resolve",
+        headers=auth_context["headers"],
+        json=payload,
+    )
+
+    assert response.status_code == 422
 
 
 @pytest.mark.parametrize("role", ["creator", "ops"])
@@ -582,14 +618,17 @@ def test_admin_task_monitor_normalizes_all_task_families_and_filters_them(
     assert items[fixture["task_id"]]["video_mode"] == "photo"
     assert items[completed_video_id]["status"] == "succeeded"
     reverse_item = items[jobs["reverse_job_id"]]
-    assert {key: reverse_item[key] for key in (
-        "task_family",
-        "mode",
-        "label",
-        "status",
-        "progress",
-        "retryable",
-    )} == {
+    assert {
+        key: reverse_item[key]
+        for key in (
+            "task_family",
+            "mode",
+            "label",
+            "status",
+            "progress",
+            "retryable",
+        )
+    } == {
         "task_family": "reverse_prompt",
         "mode": "video",
         "label": "seedance_2_0",
@@ -612,9 +651,7 @@ def test_admin_task_monitor_normalizes_all_task_families_and_filters_them(
 
     assert filtered.status_code == 200
     assert filtered.json()["data"]["total"] == 2
-    assert {
-        item["task_family"] for item in filtered.json()["data"]["items"]
-    } == {"reverse_prompt"}
+    assert {item["task_family"] for item in filtered.json()["data"]["items"]} == {"reverse_prompt"}
 
     legacy_done_filter = client.get(
         "/api/v1/admin/console/tasks",
@@ -622,9 +659,9 @@ def test_admin_task_monitor_normalizes_all_task_families_and_filters_them(
         headers=auth_context["headers"],
     )
     assert legacy_done_filter.status_code == 200
-    assert [
-        item["id"] for item in legacy_done_filter.json()["data"]["items"]
-    ] == [completed_video_id]
+    assert [item["id"] for item in legacy_done_filter.json()["data"]["items"]] == [
+        completed_video_id
+    ]
 
 
 def test_admin_task_monitor_excludes_soft_deleted_reverse_prompt_jobs(
@@ -884,6 +921,7 @@ def test_credit_adjustment_uses_for_update_and_independent_commits_do_not_lose_u
     fixture = _seed_console_read_fixture(auth_db, auth_context)
     statements: list[str] = []
     with auth_db() as db:
+
         @event.listens_for(db, "do_orm_execute")
         def capture_statement(orm_execute_state) -> None:
             if orm_execute_state.is_select:
@@ -1126,9 +1164,7 @@ def test_photo_retry_rejects_when_bound_image_provider_is_no_longer_available(
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "IMAGE_PROVIDER_NOT_CONFIGURED"
-    assert response.json()["error"]["message"] == (
-        "原任务绑定的图片服务已不可用，请重新创建任务。"
-    )
+    assert response.json()["error"]["message"] == ("原任务绑定的图片服务已不可用，请重新创建任务。")
     assert enqueued is False
     assert reservation_attempted is False
     with auth_db() as db:
@@ -1612,9 +1648,7 @@ def test_admin_task_retry_reuses_reverse_video_and_replicate_output_paths(
             db.scalars(
                 select(AdminAuditLog).where(
                     AdminAuditLog.action == "task_retry",
-                    AdminAuditLog.target_id.in_(
-                        (jobs["reverse_job_id"], jobs["replicate_job_id"])
-                    ),
+                    AdminAuditLog.target_id.in_((jobs["reverse_job_id"], jobs["replicate_job_id"])),
                 )
             )
         )
@@ -1970,9 +2004,7 @@ def test_non_video_stale_retries_redispatch_without_duplicate_charge_or_audit(
             db.scalars(
                 select(AdminAuditLog).where(
                     AdminAuditLog.action == "task_retry",
-                    AdminAuditLog.target_id.in_(
-                        (jobs["reverse_job_id"], jobs["replicate_job_id"])
-                    ),
+                    AdminAuditLog.target_id.in_((jobs["reverse_job_id"], jobs["replicate_job_id"])),
                 )
             )
         )
@@ -2080,9 +2112,7 @@ def test_non_video_retry_enqueue_compensations_are_idempotent(
             db.scalars(
                 select(AdminAuditLog).where(
                     AdminAuditLog.action == "task_retry",
-                    AdminAuditLog.target_id.in_(
-                        (jobs["reverse_job_id"], jobs["replicate_job_id"])
-                    ),
+                    AdminAuditLog.target_id.in_((jobs["reverse_job_id"], jobs["replicate_job_id"])),
                 )
             )
         )
@@ -2132,21 +2162,17 @@ def test_reverse_retry_enqueue_compensation_releases_reservation_after_soft_dele
 
     with auth_db() as db:
         actor = db.get(User, auth_context["user_id"])
-        compensated = (
-            admin_console_service.compensate_reverse_prompt_retry_enqueue_failure(
-                db,
-                actor=actor,
-                job_id=job_id,
-            )
+        compensated = admin_console_service.compensate_reverse_prompt_retry_enqueue_failure(
+            db,
+            actor=actor,
+            job_id=job_id,
         )
         assert compensated is not None
         assert compensated.deleted_at is not None
         db.commit()
 
     with auth_db() as db:
-        usage = db.scalar(
-            select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id)
-        )
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id))
         subscription = db.get(Subscription, fixture["subscription_id"])
         job = db.get(ReversePromptJob, job_id)
         assert usage.status == "released"
@@ -2345,8 +2371,9 @@ def test_ecom_replicate_worker_entry_claims_job_once_before_rendering(
     monkeypatch.setattr(
         image_gen,
         "run_ecom_replicate_generation",
-        lambda job_id, output_index=None: calls.append((job_id, output_index))
-        or {"status": "executed"},
+        lambda job_id, output_index=None: (
+            calls.append((job_id, output_index)) or {"status": "executed"}
+        ),
     )
 
     first = image_gen.generate_ecom_replicate_task.run(jobs["replicate_job_id"])
@@ -2378,8 +2405,7 @@ def test_ecom_replicate_worker_does_not_claim_soft_deleted_job(
     monkeypatch.setattr(
         image_gen,
         "run_ecom_replicate_generation",
-        lambda job_id, output_index=None: calls.append(job_id)
-        or {"status": "executed"},
+        lambda job_id, output_index=None: calls.append(job_id) or {"status": "executed"},
     )
 
     result = image_gen.generate_ecom_replicate_task.run(jobs["replicate_job_id"])
@@ -2411,9 +2437,7 @@ def test_plan_change_updates_target_auth_entitlements_immediately(
 
     before = client.get("/api/v1/auth/me", headers=target_headers)
     assert before.status_code == 200
-    assert {"voice_clone_vip", "analytics_view"}.issubset(
-        set(before.json()["data"]["permissions"])
-    )
+    assert {"voice_clone_vip", "analytics_view"}.issubset(set(before.json()["data"]["permissions"]))
 
     changed = client.patch(
         f"/api/v1/admin/console/tenants/{fixture['tenant_id']}/plan",
@@ -2556,10 +2580,7 @@ def test_admin_audit_migration_upgrades_and_downgrades_on_sqlite() -> None:
         migration.upgrade()
         names = set(
             connection.scalars(
-                text(
-                    "SELECT name FROM sqlite_master "
-                    "WHERE name LIKE '%admin_audit_logs%'"
-                )
+                text("SELECT name FROM sqlite_master WHERE name LIKE '%admin_audit_logs%'")
             )
         )
         assert {
@@ -2568,9 +2589,12 @@ def test_admin_audit_migration_upgrades_and_downgrades_on_sqlite() -> None:
             "ix_admin_audit_logs_target_tenant_created_at",
         }.issubset(names)
         migration.downgrade()
-        assert connection.scalar(
-            text(
-                "SELECT count(*) FROM sqlite_master "
-                "WHERE type='table' AND name='admin_audit_logs'"
+        assert (
+            connection.scalar(
+                text(
+                    "SELECT count(*) FROM sqlite_master "
+                    "WHERE type='table' AND name='admin_audit_logs'"
+                )
             )
-        ) == 0
+            == 0
+        )

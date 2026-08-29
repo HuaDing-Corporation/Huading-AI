@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -812,10 +812,79 @@ def test_delete_brand_voice_releases_env_fallback_speaker_slot(
             "voice_clone_provider": "doubao-voice-clone",
         }
     ]
+
+
     with auth_db() as db:
         config = db.scalar(select(ProviderConfig).where(ProviderConfig.capability == "voice_clone"))
         assert "speaker_ids" not in config.config
         assert config.config["used_speaker_ids"] == {}
+
+
+def test_delete_brand_voice_rejects_awaiting_manual_renewal(auth_context, auth_db):
+    now = datetime.now(UTC)
+    with auth_db() as db:
+        subscription = db.scalar(select(Subscription))
+        db.get(Plan, subscription.plan_id).code = "huading"
+        subscription.quota_credits_total = 100_000
+        voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            owner_user_id=auth_context["user_id"],
+            name="Expired renewal target",
+            provider="doubao-voice-clone",
+            speaker_id="manual-renewal-target",
+            status="ready",
+            consent_confirmed=True,
+            consent_confirmed_at=now - timedelta(days=366),
+            activated_at=now - timedelta(days=366),
+            expires_at=now - timedelta(days=1),
+        )
+        asset = Asset(
+            tenant_id=auth_context["tenant_id"],
+            type="audio",
+            source="upload",
+            storage_key=f"tenants/{auth_context['tenant_id']}/uploads/renewal.wav",
+            mime_type="audio/wav",
+            duration_ms=10_000,
+            status="ready",
+        )
+        db.add_all([voice, asset])
+        db.commit()
+        voice_id = voice.id
+        asset_id = asset.id
+
+    client = TestClient(app)
+    payload = {
+        "order_type": "renew",
+        "requested_name": "Renewed voice",
+        "source_audio_asset_id": asset_id,
+        "consent_confirmed": True,
+        "existing_brand_voice_id": voice_id,
+    }
+    quote = client.post(
+        "/api/v1/brand-voice-orders/estimate",
+        headers=auth_context["headers"],
+        json=payload,
+    ).json()["data"]
+    submitted = client.post(
+        "/api/v1/brand-voice-orders",
+        headers={
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote["quote_token"],
+        },
+        json=payload,
+    )
+    assert submitted.status_code == 201
+
+    deleted = client.delete(
+        f"/api/v1/brand-voices/{voice_id}",
+        headers=auth_context["headers"],
+    )
+
+    assert deleted.status_code == 409
+    assert deleted.json()["error"]["code"] == "BRAND_VOICE_ORDER_NOT_CANCELLABLE"
+    with auth_db() as db:
+        assert db.get(BrandVoice, voice_id).deleted_at is None
 
 
 def test_voice_clone_slot_allocation_locks_provider_config_row():

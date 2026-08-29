@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
 from app.db.models import Asset, TaskAsset, UsageRecord, VideoTask
+from app.services.asset_retention import assert_asset_not_held_by_manual_order
 from app.services.storage.base import ObjectStorage, StorageKeyError
 from app.services.storage.keys import (
     delete_tenant_storage_key,
@@ -111,12 +112,20 @@ def _hard_delete_tasks(
     for task in tasks:
         storage_keys.extend([task.storage_key, task.thumbnail_key])
 
-    links = list(
-        db.scalars(select(TaskAsset).where(TaskAsset.video_task_id.in_(task_ids)))
-    )
+    links = list(db.scalars(select(TaskAsset).where(TaskAsset.video_task_id.in_(task_ids))))
+    asset_ids = sorted({link.asset_id for link in links})
+    assets_by_id = {
+        asset.id: asset
+        for asset in db.scalars(
+            select(Asset)
+            .where(Asset.id.in_(asset_ids))
+            .order_by(Asset.id)
+            .with_for_update()
+        )
+    }
     assets_to_delete: dict[str, Asset] = {}
     for link in links:
-        asset = db.get(Asset, link.asset_id)
+        asset = assets_by_id.get(link.asset_id)
         if asset is None:
             continue
         if link.role not in _OUTPUT_ASSET_ROLES or asset.source != "generated":
@@ -138,14 +147,13 @@ def _hard_delete_tasks(
             status_code=404,
         ) from exc
 
-    for usage in db.scalars(
-        select(UsageRecord).where(UsageRecord.video_task_id.in_(task_ids))
-    ):
+    for usage in db.scalars(select(UsageRecord).where(UsageRecord.video_task_id.in_(task_ids))):
         usage.video_task_id = None
     for link in links:
         db.delete(link)
     db.flush()
     for asset in assets_to_delete.values():
+        assert_asset_not_held_by_manual_order(db, asset_id=asset.id)
         db.delete(asset)
     for task in tasks:
         db.delete(task)

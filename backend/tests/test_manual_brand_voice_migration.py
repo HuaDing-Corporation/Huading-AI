@@ -10,7 +10,7 @@ import pytest
 import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
 
@@ -329,24 +329,22 @@ def test_refund_amount_requires_a_positive_integer_value(upgraded_engine, amount
         (
             BrandVoiceOrderResolveRequest,
             {
-                "status": "fulfilled",
-                "fulfilled_brand_voice_id": "   ",
-                "fulfilled_provider_id": "provider",
+                "action": "fulfill",
+                "provider_voice_id": "   ",
             },
         ),
         (
             BrandVoiceOrderResolveRequest,
             {
-                "status": "fulfilled",
-                "fulfilled_brand_voice_id": "voice",
-                "fulfilled_provider_id": "   ",
+                "action": "reject",
+                "rejection_reason": "   ",
             },
         ),
     ),
 )
 def test_order_schemas_reject_blank_identifiers(request_type, payload):
     with pytest.raises(ValidationError):
-        request_type.model_validate(payload)
+        TypeAdapter(request_type).validate_python(payload)
 
 
 def test_order_schemas_strip_supplied_identifiers():
@@ -359,18 +357,14 @@ def test_order_schemas_strip_supplied_identifiers():
             "existing_brand_voice_id": " existing ",
         }
     )
-    resolve = BrandVoiceOrderResolveRequest.model_validate(
+    resolve = TypeAdapter(BrandVoiceOrderResolveRequest).validate_python(
         {
-            "status": "fulfilled",
-            "fulfilled_brand_voice_id": " voice ",
-            "fulfilled_provider_id": " provider ",
+            "action": "fulfill",
+            "provider_voice_id": " provider ",
         }
     )
     assert (create.source_audio_asset_id, create.existing_brand_voice_id) == ("asset", "existing")
-    assert (resolve.fulfilled_brand_voice_id, resolve.fulfilled_provider_id) == (
-        "voice",
-        "provider",
-    )
+    assert resolve.provider_voice_id == "provider"
 
 
 def test_new_foreign_keys_restrict_real_parent_deletes(upgraded_engine):
