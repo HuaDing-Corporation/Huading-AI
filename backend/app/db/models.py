@@ -581,8 +581,7 @@ BRAND_VOICE_ORDER_RENEWAL_FULFILLMENT_CHECK = (
     "fulfilled_brand_voice_id = existing_brand_voice_id"
 )
 CREDIT_REFUND_AMOUNT_CHECK = (
-    "amount_credits > 0 AND LOWER(CAST(amount_credits AS TEXT)) NOT IN "
-    "('nan', 'infinity', '-infinity', 'inf', '-inf')"
+    "amount_credits > 0 AND amount_credits = CAST(amount_credits AS INTEGER)"
 )
 CREDIT_REFUND_STATE_CHECK = (
     "(status = 'pending' AND target_subscription_id IS NULL AND applied_at IS NULL) OR "
@@ -688,7 +687,14 @@ class BrandVoiceProviderId(Base):
         String(36), ForeignKey("brand_voices.id", ondelete="RESTRICT"), nullable=True
     )
     first_order_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("brand_voice_orders.id", ondelete="RESTRICT"), nullable=True
+        String(36),
+        ForeignKey(
+            "brand_voice_orders.id",
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="fk_brand_voice_provider_ids_first_order_id",
+        ),
+        nullable=True,
     )
     status: Mapped[Literal["active", "retired"]] = mapped_column(String(16), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

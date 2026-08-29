@@ -40,10 +40,15 @@ OR
   AND LENGTH(TRIM(rejection_reason)) > 0
 )
 """
-_REFUND_AMOUNT = (
-    "amount_credits > 0 AND LOWER(CAST(amount_credits AS TEXT)) NOT IN "
-    "('nan', 'infinity', '-infinity', 'inf', '-inf')"
+_ORDER_EXISTING_VOICE = (
+    "(order_type = 'create' AND existing_brand_voice_id IS NULL) OR "
+    "(order_type = 'renew' AND existing_brand_voice_id IS NOT NULL)"
 )
+_ORDER_RENEWAL_FULFILLMENT = (
+    "order_type != 'renew' OR status != 'fulfilled' OR "
+    "fulfilled_brand_voice_id = existing_brand_voice_id"
+)
+_REFUND_AMOUNT = "amount_credits > 0 AND amount_credits = CAST(amount_credits AS INTEGER)"
 _REFUND_STATE = (
     "(status = 'pending' AND target_subscription_id IS NULL AND applied_at IS NULL) OR "
     "(status = 'applied' AND target_subscription_id IS NOT NULL AND applied_at IS NOT NULL)"
@@ -52,6 +57,10 @@ _AUDIT_ACTIONS = (
     "action IN ('credits_adjust', 'plan_change', 'status_change', 'voice_slot_assign', "
     "'task_retry', 'brand_voice_order_audio_access', 'brand_voice_order_fulfill', "
     "'brand_voice_order_reject')"
+)
+_LEGACY_AUDIT_ACTIONS = (
+    "action IN ('credits_adjust', 'plan_change', 'status_change', "
+    "'voice_slot_assign', 'task_retry')"
 )
 
 
@@ -161,10 +170,7 @@ def upgrade() -> None:
             "source_audio_asset_id IS NOT NULL AND consent_confirmed_at IS NOT NULL",
             name="ck_brand_voice_orders_source_and_consent",
         ),
-        sa.CheckConstraint(
-            "(order_type = 'create' AND existing_brand_voice_id IS NULL) OR (order_type = 'renew' AND existing_brand_voice_id IS NOT NULL)",
-            name="ck_brand_voice_orders_existing_voice",
-        ),
+        sa.CheckConstraint(_ORDER_EXISTING_VOICE, name="ck_brand_voice_orders_existing_voice"),
         sa.CheckConstraint(
             "status IN ('awaiting_fulfillment', 'fulfilled', 'rejected')",
             name="ck_brand_voice_orders_status",
@@ -173,7 +179,7 @@ def upgrade() -> None:
             f"({_ORDER_STATE}) IS TRUE", name="ck_brand_voice_orders_resolution_state"
         ),
         sa.CheckConstraint(
-            "order_type != 'renew' OR status != 'fulfilled' OR fulfilled_brand_voice_id = existing_brand_voice_id",
+            _ORDER_RENEWAL_FULFILLMENT,
             name="ck_brand_voice_orders_renewal_fulfills_existing_voice",
         ),
     )
@@ -263,7 +269,9 @@ def downgrade() -> None:
         "manual audit logs": int(
             connection.scalar(
                 sa.text(
-                    "SELECT COUNT(*) FROM admin_audit_logs WHERE action IN ('brand_voice_order_audio_access', 'brand_voice_order_fulfill', 'brand_voice_order_reject')"
+                    "SELECT COUNT(*) FROM admin_audit_logs WHERE action IN "
+                    "('brand_voice_order_audio_access', 'brand_voice_order_fulfill', "
+                    "'brand_voice_order_reject')"
                 )
             )
             or 0
@@ -279,7 +287,7 @@ def downgrade() -> None:
         batch_op.drop_constraint("ck_admin_audit_logs_action", type_="check")
         batch_op.create_check_constraint(
             "ck_admin_audit_logs_action",
-            "action IN ('credits_adjust', 'plan_change', 'status_change', 'voice_slot_assign', 'task_retry')",
+            _LEGACY_AUDIT_ACTIONS,
         )
     op.drop_index(
         "ix_credit_refund_grants_tenant_user_created_at", table_name="credit_refund_grants"

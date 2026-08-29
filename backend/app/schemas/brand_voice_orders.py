@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 
 def _non_blank(value: str, field: str) -> str:
@@ -19,10 +19,15 @@ class BrandVoiceOrderCreateRequest(BaseModel):
     consent_confirmed: StrictBool
     existing_brand_voice_id: str | None = None
 
+    @field_validator("requested_name", "source_audio_asset_id", "existing_brand_voice_id")
+    @classmethod
+    def normalize_identifiers(cls, value: str | None, info):
+        if value is None:
+            return None
+        return _non_blank(value, info.field_name)
+
     @model_validator(mode="after")
     def validate_order_type(self):
-        self.requested_name = _non_blank(self.requested_name, "requested_name")
-        self.source_audio_asset_id = _non_blank(self.source_audio_asset_id, "source_audio_asset_id")
         if not self.consent_confirmed:
             raise ValueError("consent_confirmed must be true")
         if self.order_type == "create" and self.existing_brand_voice_id is not None:
@@ -39,6 +44,13 @@ class BrandVoiceOrderResolveRequest(BaseModel):
     fulfilled_brand_voice_id: str | None = None
     fulfilled_provider_id: str | None = None
     rejection_reason: str | None = None
+
+    @field_validator("fulfilled_brand_voice_id", "fulfilled_provider_id")
+    @classmethod
+    def normalize_identifiers(cls, value: str | None, info):
+        if value is None:
+            return None
+        return _non_blank(value, info.field_name)
 
     @model_validator(mode="after")
     def validate_resolution(self):
