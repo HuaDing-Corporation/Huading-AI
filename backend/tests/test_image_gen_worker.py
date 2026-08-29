@@ -53,6 +53,18 @@ class _FakeStorage:
         self.saved.pop(key, None)
 
 
+def test_successful_item_finalizer_failure_does_not_raise_into_generation(monkeypatch) -> None:
+    from app.workers import image_gen
+
+    monkeypatch.setattr(
+        image_gen,
+        "finalize_ecom_operation",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("settlement unavailable")),
+    )
+
+    image_gen._finalize_ecom_after_item_commit("billing-operation")
+
+
 class _MemProgressStore:
     def __init__(self) -> None:
         self.history: list[tuple[str, dict]] = []

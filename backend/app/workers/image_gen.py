@@ -737,6 +737,21 @@ def _failure_message(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
 
+def _finalize_ecom_after_item_commit(billing_operation_id: str) -> None:
+    """Settlement is recoverable work and must not rewrite a committed image result."""
+    try:
+        finalize_ecom_operation(
+            billing_operation_id=billing_operation_id,
+            session_factory=SessionLocal,
+        )
+    except Exception as exc:  # pragma: no cover - asserted with injected finalizer failure
+        logger.error(
+            "ecom_image_parent_finalization_failed",
+            billing_operation_id=billing_operation_id,
+            error=str(exc),
+        )
+
+
 def _mark_failed(
     *,
     tenant_id: str,
@@ -762,10 +777,7 @@ def _mark_failed(
             release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
         db.commit()
     if billing_operation_id:
-        finalize_ecom_operation(
-            billing_operation_id=billing_operation_id,
-            session_factory=SessionLocal,
-        )
+        _finalize_ecom_after_item_commit(billing_operation_id)
     with SessionLocal() as db:
         prune_video_history_best_effort(
             db,
@@ -1084,10 +1096,7 @@ def run_image_generation(params: dict[str, Any]) -> dict[str, Any]:
                 )
             db.commit()
             if billing_operation_id:
-                finalize_ecom_operation(
-                    billing_operation_id=billing_operation_id,
-                    session_factory=SessionLocal,
-                )
+                _finalize_ecom_after_item_commit(billing_operation_id)
             prune_video_history_best_effort(
                 db,
                 tenant_id=tenant_id,
