@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from app.core.exceptions import AppError
 from app.db.models import BillingOperation, Subscription, UsageRecord, User
@@ -351,6 +351,53 @@ def test_zero_price_operation_is_idempotent_and_keeps_wallet_unchanged(
     assert db_session.scalar(select(func.count()).select_from(UsageRecord)) == 1
 
 
+def test_fixed_free_operation_allows_explicit_zero_actual_quantity(
+    db_session, zero_price_quote
+):
+    register_billing_result_schema("test_zero_actual_result", StoredResource)
+    allocation = UsageAllocation(
+        0,
+        0,
+        Decimal("1"),
+        Decimal("0"),
+        "cosyvoice",
+        None,
+        None,
+    )
+    operation = create_reserved_operation(
+        db_session,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        operation="cosyvoice_brand_voice_create",
+        idempotency_key=uuid4(),
+        request_hash="a" * 64,
+        verified_quote=zero_price_quote,
+        usage_allocations=[allocation],
+    )
+
+    completed = complete_succeeded(
+        db_session,
+        operation_id=operation.id,
+        actual_quantities={0: Decimal("0")},
+        result_type="test_zero_actual_result",
+        result_id="voice-1",
+        result_payload=StoredResource(id="voice-1", status="ready"),
+    )
+    db_session.commit()
+
+    usage = db_session.scalar(
+        select(UsageRecord).where(UsageRecord.billing_operation_id == operation.id)
+    )
+    assert completed.completion_kind == "succeeded"
+    assert billing_summary(completed).status == "settled"
+    assert completed.requested_credits == 0
+    assert completed.settled_credits == 0
+    assert completed.released_credits == 0
+    assert usage.status == "settled"
+    assert usage.quantity == 0
+    assert usage.credits == 0
+
+
 def test_actual_quantity_may_be_shorter_or_equal_but_never_greater(
     db_session, verified_quote
 ):
@@ -481,6 +528,65 @@ def test_result_and_error_payload_bounds_and_sanitization(db_session, verified_q
     assert raw_exception_error.value.code == "BILLING_ERROR_PAYLOAD_INVALID"
 
 
+def test_sensitive_nested_keys_and_log_strings_never_persist_or_replay(
+    db_session, verified_quote
+):
+    nested = reserve_batch(db_session, verified_quote)
+    nested_failed = complete_failed(
+        db_session,
+        operation_id=nested.id,
+        code="PROVIDER_FAILED",
+        http_status=502,
+        sanitized_detail={
+            "metadata": {
+                "supplier_api_key": "supplier-secret",
+                "reason": "timeout",
+            }
+        },
+    )
+    assert nested_failed.error_payload == {
+        "detail": {
+            "metadata": {
+                "supplier_api_key": "[REDACTED]",
+                "reason": "timeout",
+            }
+        }
+    }
+    assert "supplier-secret" not in str(nested_failed.error_payload)
+    db_session.commit()
+
+    log_like = reserve_batch(db_session, verified_quote, key=uuid4())
+    log_failed = complete_failed(
+        db_session,
+        operation_id=log_like.id,
+        code="PROVIDER_FAILED",
+        http_status=502,
+        sanitized_detail={
+            "message": (
+                "Authorization: Bearer supplier-token\n"
+                "Traceback (most recent call last): raw provider log"
+            )
+        },
+    )
+    assert log_failed.error_payload == {"detail": {"message": "[REDACTED]"}}
+    assert "supplier-token" not in str(log_failed.error_payload)
+    assert "Traceback" not in str(log_failed.error_payload)
+    db_session.commit()
+
+    log_failed.error_payload = {
+        "detail": {"message": "Authorization: Bearer stored-raw-secret"}
+    }
+    db_session.commit()
+    with pytest.raises(BillingInvariantError):
+        lookup_operation(
+            db_session,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            operation=log_failed.operation,
+            idempotency_key=UUID(log_failed.idempotency_key),
+        )
+
+
 def test_lookup_returns_all_four_closed_union_states(db_session, verified_quote):
     register_billing_result_schema("test_lookup_result", EcomBatchResult)
     register_billing_result_schema("test_lookup_resource", StoredResource)
@@ -591,6 +697,61 @@ def test_lookup_fails_closed_for_unknown_or_invalid_stored_payload(
             idempotency_key=UUID(operation.idempotency_key),
         )
 
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "status",
+        "provider",
+        "pricing_line",
+        "item_gap",
+        "released_quantity",
+        "released_credits",
+    ],
+)
+def test_terminal_lookup_rejects_corrupt_canonical_usage(
+    db_session, verified_quote, corruption
+):
+    register_billing_result_schema("test_terminal_integrity", EcomBatchResult)
+    operation = reserve_batch(db_session, verified_quote)
+    complete_succeeded(
+        db_session,
+        operation_id=operation.id,
+        actual_quantities={0: Decimal("1")},
+        result_type="test_terminal_integrity",
+        result_id=None,
+        result_payload=EcomBatchResult(item_ids=["a"]),
+    )
+    db_session.commit()
+    usages = list(
+        db_session.scalars(
+            select(UsageRecord)
+            .where(UsageRecord.billing_operation_id == operation.id)
+            .order_by(UsageRecord.billing_item_index)
+        )
+    )
+    released = usages[1]
+    if corruption == "status":
+        released.status = "corrupt"
+    elif corruption == "provider":
+        released.provider = ""
+    elif corruption == "pricing_line":
+        released.billing_pricing_line_index = 99
+    elif corruption == "item_gap":
+        db_session.execute(delete(UsageRecord).where(UsageRecord.id == usages[-1].id))
+    elif corruption == "released_quantity":
+        released.quantity = Decimal("0.5")
+    elif corruption == "released_credits":
+        released.credits = Decimal("0.5")
+
+    with pytest.raises(BillingInvariantError):
+        lookup_operation(
+            db_session,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            operation=operation.operation,
+            idempotency_key=UUID(operation.idempotency_key),
+        )
 
 def test_legacy_unassociated_reservation_coexists_with_operation_reservation(
     db_session, verified_quote

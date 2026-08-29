@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
+from sqlalchemy import Integer, String, create_engine, func, select
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from app.services.transaction_retry import run_db_transaction_with_retry
 
@@ -16,11 +18,15 @@ class FakeDbError(Exception):
 class FakeSession:
     def __init__(self) -> None:
         self.commits = 0
+        self.flushes = 0
         self.rollbacks = 0
         self.closes = 0
 
     def commit(self) -> None:
         self.commits += 1
+
+    def flush(self) -> None:
+        self.flushes += 1
 
     def rollback(self) -> None:
         self.rollbacks += 1
@@ -37,6 +43,25 @@ class FakeFactory:
         session = FakeSession()
         self.sessions.append(session)
         return session
+
+
+class RetryProbeBase(DeclarativeBase):
+    pass
+
+
+class RetryProbe(RetryProbeBase):
+    __tablename__ = "retry_probe"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    value: Mapped[str] = mapped_column(String(32))
+
+
+class RefreshFailsAfterCommitSession(Session):
+    refresh_calls = 0
+
+    def refresh(self, instance, attribute_names=None, with_for_update=None) -> None:
+        type(self).refresh_calls += 1
+        raise OperationalError("refresh", {}, FakeDbError("40001"))
 
 
 @pytest.mark.parametrize("sqlstate", ["40P01", "40001"])
@@ -103,3 +128,33 @@ def test_invalid_max_attempts_is_rejected_before_opening_session():
     with pytest.raises(ValueError):
         run_db_transaction_with_retry(factory, lambda _session: None, max_attempts=0)
     assert factory.sessions == []
+
+
+def test_no_fallible_database_work_or_retry_occurs_after_commit():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    RetryProbeBase.metadata.create_all(engine)
+    factory = sessionmaker(
+        bind=engine,
+        class_=RefreshFailsAfterCommitSession,
+        autoflush=False,
+        expire_on_commit=True,
+    )
+    RefreshFailsAfterCommitSession.refresh_calls = 0
+    attempts = 0
+
+    def operation(db: Session) -> RetryProbe:
+        nonlocal attempts
+        attempts += 1
+        probe = RetryProbe(value="committed-once")
+        db.add(probe)
+        return probe
+
+    probe = run_db_transaction_with_retry(factory, operation)
+
+    assert attempts == 1
+    assert RefreshFailsAfterCommitSession.refresh_calls == 0
+    assert probe.id is not None
+    assert probe.value == "committed-once"
+    with factory() as db:
+        assert db.scalar(select(func.count()).select_from(RetryProbe)) == 1
+    engine.dispose()

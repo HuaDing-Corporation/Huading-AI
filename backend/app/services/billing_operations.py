@@ -12,7 +12,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 import structlog
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -21,27 +21,58 @@ from app.db.models import (
     ERROR_PAYLOAD_MAX_BYTES,
     RESULT_PAYLOAD_MAX_BYTES,
     BillingOperation,
+    Subscription,
     UsageRecord,
 )
 from app.services import quota
 from app.services.billing_quotes import VerifiedQuote, canonical_json
-from app.services.pricing import PricingInvariantError, PricingSnapshot, validate_pricing_snapshot
+from app.services.pricing import (
+    PricingInvariantError,
+    PricingLine,
+    PricingSnapshot,
+    RateSource,
+    validate_pricing_snapshot,
+)
 
 logger = structlog.get_logger(__name__)
 
 _RESULT_SCHEMAS: dict[str, type[BaseModel]] = {}
 _RESULT_SCHEMAS_LOCK = threading.Lock()
 _SAFE_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
-_SENSITIVE_KEYS = frozenset(
+_SENSITIVE_KEY_PARTS = frozenset(
     {
-        "api_key",
+        "api",
         "apikey",
+        "auth",
         "authorization",
         "cookie",
+        "credential",
+        "credentials",
+        "header",
+        "headers",
+        "key",
+        "log",
+        "logs",
         "password",
+        "provider",
         "secret",
+        "supplier",
         "token",
     }
+)
+_SENSITIVE_TEXT_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bauthorization\s*:",
+        r"\bproxy-authorization\s*:",
+        r"\bbearer\s+[a-z0-9._~+/=-]+",
+        r"\bbasic\s+[a-z0-9+/=]+",
+        r"\b(?:api[ _-]?key|token|secret|password|credential)s?\s*[:=]",
+        r"\btraceback\s*\(",
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+        r"\b(?:stack trace|provider log|supplier log)\b",
+        r"[\r\n]",
+    )
 )
 
 
@@ -89,7 +120,7 @@ class BillingSummary(_BillingModel):
 class BillingFailure(_BillingModel):
     code: str
     original_http_status: int
-    detail: object | None
+    detail: JsonValue | None
 
 
 class BillingInProgressLookup(_BillingModel):
@@ -153,7 +184,7 @@ BillingOperationLookup = (
 
 
 class _StoredErrorPayload(_BillingModel):
-    detail: object | None = None
+    detail: JsonValue | None = None
 
 
 def register_billing_result_schema(result_type: str, schema: type[BaseModel]) -> None:
@@ -384,6 +415,17 @@ def _validate_allocations(
                 code="BILLING_ALLOCATION_INVALID",
                 status_code=500,
             )
+        line = snapshot.pricing_lines[0]
+        if line.unit in {"call", "image"} and line.quantity == line.quantity.to_integral_value():
+            expected_items = int(line.quantity)
+            if len(items) != expected_items or any(
+                Decimal(item.quantity) != Decimal("1") for item in items
+            ):
+                raise AppError(
+                    "Simple per-item pricing must use one allocation per quoted unit.",
+                    code="BILLING_ALLOCATION_INVALID",
+                    status_code=500,
+                )
     elif any(
         item.item_index != item.pricing_line_index
         for item in items
@@ -526,16 +568,45 @@ def _operation_for_update(db: Session, operation_id: str) -> BillingOperation:
     return operation
 
 
+def _subscription_ids_for_operation(db: Session, operation_id: str) -> list[str]:
+    return list(
+        db.scalars(
+            select(UsageRecord.subscription_id)
+            .where(
+                UsageRecord.billing_operation_id == operation_id,
+                UsageRecord.subscription_id.is_not(None),
+            )
+            .distinct()
+            .order_by(UsageRecord.subscription_id)
+        )
+    )
+
+
 def _usage_for_update(db: Session, operation_id: str) -> list[UsageRecord]:
     return list(
         db.scalars(
             select(UsageRecord)
             .where(UsageRecord.billing_operation_id == operation_id)
-            .order_by(UsageRecord.billing_item_index)
+            .order_by(UsageRecord.id)
             .with_for_update()
             .execution_options(populate_existing=True)
         )
     )
+
+
+def _operation_subscription(
+    subscriptions: Sequence[Subscription],
+    usages: Sequence[UsageRecord],
+) -> Subscription:
+    subscription_ids = {usage.subscription_id for usage in usages}
+    if len(subscription_ids) != 1 or None in subscription_ids:
+        raise BillingInvariantError("operation usages do not share a subscription")
+    subscription_id = next(iter(subscription_ids))
+    by_id = {subscription.id: subscription for subscription in subscriptions}
+    subscription = by_id.get(subscription_id)
+    if subscription is None or set(by_id) != subscription_ids:
+        raise BillingInvariantError("operation subscription lock set is invalid")
+    return subscription
 
 
 def _snapshot_from_operation(operation: BillingOperation) -> PricingSnapshot:
@@ -588,10 +659,34 @@ def _validate_result_payload(result_type: str, payload: BaseModel) -> dict[str, 
     return stored
 
 
-def _sanitize_detail(value: object, *, key: str | None = None) -> object:
-    if key is not None and key.casefold() in _SENSITIVE_KEYS:
+def _sensitive_key(key: str) -> bool:
+    parts = {
+        part
+        for part in re.split(r"[^a-z0-9]+", key.casefold())
+        if part
+    }
+    compact = "".join(parts)
+    return bool(parts & _SENSITIVE_KEY_PARTS) or any(
+        fragment in compact
+        for fragment in ("apikey", "accesstoken", "refreshtoken", "privatekey")
+    )
+
+
+def _sanitize_detail(
+    value: object,
+    *,
+    key: str | None = None,
+    depth: int = 0,
+) -> JsonValue:
+    if depth > 5:
         return "[REDACTED]"
-    if value is None or isinstance(value, str | bool | int):
+    if key is not None and _sensitive_key(key):
+        return "[REDACTED]"
+    if isinstance(value, str):
+        if any(pattern.search(value) for pattern in _SENSITIVE_TEXT_PATTERNS):
+            return "[REDACTED]"
+        return value
+    if value is None or isinstance(value, bool | int):
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
@@ -604,14 +699,22 @@ def _sanitize_detail(value: object, *, key: str | None = None) -> object:
     if isinstance(value, BaseException):
         raise ValueError("raw exceptions are not safe billing details")
     if isinstance(value, Mapping):
-        cleaned: dict[str, object] = {}
+        if len(value) > 50:
+            raise ValueError("detail mapping is too large")
+        cleaned: dict[str, JsonValue] = {}
         for nested_key, nested_value in value.items():
             if not isinstance(nested_key, str):
                 raise ValueError("detail keys must be strings")
-            cleaned[nested_key] = _sanitize_detail(nested_value, key=nested_key)
+            cleaned[nested_key] = _sanitize_detail(
+                nested_value,
+                key=nested_key,
+                depth=depth + 1,
+            )
         return cleaned
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        return [_sanitize_detail(item) for item in value]
+        if len(value) > 50:
+            raise ValueError("detail sequence is too large")
+        return [_sanitize_detail(item, depth=depth + 1) for item in value]
     raise ValueError("detail is not schema-safe JSON")
 
 
@@ -673,6 +776,16 @@ def _validate_stored_allocations(
         raise BillingInvariantError("stored billing allocations are invalid") from exc
 
 
+def _is_explicit_fixed_zero_line(snapshot: PricingSnapshot, line: PricingLine) -> bool:
+    return (
+        snapshot.operation == "cosyvoice_brand_voice_create"
+        and line.operation == snapshot.operation
+        and line.unit_credits == 0
+        and line.rate.source == RateSource.FIXED_POLICY
+        and line.rate.policy_key == snapshot.operation
+    )
+
+
 def _release_operation(
     operation: BillingOperation,
     usages: Sequence[UsageRecord],
@@ -716,22 +829,21 @@ def complete_succeeded(
     result_id: str | None,
     result_payload: BaseModel,
 ) -> BillingOperation:
+    discovered_subscription_ids = _subscription_ids_for_operation(db, operation_id)
     operation = _operation_for_update(db, operation_id)
     if operation.status == "completed":
         return operation
     stored_result = _validate_result_payload(result_type, result_payload)
     snapshot = _snapshot_from_operation(operation)
+    subscriptions = quota.lock_subscriptions_for_billing(
+        db,
+        subscription_ids=discovered_subscription_ids,
+    )
     usages = _usage_for_update(db, operation.id)
     _validate_stored_allocations(snapshot, usages, require_reserved=True)
     if not usages:
         raise BillingInvariantError("operation has no usage allocations")
-    subscription_ids = {usage.subscription_id for usage in usages}
-    if len(subscription_ids) != 1 or None in subscription_ids:
-        raise BillingInvariantError("operation usages do not share a subscription")
-    subscription = quota.lock_subscription_for_billing(
-        db,
-        subscription_id=next(iter(subscription_ids)),
-    )
+    subscription = _operation_subscription(subscriptions, usages)
     usage_by_item = {int(usage.billing_item_index): usage for usage in usages}
     exact_subtotal = Decimal("0")
     parsed_actual: dict[int, Decimal] = {}
@@ -744,18 +856,22 @@ def complete_succeeded(
         if usage is None:
             invalid_code = "BILLING_ACTUAL_QUANTITY_INVALID"
             break
+        line = snapshot.pricing_lines[int(usage.billing_pricing_line_index)]
         try:
-            actual = _finite_decimal(value, field="actual quantity", allow_zero=False)
+            actual = _finite_decimal(
+                value,
+                field="actual quantity",
+                allow_zero=_is_explicit_fixed_zero_line(snapshot, line),
+            )
         except AppError:
             invalid_code = "BILLING_ACTUAL_QUANTITY_INVALID"
             break
         if actual > Decimal(usage.quantity):
             invalid_code = "BILLING_QUOTE_EXCEEDED"
             break
-        line = snapshot.pricing_lines[int(usage.billing_pricing_line_index)]
         parsed_actual[item_index] = actual
         exact_subtotal += actual * line.unit_credits
-    if not parsed_actual and snapshot.payable_credits > 0:
+    if not parsed_actual:
         invalid_code = invalid_code or "BILLING_NO_SUCCESSFUL_ALLOCATION"
     if invalid_code is not None:
         error_payload = _validated_error_payload(
@@ -814,20 +930,19 @@ def complete_failed(
     http_status: int,
     sanitized_detail: object | None,
 ) -> BillingOperation:
+    discovered_subscription_ids = _subscription_ids_for_operation(db, operation_id)
     operation = _operation_for_update(db, operation_id)
     if operation.status == "completed":
         return operation
     error_payload = _validated_error_payload(code, http_status, sanitized_detail)
     snapshot = _snapshot_from_operation(operation)
+    subscriptions = quota.lock_subscriptions_for_billing(
+        db,
+        subscription_ids=discovered_subscription_ids,
+    )
     usages = _usage_for_update(db, operation.id)
     _validate_stored_allocations(snapshot, usages, require_reserved=True)
-    subscription_ids = {usage.subscription_id for usage in usages}
-    if len(subscription_ids) != 1 or None in subscription_ids:
-        raise BillingInvariantError("operation usages do not share a subscription")
-    subscription = quota.lock_subscription_for_billing(
-        db,
-        subscription_id=next(iter(subscription_ids)),
-    )
+    subscription = _operation_subscription(subscriptions, usages)
     released = _release_operation(
         operation,
         usages,
@@ -856,6 +971,27 @@ def _validate_stored_result(operation: BillingOperation) -> BaseModel:
     return result
 
 
+def _validate_stored_error_payload(operation: BillingOperation) -> _StoredErrorPayload:
+    if (
+        operation.error_payload is None
+        or operation.error_code is None
+        or not _SAFE_CODE.fullmatch(operation.error_code)
+        or operation.error_http_status is None
+        or not 400 <= operation.error_http_status <= 599
+    ):
+        raise BillingInvariantError("failed operation is missing its safe error")
+    try:
+        stored_error = _StoredErrorPayload.model_validate(operation.error_payload)
+        cleaned_detail = _sanitize_detail(stored_error.detail)
+    except (ValidationError, ValueError) as exc:
+        raise BillingInvariantError("stored error payload is invalid") from exc
+    if cleaned_detail != stored_error.detail:
+        raise BillingInvariantError("stored error payload is not sanitized")
+    if len(_payload_bytes(stored_error.model_dump(mode="json"))) > ERROR_PAYLOAD_MAX_BYTES:
+        raise BillingInvariantError("stored error payload exceeds its byte limit")
+    return stored_error
+
+
 def _validate_lookup_usages(
     operation: BillingOperation,
     snapshot: PricingSnapshot,
@@ -863,16 +999,106 @@ def _validate_lookup_usages(
 ) -> None:
     if not usages:
         raise BillingInvariantError("billing operation has no usage rows")
+    ordered = sorted(
+        usages,
+        key=lambda usage: (
+            usage.billing_item_index
+            if usage.billing_item_index is not None
+            else -1
+        ),
+    )
+    if [usage.billing_item_index for usage in ordered] != list(range(len(ordered))):
+        raise BillingInvariantError("billing usage item allocation is not contiguous")
+    line_indexes: set[int] = set()
+    quantities_by_line: dict[int, Decimal] = {}
+    for usage in ordered:
+        if (
+            usage.billing_operation_id != operation.id
+            or usage.tenant_id != operation.tenant_id
+            or usage.subscription_id is None
+            or usage.billing_pricing_line_index is None
+            or not 0 <= usage.billing_pricing_line_index < len(snapshot.pricing_lines)
+        ):
+            raise BillingInvariantError("billing usage allocation identity is invalid")
+        if (
+            not usage.provider.strip()
+            or len(usage.provider) > 40
+            or (usage.model is not None and len(usage.model) > 80)
+            or usage.cost_cents < 0
+        ):
+            raise BillingInvariantError("billing usage provider data is invalid")
+        line_index = usage.billing_pricing_line_index
+        line = snapshot.pricing_lines[line_index]
+        if usage.capability != line.capability or usage.unit != line.unit:
+            raise BillingInvariantError("billing usage line metadata is invalid")
+        quantity = Decimal(usage.quantity)
+        credits = Decimal(usage.credits)
+        if not quantity.is_finite() or quantity < 0 or not credits.is_finite() or credits < 0:
+            raise BillingInvariantError("billing usage amount is invalid")
+        if credits != quantity * line.unit_credits:
+            raise BillingInvariantError("billing usage arithmetic is invalid")
+        if line.unit_credits > 0 and quantity <= 0:
+            raise BillingInvariantError("positive-price billing usage must have quantity")
+        line_indexes.add(line_index)
+        quantities_by_line[line_index] = quantities_by_line.get(
+            line_index, Decimal("0")
+        ) + quantity
+    if line_indexes != set(range(len(snapshot.pricing_lines))):
+        raise BillingInvariantError("billing usage does not cover every pricing line")
+    if snapshot.pricing_shape == "simple":
+        if any(usage.billing_pricing_line_index != 0 for usage in ordered):
+            raise BillingInvariantError("simple billing usage must use pricing line zero")
+        line = snapshot.pricing_lines[0]
+        if line.unit in {"call", "image"} and line.quantity == line.quantity.to_integral_value():
+            if len(ordered) != int(line.quantity):
+                raise BillingInvariantError("simple billing usage item coverage is invalid")
+            if any(
+                usage.status == "released" and Decimal(usage.quantity) != Decimal("1")
+                for usage in ordered
+            ):
+                raise BillingInvariantError("released per-item billing usage is invalid")
+            if any(
+                usage.status == "settled" and Decimal(usage.quantity) > Decimal("1")
+                for usage in ordered
+            ):
+                raise BillingInvariantError("settled per-item billing usage exceeds its quote")
+    elif len(ordered) != len(snapshot.pricing_lines) or any(
+        usage.billing_item_index != usage.billing_pricing_line_index
+        for usage in ordered
+    ):
+        raise BillingInvariantError("composite billing usage mapping is invalid")
     if operation.status == "in_progress":
+        if any(usage.settled_at is not None for usage in usages):
+            raise BillingInvariantError("reserved billing usage has a settlement time")
         _validate_stored_allocations(snapshot, usages, require_reserved=True)
         return
+    if any(usage.settled_at is None for usage in usages):
+        raise BillingInvariantError("terminal billing usage is missing settlement time")
     if operation.completion_kind in {"failed", "rejected"}:
         if any(usage.status != "released" for usage in usages):
             raise BillingInvariantError("released operation has non-released usage")
+        _validate_stored_allocations(snapshot, usages, require_reserved=False)
         return
     if operation.completion_kind == "succeeded":
-        if any(usage.status == "reserved" for usage in usages):
-            raise BillingInvariantError("succeeded operation retains a reservation")
+        if any(usage.status not in {"settled", "released"} for usage in usages):
+            raise BillingInvariantError("succeeded operation has invalid usage state")
+        if not any(usage.status == "settled" for usage in usages):
+            raise BillingInvariantError("succeeded operation has no settled usage")
+        if snapshot.pricing_shape == "composite":
+            for usage in usages:
+                if usage.status != "released":
+                    continue
+                line = snapshot.pricing_lines[int(usage.billing_pricing_line_index)]
+                if (
+                    Decimal(usage.quantity) != line.quantity
+                    or Decimal(usage.credits) != line.subtotal_credits
+                ):
+                    raise BillingInvariantError(
+                        "released composite usage differs from its quote"
+                    )
+        for line_index, line in enumerate(snapshot.pricing_lines):
+            if quantities_by_line[line_index] > line.quantity:
+                raise BillingInvariantError("terminal usage exceeds quoted line quantity")
         exact = Decimal("0")
         for usage in usages:
             if usage.status == "settled":
@@ -955,12 +1181,7 @@ def lookup_operation(
             raise BillingInvariantError("failed operation contains a result")
         if row.error_code is None or row.error_http_status is None or row.error_payload is None:
             raise BillingInvariantError("failed operation is missing its safe error")
-        try:
-            stored_error = _StoredErrorPayload.model_validate(row.error_payload)
-        except ValidationError as exc:
-            raise BillingInvariantError("stored error payload is invalid") from exc
-        if len(_payload_bytes(stored_error.model_dump(mode="json"))) > ERROR_PAYLOAD_MAX_BYTES:
-            raise BillingInvariantError("stored error payload exceeds its byte limit")
+        stored_error = _validate_stored_error_payload(row)
         return BillingFailedLookup(
             **common,
             failure=BillingFailure(

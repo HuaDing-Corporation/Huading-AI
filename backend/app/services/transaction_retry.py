@@ -26,10 +26,9 @@ def _sqlstate(exc: BaseException) -> str | None:
     return None
 
 
-def _detach_orm_result(session: Session, result: T) -> T:
+def _detach_orm_result_before_commit(session: Session, result: T) -> T:
     state = sqlalchemy_inspect(result, raiseerr=False)
     if state is not None and getattr(state, "persistent", False):
-        session.refresh(result)
         session.expunge(result)
     return result
 
@@ -48,8 +47,9 @@ def run_db_transaction_with_retry(
         session = session_factory()
         try:
             result = operation(session)
+            session.flush()
+            result = _detach_orm_result_before_commit(session, result)
             session.commit()
-            return _detach_orm_result(session, result)
         except Exception as exc:
             session.rollback()
             if _sqlstate(exc) not in _RETRYABLE_SQLSTATES or attempt >= max_attempts:
@@ -59,6 +59,8 @@ def run_db_transaction_with_retry(
                 _MIN_RETRY_DELAY_SECONDS * (2**attempt),
             )
             time.sleep(random.uniform(_MIN_RETRY_DELAY_SECONDS, upper_bound))
+        else:
+            return result
         finally:
             session.close()
 

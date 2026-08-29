@@ -982,7 +982,7 @@ def _seed_postgres_billing_owner(factory) -> tuple[str, str]:
         return tenant_id, user.id
 
 
-def test_operation_transitions_lock_operation_usage_then_subscription(
+def test_operation_transitions_discover_ids_then_lock_operation_subscription_usage(
     auth_db,
     auth_context,
 ) -> None:
@@ -1013,16 +1013,21 @@ def test_operation_transitions_lock_operation_usage_then_subscription(
     operation_index = next(
         index for index, sql in enumerate(statements) if "FROM billing_operations" in sql
     )
-    usage_index = next(
+    usage_indexes = [
         index for index, sql in enumerate(statements) if "FROM usage_records" in sql
-    )
+    ]
     subscription_index = next(
         index for index, sql in enumerate(statements) if "FROM subscriptions" in sql
     )
-    assert operation_index < usage_index < subscription_index
+    assert len(usage_indexes) == 2
+    discovery_index, locked_usage_index = usage_indexes
+    assert discovery_index < operation_index < subscription_index < locked_usage_index
+    assert "FOR UPDATE" not in statements[discovery_index]
     assert "FOR UPDATE" in statements[operation_index]
-    assert "FOR UPDATE" in statements[usage_index]
     assert "FOR UPDATE" in statements[subscription_index]
+    assert "ORDER BY subscriptions.id" in statements[subscription_index]
+    assert "FOR UPDATE" in statements[locked_usage_index]
+    assert "ORDER BY usage_records.id" in statements[locked_usage_index]
 
 
 def test_postgres_concurrent_first_submission_reserves_once(

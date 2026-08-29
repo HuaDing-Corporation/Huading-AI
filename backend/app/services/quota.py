@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal
@@ -153,6 +154,25 @@ def lock_subscription_for_billing(
             status_code=500,
         )
     return subscription
+
+
+def lock_subscriptions_for_billing(
+    db: Session,
+    *,
+    subscription_ids: Sequence[str],
+) -> list[Subscription]:
+    ordered_ids = sorted(set(subscription_ids))
+    if not ordered_ids:
+        return []
+    return list(
+        db.scalars(
+            select(Subscription)
+            .where(Subscription.id.in_(ordered_ids))
+            .order_by(Subscription.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    )
 
 
 def settle_locked_subscription_credits(
