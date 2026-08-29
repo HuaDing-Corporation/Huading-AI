@@ -526,6 +526,9 @@ class BrandVoice(TenantScopedMixin, Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
     name: Mapped[str] = mapped_column(String(30))
     source_audio_asset_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("assets.id", ondelete="SET NULL"), nullable=True
@@ -537,11 +540,198 @@ class BrandVoice(TenantScopedMixin, Base):
     consent_confirmed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), default=None
     )
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     error_code: Mapped[str | None] = mapped_column(String(40), default=None)
     error_message: Mapped[str | None] = mapped_column(Text, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+
+BRAND_VOICE_ORDER_STATE_CHECK = """
+(
+  status = 'awaiting_fulfillment'
+  AND fulfilled_brand_voice_id IS NULL AND fulfilled_provider_id IS NULL
+  AND resolver_user_id IS NULL AND fulfilled_at IS NULL
+  AND rejected_at IS NULL AND rejection_reason IS NULL
+)
+OR
+(
+  status = 'fulfilled'
+  AND fulfilled_brand_voice_id IS NOT NULL AND fulfilled_provider_id IS NOT NULL
+  AND resolver_user_id IS NOT NULL AND fulfilled_at IS NOT NULL
+  AND rejected_at IS NULL AND rejection_reason IS NULL
+)
+OR
+(
+  status = 'rejected'
+  AND fulfilled_brand_voice_id IS NULL AND fulfilled_provider_id IS NULL
+  AND resolver_user_id IS NOT NULL AND fulfilled_at IS NULL
+  AND rejected_at IS NOT NULL AND rejection_reason IS NOT NULL
+  AND LENGTH(TRIM(rejection_reason)) > 0
+)
+"""
+BRAND_VOICE_ORDER_EXISTING_VOICE_CHECK = (
+    "(order_type = 'create' AND existing_brand_voice_id IS NULL) OR "
+    "(order_type = 'renew' AND existing_brand_voice_id IS NOT NULL)"
+)
+BRAND_VOICE_ORDER_RENEWAL_FULFILLMENT_CHECK = (
+    "order_type != 'renew' OR status != 'fulfilled' OR "
+    "fulfilled_brand_voice_id = existing_brand_voice_id"
+)
+CREDIT_REFUND_AMOUNT_CHECK = (
+    "amount_credits > 0 AND LOWER(CAST(amount_credits AS TEXT)) NOT IN "
+    "('nan', 'infinity', '-infinity', 'inf', '-inf')"
+)
+CREDIT_REFUND_STATE_CHECK = (
+    "(status = 'pending' AND target_subscription_id IS NULL AND applied_at IS NULL) OR "
+    "(status = 'applied' AND target_subscription_id IS NOT NULL AND applied_at IS NOT NULL)"
+)
+
+
+class BrandVoiceOrder(Base):
+    __tablename__ = "brand_voice_orders"
+    __table_args__ = (
+        UniqueConstraint("billing_operation_id", name="uq_brand_voice_orders_billing_operation_id"),
+        CheckConstraint(
+            "order_type IN ('create', 'renew')", name="ck_brand_voice_orders_order_type"
+        ),
+        CheckConstraint(
+            "source_audio_asset_id IS NOT NULL AND consent_confirmed_at IS NOT NULL",
+            name="ck_brand_voice_orders_source_and_consent",
+        ),
+        CheckConstraint(
+            BRAND_VOICE_ORDER_EXISTING_VOICE_CHECK,
+            name="ck_brand_voice_orders_existing_voice",
+        ),
+        CheckConstraint(
+            "status IN ('awaiting_fulfillment', 'fulfilled', 'rejected')",
+            name="ck_brand_voice_orders_status",
+        ),
+        CheckConstraint(
+            f"({BRAND_VOICE_ORDER_STATE_CHECK}) IS TRUE",
+            name="ck_brand_voice_orders_resolution_state",
+        ),
+        CheckConstraint(
+            BRAND_VOICE_ORDER_RENEWAL_FULFILLMENT_CHECK,
+            name="ck_brand_voice_orders_renewal_fulfills_existing_voice",
+        ),
+        Index(
+            "uq_brand_voice_orders_awaiting_renewal_per_voice",
+            "existing_brand_voice_id",
+            unique=True,
+            postgresql_where=text("order_type = 'renew' AND status = 'awaiting_fulfillment'"),
+            sqlite_where=text("order_type = 'renew' AND status = 'awaiting_fulfillment'"),
+        ),
+        Index("ix_brand_voice_orders_queue_created_at", "status", "created_at"),
+        Index("ix_brand_voice_orders_tenant_user_created_at", "tenant_id", "user_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenants.id", ondelete="RESTRICT")
+    )
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="RESTRICT"))
+    order_type: Mapped[Literal["create", "renew"]] = mapped_column(String(16))
+    requested_name: Mapped[str] = mapped_column(String(30))
+    source_audio_asset_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("assets.id", ondelete="RESTRICT")
+    )
+    source_metadata_snapshot: Mapped[dict[str, object]] = mapped_column(_json_type())
+    consent_confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    existing_brand_voice_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("brand_voices.id", ondelete="RESTRICT"), nullable=True
+    )
+    billing_operation_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("billing_operations.id", ondelete="RESTRICT")
+    )
+    status: Mapped[Literal["awaiting_fulfillment", "fulfilled", "rejected"]] = mapped_column(
+        String(32), default="awaiting_fulfillment"
+    )
+    fulfilled_brand_voice_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("brand_voices.id", ondelete="RESTRICT"), nullable=True
+    )
+    fulfilled_provider_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("brand_voice_provider_ids.id", ondelete="RESTRICT"), nullable=True
+    )
+    resolver_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+    fulfilled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class BrandVoiceProviderId(Base):
+    __tablename__ = "brand_voice_provider_ids"
+    __table_args__ = (
+        UniqueConstraint(
+            "normalized_provider_id", name="uq_brand_voice_provider_ids_normalized_id"
+        ),
+        CheckConstraint(
+            "kind IN ('official', 'customer')", name="ck_brand_voice_provider_ids_kind"
+        ),
+        CheckConstraint(
+            "status IN ('active', 'retired')", name="ck_brand_voice_provider_ids_status"
+        ),
+        Index("ix_brand_voice_provider_ids_brand_voice_id", "brand_voice_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    provider: Mapped[str] = mapped_column(String(40))
+    normalized_provider_id: Mapped[str] = mapped_column(String(160))
+    kind: Mapped[Literal["official", "customer"]] = mapped_column(String(16))
+    brand_voice_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("brand_voices.id", ondelete="RESTRICT"), nullable=True
+    )
+    first_order_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("brand_voice_orders.id", ondelete="RESTRICT"), nullable=True
+    )
+    status: Mapped[Literal["active", "retired"]] = mapped_column(String(16), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class CreditRefundGrant(Base):
+    __tablename__ = "credit_refund_grants"
+    __table_args__ = (
+        UniqueConstraint(
+            "billing_operation_id", name="uq_credit_refund_grants_billing_operation_id"
+        ),
+        CheckConstraint(
+            CREDIT_REFUND_AMOUNT_CHECK,
+            name="ck_credit_refund_grants_amount_positive_finite",
+        ),
+        CheckConstraint(
+            CREDIT_REFUND_STATE_CHECK,
+            name="ck_credit_refund_grants_state",
+        ),
+        Index(
+            "ix_credit_refund_grants_tenant_user_created_at", "tenant_id", "user_id", "created_at"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    billing_operation_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("billing_operations.id", ondelete="RESTRICT")
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenants.id", ondelete="RESTRICT")
+    )
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="RESTRICT"))
+    source_subscription_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("subscriptions.id", ondelete="RESTRICT")
+    )
+    target_subscription_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("subscriptions.id", ondelete="RESTRICT"), nullable=True
+    )
+    amount_credits: Mapped[int] = mapped_column(Integer)
+    status: Mapped[Literal["pending", "applied"]] = mapped_column(String(16), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Asset(Base):
@@ -1158,7 +1348,8 @@ class AdminAuditLog(Base):
     __table_args__ = (
         CheckConstraint(
             "action IN ('credits_adjust', 'plan_change', 'status_change', "
-            "'voice_slot_assign', 'task_retry')",
+            "'voice_slot_assign', 'task_retry', 'brand_voice_order_audio_access', "
+            "'brand_voice_order_fulfill', 'brand_voice_order_reject')",
             name="ck_admin_audit_logs_action",
         ),
         Index("ix_admin_audit_logs_created_at", created_at.desc()),

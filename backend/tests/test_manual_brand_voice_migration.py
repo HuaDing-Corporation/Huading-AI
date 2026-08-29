@@ -1,0 +1,245 @@
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import pytest
+import sqlalchemy as sa
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from sqlalchemy.exc import IntegrityError
+
+from app.db import models
+
+MIGRATION_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "alembic"
+    / "versions"
+    / "20260829_0038_manual_brand_voice.py"
+)
+
+
+def _migration():
+    assert MIGRATION_PATH.exists(), "0038 manual brand voice migration is required"
+    spec = importlib.util.spec_from_file_location("manual_brand_voice_migration", MIGRATION_PATH)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _create_0037_schema(connection) -> None:
+    for ddl in (
+        "CREATE TABLE tenants (id VARCHAR(36) PRIMARY KEY)",
+        "CREATE TABLE users (id VARCHAR(36) PRIMARY KEY)",
+        "CREATE TABLE assets (id VARCHAR(36) PRIMARY KEY)",
+        "CREATE TABLE subscriptions (id VARCHAR(36) PRIMARY KEY)",
+        "CREATE TABLE billing_operations (id VARCHAR(36) PRIMARY KEY)",
+        """CREATE TABLE brand_voices (
+            id VARCHAR(36) PRIMARY KEY, tenant_id VARCHAR(36), name VARCHAR(30) NOT NULL,
+            source_audio_asset_id VARCHAR(36), provider VARCHAR(40) NOT NULL,
+            speaker_id VARCHAR(160), status VARCHAR(32) NOT NULL,
+            consent_confirmed BOOLEAN NOT NULL, consent_confirmed_at DATETIME,
+            error_code VARCHAR(40), error_message TEXT, created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL, deleted_at DATETIME)""",
+        """CREATE TABLE admin_audit_logs (
+            id VARCHAR(36) PRIMARY KEY, actor_user_id VARCHAR(36) NOT NULL,
+            actor_tenant_id VARCHAR(36) NOT NULL, action VARCHAR(32) NOT NULL,
+            target_tenant_id VARCHAR(36), target_id VARCHAR(36), before JSON, after JSON,
+            reason TEXT, created_at DATETIME NOT NULL,
+            CONSTRAINT ck_admin_audit_logs_action CHECK (action IN
+            ('credits_adjust', 'plan_change', 'status_change', 'voice_slot_assign', 'task_retry')))""",  # noqa: E501
+    ):
+        connection.execute(sa.text(ddl))
+
+
+@pytest.fixture
+def upgraded_engine():
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        _create_0037_schema(connection)
+        connection.execute(
+            sa.text(
+                "INSERT INTO brand_voices (id, tenant_id, name, provider, status, "
+                "consent_confirmed, created_at, updated_at) VALUES "
+                "('historic', 'tenant', 'Historic', 'legacy', 'ready', 1, '2025-01-01', '2025-01-01')"  # noqa: E501
+            )
+        )
+        migration = _migration()
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+def _order(connection, **changes):
+    values = {
+        "id": "order",
+        "tenant_id": "tenant",
+        "user_id": "user",
+        "order_type": "create",
+        "requested_name": "Voice",
+        "source_audio_asset_id": "asset",
+        "source_metadata_snapshot": "{}",
+        "consent_confirmed_at": "2025-01-01",
+        "existing_brand_voice_id": None,
+        "billing_operation_id": "operation",
+        "status": "awaiting_fulfillment",
+        "fulfilled_brand_voice_id": None,
+        "fulfilled_provider_id": None,
+        "resolver_user_id": None,
+        "fulfilled_at": None,
+        "rejected_at": None,
+        "rejection_reason": None,
+        "created_at": "2025-01-01",
+        "updated_at": "2025-01-01",
+    }
+    values.update(changes)
+    connection.execute(
+        sa.text("""INSERT INTO brand_voice_orders (
+            id, tenant_id, user_id, order_type, requested_name, source_audio_asset_id,
+            source_metadata_snapshot, consent_confirmed_at, existing_brand_voice_id,
+            billing_operation_id, status, fulfilled_brand_voice_id, fulfilled_provider_id,
+            resolver_user_id, fulfilled_at, rejected_at, rejection_reason, created_at, updated_at)
+            VALUES (:id, :tenant_id, :user_id, :order_type, :requested_name, :source_audio_asset_id,
+            :source_metadata_snapshot, :consent_confirmed_at, :existing_brand_voice_id,
+            :billing_operation_id, :status, :fulfilled_brand_voice_id, :fulfilled_provider_id,
+            :resolver_user_id, :fulfilled_at, :rejected_at, :rejection_reason, :created_at, :updated_at)"""),  # noqa: E501
+        values,
+    )
+
+
+def test_models_and_migration_expose_manual_delivery_contract():
+    assert hasattr(models, "BrandVoiceOrder")
+    assert hasattr(models, "BrandVoiceProviderId")
+    assert hasattr(models, "CreditRefundGrant")
+    assert {"owner_user_id", "activated_at", "expires_at"} <= set(
+        models.BrandVoice.__table__.columns.keys()
+    )
+    migration = _migration()
+    assert (migration.revision, migration.down_revision) == ("20260829_0038", "20260829_0037")
+
+
+def test_upgrade_leaves_historic_voice_and_financial_history_untouched(upgraded_engine):
+    with upgraded_engine.begin() as connection:
+        row = (
+            connection.execute(
+                sa.text(
+                    "SELECT owner_user_id, activated_at, expires_at FROM brand_voices WHERE id = 'historic'"  # noqa: E501
+                )
+            )
+            .mappings()
+            .one()
+        )
+        assert dict(row) == {"owner_user_id": None, "activated_at": None, "expires_at": None}
+        assert connection.scalar(sa.text("SELECT COUNT(*) FROM brand_voice_orders")) == 0
+        assert connection.scalar(sa.text("SELECT COUNT(*) FROM billing_operations")) == 0
+
+
+def test_order_checks_and_awaiting_renewal_index(upgraded_engine):
+    with upgraded_engine.begin() as connection:
+        _order(connection)
+        invalid_orders = (
+            {
+                "id": "bad-create",
+                "billing_operation_id": "op-1",
+                "existing_brand_voice_id": "historic",
+            },
+            {"id": "bad-renew", "billing_operation_id": "op-2", "order_type": "renew"},
+            {"id": "bad-fulfilled", "billing_operation_id": "op-3", "status": "fulfilled"},
+            {
+                "id": "bad-rejected",
+                "billing_operation_id": "op-4",
+                "status": "rejected",
+                "rejected_at": "2025-01-02",
+            },
+            {
+                "id": "bad-renew-result",
+                "billing_operation_id": "op-5",
+                "order_type": "renew",
+                "existing_brand_voice_id": "historic",
+                "status": "fulfilled",
+                "fulfilled_brand_voice_id": "other",
+                "fulfilled_provider_id": "provider",
+                "resolver_user_id": "resolver",
+                "fulfilled_at": "2025-01-02",
+            },
+        )
+        for changes in invalid_orders:
+            with pytest.raises(IntegrityError):
+                _order(connection, **changes)
+        _order(
+            connection,
+            id="renew-1",
+            billing_operation_id="renew-op-1",
+            order_type="renew",
+            existing_brand_voice_id="historic",
+        )
+        with pytest.raises(IntegrityError):
+            _order(
+                connection,
+                id="renew-2",
+                billing_operation_id="renew-op-2",
+                order_type="renew",
+                existing_brand_voice_id="historic",
+            )
+
+
+def test_provider_refund_and_audit_constraints(upgraded_engine):
+    with upgraded_engine.begin() as connection:
+        connection.execute(
+            sa.text("""INSERT INTO brand_voice_provider_ids
+            (id, provider, normalized_provider_id, kind, status, created_at, updated_at)
+            VALUES ('retired', 'p', 'permanent-id', 'customer', 'retired', '2025-01-01', '2025-01-01')""")  # noqa: E501
+        )
+        with pytest.raises(IntegrityError):
+            connection.execute(
+                sa.text("""INSERT INTO brand_voice_provider_ids
+                (id, provider, normalized_provider_id, kind, status, created_at, updated_at)
+                VALUES ('reuse', 'other', 'permanent-id', 'official', 'active', '2025-01-01', '2025-01-01')""")  # noqa: E501
+            )
+        connection.execute(
+            sa.text("""INSERT INTO credit_refund_grants
+            (id, billing_operation_id, tenant_id, user_id, source_subscription_id,
+            amount_credits, status, created_at)
+            VALUES ('pending', 'refund-op', 'tenant', 'user', 'source-sub', 1, 'pending', '2025-01-01')""")  # noqa: E501
+        )
+        for values in (
+            "'duplicate', 'refund-op', 'tenant', 'user', 'source-sub', 2, 'pending', '2025-01-01'",
+            "'zero', 'refund-zero', 'tenant', 'user', 'source-sub', 0, 'pending', '2025-01-01'",
+            "'invalid-applied', 'refund-applied', 'tenant', 'user', 'source-sub', 2, 'applied', '2025-01-01'",  # noqa: E501
+        ):
+            with pytest.raises(IntegrityError):
+                connection.execute(
+                    sa.text(
+                        """INSERT INTO credit_refund_grants
+                    (id, billing_operation_id, tenant_id, user_id, source_subscription_id,
+                    amount_credits, status, created_at)
+                    VALUES ("""
+                        + values
+                        + ")"
+                    )
+                )
+    owner_fk = next(
+        fk for fk in models.BrandVoice.__table__.foreign_keys if fk.parent.name == "owner_user_id"
+    )
+    tables = (
+        models.BrandVoiceOrder.__table__,
+        models.BrandVoiceProviderId.__table__,
+        models.CreditRefundGrant.__table__,
+    )
+    assert owner_fk.ondelete == "RESTRICT"
+    assert all(fk.ondelete == "RESTRICT" for table in tables for fk in table.foreign_keys)
+    audit = " ".join(
+        str(c.sqltext)
+        for c in models.AdminAuditLog.__table__.constraints
+        if isinstance(c, sa.CheckConstraint)
+    )
+    for action in (
+        "brand_voice_order_audio_access",
+        "brand_voice_order_fulfill",
+        "brand_voice_order_reject",
+    ):
+        assert action in audit
