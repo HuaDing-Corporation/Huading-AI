@@ -53,6 +53,17 @@ def test_default_when_unset(monkeypatch) -> None:
     assert "http://localhost:3000" in s.cors_origins
 
 
+def test_jwt_secret_requires_at_least_32_utf8_bytes() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, jwt_secret_key="x" * 31)
+
+
+def test_quote_tokens_use_a_fixed_hmac_algorithm() -> None:
+    assert Settings(_env_file=None, jwt_secret_key=_JWT).quote_token_algorithm == "HS256"
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, jwt_secret_key=_JWT, quote_token_algorithm="HS384")
+
+
 def test_generation_wait_defaults_allow_1500_seconds(monkeypatch) -> None:
     for env_name in _GENERATION_WAIT_ENV:
         monkeypatch.delenv(env_name, raising=False)

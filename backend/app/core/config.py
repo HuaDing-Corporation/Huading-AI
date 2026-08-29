@@ -64,6 +64,7 @@ class Settings(BaseSettings):
 
     jwt_secret_key: str = Field(min_length=32)
     jwt_algorithm: str = "HS256"
+    quote_token_algorithm: Literal["HS256"] = "HS256"
     access_token_expire_minutes: int = 1440
 
     # Readiness probe timeouts so an unreachable dependency degrades fast
