@@ -2181,9 +2181,16 @@ ECOM_I2V_STEPS = [
 ]
 
 
-def _hide_billed_video_output(db: Session, *, task: VideoTask) -> None:
+def _hide_billed_video_output(
+    db: Session,
+    *,
+    task: VideoTask,
+    mark_task_failed: bool = False,
+) -> None:
     task.storage_key = None
     task.thumbnail_key = None
+    if mark_task_failed:
+        task.status = "failed"
     output_assets = list(
         db.scalars(
             select(Asset)

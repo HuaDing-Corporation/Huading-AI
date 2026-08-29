@@ -536,6 +536,12 @@ def test_recovery_releases_done_video_without_persisted_actual_meter(db_session)
     )
     assert operation.completion_kind == "failed"
     assert operation.settled_credits == Decimal("0")
+    db_session.expire_all()
+    stored_task = db_session.get(VideoTask, task.id)
+    stored_asset = db_session.get(Asset, f"{operation.id}-asset")
+    assert stored_task.status == "failed"
+    assert stored_task.storage_key is None
+    assert stored_asset.status == "failed"
 
 
 def test_recovery_settles_done_seedance_video_from_persisted_actual_meter(db_session) -> None:

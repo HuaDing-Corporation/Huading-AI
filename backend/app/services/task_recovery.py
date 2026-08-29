@@ -135,6 +135,19 @@ def _release_stale_operation(db: Session, *, operation_id: str) -> None:
     )
 
 
+def _fail_closed_video_recovery(
+    db: Session,
+    *,
+    operation_id: str,
+    task: VideoTask,
+) -> None:
+    """Atomically revoke a delivered-looking output when settlement evidence is invalid."""
+    from app.workers.avatar_talk import _hide_billed_video_output
+
+    _hide_billed_video_output(db, task=task, mark_task_failed=True)
+    _release_stale_operation(db, operation_id=operation_id)
+
+
 def _has_persisted_video_deliverable(db: Session, *, task: VideoTask) -> bool:
     if not task.storage_key:
         return False
@@ -233,7 +246,7 @@ def _recover_stale_billing_operations_once(
                     continue
             if task.status == "done":
                 if not _has_persisted_video_deliverable(db, task=task):
-                    _release_stale_operation(db, operation_id=operation.id)
+                    _fail_closed_video_recovery(db, operation_id=operation.id, task=task)
                     released.append(operation.id)
                     continue
                 try:
@@ -259,7 +272,7 @@ def _recover_stale_billing_operations_once(
                     )
                 except (BillingInvariantError, AppError, StopIteration):
                     if operation.status == "in_progress":
-                        _release_stale_operation(db, operation_id=operation.id)
+                        _fail_closed_video_recovery(db, operation_id=operation.id, task=task)
                     released.append(operation.id)
                 else:
                     settled.append(operation.id)
