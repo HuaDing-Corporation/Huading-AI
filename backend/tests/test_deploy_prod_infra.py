@@ -253,6 +253,17 @@ def test_prod_nginx_enforces_https_and_supports_api_sse_and_minio() -> None:
     assert "proxy_pass $upstream_minio/;" not in minio_block
 
 
+def test_nginx_accepts_4096_byte_quote_header() -> None:
+    nginx_conf = (INFRA / "nginx" / "conf.d" / "huadingai.conf").read_text(
+        encoding="utf-8"
+    )
+    buffers = next(
+        line for line in nginx_conf.splitlines() if "large_client_header_buffers" in line
+    )
+    buffer_size = buffers.rstrip(";").split()[-1].lower()
+    assert int(buffer_size.removesuffix("k")) * 1024 >= 16 * 1024
+
+
 def test_backend_uv_lock_uses_official_sources() -> None:
     lock = (REPO_ROOT / "backend" / "uv.lock").read_text(encoding="utf-8")
     pyproject = (REPO_ROOT / "backend" / "pyproject.toml").read_text(encoding="utf-8")

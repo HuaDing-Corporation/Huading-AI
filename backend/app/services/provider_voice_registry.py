@@ -237,6 +237,7 @@ def provider_voice_inventory(db: Session) -> ProviderVoiceInventory:
     brand_voice_ids = {
         normalized
         for voice in voices
+        if voice.provider == DOUBAO_VOICE_CLONE_PROVIDER
         if voice.speaker_id is not None
         if (normalized := str(voice.speaker_id).strip())
     }

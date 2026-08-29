@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from app.db.models import (
     BatchJob,
+    BillingOperation,
     ChatConversation,
     ChatMessage,
     EcomReplicateJob,
@@ -23,6 +24,237 @@ from app.db.models import (
 )
 from app.main import app
 from app.services import aibrain
+
+
+def _pricing_snapshot(*, operation: str, credits: str = "1.0000") -> dict[str, object]:
+    capability, unit = (
+        ("video", "second") if operation == "video_create" else ("image", "image")
+    )
+    return {
+        "operation": operation,
+        "pricing_shape": "simple",
+        "pricing_lines": [
+            {
+                "operation": operation,
+                "capability": capability,
+                "unit": unit,
+                "quantity": "1",
+                "unit_credits": credits,
+                "subtotal_credits": credits,
+                "rate_scope": "tenant_overridable",
+                "rate_source": "code_default",
+                "rate_id": None,
+                "effective_at": None,
+                "policy_key": operation,
+                "policy_version": 1,
+                "label": operation,
+            }
+        ],
+        "disclosures": [],
+        "subtotal_credits": credits,
+        "payable_credits": 1,
+        "rounding": "ROUND_CEILING",
+    }
+
+
+def _manual_order_snapshot(operation: str) -> dict[str, object]:
+    return {
+        "operation": operation,
+        "pricing_shape": "simple",
+        "pricing_lines": [
+            {
+                "operation": operation,
+                "capability": "voice_clone",
+                "unit": "call",
+                "quantity": "1",
+                "unit_credits": "30000.0000",
+                "subtotal_credits": "30000.0000",
+                "rate_scope": "platform_fixed",
+                "rate_source": "code_default",
+                "rate_id": None,
+                "effective_at": None,
+                "policy_key": operation,
+                "policy_version": 1,
+                "label": operation,
+            }
+        ],
+        "disclosures": [],
+        "subtotal_credits": "30000.0000",
+        "payable_credits": 30000,
+        "rounding": "ROUND_CEILING",
+    }
+
+
+def _financial_snapshot(operation: BillingOperation) -> tuple[object, ...]:
+    return (
+        operation.status,
+        operation.completion_kind,
+        operation.settled_credits,
+        operation.released_credits,
+        operation.completed_at,
+    )
+
+
+def test_recovery_never_releases_waiting_manual_order(db_session) -> None:
+    """Manual Doubao fulfillment is human-owned, never a stale worker failure."""
+    from app.services.task_recovery import recover_stale_billing_operations
+
+    created_at = datetime(2025, 7, 1, tzinfo=UTC)
+    operation = BillingOperation(
+        id="manual-order-stale",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        operation="doubao_brand_voice_order_create",
+        idempotency_key="manual-order-stale",
+        request_hash="a" * 64,
+        quote_hash="b" * 64,
+        pricing_snapshot=_manual_order_snapshot("doubao_brand_voice_order_create"),
+        requested_credits=Decimal("30000"),
+        settled_credits=Decimal("0"),
+        released_credits=Decimal("0"),
+        status="in_progress",
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    db_session.add(operation)
+    db_session.commit()
+
+    before = _financial_snapshot(operation)
+    summary = recover_stale_billing_operations(
+        db_session,
+        now=created_at + timedelta(days=400),
+    )
+
+    assert operation.id in summary.exempt_manual_order_ids
+    assert _financial_snapshot(operation) == before
+
+
+def test_recovery_releases_stale_queued_video_operation_after_enqueue_failure(
+    db_session,
+) -> None:
+    from app.services.task_recovery import recover_stale_billing_operations
+
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    operation = BillingOperation(
+        id="stale-enqueue-failure",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        operation="ecom_cutout",
+        idempotency_key="stale-enqueue-failure",
+        request_hash="c" * 64,
+        quote_hash="d" * 64,
+        pricing_snapshot=_pricing_snapshot(operation="ecom_cutout"),
+        requested_credits=Decimal("1"),
+        settled_credits=Decimal("0"),
+        released_credits=Decimal("0"),
+        status="in_progress",
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    task = VideoTask(
+        id="stale-enqueue-task",
+        tenant_id="tenant-a",
+        status="queued",
+        mode="video",
+        video_mode="video",
+        params={"billing_operation_id": operation.id},
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    subscription = db_session.get(Subscription, "subscription-a")
+    subscription.quota_credits_reserved = 1
+    usage = UsageRecord(
+        id="stale-enqueue-usage",
+        tenant_id="tenant-a",
+        subscription_id=subscription.id,
+        video_task_id=task.id,
+        billing_operation_id=operation.id,
+        billing_item_index=0,
+        billing_pricing_line_index=0,
+        capability="image",
+        provider="apimart",
+        unit="image",
+        quantity=Decimal("1"),
+        credits=Decimal("1"),
+        cost_cents=0,
+        status="reserved",
+    )
+    db_session.add_all([operation, task])
+    db_session.flush()
+    db_session.add(usage)
+    db_session.commit()
+
+    summary = recover_stale_billing_operations(
+        db_session,
+        now=created_at + timedelta(hours=2),
+    )
+
+    assert operation.id in summary.released_operation_ids
+    assert operation.status == "completed"
+    assert operation.completion_kind == "failed"
+
+
+def test_recovery_releases_video_operation_with_schema_invalid_result(db_session) -> None:
+    from app.services.task_recovery import recover_stale_billing_operations
+
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    operation = BillingOperation(
+        id="invalid-video-result",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        operation="video_create",
+        idempotency_key="invalid-video-result",
+        request_hash="e" * 64,
+        quote_hash="f" * 64,
+        pricing_snapshot=_pricing_snapshot(operation="video_create"),
+        requested_credits=Decimal("1"),
+        settled_credits=Decimal("0"),
+        released_credits=Decimal("0"),
+        status="in_progress",
+        result_type="video_task",
+        result_id="invalid-video-result-task",
+        result_payload={"task_id": "invalid-video-result-task", "status": "broken"},
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    task = VideoTask(
+        id="invalid-video-result-task",
+        tenant_id="tenant-a",
+        status="running",
+        mode="video",
+        video_mode="video",
+        params={"billing_operation_id": operation.id},
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    subscription = db_session.get(Subscription, "subscription-a")
+    subscription.quota_credits_reserved = 1
+    db_session.add_all([operation, task])
+    db_session.flush()
+    db_session.add(
+        UsageRecord(
+            id="invalid-video-result-usage",
+            tenant_id="tenant-a",
+            subscription_id=subscription.id,
+            video_task_id=task.id,
+            billing_operation_id=operation.id,
+            billing_item_index=0,
+            billing_pricing_line_index=0,
+            capability="video",
+            provider="seedance",
+            unit="second",
+            quantity=Decimal("1"),
+            credits=Decimal("1"),
+            cost_cents=0,
+            status="reserved",
+        )
+    )
+    db_session.commit()
+
+    summary = recover_stale_billing_operations(db_session, now=created_at)
+
+    assert summary.released_operation_ids == (operation.id,)
+    assert operation.completion_kind == "failed"
 
 
 class _ProgressStore:

@@ -1110,3 +1110,46 @@ def test_inventory_reports_all_sources_without_writes(db_session, monkeypatch) -
     assert inventory.legacy_configured_ids == ("legacy-a",)
     assert inventory.provider_config_ids == ("config-a", "used-a")
     assert db_session.scalars(select(BrandVoiceProviderId)).all() == []
+
+
+def test_inventory_includes_soft_deleted_doubao_history_but_ignores_cosyvoice_ids(
+    db_session,
+    monkeypatch,
+) -> None:
+    from app.services.provider_voice_registry import provider_voice_inventory
+
+    monkeypatch.setattr(
+        "app.services.provider_voice_registry.settings.engine_doubao_official_voice_ids",
+        ["doubao-deleted"],
+    )
+    db_session.add_all(
+        [
+            BrandVoice(
+                id="soft-deleted-doubao",
+                tenant_id="tenant-a",
+                owner_user_id="user-a",
+                name="Deleted Doubao",
+                provider="doubao-voice-clone",
+                speaker_id="doubao-deleted",
+                status="ready",
+                consent_confirmed=True,
+                deleted_at=datetime(2026, 8, 29, tzinfo=UTC),
+            ),
+            BrandVoice(
+                id="cosyvoice-inventory",
+                tenant_id="tenant-a",
+                owner_user_id="user-a",
+                name="CosyVoice",
+                provider="cosyvoice-voice-clone",
+                speaker_id="cosy-private-id",
+                status="ready",
+                consent_confirmed=True,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    inventory = provider_voice_inventory(db_session)
+
+    assert inventory.brand_voice_ids == ("doubao-deleted",)
+    assert "cosy-private-id" not in inventory.unknown_ids

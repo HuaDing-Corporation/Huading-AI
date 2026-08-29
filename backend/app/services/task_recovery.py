@@ -5,10 +5,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import exists, select
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.models import (
+    BillingOperation,
     EcomReplicateJob,
     EcomReplicateOutput,
     ReversePromptJob,
@@ -18,6 +20,15 @@ from app.db.session import SessionLocal
 from app.services import ecom_replicate
 from app.services.aibrain import recover_stale_reasoning_reservations
 from app.services.batches import refresh_batch_job
+from app.services.billing_operations import (
+    BillingInvariantError,
+    VideoTaskBillingResource,
+    _usage_for_update,
+    _validate_stored_result,
+    complete_failed,
+    complete_succeeded,
+)
+from app.services.ecom_billing import try_finalize_ecom_operation
 from app.services.quota import (
     recover_stale_copy_quota_reservations,
     release_reserved_quota,
@@ -36,6 +47,11 @@ _VIDEO_TASK_RECOVERY_ERRORS = {
     "photo": ("IMAGE_GEN_FAILED", _IMAGE_WORKER_LOST_MESSAGE),
     "video_gen": ("VIDEO_GEN_FAILED", _VIDEO_GEN_WORKER_LOST_MESSAGE),
 }
+_MANUAL_DOUBAO_OPERATIONS = {
+    "doubao_brand_voice_order_create",
+    "doubao_brand_voice_order_renew",
+}
+_ECOM_OPERATIONS = {"ecom_cutout", "ecom_model"}
 
 
 @dataclass(frozen=True)
@@ -46,6 +62,188 @@ class ImageQueueRecoveryResult:
     ecom_replicate_jobs: int = 0
     aibrain_reservations: int = 0
     copy_reservations: int = 0
+    billing_operations_released: int = 0
+    billing_operations_settled: int = 0
+
+
+@dataclass(frozen=True)
+class RecoverySummary:
+    """Terminal outcomes for automatic billing reservations only."""
+
+    released_operation_ids: tuple[str, ...] = ()
+    settled_operation_ids: tuple[str, ...] = ()
+    exempt_manual_order_ids: tuple[str, ...] = ()
+    held_operation_ids: tuple[str, ...] = ()
+
+
+def _billing_task_timeout_seconds(operation: BillingOperation, task: VideoTask | None) -> float:
+    """Return the supplier timeout that owns this persisted automatic task."""
+    if operation.operation in _ECOM_OPERATIONS:
+        return settings.engine_apimart_timeout_seconds
+    if operation.operation != "video_create" or task is None:
+        return settings.engine_orphan_task_stale_seconds
+    if task.video_mode in {"avatar_talk", "avatar"}:
+        return settings.engine_omnihuman_timeout_seconds
+    if task.video_mode in {"seedance_t2v", "seedance_i2v", "video_gen"}:
+        return max(
+            settings.engine_seedance_timeout_seconds,
+            settings.engine_apimart_video_timeout_seconds,
+        )
+    if task.video_mode == "photo":
+        return settings.engine_image_provider_timeout_seconds
+    return settings.engine_orphan_task_stale_seconds
+
+
+def _operation_tasks_for_update(
+    db: Session,
+    *,
+    operation_id: str,
+) -> list[VideoTask]:
+    return list(
+        db.scalars(
+            select(VideoTask)
+            .where(VideoTask.params["billing_operation_id"].as_string() == operation_id)
+            .order_by(VideoTask.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    )
+
+
+def _task_is_stale(task: VideoTask, *, timeout_seconds: float, now: datetime) -> bool:
+    changed_at = task.updated_at or task.created_at
+    if changed_at.tzinfo is None:
+        changed_at = changed_at.replace(tzinfo=UTC)
+    return changed_at <= now - timedelta(seconds=timeout_seconds)
+
+
+def _release_stale_operation(db: Session, *, operation_id: str) -> None:
+    complete_failed(
+        db,
+        operation_id=operation_id,
+        code="BILLING_OPERATION_STALE",
+        http_status=504,
+        sanitized_detail=None,
+    )
+
+
+def recover_stale_billing_operations(
+    db: Session,
+    *,
+    now: datetime,
+) -> RecoverySummary:
+    """Recover only stale, automatic reservations from their durable task state.
+
+    Candidate IDs are captured and locked in one global order. The state is then
+    read again under the row lock so repeated workers cannot double-settle or
+    release a reservation that became valid meanwhile. Manual Doubao orders are
+    excluded before any generic recovery action.
+    """
+    if now.tzinfo is None:
+        raise ValueError("recovery timestamp must be timezone-aware")
+    candidate_ids = list(
+        db.scalars(
+            select(BillingOperation.id)
+            .where(BillingOperation.status == "in_progress")
+            .order_by(BillingOperation.id)
+        )
+    )
+    released: list[str] = []
+    settled: list[str] = []
+    exempt: list[str] = []
+    held: list[str] = []
+
+    for operation_id in candidate_ids:
+        operation = db.scalar(
+            select(BillingOperation)
+            .where(BillingOperation.id == operation_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if operation is None or operation.status != "in_progress":
+            continue
+        if operation.operation in _MANUAL_DOUBAO_OPERATIONS:
+            exempt.append(operation.id)
+            continue
+
+        tasks = _operation_tasks_for_update(db, operation_id=operation.id)
+        if operation.operation in _ECOM_OPERATIONS:
+            # E-commerce batches own their authoritative all-items settlement.
+            finalized = try_finalize_ecom_operation(db, billing_operation_id=operation.id)
+            if finalized is not None and finalized.completion_kind == "succeeded":
+                settled.append(operation.id)
+                continue
+            if finalized is not None and finalized.status == "completed":
+                released.append(operation.id)
+                continue
+
+        if operation.operation == "video_create" and len(tasks) == 1:
+            task = tasks[0]
+            if operation.result_type is not None and operation.result_payload is not None:
+                try:
+                    _validate_stored_result(operation)
+                except BillingInvariantError:
+                    _release_stale_operation(db, operation_id=operation.id)
+                    released.append(operation.id)
+                    continue
+            if task.status == "done":
+                usages = _usage_for_update(db, operation.id)
+                try:
+                    complete_succeeded(
+                        db,
+                        operation_id=operation.id,
+                        actual_quantities={
+                            int(usage.billing_item_index): usage.quantity
+                            for usage in usages
+                            if usage.billing_item_index is not None
+                        },
+                        result_type="video_task",
+                        result_id=task.id,
+                        result_payload=VideoTaskBillingResource(
+                            task_id=task.id,
+                            status="done",
+                        ),
+                    )
+                except BillingInvariantError:
+                    _release_stale_operation(db, operation_id=operation.id)
+                    released.append(operation.id)
+                else:
+                    settled.append(operation.id)
+                continue
+            if task.status in {"failed", "cancelled"}:
+                _release_stale_operation(db, operation_id=operation.id)
+                released.append(operation.id)
+                continue
+
+        if not tasks:
+            # Synchronous paths have no durable worker state to recover here.
+            held.append(operation.id)
+            continue
+        timeout = max(
+            _billing_task_timeout_seconds(operation, task)
+            for task in tasks
+        )
+        if any(not _task_is_stale(task, timeout_seconds=timeout, now=now) for task in tasks):
+            held.append(operation.id)
+            continue
+        for task in tasks:
+            if task.status in {"queued", "running"}:
+                task.status = "failed"
+                task.error_code = "BILLING_OPERATION_STALE"
+                task.error_message = "Billing operation exceeded its authoritative timeout."
+                task.error = task.error_message
+                task.finished_at = now
+                task.updated_at = now
+        _release_stale_operation(db, operation_id=operation.id)
+        released.append(operation.id)
+
+    db.flush()
+    return RecoverySummary(
+        released_operation_ids=tuple(released),
+        settled_operation_ids=tuple(settled),
+        exempt_manual_order_ids=tuple(exempt),
+        held_operation_ids=tuple(held),
+    )
 
 
 def recover_orphaned_image_queue_tasks(
@@ -193,6 +391,7 @@ def recover_orphaned_image_queue_tasks(
             cutoff=cutoff,
             recovered_at=recovered_at,
         )
+        billing_recovery = recover_stale_billing_operations(db, now=recovered_at)
         db.commit()
 
     if progress_store is not None:
@@ -220,4 +419,6 @@ def recover_orphaned_image_queue_tasks(
         ecom_replicate_jobs=len(replicate_jobs),
         aibrain_reservations=aibrain_reservations,
         copy_reservations=copy_reservations,
+        billing_operations_released=len(billing_recovery.released_operation_ids),
+        billing_operations_settled=len(billing_recovery.settled_operation_ids),
     )
