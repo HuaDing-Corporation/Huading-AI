@@ -787,9 +787,7 @@ def test_registry_writers_and_readiness_share_the_snapshot_lock(
     monkeypatch.setattr(
         provider_voice_registry,
         "lock_provider_voice_registry_snapshot",
-        lambda db, *, provider_voice_ids=(): snapshot_calls.append(
-            tuple(provider_voice_ids)
-        ),
+        lambda db, *, provider_voice_ids=(): snapshot_calls.append(tuple(provider_voice_ids)),
     )
     monkeypatch.setattr(
         provider_voice_registry.settings,
@@ -852,9 +850,7 @@ def test_switch_claims_new_and_retires_old_under_one_sorted_double_lock(
     monkeypatch.setattr(
         provider_voice_registry,
         "lock_provider_voice_ids",
-        lambda db, *, provider, provider_voice_ids: lock_calls.append(
-            tuple(provider_voice_ids)
-        ),
+        lambda db, *, provider, provider_voice_ids: lock_calls.append(tuple(provider_voice_ids)),
     )
 
     new = provider_voice_registry.claim_customer_provider_voice_id(
@@ -923,12 +919,33 @@ def test_register_official_exact_list_only_adds_official_registry_rows(
     )
     db_session.flush()
     before = (
-        [(row.normalized_provider_id, row.kind, row.status) for row in db_session.scalars(select(BrandVoiceProviderId)).all()],
-        [(row.id, row.provider, row.speaker_id, row.owner_user_id, row.activated_at, row.expires_at, row.deleted_at) for row in db_session.scalars(select(BrandVoice)).all()],
-        [(row.id, row.status, row.requested_credits, row.settled_credits, row.released_credits) for row in db_session.scalars(select(BillingOperation)).all()],
+        [
+            (row.normalized_provider_id, row.kind, row.status)
+            for row in db_session.scalars(select(BrandVoiceProviderId)).all()
+        ],
+        [
+            (
+                row.id,
+                row.provider,
+                row.speaker_id,
+                row.owner_user_id,
+                row.activated_at,
+                row.expires_at,
+                row.deleted_at,
+            )
+            for row in db_session.scalars(select(BrandVoice)).all()
+        ],
+        [
+            (row.id, row.status, row.requested_credits, row.settled_credits, row.released_credits)
+            for row in db_session.scalars(select(BillingOperation)).all()
+        ],
         [(row.id, row.config) for row in db_session.scalars(select(ProviderConfig)).all()],
     )
-    monkeypatch.setattr(provider_voice_registry.settings, "engine_doubao_official_voice_ids", ["official-b", "official-a"])
+    monkeypatch.setattr(
+        provider_voice_registry.settings,
+        "engine_doubao_official_voice_ids",
+        ["official-b", "official-a"],
+    )
 
     first = provider_voice_registry.register_official_provider_voice_ids(
         db_session, provider_voice_ids=[" official-a ", "official-b"]
@@ -944,7 +961,11 @@ def test_register_official_exact_list_only_adds_official_registry_rows(
         ("official-b", "official", "active", "doubao-voice-clone"),
     ]
     assert [row.id for row in second] == [row.id for row in first]
-    registry = list(db_session.scalars(select(BrandVoiceProviderId).order_by(BrandVoiceProviderId.normalized_provider_id)))
+    registry = list(
+        db_session.scalars(
+            select(BrandVoiceProviderId).order_by(BrandVoiceProviderId.normalized_provider_id)
+        )
+    )
     assert [(row.normalized_provider_id, row.kind, row.status) for row in registry] == [
         ("customer-preserved", "customer", "active"),
         ("official-a", "official", "active"),
@@ -952,9 +973,27 @@ def test_register_official_exact_list_only_adds_official_registry_rows(
     ]
     assert customer.normalized_provider_id == "customer-preserved"
     after = (
-        [(row.normalized_provider_id, row.kind, row.status) for row in registry if row.kind == "customer"],
-        [(row.id, row.provider, row.speaker_id, row.owner_user_id, row.activated_at, row.expires_at, row.deleted_at) for row in db_session.scalars(select(BrandVoice)).all()],
-        [(row.id, row.status, row.requested_credits, row.settled_credits, row.released_credits) for row in db_session.scalars(select(BillingOperation)).all()],
+        [
+            (row.normalized_provider_id, row.kind, row.status)
+            for row in registry
+            if row.kind == "customer"
+        ],
+        [
+            (
+                row.id,
+                row.provider,
+                row.speaker_id,
+                row.owner_user_id,
+                row.activated_at,
+                row.expires_at,
+                row.deleted_at,
+            )
+            for row in db_session.scalars(select(BrandVoice)).all()
+        ],
+        [
+            (row.id, row.status, row.requested_credits, row.settled_credits, row.released_credits)
+            for row in db_session.scalars(select(BillingOperation)).all()
+        ],
         [(row.id, row.config) for row in db_session.scalars(select(ProviderConfig)).all()],
     )
     assert after == ([("customer-preserved", "customer", "active")], *before[1:])
@@ -1035,11 +1074,7 @@ def test_inventory_scans_cross_provider_and_cross_capability_configs(
             ProviderConfig(
                 capability="voice_clone",
                 provider="unrelated-inactive-provider",
-                config={
-                    "used_speaker_ids": {
-                        "cross-provider-used": "historical-owner"
-                    }
-                },
+                config={"used_speaker_ids": {"cross-provider-used": "historical-owner"}},
                 is_active=False,
             ),
         ]
