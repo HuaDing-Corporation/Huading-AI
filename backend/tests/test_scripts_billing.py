@@ -1,10 +1,11 @@
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
-from app.db.models import BillingOperation, CreditRate, UsageRecord
+from app.db.models import BillingOperation, CreditRate, Subscription, UsageRecord
 from app.main import app
 
 
@@ -111,6 +112,114 @@ def test_script_quote_is_read_only_and_rejects_changed_request(
     assert response.json()["error"]["code"] == "PRICE_CHANGED"
     with auth_db() as db:
         assert db.scalar(select(func.count()).select_from(BillingOperation)) == 0
+
+
+def test_script_expired_quote_never_reserves_or_calls_supplier(
+    monkeypatch, auth_context, auth_db
+) -> None:
+    """An expired quote must fail before creating its first billing operation."""
+    from app.api.v1.routes import scripts as scripts_route
+    from app.services import billing_quotes
+
+    supplier_calls = 0
+
+    class _DeepSeek:
+        async def generate_text(self, _payload: dict) -> dict:
+            nonlocal supplier_calls
+            supplier_calls += 1
+            return {"text": "This call must never occur."}
+
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_api_key", "key")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_base_url", "https://llm.test")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_model", "deepseek-v4-flash")
+    monkeypatch.setattr(scripts_route, "resolve", lambda *_args, **_kwargs: _DeepSeek())
+    client = TestClient(app)
+    payload = {"topic": "新品介绍"}
+    quote = _quote(client, auth_context["headers"], payload)
+    expired_at = datetime.now(UTC) + timedelta(minutes=11)
+
+    class _ExpiredQuoteClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return expired_at if tz is not None else expired_at.replace(tzinfo=None)
+
+    monkeypatch.setattr(billing_quotes, "datetime", _ExpiredQuoteClock)
+    response = client.post(
+        "/api/v1/scripts/generate",
+        json=payload,
+        headers={
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote["quote_token"],
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "QUOTE_EXPIRED"
+    assert supplier_calls == 0
+    with auth_db() as db:
+        assert db.scalar(select(func.count()).select_from(BillingOperation)) == 0
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == 0
+        subscription = db.scalar(select(Subscription))
+        assert subscription is not None
+        assert subscription.quota_credits_reserved == 0
+        assert subscription.quota_credits_used == 0
+
+
+def test_script_first_submit_after_rate_change_never_reserves_or_calls_supplier(
+    monkeypatch, auth_context, auth_db
+) -> None:
+    """A quote bound to an old price must fail before its first provider attempt."""
+    from app.api.v1.routes import scripts as scripts_route
+
+    supplier_calls = 0
+
+    class _DeepSeek:
+        async def generate_text(self, _payload: dict) -> dict:
+            nonlocal supplier_calls
+            supplier_calls += 1
+            return {"text": "This call must never occur."}
+
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_api_key", "key")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_base_url", "https://llm.test")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_model", "deepseek-v4-flash")
+    monkeypatch.setattr(scripts_route, "resolve", lambda *_args, **_kwargs: _DeepSeek())
+    client = TestClient(app)
+    payload = {"topic": "新品介绍"}
+    quote = _quote(client, auth_context["headers"], payload)
+    with auth_db() as db:
+        db.add(
+            CreditRate(
+                tenant_id=auth_context["tenant_id"],
+                capability="script_generate",
+                unit="call",
+                credits_per_unit=Decimal("9"),
+                effective_at=datetime.now(UTC) - timedelta(seconds=1),
+                is_active=True,
+            )
+        )
+        db.commit()
+
+    response = client.post(
+        "/api/v1/scripts/generate",
+        json=payload,
+        headers={
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote["quote_token"],
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "PRICE_CHANGED"
+    assert supplier_calls == 0
+    with auth_db() as db:
+        assert db.scalar(select(func.count()).select_from(BillingOperation)) == 0
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == 0
+        subscription = db.scalar(select(Subscription))
+        assert subscription is not None
+        assert subscription.quota_credits_reserved == 0
+        assert subscription.quota_credits_used == 0
 
 
 def test_script_replay_returns_stored_clean_result_after_rate_changes(

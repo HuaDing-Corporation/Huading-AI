@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from app.api.deps import get_object_storage
-from app.db.models import BillingOperation, UsageRecord
+from app.db.models import BillingOperation, Subscription, UsageRecord
 from app.main import app
 
 
@@ -209,3 +209,158 @@ def test_scene_oversized_result_releases_reservation_with_billing(
         operation = db.get(BillingOperation, billing["operation_id"])
         assert operation is not None
         assert operation.completion_kind == "failed"
+
+
+def test_scene_success_replay_returns_exact_cleaned_result_without_provider_retry(
+    monkeypatch, auth_context, auth_db
+) -> None:
+    """A same-key replay returns persisted business fields and current billing exactly."""
+    from app.api.v1.routes import videos as videos_route
+
+    supplier_calls = 0
+
+    class _Provider:
+        async def generate_scene_prompt(self, _payload: dict) -> dict:
+            nonlocal supplier_calls
+            supplier_calls += 1
+            return {
+                "scene_prompt": "  Slow orbit around the product hero.  ",
+                "negative_prompt": "  blur, warped edges  ",
+            }
+
+    monkeypatch.setattr(videos_route, "resolve", lambda *_args, **_kwargs: _Provider())
+    app.dependency_overrides[get_object_storage] = _Storage
+    try:
+        client = TestClient(app)
+        payload = {"topic": "春季上新", "product_image_keys": ["uploads/product.png"]}
+        quote = client.post(
+            "/api/v1/videos/scene-prompt/estimate",
+            json=payload,
+            headers=auth_context["headers"],
+        )
+        assert quote.status_code == 200, quote.text
+        headers = {
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote.json()["data"]["quote_token"],
+        }
+        first = client.post("/api/v1/videos/scene-prompt", json=payload, headers=headers)
+        replay = client.post("/api/v1/videos/scene-prompt", json=payload, headers=headers)
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert first.status_code == 200, first.text
+    assert replay.status_code == 200, replay.text
+    assert first.json()["data"]["scene_prompt"] == "Slow orbit around the product hero."
+    assert first.json()["data"]["negative_prompt"] == "blur, warped edges"
+    assert replay.json()["data"] == first.json()["data"]
+    assert supplier_calls == 1
+    billing = replay.json()["data"]["billing"]
+    with auth_db() as db:
+        operations = list(db.scalars(select(BillingOperation)))
+        usages = list(db.scalars(select(UsageRecord)))
+        subscription = db.scalar(select(Subscription))
+    assert len(operations) == 1
+    assert operations[0].id == billing["operation_id"]
+    assert operations[0].completion_kind == "succeeded"
+    assert operations[0].result_payload == {
+        "scene_prompt": "Slow orbit around the product hero.",
+        "negative_prompt": "blur, warped edges",
+    }
+    assert len(usages) == 1
+    assert usages[0].billing_operation_id == billing["operation_id"]
+    assert usages[0].status == "settled"
+    assert subscription is not None
+    assert subscription.quota_credits_reserved == 0
+    assert subscription.quota_credits_used == 30
+
+
+def test_scene_internal_sdk_retry_uses_one_shared_billing_reservation(
+    monkeypatch, auth_context, auth_db
+) -> None:
+    """Provider-internal retries remain inside one route operation and settlement."""
+    from app.api.v1.routes import videos as videos_route
+    from app.providers.scene_prompt.apimart_luna import APIMartLunaScenePromptProvider
+
+    class _Response:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        def __init__(self, payload: dict) -> None:
+            self.payload = payload
+
+        def json(self) -> dict:
+            return self.payload
+
+    class _Session:
+        def __init__(self) -> None:
+            self.responses = [
+                _Response(
+                    {
+                        "choices": [{"message": {"content": "not-json"}}],
+                        "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+                    }
+                ),
+                _Response(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": (
+                                        '{"scene_prompt":"Recovered product reveal.",'
+                                        '"negative_prompt":"blur, deformation"}'
+                                    )
+                                }
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 120, "completion_tokens": 20},
+                    }
+                ),
+            ]
+            self.calls: list[dict] = []
+
+        def post(self, _url: str, *, headers: dict, json: dict, timeout: float) -> _Response:
+            self.calls.append({"headers": headers, "json": json, "timeout": timeout})
+            return self.responses.pop(0)
+
+    session = _Session()
+    provider = APIMartLunaScenePromptProvider(api_key="test-key", session=session)
+    monkeypatch.setattr(videos_route, "resolve", lambda *_args, **_kwargs: provider)
+    app.dependency_overrides[get_object_storage] = _Storage
+    try:
+        client = TestClient(app)
+        payload = {"topic": "春季上新", "product_image_keys": ["uploads/product.png"]}
+        quote = client.post(
+            "/api/v1/videos/scene-prompt/estimate",
+            json=payload,
+            headers=auth_context["headers"],
+        )
+        assert quote.status_code == 200, quote.text
+        response = client.post(
+            "/api/v1/videos/scene-prompt",
+            json=payload,
+            headers={
+                **auth_context["headers"],
+                "Idempotency-Key": str(uuid4()),
+                "X-Huading-Quote": quote.json()["data"]["quote_token"],
+            },
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert response.status_code == 200, response.text
+    assert len(session.calls) == 2
+    billing = response.json()["data"]["billing"]
+    with auth_db() as db:
+        operations = list(db.scalars(select(BillingOperation)))
+        usages = list(db.scalars(select(UsageRecord)))
+        subscription = db.scalar(select(Subscription))
+    assert len(operations) == 1
+    assert operations[0].id == billing["operation_id"]
+    assert operations[0].completion_kind == "succeeded"
+    assert len(usages) == 1
+    assert usages[0].billing_operation_id == billing["operation_id"]
+    assert usages[0].status == "settled"
+    assert subscription is not None
+    assert subscription.quota_credits_reserved == 0
+    assert subscription.quota_credits_used == 30
