@@ -172,6 +172,7 @@ def test_registry_rejects_id_from_every_brand_voice_including_soft_deleted(
         ("active", "doubao-voice-clone"),
         ("retired", "doubao-voice-clone"),
         ("active", "historical-provider-alias"),
+        ("retired", "historical-provider-alias"),
     ],
 )
 def test_registry_rejects_every_active_and_retired_registry_id(
@@ -205,7 +206,43 @@ def test_registry_rejects_every_active_and_retired_registry_id(
     assert exc.value.code == "PROVIDER_VOICE_ID_CONFLICT"
 
 
-@pytest.mark.parametrize("env_field", ["engine_doubao_official_voice_ids", "engine_doubao_voice_clone_speaker_ids"])
+def test_claim_rejects_malformed_normalized_registry_id_without_duplicate_insert(
+    db_session,
+) -> None:
+    from app.services.provider_voice_registry import claim_customer_provider_voice_id
+
+    _seed_brand_voice_order(db_session)
+    db_session.add(
+        BrandVoiceProviderId(
+            provider="doubao-voice-clone",
+            normalized_provider_id=" voice-conflict ",
+            kind="customer",
+            brand_voice_id="brand-a",
+            first_order_id="order-a",
+            status="active",
+        )
+    )
+    db_session.flush()
+
+    with pytest.raises(AppError) as exc:
+        claim_customer_provider_voice_id(
+            db_session,
+            provider_voice_id="voice-conflict",
+            brand_voice_id="brand-a",
+            order_id="order-a",
+        )
+
+    assert exc.value.code == "PROVIDER_VOICE_ID_CONFLICT"
+    assert len(list(db_session.scalars(select(BrandVoiceProviderId)))) == 1
+
+
+@pytest.mark.parametrize(
+    "env_field",
+    [
+        "engine_doubao_official_voice_ids",
+        "engine_doubao_voice_clone_speaker_ids",
+    ],
+)
 def test_registry_rejects_official_and_legacy_environment_ids(
     db_session,
     monkeypatch,
@@ -240,6 +277,9 @@ def test_customer_claim_allows_only_exact_active_same_voice_renewal(db_session) 
         brand_voice_id="brand-a",
         order_id="order-a",
     )
+    brand_voice = db_session.get(BrandVoice, "brand-a")
+    brand_voice.speaker_id = "voice-owned"
+    db_session.flush()
     renewed = claim_customer_provider_voice_id(
         db_session,
         provider_voice_id="voice-owned",
@@ -276,6 +316,128 @@ def test_customer_claim_allows_only_exact_active_same_voice_renewal(db_session) 
     )
     assert retired.status == "retired"
     assert retired.updated_at == datetime(2026, 8, 29, tzinfo=UTC)
+
+
+def test_own_id_renewal_rejects_other_sources_without_registry_state_change(
+    db_session,
+    monkeypatch,
+) -> None:
+    from app.services import provider_voice_registry
+
+    _seed_brand_voice_order(db_session)
+    claimed = provider_voice_registry.claim_customer_provider_voice_id(
+        db_session,
+        provider_voice_id="voice-owned",
+        brand_voice_id="brand-a",
+        order_id="order-a",
+    )
+    own_voice = db_session.get(BrandVoice, "brand-a")
+    own_voice.speaker_id = "voice-owned"
+    db_session.flush()
+    original = (
+        claimed.provider,
+        claimed.kind,
+        claimed.brand_voice_id,
+        claimed.first_order_id,
+        claimed.status,
+        claimed.updated_at,
+    )
+
+    def assert_rejected() -> None:
+        with pytest.raises(AppError) as exc:
+            provider_voice_registry.claim_customer_provider_voice_id(
+                db_session,
+                provider_voice_id="voice-owned",
+                brand_voice_id="brand-a",
+                order_id="order-a",
+            )
+        assert exc.value.code == "PROVIDER_VOICE_ID_CONFLICT"
+        assert (
+            claimed.provider,
+            claimed.kind,
+            claimed.brand_voice_id,
+            claimed.first_order_id,
+            claimed.status,
+            claimed.updated_at,
+        ) == original
+        assert len(list(db_session.scalars(select(BrandVoiceProviderId)))) == 1
+
+    other_voice = BrandVoice(
+        id="brand-other",
+        tenant_id="tenant-a",
+        owner_user_id="user-a",
+        name="Other",
+        speaker_id="voice-owned",
+        status="ready",
+        consent_confirmed=True,
+    )
+    db_session.add(other_voice)
+    db_session.flush()
+    assert_rejected()
+    db_session.delete(other_voice)
+    db_session.flush()
+
+    config = ProviderConfig(
+        capability="chat",
+        provider="other-provider",
+        config={"used_speaker_ids": {"voice-owned": "historical-owner"}},
+        is_active=False,
+    )
+    db_session.add(config)
+    db_session.flush()
+    assert_rejected()
+    db_session.delete(config)
+    db_session.flush()
+
+    monkeypatch.setattr(
+        provider_voice_registry.settings,
+        "engine_doubao_voice_clone_speaker_ids",
+        ["voice-owned"],
+    )
+    assert_rejected()
+    monkeypatch.setattr(
+        provider_voice_registry.settings,
+        "engine_doubao_voice_clone_speaker_ids",
+        [],
+    )
+    monkeypatch.setattr(
+        provider_voice_registry.settings,
+        "engine_doubao_official_voice_ids",
+        ["voice-owned"],
+    )
+    assert_rejected()
+    monkeypatch.setattr(
+        provider_voice_registry.settings,
+        "engine_doubao_official_voice_ids",
+        [],
+    )
+
+    claimed.provider = "historical-provider-alias"
+    db_session.flush()
+    alias_original = (
+        claimed.provider,
+        claimed.kind,
+        claimed.brand_voice_id,
+        claimed.first_order_id,
+        claimed.status,
+        claimed.updated_at,
+    )
+    with pytest.raises(AppError) as alias:
+        provider_voice_registry.claim_customer_provider_voice_id(
+            db_session,
+            provider_voice_id="voice-owned",
+            brand_voice_id="brand-a",
+            order_id="order-a",
+        )
+    assert alias.value.code == "PROVIDER_VOICE_ID_CONFLICT"
+    assert (
+        claimed.provider,
+        claimed.kind,
+        claimed.brand_voice_id,
+        claimed.first_order_id,
+        claimed.status,
+        claimed.updated_at,
+    ) == alias_original
 
 
 def test_registry_lock_uses_exact_namespace_and_sorted_unique_ids() -> None:
@@ -422,6 +584,144 @@ def test_registry_readiness_fails_closed_in_production_for_empty_mismatch_and_un
     with pytest.raises(AppError) as unknown:
         provider_voice_registry.assert_doubao_registry_ready(db_session)
     assert unknown.value.code == "DOUBAO_REGISTRY_NOT_READY"
+
+
+def test_registry_readiness_accepts_exact_config_and_valid_official_rows(
+    db_session,
+    monkeypatch,
+) -> None:
+    from app.services import provider_voice_registry
+
+    monkeypatch.setattr(provider_voice_registry.settings, "environment", "production")
+    monkeypatch.setattr(
+        provider_voice_registry.settings,
+        "engine_doubao_official_voice_ids",
+        ["official-b", "official-a"],
+    )
+    provider_voice_registry.register_official_provider_voice_ids(
+        db_session,
+        provider_voice_ids=["official-a", "official-b"],
+    )
+
+    provider_voice_registry.assert_doubao_registry_ready(db_session)
+
+
+def test_inventory_scans_cross_provider_and_cross_capability_configs(
+    db_session,
+) -> None:
+    from app.services.provider_voice_registry import provider_voice_inventory
+
+    db_session.add_all(
+        [
+            ProviderConfig(
+                capability="chat",
+                provider="unrelated-active-provider",
+                config={"speaker_ids": ["cross-capability-speaker"]},
+                is_active=True,
+            ),
+            ProviderConfig(
+                capability="voice_clone",
+                provider="unrelated-inactive-provider",
+                config={
+                    "used_speaker_ids": {
+                        "cross-provider-used": "historical-owner"
+                    }
+                },
+                is_active=False,
+            ),
+        ]
+    )
+    db_session.flush()
+
+    inventory = provider_voice_inventory(db_session)
+
+    assert inventory.provider_config_ids == (
+        "cross-capability-speaker",
+        "cross-provider-used",
+    )
+
+
+def test_readiness_blocks_alias_and_malformed_registry_rows(
+    db_session,
+    monkeypatch,
+) -> None:
+    from app.services import provider_voice_registry
+
+    _seed_brand_voice_order(db_session)
+    monkeypatch.setattr(provider_voice_registry.settings, "environment", "production")
+    monkeypatch.setattr(
+        provider_voice_registry.settings,
+        "engine_doubao_official_voice_ids",
+        ["official-ok"],
+    )
+    provider_voice_registry.register_official_provider_voice_ids(
+        db_session,
+        provider_voice_ids=["official-ok"],
+    )
+    db_session.add_all(
+        [
+            BrandVoiceProviderId(
+                provider="historical-provider-alias",
+                normalized_provider_id="alias-active",
+                kind="customer",
+                brand_voice_id="brand-a",
+                first_order_id="order-a",
+                status="active",
+            ),
+            BrandVoiceProviderId(
+                provider="unknown-provider",
+                normalized_provider_id="alias-retired",
+                kind="customer",
+                brand_voice_id="brand-a",
+                first_order_id="order-a",
+                status="retired",
+            ),
+            BrandVoiceProviderId(
+                provider="doubao-voice-clone",
+                normalized_provider_id="official-with-owner",
+                kind="official",
+                brand_voice_id="brand-a",
+                first_order_id="order-a",
+                status="active",
+            ),
+            BrandVoiceProviderId(
+                provider="doubao-voice-clone",
+                normalized_provider_id="customer-without-owner",
+                kind="customer",
+                status="active",
+            ),
+            BrandVoiceProviderId(
+                provider="doubao-voice-clone",
+                normalized_provider_id="customer-without-order",
+                kind="customer",
+                brand_voice_id="brand-a",
+                status="retired",
+            ),
+            BrandVoiceProviderId(
+                provider="doubao-voice-clone",
+                normalized_provider_id="official-retired",
+                kind="official",
+                status="retired",
+            ),
+        ]
+    )
+    db_session.flush()
+
+    inventory = provider_voice_registry.provider_voice_inventory(db_session)
+
+    assert {item.provider_voice_id for item in inventory.registry_blockers} == {
+        "alias-active",
+        "alias-retired",
+        "official-with-owner",
+        "customer-without-owner",
+        "customer-without-order",
+        "official-retired",
+    }
+    assert "alias-active" not in inventory.active_customer_registry_ids
+    assert "alias-retired" not in inventory.retired_customer_registry_ids
+    with pytest.raises(AppError) as exc:
+        provider_voice_registry.assert_doubao_registry_ready(db_session)
+    assert exc.value.code == "DOUBAO_REGISTRY_NOT_READY"
 
 
 def test_inventory_reports_all_sources_without_writes(db_session, monkeypatch) -> None:

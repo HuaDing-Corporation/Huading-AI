@@ -5,14 +5,29 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.exceptions import AppError
-from app.db.models import BrandVoice, BrandVoiceProviderId, ProviderConfig
+from app.db.models import (
+    BrandVoice,
+    BrandVoiceOrder,
+    BrandVoiceProviderId,
+    ProviderConfig,
+)
 
 DOUBAO_VOICE_CLONE_PROVIDER = "doubao-voice-clone"
+
+
+@dataclass(frozen=True)
+class ProviderVoiceRegistryBlocker:
+    row_id: str
+    provider_voice_id: str
+    provider: str
+    kind: str
+    status: str
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -25,6 +40,7 @@ class ProviderVoiceInventory:
     retired_official_registry_ids: tuple[str, ...]
     active_customer_registry_ids: tuple[str, ...]
     retired_customer_registry_ids: tuple[str, ...]
+    registry_blockers: tuple[ProviderVoiceRegistryBlocker, ...]
     unknown_ids: tuple[str, ...]
 
 
@@ -86,13 +102,39 @@ def lock_provider_voice_ids(
 
 
 def _registry_rows(db: Session) -> list[BrandVoiceProviderId]:
-    return list(
-        db.scalars(
-            select(BrandVoiceProviderId).where(
-                BrandVoiceProviderId.provider == DOUBAO_VOICE_CLONE_PROVIDER
-            )
-        )
-    )
+    return list(db.scalars(select(BrandVoiceProviderId)))
+
+
+def _registry_blocker_reason(
+    row: BrandVoiceProviderId,
+    *,
+    voices_by_id: dict[str, BrandVoice],
+    orders_by_id: dict[str, BrandVoiceOrder],
+) -> str | None:
+    raw_provider_id = str(row.normalized_provider_id)
+    if not raw_provider_id.strip() or raw_provider_id != raw_provider_id.strip():
+        return "provider_voice_id_not_normalized"
+    if row.provider != DOUBAO_VOICE_CLONE_PROVIDER:
+        return "provider_not_canonical"
+    if row.kind == "official":
+        if row.status != "active":
+            return "official_status_not_active"
+        if row.brand_voice_id is not None or row.first_order_id is not None:
+            return "official_has_customer_binding"
+        return None
+    if row.kind != "customer":
+        return "kind_invalid"
+    if row.status not in {"active", "retired"}:
+        return "customer_status_invalid"
+    if row.brand_voice_id is None or row.first_order_id is None:
+        return "customer_binding_missing"
+    voice = voices_by_id.get(row.brand_voice_id)
+    order = orders_by_id.get(row.first_order_id)
+    if voice is None or order is None:
+        return "customer_binding_target_missing"
+    if voice.tenant_id != order.tenant_id:
+        return "customer_binding_tenant_mismatch"
+    return None
 
 
 def provider_voice_inventory(db: Session) -> ProviderVoiceInventory:
@@ -107,19 +149,39 @@ def provider_voice_inventory(db: Session) -> ProviderVoiceInventory:
         values = dict(config.config or {})
         config_ids.update(_normalized_ids(values.get("speaker_ids")))
         config_ids.update(_normalized_ids(values.get("used_speaker_ids")))
+    voices = list(db.scalars(select(BrandVoice)))
+    voices_by_id = {voice.id: voice for voice in voices}
+    orders_by_id = {order.id: order for order in db.scalars(select(BrandVoiceOrder))}
     brand_voice_ids = {
         normalized
-        for value in db.scalars(
-            select(BrandVoice.speaker_id).where(BrandVoice.speaker_id.is_not(None))
-        )
-        if (normalized := str(value).strip())
+        for voice in voices
+        if voice.speaker_id is not None
+        if (normalized := str(voice.speaker_id).strip())
     }
     registry_groups: dict[tuple[str, str], set[str]] = {
         (kind, status): set()
         for kind in ("official", "customer")
         for status in ("active", "retired")
     }
+    registry_blockers: list[ProviderVoiceRegistryBlocker] = []
     for row in _registry_rows(db):
+        reason = _registry_blocker_reason(
+            row,
+            voices_by_id=voices_by_id,
+            orders_by_id=orders_by_id,
+        )
+        if reason is not None:
+            registry_blockers.append(
+                ProviderVoiceRegistryBlocker(
+                    row_id=row.id,
+                    provider_voice_id=str(row.normalized_provider_id),
+                    provider=str(row.provider),
+                    kind=str(row.kind),
+                    status=str(row.status),
+                    reason=reason,
+                )
+            )
+            continue
         registry_groups[(row.kind, row.status)].add(row.normalized_provider_id)
     official_registry = registry_groups[("official", "active")]
     customer_registry = (
@@ -143,6 +205,12 @@ def provider_voice_inventory(db: Session) -> ProviderVoiceInventory:
         retired_customer_registry_ids=tuple(
             sorted(registry_groups[("customer", "retired")])
         ),
+        registry_blockers=tuple(
+            sorted(
+                registry_blockers,
+                key=lambda item: (item.provider_voice_id, item.row_id),
+            )
+        ),
         unknown_ids=tuple(sorted(unknown)),
     )
 
@@ -165,18 +233,60 @@ def _historical_ids(db: Session) -> set[str]:
     )
 
 
-def _customer_row_for_update(
+def _registry_rows_for_update(
     db: Session,
     *,
     provider_voice_id: str,
-) -> BrandVoiceProviderId | None:
-    return db.scalar(
-        select(BrandVoiceProviderId)
-        .where(
-            BrandVoiceProviderId.normalized_provider_id == provider_voice_id,
+) -> list[BrandVoiceProviderId]:
+    return list(
+        db.scalars(
+            select(BrandVoiceProviderId)
+            .where(
+                func.trim(BrandVoiceProviderId.normalized_provider_id)
+                == provider_voice_id,
+            )
+            .with_for_update()
         )
-        .with_for_update()
     )
+
+
+def _is_valid_customer_row(db: Session, row: BrandVoiceProviderId) -> bool:
+    if row.brand_voice_id is None or row.first_order_id is None:
+        return False
+    voice = db.get(BrandVoice, row.brand_voice_id)
+    order = db.get(BrandVoiceOrder, row.first_order_id)
+    return bool(
+        row.provider == DOUBAO_VOICE_CLONE_PROVIDER
+        and row.normalized_provider_id == str(row.normalized_provider_id).strip()
+        and row.kind == "customer"
+        and row.status in {"active", "retired"}
+        and voice is not None
+        and order is not None
+        and voice.tenant_id == order.tenant_id
+    )
+
+
+def _same_voice_renewal_has_other_source(
+    db: Session,
+    *,
+    provider_voice_id: str,
+    brand_voice_id: str,
+) -> bool:
+    inventory = provider_voice_inventory(db)
+    if provider_voice_id in (
+        set(inventory.official_configured_ids)
+        | set(inventory.legacy_configured_ids)
+        | set(inventory.provider_config_ids)
+    ):
+        return True
+    matching_voices = [
+        voice
+        for voice in db.scalars(
+            select(BrandVoice).where(BrandVoice.speaker_id.is_not(None))
+        )
+        if str(voice.speaker_id).strip() == provider_voice_id
+    ]
+    return any(voice.id != brand_voice_id for voice in matching_voices)
 
 
 def claim_customer_provider_voice_id(
@@ -202,7 +312,8 @@ def claim_customer_provider_voice_id(
 
     previous_row: BrandVoiceProviderId | None = None
     if previous is not None and previous != normalized:
-        previous_row = _customer_row_for_update(db, provider_voice_id=previous)
+        previous_rows = _registry_rows_for_update(db, provider_voice_id=previous)
+        previous_row = previous_rows[0] if len(previous_rows) == 1 else None
         if (
             previous_row is None
             or previous_row.provider != DOUBAO_VOICE_CLONE_PROVIDER
@@ -212,13 +323,20 @@ def claim_customer_provider_voice_id(
         ):
             raise _conflict(previous)
 
-    existing = _customer_row_for_update(db, provider_voice_id=normalized)
+    existing_rows = _registry_rows_for_update(db, provider_voice_id=normalized)
+    if len(existing_rows) > 1:
+        raise _conflict(normalized)
+    existing = existing_rows[0] if existing_rows else None
     if existing is not None:
         if (
-            existing.provider == DOUBAO_VOICE_CLONE_PROVIDER
-            and existing.kind == "customer"
+            _is_valid_customer_row(db, existing)
             and existing.status == "active"
             and existing.brand_voice_id == brand_voice_id
+            and not _same_voice_renewal_has_other_source(
+                db,
+                provider_voice_id=normalized,
+                brand_voice_id=brand_voice_id,
+            )
         ):
             claimed = existing
         else:
@@ -256,7 +374,8 @@ def retire_customer_provider_voice_id(
         provider=DOUBAO_VOICE_CLONE_PROVIDER,
         provider_voice_ids=[normalized],
     )
-    row = _customer_row_for_update(db, provider_voice_id=normalized)
+    rows = _registry_rows_for_update(db, provider_voice_id=normalized)
+    row = rows[0] if len(rows) == 1 else None
     if (
         row is None
         or row.provider != DOUBAO_VOICE_CLONE_PROVIDER
@@ -295,7 +414,13 @@ def register_official_provider_voice_ids(
     )
     rows: list[BrandVoiceProviderId] = []
     for provider_voice_id in requested:
-        existing = _customer_row_for_update(db, provider_voice_id=provider_voice_id)
+        existing_rows = _registry_rows_for_update(
+            db,
+            provider_voice_id=provider_voice_id,
+        )
+        if len(existing_rows) > 1:
+            raise _conflict(provider_voice_id)
+        existing = existing_rows[0] if existing_rows else None
         if existing is None:
             existing = BrandVoiceProviderId(
                 provider=DOUBAO_VOICE_CLONE_PROVIDER,
@@ -328,6 +453,7 @@ def assert_doubao_registry_ready(db: Session) -> None:
         not configured
         or configured != registered
         or inventory.retired_official_registry_ids
+        or inventory.registry_blockers
         or inventory.unknown_ids
     ):
         raise AppError(
@@ -337,6 +463,16 @@ def assert_doubao_registry_ready(db: Session) -> None:
             detail={
                 "official_configured_ids": sorted(configured),
                 "official_registered_ids": sorted(registered),
+                "registry_blockers": [
+                    {
+                        "provider_voice_id": item.provider_voice_id,
+                        "provider": item.provider,
+                        "kind": item.kind,
+                        "status": item.status,
+                        "reason": item.reason,
+                    }
+                    for item in inventory.registry_blockers
+                ],
                 "unknown_ids": list(inventory.unknown_ids),
             },
         )
