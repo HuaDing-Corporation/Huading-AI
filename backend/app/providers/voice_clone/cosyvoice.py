@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import tempfile
 import threading
@@ -20,6 +21,8 @@ _TTS_PROVIDER_NAME = "cosyvoice-tts"
 _DEFAULT_TARGET_MODEL = "cosyvoice-v3.5-plus"
 _SAFE_PREFIX_PATTERN = re.compile(r"[a-z0-9]+")
 _REQUEST_KEY_PATTERN = re.compile(r"^[a-f0-9]{64}$")
+_REMOTE_REQUEST_MARKER_LENGTH = 9
+_BASE36_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
 _DASHSCOPE_RUNTIME_LOCK = threading.RLock()
 
 logger = get_logger(__name__)
@@ -265,9 +268,11 @@ def _dashscope_runtime(api_key: str, base_url: str):
 
 
 def _safe_prefix(payload: Mapping[str, Any]) -> str:
+    request_key = str(payload.get("external_request_key") or "").strip()
+    if _REQUEST_KEY_PATTERN.fullmatch(request_key):
+        return _request_recovery_marker(request_key)
     raw = (
-        str(payload.get("external_request_key") or "")
-        or str(payload.get("brand_voice_id") or "")
+        str(payload.get("brand_voice_id") or "")
         or str(payload.get("source_audio_asset_id") or "")
         or str(payload.get("name") or "")
     ).lower()
@@ -275,6 +280,16 @@ def _safe_prefix(payload: Mapping[str, Any]) -> str:
     if not compact:
         compact = "voice"
     return f"bv{compact}"[:10]
+
+
+def _request_recovery_marker(request_key: str) -> str:
+    value = int.from_bytes(hashlib.sha256(request_key.encode("ascii")).digest(), "big")
+    value %= 36**_REMOTE_REQUEST_MARKER_LENGTH
+    marker = ["0"] * _REMOTE_REQUEST_MARKER_LENGTH
+    for index in range(_REMOTE_REQUEST_MARKER_LENGTH - 1, -1, -1):
+        value, remainder = divmod(value, 36)
+        marker[index] = _BASE36_ALPHABET[remainder]
+    return "".join(marker)
 
 
 def _remote_voice_ids(enrollment: Any, *, prefix: str) -> set[str]:

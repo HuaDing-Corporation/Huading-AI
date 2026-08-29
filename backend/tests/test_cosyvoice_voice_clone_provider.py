@@ -1,5 +1,6 @@
 import threading
 import time
+from contextlib import nullcontext
 
 import pytest
 
@@ -109,11 +110,15 @@ async def test_cosyvoice_clone_recovers_remote_success_after_timeout_across_new_
         }
     )
 
-    assert first == second == {
-        "speaker_id": "bvffffffff-remote-001",
+    assert first == second
+    assert first == {
+        "speaker_id": enrollment.voices[0]["voice_id"],
         "status": "ready",
         "provider": "cosyvoice-voice-clone",
     }
+    assert len(enrollment.voices[0]["prefix"]) == 9
+    assert enrollment.voices[0]["prefix"].isalnum()
+    assert enrollment.voices[0]["prefix"].islower()
     assert len(enrollment.create_calls) == 1
 
 
@@ -170,11 +175,12 @@ async def test_cosyvoice_clone_prevents_pinned_sdk_retry_after_remote_timeout(mo
         }
     )
 
-    assert result["speaker_id"] == "bv11111111-remote-1"
+    assert result["speaker_id"] == remote_voices[0]["voice_id"]
     assert create_attempts == 1
-    assert remote_voices == [
-        {"voice_id": "bv11111111-remote-1", "prefix": "bv11111111"}
-    ]
+    assert len(remote_voices) == 1
+    assert len(remote_voices[0]["prefix"]) == 9
+    assert remote_voices[0]["prefix"].isalnum()
+    assert remote_voices[0]["prefix"].islower()
 
 
 @pytest.mark.asyncio
@@ -215,8 +221,111 @@ async def test_cosyvoice_clone_does_not_reuse_different_full_hash_with_same_old_
         }
     )
 
-    assert result["speaker_id"] == "bvdeadbeef-new-request"
+    request_prefix = enrollment.create_calls[0]["prefix"]
+    assert result["speaker_id"] == f"{request_prefix}-new-request"
+    assert request_prefix != "bvdeadbeef"
+    assert len(request_prefix) == 9
+    assert request_prefix.isalnum()
+    assert request_prefix.islower()
     assert len(enrollment.create_calls) == 1
+
+
+def test_cosyvoice_timeout_recovery_never_cross_binds_concurrent_request_hashes(
+    monkeypatch,
+):
+    from app.providers.voice_clone import cosyvoice as cosyvoice_module
+    from app.providers.voice_clone.cosyvoice import CosyVoiceCloneProvider
+
+    class _SharedRemoteSupplier:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self.voices: list[dict[str, str]] = []
+            self.a_create_started = threading.Event()
+            self.b_create_finished = threading.Event()
+            self.b_voice_id = ""
+            self.create_prefixes: dict[str, str] = {}
+
+        def list_voices(self, prefix: str) -> list[dict[str, str]]:
+            with self._lock:
+                return [item.copy() for item in self.voices if item["prefix"] == prefix]
+
+        def create_voice(self, request: str, prefix: str) -> str:
+            self.create_prefixes[request] = prefix
+            if request == "a":
+                self.a_create_started.set()
+                assert self.b_create_finished.wait(2)
+                raise TimeoutError("A response was lost without a remote commit")
+
+            assert self.a_create_started.wait(2)
+            voice_id = f"{prefix}-speaker-b"
+            with self._lock:
+                self.voices.append({"voice_id": voice_id, "prefix": prefix})
+                self.b_voice_id = voice_id
+            self.b_create_finished.set()
+            return voice_id
+
+    class _IndependentEnrollment:
+        def __init__(self, remote: _SharedRemoteSupplier, request: str) -> None:
+            self.remote = remote
+            self.request = request
+
+        def create_voice(self, target_model: str, prefix: str, url: str) -> str:
+            return self.remote.create_voice(self.request, prefix)
+
+        def list_voices(self, prefix=None, page_index=0, page_size=10):
+            return self.remote.list_voices(prefix)
+
+    remote = _SharedRemoteSupplier()
+    provider_a = CosyVoiceCloneProvider(
+        api_key="dashscope-key-a",
+        enrollment_service=_IndependentEnrollment(remote, "a"),
+    )
+    provider_b = CosyVoiceCloneProvider(
+        api_key="dashscope-key-b",
+        enrollment_service=_IndependentEnrollment(remote, "b"),
+    )
+    monkeypatch.setattr(
+        cosyvoice_module,
+        "_dashscope_runtime",
+        lambda *_args: nullcontext(),
+    )
+    payloads = {
+        "a": {
+            "external_request_key": "deadbeef" + "a" * 56,
+            "source_audio_url": "https://storage.test/a.wav",
+        },
+        "b": {
+            "external_request_key": "deadbeef" + "b" * 56,
+            "source_audio_url": "https://storage.test/b.wav",
+        },
+    }
+    results: dict[str, dict[str, str]] = {}
+    errors: dict[str, BaseException] = {}
+
+    def run_clone(request: str, provider: CosyVoiceCloneProvider) -> None:
+        try:
+            results[request] = provider.clone_voice_sync(payloads[request])
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors[request] = exc
+
+    thread_a = threading.Thread(target=run_clone, args=("a", provider_a))
+    thread_b = threading.Thread(target=run_clone, args=("b", provider_b))
+    thread_a.start()
+    assert remote.a_create_started.wait(2)
+    thread_b.start()
+    thread_a.join(2)
+    thread_b.join(2)
+
+    assert not thread_a.is_alive()
+    assert not thread_b.is_alive()
+    assert "b" not in errors
+    assert results["b"]["speaker_id"] == remote.b_voice_id
+    assert remote.create_prefixes["a"] != remote.create_prefixes["b"]
+    assert all(len(prefix) == 9 for prefix in remote.create_prefixes.values())
+    assert isinstance(errors.get("a"), TimeoutError)
+    assert results.get("a", {}).get("speaker_id") != remote.b_voice_id
+    with pytest.raises(TimeoutError):
+        provider_a.clone_voice_sync(payloads["a"])
 
 
 @pytest.mark.asyncio

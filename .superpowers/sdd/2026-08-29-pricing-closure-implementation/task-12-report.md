@@ -341,3 +341,87 @@ No output; exit 0.
 - The one-shot transport helper intentionally depends on private fields of the pinned DashScope 1.25.21 `VoiceEnrollmentService`; the real-SDK regression makes a future SDK incompatibility fail visibly. This should be re-audited when upgrading DashScope.
 - If post-timeout inventory contains more than one previously unseen matching voice, recovery fails closed rather than risking cross-request association.
 - Existing Starlette/httpx deprecation warning remains non-blocking. No subagent, network/provider call, push, merge, deploy, migration, production/shared database write, production configuration change, supplier registration write, Task 13 work, or external side effect was performed.
+
+## Fix Round 3 — 2026-08-29
+
+### Status and finding closed
+
+The remaining concurrent timeout-recovery finding is closed without changing the approved billing, ownership, route replay, pinned-SDK transport, deletion, or Doubao behavior.
+
+- A valid 64-character external request hash now produces a deterministic nine-character lowercase-alphanumeric supplier marker by hashing the complete request key and encoding the result into the maximum DashScope-compatible base-36 space. The old `bv` plus first-eight-hex marker is no longer used for request-bound recovery.
+- Remote inventory snapshots and post-timeout set differences are therefore scoped to the full-request-derived marker. Requests with different complete hashes but the same old first eight characters no longer share recovery inventory.
+- Recovery still accepts only one newly observed voice for the request-bound marker. No new voice re-raises the original transport error, and multiple new voices remain an explicit fail-closed ambiguity error.
+- The deterministic regression uses two independent `CosyVoiceCloneProvider` instances and independent enrollment adapters with the runtime lock disabled to model separate processes. A shared fake supplier forces A's uncertain create to overlap B's successful create. B returns only B's speaker; A fails closed and cannot replay B from its exact-key cache.
+
+### Fix Round 3 RED evidence
+
+```text
+uv run pytest tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_timeout_recovery_never_cross_binds_concurrent_request_hashes -q
+FAILED tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_timeout_recovery_never_cross_binds_concurrent_request_hashes
+AssertionError: assert False
+where False = isinstance(None, TimeoutError)
+Command exited 1.
+```
+
+Both requests used `bvdeadbeef` on RED. B committed its speaker while A's create had an uncertain non-commit outcome; A then treated B's sole new speaker as its own and returned successfully instead of failing closed.
+
+### Fix Round 3 GREEN evidence
+
+Finding-specific regression:
+
+```text
+uv run pytest tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_timeout_recovery_never_cross_binds_concurrent_request_hashes -q
+Command exited 0.
+```
+
+Pinned transport, same-full-request recovery, old-prefix collision, concurrent cross-bind, and durable/late route replay selection:
+
+```text
+uv run pytest tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_clone_prevents_pinned_sdk_retry_after_remote_timeout tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_clone_recovers_remote_success_after_timeout_across_new_local_key tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_clone_does_not_reuse_different_full_hash_with_same_old_prefix tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_timeout_recovery_never_cross_binds_concurrent_request_hashes tests/test_brand_voice_pipeline.py::test_cosyvoice_new_http_key_reuses_stable_remote_request_identity -q
+5 passed, 1 warning
+```
+
+Complete provider file and provider plus brand-voice lifecycle files:
+
+```text
+uv run pytest tests/test_cosyvoice_voice_clone_provider.py -q
+11 passed, 1 warning
+
+uv run pytest tests/test_cosyvoice_voice_clone_provider.py tests/test_brand_voice_pipeline.py -q
+61 passed, 1 warning
+```
+
+Task 12 focused regression suite:
+
+```text
+uv run pytest tests/test_brand_voice_pipeline.py tests/test_batch_prod_pipeline.py tests/test_avatar_talk_worker.py tests/test_video_pipeline_quota.py tests/test_video_pricing_contract.py tests/test_cosyvoice_voice_clone_provider.py
+145 passed, 1 warning in 16.90s
+```
+
+Static verification:
+
+```text
+uv run ruff check app/providers/voice_clone/cosyvoice.py tests/test_cosyvoice_voice_clone_provider.py
+All checks passed!
+
+uv run python -m compileall -q app/providers/voice_clone/cosyvoice.py
+No output; exit 0.
+
+git diff --check
+No output; exit 0.
+```
+
+### Files changed
+
+- `backend/app/providers/voice_clone/cosyvoice.py`
+- `backend/tests/test_cosyvoice_voice_clone_provider.py`
+- `.superpowers/sdd/2026-08-29-pricing-closure-implementation/task-12-report.md`
+
+### Fix-round self-review and concerns
+
+- Confirmed the marker change applies only to validated complete request hashes. The legacy safe-label fallback for calls without an external request key is unchanged.
+- Confirmed the complete request key deterministically selects the same remote marker, while the two complete hashes in the regression share the old first eight characters but select different markers.
+- Confirmed same-key timeout recovery after a remote commit, the pinned SDK one-shot create transport, exact-key in-process replay, and durable/late route replay remain green.
+- Confirmed A's failed recovery stores no exact-key mapping: a second public clone call cannot return B's speaker.
+- DashScope permits fewer than ten lowercase-alphanumeric prefix characters, so the remote recovery namespace is necessarily finite. Nine base-36 characters maximize that supplier field and use the complete request hash, but do not make cryptographic collisions mathematically impossible. Multiple observed candidates fail closed; the marker scheme should be revisited if DashScope adds a full idempotency key or request metadata.
+- Existing Starlette/httpx deprecation warning remains non-blocking. No subagent, network/provider call, push, merge, deploy, migration, production/shared database write, provider-ID registration, configuration write, production routing change, Doubao routing change, Task 13 work, or external side effect was performed.
