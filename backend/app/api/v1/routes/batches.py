@@ -308,8 +308,9 @@ def _create_ecom_table_tasks(
     common = payload.common
     voice, brand_voice = validate_voice_or_raise(
         db,
-        tenant_id=user.tenant_id,
+        user=user,
         voice_id=common.voice_id,
+        requested_at=datetime.now(UTC),
     )
     if brand_voice is not None and uses_doubao_voice_clone(brand_voice.provider):
         require_doubao_voice_clone_access(

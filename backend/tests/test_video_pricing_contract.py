@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -158,11 +158,14 @@ def test_doubao_brand_video_has_no_character_component(db_session) -> None:
     voice = BrandVoice(
         id="doubao-voice",
         tenant_id=user.tenant_id,
+        owner_user_id=user.id,
         name="Doubao",
         provider="doubao-voice-clone",
         speaker_id="doubao-speaker",
         status="ready",
         consent_confirmed=True,
+        activated_at=datetime.now(UTC) - timedelta(days=1),
+        expires_at=datetime.now(UTC) + timedelta(days=364),
     )
     db_session.add(voice)
     db_session.commit()
@@ -586,11 +589,14 @@ def test_doubao_seedance_brand_video_runs_full_billing_lifecycle(
         db.query(Plan).one().code = "huading"
         voice = BrandVoice(
             tenant_id=auth_context["tenant_id"],
+            owner_user_id=auth_context["user_id"],
             name="Doubao",
             provider="doubao-voice-clone",
             speaker_id="doubao-speaker",
             status="ready",
             consent_confirmed=True,
+            activated_at=datetime.now(UTC) - timedelta(days=1),
+            expires_at=datetime.now(UTC) + timedelta(days=364),
         )
         db.add(voice)
         db.commit()

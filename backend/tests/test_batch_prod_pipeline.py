@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import socket
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -937,12 +937,15 @@ def test_batch_ecom_rejects_doubao_brand_voice_without_huading_access(
         user.role = "creator"
         brand_voice = BrandVoice(
             tenant_id=auth_context["tenant_id"],
+            owner_user_id=auth_context["user_id"],
             name="Batch Premium Voice",
             provider="doubao-voice-clone",
             speaker_id="batch-premium-speaker",
             status="ready",
             consent_confirmed=True,
             consent_confirmed_at=datetime.now(UTC),
+            activated_at=datetime.now(UTC) - timedelta(days=1),
+            expires_at=datetime.now(UTC) + timedelta(days=364),
         )
         image = _seed_image_asset(db, tenant_id=auth_context["tenant_id"])
         db.add(brand_voice)

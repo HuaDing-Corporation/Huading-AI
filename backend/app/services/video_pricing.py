@@ -166,9 +166,8 @@ def resolve_video_pricing_context(
 
     voice, brand_voice = resolve_narration_voice(
         db,
-        tenant_id=user.tenant_id,
+        user=user,
         voice_id=payload.voice_id,
-        user_id=user.id,
         requested_at=requested_at,
     )
     if brand_voice is None:

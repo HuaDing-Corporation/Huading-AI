@@ -724,8 +724,9 @@ def _create_avatar_talk_video(
         )
     voice, brand_voice = resolve_narration_voice(
         db,
-        tenant_id=user.tenant_id,
+        user=user,
         voice_id=payload.voice_id,
+        requested_at=datetime.now(UTC),
     )
     if brand_voice is not None and uses_doubao_voice_clone(brand_voice.provider):
         require_doubao_voice_clone_access(
@@ -822,8 +823,9 @@ def _create_seedance_i2v_video(
         raise AppError("seedance_i2v requires voice_id.", code="VALIDATION_ERROR", status_code=422)
     voice, brand_voice = resolve_narration_voice(
         db,
-        tenant_id=user.tenant_id,
+        user=user,
         voice_id=payload.voice_id,
+        requested_at=datetime.now(UTC),
     )
     if brand_voice is not None and uses_doubao_voice_clone(brand_voice.provider):
         require_doubao_voice_clone_access(

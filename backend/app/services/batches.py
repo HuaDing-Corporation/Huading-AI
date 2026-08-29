@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import tenant_storage_key
 from app.core.config import settings
 from app.core.exceptions import AppError
-from app.db.models import Asset, BatchJob, BgmLibraryTrack, BrandVoice, VideoTask, Voice
+from app.db.models import Asset, BatchJob, BgmLibraryTrack, BrandVoice, User, VideoTask, Voice
 from app.providers.url_guard import ProviderUrlError, ensure_public_https_url
 from app.schemas.batches import BatchRequest
 from app.services.bgm_library import ensure_default_bgm_tracks
@@ -162,10 +162,16 @@ def image_asset_or_raise(db: Session, *, tenant_id: str, asset_id: str) -> Asset
 def validate_voice_or_raise(
     db: Session,
     *,
-    tenant_id: str,
+    user: User,
     voice_id: str | None,
+    requested_at: datetime | None = None,
 ) -> tuple[Voice | None, BrandVoice | None]:
-    return resolve_narration_voice(db, tenant_id=tenant_id, voice_id=voice_id)
+    return resolve_narration_voice(
+        db,
+        user=user,
+        voice_id=voice_id,
+        requested_at=requested_at,
+    )
 
 
 def tenant_relative_upload_key(asset: Asset, *, tenant_id: str) -> str:

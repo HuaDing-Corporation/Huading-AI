@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
-from app.db.models import Asset, TaskAsset, UsageRecord, VideoTask, Voice
+from app.db.models import Asset, TaskAsset, UsageRecord, User, VideoTask, Voice
 from app.db.session import SessionLocal
 from app.providers.base import invoke, resolve, resolve_named_provider
 from app.providers.url_guard import (
@@ -956,14 +956,16 @@ def _tts_voice_for_task(
     brand_voice_id = task.brand_voice_id or str(params.get("brand_voice_id") or "")
     if brand_voice_id:
         billed = _billing_operation_id(task) is not None
-        if billed and not task.created_by_user_id:
-            raise BillingInvariantError("billed video task is missing its payer user")
+        task_user = db.get(User, task.created_by_user_id) if task.created_by_user_id else None
+        if task_user is None or task_user.tenant_id != tenant_id:
+            if billed:
+                raise BillingInvariantError("billed video task is missing its payer user")
+            raise RuntimeError("Brand voice task is missing its submitting user.")
         try:
             _voice, brand_voice = resolve_narration_voice(
                 db,
-                tenant_id=tenant_id,
+                user=task_user,
                 voice_id=brand_voice_id,
-                user_id=task.created_by_user_id,
                 requested_at=task.created_at,
             )
         except AppError as exc:

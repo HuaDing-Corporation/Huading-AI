@@ -349,8 +349,8 @@ def test_self_registered_admin_free_has_no_vip_or_analytics_access(
         },
         headers=auth_context["headers"],
     )
-    assert clone.status_code == 403
-    assert clone.json()["error"]["code"] == "VOICE_CLONE_PLAN_REQUIRED"
+    assert clone.status_code == 422
+    assert clone.json()["error"]["code"] == "DOUBAO_MANUAL_ORDER_REQUIRED"
 
 
 def test_analytics_access_allows_huading_plan_creator(

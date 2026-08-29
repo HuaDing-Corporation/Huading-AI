@@ -923,3 +923,56 @@ def test_seedance_i2v_task_failure_marks_failed_and_releases_quota(monkeypatch, 
     assert storage.deleted == [old_storage_keys[0]]
     assert store.events[-1]["status"] == "failed"
     assert store.events[-1]["error_code"] == "SEEDANCE_I2V_FAILED"
+
+
+def test_worker_uses_submission_time_for_paid_voice_expiry(worker_db):
+    submitted_at = datetime.now(UTC) - timedelta(hours=2)
+    with worker_db() as db:
+        tenant = Tenant(id="tenant-expiry", slug="expiry", name="Expiry")
+        user = User(
+            id="user-expiry",
+            tenant_id=tenant.id,
+            email="expiry@example.com",
+            password_hash="unused",
+            role="creator",
+            is_active=True,
+            status="active",
+        )
+        voice = BrandVoice(
+            id="voice-expiry",
+            tenant_id=tenant.id,
+            owner_user_id=user.id,
+            name="Accepted before expiry",
+            provider="doubao-voice-clone",
+            speaker_id="S_expiry",
+            status="ready",
+            consent_confirmed=True,
+            consent_confirmed_at=submitted_at,
+            activated_at=submitted_at - timedelta(days=1),
+            expires_at=submitted_at + timedelta(minutes=1),
+        )
+        task = VideoTask(
+            id="task-expiry",
+            tenant_id=tenant.id,
+            created_by_user_id=user.id,
+            created_at=submitted_at,
+            mode="avatar_talk",
+            video_mode="avatar_talk",
+            status="running",
+            brand_voice_id=voice.id,
+            params={"brand_voice_id": voice.id},
+        )
+        db.add_all([tenant, user, voice, task])
+        db.commit()
+
+        voice_code, source, provider = avatar_talk._tts_voice_for_task(
+            db,
+            task,
+            tenant_id=tenant.id,
+        )
+
+    assert (voice_code, source, provider) == (
+        "S_expiry",
+        "brand_voice",
+        "doubao-voice-clone",
+    )
