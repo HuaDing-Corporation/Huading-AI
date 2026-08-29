@@ -362,8 +362,8 @@ def test_batch_estimate_prompt_set_sums_video_gen_quota(
     data = resp.json()["data"]
     assert data == {
         "total_rows": 2,
-        "per_row_credits": 1600,
-        "total_credits": 3200,
+        "per_row_credits": 2000,
+        "total_credits": 4000,
         "insufficient": False,
         "balance_credits": 5000,
     }
@@ -454,8 +454,8 @@ def test_batch_estimate_ecom_table_sums_row_tts_characters(
     assert resp.status_code == 200
     assert resp.json()["data"] == {
         "total_rows": 2,
-        "per_row_credits": 401,
-        "total_credits": 802,
+        "per_row_credits": 501,
+        "total_credits": 1002,
         "insufficient": False,
         "balance_credits": 5000,
     }
@@ -515,7 +515,7 @@ def test_batch_create_prompt_set_fans_out_video_gen_tasks_on_video_queue(
             select(func.count()).select_from(UsageRecord).where(UsageRecord.status == "reserved")
         )
         assert usage_count == 2
-        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 4000
+        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 5000
         roles = {
             item.role
             for item in db.scalars(
@@ -921,7 +921,7 @@ def test_batch_create_ecom_table_download_failure_marks_one_row_failed_not_whole
         assert queued_task.params["speed"] == 1.25
         assert queued_task.params["resolution"] == "480p"
         assert db.scalar(select(func.count()).select_from(UsageRecord)) == 1
-        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 803
+        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 1003
 
 
 def test_batch_ecom_rejects_doubao_brand_voice_without_huading_access(
@@ -1122,7 +1122,7 @@ def test_batch_cancel_releases_queued_tasks_and_leaves_running_tasks(
         )
         assert released.status == "released"
         assert reserved.status == "reserved"
-        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 800
+        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 1000
         assert db.get(BatchJob, "batch-cancel").status == "running"
 
 

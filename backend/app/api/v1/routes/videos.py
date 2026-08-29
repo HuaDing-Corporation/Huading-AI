@@ -2,6 +2,7 @@ import asyncio
 import json
 import subprocess
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -18,6 +19,7 @@ from app.api.deps import (
     DbSessionDependency,
     get_object_storage,
     get_progress_store,
+    optional_billing_submission_headers,
     require_billing_submission_headers,
     require_permission,
     scoped_task_id,
@@ -48,6 +50,9 @@ from app.providers.base import (
 from app.schemas.billing import BillingQuote
 from app.schemas.response import ApiResponse, ok
 from app.schemas.videos import (
+    BillingQuoteVideoAccepted,
+    DeferredVideoAccepted,
+    LegacyVideoAccepted,
     ScenePromptRequest,
     ScenePromptResponse,
     VideoAccepted,
@@ -66,6 +71,7 @@ from app.services.billing_operations import (
     BillingSucceededLookup,
     ScenePromptStoredResult,
     UsageAllocation,
+    VideoTaskBillingResource,
     billing_summary,
     complete_failed,
     complete_succeeded,
@@ -106,6 +112,13 @@ from app.services.storage.keys import (
     presign_tenant_storage_key,
     tenant_storage_key_exists,
 )
+from app.services.video_pricing import (
+    VideoPricingContext,
+    build_video_estimate,
+    resolve_effective_video_mode,
+    resolve_video_pricing_context,
+    video_pricing_request_hash,
+)
 from app.services.video_reference import (
     VIDEO_REFERENCE_MAX_DURATION_MS,
     VIDEO_REFERENCE_MIN_DURATION_MS,
@@ -125,6 +138,7 @@ logger = get_logger(__name__)
 ProgressStoreDependency = Depends(get_progress_store)
 ObjectStorageDependency = Depends(get_object_storage)
 BillingSubmissionHeadersDependency = Depends(require_billing_submission_headers)
+OptionalBillingSubmissionHeadersDependency = Depends(optional_billing_submission_headers)
 CreateVideoPermissionDependency = Depends(require_permission("video:create"))
 _video_task_tenants: dict[str, str] = {}
 
@@ -173,18 +187,12 @@ class _AvatarVideoProbe:
 
 
 def _is_avatar_talk_requested(payload: VideoGenerateRequest) -> bool:
-    if payload.video_mode == "photo":
-        return False
-    return (
-        payload.video_mode == "avatar_talk"
-        or bool(payload.voice_id)
-        or bool(payload.avatar_asset_id)
-        or bool(payload.avatar_video_asset_id)
-    )
+    return resolve_effective_video_mode(payload) == "avatar_talk"
 
 
 def _worker_params(payload: VideoGenerateRequest) -> dict:
     params = payload.model_dump()
+    params["video_mode"] = resolve_effective_video_mode(payload)
     if payload.video_mode == "photo":
         params.pop("image_size", None)
         params.pop("image_quality", None)
@@ -499,14 +507,15 @@ def _quota_estimate_for_payload(
     tenant_id: str,
     db: Session,
 ) -> QuotaEstimate | None:
-    if payload.video_mode == "photo":
+    effective_mode = resolve_effective_video_mode(payload)
+    if effective_mode == "photo":
         return estimate_image_generation_quota(
             db,
             tenant_id=tenant_id,
             n=1,
             resolution=_photo_image_resolution(payload),
         )
-    if payload.video_mode == "seedance_i2v":
+    if effective_mode == "seedance_i2v":
         target_duration_sec = seedance_i2v_target_seconds(payload.duration_sec)
         return estimate_seedance_i2v_quota(
             db,
@@ -516,7 +525,7 @@ def _quota_estimate_for_payload(
             estimated_seconds=seedance_i2v_billable_seconds(target_duration_sec),
             resolution=payload.resolution,
         )
-    if payload.video_mode == "video_gen":
+    if effective_mode == "video_gen":
         return estimate_video_gen_quota(
             db,
             tenant_id=tenant_id,
@@ -883,6 +892,211 @@ def _create_seedance_i2v_video(
     db.commit()
     _video_task_tenants[task_id] = user.tenant_id
     return task_id
+
+
+def _billing_quote_video_replay(
+    db: Session,
+    *,
+    user: User,
+    operation,
+) -> BillingQuoteVideoAccepted:
+    task_id = operation.result_id
+    if not task_id:
+        task_id = db.scalar(
+            select(UsageRecord.video_task_id)
+            .where(UsageRecord.billing_operation_id == operation.id)
+            .order_by(UsageRecord.billing_item_index)
+            .limit(1)
+        )
+    task = db.get(VideoTask, task_id) if task_id else None
+    if task is None or task.tenant_id != user.tenant_id:
+        raise AppError(
+            "Video billing replay is invalid.",
+            code="BILLING_REPLAY_INVALID",
+            status_code=500,
+        )
+    return BillingQuoteVideoAccepted(
+        id=task.id,
+        task_id=task.id,
+        status=_api_status(task),
+        billing=billing_summary(operation),
+    )
+
+
+def _create_billing_quote_video(
+    payload: VideoGenerateRequest,
+    *,
+    context: VideoPricingContext,
+    headers: BillingSubmissionHeaders,
+    user: User,
+    db: Session,
+    storage: ObjectStorage,
+) -> tuple[VideoTask, object]:
+    if context.brand_voice is None or context.pricing_draft is None:
+        raise RuntimeError("billing quote video context is incomplete")
+    mode = context.effective_video_mode
+    avatar: Asset | None = None
+    avatar_source_type: str | None = None
+    if mode == "avatar_talk":
+        if _avatar_source_count(payload) != 1:
+            raise AppError(
+                "avatar_talk requires exactly one of avatar_asset_id or avatar_video_asset_id.",
+                code="VALIDATION_ERROR",
+                status_code=422,
+            )
+        if payload.avatar_video_asset_id:
+            avatar = _avatar_video_asset_or_404(
+                db,
+                tenant_id=user.tenant_id,
+                asset_id=payload.avatar_video_asset_id,
+                storage=storage,
+            )
+            avatar_source_type = "video"
+        else:
+            avatar = _avatar_image_asset_or_404(
+                db,
+                tenant_id=user.tenant_id,
+                asset_id=str(payload.avatar_asset_id),
+            )
+            avatar_source_type = "image"
+    else:
+        _validate_product_image_storage_keys(
+            payload.product_image_keys,
+            tenant_id=user.tenant_id,
+            storage=storage,
+        )
+
+    request_hash = video_pricing_request_hash(payload)
+    verified_quote = verify_quote(
+        token=headers.quote_token,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        operation="video_create",
+        request_hash=request_hash,
+        current_draft=context.pricing_draft,
+    )
+    text = str(context.billable_tts_text or "")
+    task_id = str(uuid4())
+    params: dict[str, object] = {
+        "estimated": True,
+        "apply_visible_label": payload.apply_visible_label,
+        "voice_source": "brand_voice",
+        "brand_voice_id": context.brand_voice.id,
+        "tts_speaker_id": context.brand_voice.speaker_id,
+        "brand_voice_provider": context.brand_voice.provider,
+        "billing_tts_text": text,
+        "pricing_contract": "billing_quote",
+    }
+    if mode == "avatar_talk":
+        params["avatar_source_type"] = avatar_source_type
+        if payload.avatar_video_asset_id:
+            params["avatar_video_asset_id"] = payload.avatar_video_asset_id
+            for key in _CHANGE_LIPS_OPTIONAL_FIELDS:
+                value = getattr(payload, key)
+                if value is not None:
+                    params[key] = value
+        else:
+            params["avatar_asset_id"] = payload.avatar_asset_id
+    else:
+        target_duration_sec = seedance_i2v_target_seconds(payload.duration_sec)
+        params.update(
+            {
+                "product_image_keys": list(payload.product_image_keys),
+                "scene_prompt": payload.scene_prompt,
+                "negative_prompt": payload.negative_prompt,
+                "duration_sec": target_duration_sec,
+                "resolution": payload.resolution,
+            }
+        )
+    subtitle_style = _subtitle_style_params(payload)
+    if subtitle_style is not None:
+        params["subtitle_style"] = subtitle_style
+    task = VideoTask(
+        id=task_id,
+        tenant_id=user.tenant_id,
+        created_by_user_id=user.id,
+        status="queued",
+        topic=payload.topic,
+        script=text,
+        mode=mode,
+        video_mode=mode,
+        progress=0,
+        brand_voice_id=context.brand_voice.id,
+        speed=Decimal(str(payload.speed)),
+        aspect_ratio=payload.aspect_ratio,
+        subtitle_enabled=payload.subtitle_enabled,
+        duration_sec=(
+            seedance_i2v_target_seconds(payload.duration_sec) if mode == "seedance_i2v" else None
+        ),
+        params=params,
+    )
+    db.add(task)
+    db.flush()
+    if avatar is not None:
+        db.add(TaskAsset(video_task_id=task.id, asset_id=avatar.id, role="input_avatar"))
+
+    allocations = []
+    for index, line in enumerate(verified_quote.snapshot.pricing_lines):
+        provider = context.base_provider if index == 0 else context.tts_provider
+        allocations.append(
+            UsageAllocation(
+                item_index=index,
+                pricing_line_index=index,
+                quantity=line.quantity,
+                credits=line.subtotal_credits,
+                provider=str(provider or "unknown"),
+                model=(
+                    settings.engine_cosyvoice_voice_clone_target_model
+                    if line.capability == "tts"
+                    else None
+                ),
+                video_task_id=task.id,
+            )
+        )
+    operation = create_reserved_operation(
+        db,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        operation="video_create",
+        idempotency_key=headers.idempotency_key,
+        request_hash=request_hash,
+        verified_quote=verified_quote,
+        usage_allocations=tuple(allocations),
+        result_type="video_task",
+        result_id=task.id,
+    )
+    if operation.result_id != task.id:
+        db.rollback()
+        replay = find_replay(
+            db,
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            operation="video_create",
+            idempotency_key=headers.idempotency_key,
+            request_hash=request_hash,
+        )
+        if replay is None:
+            raise AppError(
+                "Video billing replay was lost.",
+                code="BILLING_REPLAY_INVALID",
+                status_code=500,
+            )
+        replay_task = db.get(VideoTask, replay.operation.result_id)
+        if replay_task is None:
+            raise AppError(
+                "Video billing replay is invalid.",
+                code="BILLING_REPLAY_INVALID",
+                status_code=500,
+            )
+        return replay_task, replay.operation
+    operation.result_payload = VideoTaskBillingResource(
+        task_id=task.id,
+        status="queued",
+    ).model_dump(mode="json")
+    task.params = {**params, "billing_operation_id": operation.id}
+    db.commit()
+    _video_task_tenants[task.id] = user.tenant_id
+    return task, operation
 
 
 def _video_gen_reference_assets_or_404(
@@ -1514,15 +1728,7 @@ def estimate_video(
     user: User = CreateVideoPermissionDependency,
     db: Session = DbSessionDependency,
 ) -> ApiResponse[VideoEstimateResponse]:
-    estimate = _quota_estimate_for_payload(payload, tenant_id=user.tenant_id, db=db)
-    return ok(
-        request,
-        VideoEstimateResponse(
-            estimated_credits=estimate.reservation_units if estimate is not None else 0,
-            unit="credits",
-            note=_ESTIMATE_NOTE,
-        ),
-    )
+    return ok(request, build_video_estimate(db, user=user, payload=payload))
 
 
 @router.post("", response_model=ApiResponse[VideoAccepted], status_code=status.HTTP_202_ACCEPTED)
@@ -1532,8 +1738,83 @@ def create_video(
     user: User = CreateVideoPermissionDependency,
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
+    headers: BillingSubmissionHeaders | None = OptionalBillingSubmissionHeadersDependency,
 ) -> ApiResponse[VideoAccepted]:
-    if payload.video_mode == "photo":
+    effective_mode = resolve_effective_video_mode(payload)
+    request_hash = video_pricing_request_hash(payload)
+    if headers is not None and effective_mode in {"avatar_talk", "seedance_i2v"}:
+        replay = find_replay(
+            db,
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            operation="video_create",
+            idempotency_key=headers.idempotency_key,
+            request_hash=request_hash,
+        )
+        if replay is not None:
+            return ok(
+                request,
+                _billing_quote_video_replay(db, user=user, operation=replay.operation),
+            )
+    pricing_context = resolve_video_pricing_context(db, user=user, payload=payload)
+    if pricing_context.pricing_contract == "billing_quote":
+        if headers is None:
+            raise AppError(
+                "Idempotency-Key and X-Huading-Quote are required for this video.",
+                code="BILLING_HEADERS_REQUIRED",
+                status_code=422,
+            )
+        task, operation = _create_billing_quote_video(
+            payload,
+            context=pricing_context,
+            headers=headers,
+            user=user,
+            db=db,
+            storage=storage,
+        )
+        _prune_after_create(db, tenant_id=user.tenant_id, mode=effective_mode, storage=storage)
+        params = _worker_params(payload)
+        params["tenant_id"] = user.tenant_id
+        params["video_task_id"] = task.id
+        try:
+            if effective_mode == "seedance_i2v":
+                generate_seedance_i2v_task.apply_async(
+                    args=[params], task_id=task.id, queue="video"
+                )
+            else:
+                generate_avatar_talk_task.apply_async(
+                    args=[params], task_id=task.id, queue="avatar"
+                )
+        except Exception as exc:
+            task.status = "failed"
+            task.error_code = "VIDEO_ENQUEUE_FAILED"
+            task.error_message = str(exc) or "Video queue submission failed."
+            task.error = task.error_message
+            task.finished_at = datetime.now(UTC)
+            failed = complete_failed(
+                db,
+                operation_id=operation.id,
+                code="VIDEO_ENQUEUE_FAILED",
+                http_status=503,
+                sanitized_detail=None,
+            )
+            db.commit()
+            raise AppError(
+                "Video queue submission failed.",
+                code="VIDEO_ENQUEUE_FAILED",
+                status_code=503,
+                detail={"billing": billing_summary(failed).model_dump(mode="json")},
+            ) from exc
+        return ok(
+            request,
+            BillingQuoteVideoAccepted(
+                id=task.id,
+                task_id=task.id,
+                status="queued",
+                billing=billing_summary(operation),
+            ),
+        )
+    if effective_mode == "photo":
         selection = _validate_photo_provider_capabilities(payload, user=user, db=db)
         task_id = _create_photo_video(
             payload,
@@ -1547,25 +1828,34 @@ def create_video(
         params["video_task_id"] = task_id
         params["image_provider"] = selection.name
         generate_image_task.apply_async(args=[params], task_id=task_id, queue="image")
-        return ok(request, VideoAccepted(id=task_id, task_id=task_id, status="queued"))
+        return ok(
+            request,
+            LegacyVideoAccepted(id=task_id, task_id=task_id, status="queued"),
+        )
 
-    if payload.video_mode == "seedance_i2v":
+    if effective_mode == "seedance_i2v":
         task_id = _create_seedance_i2v_video(payload, user=user, db=db, storage=storage)
         _prune_after_create(db, tenant_id=user.tenant_id, mode="seedance_i2v", storage=storage)
         params = _worker_params(payload)
         params["tenant_id"] = user.tenant_id
         params["video_task_id"] = task_id
         generate_seedance_i2v_task.apply_async(args=[params], task_id=task_id, queue="video")
-        return ok(request, VideoAccepted(id=task_id, task_id=task_id, status="queued"))
+        return ok(
+            request,
+            LegacyVideoAccepted(id=task_id, task_id=task_id, status="queued"),
+        )
 
-    if payload.video_mode == "video_gen":
+    if effective_mode == "video_gen":
         task_id = _create_video_gen_video(payload, user=user, db=db, storage=storage)
         _prune_after_create(db, tenant_id=user.tenant_id, mode="video_gen", storage=storage)
         params = _video_gen_worker_params(payload)
         params["tenant_id"] = user.tenant_id
         params["video_task_id"] = task_id
         generate_video_gen_task.apply_async(args=[params], task_id=task_id, queue="video")
-        return ok(request, VideoAccepted(id=task_id, task_id=task_id, status="queued"))
+        return ok(
+            request,
+            LegacyVideoAccepted(id=task_id, task_id=task_id, status="queued"),
+        )
 
     if _is_avatar_talk_requested(payload):
         task_id = _create_avatar_talk_video(payload, user=user, db=db, storage=storage)
@@ -1574,7 +1864,10 @@ def create_video(
         params["tenant_id"] = user.tenant_id
         params["video_task_id"] = task_id
         generate_avatar_talk_task.apply_async(args=[params], task_id=task_id, queue="avatar")
-        return ok(request, VideoAccepted(id=task_id, task_id=task_id, status="queued"))
+        return ok(
+            request,
+            LegacyVideoAccepted(id=task_id, task_id=task_id, status="queued"),
+        )
 
     task_id = str(uuid4())
     task = VideoTask(
@@ -1594,7 +1887,10 @@ def create_video(
     params["video_task_id"] = task_id
     result = generate_video_task.apply_async(args=[params], task_id=task_id)
     _video_task_tenants[task_id] = user.tenant_id
-    return ok(request, VideoAccepted(id=task_id, task_id=task_id, status=result.status))
+    return ok(
+        request,
+        DeferredVideoAccepted(id=task_id, task_id=task_id, status=result.status),
+    )
 
 
 @router.delete("", response_model=ApiResponse[VideoClearResponse])

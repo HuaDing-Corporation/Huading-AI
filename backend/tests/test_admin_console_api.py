@@ -1248,10 +1248,10 @@ def test_avatar_retry_discloses_estimate_and_settles_once_at_actual_duration(
                 )
             )
         )
-        assert subscription.quota_credits_used == used_before + 1801
+        assert subscription.quota_credits_used == used_before + 1802
         assert subscription.quota_credits_reserved == reserved_before
         assert len(settled) == 1
-        assert settled[0].credits == Decimal("1801")
+        assert settled[0].credits == Decimal("1801.2")
         settle_reserved_quota(
             db,
             tenant_id=fixture["tenant_id"],
@@ -1270,7 +1270,7 @@ def test_avatar_retry_discloses_estimate_and_settles_once_at_actual_duration(
                 UsageRecord.credits > 0,
             )
         )
-        assert subscription.quota_credits_used == used_before + 1801
+        assert subscription.quota_credits_used == used_before + 1802
         assert settled_count == 1
 
 

@@ -618,6 +618,27 @@ def record_tts_usage(
     return record
 
 
+def attach_tts_usage(record: UsageRecord, *, result: object) -> UsageRecord:
+    """Attach sanitized supplier telemetry to an existing character allocation."""
+    if not isinstance(result, dict):
+        return record
+    provider = str(result.get("provider") or "").strip()
+    if provider not in {"doubao-seed-tts", "cosyvoice-tts"}:
+        return record
+    try:
+        characters = max(0, int(result.get("characters") or 0))
+    except (TypeError, ValueError):
+        return record
+    if characters <= 0:
+        return record
+    record.provider = provider
+    record.model = _tts_model_from_result(result, provider)
+    record.provider_usage = {"characters": characters}
+    record.cost_cents = tts_cost_cents(characters, provider=provider)
+    record.provider_cost_usd = _provider_cost_usd(result)
+    return record
+
+
 def record_seed_tts_usage(
     db: Session,
     *,

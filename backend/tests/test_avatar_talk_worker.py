@@ -6,7 +6,20 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.db.models import Base, Subscription, Tenant, UsageRecord, User, VideoTask
+from app.core.exceptions import AppError
+from app.db.models import Base, BillingOperation, Subscription, Tenant, UsageRecord, User, VideoTask
+from app.services.billing_operations import (
+    UsageAllocation,
+    VideoTaskBillingResource,
+    create_reserved_operation,
+)
+from app.services.billing_quotes import issue_quote, request_sha256, verify_quote
+from app.services.pricing import (
+    PRICING_POLICIES,
+    build_composite_pricing,
+    build_simple_pricing,
+    code_default_rate,
+)
 from app.workers import avatar_talk
 
 
@@ -166,6 +179,122 @@ def _seed_reserved_seedance_task(
     return tenant_id, task_id
 
 
+def _seed_billed_avatar_task(
+    SessionTesting,
+    *,
+    task_id: str,
+    reserved_seconds: int = 5,
+) -> tuple[str, str]:
+    tenant_id = f"tenant-{task_id}"
+    user_id = f"user-{task_id}"
+    frozen_text = "你好，世界！"
+    now = datetime.now(UTC)
+    with SessionTesting() as db:
+        db.add(Tenant(id=tenant_id, slug=task_id, name=task_id))
+        db.add(
+            User(
+                id=user_id,
+                tenant_id=tenant_id,
+                email=f"{task_id}@example.com",
+                password_hash="hash",
+            )
+        )
+        task = VideoTask(
+            id=task_id,
+            tenant_id=tenant_id,
+            created_by_user_id=user_id,
+            mode="avatar_talk",
+            video_mode="avatar_talk",
+            status="queued",
+            progress=0,
+            topic="topic",
+            script=frozen_text,
+            params={
+                "pricing_contract": "billing_quote",
+                "billing_tts_text": frozen_text,
+            },
+        )
+        sub = Subscription(
+            id=f"sub-{task_id}",
+            tenant_id=tenant_id,
+            plan_id="plan-missing-ok-for-sqlite",
+            status="active",
+            period_start=now - timedelta(days=1),
+            period_end=now + timedelta(days=30),
+            quota_credits_total=2_000,
+            quota_credits_used=0,
+            quota_credits_reserved=0,
+        )
+        db.add_all([task, sub])
+        db.flush()
+        base = build_simple_pricing(
+            policy=PRICING_POLICIES["video_create"],
+            rate=code_default_rate(PRICING_POLICIES["video_create"]),
+            quantity=Decimal(reserved_seconds),
+        )
+        tts = build_simple_pricing(
+            policy=PRICING_POLICIES["cosyvoice_brand_tts"],
+            rate=code_default_rate(PRICING_POLICIES["cosyvoice_brand_tts"]),
+            quantity=Decimal(len(frozen_text)),
+        )
+        draft = build_composite_pricing(
+            operation="video_create",
+            lines=(base.pricing_lines[0], tts.pricing_lines[0]),
+        )
+        request_hash = request_sha256({"task_id": task_id})
+        quote = issue_quote(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            request_hash=request_hash,
+            draft=draft,
+        )
+        verified = verify_quote(
+            token=quote.quote_token,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            operation="video_create",
+            request_hash=request_hash,
+            current_draft=draft,
+        )
+        operation = create_reserved_operation(
+            db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            operation="video_create",
+            idempotency_key=__import__("uuid").uuid4(),
+            request_hash=request_hash,
+            verified_quote=verified,
+            usage_allocations=(
+                UsageAllocation(
+                    0,
+                    0,
+                    Decimal(reserved_seconds),
+                    base.subtotal_credits,
+                    "omnihuman",
+                    None,
+                    task_id,
+                ),
+                UsageAllocation(
+                    1,
+                    1,
+                    Decimal(len(frozen_text)),
+                    tts.subtotal_credits,
+                    "cosyvoice-tts",
+                    None,
+                    task_id,
+                ),
+            ),
+            result_type="video_task",
+            result_id=task_id,
+        )
+        operation.result_payload = VideoTaskBillingResource(
+            task_id=task_id, status="queued"
+        ).model_dump(mode="json")
+        task.params = {**task.params, "billing_operation_id": operation.id}
+        db.commit()
+    return tenant_id, task_id
+
+
 def _seed_terminal_history(
     SessionTesting,
     *,
@@ -188,8 +317,7 @@ def _seed_terminal_history(
                     status="done",
                     progress=100,
                     storage_key=storage_key,
-                    created_at=datetime(2026, 1, 1, tzinfo=UTC)
-                    + timedelta(minutes=index),
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=index),
                 )
             )
         db.commit()
@@ -302,6 +430,81 @@ def test_avatar_talk_task_failure_marks_failed_and_releases_quota(monkeypatch, w
     assert storage.deleted == [old_storage_keys[0]]
     assert store.events[-1]["status"] == "failed"
     assert store.events[-1]["error_code"] == "AVATAR_TALK_FAILED"
+
+
+def test_billed_avatar_task_settles_actual_without_duplicate_tts_usage(monkeypatch, worker_db):
+    tenant_id, task_id = _seed_billed_avatar_task(
+        worker_db, task_id="billed-avatar-success", reserved_seconds=5
+    )
+    store = _RecordingStore()
+    storage = _Storage()
+
+    def fake_step(ctx):
+        ctx.duration_sec = 4
+        ctx.storage_key = f"tenants/{tenant_id}/videos/{task_id}/final.mp4"
+        ctx.size_bytes = 123
+        return ctx
+
+    monkeypatch.setattr(avatar_talk, "SessionLocal", worker_db)
+    monkeypatch.setattr(avatar_talk, "build_progress_store", lambda _url: store)
+    monkeypatch.setattr(avatar_talk, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(avatar_talk, "AVATAR_TALK_STEPS", [("upload", 100, fake_step)])
+
+    result = avatar_talk.generate_avatar_talk_task.apply(
+        args=[{"tenant_id": tenant_id, "video_task_id": task_id}], task_id=task_id
+    ).get()
+
+    assert result["status"] == "done"
+    with worker_db() as db:
+        task = db.get(VideoTask, task_id)
+        operation = db.query(BillingOperation).filter_by(result_id=task_id).one()
+        usages = db.query(UsageRecord).filter_by(video_task_id=task_id).all()
+        assert task.status == "done"
+        assert operation.completion_kind == "succeeded"
+        assert operation.settled_credits == Decimal("401")
+        assert len(usages) == 2
+        assert [usage.status for usage in usages] == ["settled", "settled"]
+        assert usages[0].quantity == Decimal("4")
+        assert usages[1].quantity == Decimal("6")
+
+
+def test_billed_avatar_overage_hides_output_and_releases_without_debit(monkeypatch, worker_db):
+    tenant_id, task_id = _seed_billed_avatar_task(
+        worker_db, task_id="billed-avatar-overage", reserved_seconds=5
+    )
+    store = _RecordingStore()
+    storage = _Storage()
+
+    def fake_step(ctx):
+        ctx.duration_sec = 6
+        ctx.storage_key = f"tenants/{tenant_id}/videos/{task_id}/final.mp4"
+        return ctx
+
+    monkeypatch.setattr(avatar_talk, "SessionLocal", worker_db)
+    monkeypatch.setattr(avatar_talk, "build_progress_store", lambda _url: store)
+    monkeypatch.setattr(avatar_talk, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(avatar_talk, "AVATAR_TALK_STEPS", [("upload", 100, fake_step)])
+
+    with pytest.raises(AppError) as caught:
+        avatar_talk.generate_avatar_talk_task.apply(
+            args=[{"tenant_id": tenant_id, "video_task_id": task_id}], task_id=task_id
+        ).get(propagate=True)
+
+    assert caught.value.code == "BILLING_QUOTE_EXCEEDED"
+    with worker_db() as db:
+        task = db.get(VideoTask, task_id)
+        operation = (
+            db.query(BillingOperation).filter_by(id=task.params["billing_operation_id"]).one()
+        )
+        subscription = db.get(Subscription, f"sub-{task_id}")
+        usages = db.query(UsageRecord).filter_by(video_task_id=task_id).all()
+        assert task.status == "failed"
+        assert task.storage_key is None
+        assert operation.completion_kind == "failed"
+        assert operation.settled_credits == 0
+        assert subscription.quota_credits_used == 0
+        assert subscription.quota_credits_reserved == 0
+        assert all(usage.status == "released" for usage in usages)
 
 
 def test_seedance_i2v_task_success_marks_done_and_settles_quota(monkeypatch, worker_db):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
@@ -11,7 +13,12 @@ def resolve_narration_voice(
     *,
     tenant_id: str,
     voice_id: str | None,
+    user_id: str | None = None,
+    requested_at: datetime | None = None,
 ) -> tuple[Voice | None, BrandVoice | None]:
+    # user_id/requested_at are deliberate extension points for Task 12's payer
+    # and activation-window predicates; Task 7 enforces every field available now.
+    del user_id, requested_at
     if not voice_id:
         raise AppError("voice_id is required.", code="VALIDATION_ERROR", status_code=422)
     voice = db.get(Voice, voice_id)
@@ -24,6 +31,7 @@ def resolve_narration_voice(
         and brand_voice.deleted_at is None
         and brand_voice.status == "ready"
         and brand_voice.speaker_id
+        and brand_voice.provider in {"doubao-voice-clone", "cosyvoice-voice-clone"}
     ):
         return None, brand_voice
     raise AppError("Voice not found.", code="VOICE_NOT_FOUND", status_code=404)

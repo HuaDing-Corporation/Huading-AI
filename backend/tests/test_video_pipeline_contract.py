@@ -1926,6 +1926,7 @@ def test_video_estimate_seedance_i2v_matches_reserved_quota_with_tenant_rate(
 
     assert estimate_resp.status_code == 200
     assert estimate_resp.json()["data"] == {
+        "pricing_contract": "legacy_estimate",
         "estimated_credits": 183,
         "unit": "credits",
         "note": "Estimated reservation; final settlement uses actual generated duration.",
@@ -1989,6 +1990,7 @@ def test_video_estimate_photo_matches_resolution_tier_reservation(
 
     assert estimate_resp.status_code == 200
     assert estimate_resp.json()["data"] == {
+        "pricing_contract": "legacy_estimate",
         "estimated_credits": 180,
         "unit": "credits",
         "note": "Estimated reservation; final settlement uses actual generated duration.",

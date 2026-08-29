@@ -190,9 +190,15 @@ class EcomImageBatchStoredResult(_BillingModel):
     items: list[EcomImageBatchStoredItem] = Field(min_length=1, max_length=20)
 
 
+class VideoTaskBillingResource(_BillingModel):
+    task_id: str = Field(min_length=1, max_length=36)
+    status: Literal["queued", "running", "done", "failed", "cancelled"]
+
+
 register_billing_result_schema("script_generate_result", ScriptGenerateStoredResult)
 register_billing_result_schema("scene_prompt_result", ScenePromptStoredResult)
 register_billing_result_schema("ecom_image_batch", EcomImageBatchStoredResult)
+register_billing_result_schema("video_task", VideoTaskBillingResource)
 
 
 def _integer_amount(value: Decimal, *, field: str) -> int:

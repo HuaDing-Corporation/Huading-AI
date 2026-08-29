@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
-from app.db.models import Asset, BrandVoice, TaskAsset, VideoTask, Voice
+from app.db.models import Asset, BrandVoice, TaskAsset, UsageRecord, VideoTask, Voice
 from app.db.session import SessionLocal
 from app.providers.base import invoke, resolve, resolve_named_provider
 from app.providers.url_guard import (
@@ -39,6 +39,12 @@ from app.services.apimart_costs import (
     apimart_price_table_credits,
 )
 from app.services.batches import refresh_batch_job
+from app.services.billing_operations import (
+    BillingInvariantError,
+    VideoTaskBillingResource,
+    complete_failed,
+    complete_succeeded,
+)
 from app.services.history import prune_video_history_best_effort
 from app.services.plan_access import (
     require_doubao_voice_clone_access,
@@ -785,6 +791,11 @@ def _script_generation_payload(task: VideoTask) -> dict[str, Any]:
 
 def script_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
+    if _billing_operation_id(task) is not None:
+        frozen_text = (task.params or {}).get("billing_tts_text")
+        if not isinstance(frozen_text, str) or not frozen_text or task.script != frozen_text:
+            raise BillingInvariantError("billed video task text is not frozen")
+        return ctx
     generated_script = False
     if not task.script:
         if not (
@@ -860,12 +871,27 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
             timeout_seconds=settings.engine_omnihuman_request_timeout_seconds,
         )
     )
-    provider_costs.record_tts_usage(
-        ctx.db,
-        tenant_id=ctx.tenant_id,
-        result=result,
-        video_task_id=ctx.task_id,
-    )
+    operation_id = _billing_operation_id(task)
+    if operation_id is None:
+        provider_costs.record_tts_usage(
+            ctx.db,
+            tenant_id=ctx.tenant_id,
+            result=result,
+            video_task_id=ctx.task_id,
+        )
+    elif brand_voice_provider == "cosyvoice-voice-clone":
+        usage = ctx.db.scalar(
+            select(UsageRecord).where(
+                UsageRecord.billing_operation_id == operation_id,
+                UsageRecord.video_task_id == task.id,
+                UsageRecord.capability == "tts",
+                UsageRecord.unit == "character",
+            )
+        )
+        if usage is None:
+            raise BillingInvariantError("billed CosyVoice task is missing its TTS allocation")
+        provider_costs.attach_tts_usage(usage, result=result)
+        ctx.db.flush([usage])
     audio_source_path = _tail_faded_tts_audio(Path(str(result["audio_path"])))
     audio_bytes = audio_source_path.read_bytes()
     audio_bytes, label_metadata = _apply_synthetic_label(
@@ -921,6 +947,8 @@ def _tts_voice_for_task(
     params = task.params or {}
     brand_voice_id = task.brand_voice_id or str(params.get("brand_voice_id") or "")
     if brand_voice_id:
+        if _billing_operation_id(task) is not None and not task.created_by_user_id:
+            raise BillingInvariantError("billed video task is missing its payer user")
         brand_voice = db.get(BrandVoice, brand_voice_id)
         if (
             brand_voice is None
@@ -939,6 +967,16 @@ def _tts_voice_for_task(
     if voice is None:
         raise RuntimeError("Voice not found for avatar_talk.")
     return voice.voice_code, "preset", None
+
+
+def _billing_operation_id(task: VideoTask) -> str | None:
+    params = task.params or {}
+    if params.get("pricing_contract") != "billing_quote":
+        return None
+    value = str(params.get("billing_operation_id") or "").strip()
+    if not value:
+        raise BillingInvariantError("billed video task is missing its operation")
+    return value
 
 
 def _tts_provider_for_voice(
@@ -2119,6 +2157,100 @@ ECOM_I2V_STEPS = [
 ]
 
 
+def _hide_billed_video_output(db: Session, *, task: VideoTask) -> None:
+    task.storage_key = None
+    task.thumbnail_key = None
+    output_assets = list(
+        db.scalars(
+            select(Asset)
+            .join(TaskAsset, TaskAsset.asset_id == Asset.id)
+            .where(
+                TaskAsset.video_task_id == task.id,
+                TaskAsset.role == "output_video",
+            )
+        )
+    )
+    for asset in output_assets:
+        asset.status = "failed"
+
+
+def _complete_billing_quote_video(
+    db: Session,
+    *,
+    task: VideoTask,
+    actual_seconds: int,
+    base_cost_cents: int,
+    base_provider: str | None = None,
+    base_model: str | None = None,
+):
+    operation_id = _billing_operation_id(task)
+    if operation_id is None:
+        return None
+    usages = list(
+        db.scalars(
+            select(UsageRecord)
+            .where(UsageRecord.billing_operation_id == operation_id)
+            .order_by(UsageRecord.billing_item_index)
+        )
+    )
+    if not usages or usages[0].capability != "video":
+        raise BillingInvariantError("billed video task is missing its base allocation")
+    base_usage = usages[0]
+    base_usage.cost_cents = max(0, int(base_cost_cents))
+    if base_provider:
+        base_usage.provider = base_provider
+    if base_model:
+        base_usage.model = base_model
+    actual_quantities = {int(base_usage.billing_item_index): Decimal(actual_seconds)}
+    tts_usages = [usage for usage in usages if usage.capability == "tts"]
+    if len(tts_usages) > 1:
+        raise BillingInvariantError("billed video task has duplicate TTS allocations")
+    if tts_usages:
+        frozen_text = str((task.params or {}).get("billing_tts_text") or "")
+        if not frozen_text or task.script != frozen_text:
+            raise BillingInvariantError("billed video task text changed before settlement")
+        tts_usage = tts_usages[0]
+        actual_quantities[int(tts_usage.billing_item_index)] = Decimal(len(frozen_text))
+    operation = complete_succeeded(
+        db,
+        operation_id=operation_id,
+        actual_quantities=actual_quantities,
+        result_type="video_task",
+        result_id=task.id,
+        result_payload=VideoTaskBillingResource(task_id=task.id, status="done"),
+    )
+    if operation.completion_kind != "succeeded":
+        _hide_billed_video_output(db, task=task)
+        raise AppError(
+            "Generated video exceeded the accepted quote.",
+            code=operation.error_code or "BILLING_QUOTE_EXCEEDED",
+            status_code=operation.error_http_status or 409,
+            detail={"requires_new_quote": True},
+        )
+    return operation
+
+
+def _fail_billing_quote_video(
+    db: Session,
+    *,
+    task: VideoTask,
+    code: str,
+    http_status: int = 502,
+) -> bool:
+    operation_id = _billing_operation_id(task)
+    if operation_id is None:
+        return False
+    _hide_billed_video_output(db, task=task)
+    complete_failed(
+        db,
+        operation_id=operation_id,
+        code=code,
+        http_status=http_status,
+        sanitized_detail=None,
+    )
+    return True
+
+
 def _pipeline_error_details(exc: Exception, *, fallback_code: str) -> tuple[str, str]:
     if isinstance(exc, AppError):
         return exc.code, exc.message
@@ -2179,15 +2311,25 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 )
             else:
                 cost_cents = provider_costs.omnihuman_cost_cents(actual_seconds)
-            settle_reserved_quota(
-                db,
-                tenant_id=tenant_id,
-                video_task_id=task_id,
-                actual_seconds=actual_seconds,
-                cost_cents=cost_cents,
-                provider="omnihuman" if provider_model else None,
-                model=provider_model,
-            )
+            if _billing_operation_id(task) is not None:
+                _complete_billing_quote_video(
+                    db,
+                    task=task,
+                    actual_seconds=actual_seconds,
+                    base_cost_cents=cost_cents,
+                    base_provider="omnihuman",
+                    base_model=provider_model,
+                )
+            else:
+                settle_reserved_quota(
+                    db,
+                    tenant_id=tenant_id,
+                    video_task_id=task_id,
+                    actual_seconds=actual_seconds,
+                    cost_cents=cost_cents,
+                    provider="omnihuman" if provider_model else None,
+                    model=provider_model,
+                )
             refresh_batch_job(db, batch_id=task.batch_id)
             db.commit()
             output_storage_key = task.storage_key
@@ -2236,7 +2378,13 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
             task.error_message = error_message
             task.error = error_message
             task.finished_at = datetime.now(UTC)
-            release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
+            if not _fail_billing_quote_video(
+                db,
+                task=task,
+                code=error_code,
+                http_status=exc.status_code if isinstance(exc, AppError) else 502,
+            ):
+                release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
             refresh_batch_job(db, batch_id=task.batch_id)
             db.commit()
             failed_progress = task.progress or 0
@@ -2313,13 +2461,23 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
                     actual_seconds=actual_seconds,
                     resolution=_seedance_i2v_resolution(task.params),
                 )
-            settle_reserved_quota(
-                db,
-                tenant_id=tenant_id,
-                video_task_id=task_id,
-                actual_seconds=actual_seconds,
-                cost_cents=cost_cents,
-            )
+            if _billing_operation_id(task) is not None:
+                _complete_billing_quote_video(
+                    db,
+                    task=task,
+                    actual_seconds=actual_seconds,
+                    base_cost_cents=cost_cents,
+                    base_provider="apimart",
+                    base_model="doubao-seedance-2.0",
+                )
+            else:
+                settle_reserved_quota(
+                    db,
+                    tenant_id=tenant_id,
+                    video_task_id=task_id,
+                    actual_seconds=actual_seconds,
+                    cost_cents=cost_cents,
+                )
             refresh_batch_job(db, batch_id=task.batch_id)
             db.commit()
             output_storage_key = task.storage_key
@@ -2368,7 +2526,13 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
             task.error_message = error_message
             task.error = error_message
             task.finished_at = datetime.now(UTC)
-            release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
+            if not _fail_billing_quote_video(
+                db,
+                task=task,
+                code=error_code,
+                http_status=exc.status_code if isinstance(exc, AppError) else 502,
+            ):
+                release_reserved_quota(db, tenant_id=tenant_id, video_task_id=task_id)
             refresh_batch_job(db, batch_id=task.batch_id)
             db.commit()
             failed_progress = task.progress or 0
