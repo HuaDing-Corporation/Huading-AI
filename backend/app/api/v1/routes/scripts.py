@@ -14,7 +14,7 @@ from app.api.deps import (
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.db.models import UsageRecord, User
-from app.providers.base import ProviderInvocationError, invoke, resolve
+from app.providers.base import ProviderInvocationError, ProviderResolutionError, invoke, resolve
 from app.schemas.billing import BillingQuote
 from app.schemas.response import ApiResponse, ok
 from app.schemas.scripts import ScriptGenerateRequest, ScriptGenerateResponse
@@ -67,6 +67,22 @@ def _failure_usage_from_error(exc: BaseException) -> object | None:
     return None
 
 
+def _preflight_script_provider(db: Session, *, tenant_id: str) -> None:
+    """Reject quotes before they can be issued for an unavailable LLM."""
+    if not (
+        settings.engine_llm_api_key and settings.engine_llm_base_url and settings.engine_llm_model
+    ):
+        raise AppError("DeepSeek is not configured.", code="LLM_NOT_CONFIGURED", status_code=503)
+    try:
+        resolve(db, tenant_id=tenant_id, capability="llm")
+    except ProviderResolutionError as exc:
+        raise AppError(
+            "DeepSeek provider is not configured.",
+            code="LLM_NOT_CONFIGURED",
+            status_code=503,
+        ) from exc
+
+
 def _replayed_response(
     db: Session, *, user: User, headers: BillingSubmissionHeaders
 ) -> ScriptGenerateResponse:
@@ -106,6 +122,7 @@ def _release_after_failure(
     result: object | None,
     code: str,
     message: str,
+    http_status: int = 502,
     cause: BaseException | None = None,
 ) -> None:
     usage = db.scalar(select(UsageRecord).where(UsageRecord.billing_operation_id == operation_id))
@@ -113,13 +130,17 @@ def _release_after_failure(
         provider_costs.attach_deepseek_usage(usage, result=result)
         db.flush([usage])
     operation = complete_failed(
-        db, operation_id=operation_id, code=code, http_status=502, sanitized_detail=None
+        db,
+        operation_id=operation_id,
+        code=code,
+        http_status=http_status,
+        sanitized_detail=None,
     )
     db.commit()
     error = AppError(
         message,
         code=code,
-        status_code=502,
+        status_code=http_status,
         detail={"billing": billing_summary(operation).model_dump(mode="json")},
     )
     if cause is None:
@@ -134,6 +155,7 @@ def estimate_script(
     user: User = CurrentUserDependency,
     db: Session = DbSessionDependency,
 ) -> ApiResponse[BillingQuote]:
+    _preflight_script_provider(db, tenant_id=user.tenant_id)
     return ok(
         request,
         issue_quote(
@@ -164,6 +186,7 @@ def generate_script(
     )
     if replay is not None:
         return ok(request, _replayed_response(db, user=user, headers=headers))
+    _preflight_script_provider(db, tenant_id=user.tenant_id)
     verified_quote = verify_quote(
         token=headers.quote_token,
         tenant_id=user.tenant_id,
@@ -172,10 +195,6 @@ def generate_script(
         request_hash=request_hash,
         current_draft=_pricing_draft(db, tenant_id=user.tenant_id),
     )
-    if not (
-        settings.engine_llm_api_key and settings.engine_llm_base_url and settings.engine_llm_model
-    ):
-        raise AppError("DeepSeek is not configured.", code="LLM_NOT_CONFIGURED", status_code=503)
     operation = create_reserved_operation(
         db,
         tenant_id=user.tenant_id,
@@ -217,6 +236,16 @@ def generate_script(
                 timeout_seconds=30.0,
             )
         )
+    except ProviderResolutionError as exc:
+        _release_after_failure(
+            db,
+            operation_id=operation.id,
+            result=None,
+            code="LLM_NOT_CONFIGURED",
+            message="DeepSeek provider is not configured.",
+            http_status=503,
+            cause=exc,
+        )
     except (ProviderInvocationError, AppError) as exc:
         _release_after_failure(
             db,
@@ -243,17 +272,32 @@ def generate_script(
             code="LLM_EMPTY_RESULT",
             message="DeepSeek returned an empty script.",
         )
-    usage = db.scalar(select(UsageRecord).where(UsageRecord.billing_operation_id == operation.id))
-    if usage is not None:
-        provider_costs.attach_deepseek_usage(usage, result=result)
-        db.flush([usage])
-    operation = complete_succeeded(
-        db,
-        operation_id=operation.id,
-        actual_quantities={0: Decimal("1")},
-        result_type="script_generate_result",
-        result_id=None,
-        result_payload=ScriptGenerateStoredResult(script=script),
-    )
-    db.commit()
+    operation_id = operation.id
+    try:
+        usage = db.scalar(
+            select(UsageRecord).where(UsageRecord.billing_operation_id == operation_id)
+        )
+        if usage is not None:
+            provider_costs.attach_deepseek_usage(usage, result=result)
+            db.flush([usage])
+        operation = complete_succeeded(
+            db,
+            operation_id=operation_id,
+            actual_quantities={0: Decimal("1")},
+            result_type="script_generate_result",
+            result_id=None,
+            result_payload=ScriptGenerateStoredResult(script=script),
+        )
+        db.commit()
+    except AppError as exc:
+        db.rollback()
+        _release_after_failure(
+            db,
+            operation_id=operation_id,
+            result=result,
+            code=exc.code,
+            message=exc.message,
+            http_status=exc.status_code,
+            cause=exc,
+        )
     return ok(request, ScriptGenerateResponse(script=script, billing=billing_summary(operation)))

@@ -20,9 +20,6 @@ def test_script_reservation_commits_before_supplier_call(
     """Breaking reservation commit before invoking DeepSeek must fail this test."""
     from app.api.v1.routes import scripts as scripts_route
 
-    client = TestClient(app)
-    quote = _quote(client, auth_context["headers"], {"topic": "新品介绍"})
-
     class _DeepSeek:
         async def generate_text(self, _payload: dict) -> dict:
             with auth_db() as db:
@@ -49,6 +46,8 @@ def test_script_reservation_commits_before_supplier_call(
     monkeypatch.setattr(scripts_route.settings, "engine_llm_base_url", "https://llm.test")
     monkeypatch.setattr(scripts_route.settings, "engine_llm_model", "deepseek-v4-flash")
     monkeypatch.setattr(scripts_route, "resolve", lambda *_args, **_kwargs: _DeepSeek())
+    client = TestClient(app)
+    quote = _quote(client, auth_context["headers"], {"topic": "新品介绍"})
 
     response = client.post(
         "/api/v1/scripts/generate",
@@ -82,8 +81,16 @@ def test_script_reservation_commits_before_supplier_call(
     }
 
 
-def test_script_quote_is_read_only_and_rejects_changed_request(auth_context, auth_db) -> None:
+def test_script_quote_is_read_only_and_rejects_changed_request(
+    monkeypatch, auth_context, auth_db
+) -> None:
     """A quote must neither reserve credits nor authorize a different payload."""
+    from app.api.v1.routes import scripts as scripts_route
+
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_api_key", "key")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_base_url", "https://llm.test")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_model", "deepseek-v4-flash")
+    monkeypatch.setattr(scripts_route, "resolve", lambda *_args, **_kwargs: object())
     client = TestClient(app)
     quote = _quote(client, auth_context["headers"], {"topic": "新品介绍"})
     with auth_db() as db:
@@ -153,3 +160,86 @@ def test_script_replay_returns_stored_clean_result_after_rate_changes(
     with auth_db() as db:
         stored = db.scalar(select(BillingOperation.result_payload))
     assert stored == {"script": "干净的口播文案。"}
+
+
+def test_script_oversized_result_releases_reservation_with_billing(
+    monkeypatch, auth_context, auth_db
+) -> None:
+    """Removing terminal-result failure handling must leave this reservation stuck."""
+    from app.api.v1.routes import scripts as scripts_route
+
+    class _DeepSeek:
+        async def generate_text(self, _payload: dict) -> dict:
+            return {"text": "x" * 70_000}
+
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_api_key", "key")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_base_url", "https://llm.test")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_model", "deepseek-v4-flash")
+    monkeypatch.setattr(scripts_route, "resolve", lambda *_args, **_kwargs: _DeepSeek())
+    client = TestClient(app)
+    payload = {"topic": "新品介绍"}
+    quote = _quote(client, auth_context["headers"], payload)
+    response = client.post(
+        "/api/v1/scripts/generate",
+        json=payload,
+        headers={
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote["quote_token"],
+        },
+    )
+
+    assert response.status_code == 500
+    billing = response.json()["error"]["detail"]["billing"]
+    assert billing["status"] == "released"
+    with auth_db() as db:
+        operation = db.get(BillingOperation, billing["operation_id"])
+        assert operation is not None
+        assert operation.completion_kind == "failed"
+
+
+def test_script_provider_resolution_race_releases_reservation(
+    monkeypatch, auth_context, auth_db
+) -> None:
+    """A provider disappearing after reservation returns the normal released billing error."""
+    from app.api.v1.routes import scripts as scripts_route
+    from app.providers.base import ProviderResolutionError
+
+    class _DeepSeek:
+        async def generate_text(self, _payload: dict) -> dict:
+            raise AssertionError("the provider disappeared before invocation")
+
+    resolutions = 0
+
+    def _resolve(*_args, **_kwargs):
+        nonlocal resolutions
+        resolutions += 1
+        if resolutions == 3:
+            raise ProviderResolutionError("provider changed after reservation")
+        return _DeepSeek()
+
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_api_key", "key")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_base_url", "https://llm.test")
+    monkeypatch.setattr(scripts_route.settings, "engine_llm_model", "deepseek-v4-flash")
+    monkeypatch.setattr(scripts_route, "resolve", _resolve)
+    client = TestClient(app)
+    payload = {"topic": "新品介绍"}
+    quote = _quote(client, auth_context["headers"], payload)
+    response = client.post(
+        "/api/v1/scripts/generate",
+        json=payload,
+        headers={
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote["quote_token"],
+        },
+    )
+
+    assert response.status_code == 503, response.text
+    billing = response.json()["error"]["detail"]["billing"]
+    assert billing["status"] == "released"
+    assert resolutions == 3
+    with auth_db() as db:
+        operation = db.get(BillingOperation, billing["operation_id"])
+        assert operation is not None
+        assert operation.completion_kind == "failed"

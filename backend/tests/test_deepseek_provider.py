@@ -1,8 +1,42 @@
-import pytest
-from fastapi.testclient import TestClient
 from uuid import uuid4
 
+import pytest
+from fastapi.testclient import TestClient
+
 from app.providers.llm.deepseek import DeepSeekProvider
+
+
+def test_deepseek_attachment_rejects_non_integer_supplier_telemetry() -> None:
+    from decimal import Decimal
+
+    from app.db.models import UsageRecord
+    from app.services.provider_costs import attach_deepseek_usage
+
+    record = UsageRecord(
+        tenant_id="tenant-1",
+        capability="llm",
+        provider="quoted-provider",
+        model="quoted-model",
+        unit="call",
+        quantity=Decimal("1"),
+        credits=Decimal("1"),
+        cost_cents=0,
+        status="reserved",
+    )
+
+    attach_deepseek_usage(
+        record,
+        result={
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "usage": {"prompt_tokens": True, "completion_tokens": 1.5, "total_tokens": 2},
+        },
+    )
+
+    assert record.provider == "quoted-provider"
+    assert record.model == "quoted-model"
+    assert record.provider_usage is None
+    assert record.cost_cents == 0
 
 
 def _script_submission_headers(

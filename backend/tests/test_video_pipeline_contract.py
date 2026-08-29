@@ -2900,9 +2900,9 @@ def test_scene_prompt_endpoint_maps_provider_resolution_failure_to_503(
         client = TestClient(app)
         payload = {"product_image_keys": ["uploads/product.png"]}
         resp = client.post(
-            "/api/v1/videos/scene-prompt",
+            "/api/v1/videos/scene-prompt/estimate",
             json=payload,
-            headers=_scene_submission_headers(client, auth_context["headers"], payload),
+            headers=auth_context["headers"],
         )
     finally:
         app.dependency_overrides.pop(get_object_storage, None)
@@ -2942,9 +2942,9 @@ def test_scene_prompt_endpoint_rejects_missing_product_image_before_provider_res
             "product_image_keys": ["uploads/product-front.png", "uploads/product-missing.png"]
         }
         resp = client.post(
-            "/api/v1/videos/scene-prompt",
+            "/api/v1/videos/scene-prompt/estimate",
             json=payload,
-            headers=_scene_submission_headers(client, auth_context["headers"], payload),
+            headers=auth_context["headers"],
         )
     finally:
         app.dependency_overrides.pop(get_object_storage, None)
@@ -2986,9 +2986,9 @@ def test_scene_prompt_endpoint_rejects_cross_tenant_product_image_before_provide
         client = TestClient(app)
         payload = {"product_image_keys": ["uploads/product.png"]}
         resp = client.post(
-            "/api/v1/videos/scene-prompt",
+            "/api/v1/videos/scene-prompt/estimate",
             json=payload,
-            headers=_scene_submission_headers(client, auth_context["headers"], payload),
+            headers=auth_context["headers"],
         )
     finally:
         app.dependency_overrides.pop(get_object_storage, None)

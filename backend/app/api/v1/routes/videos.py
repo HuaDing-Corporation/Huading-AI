@@ -1223,6 +1223,30 @@ def _scene_prompt_pricing_draft(db: Session, *, tenant_id: str):
     )
 
 
+def _preflight_scene_prompt(
+    db: Session,
+    *,
+    tenant_id: str,
+    product_image_keys: list[str],
+    storage: ObjectStorage,
+) -> list[str]:
+    """Run the read-only submit gates before issuing a scene-prompt quote."""
+    storage_keys = _validate_product_image_storage_keys(
+        product_image_keys,
+        tenant_id=tenant_id,
+        storage=storage,
+    )
+    try:
+        resolve(db, tenant_id=tenant_id, capability="scene_prompt")
+    except ProviderResolutionError as exc:
+        raise AppError(
+            "Scene prompt provider is not configured.",
+            code="SCENE_PROMPT_PROVIDER_NOT_CONFIGURED",
+            status_code=503,
+        ) from exc
+    return storage_keys
+
+
 def _scene_prompt_replay(
     db: Session,
     *,
@@ -1301,7 +1325,14 @@ def estimate_scene_prompt(
     payload: ScenePromptRequest,
     user: User = CreateVideoPermissionDependency,
     db: Session = DbSessionDependency,
+    storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[BillingQuote]:
+    _preflight_scene_prompt(
+        db,
+        tenant_id=user.tenant_id,
+        product_image_keys=payload.product_image_keys,
+        storage=storage,
+    )
     return ok(
         request,
         issue_quote(
@@ -1334,9 +1365,10 @@ def generate_scene_prompt(
     if replay is not None:
         return ok(request, _scene_prompt_replay(db, user=user, headers=headers))
 
-    storage_keys = _validate_product_image_storage_keys(
-        payload.product_image_keys,
+    storage_keys = _preflight_scene_prompt(
+        db,
         tenant_id=user.tenant_id,
+        product_image_keys=payload.product_image_keys,
         storage=storage,
     )
     image_urls = [
@@ -1434,22 +1466,37 @@ def generate_scene_prompt(
             code="SCENE_PROMPT_EMPTY_RESULT",
             message="Luna returned an incomplete scene prompt.",
         )
-    usage = db.scalar(select(UsageRecord).where(UsageRecord.billing_operation_id == operation.id))
-    if usage is not None:
-        provider_costs.attach_scene_prompt_usage(usage, result=result)
-        db.flush([usage])
-    operation = complete_succeeded(
-        db,
-        operation_id=operation.id,
-        actual_quantities={0: Decimal("1")},
-        result_type="scene_prompt_result",
-        result_id=None,
-        result_payload=ScenePromptStoredResult(
-            scene_prompt=scene_prompt,
-            negative_prompt=negative_prompt,
-        ),
-    )
-    db.commit()
+    operation_id = operation.id
+    try:
+        usage = db.scalar(
+            select(UsageRecord).where(UsageRecord.billing_operation_id == operation_id)
+        )
+        if usage is not None:
+            provider_costs.attach_scene_prompt_usage(usage, result=result)
+            db.flush([usage])
+        operation = complete_succeeded(
+            db,
+            operation_id=operation_id,
+            actual_quantities={0: Decimal("1")},
+            result_type="scene_prompt_result",
+            result_id=None,
+            result_payload=ScenePromptStoredResult(
+                scene_prompt=scene_prompt,
+                negative_prompt=negative_prompt,
+            ),
+        )
+        db.commit()
+    except AppError as exc:
+        db.rollback()
+        _release_scene_prompt_failure(
+            db,
+            operation_id=operation_id,
+            result=result,
+            code=exc.code,
+            message=exc.message,
+            http_status=exc.status_code,
+            cause=exc,
+        )
     return ok(
         request,
         ScenePromptResponse(

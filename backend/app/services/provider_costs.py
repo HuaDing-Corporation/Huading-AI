@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.models import UsageRecord
-from app.services.apimart_token_pricing import apimart_token_usage_cost
+from app.services.apimart_token_pricing import APIMartTokenPricingError, apimart_token_usage_cost
 
 logger = get_logger(__name__)
 
@@ -180,23 +181,29 @@ def apimart_scene_prompt_cost_cents(
 
 
 def _int_from_usage(usage: Any, key: str) -> int:
-    if isinstance(usage, dict):
-        value = usage.get(key)
-    else:
-        value = getattr(usage, key, 0)
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
+    value = usage.get(key) if isinstance(usage, dict) else getattr(usage, key, None)
+    if value is None:
         return 0
+    parsed = _strict_nonnegative_int(value)
+    if parsed is None:
+        raise DeepSeekCostError("Supplier usage is invalid.", error_type="invalid_usage")
+    return parsed
 
 
 def _optional_nonnegative_int(value: Any) -> int | None:
     if value in (None, ""):
         return None
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
+    return _strict_nonnegative_int(value)
+
+
+def _strict_nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool) or isinstance(value, float):
         return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        return int(value)
+    return None
 
 
 def _deepseek_cache_breakdown(
@@ -224,30 +231,49 @@ def deepseek_usage_from_result(result: Any) -> DeepSeekUsageCost | None:
     usage = result.get("usage")
     if usage is None:
         return None
-    prompt_tokens = _int_from_usage(usage, "prompt_tokens")
-    completion_tokens = _int_from_usage(usage, "completion_tokens")
-    total_tokens = _int_from_usage(usage, "total_tokens") or (prompt_tokens + completion_tokens)
-    raw_prompt_cache_hit_tokens = _optional_nonnegative_int(
+    try:
+        prompt_tokens = _int_from_usage(usage, "prompt_tokens")
+        completion_tokens = _int_from_usage(usage, "completion_tokens")
+        total_tokens = _int_from_usage(usage, "total_tokens") or (
+            prompt_tokens + completion_tokens
+        )
+    except DeepSeekCostError:
+        return None
+    raw_cache_hit_value = (
         usage.get("prompt_cache_hit_tokens")
         if isinstance(usage, dict)
         else getattr(usage, "prompt_cache_hit_tokens", None)
     )
-    raw_prompt_cache_miss_tokens = _optional_nonnegative_int(
+    raw_cache_miss_value = (
         usage.get("prompt_cache_miss_tokens")
         if isinstance(usage, dict)
         else getattr(usage, "prompt_cache_miss_tokens", None)
     )
+    raw_prompt_cache_hit_tokens = _optional_nonnegative_int(
+        raw_cache_hit_value
+    )
+    raw_prompt_cache_miss_tokens = _optional_nonnegative_int(
+        raw_cache_miss_value
+    )
+    if (
+        (raw_cache_hit_value not in (None, "") and raw_prompt_cache_hit_tokens is None)
+        or (raw_cache_miss_value not in (None, "") and raw_prompt_cache_miss_tokens is None)
+    ):
+        return None
     if total_tokens > 0 and prompt_tokens + completion_tokens == 0:
         prompt_tokens = total_tokens
     if total_tokens <= 0:
         return None
-    prompt_cache_hit_tokens, prompt_cache_miss_tokens, cache_tokens_reported = (
-        _deepseek_cache_breakdown(
-            prompt_tokens=prompt_tokens,
-            prompt_cache_hit_tokens=raw_prompt_cache_hit_tokens,
-            prompt_cache_miss_tokens=raw_prompt_cache_miss_tokens,
+    try:
+        prompt_cache_hit_tokens, prompt_cache_miss_tokens, cache_tokens_reported = (
+            _deepseek_cache_breakdown(
+                prompt_tokens=prompt_tokens,
+                prompt_cache_hit_tokens=raw_prompt_cache_hit_tokens,
+                prompt_cache_miss_tokens=raw_prompt_cache_miss_tokens,
+            )
         )
-    )
+    except DeepSeekCostError:
+        return None
     provider = str(result.get("provider") or _DEEPSEEK_PROVIDER).strip().lower()
     if provider != _DEEPSEEK_PROVIDER:
         raise DeepSeekCostError(
@@ -262,6 +288,9 @@ def deepseek_usage_from_result(result: Any) -> DeepSeekUsageCost | None:
             model=model,
             prompt_tokens=prompt_tokens,
         )
+    provider_cost_usd = _provider_cost_usd(result)
+    if result.get("provider_cost_usd") not in (None, "") and provider_cost_usd is None:
+        return None
     cost_cny = deepseek_cost_cny(
         model=model,
         prompt_tokens=prompt_tokens,
@@ -280,7 +309,7 @@ def deepseek_usage_from_result(result: Any) -> DeepSeekUsageCost | None:
         prompt_cache_hit_tokens=prompt_cache_hit_tokens,
         prompt_cache_miss_tokens=prompt_cache_miss_tokens,
         cache_tokens_reported=cache_tokens_reported,
-        provider_cost_usd=_provider_cost_usd(result),
+        provider_cost_usd=provider_cost_usd,
     )
 
 
@@ -451,24 +480,46 @@ def attach_deepseek_usage(record: UsageRecord, *, result: object) -> UsageRecord
 def _scene_prompt_supplier_fields(result: Any) -> tuple[str, str, dict[str, int], int] | None:
     if not isinstance(result, dict):
         return None
-    prompt_tokens = _int_from_usage(result, "prompt_tokens")
-    completion_tokens = _int_from_usage(result, "completion_tokens")
-    total_tokens = _int_from_usage(result, "total_tokens") or (prompt_tokens + completion_tokens)
+    try:
+        prompt_tokens = _int_from_usage(result, "prompt_tokens")
+        completion_tokens = _int_from_usage(result, "completion_tokens")
+        total_tokens = _int_from_usage(result, "total_tokens") or (
+            prompt_tokens + completion_tokens
+        )
+    except DeepSeekCostError:
+        return None
     model = str(result.get("model") or settings.engine_apimart_scene_prompt_model)
     explicit_cost_cents = _optional_nonnegative_int(result.get("cost_cents"))
-    cost_cents = (
-        explicit_cost_cents
-        if explicit_cost_cents is not None
-        else apimart_scene_prompt_cost_cents(
-            model=model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            cached_prompt_tokens=_optional_nonnegative_int(result.get("cached_prompt_tokens")),
-            cache_write_tokens=_optional_nonnegative_int(result.get("cache_write_tokens")),
-            authoritative_credits=result.get("credits"),
+    if result.get("cost_cents") not in (None, "") and explicit_cost_cents is None:
+        return None
+    cached_prompt_tokens = _optional_nonnegative_int(result.get("cached_prompt_tokens"))
+    cache_write_tokens = _optional_nonnegative_int(result.get("cache_write_tokens"))
+    if (
+        (result.get("cached_prompt_tokens") not in (None, "") and cached_prompt_tokens is None)
+        or (result.get("cache_write_tokens") not in (None, "") and cache_write_tokens is None)
+    ):
+        return None
+    if (
+        result.get("provider_cost_usd") not in (None, "")
+        and _provider_cost_usd(result) is None
+    ):
+        return None
+    try:
+        cost_cents = (
+            explicit_cost_cents
+            if explicit_cost_cents is not None
+            else apimart_scene_prompt_cost_cents(
+                model=model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                cached_prompt_tokens=cached_prompt_tokens,
+                cache_write_tokens=cache_write_tokens,
+                authoritative_credits=result.get("credits"),
+            )
         )
-    )
+    except (APIMartTokenPricingError, InvalidOperation, TypeError, ValueError):
+        return None
     if total_tokens <= 0 and cost_cents <= 0:
         return None
     usage = {
@@ -477,7 +528,7 @@ def _scene_prompt_supplier_fields(result: Any) -> tuple[str, str, dict[str, int]
         "total_tokens": total_tokens,
     }
     for key in ("cached_prompt_tokens", "cache_write_tokens"):
-        value = _optional_nonnegative_int(result.get(key))
+        value = cached_prompt_tokens if key == "cached_prompt_tokens" else cache_write_tokens
         if value is not None:
             usage[key] = value
     return str(result.get("provider") or "apimart"), model, usage, cost_cents
