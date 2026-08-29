@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import json
+from contextlib import contextmanager
 from dataclasses import replace
 from decimal import Decimal
 
 from sqlalchemy import select, text
 
 from app.db.models import BrandVoice, CreditRate, ProviderConfig
+
+
+def _session_scope(session):
+    @contextmanager
+    def scope():
+        yield session
+
+    return scope
 
 
 def test_readiness_fails_on_unknown_historic_doubao_id(db_session) -> None:
@@ -202,3 +212,56 @@ def test_readiness_lists_safe_platform_and_tenant_rate_rows(db_session) -> None:
             "active": True,
         }
     ]
+
+
+def test_readiness_cli_default_audit_emits_json_and_rolls_back(
+    db_session, monkeypatch, capsys
+) -> None:
+    from scripts.ops import pricing_closure_readiness as readiness
+
+    db_session.add(
+        ProviderConfig(
+            capability="voice_clone",
+            provider="doubao-voice-clone",
+            config={"api_key": "cli-audit-secret"},
+            is_active=False,
+        )
+    )
+    db_session.commit()
+    before = db_session.scalar(select(CreditRate.id))
+    monkeypatch.setattr(readiness, "SessionLocal", _session_scope(db_session))
+
+    exit_code = readiness.main([])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code in {0, 2}
+    assert payload["production_mode"] is True
+    assert "cli-audit-secret" not in json.dumps(payload)
+    assert db_session.scalar(select(CreditRate.id)) == before
+
+
+def test_readiness_cli_unknown_inventory_aborts_without_mutation(
+    db_session,
+    monkeypatch,
+    capsys,
+) -> None:
+    from scripts.ops import pricing_closure_readiness as readiness
+
+    db_session.add(
+        ProviderConfig(
+            capability="voice_clone",
+            provider="doubao-voice-clone",
+            config={"used_speaker_ids": {"unknown-cli-id": "historic"}},
+            is_active=False,
+        )
+    )
+    db_session.commit()
+    before = len(db_session.scalars(select(ProviderConfig)).all())
+    monkeypatch.setattr(readiness, "SessionLocal", _session_scope(db_session))
+
+    exit_code = readiness.main(["register-official"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert payload["unknown_ids"] == ["unknown-cli-id"]
+    assert len(db_session.scalars(select(ProviderConfig)).all()) == before
