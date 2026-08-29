@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -802,6 +803,7 @@ def test_cosyvoice_create_is_signed_free_committed_and_idempotent(
         assert usage.cost_cents == 7
         assert usage.provider_usage == {"cost_cents": 7}
         operation = db.scalar(select(BillingOperation))
+        assert provider.clone_calls[0]["billing_operation_id"] == operation.id
         assert Decimal(
             str(operation.pricing_snapshot["disclosures"][0]["reference_unit_credits"])
         ) == Decimal("0.2000")
@@ -901,6 +903,114 @@ def test_cosyvoice_new_http_key_reuses_stable_remote_request_identity(
     with auth_db() as db:
         assert db.query(BillingOperation).count() == 1
         assert db.query(BrandVoice).count() == 1
+
+
+def test_cosyvoice_route_fails_closed_before_provider_on_durable_true_marker_collision(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+    from app.db import session as db_session_module
+    from app.providers.voice_clone import cosyvoice as cosyvoice_module
+    from app.providers.voice_clone.cosyvoice import CosyVoiceCloneProvider
+
+    class _Enrollment:
+        def __init__(self) -> None:
+            self.voices: list[dict[str, str]] = []
+            self.create_calls: list[dict[str, str]] = []
+
+        def list_voices(self, prefix=None, page_index=0, page_size=10):
+            return [item.copy() for item in self.voices if item["prefix"] == prefix]
+
+        def create_voice(self, target_model: str, prefix: str, url: str) -> str:
+            self.create_calls.append(
+                {"target_model": target_model, "prefix": prefix, "url": url}
+            )
+            voice_id = f"{prefix}-speaker-{len(self.create_calls)}"
+            self.voices.append({"voice_id": voice_id, "prefix": prefix})
+            return voice_id
+
+    enrollment = _Enrollment()
+    provider = CosyVoiceCloneProvider(
+        api_key="dashscope-key",
+        enrollment_service=enrollment,
+    )
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "resolve_named_provider",
+        lambda *_args, **_kwargs: provider,
+    )
+    monkeypatch.setattr(db_session_module, "SessionLocal", auth_db)
+    monkeypatch.setattr(
+        cosyvoice_module,
+        "_request_recovery_marker",
+        lambda _request_key: "collision",
+    )
+    monkeypatch.setattr(
+        cosyvoice_module,
+        "_dashscope_runtime",
+        lambda *_args: nullcontext(),
+    )
+    with auth_db() as db:
+        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
+    storage = _Storage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    payloads = (
+        {
+            "name": "Marker owner A",
+            "source_audio_asset_id": asset_id,
+            "consent_confirmed": True,
+            "provider": "cosyvoice",
+        },
+        {
+            "name": "Marker collider B",
+            "source_audio_asset_id": asset_id,
+            "consent_confirmed": True,
+            "provider": "cosyvoice",
+        },
+    )
+    responses = []
+    try:
+        client = TestClient(app)
+        for payload in payloads:
+            quote = client.post(
+                "/api/v1/brand-voices/estimate",
+                json=payload,
+                headers=auth_context["headers"],
+            ).json()["data"]
+            responses.append(
+                client.post(
+                    "/api/v1/brand-voices",
+                    json=payload,
+                    headers={
+                        **auth_context["headers"],
+                        "Idempotency-Key": str(uuid4()),
+                        "X-Huading-Quote": quote["quote_token"],
+                    },
+                )
+            )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert responses[0].status_code == 201, responses[0].text
+    assert responses[1].status_code == 502, responses[1].text
+    assert responses[1].json()["error"]["code"] == "VOICE_CLONE_FAILED"
+    assert len(enrollment.create_calls) == 1
+    with auth_db() as db:
+        operations = list(
+            db.scalars(
+                select(BillingOperation).order_by(
+                    BillingOperation.created_at,
+                    BillingOperation.id,
+                )
+            )
+        )
+        assert len(operations) == 2
+        assert operations[0].completion_kind == "succeeded"
+        assert operations[1].completion_kind == "failed"
+        assert operations[0].request_hash != operations[1].request_hash
 
 
 def test_cosyvoice_delete_loses_to_in_progress_finalize_without_orphan(

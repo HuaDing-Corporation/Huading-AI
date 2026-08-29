@@ -6,7 +6,7 @@ import re
 import tempfile
 import threading
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -71,29 +71,48 @@ class CosyVoiceCloneProvider:
         request_key = str(payload.get("external_request_key") or "").strip()
         if request_key and not _REQUEST_KEY_PATTERN.fullmatch(request_key):
             raise CosyVoiceCloneError("CosyVoice external request key must be a full SHA-256 hash.")
+        operation_id = str(payload.get("billing_operation_id") or "").strip()
+        if request_key and not operation_id:
+            raise CosyVoiceCloneError(
+                "CosyVoice external request key requires a durable billing operation identity."
+            )
         prefix = _safe_prefix(payload)
-        with _dashscope_runtime(self.api_key, self.base_url):
-            if request_key and request_key in self._voice_id_by_request_key:
-                voice_id = self._voice_id_by_request_key[request_key]
-                return {"speaker_id": voice_id, "status": "ready", "provider": _PROVIDER_NAME}
-            existing_voice_ids = _remote_voice_ids(self.enrollment, prefix=prefix)
-            try:
-                voice_id = _create_voice_once(
-                    self.enrollment,
-                    self.target_model,
-                    prefix,
-                    source_audio_url,
-                )
-            except Exception:
-                voice_id = _recover_created_voice_id(
-                    self.enrollment,
-                    prefix=prefix,
-                    existing_voice_ids=existing_voice_ids,
-                )
-                if not voice_id:
-                    raise
-            if request_key:
-                self._voice_id_by_request_key[request_key] = str(voice_id)
+        recovery_claim = (
+            _cosyvoice_recovery_claim(
+                operation_id=operation_id,
+                request_key=request_key,
+                marker=prefix,
+            )
+            if operation_id and request_key
+            else nullcontext()
+        )
+        with recovery_claim:
+            with _dashscope_runtime(self.api_key, self.base_url):
+                if request_key and request_key in self._voice_id_by_request_key:
+                    voice_id = self._voice_id_by_request_key[request_key]
+                    return {
+                        "speaker_id": voice_id,
+                        "status": "ready",
+                        "provider": _PROVIDER_NAME,
+                    }
+                existing_voice_ids = _remote_voice_ids(self.enrollment, prefix=prefix)
+                try:
+                    voice_id = _create_voice_once(
+                        self.enrollment,
+                        self.target_model,
+                        prefix,
+                        source_audio_url,
+                    )
+                except Exception:
+                    voice_id = _recover_created_voice_id(
+                        self.enrollment,
+                        prefix=prefix,
+                        existing_voice_ids=existing_voice_ids,
+                    )
+                    if not voice_id:
+                        raise
+                if request_key:
+                    self._voice_id_by_request_key[request_key] = str(voice_id)
         logger.info(
             "cosyvoice.clone_voice",
             tenant_id=str(payload.get("tenant_id") or ""),
@@ -290,6 +309,33 @@ def _request_recovery_marker(request_key: str) -> str:
         value, remainder = divmod(value, 36)
         marker[index] = _BASE36_ALPHABET[remainder]
     return "".join(marker)
+
+
+@contextmanager
+def _cosyvoice_recovery_claim(
+    *,
+    operation_id: str,
+    request_key: str,
+    marker: str,
+):
+    from app.db.session import SessionLocal
+    from app.services.cosyvoice_recovery import (
+        CosyVoiceRecoveryInvariantError,
+        CosyVoiceRecoveryMarkerCollisionError,
+        claim_cosyvoice_recovery_marker,
+    )
+
+    try:
+        with claim_cosyvoice_recovery_marker(
+            session_factory=SessionLocal,
+            operation_id=operation_id,
+            request_key=request_key,
+            marker=marker,
+            marker_for_request=_request_recovery_marker,
+        ):
+            yield
+    except (CosyVoiceRecoveryInvariantError, CosyVoiceRecoveryMarkerCollisionError) as exc:
+        raise CosyVoiceCloneError(str(exc)) from exc
 
 
 def _remote_voice_ids(enrollment: Any, *, prefix: str) -> set[str]:

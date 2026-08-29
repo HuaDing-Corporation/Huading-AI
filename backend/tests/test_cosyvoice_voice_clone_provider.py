@@ -1,6 +1,6 @@
 import threading
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 
 import pytest
 
@@ -70,7 +70,10 @@ async def test_cosyvoice_clone_uses_generated_safe_prefix_and_audio_url():
 
 
 @pytest.mark.asyncio
-async def test_cosyvoice_clone_recovers_remote_success_after_timeout_across_new_local_key():
+async def test_cosyvoice_clone_recovers_remote_success_after_timeout_across_new_local_key(
+    monkeypatch,
+):
+    from app.providers.voice_clone import cosyvoice as cosyvoice_module
     from app.providers.voice_clone.cosyvoice import CosyVoiceCloneProvider
 
     class _RemoteSuccessTimeoutEnrollment(_FakeEnrollment):
@@ -94,10 +97,16 @@ async def test_cosyvoice_clone_recovers_remote_success_after_timeout_across_new_
         target_model="cosyvoice-v3.5-plus",
         enrollment_service=enrollment,
     )
+    monkeypatch.setattr(
+        cosyvoice_module,
+        "_cosyvoice_recovery_claim",
+        lambda **_kwargs: nullcontext(),
+    )
     stable_request_key = "f" * 64
     first = await provider.clone_voice(
         {
             "brand_voice_id": "first-local-row",
+            "billing_operation_id": "operation-first",
             "external_request_key": stable_request_key,
             "source_audio_url": "https://storage.test/audio.wav",
         }
@@ -105,6 +114,7 @@ async def test_cosyvoice_clone_recovers_remote_success_after_timeout_across_new_
     second = await provider.clone_voice(
         {
             "brand_voice_id": "second-local-row-new-http-key",
+            "billing_operation_id": "operation-second",
             "external_request_key": stable_request_key,
             "source_audio_url": "https://storage.test/audio.wav",
         }
@@ -123,11 +133,36 @@ async def test_cosyvoice_clone_recovers_remote_success_after_timeout_across_new_
 
 
 @pytest.mark.asyncio
+async def test_cosyvoice_external_request_key_requires_durable_operation_identity():
+    from app.providers.voice_clone.cosyvoice import (
+        CosyVoiceCloneError,
+        CosyVoiceCloneProvider,
+    )
+
+    enrollment = _FakeEnrollment()
+    provider = CosyVoiceCloneProvider(
+        api_key="dashscope-key",
+        enrollment_service=enrollment,
+    )
+
+    with pytest.raises(CosyVoiceCloneError):
+        await provider.clone_voice(
+            {
+                "external_request_key": "1" * 64,
+                "source_audio_url": "https://storage.test/audio.wav",
+            }
+        )
+
+    assert enrollment.create_calls == []
+
+
+@pytest.mark.asyncio
 async def test_cosyvoice_clone_prevents_pinned_sdk_retry_after_remote_timeout(monkeypatch):
     from dashscope.audio.tts_v2 import enrollment as enrollment_module
     from dashscope.audio.tts_v2.enrollment import VoiceEnrollmentService
     from dashscope.client.base_api import BaseApi
 
+    from app.providers.voice_clone import cosyvoice as cosyvoice_module
     from app.providers.voice_clone.cosyvoice import CosyVoiceCloneProvider
 
     remote_voices: list[dict[str, str]] = []
@@ -167,9 +202,15 @@ async def test_cosyvoice_clone_prevents_pinned_sdk_retry_after_remote_timeout(mo
         target_model="cosyvoice-v3.5-plus",
         enrollment_service=VoiceEnrollmentService(api_key="dashscope-key"),
     )
+    monkeypatch.setattr(
+        cosyvoice_module,
+        "_cosyvoice_recovery_claim",
+        lambda **_kwargs: nullcontext(),
+    )
 
     result = await provider.clone_voice(
         {
+            "billing_operation_id": "operation-pinned-sdk",
             "external_request_key": "1" * 64,
             "source_audio_url": "https://storage.test/audio.wav",
         }
@@ -184,7 +225,10 @@ async def test_cosyvoice_clone_prevents_pinned_sdk_retry_after_remote_timeout(mo
 
 
 @pytest.mark.asyncio
-async def test_cosyvoice_clone_does_not_reuse_different_full_hash_with_same_old_prefix():
+async def test_cosyvoice_clone_does_not_reuse_different_full_hash_with_same_old_prefix(
+    monkeypatch,
+):
+    from app.providers.voice_clone import cosyvoice as cosyvoice_module
     from app.providers.voice_clone.cosyvoice import CosyVoiceCloneProvider
 
     class _CollidingPrefixEnrollment(_FakeEnrollment):
@@ -213,9 +257,15 @@ async def test_cosyvoice_clone_does_not_reuse_different_full_hash_with_same_old_
         api_key="dashscope-key",
         enrollment_service=enrollment,
     )
+    monkeypatch.setattr(
+        cosyvoice_module,
+        "_cosyvoice_recovery_claim",
+        lambda **_kwargs: nullcontext(),
+    )
 
     result = await provider.clone_voice(
         {
+            "billing_operation_id": "operation-old-prefix",
             "external_request_key": "deadbeef" + "2" * 56,
             "source_audio_url": "https://storage.test/audio.wav",
         }
@@ -289,12 +339,19 @@ def test_cosyvoice_timeout_recovery_never_cross_binds_concurrent_request_hashes(
         "_dashscope_runtime",
         lambda *_args: nullcontext(),
     )
+    monkeypatch.setattr(
+        cosyvoice_module,
+        "_cosyvoice_recovery_claim",
+        lambda **_kwargs: nullcontext(),
+    )
     payloads = {
         "a": {
+            "billing_operation_id": "operation-a",
             "external_request_key": "deadbeef" + "a" * 56,
             "source_audio_url": "https://storage.test/a.wav",
         },
         "b": {
+            "billing_operation_id": "operation-b",
             "external_request_key": "deadbeef" + "b" * 56,
             "source_audio_url": "https://storage.test/b.wav",
         },
@@ -326,6 +383,233 @@ def test_cosyvoice_timeout_recovery_never_cross_binds_concurrent_request_hashes(
     assert results.get("a", {}).get("speaker_id") != remote.b_voice_id
     with pytest.raises(TimeoutError):
         provider_a.clone_voice_sync(payloads["a"])
+
+
+def test_cosyvoice_timeout_recovery_fails_closed_on_true_marker_collision_across_instances(
+    monkeypatch,
+):
+    from app.providers.voice_clone import cosyvoice as cosyvoice_module
+    from app.providers.voice_clone.cosyvoice import (
+        CosyVoiceCloneError,
+        CosyVoiceCloneProvider,
+    )
+
+    class _SharedRemoteSupplier:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self.voices: list[dict[str, str]] = []
+            self.a_create_started = threading.Event()
+            self.b_outcome_known = threading.Event()
+            self.create_requests: list[str] = []
+
+        def list_voices(self, prefix: str) -> list[dict[str, str]]:
+            with self._lock:
+                return [item.copy() for item in self.voices if item["prefix"] == prefix]
+
+        def create_voice(self, request: str, prefix: str) -> str:
+            self.create_requests.append(request)
+            if request == "a":
+                self.a_create_started.set()
+                assert self.b_outcome_known.wait(2)
+                raise TimeoutError("A response was lost without a remote commit")
+
+            voice_id = f"{prefix}-speaker-b"
+            with self._lock:
+                self.voices.append({"voice_id": voice_id, "prefix": prefix})
+            self.b_outcome_known.set()
+            return voice_id
+
+    class _IndependentEnrollment:
+        def __init__(self, remote: _SharedRemoteSupplier, request: str) -> None:
+            self.remote = remote
+            self.request = request
+
+        def create_voice(self, target_model: str, prefix: str, url: str) -> str:
+            return self.remote.create_voice(self.request, prefix)
+
+        def list_voices(self, prefix=None, page_index=0, page_size=10):
+            return self.remote.list_voices(prefix)
+
+    remote = _SharedRemoteSupplier()
+    claims: list[tuple[str, str, str]] = []
+
+    @contextmanager
+    def durable_collision_claim(*, operation_id: str, request_key: str, marker: str):
+        claims.append((operation_id, request_key, marker))
+        if operation_id == "operation-b":
+            remote.b_outcome_known.set()
+            raise CosyVoiceCloneError("CosyVoice recovery marker collision.")
+        yield
+
+    # Force the finite supplier namespace to produce the exact same complete
+    # nine-character marker for two different full request hashes.
+    monkeypatch.setattr(
+        cosyvoice_module,
+        "_request_recovery_marker",
+        lambda _request_key: "collision",
+    )
+    monkeypatch.setattr(
+        cosyvoice_module,
+        "_cosyvoice_recovery_claim",
+        durable_collision_claim,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cosyvoice_module,
+        "_dashscope_runtime",
+        lambda *_args: nullcontext(),
+    )
+    provider_a = CosyVoiceCloneProvider(
+        api_key="dashscope-key-a",
+        enrollment_service=_IndependentEnrollment(remote, "a"),
+    )
+    provider_b = CosyVoiceCloneProvider(
+        api_key="dashscope-key-b",
+        enrollment_service=_IndependentEnrollment(remote, "b"),
+    )
+    payloads = {
+        "a": {
+            "billing_operation_id": "operation-a",
+            "external_request_key": "1" * 64,
+            "source_audio_url": "https://storage.test/a.wav",
+        },
+        "b": {
+            "billing_operation_id": "operation-b",
+            "external_request_key": "2" * 64,
+            "source_audio_url": "https://storage.test/b.wav",
+        },
+    }
+    results: dict[str, dict[str, str]] = {}
+    errors: dict[str, BaseException] = {}
+
+    def run_clone(request: str, provider: CosyVoiceCloneProvider) -> None:
+        try:
+            results[request] = provider.clone_voice_sync(payloads[request])
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors[request] = exc
+
+    thread_a = threading.Thread(target=run_clone, args=("a", provider_a))
+    thread_b = threading.Thread(target=run_clone, args=("b", provider_b))
+    thread_a.start()
+    assert remote.a_create_started.wait(2)
+    thread_b.start()
+    thread_a.join(2)
+    thread_b.join(2)
+
+    assert not thread_a.is_alive()
+    assert not thread_b.is_alive()
+    assert results == {}
+    assert isinstance(errors.get("a"), TimeoutError)
+    assert isinstance(errors.get("b"), CosyVoiceCloneError)
+    assert remote.voices == []
+    assert remote.create_requests == ["a"]
+    assert claims == [
+        ("operation-a", "1" * 64, "collision"),
+        ("operation-b", "2" * 64, "collision"),
+    ]
+
+
+def test_cosyvoice_recovery_collision_decision_fails_closed_for_one_foreign_candidate():
+    from app.services.cosyvoice_recovery import (
+        CosyVoiceRecoveryMarkerCollisionError,
+        assert_cosyvoice_recovery_marker_owned,
+    )
+
+    request_a = "1" * 64
+    request_b = "2" * 64
+
+    with pytest.raises(CosyVoiceRecoveryMarkerCollisionError):
+        assert_cosyvoice_recovery_marker_owned(
+            request_key=request_a,
+            marker="collision",
+            candidate_request_keys=(request_a, request_b),
+            marker_for_request=lambda _request_key: "collision",
+        )
+
+    assert_cosyvoice_recovery_marker_owned(
+        request_key=request_a,
+        marker="collision",
+        candidate_request_keys=(request_a, request_a),
+        marker_for_request=lambda _request_key: "collision",
+    )
+
+
+def test_cosyvoice_recovery_gate_uses_postgresql_transaction_advisory_lock():
+    from app.services.cosyvoice_recovery import lock_cosyvoice_recovery_marker
+
+    class _Dialect:
+        name = "postgresql"
+
+    class _Bind:
+        dialect = _Dialect()
+
+    class _Database:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, int]]] = []
+
+        def get_bind(self):
+            return _Bind()
+
+        def execute(self, statement, params):
+            self.calls.append((str(statement), params))
+
+    database = _Database()
+
+    lock_cosyvoice_recovery_marker(database, marker="collision")
+
+    assert len(database.calls) == 1
+    statement, params = database.calls[0]
+    assert statement == "SELECT pg_advisory_xact_lock(:lock_id)"
+    assert isinstance(params["lock_id"], int)
+
+
+def test_cosyvoice_recovery_claim_checks_durable_operation_scope_before_supplier_call():
+    from app.services.cosyvoice_recovery import (
+        CosyVoiceRecoveryMarkerCollisionError,
+        claim_cosyvoice_recovery_marker,
+    )
+
+    class _Dialect:
+        name = "sqlite"
+
+    class _Bind:
+        dialect = _Dialect()
+
+    class _Database:
+        def __init__(self) -> None:
+            self.rolled_back = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get_bind(self):
+            return _Bind()
+
+        def scalar(self, _statement):
+            return "1" * 64
+
+        def scalars(self, _statement):
+            return iter(("1" * 64, "2" * 64))
+
+        def rollback(self):
+            self.rolled_back = True
+
+    database = _Database()
+
+    with pytest.raises(CosyVoiceRecoveryMarkerCollisionError):
+        with claim_cosyvoice_recovery_marker(
+            session_factory=lambda: database,
+            operation_id="operation-a",
+            request_key="1" * 64,
+            marker="collision",
+            marker_for_request=lambda _request_key: "collision",
+        ):
+            pytest.fail("supplier call must not run for a colliding durable request")
+
+    assert database.rolled_back is True
 
 
 @pytest.mark.asyncio

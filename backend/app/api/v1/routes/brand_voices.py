@@ -299,6 +299,7 @@ def create_brand_voice(
     clone_payload = _clone_payload(
         tenant_id=user.tenant_id,
         brand_voice_id=brand_voice.id,
+        billing_operation_id=operation.id,
         name=payload.name,
         provider=_COSYVOICE_CLONE_PROVIDER,
         source_audio=source_audio,
@@ -316,6 +317,10 @@ def create_brand_voice(
             capability="voice_clone",
             provider=_COSYVOICE_CLONE_PROVIDER,
         )
+        # Provider recovery uses its own database transaction while holding a
+        # cross-process advisory lock. Release the resolver's read transaction
+        # before entering that supplier call so it does not retain a pool slot.
+        db.commit()
         result = asyncio.run(provider.clone_voice(clone_payload))
     except ProviderResolutionError as exc:
         _complete_cosyvoice_failure(
@@ -793,6 +798,7 @@ def _clone_payload(
     *,
     tenant_id: str,
     brand_voice_id: str,
+    billing_operation_id: str,
     name: str,
     provider: str,
     source_audio: Asset,
@@ -802,6 +808,7 @@ def _clone_payload(
     payload: dict[str, Any] = {
         "tenant_id": tenant_id,
         "brand_voice_id": brand_voice_id,
+        "billing_operation_id": billing_operation_id,
         "name": name,
         "source_audio_asset_id": source_audio.id,
         "source_audio_storage_key": source_audio.storage_key,

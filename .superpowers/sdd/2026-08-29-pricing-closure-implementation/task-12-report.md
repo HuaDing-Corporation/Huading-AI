@@ -425,3 +425,122 @@ No output; exit 0.
 - Confirmed A's failed recovery stores no exact-key mapping: a second public clone call cannot return B's speaker.
 - DashScope permits fewer than ten lowercase-alphanumeric prefix characters, so the remote recovery namespace is necessarily finite. Nine base-36 characters maximize that supplier field and use the complete request hash, but do not make cryptographic collisions mathematically impossible. Multiple observed candidates fail closed; the marker scheme should be revisited if DashScope adds a full idempotency key or request metadata.
 - Existing Starlette/httpx deprecation warning remains non-blocking. No subagent, network/provider call, push, merge, deploy, migration, production/shared database write, provider-ID registration, configuration write, production routing change, Doubao routing change, Task 13 work, or external side effect was performed.
+
+## Fix Round 4 — 2026-08-29
+
+### Status and design
+
+The finite nine-character marker collision finding is closed without a schema change or migration.
+
+- Every request-bound CosyVoice supplier call now requires the ID of its already-committed `cosyvoice_brand_voice_create` `BillingOperation`. The adapter verifies that the durable operation's complete `request_hash` exactly matches the external request key before inventory, create, or timeout recovery can run.
+- A dedicated recovery coordinator takes a PostgreSQL transaction advisory lock derived from the complete nine-character supplier marker. The namespace is global across tenants, users, operation states, and provider instances because the configured DashScope API credential/workspace and remote prefix inventory are global. A 64-bit advisory-key collision only over-serializes unrelated markers and cannot create an unsafe association.
+- While holding that lock, the coordinator reads every committed CosyVoice-create request hash and recomputes its marker with the same adapter function. Any different complete hash with the current marker fails closed before the supplier is queried, even when it is the only foreign candidate. Exact same-hash operations remain allowed so existing durable/same-request replay semantics are unchanged.
+- All historical operation outcomes reserve their marker. Failed operations are intentionally included because a timed-out supplier request can become visible after the local recovery query; reusing that marker could otherwise reintroduce a late cross-bind.
+- The route still commits the zero-price operation and usage before provider work, adds `billing_operation_id` to the clone payload, and releases the provider-config resolver's read transaction before the coordinator opens its independent session. The coordinator holds only its advisory lock and read snapshot across supplier inventory/create/recovery, rolls back to release it, and only then does the route use the established `BillingOperation -> BrandVoice` finalization lock order.
+- SDK create remains a single direct `BaseApi.call()` attempt. Normal response-loss recovery still accepts the unique marker-local inventory delta for the same durable request; a different request can no longer enter that recovery namespace.
+
+### Fix Round 4 RED evidence
+
+The required true-marker collision regression was written first. It forces two distinct valid 64-character hashes to the exact same nine-character `collision` marker, uses two independent providers and enrollment adapters, disables the process runtime lock, and overlaps A's uncertain non-commit with B's successful remote create:
+
+```text
+uv run pytest tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_timeout_recovery_fails_closed_on_true_marker_collision_across_instances -q
+FAILED tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_timeout_recovery_fails_closed_on_true_marker_collision_across_instances
+AssertionError: assert {'a': {'speaker_id': 'collision-speaker-b', ...},
+                        'b': {'speaker_id': 'collision-speaker-b', ...}} == {}
+Command exited 1.
+```
+
+This reproduces the open finding exactly: A accepted B's sole newly visible voice and both requests returned B's speaker.
+
+The subsequent vertical TDD slices also produced these RED results before their implementations:
+
+```text
+test_cosyvoice_recovery_collision_decision_fails_closed_for_one_foreign_candidate
+ModuleNotFoundError: No module named 'app.services.cosyvoice_recovery'
+
+test_cosyvoice_recovery_gate_uses_postgresql_transaction_advisory_lock
+ImportError: cannot import name 'lock_cosyvoice_recovery_marker'
+
+test_cosyvoice_recovery_claim_checks_durable_operation_scope_before_supplier_call
+ImportError: cannot import name 'claim_cosyvoice_recovery_marker'
+
+test_cosyvoice_create_is_signed_free_committed_and_idempotent
+KeyError: 'billing_operation_id'
+
+test_cosyvoice_external_request_key_requires_durable_operation_identity
+Failed: DID NOT RAISE CosyVoiceCloneError
+```
+
+### Fix Round 4 GREEN evidence
+
+Finding-specific collision regression:
+
+```text
+uv run pytest tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_timeout_recovery_fails_closed_on_true_marker_collision_across_instances -q
+1 passed, 1 warning
+```
+
+Complete provider and route lifecycle files:
+
+```text
+uv run pytest tests/test_cosyvoice_voice_clone_provider.py -q
+16 passed, 1 warning
+
+uv run pytest tests/test_brand_voice_pipeline.py -q
+51 passed, 1 warning
+```
+
+Pinned one-shot transport, same-request response-loss recovery, old-prefix isolation, distinct-marker concurrency, true-marker collision, durable identity enforcement, and route durable/late replay selection:
+
+```text
+uv run pytest tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_clone_prevents_pinned_sdk_retry_after_remote_timeout tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_clone_recovers_remote_success_after_timeout_across_new_local_key tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_clone_does_not_reuse_different_full_hash_with_same_old_prefix tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_timeout_recovery_never_cross_binds_concurrent_request_hashes tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_timeout_recovery_fails_closed_on_true_marker_collision_across_instances tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_external_request_key_requires_durable_operation_identity tests/test_brand_voice_pipeline.py::test_cosyvoice_new_http_key_reuses_stable_remote_request_identity tests/test_brand_voice_pipeline.py::test_cosyvoice_route_fails_closed_before_provider_on_durable_true_marker_collision -q
+8 passed, 1 warning
+```
+
+Task 12 focused suite:
+
+```text
+uv run pytest tests/test_brand_voice_pipeline.py tests/test_batch_prod_pipeline.py tests/test_avatar_talk_worker.py tests/test_video_pipeline_quota.py tests/test_video_pricing_contract.py tests/test_cosyvoice_voice_clone_provider.py -q
+151 tests collected; 100%; exit 0; no failures
+```
+
+Full backend suite, run once after focused suites were green:
+
+```text
+uv run pytest -q
+1867 tests collected; 100%; exit 0; no failures
+```
+
+Static verification:
+
+```text
+uv run ruff check app/providers/voice_clone/cosyvoice.py app/services/cosyvoice_recovery.py app/api/v1/routes/brand_voices.py tests/test_cosyvoice_voice_clone_provider.py tests/test_brand_voice_pipeline.py
+All checks passed!
+
+uv run python -m compileall -q app/providers/voice_clone/cosyvoice.py app/services/cosyvoice_recovery.py app/api/v1/routes/brand_voices.py
+No output; exit 0.
+
+git diff --check
+No output; exit 0.
+```
+
+### Files changed
+
+- `backend/app/services/cosyvoice_recovery.py`
+- `backend/app/providers/voice_clone/cosyvoice.py`
+- `backend/app/api/v1/routes/brand_voices.py`
+- `backend/tests/test_cosyvoice_voice_clone_provider.py`
+- `backend/tests/test_brand_voice_pipeline.py`
+- `.superpowers/sdd/2026-08-29-pricing-closure-implementation/task-12-report.md`
+
+### Fix-round self-review and concerns
+
+- Confirmed the collision decision is based on complete durable request hashes and exact nine-character markers, not probability, old prefixes, process locks, or candidate count. The SQLite route regression proves one foreign candidate prevents a second supplier create.
+- Confirmed committed-operation ordering plus the marker advisory lock handles true concurrency: if B commits while A owns the marker lock, B waits and then sees A; if B is already committed before A's locked snapshot, A sees B. At most one different full request can enter the supplier call, and commonly both fail closed.
+- Confirmed a provider call with an external request key but no durable operation identity now fails before inventory or create. The route regression confirms the committed operation ID is passed through.
+- Confirmed same-full-request remote success plus lost response, exact-key adapter replay, route full-hash replay/late-race rollback, strict provider result validation, deletion/finalization ordering, zero-price settlement, and parent-video billing remain green.
+- Confirmed the one-shot pinned SDK transport path is unchanged and the SDK's non-idempotent create retry remains bypassed.
+- No PostgreSQL service is available in the local focused environment. Executable local tests cover the exact collision decision, durable operation/hash verification, SQLite route behavior, stable signed advisory key, and emitted `pg_advisory_xact_lock` statement without skips. A real PostgreSQL two-process concurrency execution is explicitly left to Task 18 as directed.
+- The global collision scan selects only request hashes but is linear in historical CosyVoice-create operations because no marker column/index exists. This favors correctness and avoids an unapproved migration; volume-driven indexing can be evaluated separately.
+- Existing Starlette/httpx and Alembic path-separator warnings remain non-blocking. No subagent, network/provider call, push, merge, deploy, migration, production/shared database write, provider-ID registration, configuration write, production routing change, Doubao routing change, Task 13 work, or external side effect was performed.
