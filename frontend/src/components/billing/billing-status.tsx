@@ -85,7 +85,7 @@ export function BillingStatus({
       )}
     >
       {content}
-      {!parsed && onContinueLookup && (
+      {querying && onContinueLookup && (
         <Button
           type="button"
           variant="soft"

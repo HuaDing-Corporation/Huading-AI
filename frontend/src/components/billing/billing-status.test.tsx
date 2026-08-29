@@ -53,4 +53,22 @@ describe("BillingStatus", () => {
     fireEvent.click(screen.getByRole("button", { name: "继续查询" }));
     expect(onContinueLookup).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps reserved billing visible while querying can be continued", () => {
+    const onContinueLookup = vi.fn();
+    render(
+      <BillingStatus
+        summary={summary("reserved")}
+        querying
+        onContinueLookup={onContinueLookup}
+      />
+    );
+
+    expect(screen.getByText("已冻结 30 积分")).toBeInTheDocument();
+    const button = screen.getByRole("button", { name: "继续查询" });
+    button.focus();
+    expect(button).toHaveFocus();
+    fireEvent.click(button, { detail: 0 });
+    expect(onContinueLookup).toHaveBeenCalledTimes(1);
+  });
 });

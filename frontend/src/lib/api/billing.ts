@@ -1,9 +1,11 @@
 import { apiFetch, ApiError, isApiError } from "./client";
 import type {
   BillingConfirmation,
+  BillingLookupPayload,
   BillingOperationLookup,
   BillingQuote,
-  BillingSummary
+  BillingSummary,
+  ExtendedBillingOperationLookup
 } from "./types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -61,6 +63,14 @@ function isoDate(value: unknown): value is string {
       (Number(offsetHour) <= 23 && Number(offsetMinute) <= 59)) &&
     Number.isFinite(Date.parse(value))
   );
+}
+
+function nullableString(value: unknown): value is string | null {
+  return value === null || nonEmptyString(value);
+}
+
+function nullableIsoDate(value: unknown): value is string | null {
+  return value === null || isoDate(value);
 }
 
 function rateScope(value: unknown): value is "tenant_overridable" | "platform_fixed" {
@@ -316,7 +326,274 @@ function failure(value: unknown): boolean {
   );
 }
 
-export function parseBillingOperationLookup(value: unknown): BillingOperationLookup | null {
+export interface BillingLookupResultSchema {
+  operations: readonly string[];
+  completionKinds: readonly ("succeeded" | "rejected")[];
+  parse: (value: unknown) => BillingLookupPayload | null;
+  validateResultId: (resultId: string | null, payload: BillingLookupPayload | null) => boolean;
+  validateContext?: (
+    payload: BillingLookupPayload,
+    lookup: { billing: BillingSummary; completionKind: "succeeded" | "rejected" | null }
+  ) => boolean;
+}
+
+export type BillingLookupResultRegistry = Readonly<Record<string, BillingLookupResultSchema>>;
+
+function exactPayload(
+  value: unknown,
+  keys: readonly string[],
+  validate: (payload: Record<string, unknown>) => boolean
+): BillingLookupPayload | null {
+  return record(value) && exactKeys(value, keys) && validate(value) ? value : null;
+}
+
+function parseScriptResult(value: unknown): BillingLookupPayload | null {
+  return exactPayload(value, ["script"], (payload) => typeof payload.script === "string");
+}
+
+function parseScenePromptResult(value: unknown): BillingLookupPayload | null {
+  return exactPayload(value, ["scene_prompt", "negative_prompt"], (payload) =>
+    typeof payload.scene_prompt === "string" && typeof payload.negative_prompt === "string"
+  );
+}
+
+const ECOM_ITEM_KEYS = [
+  "item_index",
+  "task_id",
+  "source_asset_id",
+  "status",
+  "asset_id"
+] as const;
+
+function parseEcomImageBatch(value: unknown): BillingLookupPayload | null {
+  return exactPayload(value, ["items"], (payload) => {
+    if (!Array.isArray(payload.items) || payload.items.length < 1 || payload.items.length > 20) return false;
+    const indexes = new Set<number>();
+    for (const item of payload.items) {
+      if (
+        !record(item) ||
+        !exactKeys(item, ECOM_ITEM_KEYS) ||
+        !nonNegativeInteger(item.item_index) ||
+        item.item_index > 19 ||
+        indexes.has(item.item_index) ||
+        !nonEmptyString(item.task_id) ||
+        item.task_id.length > 36 ||
+        !nonEmptyString(item.source_asset_id) ||
+        item.source_asset_id.length > 36 ||
+        (item.status !== "done" && item.status !== "failed") ||
+        !(item.asset_id === null || (nonEmptyString(item.asset_id) && item.asset_id.length <= 36))
+      ) {
+        return false;
+      }
+      indexes.add(item.item_index);
+    }
+    return [...indexes].sort((a, b) => a - b).every((index, position) => index === position);
+  });
+}
+
+function parseVideoTask(value: unknown): BillingLookupPayload | null {
+  return exactPayload(value, ["task_id", "status"], (payload) =>
+    nonEmptyString(payload.task_id) &&
+    payload.task_id.length <= 36 &&
+    ["queued", "running", "done", "failed", "cancelled"].includes(payload.status as string)
+  );
+}
+
+const BRAND_VOICE_KEYS = [
+  "id",
+  "name",
+  "provider",
+  "status",
+  "order_status",
+  "delivery_status",
+  "created_at"
+] as const;
+
+function parseBrandVoice(value: unknown): BillingLookupPayload | null {
+  return exactPayload(value, BRAND_VOICE_KEYS, (payload) =>
+    nonEmptyString(payload.id) &&
+    nonEmptyString(payload.name) &&
+    nonEmptyString(payload.provider) &&
+    nonEmptyString(payload.status) &&
+    (payload.order_status === null ||
+      ["awaiting_fulfillment", "fulfilled", "rejected"].includes(payload.order_status as string)) &&
+    ["awaiting_fulfillment", "active", "expired", "rejected"].includes(
+      payload.delivery_status as string
+    ) &&
+    isoDate(payload.created_at)
+  );
+}
+
+const BRAND_VOICE_ORDER_KEYS = [
+  "id",
+  "tenant_id",
+  "ordered_by_user_id",
+  "order_type",
+  "requested_name",
+  "source_audio_asset_id",
+  "existing_brand_voice_id",
+  "status",
+  "fulfilled_brand_voice_id",
+  "fulfilled_provider_voice_id",
+  "rejection_reason",
+  "fulfilled_at",
+  "rejected_at",
+  "created_at",
+  "updated_at",
+  "billing",
+  "refund_disposition",
+  "refund_grant_status",
+  "refund_applied_at"
+] as const;
+
+function parseBrandVoiceOrder(value: unknown): BillingLookupPayload | null {
+  return exactPayload(value, BRAND_VOICE_ORDER_KEYS, (payload) => {
+    const billing = parseBillingSummary(payload.billing);
+    const status = payload.status;
+    const common =
+      nonEmptyString(payload.id) &&
+      nonEmptyString(payload.tenant_id) &&
+      nonEmptyString(payload.ordered_by_user_id) &&
+      (payload.order_type === "create" || payload.order_type === "renew") &&
+      nonEmptyString(payload.requested_name) &&
+      nonEmptyString(payload.source_audio_asset_id) &&
+      nullableString(payload.existing_brand_voice_id) &&
+      (payload.order_type !== "create" || payload.existing_brand_voice_id === null) &&
+      (payload.order_type !== "renew" || nonEmptyString(payload.existing_brand_voice_id)) &&
+      nullableString(payload.fulfilled_brand_voice_id) &&
+      nullableString(payload.fulfilled_provider_voice_id) &&
+      nullableString(payload.rejection_reason) &&
+      nullableIsoDate(payload.fulfilled_at) &&
+      nullableIsoDate(payload.rejected_at) &&
+      isoDate(payload.created_at) &&
+      isoDate(payload.updated_at) &&
+      billing !== null &&
+      [
+        "not_applicable",
+        "source_subscription_released",
+        "current_subscription_credited",
+        "pending_next_subscription"
+      ].includes(payload.refund_disposition as string) &&
+      (payload.refund_grant_status === null ||
+        payload.refund_grant_status === "pending" ||
+        payload.refund_grant_status === "applied") &&
+      nullableIsoDate(payload.refund_applied_at);
+    if (!common) return false;
+    if (status === "awaiting_fulfillment") {
+      return (
+        payload.fulfilled_brand_voice_id === null &&
+        payload.fulfilled_provider_voice_id === null &&
+        payload.rejection_reason === null &&
+        payload.fulfilled_at === null &&
+        payload.rejected_at === null
+      );
+    }
+    if (status === "fulfilled") {
+      return (
+        nonEmptyString(payload.fulfilled_brand_voice_id) &&
+        nonEmptyString(payload.fulfilled_provider_voice_id) &&
+        payload.rejection_reason === null &&
+        isoDate(payload.fulfilled_at) &&
+        payload.rejected_at === null
+      );
+    }
+    return (
+      status === "rejected" &&
+      payload.fulfilled_brand_voice_id === null &&
+      payload.fulfilled_provider_voice_id === null &&
+      nonEmptyString(payload.rejection_reason) &&
+      payload.fulfilled_at === null &&
+      isoDate(payload.rejected_at)
+    );
+  });
+}
+
+function payloadId(field: string) {
+  return (resultId: string | null, payload: BillingLookupPayload | null): boolean =>
+    payload !== null && nonEmptyString(resultId) && payload[field] === resultId;
+}
+
+export const defaultBillingLookupResultRegistry: BillingLookupResultRegistry = {
+  script_generate_result: {
+    operations: ["script_generate"],
+    completionKinds: ["succeeded"],
+    parse: parseScriptResult,
+    validateResultId: (resultId) => resultId === null
+  },
+  scene_prompt_result: {
+    operations: ["scene_prompt"],
+    completionKinds: ["succeeded"],
+    parse: parseScenePromptResult,
+    validateResultId: (resultId) => resultId === null
+  },
+  ecom_image_batch: {
+    operations: ["ecom_cutout", "ecom_model"],
+    completionKinds: ["succeeded"],
+    parse: parseEcomImageBatch,
+    validateResultId: (resultId) => nonEmptyString(resultId) && UUID.test(resultId)
+  },
+  video_task: {
+    operations: ["video_create"],
+    completionKinds: ["succeeded"],
+    parse: parseVideoTask,
+    validateResultId: payloadId("task_id")
+  },
+  brand_voice_order: {
+    operations: ["doubao_brand_voice_order_create", "doubao_brand_voice_order_renew"],
+    completionKinds: ["succeeded", "rejected"],
+    parse: parseBrandVoiceOrder,
+    validateResultId: payloadId("id"),
+    validateContext: (payload, lookup) => {
+      const nestedBilling = parseBillingSummary(payload.billing);
+      if (
+        !nestedBilling ||
+        nestedBilling.operation_id !== lookup.billing.operation_id ||
+        nestedBilling.idempotency_key !== lookup.billing.idempotency_key
+      ) {
+        return false;
+      }
+      return lookup.completionKind === "rejected"
+        ? payload.status === "rejected"
+        : payload.status === "fulfilled" || payload.status === "awaiting_fulfillment";
+    }
+  },
+  brand_voice: {
+    operations: ["cosyvoice_brand_voice_create"],
+    completionKinds: ["succeeded"],
+    parse: parseBrandVoice,
+    validateResultId: payloadId("id")
+  }
+};
+
+function payloadsEqual(left: BillingLookupPayload, right: BillingLookupPayload): boolean {
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  if (leftKeys.length !== rightKeys.length || leftKeys.some((key, index) => key !== rightKeys[index])) {
+    return false;
+  }
+  return leftKeys.every((key) => {
+    const a = left[key];
+    const b = right[key];
+    if (record(a) && record(b)) return payloadsEqual(a, b);
+    if (Array.isArray(a) && Array.isArray(b)) {
+      return a.length === b.length && a.every((item, index) => {
+        const other = b[index];
+        return record(item) && record(other) ? payloadsEqual(item, other) : item === other;
+      });
+    }
+    return a === b;
+  });
+}
+
+export function parseBillingOperationLookup(value: unknown): BillingOperationLookup | null;
+export function parseBillingOperationLookup(
+  value: unknown,
+  registry: BillingLookupResultRegistry
+): ExtendedBillingOperationLookup | null;
+export function parseBillingOperationLookup(
+  value: unknown,
+  registry: BillingLookupResultRegistry = defaultBillingLookupResultRegistry
+): BillingOperationLookup | ExtendedBillingOperationLookup | null {
   if (
     !record(value) ||
     !exactKeys(value, LOOKUP_KEYS) ||
@@ -329,6 +606,13 @@ export function parseBillingOperationLookup(value: unknown): BillingOperationLoo
   }
   const billing = parseBillingSummary(value.billing);
   if (!billing || billing.idempotency_key !== value.idempotency_key) return null;
+  const schema = typeof value.result_type === "string" ? registry[value.result_type] : null;
+  const knownOperation = Object.values(registry).some((entry) =>
+    entry.operations.includes(value.operation as string)
+  );
+  if (!knownOperation) return null;
+  if (value.result_type !== null && !schema) return null;
+  if (schema && !schema.operations.includes(value.operation)) return null;
 
   if (value.state === "in_progress") {
     if (
@@ -341,6 +625,19 @@ export function parseBillingOperationLookup(value: unknown): BillingOperationLoo
     ) {
       return null;
     }
+    if (value.result_type === null && (value.result_id !== null || value.resource !== null)) return null;
+    if (schema) {
+      const resource = value.resource === null ? null : schema.parse(value.resource);
+      if (value.resource !== null && !resource) return null;
+      if (!schema.validateResultId(value.result_id as string | null, resource)) return null;
+      if (
+        resource &&
+        schema.validateContext &&
+        !schema.validateContext(resource, { billing, completionKind: null })
+      ) {
+        return null;
+      }
+    }
   } else if (value.state === "completed" && value.completion_kind === "succeeded") {
     if (
       (billing.status !== "settled" && billing.status !== "partially_settled") ||
@@ -351,6 +648,21 @@ export function parseBillingOperationLookup(value: unknown): BillingOperationLoo
     ) {
       return null;
     }
+    if (!schema || !schema.completionKinds.includes("succeeded")) return null;
+    const result = schema.parse(value.result);
+    if (!result || !schema.validateResultId(value.result_id as string | null, result)) return null;
+    if (value.result_id === null) {
+      if (value.resource !== null) return null;
+    } else {
+      const resource = schema.parse(value.resource);
+      if (!resource || !payloadsEqual(result, resource)) return null;
+    }
+    if (
+      schema.validateContext &&
+      !schema.validateContext(result, { billing, completionKind: "succeeded" })
+    ) {
+      return null;
+    }
   } else if (value.state === "completed" && value.completion_kind === "rejected") {
     if (
       billing.status !== "released" ||
@@ -358,6 +670,15 @@ export function parseBillingOperationLookup(value: unknown): BillingOperationLoo
       !record(value.resource) ||
       value.result !== null ||
       value.failure !== null
+    ) {
+      return null;
+    }
+    if (!schema || !schema.completionKinds.includes("rejected")) return null;
+    const resource = schema.parse(value.resource);
+    if (!resource || !schema.validateResultId(value.result_id as string | null, resource)) return null;
+    if (
+      schema.validateContext &&
+      !schema.validateContext(resource, { billing, completionKind: "rejected" })
     ) {
       return null;
     }
@@ -375,7 +696,7 @@ export function parseBillingOperationLookup(value: unknown): BillingOperationLoo
   } else {
     return null;
   }
-  return value as unknown as BillingOperationLookup;
+  return value as unknown as BillingOperationLookup | ExtendedBillingOperationLookup;
 }
 
 export async function getBillingOperation(

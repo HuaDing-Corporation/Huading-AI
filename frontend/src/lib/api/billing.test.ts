@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+
+import type { BillingOperationLookup, ExtendedBillingOperationLookup } from "./types";
 
 import { ApiError } from "./client";
 import {
@@ -9,6 +11,7 @@ import {
   parseBillingQuote,
   parseBillingSummary
 } from "./billing";
+import type { BillingLookupResultRegistry } from "./billing";
 
 const key = "11111111-1111-4111-8111-111111111111";
 
@@ -243,7 +246,7 @@ describe("billing quote parsing", () => {
 
 function lookupBase(overrides: Record<string, unknown> = {}) {
   return {
-    operation: "brand_voice_clone",
+    operation: "cosyvoice_brand_voice_create",
     idempotency_key: key,
     state: "in_progress",
     completion_kind: null,
@@ -257,7 +260,81 @@ function lookupBase(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function brandVoicePayload(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "voice-1",
+    name: "品牌音色",
+    provider: "cosyvoice",
+    status: "ready",
+    order_status: null,
+    delivery_status: "active",
+    created_at: "2026-08-29T10:00:00Z",
+    ...overrides
+  };
+}
+
+function brandVoiceOrderPayload(
+  status: "awaiting_fulfillment" | "fulfilled" | "rejected",
+  overrides: Record<string, unknown> = {}
+) {
+  return {
+    id: "order-1",
+    tenant_id: "tenant-1",
+    ordered_by_user_id: "user-1",
+    order_type: "create",
+    requested_name: "品牌音色",
+    source_audio_asset_id: "asset-1",
+    existing_brand_voice_id: null,
+    status,
+    fulfilled_brand_voice_id: status === "fulfilled" ? "voice-1" : null,
+    fulfilled_provider_voice_id: status === "fulfilled" ? "provider-voice-1" : null,
+    rejection_reason: status === "rejected" ? "音频不合格" : null,
+    fulfilled_at: status === "fulfilled" ? "2026-08-29T10:02:00Z" : null,
+    rejected_at: status === "rejected" ? "2026-08-29T10:02:00Z" : null,
+    created_at: "2026-08-29T10:00:00Z",
+    updated_at: "2026-08-29T10:02:00Z",
+    billing: summary(status === "awaiting_fulfillment" ? "reserved" : status === "fulfilled" ? "settled" : "released"),
+    refund_disposition: "not_applicable",
+    refund_grant_status: null,
+    refund_applied_at: null,
+    ...overrides
+  };
+}
+
 describe("billing operation lookup parsing", () => {
+  it("rejects an unregistered successful result type by default", () => {
+    expect(
+      parseBillingOperationLookup(
+        lookupBase({
+          state: "completed",
+          completion_kind: "succeeded",
+          billing: summary("settled"),
+          result_type: "future_unregistered_result",
+          result_id: "resource-1",
+          result: { id: "resource-1" },
+          resource: { id: "resource-1" }
+        })
+      )
+    ).toBeNull();
+  });
+
+  it("rejects a registered result type whose payload does not match its schema", () => {
+    expect(
+      parseBillingOperationLookup(
+        lookupBase({
+          operation: "cosyvoice_brand_voice_create",
+          state: "completed",
+          completion_kind: "succeeded",
+          billing: summary("settled"),
+          result_type: "brand_voice",
+          result_id: "voice-1",
+          result: { id: "voice-1" },
+          resource: { id: "voice-1" }
+        })
+      )
+    ).toBeNull();
+  });
+
   it("accepts all four closed lookup variants", () => {
     const succeeded = lookupBase({
       state: "completed",
@@ -265,15 +342,17 @@ describe("billing operation lookup parsing", () => {
       billing: summary("settled"),
       result_type: "brand_voice",
       result_id: "voice-1",
-      result: { id: "voice-1" }
+      result: brandVoicePayload(),
+      resource: brandVoicePayload()
     });
     const rejected = lookupBase({
+      operation: "doubao_brand_voice_order_create",
       state: "completed",
       completion_kind: "rejected",
       billing: summary("released"),
       result_type: "brand_voice_order",
       result_id: "order-1",
-      resource: { id: "order-1", status: "rejected" }
+      resource: brandVoiceOrderPayload("rejected")
     });
     const failed = lookupBase({
       state: "completed",
@@ -289,6 +368,89 @@ describe("billing operation lookup parsing", () => {
     expect(parseBillingOperationLookup(succeeded)?.completion_kind).toBe("succeeded");
     expect(parseBillingOperationLookup(rejected)?.completion_kind).toBe("rejected");
     expect(parseBillingOperationLookup(failed)?.completion_kind).toBe("failed");
+  });
+
+  it.each([
+    ["script_generate", "script_generate_result", null, { script: "成稿" }],
+    [
+      "scene_prompt",
+      "scene_prompt_result",
+      null,
+      { scene_prompt: "产品特写", negative_prompt: "模糊" }
+    ],
+    [
+      "ecom_cutout",
+      "ecom_image_batch",
+      "33333333-3333-4333-8333-333333333333",
+      {
+        items: [
+          {
+            item_index: 0,
+            task_id: "task-1",
+            source_asset_id: "asset-1",
+            status: "done",
+            asset_id: "output-1"
+          }
+        ]
+      }
+    ],
+    ["video_create", "video_task", "task-1", { task_id: "task-1", status: "done" }],
+    [
+      "doubao_brand_voice_order_create",
+      "brand_voice_order",
+      "order-1",
+      brandVoiceOrderPayload("fulfilled")
+    ],
+    ["cosyvoice_brand_voice_create", "brand_voice", "voice-1", brandVoicePayload()]
+  ])("accepts the registered %s / %s result schema", (operation, resultType, resultId, payload) => {
+    const parsed = parseBillingOperationLookup(
+      lookupBase({
+        operation,
+        state: "completed",
+        completion_kind: "succeeded",
+        billing: summary("settled"),
+        result_type: resultType,
+        result_id: resultId,
+        result: payload,
+        resource: resultId === null ? null : payload
+      })
+    );
+    expect(parsed?.completion_kind).toBe("succeeded");
+  });
+
+  it("rejects known payloads with the wrong operation, ID, resource copy, or error extension", () => {
+    const valid = {
+      operation: "cosyvoice_brand_voice_create",
+      state: "completed",
+      completion_kind: "succeeded",
+      billing: summary("settled"),
+      result_type: "brand_voice",
+      result_id: "voice-1",
+      result: brandVoicePayload(),
+      resource: brandVoicePayload()
+    };
+    expect(parseBillingOperationLookup(lookupBase({ ...valid, operation: "video_create" }))).toBeNull();
+    expect(parseBillingOperationLookup(lookupBase({ ...valid, result_id: "voice-2" }))).toBeNull();
+    expect(
+      parseBillingOperationLookup(
+        lookupBase({ ...valid, resource: brandVoicePayload({ name: "另一音色" }) })
+      )
+    ).toBeNull();
+    expect(
+      parseBillingOperationLookup(
+        lookupBase({
+          operation: "video_create",
+          state: "completed",
+          completion_kind: "failed",
+          billing: summary("released"),
+          failure: {
+            code: "PROVIDER_FAILED",
+            original_http_status: 502,
+            detail: { requires_new_quote: true, supplier_trace: "forbidden" }
+          }
+        })
+      )
+    ).toBeNull();
   });
 
   it.each([
@@ -329,7 +491,7 @@ describe("billing operation lookup parsing", () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
-          data: lookupBase({ operation: "voice/clone" }),
+          data: lookupBase({ operation: "script_generate" }),
           error: null,
           request_id: "req-1"
         }),
@@ -338,12 +500,12 @@ describe("billing operation lookup parsing", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(getBillingOperation("voice/clone", key)).resolves.toMatchObject({
+    await expect(getBillingOperation("script_generate", key)).resolves.toMatchObject({
       state: "in_progress",
       idempotency_key: key
     });
     expect(fetchMock.mock.calls[0][0]).toContain(
-      `/api/v1/billing/operations/by-idempotency/voice%2Fclone/${key}`
+      `/api/v1/billing/operations/by-idempotency/script_generate/${key}`
     );
   });
 
@@ -360,5 +522,39 @@ describe("billing operation lookup parsing", () => {
     await expect(getBillingOperation("voice_clone", key)).rejects.toMatchObject({
       code: "INVALID_BILLING_RESPONSE"
     });
+  });
+
+  it("marks only explicitly registered lookup extensions as extended", () => {
+    const registry: BillingLookupResultRegistry = {
+      custom_result: {
+        operations: ["custom_operation"],
+        completionKinds: ["succeeded"],
+        parse: (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          !Array.isArray(value) &&
+          Object.keys(value).length === 1 &&
+          typeof (value as { id?: unknown }).id === "string"
+            ? (value as Record<string, unknown>)
+            : null,
+        validateResultId: (resultId, payload) => payload?.id === resultId
+      }
+    };
+    const custom = lookupBase({
+      operation: "custom_operation",
+      state: "completed",
+      completion_kind: "succeeded",
+      billing: summary("settled"),
+      result_type: "custom_result",
+      result_id: "custom-1",
+      resource: { id: "custom-1" },
+      result: { id: "custom-1" }
+    });
+
+    const builtIn = parseBillingOperationLookup(lookupBase());
+    const extended = parseBillingOperationLookup(custom, registry);
+    expectTypeOf(builtIn).toEqualTypeOf<BillingOperationLookup | null>();
+    expectTypeOf(extended).toEqualTypeOf<ExtendedBillingOperationLookup | null>();
+    expect(extended?.result_type).toBe("custom_result");
   });
 });

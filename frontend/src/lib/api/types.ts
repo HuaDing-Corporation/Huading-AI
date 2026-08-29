@@ -974,6 +974,79 @@ export type BillingQuote =
 
 export type BillingLookupPayload = Record<string, unknown>;
 
+export interface BillingScriptResult extends BillingLookupPayload {
+  script: string;
+}
+
+export interface BillingScenePromptResult extends BillingLookupPayload {
+  scene_prompt: string;
+  negative_prompt: string;
+}
+
+export interface BillingEcomImageBatchItem extends BillingLookupPayload {
+  item_index: number;
+  task_id: string;
+  source_asset_id: string;
+  status: "done" | "failed";
+  asset_id: string | null;
+}
+
+export interface BillingEcomImageBatchResult extends BillingLookupPayload {
+  items: BillingEcomImageBatchItem[];
+}
+
+export interface BillingVideoTaskResource extends BillingLookupPayload {
+  task_id: string;
+  status: "queued" | "running" | "done" | "failed" | "cancelled";
+}
+
+export interface BillingBrandVoiceResource extends BillingLookupPayload {
+  id: string;
+  name: string;
+  provider: string;
+  status: string;
+  order_status: "awaiting_fulfillment" | "fulfilled" | "rejected" | null;
+  delivery_status: "awaiting_fulfillment" | "active" | "expired" | "rejected";
+  created_at: string;
+}
+
+export interface BillingBrandVoiceOrderResource extends BillingLookupPayload {
+  id: string;
+  tenant_id: string;
+  ordered_by_user_id: string;
+  order_type: "create" | "renew";
+  requested_name: string;
+  source_audio_asset_id: string;
+  existing_brand_voice_id: string | null;
+  status: "awaiting_fulfillment" | "fulfilled" | "rejected";
+  fulfilled_brand_voice_id: string | null;
+  fulfilled_provider_voice_id: string | null;
+  rejection_reason: string | null;
+  fulfilled_at: string | null;
+  rejected_at: string | null;
+  created_at: string;
+  updated_at: string;
+  billing: BillingSummary;
+  refund_disposition:
+    | "not_applicable"
+    | "source_subscription_released"
+    | "current_subscription_credited"
+    | "pending_next_subscription";
+  refund_grant_status: "pending" | "applied" | null;
+  refund_applied_at: string | null;
+}
+
+export interface BillingLookupPayloadMap {
+  script_generate_result: BillingScriptResult;
+  scene_prompt_result: BillingScenePromptResult;
+  ecom_image_batch: BillingEcomImageBatchResult;
+  video_task: BillingVideoTaskResource;
+  brand_voice_order: BillingBrandVoiceOrderResource;
+  brand_voice: BillingBrandVoiceResource;
+}
+
+export type BillingKnownResultType = keyof BillingLookupPayloadMap;
+
 interface BillingOperationLookupBase {
   operation: string;
   idempotency_key: string;
@@ -981,11 +1054,69 @@ interface BillingOperationLookupBase {
   result_id: string | null;
 }
 
-export type BillingOperationLookup =
+type BillingInProgressLookup =
   | (BillingOperationLookupBase & {
       state: "in_progress";
       completion_kind: null;
-      result_type: string | null;
+      result_type: null;
+      result_id: null;
+      resource: null;
+      result: null;
+      failure: null;
+    })
+  | {
+      [K in BillingKnownResultType]: BillingOperationLookupBase & {
+        state: "in_progress";
+        completion_kind: null;
+        result_type: K;
+        resource: BillingLookupPayloadMap[K] | null;
+        result: null;
+        failure: null;
+      };
+    }[BillingKnownResultType];
+
+type BillingSucceededLookup = {
+  [K in BillingKnownResultType]: BillingOperationLookupBase & {
+    state: "completed";
+    completion_kind: "succeeded";
+    result_type: K;
+    resource: BillingLookupPayloadMap[K] | null;
+    result: BillingLookupPayloadMap[K];
+    failure: null;
+  };
+}[BillingKnownResultType];
+
+export type BillingOperationLookup =
+  | BillingInProgressLookup
+  | BillingSucceededLookup
+  | (BillingOperationLookupBase & {
+      state: "completed";
+      completion_kind: "rejected";
+      result_type: "brand_voice_order";
+      resource: BillingBrandVoiceOrderResource;
+      result: null;
+      failure: null;
+    })
+  | (BillingOperationLookupBase & {
+      state: "completed";
+      completion_kind: "failed";
+      result_type: null;
+      result_id: null;
+      resource: null;
+      result: null;
+      failure: {
+        code: string;
+        original_http_status: number;
+        detail: { requires_new_quote: boolean | null } | null;
+      };
+    });
+
+/** Only returned when a caller explicitly supplies an extension registry/parser. */
+export type ExtendedBillingOperationLookup =
+  | (BillingOperationLookupBase & {
+      state: "in_progress";
+      completion_kind: null;
+      result_type: string;
       resource: BillingLookupPayload | null;
       result: null;
       failure: null;

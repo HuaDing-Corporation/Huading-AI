@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   billingFromApiError,
@@ -110,11 +110,16 @@ function isUnknownPostResult(error: unknown): boolean {
   );
 }
 
-interface BoundAttempt<TInput> {
+interface BoundAttempt<TInput, TResult> {
   operation: string;
   input: TInput;
   fingerprint: string;
   fingerprintInput: (input: TInput) => string;
+  submit: (input: TInput, confirmation: BillingConfirmation) => Promise<TResult>;
+  lookup: (operation: string, idempotencyKey: string) => Promise<BillingOperationLookup>;
+  billingFromResult: (result: TResult) => BillingSummary | null;
+  resultFromLookup?: (lookup: BillingOperationLookup) => TResult | null;
+  now: () => number;
   confirmation: BillingConfirmation;
   replayed: boolean;
   run: number;
@@ -124,27 +129,28 @@ export function useBillingAction<TInput, TQuote, TResult>(
   options: UseBillingActionOptions<TInput, TQuote, TResult>
 ): UseBillingActionResult<TInput, TQuote, TResult> {
   const optionsRef = useRef(options);
-  const fingerprint = useMemo(
-    () =>
-      options.input === null
-        ? null
-        : (options.fingerprint ?? normalizedBillingInputFingerprint)(options.input),
-    [options.input, options.fingerprint]
-  );
-  const previousFingerprint = useRef(fingerprint);
+  // Deliberately recompute on every render: React state should be immutable, but a
+  // billing boundary must also detect an in-place mutation of the same object.
+  const fingerprint =
+    options.input === null
+      ? null
+      : (options.fingerprint ?? normalizedBillingInputFingerprint)(options.input);
+  const previousBinding = useRef({ operation: options.operation, fingerprint });
   const currentFingerprint = useRef(fingerprint);
   const mounted = useRef(true);
-  const submitLock = useRef(false);
-  const queryLock = useRef(false);
+  const submitOwner = useRef<number | null>(null);
+  const queryOwner = useRef<number | null>(null);
   const attemptClosed = useRef(false);
   const runId = useRef(0);
   const boundFingerprint = useRef<string | null>(null);
   const quoteRef = useRef<TQuote | null>(null);
   const parsedQuoteRef = useRef<BillingQuote | null>(null);
   const keyRef = useRef<string | null>(null);
-  const attemptRef = useRef<BoundAttempt<TInput> | null>(null);
+  const attemptRef = useRef<BoundAttempt<TInput, TResult> | null>(null);
   const pollTimers = useRef(new Set<number>());
-  const submitBoundRef = useRef<(attempt: BoundAttempt<TInput>) => Promise<void>>(async () => undefined);
+  const submitBoundRef = useRef<(attempt: BoundAttempt<TInput, TResult>) => Promise<void>>(
+    async () => undefined
+  );
 
   const [phase, setPhase] = useState<BillingActionPhase>("idle");
   const [quoteValue, setQuoteValue] = useState<TQuote | null>(null);
@@ -168,8 +174,8 @@ export function useBillingAction<TInput, TQuote, TResult>(
   const clearAttempt = useCallback((nextPhase: BillingActionPhase = "idle") => {
     runId.current += 1;
     clearPollTimers();
-    submitLock.current = false;
-    queryLock.current = false;
+    submitOwner.current = null;
+    queryOwner.current = null;
     attemptClosed.current = false;
     boundFingerprint.current = null;
     quoteRef.current = null;
@@ -196,11 +202,14 @@ export function useBillingAction<TInput, TQuote, TResult>(
   }, [clearPollTimers]);
 
   useEffect(() => {
-    if (previousFingerprint.current !== fingerprint) {
-      previousFingerprint.current = fingerprint;
+    if (
+      previousBinding.current.operation !== options.operation ||
+      previousBinding.current.fingerprint !== fingerprint
+    ) {
+      previousBinding.current = { operation: options.operation, fingerprint };
       clearAttempt();
     }
-  }, [clearAttempt, fingerprint]);
+  }, [clearAttempt, fingerprint, options.operation]);
 
   useEffect(() => {
     const parsed = parsedQuoteRef.current;
@@ -220,11 +229,14 @@ export function useBillingAction<TInput, TQuote, TResult>(
   }, [phase, quoteValue]);
 
   const estimate = useCallback(async () => {
-    const input = optionsRef.current.input;
+    const estimateOptions = optionsRef.current;
+    const input = estimateOptions.input;
+    const operation = estimateOptions.operation;
     const startFingerprint = currentFingerprint.current;
     if (input === null || startFingerprint === null) return;
     const id = ++runId.current;
-    submitLock.current = false;
+    submitOwner.current = null;
+    queryOwner.current = null;
     attemptClosed.current = false;
     attemptRef.current = null;
     keyRef.current = null;
@@ -235,19 +247,21 @@ export function useBillingAction<TInput, TQuote, TResult>(
     setError(null);
     setPhase("estimating");
     try {
-      const raw = await optionsRef.current.estimate(input);
+      const raw = await estimateOptions.estimate(input);
       if (!mounted.current || id !== runId.current || currentFingerprint.current !== startFingerprint) return;
-      const parsed = optionsRef.current.parseQuote
-        ? optionsRef.current.parseQuote(raw)
+      const parsed = estimateOptions.parseQuote
+        ? estimateOptions.parseQuote(raw)
         : parseBillingQuote(raw);
-      if (!parsed) throw new ApiError("报价数据无效，请重新获取价格。", "INVALID_BILLING_QUOTE", 502);
+      if (!parsed || parsed.operation !== operation) {
+        throw new ApiError("报价数据无效，请重新获取价格。", "INVALID_BILLING_QUOTE", 502);
+      }
       quoteRef.current = raw;
       parsedQuoteRef.current = parsed;
       boundFingerprint.current = startFingerprint;
       setQuoteValue(raw);
       const remaining = Math.max(
         0,
-        Math.ceil((Date.parse(parsed.expires_at) - (optionsRef.current.now?.() ?? Date.now())) / 1000)
+        Math.ceil((Date.parse(parsed.expires_at) - (estimateOptions.now?.() ?? Date.now())) / 1000)
       );
       setExpiresInSeconds(remaining);
       setPhase(remaining > 0 ? "ready" : "expired");
@@ -261,7 +275,10 @@ export function useBillingAction<TInput, TQuote, TResult>(
     }
   }, []);
 
-  const applyLookup = useCallback((raw: BillingOperationLookup): boolean => {
+  const applyLookup = useCallback((
+    raw: BillingOperationLookup,
+    attempt: BoundAttempt<TInput, TResult>
+  ): boolean => {
     const parsed = parseBillingOperationLookup(raw);
     if (!parsed) return false;
     setLookupValue(parsed);
@@ -271,8 +288,8 @@ export function useBillingAction<TInput, TQuote, TResult>(
       return false;
     }
     if (parsed.completion_kind === "succeeded") {
-      const recovered = optionsRef.current.resultFromLookup
-        ? optionsRef.current.resultFromLookup(parsed)
+      const recovered = attempt.resultFromLookup
+        ? attempt.resultFromLookup(parsed)
         : (parsed.result as TResult);
       setResult(recovered);
       setError(null);
@@ -298,9 +315,13 @@ export function useBillingAction<TInput, TQuote, TResult>(
     []
   );
 
-  const recoverUnknown = useCallback(async (attempt: BoundAttempt<TInput>) => {
-    if (queryLock.current) return;
-    queryLock.current = true;
+  const recoverUnknown = useCallback(async (attempt: BoundAttempt<TInput, TResult>) => {
+    if (
+      !mounted.current ||
+      attempt.run !== runId.current ||
+      queryOwner.current !== null
+    ) return;
+    queryOwner.current = attempt.run;
     setPhase("querying");
     let onlyNotFound = true;
     try {
@@ -308,7 +329,7 @@ export function useBillingAction<TInput, TQuote, TResult>(
         if (index > 0) await waitForNextLookup();
         if (!mounted.current || attempt.run !== runId.current) return;
         try {
-          const raw = await (optionsRef.current.lookup ?? getBillingOperation)(
+          const raw = await attempt.lookup(
             attempt.operation,
             attempt.confirmation.idempotency_key
           );
@@ -324,7 +345,7 @@ export function useBillingAction<TInput, TQuote, TResult>(
             return;
           }
           onlyNotFound = false;
-          if (applyLookup(parsed)) return;
+          if (applyLookup(parsed, attempt)) return;
         } catch (caught) {
           if (!mounted.current || attempt.run !== runId.current) return;
           if (!isApiError(caught) || caught.status !== 404) {
@@ -344,7 +365,7 @@ export function useBillingAction<TInput, TQuote, TResult>(
       const parsedQuote = parsedQuoteRef.current;
       const expired =
         !parsedQuote ||
-        Date.parse(parsedQuote.expires_at) <= (optionsRef.current.now?.() ?? Date.now());
+        Date.parse(parsedQuote.expires_at) <= attempt.now();
       if (expired || currentFingerprint.current !== attempt.fingerprint) {
         clearAttempt("expired");
         return;
@@ -356,14 +377,21 @@ export function useBillingAction<TInput, TQuote, TResult>(
       }
 
       attempt.replayed = true;
-      queryLock.current = false;
-      await submitBoundRef.current(attempt);
+      if (queryOwner.current === attempt.run) queryOwner.current = null;
+      const acquiredSubmit = submitOwner.current === null;
+      if (submitOwner.current !== null && submitOwner.current !== attempt.run) return;
+      if (acquiredSubmit) submitOwner.current = attempt.run;
+      try {
+        await submitBoundRef.current(attempt);
+      } finally {
+        if (acquiredSubmit && submitOwner.current === attempt.run) submitOwner.current = null;
+      }
     } finally {
-      queryLock.current = false;
+      if (queryOwner.current === attempt.run) queryOwner.current = null;
     }
   }, [applyLookup, clearAttempt, waitForNextLookup]);
 
-  const submitBound = useCallback(async (attempt: BoundAttempt<TInput>) => {
+  const submitBound = useCallback(async (attempt: BoundAttempt<TInput, TResult>) => {
     if (!mounted.current || attempt.run !== runId.current) return;
     setError(null);
     setPhase("submitting");
@@ -375,11 +403,9 @@ export function useBillingAction<TInput, TQuote, TResult>(
         clearAttempt();
         return;
       }
-      const completed = await optionsRef.current.submit(attempt.input, attempt.confirmation);
+      const completed = await attempt.submit(attempt.input, attempt.confirmation);
       if (!mounted.current || attempt.run !== runId.current) return;
-      const parsedBilling = optionsRef.current.billingFromResult
-        ? optionsRef.current.billingFromResult(completed)
-        : defaultBillingFromResult(completed);
+      const parsedBilling = attempt.billingFromResult(completed);
       if (!parsedBilling || parsedBilling.idempotency_key !== attempt.confirmation.idempotency_key) {
         throw new ApiError("提交结果无法确认。", "INVALID_BILLING_RESPONSE", 502);
       }
@@ -396,7 +422,11 @@ export function useBillingAction<TInput, TQuote, TResult>(
     } catch (caught) {
       if (!mounted.current || attempt.run !== runId.current) return;
       const knownBilling = billingFromApiError(caught);
-      if (
+      if (isApiError(caught) && caught.code === "PRICE_CHANGED") {
+        clearAttempt();
+        setError(caught);
+        setPhase("failed");
+      } else if (
         knownBilling?.status === "released" &&
         knownBilling.idempotency_key === attempt.confirmation.idempotency_key
       ) {
@@ -410,10 +440,6 @@ export function useBillingAction<TInput, TQuote, TResult>(
       ) {
         setError(caught);
         await recoverUnknown(attempt);
-      } else if (isApiError(caught) && caught.code === "PRICE_CHANGED") {
-        clearAttempt();
-        setError(caught);
-        setPhase("failed");
       } else if (isUnknownPostResult(caught)) {
         setError(caught);
         await recoverUnknown(attempt);
@@ -435,7 +461,7 @@ export function useBillingAction<TInput, TQuote, TResult>(
   }, [recoverUnknown]);
 
   const confirm = useCallback(async () => {
-    if (submitLock.current || attemptClosed.current) return;
+    if (submitOwner.current !== null || attemptClosed.current) return;
     const input = optionsRef.current.input;
     const rawQuote = quoteRef.current;
     const parsedQuote = parsedQuoteRef.current;
@@ -451,17 +477,22 @@ export function useBillingAction<TInput, TQuote, TResult>(
       clearAttempt("expired");
       return;
     }
-    submitLock.current = true;
     const key = keyRef.current ?? (optionsRef.current.createIdempotencyKey ?? defaultUuid)();
     keyRef.current = key;
     setIdempotencyKey(key);
     const confirmation = { idempotency_key: key, quote_token: parsedQuote.quote_token };
     const id = ++runId.current;
-    const attempt: BoundAttempt<TInput> = {
+    submitOwner.current = id;
+    const attempt: BoundAttempt<TInput, TResult> = {
       operation: optionsRef.current.operation,
       input,
       fingerprint: attemptFingerprint,
       fingerprintInput: optionsRef.current.fingerprint ?? normalizedBillingInputFingerprint,
+      submit: optionsRef.current.submit,
+      lookup: optionsRef.current.lookup ?? getBillingOperation,
+      billingFromResult: optionsRef.current.billingFromResult ?? defaultBillingFromResult,
+      resultFromLookup: optionsRef.current.resultFromLookup,
+      now: optionsRef.current.now ?? Date.now,
       confirmation,
       replayed: false,
       run: id
@@ -470,7 +501,7 @@ export function useBillingAction<TInput, TQuote, TResult>(
     try {
       await submitBound(attempt);
     } finally {
-      submitLock.current = false;
+      if (submitOwner.current === id) submitOwner.current = null;
     }
   }, [clearAttempt, submitBound]);
 
