@@ -1,8 +1,10 @@
 import { apiFetch, ApiError, isApiError } from "./client";
 import type {
   BillingConfirmation,
+  BillingKnownOperation,
   BillingLookupPayload,
   BillingOperationLookup,
+  BillingOperationLookupFor,
   BillingQuote,
   BillingSummary,
   ExtendedBillingOperationLookup
@@ -365,39 +367,134 @@ export type BillingLookupResultRegistry = Readonly<Record<string, BillingLookupR
 export type BillingOperationLookupLike =
   | BillingOperationLookup
   | ExtendedBillingOperationLookup;
-export type BillingOperationLookupParser<TLookup extends BillingOperationLookupLike> = (
-  value: unknown
-) => TLookup | null;
+export type IsAny<T> = 0 extends 1 & T ? true : false;
+type IsExactly<TLeft, TRight> = [TLeft] extends [TRight]
+  ? [TRight] extends [TLeft]
+    ? true
+    : false
+  : false;
+export type BillingOperationLookupParser<TLookup> = IsAny<TLookup> extends true
+  ? never
+  : [unknown] extends [TLookup]
+    ? never
+    : [TLookup] extends [BillingOperationLookupLike]
+      ? (value: unknown) => TLookup | null
+      : never;
+export type StrictCustomBillingOperationLookup<TLookup> = IsAny<TLookup> extends true
+  ? never
+  : [unknown] extends [TLookup]
+    ? never
+    : [TLookup] extends [BillingOperationLookupLike]
+      ? IsExactly<TLookup, BillingOperationLookup> extends true
+        ? never
+        : IsExactly<TLookup, BillingOperationLookupLike> extends true
+          ? never
+          : TLookup extends { operation: infer TOperation }
+            ? string extends TOperation
+              ? never
+              : TLookup
+            : never
+      : never;
+type StrictCustomLookupGuard<TLookup> = [StrictCustomBillingOperationLookup<TLookup>] extends [never]
+  ? never
+  : unknown;
+type LookupOperation<TLookup> = TLookup extends { operation: infer TOperation extends string }
+  ? TOperation
+  : never;
 
 const FORBIDDEN_REGISTRY_KEYS = new Set(["__proto__", "constructor", "prototype", "toString"]);
+const REGISTRY_IDENTIFIER = /^[a-z][a-z0-9_]{0,63}$/;
+const EXTENSION_SCHEMA_KEYS = new Set([
+  "operations",
+  "completionKinds",
+  "parse",
+  "validateResultId",
+  "validateContext"
+]);
+
+interface NormalizedBillingLookupResultSchema {
+  operations: ReadonlySet<string>;
+  completionKinds: ReadonlySet<"succeeded" | "rejected">;
+  parse: BillingLookupResultSchema["parse"];
+  validateResultId: BillingLookupResultSchema["validateResultId"];
+  validateContext: BillingLookupResultSchema["validateContext"];
+}
 
 function ownDataValue(value: Record<string, unknown>, key: string): unknown {
   const descriptor = Object.getOwnPropertyDescriptor(value, key);
   return descriptor && "value" in descriptor ? descriptor.value : undefined;
 }
 
-function parseExtensionSchema(value: unknown): BillingLookupResultSchema | null {
-  if (!record(value)) return null;
-  const allowedKeys = [
-    "operations",
-    "completionKinds",
-    "parse",
-    "validateResultId",
-    "validateContext"
-  ];
-  if (Object.keys(value).some((key) => !allowedKeys.includes(key))) return null;
+function plainExtensionRecord(value: unknown): value is Record<string, unknown> {
+  if (!record(value)) return false;
+  const prototype = Reflect.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function copyDescriptorArray<T extends string>(
+  value: unknown,
+  validate: (entry: unknown) => entry is T,
+  maximumLength: number
+): readonly T[] | null {
+  if (!Array.isArray(value) || Reflect.getPrototypeOf(value) !== Array.prototype) return null;
+  const keys = Reflect.ownKeys(value);
+  const lengthDescriptor = Reflect.getOwnPropertyDescriptor(value, "length");
+  const length = lengthDescriptor && "value" in lengthDescriptor ? lengthDescriptor.value : null;
+  if (
+    typeof length !== "number" ||
+    !Number.isSafeInteger(length) ||
+    length < 1 ||
+    length > maximumLength ||
+    keys.length !== length + 1
+  ) {
+    return null;
+  }
+
+  const copied: T[] = [];
+  const seen = new Set<T>();
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = Reflect.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !("value" in descriptor) || !validate(descriptor.value)) return null;
+    if (seen.has(descriptor.value)) return null;
+    seen.add(descriptor.value);
+    copied.push(descriptor.value);
+  }
+  return Object.freeze(copied);
+}
+
+function extensionOperation(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    REGISTRY_IDENTIFIER.test(value) &&
+    !FORBIDDEN_REGISTRY_KEYS.has(value)
+  );
+}
+
+function extensionCompletionKind(value: unknown): value is "succeeded" | "rejected" {
+  return value === "succeeded" || value === "rejected";
+}
+
+function normalizeExtensionSchema(value: unknown): NormalizedBillingLookupResultSchema | null {
+  if (!plainExtensionRecord(value)) return null;
+  const keys = Reflect.ownKeys(value);
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+    if (typeof key !== "string" || !EXTENSION_SCHEMA_KEYS.has(key)) return null;
+  }
   const operations = ownDataValue(value, "operations");
   const completionKinds = ownDataValue(value, "completionKinds");
   const parse = ownDataValue(value, "parse");
   const validateResultId = ownDataValue(value, "validateResultId");
-  const validateContextDescriptor = Object.getOwnPropertyDescriptor(value, "validateContext");
+  const validateContextDescriptor = Reflect.getOwnPropertyDescriptor(value, "validateContext");
+  const copiedOperations = copyDescriptorArray(operations, extensionOperation, 64);
+  const copiedCompletionKinds = copyDescriptorArray(
+    completionKinds,
+    extensionCompletionKind,
+    2
+  );
   if (
-    !Array.isArray(operations) ||
-    operations.length === 0 ||
-    !operations.every(nonEmptyString) ||
-    !Array.isArray(completionKinds) ||
-    completionKinds.length === 0 ||
-    !completionKinds.every((kind) => kind === "succeeded" || kind === "rejected") ||
+    !copiedOperations ||
+    !copiedCompletionKinds ||
     typeof parse !== "function" ||
     typeof validateResultId !== "function" ||
     (validateContextDescriptor !== undefined && !("value" in validateContextDescriptor))
@@ -406,38 +503,39 @@ function parseExtensionSchema(value: unknown): BillingLookupResultSchema | null 
   }
   const validateContext = validateContextDescriptor?.value;
   if (validateContext !== undefined && typeof validateContext !== "function") return null;
-  return {
-    operations: operations as string[],
-    completionKinds: completionKinds as ("succeeded" | "rejected")[],
+  return Object.freeze({
+    operations: new Set(copiedOperations),
+    completionKinds: new Set(copiedCompletionKinds),
     parse: parse as BillingLookupResultSchema["parse"],
     validateResultId: validateResultId as BillingLookupResultSchema["validateResultId"],
     validateContext: validateContext as BillingLookupResultSchema["validateContext"]
-  };
+  });
 }
 
 function lookupRegistry(
   extensions?: BillingLookupResultRegistry
-): Map<string, BillingLookupResultSchema> | null {
-  const registry = new Map<string, BillingLookupResultSchema>(
-    Object.entries(defaultBillingLookupResultRegistry)
-  );
+): Map<string, NormalizedBillingLookupResultSchema> | null {
+  const registry = new Map(CANONICAL_LOOKUP_RESULT_REGISTRY);
   if (!extensions) return registry;
   try {
-    const canonicalOperations = new Set(
-      [...registry.values()].flatMap((entry) => entry.operations)
-    );
-    for (const resultType of Object.getOwnPropertyNames(extensions)) {
+    if (!plainExtensionRecord(extensions)) return null;
+    const extensionKeys = Reflect.ownKeys(extensions);
+    for (let index = 0; index < extensionKeys.length; index += 1) {
+      const resultType = extensionKeys[index];
       if (
+        typeof resultType !== "string" ||
+        !REGISTRY_IDENTIFIER.test(resultType) ||
         FORBIDDEN_REGISTRY_KEYS.has(resultType) ||
-        Object.hasOwn(defaultBillingLookupResultRegistry, resultType)
+        CANONICAL_LOOKUP_RESULT_REGISTRY.has(resultType)
       ) {
         return null;
       }
-      const descriptor = Object.getOwnPropertyDescriptor(extensions, resultType);
+      const descriptor = Reflect.getOwnPropertyDescriptor(extensions, resultType);
       if (!descriptor || !("value" in descriptor)) return null;
-      const schema = parseExtensionSchema(descriptor.value);
-      if (!schema || schema.operations.some((operation) => canonicalOperations.has(operation))) {
-        return null;
+      const schema = normalizeExtensionSchema(descriptor.value);
+      if (!schema) return null;
+      for (const operation of schema.operations) {
+        if (CANONICAL_LOOKUP_OPERATIONS.has(operation)) return null;
       }
       registry.set(resultType, schema);
     }
@@ -703,6 +801,37 @@ export const defaultBillingLookupResultRegistry: BillingLookupResultRegistry = {
       payload.delivery_status === "active"
   }
 };
+for (const schema of Object.values(defaultBillingLookupResultRegistry)) {
+  Object.freeze(schema.operations);
+  Object.freeze(schema.completionKinds);
+  Object.freeze(schema);
+}
+Object.freeze(defaultBillingLookupResultRegistry);
+
+function normalizeCanonicalSchema(
+  schema: BillingLookupResultSchema
+): NormalizedBillingLookupResultSchema {
+  return Object.freeze({
+    operations: new Set(schema.operations),
+    completionKinds: new Set(schema.completionKinds),
+    parse: schema.parse,
+    validateResultId: schema.validateResultId,
+    validateContext: schema.validateContext
+  });
+}
+
+const CANONICAL_LOOKUP_RESULT_REGISTRY = new Map<string, NormalizedBillingLookupResultSchema>([
+  ["script_generate_result", normalizeCanonicalSchema(defaultBillingLookupResultRegistry.script_generate_result)],
+  ["scene_prompt_result", normalizeCanonicalSchema(defaultBillingLookupResultRegistry.scene_prompt_result)],
+  ["ecom_image_batch", normalizeCanonicalSchema(defaultBillingLookupResultRegistry.ecom_image_batch)],
+  ["video_task", normalizeCanonicalSchema(defaultBillingLookupResultRegistry.video_task)],
+  ["brand_voice_order", normalizeCanonicalSchema(defaultBillingLookupResultRegistry.brand_voice_order)],
+  ["brand_voice", normalizeCanonicalSchema(defaultBillingLookupResultRegistry.brand_voice)]
+]);
+const CANONICAL_LOOKUP_OPERATIONS = new Set<string>();
+for (const schema of CANONICAL_LOOKUP_RESULT_REGISTRY.values()) {
+  for (const operation of schema.operations) CANONICAL_LOOKUP_OPERATIONS.add(operation);
+}
 
 function payloadsEqual(left: BillingLookupPayload, right: BillingLookupPayload): boolean {
   const leftKeys = Object.keys(left).sort();
@@ -733,6 +862,17 @@ export function parseBillingOperationLookup(
   value: unknown,
   extensions?: BillingLookupResultRegistry
 ): BillingOperationLookup | ExtendedBillingOperationLookup | null {
+  try {
+    return parseBillingOperationLookupUnchecked(value, extensions);
+  } catch {
+    return null;
+  }
+}
+
+function parseBillingOperationLookupUnchecked(
+  value: unknown,
+  extensions?: BillingLookupResultRegistry
+): BillingOperationLookup | ExtendedBillingOperationLookup | null {
   const envelope = parseBillingOperationLookupEnvelope(value);
   const registry = lookupRegistry(extensions);
   if (
@@ -748,12 +888,16 @@ export function parseBillingOperationLookup(
     typeof value.result_type === "string" && !FORBIDDEN_REGISTRY_KEYS.has(value.result_type)
       ? registry.get(value.result_type) ?? null
       : null;
-  const knownOperation = [...registry.values()].some((entry) =>
-    entry.operations.includes(value.operation as string)
-  );
+  let knownOperation = false;
+  for (const entry of registry.values()) {
+    if (entry.operations.has(envelope.operation)) {
+      knownOperation = true;
+      break;
+    }
+  }
   if (!knownOperation) return null;
   if (value.result_type !== null && !schema) return null;
-  if (schema && !schema.operations.includes(envelope.operation)) return null;
+  if (schema && !schema.operations.has(envelope.operation)) return null;
 
   if (value.state === "in_progress") {
     if (
@@ -796,7 +940,7 @@ export function parseBillingOperationLookup(
     ) {
       return null;
     }
-    if (!schema || !schema.completionKinds.includes("succeeded")) return null;
+    if (!schema || !schema.completionKinds.has("succeeded")) return null;
     const result = schema.parse(value.result);
     if (!result || !schema.validateResultId(value.result_id as string | null, result)) return null;
     if (value.result_id === null) {
@@ -821,7 +965,7 @@ export function parseBillingOperationLookup(
     ) {
       return null;
     }
-    if (!schema || !schema.completionKinds.includes("rejected")) return null;
+    if (!schema || !schema.completionKinds.has("rejected")) return null;
     const resource = schema.parse(value.resource);
     if (!resource || !schema.validateResultId(value.result_id as string | null, resource)) return null;
     if (
@@ -847,15 +991,19 @@ export function parseBillingOperationLookup(
   return value as unknown as BillingOperationLookup | ExtendedBillingOperationLookup;
 }
 
-export async function getBillingOperation(
-  operation: string,
+export async function getBillingOperation<TOperation>(
+  operation: IsAny<TOperation> extends true
+    ? never
+    : [TOperation] extends [BillingKnownOperation]
+      ? TOperation
+      : never,
   idempotencyKey: string
-): Promise<BillingOperationLookup>;
-export async function getBillingOperation<TLookup extends BillingOperationLookupLike>(
-  operation: string,
+): Promise<BillingOperationLookupFor<Extract<TOperation, BillingKnownOperation>>>;
+export async function getBillingOperation<TLookup>(
+  operation: LookupOperation<TLookup> & StrictCustomLookupGuard<TLookup>,
   idempotencyKey: string,
-  parseLookup: BillingOperationLookupParser<TLookup>
-): Promise<TLookup>;
+  parseLookup: ((value: unknown) => TLookup | null) & StrictCustomLookupGuard<TLookup>
+): Promise<StrictCustomBillingOperationLookup<TLookup>>;
 export async function getBillingOperation(
   operation: string,
   idempotencyKey: string,
@@ -865,13 +1013,20 @@ export async function getBillingOperation(
   const value = await apiFetch<unknown>(
     `/api/v1/billing/operations/by-idempotency/${encodeURIComponent(operation)}/${encodeURIComponent(idempotencyKey)}`
   );
-  const parsed = parseLookup(value);
-  const envelope = parseBillingOperationLookupEnvelope(value);
-  if (
-    !parsed ||
-    parsed.operation !== operation ||
-    parsed.idempotency_key.toLowerCase() !== idempotencyKey.toLowerCase()
-  ) {
+  let parsed: BillingOperationLookupLike | null = null;
+  let envelope: BillingOperationLookupEnvelope | null = null;
+  let matchesRequest = false;
+  try {
+    parsed = parseLookup(value);
+    envelope = parseBillingOperationLookupEnvelope(value);
+    matchesRequest =
+      parsed !== null &&
+      parsed.operation === operation &&
+      parsed.idempotency_key.toLowerCase() === idempotencyKey.toLowerCase();
+  } catch {
+    // An extension parser is untrusted input at this protocol boundary.
+  }
+  if (!parsed || !matchesRequest) {
     const detail =
       envelope &&
       envelope.operation === operation &&

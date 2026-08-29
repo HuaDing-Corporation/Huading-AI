@@ -1219,6 +1219,25 @@ export type BillingOperationLookup =
       };
     });
 
+type BillingOperationLookupForMember<
+  TLookup,
+  TOperation extends BillingKnownOperation
+> = TLookup extends { operation: infer SupportedOperation extends BillingKnownOperation }
+  ? TOperation extends SupportedOperation
+    ? Omit<TLookup, "operation"> & { operation: TOperation }
+    : never
+  : never;
+
+export type BillingOperationLookupFor<TOperation extends BillingKnownOperation> =
+  TOperation extends BillingKnownOperation
+    ? BillingOperationLookupForMember<BillingOperationLookup, TOperation>
+    : never;
+
+/** Complete canonical operation-to-lookup mapping used by parser-free billing APIs. */
+export type BillingOperationLookupMap = {
+  readonly [TOperation in BillingKnownOperation]: BillingOperationLookupFor<TOperation>;
+};
+
 /** Only returned when a caller explicitly supplies an extension registry/parser. */
 export type ExtendedBillingOperationLookup =
   | (BillingOperationLookupBase & {

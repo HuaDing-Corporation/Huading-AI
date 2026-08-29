@@ -8,7 +8,10 @@ import {
   type BillingLookupResultRegistry
 } from "@/lib/api/billing";
 import type {
+  BillingKnownOperation,
   BillingOperationLookup,
+  BillingOperationLookupFor,
+  BillingOperationLookupMap,
   BillingQuote,
   BillingSummary,
   ExtendedBillingOperationLookup
@@ -712,7 +715,12 @@ describe("useBillingAction", () => {
     const deps = options({ submit: originalSubmit, lookup: originalLookup });
     const view = renderHook(
       ({ operation, submit, lookup }) =>
-        useBillingAction({ ...deps, operation, submit, lookup }),
+        useBillingAction({
+          ...deps,
+          operation: operation as BillingKnownOperation,
+          submit,
+          lookup
+        }),
       {
         initialProps: {
           operation: "cosyvoice_brand_voice_create",
@@ -842,7 +850,8 @@ describe("useBillingAction", () => {
   it("clears a ready quote when the operation changes", async () => {
     const deps = options();
     const view = renderHook(
-      ({ operation }) => useBillingAction({ ...deps, operation }),
+      ({ operation }) =>
+        useBillingAction({ ...deps, operation: operation as BillingKnownOperation }),
       { initialProps: { operation: "cosyvoice_brand_voice_create" } }
     );
     await act(() => view.result.current.estimate());
@@ -936,14 +945,67 @@ describe("useBillingAction", () => {
       { completion_kind: "succeeded"; result_type: "brand_voice" }
     >;
     const voice = completedLookup() as VoiceSucceeded;
+    const parseVoice = (): VoiceSucceeded | null => voice;
     const useCompileContracts = () => {
+      // @ts-expect-error explicit any must not construct canonical options without a parser
+      const explicitAnyOptions: UseBillingActionOptions<
+        TestInput,
+        BillingQuote,
+        TestResult,
+        any // eslint-disable-line @typescript-eslint/no-explicit-any -- intentional public-API regression probe
+      > = options();
+
+      // @ts-expect-error unknown cannot select either the canonical or custom options branch
+      const unknownLookupOptions: UseBillingActionOptions<
+        TestInput,
+        BillingQuote,
+        TestResult,
+        unknown
+      > = options();
+
+      // @ts-expect-error the full canonical union is selected only by operation, never by manual TLookup
+      const broadLookupOptions: UseBillingActionOptions<
+        TestInput,
+        BillingQuote,
+        TestResult,
+        BillingOperationLookup
+      > = options();
+
+      const videoOptions: UseBillingActionOptions<
+        TestInput,
+        BillingQuote,
+        TestResult,
+        "video_create"
+      > = {
+        ...options(),
+        operation: "video_create",
+        resultFromLookup: (lookup) => {
+          expectTypeOf(lookup).toEqualTypeOf<BillingOperationLookupMap["video_create"]>();
+          return null;
+        }
+      };
+      const videoHook = useBillingAction({
+        ...options(),
+        operation: "video_create",
+        resultFromLookup: (lookup) => {
+          expectTypeOf(lookup).toEqualTypeOf<BillingOperationLookupMap["video_create"]>();
+          return null;
+        }
+      });
+      expectTypeOf(videoHook.lookup).toEqualTypeOf<
+        BillingOperationLookupFor<"video_create"> | null
+      >();
+
       // @ts-expect-error canonical brand_voice results cannot claim the video_create operation
       const mismatchedOperation: VoiceSucceeded = { ...voice, operation: "video_create" };
 
       // @ts-expect-error narrowing the canonical lookup generic requires an explicit strict parser
       useBillingAction<TestInput, BillingQuote, TestResult, VoiceSucceeded>({
         ...options(),
-        resultFromLookup: (lookup) => ({ id: lookup.result.id, billing: lookup.billing })
+        resultFromLookup: (lookup: VoiceSucceeded) => ({
+          id: lookup.result.id,
+          billing: lookup.billing
+        })
       });
 
       // @ts-expect-error a custom mapper is unavailable without its required strict parser
@@ -952,12 +1014,56 @@ describe("useBillingAction", () => {
         input: { text: "扩展请求" },
         estimate: vi.fn().mockResolvedValue({ ...quote(), operation: "custom_operation" }),
         submit: vi.fn().mockRejectedValue(networkError()),
-        resultFromLookup: (lookup) => ({ id: lookup.result.id, billing: lookup.billing })
+        resultFromLookup: (lookup: CustomLookup) => ({
+          id: lookup.result.id,
+          billing: lookup.billing
+        })
       });
 
-      // @ts-expect-error getBillingOperation narrowing also requires an explicit strict parser
-      getBillingOperation<VoiceSucceeded>("video_create", keyA);
-      return mismatchedOperation;
+      // @ts-expect-error an explicit any cannot select the canonical transport overload
+      getBillingOperation<any>("script_generate", keyA); // eslint-disable-line @typescript-eslint/no-explicit-any -- intentional public-API regression probe
+
+      // @ts-expect-error unknown is outside both transport overloads
+      getBillingOperation<unknown>("script_generate", keyA);
+
+      // @ts-expect-error a manually supplied full canonical union is too broad for the custom overload
+      getBillingOperation<BillingOperationLookup>("script_generate", keyA, parseBillingOperationLookup);
+
+      // @ts-expect-error the parser output is bound to cosyvoice, so video_create is impossible
+      getBillingOperation("video_create", keyA, parseVoice);
+
+      // @ts-expect-error an explicit any cannot select either hook overload
+      useBillingAction<TestInput, BillingQuote, TestResult, any>(options()); // eslint-disable-line @typescript-eslint/no-explicit-any -- intentional public-API regression probe
+
+      // @ts-expect-error unknown cannot select either hook overload
+      useBillingAction<TestInput, BillingQuote, TestResult, unknown>(options());
+
+      // @ts-expect-error callers cannot manually reopen the hook with the full canonical lookup union
+      useBillingAction<TestInput, BillingQuote, TestResult, BillingOperationLookup>(options());
+
+      useBillingAction({
+        ...options(),
+        // @ts-expect-error custom parser output operation must match the hook operation literal
+        operation: "video_create",
+        parseLookup: parseVoice,
+        resultFromLookup: (lookup: VoiceSucceeded) => ({
+          id: lookup.result.id,
+          billing: lookup.billing
+        })
+      });
+
+      const canonicalPromise = getBillingOperation("video_create", keyA);
+      expectTypeOf(canonicalPromise).toEqualTypeOf<
+        Promise<BillingOperationLookupFor<"video_create">>
+      >();
+      return [
+        explicitAnyOptions,
+        unknownLookupOptions,
+        broadLookupOptions,
+        videoOptions,
+        videoHook,
+        mismatchedOperation
+      ];
     };
 
     expect(useCompileContracts).toBeTypeOf("function");

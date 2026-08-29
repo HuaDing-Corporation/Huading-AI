@@ -10,12 +10,16 @@ import {
   parseBillingQuote,
   parseBillingSummary,
   type BillingOperationLookupLike,
-  type BillingOperationLookupParser
+  type BillingOperationLookupParser,
+  type IsAny,
+  type StrictCustomBillingOperationLookup
 } from "@/lib/api/billing";
 import { ApiError, isApiError } from "@/lib/api/client";
 import type {
   BillingConfirmation,
+  BillingKnownOperation,
   BillingOperationLookup,
+  BillingOperationLookupMap,
   BillingQuote,
   BillingSummary
 } from "@/lib/api/types";
@@ -30,8 +34,14 @@ export type BillingActionPhase =
   | "failed"
   | "expired";
 
-interface UseBillingActionOptionsBase<TInput, TQuote, TResult, TLookup> {
-  operation: string;
+interface UseBillingActionOptionsBase<
+  TInput,
+  TQuote,
+  TResult,
+  TLookup,
+  TOperation extends string
+> {
+  operation: TOperation;
   input: TInput | null;
   estimate: (input: TInput) => Promise<TQuote>;
   submit: (input: TInput, confirmation: BillingConfirmation) => Promise<TResult>;
@@ -48,27 +58,85 @@ export type UseBillingActionOptions<
   TInput,
   TQuote,
   TResult,
-  TLookup extends BillingOperationLookupLike = BillingOperationLookup
-> = UseBillingActionOptionsBase<TInput, TQuote, TResult, TLookup> &
-  ([TLookup] extends [BillingOperationLookup]
-    ? [BillingOperationLookup] extends [TLookup]
-      ? { parseLookup?: never }
-      : { parseLookup: BillingOperationLookupParser<TLookup> }
-    : { parseLookup: BillingOperationLookupParser<TLookup> });
+  TLookupOrOperation = BillingKnownOperation
+> = IsAny<TLookupOrOperation> extends true
+  ? never
+  : [unknown] extends [TLookupOrOperation]
+    ? never
+    : [TLookupOrOperation] extends [BillingKnownOperation]
+      ? CanonicalBillingActionOptions<
+          TInput,
+          TQuote,
+          TResult,
+          Extract<TLookupOrOperation, BillingKnownOperation>
+        >
+      : [TLookupOrOperation] extends [BillingOperationLookupLike]
+        ? StrictCustomBillingActionOptions<
+            TInput,
+            TQuote,
+            TResult,
+            Extract<TLookupOrOperation, BillingOperationLookupLike>
+          >
+        : never;
 
-type CanonicalBillingActionOptions<TInput, TQuote, TResult> =
-  UseBillingActionOptionsBase<TInput, TQuote, TResult, BillingOperationLookup> & {
-    parseLookup?: never;
-  };
+type CanonicalBillingActionOptions<
+  TInput,
+  TQuote,
+  TResult,
+  TOperation extends BillingKnownOperation = BillingKnownOperation
+> = UseBillingActionOptionsBase<
+  TInput,
+  TQuote,
+  TResult,
+  BillingOperationLookupMap[TOperation],
+  TOperation
+> & {
+  parseLookup?: never;
+};
 
 type CustomBillingActionOptions<
   TInput,
   TQuote,
   TResult,
-  TLookup extends BillingOperationLookupLike
-> = UseBillingActionOptionsBase<TInput, TQuote, TResult, TLookup> & {
-  parseLookup: BillingOperationLookupParser<TLookup>;
+  TLookup
+> = UseBillingActionOptionsBase<
+  TInput,
+  TQuote,
+  TResult,
+  TLookup,
+  InternalLookupOperation<TLookup>
+> & {
+  parseLookup: (value: unknown) => TLookup | null;
 };
+
+type StrictCustomBillingActionOptions<
+  TInput,
+  TQuote,
+  TResult,
+  TLookup
+> = [StrictCustomBillingOperationLookup<TLookup>] extends [never]
+  ? never
+  : CustomBillingActionOptions<TInput, TQuote, TResult, TLookup>;
+
+type InternalBillingActionOptions<
+  TInput,
+  TQuote,
+  TResult,
+  TLookup extends BillingOperationLookupLike
+> = UseBillingActionOptionsBase<TInput, TQuote, TResult, TLookup, string> & {
+  parseLookup?: (value: unknown) => TLookup | null;
+};
+
+type InternalStrictCustomGuard<TLookup> = [StrictCustomBillingOperationLookup<TLookup>] extends [
+  never
+]
+  ? never
+  : unknown;
+type InternalLookupOperation<TLookup> = TLookup extends {
+  operation: infer TOperation extends string;
+}
+  ? TOperation
+  : never;
 
 export interface UseBillingActionResult<
   TInput,
@@ -151,7 +219,7 @@ interface BoundAttempt<TInput, TResult, TLookup extends BillingOperationLookupLi
   fingerprintInput: (input: TInput) => string;
   submit: (input: TInput, confirmation: BillingConfirmation) => Promise<TResult>;
   lookup: (operation: string, idempotencyKey: string) => Promise<unknown>;
-  parseLookup: BillingOperationLookupParser<TLookup>;
+  parseLookup: (value: unknown) => TLookup | null;
   billingFromResult: (result: TResult) => BillingSummary | null;
   resultFromLookup: (lookup: TLookup) => TResult | null;
   now: () => number;
@@ -160,20 +228,49 @@ interface BoundAttempt<TInput, TResult, TLookup extends BillingOperationLookupLi
   run: number;
 }
 
-export function useBillingAction<TInput, TQuote, TResult>(
-  options: CanonicalBillingActionOptions<TInput, TQuote, TResult>
-): UseBillingActionResult<TInput, TQuote, TResult, BillingOperationLookup>;
 export function useBillingAction<
   TInput,
   TQuote,
   TResult,
-  TLookup extends BillingOperationLookupLike
+  TOperation = BillingKnownOperation
 >(
-  options: CustomBillingActionOptions<TInput, TQuote, TResult, TLookup>
-): UseBillingActionResult<TInput, TQuote, TResult, TLookup>;
+  options: IsAny<TOperation> extends true
+    ? never
+    : [TOperation] extends [BillingKnownOperation]
+      ? CanonicalBillingActionOptions<
+          TInput,
+          TQuote,
+          TResult,
+          Extract<TOperation, BillingKnownOperation>
+        >
+      : never
+): UseBillingActionResult<
+  TInput,
+  TQuote,
+  TResult,
+  BillingOperationLookupMap[Extract<TOperation, BillingKnownOperation>]
+>;
+export function useBillingAction<
+  TInput,
+  TQuote,
+  TResult,
+  TLookup
+>(
+  options: StrictCustomBillingActionOptions<TInput, TQuote, TResult, TLookup>
+): UseBillingActionResult<
+  TInput,
+  TQuote,
+  TResult,
+  Extract<TLookup, BillingOperationLookupLike>
+>;
 export function useBillingAction(options: unknown): unknown {
   return useBillingActionInternal(
-    options as UseBillingActionOptions<unknown, unknown, unknown, BillingOperationLookup>
+    options as InternalBillingActionOptions<
+      unknown,
+      unknown,
+      unknown,
+      BillingOperationLookupLike
+    >
   );
 }
 
@@ -183,7 +280,7 @@ function useBillingActionInternal<
   TResult,
   TLookup extends BillingOperationLookupLike = BillingOperationLookup
 >(
-  options: UseBillingActionOptions<TInput, TQuote, TResult, TLookup>
+  options: InternalBillingActionOptions<TInput, TQuote, TResult, TLookup>
 ): UseBillingActionResult<TInput, TQuote, TResult, TLookup> {
   const optionsRef = useRef(options);
   // Deliberately recompute on every render: React state should be immutable, but a
@@ -576,19 +673,27 @@ function useBillingActionInternal<
     const confirmation = { idempotency_key: key, quote_token: parsedQuote.quote_token };
     const id = ++runId.current;
     submitOwner.current = id;
-    const parseLookup: BillingOperationLookupParser<TLookup> =
-      optionsRef.current.parseLookup ??
+    const explicitParseLookup = optionsRef.current.parseLookup;
+    const parseLookup: ((value: unknown) => TLookup | null) =
+      explicitParseLookup ??
       ((value) => parseBillingOperationLookup(value) as TLookup | null);
+    const defaultLookup = explicitParseLookup
+      ? (operation: string, idempotencyKey: string) =>
+          getBillingOperation<TLookup>(
+            operation as InternalLookupOperation<TLookup> & InternalStrictCustomGuard<TLookup>,
+            idempotencyKey,
+            explicitParseLookup as BillingOperationLookupParser<TLookup> &
+              InternalStrictCustomGuard<TLookup>
+          )
+      : (operation: string, idempotencyKey: string) =>
+          getBillingOperation(operation as BillingKnownOperation, idempotencyKey);
     const attempt: BoundAttempt<TInput, TResult, TLookup> = {
       operation: optionsRef.current.operation,
       input,
       fingerprint: attemptFingerprint,
       fingerprintInput: optionsRef.current.fingerprint ?? normalizedBillingInputFingerprint,
       submit: optionsRef.current.submit,
-      lookup:
-        optionsRef.current.lookup ??
-        ((operation, idempotencyKey) =>
-          getBillingOperation(operation, idempotencyKey, parseLookup)),
+      lookup: optionsRef.current.lookup ?? defaultLookup,
       parseLookup,
       billingFromResult: optionsRef.current.billingFromResult ?? defaultBillingFromResult,
       resultFromLookup: optionsRef.current.resultFromLookup,
