@@ -54,6 +54,24 @@ describe("VoicePicker payer isolation", () => {
     expect(screen.queryByText("重复音")).not.toBeInTheDocument();
   });
 
+  it("does not expose expired non-canonical or non-payer records through the picker", () => {
+    render(
+      <VoicePicker
+        voices={[voice("preset", "系统音")]}
+        brandVoices={[
+          brand("canonical-expired", "规范豆包过期音", "expired", "doubao-voice-clone"),
+          brand("cosy-expired", "Cosy 过期音", "expired", "cosyvoice-voice-clone"),
+          { ...brand("historical", "历史供应商音", "expired", "doubao"), order_status: null }
+        ]}
+        value="preset"
+        onChange={() => undefined}
+      />
+    );
+    expect(screen.queryByText("规范豆包过期音")).not.toBeInTheDocument();
+    expect(screen.queryByText("Cosy 过期音")).not.toBeInTheDocument();
+    expect(screen.queryByText("历史供应商音")).not.toBeInTheDocument();
+  });
+
   it("does not re-lock a payer-authorized Doubao voice from client subscription inference", () => {
     const onChange = vi.fn();
     render(<VoicePicker voices={[voice("preset", "系统音")]} brandVoices={[brand("paid", "我的豆包音", "active", "doubao-voice-clone")]} canUseVip={false} value="preset" onChange={onChange} />);

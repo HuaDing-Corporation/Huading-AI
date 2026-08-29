@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({
@@ -22,6 +23,14 @@ vi.mock("@/lib/auth/auth-context", () => ({
 }));
 
 import { BrandVoiceCreate } from "./brand-voice-create";
+import { brandVoiceKeys, brandVoiceOrderKeys, voicesKey } from "@/lib/api/keys";
+
+function renderCreate(ui: React.ReactElement = <BrandVoiceCreate />, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
+  return {
+    client,
+    ...render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>)
+  };
+}
 
 const quote = (operation: string, payable: number, disclosures: Array<Record<string, unknown>> = []) => ({
   pricing_contract: "billing_quote",
@@ -95,7 +104,7 @@ beforeEach(() => {
 
 describe("BrandVoiceCreate", () => {
   it("shows manual delivery instead of pretending Doubao is cloning", async () => {
-    render(<BrandVoiceCreate />);
+    renderCreate();
     expect(screen.getByText("升级版 VIP 人工交付音色")).toBeVisible();
     expect(screen.getByText("提交人工订单，由平台交付；交付后有效 365 天")).toBeVisible();
     expect(screen.queryByText(/永久/)).not.toBeInTheDocument();
@@ -109,7 +118,7 @@ describe("BrandVoiceCreate", () => {
   });
 
   it("shows free CosyVoice creation as success and renders the tenant quote disclosure verbatim", async () => {
-    render(<BrandVoiceCreate />);
+    renderCreate();
     fill();
     fireEvent.click(screen.getByText("免费开通私人专属音色"));
     fireEvent.click(screen.getByRole("button", { name: "提交开通" }));
@@ -121,7 +130,7 @@ describe("BrandVoiceCreate", () => {
 
   it("does not submit when no valid quote was obtained", async () => {
     api.estimateOrder.mockRejectedValue(new Error("quote unavailable"));
-    render(<BrandVoiceCreate />);
+    renderCreate();
     fill();
     fireEvent.click(screen.getByRole("button", { name: "提交开通" }));
     const confirm = await screen.findByRole("button", { name: "确认并提交人工开通" });
@@ -132,7 +141,7 @@ describe("BrandVoiceCreate", () => {
 
   it("renewal requires a new audio upload and sends the expired voice id", async () => {
     api.estimateOrder.mockResolvedValue(quote("doubao_brand_voice_order_renew", 30000));
-    render(<BrandVoiceCreate renewVoice={{
+    renderCreate(<BrandVoiceCreate renewVoice={{
       id: "expired-1",
       name: "过期音",
       provider: "doubao-voice-clone",
@@ -148,5 +157,65 @@ describe("BrandVoiceCreate", () => {
     fireEvent.click(screen.getByRole("button", { name: "提交续期" }));
     await screen.findByText("本次冻结 30000 积分");
     expect(api.estimateOrder).toHaveBeenCalledWith(expect.objectContaining({ order_type: "renew", existing_brand_voice_id: "expired-1", source_audio_asset_id: "asset-1" }));
+  });
+
+  it("invalidates each adjacent order, brand-voice, and voice-picker cache exactly once after one success", async () => {
+    const orderRefresh = vi.fn().mockResolvedValue([]);
+    const brandRefresh = vi.fn().mockResolvedValue([]);
+    const pickerRefresh = vi.fn().mockResolvedValue([]);
+    function AdjacentConsumers() {
+      useQuery({ queryKey: brandVoiceOrderKeys.list(), queryFn: orderRefresh });
+      useQuery({ queryKey: brandVoiceKeys.list(), queryFn: brandRefresh });
+      useQuery({ queryKey: voicesKey, queryFn: pickerRefresh });
+      return null;
+    }
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const view = renderCreate(
+      <><AdjacentConsumers /><BrandVoiceCreate /></>,
+      client
+    );
+    await waitFor(() => {
+      expect(orderRefresh).toHaveBeenCalledTimes(1);
+      expect(brandRefresh).toHaveBeenCalledTimes(1);
+      expect(pickerRefresh).toHaveBeenCalledTimes(1);
+    });
+
+    fill();
+    fireEvent.click(screen.getByRole("button", { name: "提交开通" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认并提交人工开通" }));
+    await screen.findByText("已冻结 30000 积分，等待平台人工交付；订单不自动超时且无法取消");
+    await waitFor(() => {
+      expect(orderRefresh).toHaveBeenCalledTimes(2);
+      expect(brandRefresh).toHaveBeenCalledTimes(2);
+      expect(pickerRefresh).toHaveBeenCalledTimes(2);
+    });
+    expect(invalidate.mock.calls.map(([options]) => options?.queryKey)).toEqual([
+      brandVoiceOrderKeys.all,
+      brandVoiceKeys.all,
+      voicesKey
+    ]);
+
+    view.rerender(
+      <QueryClientProvider client={client}><AdjacentConsumers /><BrandVoiceCreate /></QueryClientProvider>
+    );
+    await Promise.resolve();
+    expect(invalidate).toHaveBeenCalledTimes(3);
+  });
+
+  it("invalidates the same three caches exactly once after one CosyVoice success", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    renderCreate(<BrandVoiceCreate />, client);
+    fill();
+    fireEvent.click(screen.getByText("免费开通私人专属音色"));
+    fireEvent.click(screen.getByRole("button", { name: "提交开通" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认并创建" }));
+    await screen.findByText("创建成功，本次创建免费（扣除 0 积分）");
+    expect(invalidate.mock.calls.map(([options]) => options?.queryKey)).toEqual([
+      brandVoiceOrderKeys.all,
+      brandVoiceKeys.all,
+      voicesKey
+    ]);
   });
 });

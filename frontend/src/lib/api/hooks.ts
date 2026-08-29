@@ -389,14 +389,19 @@ export function usePosterBatch() {
   return useMutation({ mutationFn: (body: PosterBatchRequest) => posterImageBatch(body) });
 }
 // ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001) ──
-// 列表：有 processing 项时每 3s 轮询，全部终态(ready/failed)则停轮询。
+// 只有 CosyVoice 自动创建的 processing 项每 3s 轮询；Doubao 人工订单绝不伪装成供应商轮询。
 export function useBrandVoices() {
   const { session } = useAuth();
   return useQuery({
     queryKey: brandVoiceKeys.list(),
     queryFn: listBrandVoices,
     enabled: !!session,
-    refetchInterval: (query) => (query.state.data?.some((v) => v.status === "processing") ? 3000 : false)
+    refetchInterval: (query) =>
+      query.state.data?.some(
+        (voice) => voice.provider === "cosyvoice-voice-clone" && voice.status === "processing"
+      )
+        ? 3000
+        : false
   });
 }
 export function useBrandVoiceOrders() {

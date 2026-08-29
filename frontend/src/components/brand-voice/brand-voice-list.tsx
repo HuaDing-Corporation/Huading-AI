@@ -53,7 +53,10 @@ export function BrandVoiceList({ onRenew }: { onRenew?: (voice: BrandVoice) => v
                 {voice.expires_at && <p className="mt-1 text-[11.5px] text-ink-soft">到期时间：{new Date(voice.expires_at).toLocaleString()}</p>}
                 {voice.delivery_status === "awaiting_fulfillment" && <p className="mt-1 text-[11.5px] text-queue-fg">等待平台人工交付，不会显示为供应商生成中</p>}
               </div>
-              {voice.delivery_status === "expired" && onRenew && (
+              {voice.delivery_status === "expired" &&
+                voice.provider === "doubao-voice-clone" &&
+                voice.order_status === "fulfilled" &&
+                onRenew && (
                 <button type="button" onClick={() => onRenew(voice)} className="rounded-field border border-line-gold px-3 py-1.5 text-[12px] text-gold-deep hover:bg-glass-hover">使用新音频续期</button>
               )}
               <button type="button" aria-label={`${copy.brandVoice.delete} ${voice.name}`} onClick={() => setPendingDelete(voice)} className="flex h-8 w-8 items-center justify-center rounded-mark text-ink-soft hover:bg-error-bg hover:text-error-fg"><Trash2 size={15} /></button>

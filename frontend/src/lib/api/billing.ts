@@ -1,6 +1,7 @@
 import { apiFetch, ApiError, isApiError } from "./client";
 import type {
   BillingConfirmation,
+  BillingBrandVoiceOrderResource,
   BillingKnownOperation,
   BillingLookupPayload,
   BillingOperationLookup,
@@ -692,6 +693,10 @@ function parseBrandVoiceOrder(value: unknown): BillingLookupPayload | null {
   return exactPayload(value, BRAND_VOICE_ORDER_KEYS, (payload) => {
     const billing = parseBillingSummary(payload.billing);
     const status = payload.status;
+    const validBillingStatus =
+      (status === "awaiting_fulfillment" && billing?.status === "reserved") ||
+      (status === "fulfilled" && billing?.status === "settled") ||
+      (status === "rejected" && billing?.status === "released");
     const validRefund =
       status === "rejected"
         ? (payload.refund_disposition === "source_subscription_released" &&
@@ -725,6 +730,7 @@ function parseBrandVoiceOrder(value: unknown): BillingLookupPayload | null {
       isoDate(payload.created_at) &&
       isoDate(payload.updated_at) &&
       billing !== null &&
+      validBillingStatus &&
       [
         "not_applicable",
         "source_subscription_released",
@@ -748,12 +754,15 @@ function parseBrandVoiceOrder(value: unknown): BillingLookupPayload | null {
       );
     }
     if (status === "fulfilled") {
+      const fulfilledAt = isoDate(payload.fulfilled_at) ? Date.parse(payload.fulfilled_at) : Number.NaN;
+      const expiresAt = isoDate(payload.expires_at) ? Date.parse(payload.expires_at) : Number.NaN;
       return (
         nonEmptyString(payload.fulfilled_brand_voice_id) &&
         nonEmptyString(payload.fulfilled_provider_voice_id) &&
         payload.rejection_reason === null &&
         isoDate(payload.fulfilled_at) &&
         isoDate(payload.expires_at) &&
+        expiresAt === fulfilledAt + 365 * 24 * 60 * 60 * 1000 &&
         payload.rejected_at === null
       );
     }
@@ -767,6 +776,28 @@ function parseBrandVoiceOrder(value: unknown): BillingLookupPayload | null {
       isoDate(payload.rejected_at)
     );
   });
+}
+
+export type ParsedBrandVoiceOrderResource = BillingBrandVoiceOrderResource & {
+  source_audio_url?: string | null;
+};
+
+/** Single runtime authority for customer, admin, and billing-lookup order resources. */
+export function parseBrandVoiceOrderResource(
+  value: unknown,
+  options: { allowSourceAudioUrl?: boolean } = {}
+): ParsedBrandVoiceOrderResource | null {
+  if (!record(value)) return null;
+  if (!Object.prototype.hasOwnProperty.call(value, "source_audio_url")) {
+    return parseBrandVoiceOrder(value) as ParsedBrandVoiceOrderResource | null;
+  }
+  if (!options.allowSourceAudioUrl || !exactKeys(value, [...BRAND_VOICE_ORDER_KEYS, "source_audio_url"])) {
+    return null;
+  }
+  if (value.source_audio_url !== null && !nonEmptyString(value.source_audio_url)) return null;
+  const base = { ...value };
+  delete base.source_audio_url;
+  return parseBrandVoiceOrder(base) ? (value as ParsedBrandVoiceOrderResource) : null;
 }
 
 function payloadId(field: string) {

@@ -638,6 +638,7 @@ interface MockBrandVoiceOrder {
   refund_applied_at: string | null;
   _resolve_payload?: string;
   _detail_polls?: number;
+  _list_polls?: number;
 }
 const seededBilling = (suffix: string, status: "reserved" | "settled" | "released") => ({
   operation_id: `00000000-0000-4000-8000-1000000000${suffix}`,
@@ -669,6 +670,7 @@ const mockOrderRead = (order: MockBrandVoiceOrder) => {
   const resource = { ...order } as Record<string, unknown>;
   delete resource._resolve_payload;
   delete resource._detail_polls;
+  delete resource._list_polls;
   return { ...resource, billing: { ...order.billing } };
 };
 let brandVoiceSeq = 0;
@@ -3519,6 +3521,15 @@ export const handlers = [
     const state = resolveMockState();
     const tenantId = state.identity?.tenant.id ?? "ten-mock";
     const userId = state.identity?.user.id ?? "u-mock";
+    const pendingRefund = brandVoiceOrders.get("bvo-pending");
+    if (pendingRefund) {
+      pendingRefund._list_polls = (pendingRefund._list_polls ?? 0) + 1;
+      if (pendingRefund._list_polls >= 2) {
+        pendingRefund.refund_disposition = "current_subscription_credited";
+        pendingRefund.refund_grant_status = "applied";
+        pendingRefund.refund_applied_at = "2026-09-01T00:00:00Z";
+      }
+    }
     const items = [...brandVoiceOrders.values()]
       .filter((order) => order.tenant_id === tenantId && order.ordered_by_user_id === userId)
       .sort((left, right) => right.created_at.localeCompare(left.created_at))

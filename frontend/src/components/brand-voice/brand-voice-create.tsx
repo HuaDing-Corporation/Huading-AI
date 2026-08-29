@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Lock, Mic, Square, Trash2, Upload } from "lucide-react";
 
 import { BillingStatus } from "@/components/billing/billing-status";
@@ -12,6 +13,7 @@ import { SelectableOption } from "@/components/ui/selectable-option";
 import { createBrandVoiceOrder, estimateBrandVoiceOrder, type BrandVoiceOrderInput, type BrandVoiceOrderRead } from "@/lib/api/brand-voice-orders";
 import { createBrandVoice, estimateBrandVoice, uploadAudio, type BrandVoiceCreateResponse } from "@/lib/api/brand-voices";
 import { errorText } from "@/lib/api/error-text";
+import { brandVoiceKeys, brandVoiceOrderKeys, voicesKey } from "@/lib/api/keys";
 import type { BillingOperationLookupFor, BillingQuote, BrandVoice, BrandVoiceCreateBody, BrandVoiceProvider } from "@/lib/api/types";
 import { useAuth } from "@/lib/auth/auth-context";
 import { canUseVipVoiceClone } from "@/lib/auth/vip";
@@ -34,6 +36,7 @@ export interface BrandVoiceCreateProps {
 }
 
 export function BrandVoiceCreate({ renewVoice = null, onFinished }: BrandVoiceCreateProps) {
+  const queryClient = useQueryClient();
   const recorder = useAudioRecorder();
   const recorderResetRef = useRef(recorder.reset);
   const handledOrderResultRef = useRef<string | null>(null);
@@ -103,9 +106,12 @@ export function BrandVoiceCreate({ renewVoice = null, onFinished }: BrandVoiceCr
       recorderResetRef.current();
       setConsent(false);
       setOrderInput(null);
+      void queryClient.invalidateQueries({ queryKey: brandVoiceOrderKeys.all });
+      void queryClient.invalidateQueries({ queryKey: brandVoiceKeys.all });
+      void queryClient.invalidateQueries({ queryKey: voicesKey });
       onFinished?.();
     }
-  }, [onFinished, orderBilling.phase, orderBilling.result]);
+  }, [onFinished, orderBilling.phase, orderBilling.result, queryClient]);
 
   useEffect(() => {
     if (cosyBilling.phase === "succeeded" && cosyBilling.result) {
@@ -118,9 +124,12 @@ export function BrandVoiceCreate({ renewVoice = null, onFinished }: BrandVoiceCr
       recorderResetRef.current();
       setConsent(false);
       setCosyInput(null);
+      void queryClient.invalidateQueries({ queryKey: brandVoiceOrderKeys.all });
+      void queryClient.invalidateQueries({ queryKey: brandVoiceKeys.all });
+      void queryClient.invalidateQueries({ queryKey: voicesKey });
       onFinished?.();
     }
-  }, [cosyBilling.phase, cosyBilling.result, onFinished]);
+  }, [cosyBilling.phase, cosyBilling.result, onFinished, queryClient]);
 
   const onUpload = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];

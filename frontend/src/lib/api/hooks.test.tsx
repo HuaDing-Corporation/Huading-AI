@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { ReactNode } from "react";
 
@@ -12,6 +12,11 @@ vi.mock("@/lib/api/uploads", () => ({ uploadImage: vi.fn(), uploadProductImage: 
 vi.mock("@/lib/api/auth", () => ({ fetchMe: vi.fn() }));
 vi.mock("@/lib/api/scripts", () => ({ generateScript: vi.fn() }));
 vi.mock("@/lib/api/voices", () => ({ listVoices: vi.fn().mockResolvedValue([]) }));
+vi.mock("@/lib/api/brand-voices", () => ({
+  listBrandVoices: vi.fn(),
+  deleteBrandVoice: vi.fn()
+}));
+vi.mock("@/lib/api/brand-voice-orders", () => ({ listBrandVoiceOrders: vi.fn().mockResolvedValue([]) }));
 vi.mock("@/lib/api/avatars", () => ({ listAvatarPresets: vi.fn().mockResolvedValue([]) }));
 vi.mock("@/lib/api/quota", () => ({ getQuota: vi.fn().mockResolvedValue({ total: 0, used: 0, reserved: 0, remaining: 0 }) }));
 vi.mock("@/lib/api/copy", () => ({ estimateCopy: vi.fn() }));
@@ -29,6 +34,7 @@ vi.mock("@/lib/auth/auth-context", () => ({
 
 import { listVideos, createVideo } from "@/lib/api/videos";
 import { estimateCopy } from "@/lib/api/copy";
+import { listBrandVoices } from "@/lib/api/brand-voices";
 import {
   createEcomCutout,
   createEcomModel,
@@ -42,7 +48,8 @@ import {
   useEstimateEcomModel,
   useVideos,
   useCreateVideo,
-  useEstimateCopy
+  useEstimateCopy,
+  useBrandVoices
 } from "@/lib/api/hooks";
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -51,8 +58,37 @@ function wrapper({ children }: { children: ReactNode }) {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.clearAllMocks();
   mockSession = { token: "t", tenantId: "ten-a" };
+});
+
+describe("useBrandVoices polling authority", () => {
+  it("does not poll a canonical Doubao manual-delivery processing record", async () => {
+    vi.useFakeTimers();
+    (listBrandVoices as Mock).mockResolvedValue([
+      { id: "doubao-1", provider: "doubao-voice-clone", status: "processing" }
+    ]);
+    renderHook(() => useBrandVoices(), { wrapper });
+    await act(async () => { await Promise.resolve(); });
+    expect(listBrandVoices).toHaveBeenCalledTimes(1);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(listBrandVoices).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps polling a CosyVoice processing record every three seconds", async () => {
+    vi.useFakeTimers();
+    (listBrandVoices as Mock).mockResolvedValue([
+      { id: "cosy-1", provider: "cosyvoice-voice-clone", status: "processing" }
+    ]);
+    renderHook(() => useBrandVoices(), { wrapper });
+    await act(async () => { await Promise.resolve(); });
+    expect(listBrandVoices).toHaveBeenCalledTimes(1);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(listBrandVoices).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("useVideos", () => {

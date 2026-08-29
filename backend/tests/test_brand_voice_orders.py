@@ -1510,7 +1510,16 @@ def test_fulfill_settles_and_starts_payment_user_voice_for_365_days(db_session):
         connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
 
 
-@pytest.mark.parametrize("invalid_delivery", ["missing", "wrong_owner", "missing_expiry"])
+@pytest.mark.parametrize(
+    "invalid_delivery",
+    [
+        "missing",
+        "wrong_owner",
+        "missing_expiry",
+        "wrong_expiry",
+        "wrong_activated_at",
+    ],
+)
 def test_fulfilled_order_read_fails_closed_for_invalid_delivered_voice(
     db_session,
     invalid_delivery: str,
@@ -1534,8 +1543,50 @@ def test_fulfilled_order_read_fails_closed_for_invalid_delivered_voice(
         resolved.fulfilled_brand_voice_id = "missing-delivered-voice"
     elif invalid_delivery == "wrong_owner":
         voice.owner_user_id = None
-    else:
+    elif invalid_delivery == "missing_expiry":
         voice.expires_at = None
+    elif invalid_delivery == "wrong_expiry":
+        voice.expires_at = resolved.fulfilled_at + timedelta(days=364)
+    else:
+        voice.activated_at = resolved.fulfilled_at + timedelta(seconds=1)
+
+    with db_session.no_autoflush, pytest.raises(AppError) as captured:
+        brand_voice_order_read(db_session, order=resolved)
+
+    assert captured.value.code == "BILLING_INVARIANT_VIOLATION"
+    db_session.rollback()
+    db_session.close()
+    with db_session.get_bind().connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+
+
+@pytest.mark.parametrize(
+    "invalid_terminal_field",
+    ["missing_fulfilled_at", "missing_provider", "rejected_at", "rejection_reason"],
+)
+def test_fulfilled_order_read_fails_closed_for_inconsistent_terminal_fields(
+    db_session,
+    invalid_terminal_field: str,
+) -> None:
+    from app.services.brand_voice_orders import brand_voice_order_read, resolve_brand_voice_order
+
+    order_id, _operation_id = _seed_manual_order_for_invariant_test(db_session)
+    resolved = resolve_brand_voice_order(
+        db_session,
+        actor=db_session.get(User, "user-a"),
+        order_id=order_id,
+        action="fulfill",
+        provider_voice_id=f"invalid-terminal-{invalid_terminal_field}",
+        now=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+    )
+    if invalid_terminal_field == "missing_fulfilled_at":
+        resolved.fulfilled_at = None
+    elif invalid_terminal_field == "missing_provider":
+        resolved.fulfilled_provider_id = None
+    elif invalid_terminal_field == "rejected_at":
+        resolved.rejected_at = datetime(2026, 8, 29, 12, 1, tzinfo=UTC)
+    else:
+        resolved.rejection_reason = "must stay null"
 
     with db_session.no_autoflush, pytest.raises(AppError) as captured:
         brand_voice_order_read(db_session, order=resolved)

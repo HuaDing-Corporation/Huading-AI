@@ -12,12 +12,19 @@ vi.mock("@/lib/api/hooks", () => ({
 
 import { BrandVoiceList } from "./brand-voice-list";
 
-const voice = (id: string, name: string, delivery: string, expires_at: string | null = null) => ({
+const voice = (
+  id: string,
+  name: string,
+  delivery: string,
+  expires_at: string | null = null,
+  provider = "doubao-voice-clone",
+  order_status: string | null = "fulfilled"
+) => ({
   id,
   name,
-  provider: "doubao-voice-clone",
+  provider,
   status: "ready",
-  order_status: "fulfilled",
+  order_status,
   delivery_status: delivery,
   expires_at,
   created_at: "2026-08-01T00:00:00Z"
@@ -44,6 +51,18 @@ describe("BrandVoiceList", () => {
     expect(screen.getAllByRole("button", { name: "使用新音频续期" })).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: "使用新音频续期" }));
     expect(renew).toHaveBeenCalledWith(expect.objectContaining({ id: "expired" }));
+  });
+
+  it.each([
+    ["cosy", "cosyvoice-voice-clone", "fulfilled"],
+    ["legacy", "doubao", "fulfilled"],
+    ["official", "doubao-voice-clone", null],
+    ["unowned", "doubao-voice-clone", null],
+    ["unfulfilled", "doubao-voice-clone", "awaiting_fulfillment"]
+  ])("does not offer renewal for an ineligible expired %s voice", (_kind, provider, orderStatus) => {
+    hooks.data = [voice("expired", "不可续期音色", "expired", "2026-08-01T00:00:00Z", provider, orderStatus)];
+    render(<BrandVoiceList onRenew={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "使用新音频续期" })).not.toBeInTheDocument();
   });
 
   it("does not promise a refund on delete", async () => {

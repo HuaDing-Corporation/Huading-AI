@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { copy } from "@/lib/copy";
@@ -37,6 +38,11 @@ vi.mock("@/lib/api/brand-voice-orders", () => ({
 vi.mock("@/lib/auth/auth-context", () => ({ useAuth: () => ({ session: { role: "admin", user: { permissions: ["voice_clone_vip"] } }, ready: true }) }));
 
 import { BrandVoiceCreate } from "./brand-voice-create";
+
+function renderCreate() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={client}><BrandVoiceCreate /></QueryClientProvider>);
+}
 
 beforeEach(() => {
   recorderState.supported = true;
@@ -83,7 +89,7 @@ afterEach(() => vi.clearAllMocks());
 describe("BrandVoiceCreate · 录音态（mock useAudioRecorder）", () => {
   it("录音权限被拒/启动失败：组件渲染 recorder.error（role=alert，降级不断链）", () => {
     recorderState.error = copy.brandVoice.recordPermissionDenied;
-    render(<BrandVoiceCreate />);
+    renderCreate();
     expect(screen.getByText(copy.brandVoice.recordPermissionDenied)).toBeInTheDocument();
   });
 
@@ -91,7 +97,7 @@ describe("BrandVoiceCreate · 录音态（mock useAudioRecorder）", () => {
     recorderState.blob = new Blob(["x"], { type: "audio/webm" });
     recorderState.url = "blob:mock";
     recorderState.durationSec = 3;
-    render(<BrandVoiceCreate />);
+    renderCreate();
     expect(screen.getByText(copy.errors.audioTooShort)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "提交开通" })).toBeDisabled();
   });
@@ -101,7 +107,7 @@ describe("BrandVoiceCreate · 录音态（mock useAudioRecorder）", () => {
     recorderState.blob = blob;
     recorderState.url = "blob:mock";
     recorderState.durationSec = 8;
-    render(<BrandVoiceCreate />);
+    renderCreate();
 
     fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "录音音色" } });
     fireEvent.click(screen.getByRole("checkbox"));

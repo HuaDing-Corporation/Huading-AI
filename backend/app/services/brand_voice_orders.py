@@ -542,18 +542,36 @@ def brand_voice_order_read(db: Session, *, order: BrandVoiceOrder) -> BrandVoice
             )
         provider_voice_id = registry.normalized_provider_id
     if order.status == "fulfilled":
-        if order.fulfilled_brand_voice_id is None:
+        if (
+            order.fulfilled_brand_voice_id is None
+            or order.fulfilled_provider_id is None
+            or order.fulfilled_at is None
+            or order.rejected_at is not None
+            or order.rejection_reason is not None
+        ):
             raise AppError(
-                "Fulfilled manual order is missing its delivered voice.",
+                "Fulfilled manual order has inconsistent terminal fields.",
                 code="BILLING_INVARIANT_VIOLATION",
                 status_code=500,
             )
         delivered_voice = db.get(BrandVoice, order.fulfilled_brand_voice_id)
+        fulfilled_at = _as_utc(order.fulfilled_at)
+        activated_at = (
+            _as_utc(delivered_voice.activated_at)
+            if delivered_voice is not None and delivered_voice.activated_at is not None
+            else None
+        )
+        delivered_expires_at = (
+            _as_utc(delivered_voice.expires_at)
+            if delivered_voice is not None and delivered_voice.expires_at is not None
+            else None
+        )
         if (
             delivered_voice is None
             or delivered_voice.tenant_id != order.tenant_id
             or delivered_voice.owner_user_id != order.user_id
-            or delivered_voice.expires_at is None
+            or activated_at != fulfilled_at
+            or delivered_expires_at != fulfilled_at + timedelta(days=365)
         ):
             raise AppError(
                 "Fulfilled manual order has an invalid delivered voice expiry.",
