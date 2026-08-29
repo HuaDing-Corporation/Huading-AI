@@ -3,8 +3,8 @@
 import { useState, type CSSProperties } from "react";
 import { Eraser } from "lucide-react";
 
-import { useCutoutBatch, useCutoutImage } from "@/lib/api/hooks";
-import type { CutoutBackground } from "@/lib/api/types";
+import { createEcomCutout, estimateEcomCutout } from "@/lib/api/ecom-images";
+import type { BillingConfirmation, CutoutBackground, CutoutBatchRequest, CutoutRequest } from "@/lib/api/types";
 import { SelectableOption } from "@/components/ui/selectable-option";
 import { AspectRatioSelect, DEFAULT_IMAGE_ASPECT_RATIO, type ImageAspectRatio } from "@/components/workbench/aspect-ratio-select";
 import { EcomImageTool } from "@/components/workbench/ecom-image-tool";
@@ -29,8 +29,6 @@ const checkerStyle: CSSProperties = {
  * task(kind=ecom_cutout)，由外壳 trackExisting 轮询（产物进 TaskList + 图片历史）。
  */
 export function EcomImageCutoutForm() {
-  const cutout = useCutoutImage();
-  const cutoutBatch = useCutoutBatch();
   const [background, setBackground] = useState<CutoutBackground>("white");
   const [aspectRatio, setAspectRatio] = useState<ImageAspectRatio>(DEFAULT_IMAGE_ASPECT_RATIO); // 画面比例，默认 1:1
   // 透明装饰按「提交时」的背景快照，避免提交后改选未重新生成却变了预览底纹。
@@ -42,20 +40,32 @@ export function EcomImageCutoutForm() {
       subtitle={copy.workbench.ecomCutoutSubtitle}
       idPrefix="ecom-cutout"
       icon={<Eraser size={18} strokeWidth={1.8} />}
-      submitting={cutout.isPending || cutoutBatch.isPending}
       resultDecoration={submittedBg === "transparent" ? checkerStyle : undefined}
-      onSubmitSingle={async (assetId, applyVisibleLabel) => {
-        setSubmittedBg(background);
-        const res = await cutout.mutateAsync({ source_asset_id: assetId, background, aspect_ratio: aspectRatio, apply_visible_label: applyVisibleLabel });
-        return [res.task_id];
+      buildRequest={(assetIds, applyVisibleLabel, mode) => mode === "single"
+        ? {
+            source_asset_id: assetIds[0],
+            background,
+            aspect_ratio: aspectRatio,
+            apply_visible_label: applyVisibleLabel
+          }
+        : {
+            items: assetIds.map((id) => ({
+              source_asset_id: id,
+              background,
+              aspect_ratio: aspectRatio,
+              apply_visible_label: applyVisibleLabel
+            }))
+          }}
+      estimate={estimateEcomCutout}
+      submit={async (request: CutoutRequest | CutoutBatchRequest, confirmation: BillingConfirmation) => {
+        if ("items" in request) {
+          const response = await createEcomCutout(request, confirmation);
+          return { taskIds: response.tasks.map((task) => task.task_id) };
+        }
+        const response = await createEcomCutout(request, confirmation);
+        return { taskIds: [response.task_id] };
       }}
-      onSubmitBatch={async (assetIds, applyVisibleLabel) => {
-        setSubmittedBg(background);
-        const res = await cutoutBatch.mutateAsync({
-          items: assetIds.map((id) => ({ source_asset_id: id, background, aspect_ratio: aspectRatio, apply_visible_label: applyVisibleLabel }))
-        });
-        return res.tasks.map((t) => t.task_id);
-      }}
+      onQuoteRequested={() => setSubmittedBg(background)}
     >
       {/* 背景：白底 / 透明 */}
       <fieldset className="mb-[15px] m-0 min-w-0 border-0 p-0">

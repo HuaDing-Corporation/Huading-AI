@@ -4,14 +4,30 @@ import { useEffect, useState } from "react";
 import { Sparkles } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
-import { useBrandVoices, useScenePromptGenerate, useScriptGenerate, useUploadProductImage, useVoices } from "@/lib/api/hooks";
+import { isApiError } from "@/lib/api/client";
+import { useBrandVoices, useUploadProductImage, useVoices } from "@/lib/api/hooks";
+import { estimateScript, generateScript } from "@/lib/api/scripts";
+import { estimateScenePrompt, generateScenePrompt } from "@/lib/api/videos";
 import { useGenerateConfirm } from "@/lib/api/use-generate-confirm";
-import type { CreateVideoRequest, ScriptLengthTier, VideoGenResolution } from "@/lib/api/types";
+import type {
+  BillingOperationLookupFor,
+  BillingConfirmation,
+  CreateVideoRequest,
+  ScenePromptRequest,
+  ScenePromptResponse,
+  ScriptGenerateRequest,
+  ScriptGenerateResponse,
+  ScriptLengthTier,
+  VideoEstimateContract,
+  VideoGenResolution
+} from "@/lib/api/types";
+import { useBillingAction } from "@/lib/billing/use-billing-action";
 import { useVideoTasks } from "@/lib/videos/tasks-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
 import { AiTextField } from "@/components/workbench/ai-text-field";
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
+import { PricingConfirmDialog } from "@/components/billing/pricing-confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { DurationPicker, isValidDuration } from "@/components/workbench/duration-picker";
 import { IMAGE_COUNT_MAX, isValidImageCount, ProductImageCountPicker } from "@/components/workbench/product-image-count-picker";
@@ -54,8 +70,6 @@ export function EcomVideoForm({
   onPrefillConsumed?: () => void;
 } = {}) {
   const { createAndTrack } = useVideoTasks();
-  const scriptGen = useScriptGenerate();
-  const scenePromptGen = useScenePromptGenerate();
   const uploadProduct = useUploadProductImage();
   const voices = useVoices();
   const { session, ready: authReady } = useAuth(); // VIP 门禁（§二之二）：doubao 品牌音色可用性
@@ -78,6 +92,72 @@ export function EcomVideoForm({
   const [speed, setSpeed] = useState(1);
   const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）
   const [error, setError] = useState<string | null>(null);
+  const [scriptPricingOpen, setScriptPricingOpen] = useState(false);
+  const scriptInput: ScriptGenerateRequest | null =
+    topic.trim() && isValidDuration(durationSec)
+      ? {
+          topic: topic.trim(),
+          video_mode: "seedance_i2v",
+          duration_sec: durationSec,
+          length_tier: scriptLength
+        }
+      : null;
+  const scriptBilling = useBillingAction<
+    ScriptGenerateRequest,
+    Awaited<ReturnType<typeof estimateScript>>,
+    ScriptGenerateResponse,
+    "script_generate"
+  >({
+    operation: "script_generate",
+    input: scriptInput,
+    estimate: estimateScript,
+    submit: generateScript,
+    resultFromLookup: (lookup: BillingOperationLookupFor<"script_generate">) => {
+      if (
+        lookup.state !== "completed" ||
+        lookup.completion_kind !== "succeeded" ||
+        lookup.result_type !== "script_generate_result"
+      ) {
+        return null;
+      }
+      return { script: lookup.result.script, billing: lookup.billing };
+    }
+  });
+  const [scenePricingOpen, setScenePricingOpen] = useState(false);
+  const sceneInput: ScenePromptRequest | null =
+    productKeys.length > 0 && isValidDuration(durationSec)
+      ? {
+          topic: topic.trim() || undefined,
+          script: script.trim() || undefined,
+          product_image_keys: productKeys,
+          duration_sec: durationSec
+        }
+      : null;
+  const sceneBilling = useBillingAction<
+    ScenePromptRequest,
+    Awaited<ReturnType<typeof estimateScenePrompt>>,
+    ScenePromptResponse,
+    "scene_prompt"
+  >({
+    operation: "scene_prompt",
+    input: sceneInput,
+    estimate: estimateScenePrompt,
+    submit: generateScenePrompt,
+    resultFromLookup: (lookup: BillingOperationLookupFor<"scene_prompt">) => {
+      if (
+        lookup.state !== "completed" ||
+        lookup.completion_kind !== "succeeded" ||
+        lookup.result_type !== "scene_prompt_result"
+      ) {
+        return null;
+      }
+      return {
+        scene_prompt: lookup.result.scene_prompt,
+        negative_prompt: lookup.result.negative_prompt,
+        billing: lookup.billing
+      };
+    }
+  });
   // WORKBENCH-KEEPALIVE-UI-0001 · prefill 消费时机重设计（详见 new-video-form.tsx 同处注释）：面板常驻后本表单
   // 不再重挂 → 改为同步 props；只写 prefill 带来的字段，用户已填的其它输入原样保留；消费后回调 clearPrefill →
   // props 回落 undefined → 下次 early-return，不重复注入（原 prefillConsumed ref 闩锁已删，它永不复位）。
@@ -107,17 +187,63 @@ export function EcomVideoForm({
     onPrefillConsumed
   ]);
 
+  const scriptBillingPhase = scriptBilling.phase;
+  const scriptBillingResult = scriptBilling.result;
+  const resetScriptBilling = scriptBilling.reset;
+  const sceneBillingPhase = sceneBilling.phase;
+  const sceneBillingResult = sceneBilling.result;
+  const resetSceneBilling = sceneBilling.reset;
+
+  useEffect(() => {
+    if (scriptBillingPhase !== "succeeded" || !scriptBillingResult) return;
+    setScript(scriptBillingResult.script);
+    setScriptPricingOpen(false);
+    resetScriptBilling();
+  }, [resetScriptBilling, scriptBillingPhase, scriptBillingResult]);
+
+  useEffect(() => {
+    if (sceneBillingPhase !== "succeeded" || !sceneBillingResult) return;
+    setScenePrompt(sceneBillingResult.scene_prompt);
+    setNegativePrompt(sceneBillingResult.negative_prompt);
+    setScenePricingOpen(false);
+    resetSceneBilling();
+  }, [resetSceneBilling, sceneBillingPhase, sceneBillingResult]);
+
   // Actual submit — runs only after the 确定生成 confirmation; owns its own errors.
-  const submit = async (req: CreateVideoRequest) => {
+  const submit = async (
+    req: CreateVideoRequest,
+    estimate?: VideoEstimateContract,
+    confirmation?: BillingConfirmation
+  ) => {
     setError(null);
     try {
       // topic 现可空（req1）→ 任务展示标题用 topic 兜底为通用名（createAndTrack 的 title 需非空字符串）。
-      await createAndTrack(req, req.topic || copy.workbench.ecomTitle);
+      const title = req.topic || copy.workbench.ecomTitle;
+      if (estimate?.pricing_contract === "billing_quote") {
+        if (!confirmation) throw new Error("缺少视频报价确认信息");
+        return await createAndTrack(req, title, { estimate, confirmation });
+      }
+      if (estimate) return await createAndTrack(req, title, { estimate });
+      await createAndTrack(req, title);
     } catch (err) {
       setError(errorText(err));
+      throw err;
     }
   };
-  const confirm = useGenerateConfirm(submit);
+  const confirm = useGenerateConfirm(submit, {
+    authoritativePricing: true,
+    onEstimateError: (caught) => setError(errorText(caught))
+  });
+  const confirmPricingError = confirm.pricing?.error;
+  const cancelConfirm = confirm.cancel;
+
+  useEffect(() => {
+    if (!isApiError(confirmPricingError) || confirmPricingError.code !== "BILLABLE_TEXT_REQUIRED") return;
+    cancelConfirm();
+    // Keep the focus callback alive across close() clearing the pricing error;
+    // the next render must not cancel the move to the actionable field.
+    window.setTimeout(() => document.getElementById("ecom-script")?.focus(), 0);
+  }, [cancelConfirm, confirmPricingError]);
 
   // Default the voice to the first loaded option (once), without clobbering a pick.
   const voiceList = voices.data;
@@ -134,42 +260,30 @@ export function EcomVideoForm({
   const canGenerate =
     hasProductImage && !imagesOverLimit && isValidImageCount(imageCount) && !!voiceId && isValidDuration(durationSec);
 
-  const onGenerateScript = async () => {
+  const onGenerateScript = () => {
     const trimmed = topic.trim();
     // 需卖点/主题（BE topic 必填）+ 时长合法（FIX2：BE ScriptGenerateRequest.duration_sec 也是 int，小数会 422——不发非法时长）。
-    if (!trimmed || !isValidDuration(durationSec) || scriptGen.isPending) return;
+    if (
+      !trimmed ||
+      !isValidDuration(durationSec) ||
+      scriptBilling.phase === "submitting" ||
+      scriptBilling.phase === "querying"
+    ) return;
     setError(null);
-    try {
-      const res = await scriptGen.mutateAsync({
-        topic: trimmed,
-        video_mode: "seedance_i2v",
-        duration_sec: durationSec,
-        length_tier: scriptLength // req3：字数档位随请求传（默认 medium）
-      });
-      setScript(res.script);
-    } catch (err) {
-      setError(errorText(err));
-    }
+    setScriptPricingOpen(true);
   };
 
   // 画面提示词 AI 生成（契约 §4.2/req7）：发产品图 keys（≥1，luna 多模态读图）+ 文案 + topic；同产出负面提示词，自动填入。
-  const onGenerateScenePrompt = async () => {
+  const onGenerateScenePrompt = () => {
     // 必须带产品图（BE 会 422）+ 时长合法（FIX1：BE duration_sec 是 int，小数会 422——不发非法时长的 scene-prompt）。
-    if (!hasProductImage || !isValidDuration(durationSec) || scenePromptGen.isPending) return;
+    if (
+      !hasProductImage ||
+      !isValidDuration(durationSec) ||
+      sceneBilling.phase === "submitting" ||
+      sceneBilling.phase === "querying"
+    ) return;
     setError(null);
-    try {
-      const res = await scenePromptGen.mutateAsync({
-        topic: topic.trim() || undefined,
-        script: script.trim() || undefined,
-        product_image_keys: productKeys,
-        duration_sec: durationSec // SCENE-DURATION-FIX：带当前选中时长（含自定义值），让画面提示词秒数随选择变化（BE 夹取 [5,120]）
-      });
-      // ?? "" 防御：契约保证二者恒为 string，但真 BE 若漏字段返 undefined 会把受控 textarea 翻成非受控（React 告警）。
-      setScenePrompt(res.scene_prompt ?? "");
-      setNegativePrompt(res.negative_prompt ?? ""); // req6：负面提示词自动填入（用户可再改）
-    } catch (err) {
-      setError(errorText(err));
-    }
+    setScenePricingOpen(true);
   };
 
   // Run existing validation, then open the confirm dialog instead of submitting.
@@ -249,7 +363,7 @@ export function EcomVideoForm({
         script={script}
         onChange={setScript}
         onRegenerate={onGenerateScript}
-        loading={scriptGen.isPending}
+        loading={scriptBilling.phase === "submitting" || scriptBilling.phase === "querying"}
         speed={speed}
         label={copy.workbench.ecomScriptLabel}
         actionLabel={copy.workbench.ecomScriptGenerate} // req3：「重写文案」→「AI生成文案」（口播共享组件不传→仍「重写文案」）
@@ -267,7 +381,7 @@ export function EcomVideoForm({
         actionLabel={copy.workbench.scenePromptGenerate}
         actionIcon="generate"
         actionDisabled={!hasProductImage || !isValidDuration(durationSec)} // req7：无产品图 / 时长非整数(FIX1) 禁点（BE 会 422，前端友好拦）
-        loading={scenePromptGen.isPending}
+        loading={sceneBilling.phase === "submitting" || sceneBilling.phase === "querying"}
         rows={3}
         placeholder={copy.workbench.scenePromptPlaceholder}
         footer={hasProductImage ? copy.workbench.scenePromptHint : copy.workbench.sceneNeedProductImage}
@@ -325,8 +439,37 @@ export function EcomVideoForm({
         open={confirm.open}
         request={confirm.request}
         submitting={confirm.submitting}
+        pricing={confirm.pricing}
         onConfirm={confirm.confirm}
         onCancel={confirm.cancel}
+      />
+
+      <PricingConfirmDialog
+        open={scriptPricingOpen}
+        phase={scriptBilling.phase}
+        quote={scriptBilling.quote}
+        expiresInSeconds={scriptBilling.expiresInSeconds}
+        errorMessage={scriptBilling.errorMessage}
+        onEstimate={() => void scriptBilling.estimate()}
+        onConfirm={() => void scriptBilling.confirm()}
+        onCancel={() => {
+          setScriptPricingOpen(false);
+          scriptBilling.reset();
+        }}
+      />
+
+      <PricingConfirmDialog
+        open={scenePricingOpen}
+        phase={sceneBilling.phase}
+        quote={sceneBilling.quote}
+        expiresInSeconds={sceneBilling.expiresInSeconds}
+        errorMessage={sceneBilling.errorMessage}
+        onEstimate={() => void sceneBilling.estimate()}
+        onConfirm={() => void sceneBilling.confirm()}
+        onCancel={() => {
+          setScenePricingOpen(false);
+          sceneBilling.reset();
+        }}
       />
     </Card>
   );

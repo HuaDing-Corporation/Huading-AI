@@ -1,13 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { RefreshCw, Sparkles } from "lucide-react";
 
-import { useModelImage, useModelStyles } from "@/lib/api/hooks";
+import { createEcomModel, estimateEcomModel } from "@/lib/api/ecom-images";
+import { useModelStyles } from "@/lib/api/hooks";
 import { useVideoTasks } from "@/lib/videos/tasks-context";
 import { useLabelTogglePreference } from "@/lib/preferences/label-toggle";
-import { errorText } from "@/lib/api/error-text";
-import type { ModelGender, ProductImagesMode } from "@/lib/api/types";
+import type {
+  BillingOperationLookupFor,
+  BillingQuote,
+  ModelGender,
+  ModelRequest,
+  ProductImagesMode
+} from "@/lib/api/types";
+import { useBillingAction } from "@/lib/billing/use-billing-action";
 import { AiTextField } from "@/components/workbench/ai-text-field";
 import { SelectableOption } from "@/components/ui/selectable-option";
 import {
@@ -17,7 +24,9 @@ import {
   type ImageAspectRatio
 } from "@/components/workbench/aspect-ratio-select";
 import { ReferenceImagesPicker } from "@/components/workbench/reference-images-picker";
-import { ResultTile } from "@/components/workbench/ecom-image-tool";
+import { ResultTile, type EcomImageSubmitResult } from "@/components/workbench/ecom-image-tool";
+import { BillingStatus } from "@/components/billing/billing-status";
+import { PricingConfirmDialog } from "@/components/billing/pricing-confirm-dialog";
 import { AiLabelToggle } from "@/components/label/ai-label-toggle";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -54,7 +63,6 @@ export function EcomImageModelForm({
   initialAspectRatio?: string;
   onPrefillConsumed?: () => void;
 } = {}) {
-  const model = useModelImage();
   const styles = useModelStyles();
   const { tasks, trackExisting } = useVideoTasks();
   const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）
@@ -69,6 +77,9 @@ export function EcomImageModelForm({
   const [modelIds, setModelIds] = useState<string[]>([]);
   const [submittedId, setSubmittedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pricingOpen, setPricingOpen] = useState(false);
+  const handledBillingResultRef = useRef<EcomImageSubmitResult | null>(null);
+  const submittedLabelRef = useRef(false);
 
   // 提示词反推「带入 · 电商图(AI 模特)」：注入自定义补充（= extra_prompt）+ 画面比例（REVERSE-DEEP-UI-0001 范围2）。
   // D4：取消 200 截断，直接注入全文。纪律：每个 `!== undefined` 各自成门，只写 prefill 真带来的字段；
@@ -90,7 +101,66 @@ export function EcomImageModelForm({
   const overBudget = productCount + modelCount > IMAGE_BUDGET;
   const customFilled = customStyle.trim().length > 0; // 自定义风格已填 → 预设禁用（D3 互斥）
 
-  const onGenerate = async () => {
+  const modelInput: ModelRequest | null = productCount > 0 && !overBudget
+    ? {
+        product_asset_ids: productIds,
+        model_asset_ids: modelCount ? modelIds : undefined,
+        product_images_mode: productCount > 1 ? productImagesMode : "multi_item",
+        gender,
+        style_id: customFilled ? undefined : styleId ?? undefined,
+        custom_style: customFilled ? customStyle.trim() : undefined,
+        extra_prompt: custom.trim() || undefined,
+        aspect_ratio: aspectRatio,
+        apply_visible_label: applyLabel
+      }
+    : null;
+  const modelBilling = useBillingAction<
+    ModelRequest,
+    BillingQuote,
+    EcomImageSubmitResult,
+    "ecom_model"
+  >({
+    operation: "ecom_model",
+    input: modelInput,
+    estimate: estimateEcomModel,
+    submit: async (request, confirmation) => {
+      const response = await createEcomModel(request, confirmation);
+      return { taskIds: [response.task_id] };
+    },
+    resultFromLookup: (lookup: BillingOperationLookupFor<"ecom_model">) => {
+      if (
+        lookup.state !== "completed" ||
+        lookup.completion_kind !== "succeeded" ||
+        lookup.result_type !== "ecom_image_batch" ||
+        !lookup.result
+      ) {
+        return null;
+      }
+      return {
+        taskIds: lookup.result.items.map((item) => item.task_id),
+        billing: lookup.billing
+      };
+    }
+  });
+
+  useEffect(() => {
+    const result = modelBilling.result;
+    if (modelBilling.phase !== "succeeded" || !result || handledBillingResultRef.current === result) return;
+    handledBillingResultRef.current = result;
+    result.taskIds.forEach((id) =>
+      trackExisting(id, copy.workbench.ecomModelTitle, "photo", submittedLabelRef.current)
+    );
+    setSubmittedId(result.taskIds[0] ?? null);
+    setPricingOpen(false);
+  }, [modelBilling.phase, modelBilling.result, trackExisting]);
+
+  useEffect(() => {
+    if (modelBilling.phase === "failed" && modelBilling.quote !== null && modelBilling.errorMessage) {
+      setError(modelBilling.errorMessage);
+    }
+  }, [modelBilling.errorMessage, modelBilling.phase, modelBilling.quote]);
+
+  const onGenerate = () => {
     setError(null);
     // 商品图至少 1 张（D1）；模特图/风格均可选。正常 UI 已 disabled，这里防 fireEvent/快速绕过。
     if (productCount < 1) {
@@ -101,28 +171,15 @@ export function EcomImageModelForm({
       setError(copy.workbench.ecomModelOverLimit); // 并发上传越限的兜底：不发越限请求，明确提示移除
       return;
     }
-    try {
-      const res = await model.mutateAsync({
-        product_asset_ids: productIds,
-        model_asset_ids: modelCount ? modelIds : undefined,
-        // 组合语义仅在 >1 张商品图时有意义（开关也仅此时显示）；≤1 张一律回默认 multi_item，与「默认 multi_item」一致。
-        product_images_mode: productCount > 1 ? productImagesMode : "multi_item",
-        gender,
-        // D3 互斥：填了自定义风格 → 只发 custom_style（不发 style_id）；否则发所选预设（可无）。
-        style_id: customFilled ? undefined : styleId ?? undefined,
-        custom_style: customFilled ? customStyle.trim() : undefined,
-        extra_prompt: custom.trim() || undefined,
-        aspect_ratio: aspectRatio,
-        apply_visible_label: applyLabel
-      });
-      trackExisting(res.task_id, copy.workbench.ecomModelTitle, "photo", applyLabel);
-      setSubmittedId(res.task_id);
-    } catch (err) {
-      setError(errorText(err));
-    }
+    if (!modelInput) return;
+    handledBillingResultRef.current = null;
+    submittedLabelRef.current = applyLabel;
+    modelBilling.reset();
+    setPricingOpen(true);
   };
 
-  const generateDisabled = model.isPending || productCount < 1 || overBudget;
+  const modelPending = modelBilling.phase === "estimating" || modelBilling.phase === "submitting" || modelBilling.phase === "querying";
+  const generateDisabled = modelPending || pricingOpen || productCount < 1 || overBudget;
   const resultTask = submittedId ? tasks.find((t) => t.taskId === submittedId) : undefined;
 
   return (
@@ -262,10 +319,39 @@ export function EcomImageModelForm({
         </p>
       )}
 
-      <Button variant="primary" size="lg" className="mt-1 w-full" onClick={() => void onGenerate()} disabled={generateDisabled}>
-        {model.isPending ? <RefreshCw size={18} strokeWidth={1.8} className="animate-spin" /> : <Sparkles size={18} strokeWidth={1.8} />}
-        {model.isPending ? copy.workbench.ecomGenerating : copy.workbench.ecomGenerate}
+      <Button variant="primary" size="lg" className="mt-1 w-full" onClick={onGenerate} disabled={generateDisabled}>
+        {modelPending ? <RefreshCw size={18} strokeWidth={1.8} className="animate-spin" /> : <Sparkles size={18} strokeWidth={1.8} />}
+        {modelPending ? copy.workbench.ecomGenerating : copy.workbench.ecomGenerate}
       </Button>
+
+      <PricingConfirmDialog
+        open={pricingOpen}
+        phase={modelBilling.phase}
+        quote={modelBilling.quote}
+        expiresInSeconds={modelBilling.expiresInSeconds}
+        errorMessage={modelBilling.errorMessage}
+        onEstimate={() => void modelBilling.estimate()}
+        onConfirm={() => void modelBilling.confirm()}
+        onCancel={() => {
+          setPricingOpen(false);
+          modelBilling.reset();
+        }}
+      />
+
+      {modelBilling.billing && (
+        <div className="mt-4 space-y-2">
+          <BillingStatus
+            summary={modelBilling.billing}
+            querying={modelBilling.phase === "querying"}
+            onContinueLookup={() => void modelBilling.continueLookup()}
+          />
+          {modelBilling.billing.status === "partially_settled" && (
+            <p className="text-[12px] leading-5 text-ink-soft">
+              仅结算成功生成的图片，失败图片对应的冻结积分已释放。
+            </p>
+          )}
+        </div>
+      )}
 
       {resultTask && (
         <div className="mt-5 border-t border-line-gold pt-5">

@@ -15,6 +15,12 @@ vi.mock("@/lib/api/voices", () => ({ listVoices: vi.fn().mockResolvedValue([]) }
 vi.mock("@/lib/api/avatars", () => ({ listAvatarPresets: vi.fn().mockResolvedValue([]) }));
 vi.mock("@/lib/api/quota", () => ({ getQuota: vi.fn().mockResolvedValue({ total: 0, used: 0, reserved: 0, remaining: 0 }) }));
 vi.mock("@/lib/api/copy", () => ({ estimateCopy: vi.fn() }));
+vi.mock("@/lib/api/ecom-images", () => ({
+  estimateEcomCutout: vi.fn(),
+  createEcomCutout: vi.fn(),
+  estimateEcomModel: vi.fn(),
+  createEcomModel: vi.fn()
+}));
 
 let mockSession: { token: string; tenantId: string } | null = { token: "t", tenantId: "ten-a" };
 vi.mock("@/lib/auth/auth-context", () => ({
@@ -23,7 +29,21 @@ vi.mock("@/lib/auth/auth-context", () => ({
 
 import { listVideos, createVideo } from "@/lib/api/videos";
 import { estimateCopy } from "@/lib/api/copy";
-import { useVideos, useCreateVideo, useEstimateCopy } from "@/lib/api/hooks";
+import {
+  createEcomCutout,
+  createEcomModel,
+  estimateEcomCutout,
+  estimateEcomModel
+} from "@/lib/api/ecom-images";
+import {
+  useCreateEcomCutout,
+  useCreateEcomModel,
+  useEstimateEcomCutout,
+  useEstimateEcomModel,
+  useVideos,
+  useCreateVideo,
+  useEstimateCopy
+} from "@/lib/api/hooks";
 
 function wrapper({ children }: { children: ReactNode }) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -112,5 +132,51 @@ describe("useEstimateCopy", () => {
       ]
     });
     await waitFor(() => expect(result.current.data?.estimated_credits).toBe(6));
+  });
+});
+
+describe("authoritative e-commerce billing hooks", () => {
+  it("keeps estimate input and confirmed cutout submission explicit", async () => {
+    const body = { source_asset_id: "asset-1", background: "white" as const };
+    const confirmation = {
+      quote_token: "quote",
+      idempotency_key: "11111111-1111-4111-8111-111111111111"
+    };
+    (estimateEcomCutout as Mock).mockResolvedValue({ operation: "ecom_cutout", payable_credits: 80 });
+    (createEcomCutout as Mock).mockResolvedValue({ task_id: "task-1", status: "queued" });
+
+    const estimate = renderHook(() => useEstimateEcomCutout(), { wrapper });
+    estimate.result.current.mutate(body);
+    await waitFor(() => expect(estimate.result.current.isSuccess).toBe(true));
+    expect(estimateEcomCutout).toHaveBeenCalledWith(body);
+
+    const create = renderHook(() => useCreateEcomCutout(), { wrapper });
+    create.result.current.mutate({ body, confirmation });
+    await waitFor(() => expect(create.result.current.isSuccess).toBe(true));
+    expect(createEcomCutout).toHaveBeenCalledWith(body, confirmation);
+  });
+
+  it("keeps estimate input and confirmed model submission explicit", async () => {
+    const body = {
+      product_asset_ids: ["asset-1"],
+      product_images_mode: "multi_item" as const,
+      gender: "female" as const
+    };
+    const confirmation = {
+      quote_token: "model-quote",
+      idempotency_key: "22222222-2222-4222-8222-222222222222"
+    };
+    (estimateEcomModel as Mock).mockResolvedValue({ operation: "ecom_model", payable_credits: 80 });
+    (createEcomModel as Mock).mockResolvedValue({ task_id: "model-task", status: "queued" });
+
+    const estimate = renderHook(() => useEstimateEcomModel(), { wrapper });
+    estimate.result.current.mutate(body);
+    await waitFor(() => expect(estimate.result.current.isSuccess).toBe(true));
+    expect(estimateEcomModel).toHaveBeenCalledWith(body);
+
+    const create = renderHook(() => useCreateEcomModel(), { wrapper });
+    create.result.current.mutate({ body, confirmation });
+    await waitFor(() => expect(create.result.current.isSuccess).toBe(true));
+    expect(createEcomModel).toHaveBeenCalledWith(body, confirmation);
   });
 });

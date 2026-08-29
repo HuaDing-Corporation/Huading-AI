@@ -338,7 +338,7 @@ export const copy = {
     ecomResultsLabel: "结果",
     ecomDownload: "下载",
     ecomDownloadAll: "批量下载",
-    ecomBatchOverLimit: "批量最多 20 张，超出部分未添加",
+    ecomBatchOverLimit: "每批最多 20 张图片",
     removeImage: "移除图片",
     // 电商图 · AI 模特 (ECOM-MODEL-UI-0001) — 子工具切换 + 模特偏好
     ecomSubToolLabel: "电商图工具",

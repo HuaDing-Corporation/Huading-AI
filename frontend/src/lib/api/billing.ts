@@ -213,10 +213,14 @@ const DISCLOSURE_KEYS = [
 ] as const;
 
 function pricingLine(value: unknown, operation: string): boolean {
+  const allowedOperations = operation === "video_create"
+    ? new Set(["video_create", "cosyvoice_brand_tts"])
+    : new Set([operation]);
   return (
     record(value) &&
     exactKeys(value, LINE_KEYS) &&
-    value.operation === operation &&
+    typeof value.operation === "string" &&
+    allowedOperations.has(value.operation) &&
     nonEmptyString(value.capability) &&
     nonEmptyString(value.unit) &&
     decimalString(value.quantity) &&

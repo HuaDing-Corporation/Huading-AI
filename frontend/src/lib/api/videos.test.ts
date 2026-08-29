@@ -1,12 +1,282 @@
-import { describe, expect, it } from "vitest";
+import { http, HttpResponse } from "msw";
+import { describe, expect, it, vi } from "vitest";
 
-import { createVideo, estimateVideo, generateScenePrompt } from "@/lib/api/videos";
+import { server } from "@/mocks/server";
+
+import { getBillingOperation } from "@/lib/api/billing";
+import { createVideo, estimateScenePrompt, estimateVideo, generateScenePrompt } from "@/lib/api/videos";
+
+const API = "http://localhost:8000";
+const sceneConfirmation = {
+  quote_token: "scene-quote-token",
+  idempotency_key: "11111111-1111-4111-8111-111111111111"
+};
+
+const videoConfirmation = {
+  quote_token: "video-quote-token",
+  idempotency_key: "22222222-2222-4222-8222-222222222222"
+};
+
+let sceneRequestSequence = 0;
+
+async function confirmedScenePrompt(input: Parameters<typeof estimateScenePrompt>[0]) {
+  sceneRequestSequence += 1;
+  const quote = await estimateScenePrompt(input);
+  return generateScenePrompt(input, {
+    quote_token: quote.quote_token,
+    idempotency_key: `30000000-0000-4000-8000-${String(sceneRequestSequence).padStart(12, "0")}`
+  });
+}
+
+const videoQuote = {
+  pricing_contract: "billing_quote" as const,
+  pricing_shape: "composite" as const,
+  operation: "video_create",
+  unit: null,
+  quantity: null,
+  unit_credits: null,
+  rate_scope: null,
+  rate_source: null,
+  subtotal_credits: "100.0000",
+  payable_credits: 100,
+  breakdown: [
+    {
+      operation: "video_create",
+      capability: "video",
+      unit: "second",
+      quantity: "1",
+      unit_credits: "100.0000",
+      subtotal_credits: "100.0000",
+      rate_scope: "tenant_overridable" as const,
+      rate_source: "code_default" as const,
+      rate_id: null,
+      effective_at: null,
+      policy_key: "video_create",
+      policy_version: 1,
+      label: "视频生成"
+    }
+  ] as const,
+  disclosures: [],
+  quote_token: videoConfirmation.quote_token,
+  expires_at: "2030-01-01T00:00:00Z"
+};
+
+const videoBilling = {
+  operation_id: "video-operation",
+  idempotency_key: videoConfirmation.idempotency_key,
+  status: "reserved" as const,
+  requested_credits: 100,
+  held_credits: 100,
+  settled_credits: 0,
+  released_credits: 0
+};
 
 // ECOM-VIDEO-OPTIMIZE-UI-0001 · FIX2 · P1：确认窗打开必调 POST /videos/estimate。此前缺 mock handler →
 // MSW 放行到真后端 → CI net::ERR_FAILED（#203 红）。本测真走 apiFetch → 全局 MSW（vitest.setup 已 server.listen），
 // 非 stub：验响应契约形状（对齐 #202 VideoEstimateResponse）+ 防假绿（estimate 与提交同一 VideoGenerateRequest 校验，
 // 缺产品图/音色在 estimate 阶段即 422，mock 不比 BE 宽松）。
 describe("estimateVideo · POST /videos/estimate（apiFetch 真走 MSW · FIX2 P1）", () => {
+  it("default MSW quotes and stores a confirmed CosyVoice branded video operation", async () => {
+    const input = {
+      video_mode: "avatar_talk",
+      topic: "品牌口播",
+      script: "四字文案",
+      voice_id: "bv-ready-2",
+      avatar_asset_id: "avatar-1"
+    };
+    const quote = await estimateVideo(input);
+    expect(quote).toMatchObject({
+      pricing_contract: "billing_quote",
+      pricing_shape: "composite",
+      operation: "video_create",
+      breakdown: [
+        { capability: "video", unit: "second" },
+        {
+          operation: "cosyvoice_brand_tts",
+          capability: "tts",
+          unit: "character",
+          quantity: "4",
+          unit_credits: "0.1000"
+        }
+      ]
+    });
+    if (quote.pricing_contract !== "billing_quote") throw new Error("expected billed video quote");
+    const key = "55555555-5555-4555-8555-555555555555";
+    const accepted = await createVideo(input, {
+      quote_token: quote.quote_token,
+      idempotency_key: key
+    });
+    expect(accepted).toMatchObject({
+      pricing_contract: "billing_quote",
+      status: "queued",
+      billing: { idempotency_key: key, status: "reserved" }
+    });
+    const lookup = await getBillingOperation("video_create", key);
+    expect(lookup).toMatchObject({
+      operation: "video_create",
+      state: "in_progress",
+      completion_kind: null,
+      result_type: "video_task",
+      result_id: accepted.id,
+      resource: { task_id: accepted.id, status: "queued" }
+    });
+  });
+
+  it("default MSW keeps a Doubao branded quote free of CosyVoice character pricing", async () => {
+    const quote = await estimateVideo({
+      video_mode: "avatar_talk",
+      topic: "豆包品牌口播",
+      script: "真实文案",
+      voice_id: "bv-ready-1",
+      avatar_asset_id: "avatar-1"
+    });
+    expect(quote).toMatchObject({
+      pricing_contract: "billing_quote",
+      pricing_shape: "composite",
+      operation: "video_create"
+    });
+    if (quote.pricing_contract !== "billing_quote" || quote.pricing_shape !== "composite") {
+      throw new Error("expected billed Doubao video quote");
+    }
+    expect(quote.breakdown).toHaveLength(1);
+    expect(quote.breakdown[0]).toMatchObject({ capability: "video", unit: "second" });
+    expect(quote.breakdown.some((line) => line.unit === "character")).toBe(false);
+  });
+
+  it("default MSW requires billable text and confirmation only for branded videos", async () => {
+    const branded = {
+      video_mode: "avatar_talk",
+      topic: "品牌口播",
+      voice_id: "bv-ready-2",
+      avatar_asset_id: "avatar-1"
+    };
+    await expect(estimateVideo(branded)).rejects.toMatchObject({
+      code: "BILLABLE_TEXT_REQUIRED",
+      status: 422
+    });
+    await expect(createVideo({ ...branded, script: "已有文案" })).rejects.toMatchObject({
+      code: "BILLING_HEADERS_REQUIRED",
+      status: 422
+    });
+  });
+
+  it("default MSW returns deferred and legacy contracts without honoring forged billing headers", async () => {
+    await expect(estimateVideo({ video_mode: "static_template", topic: "延期" })).resolves.toEqual({
+      pricing_contract: "deferred_unpriced",
+      estimated_credits: 0,
+      unit: "credits",
+      unpriced: true,
+      note: "延期处理／尚未闭环"
+    });
+    for (const [body, pricingContract] of [
+      [{ video_mode: "static_template", topic: "延期" }, "deferred_unpriced"],
+      [{ video_mode: "photo", topic: "旧计费图片" }, "legacy_estimate"]
+    ] as const) {
+      const response = await fetch(`${API}/api/v1/videos`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": "66666666-6666-4666-8666-666666666666",
+          "X-Huading-Quote": "forged-quote"
+        },
+        body: JSON.stringify(body)
+      });
+      const envelope = (await response.json()) as { data: Record<string, unknown> };
+      expect(envelope.data).toMatchObject({ pricing_contract: pricingContract, status: "queued" });
+      expect(envelope.data).not.toHaveProperty("billing");
+    }
+  });
+
+  it("fails closed when a billing_quote estimate is missing its signed quote token", async () => {
+    server.use(
+      http.post(`${API}/api/v1/videos/estimate`, () =>
+        HttpResponse.json({
+          data: {
+            pricing_contract: "billing_quote",
+            operation: "video_create",
+            payable_credits: 100
+          },
+          error: null,
+          request_id: "malformed"
+        })
+      )
+    );
+    await expect(
+      estimateVideo({
+        video_mode: "avatar_talk",
+        voice_id: "brand-voice",
+        avatar_asset_id: "avatar-1",
+        script: "测试口播"
+      })
+    ).rejects.toMatchObject({ code: "INVALID_VIDEO_PRICING_CONTRACT" });
+  });
+
+  it("parses billing_quote, legacy_estimate and deferred_unpriced as mutually exclusive contracts", async () => {
+    server.use(
+      http.post(`${API}/api/v1/videos/estimate`, async ({ request }) => {
+        const body = (await request.json()) as { topic?: string };
+        if (body.topic === "billing") return HttpResponse.json({ data: videoQuote, error: null, request_id: "quote" });
+        if (body.topic === "legacy") {
+          return HttpResponse.json({
+            data: {
+              pricing_contract: "legacy_estimate",
+              estimated_credits: 12,
+              unit: "credits",
+              note: "旧计费流程"
+            },
+            error: null,
+            request_id: "legacy"
+          });
+        }
+        return HttpResponse.json({
+          data: {
+            pricing_contract: "deferred_unpriced",
+            estimated_credits: 0,
+            unit: "credits",
+            unpriced: true,
+            note: "延期处理／尚未闭环"
+          },
+          error: null,
+          request_id: "deferred"
+        });
+      })
+    );
+
+    await expect(estimateVideo({ topic: "billing" })).resolves.toEqual(videoQuote);
+    await expect(estimateVideo({ topic: "legacy" })).resolves.toMatchObject({
+      pricing_contract: "legacy_estimate",
+      estimated_credits: 12
+    });
+    await expect(estimateVideo({ topic: "deferred" })).resolves.toEqual({
+      pricing_contract: "deferred_unpriced",
+      estimated_credits: 0,
+      unit: "credits",
+      unpriced: true,
+      note: "延期处理／尚未闭环"
+    });
+  });
+
+  it("rejects a deferred response that invents a reason_code", async () => {
+    server.use(
+      http.post(`${API}/api/v1/videos/estimate`, () =>
+        HttpResponse.json({
+          data: {
+            pricing_contract: "deferred_unpriced",
+            estimated_credits: 0,
+            unit: "credits",
+            unpriced: true,
+            reason_code: "NOT_YET_PRICED"
+          },
+          error: null,
+          request_id: "malformed-deferred"
+        })
+      )
+    );
+    await expect(estimateVideo({ topic: "deferred" })).rejects.toMatchObject({
+      code: "INVALID_VIDEO_PRICING_CONTRACT"
+    });
+  });
+
   it("seedance_i2v 合法体 → 返回契约形状 {estimated_credits:number, unit:'credits', note}", async () => {
     const res = await estimateVideo({
       video_mode: "seedance_i2v",
@@ -15,6 +285,8 @@ describe("estimateVideo · POST /videos/estimate（apiFetch 真走 MSW · FIX2 P
       duration_sec: 30,
       resolution: "720p"
     });
+    expect(res.pricing_contract).toBe("legacy_estimate");
+    if (res.pricing_contract !== "legacy_estimate") throw new Error("expected legacy estimate");
     expect(res.unit).toBe("credits");
     expect(typeof res.estimated_credits).toBe("number");
     expect(res.estimated_credits).toBeGreaterThan(0);
@@ -41,33 +313,183 @@ describe("estimateVideo · POST /videos/estimate（apiFetch 真走 MSW · FIX2 P
   });
 });
 
+describe("createVideo · strict accepted pricing contract", () => {
+  it("sends exact billing headers only for a confirmed billed submit", async () => {
+    const calls: Array<{ quote: string | null; key: string | null }> = [];
+    server.use(
+      http.post(`${API}/api/v1/videos`, ({ request }) => {
+        const quote = request.headers.get("X-Huading-Quote");
+        const key = request.headers.get("Idempotency-Key");
+        calls.push({ quote, key });
+        const id = `task-${calls.length}`;
+        return HttpResponse.json({
+          data: quote
+            ? {
+                id,
+                task_id: id,
+                status: "queued",
+                pricing_contract: "billing_quote",
+                billing: videoBilling
+              }
+            : {
+                id,
+                task_id: id,
+                status: "queued",
+                pricing_contract: "legacy_estimate"
+              },
+          error: null,
+          request_id: id
+        }, { status: 202 });
+      })
+    );
+
+    await expect(createVideo({ topic: "billing" }, videoConfirmation)).resolves.toMatchObject({
+      pricing_contract: "billing_quote",
+      billing: videoBilling
+    });
+    await expect(createVideo({ topic: "legacy" })).resolves.toMatchObject({
+      pricing_contract: "legacy_estimate"
+    });
+    expect(calls).toEqual([
+      { quote: videoConfirmation.quote_token, key: videoConfirmation.idempotency_key },
+      { quote: null, key: null }
+    ]);
+  });
+
+  it.each([
+    {
+      pricing_contract: "billing_quote",
+      id: "task-billed",
+      task_id: "task-billed",
+      status: "queued"
+    },
+    {
+      pricing_contract: "legacy_estimate",
+      id: "task-legacy",
+      task_id: "task-legacy",
+      status: "queued",
+      billing: videoBilling
+    }
+  ])("fails closed when accepted branch fields do not match $pricing_contract", async (data) => {
+    server.use(
+      http.post(`${API}/api/v1/videos`, () =>
+        HttpResponse.json({ data, error: null, request_id: "malformed-accepted" }, { status: 202 })
+      )
+    );
+    await expect(createVideo({ topic: "bad" })).rejects.toMatchObject({
+      code: "INVALID_VIDEO_ACCEPTED_CONTRACT"
+    });
+  });
+});
+
 // ECOM-VIDEO-SCENE-DURATION-FIX-UI-0001：scene-prompt 补传 duration_sec（Cowork 冻结 §4.2 漏了它，致秒数恒「约15秒」）。
 // 真走 apiFetch→MSW，验 ①duration 透传后 mock scene_prompt 反映该时长；②mock 夹取 [5,120] 镜像 BE _clamp_duration（不 reject）。
 describe("generateScenePrompt · duration 透传（apiFetch 真走 MSW · SCENE-DURATION-FIX）", () => {
+  it("estimates first and sends the exact billing confirmation headers", async () => {
+    const submit = vi.fn();
+    const input = {
+      topic: "保温杯",
+      product_image_keys: ["uploads/mock-product-1.png"],
+      duration_sec: 10
+    };
+    server.use(
+      http.post(`${API}/api/v1/videos/scene-prompt/estimate`, async ({ request }) => {
+        expect(await request.json()).toEqual(input);
+        return HttpResponse.json({
+          data: {
+            pricing_contract: "billing_quote",
+            pricing_shape: "simple",
+            operation: "scene_prompt",
+            unit: "request",
+            quantity: "1",
+            unit_credits: "30",
+            subtotal_credits: "30",
+            payable_credits: 30,
+            rate_scope: "platform_fixed",
+            rate_source: "fixed_policy",
+            breakdown: [],
+            disclosures: [],
+            quote_token: sceneConfirmation.quote_token,
+            expires_at: new Date(Date.now() + 60_000).toISOString()
+          },
+          error: null,
+          request_id: "scene-estimate"
+        });
+      }),
+      http.post(`${API}/api/v1/videos/scene-prompt`, async ({ request }) => {
+        submit({
+          body: await request.json(),
+          quote: request.headers.get("X-Huading-Quote"),
+          key: request.headers.get("Idempotency-Key")
+        });
+        return HttpResponse.json({
+          data: {
+            scene_prompt: "服务端画面",
+            negative_prompt: "模糊",
+            billing: {
+              operation_id: "scene-operation",
+              idempotency_key: sceneConfirmation.idempotency_key,
+              status: "settled",
+              requested_credits: 30,
+              held_credits: 0,
+              settled_credits: 30,
+              released_credits: 0
+            }
+          },
+          error: null,
+          request_id: "scene-submit"
+        });
+      })
+    );
+
+    await expect(estimateScenePrompt(input)).resolves.toMatchObject({
+      operation: "scene_prompt",
+      payable_credits: 30
+    });
+    await expect(generateScenePrompt(input, sceneConfirmation)).resolves.toMatchObject({
+      scene_prompt: "服务端画面",
+      billing: { status: "settled" }
+    });
+    expect(submit).toHaveBeenCalledWith({
+      body: input,
+      quote: sceneConfirmation.quote_token,
+      key: sceneConfirmation.idempotency_key
+    });
+  });
+
   it("带 duration_sec:10 → scene_prompt 反映「约 10 秒」（秒数随选择变化，非恒 15）", async () => {
-    const res = await generateScenePrompt({ product_image_keys: ["uploads/mock-product-1.png"], duration_sec: 10 });
+    const res = await confirmedScenePrompt({
+      product_image_keys: ["uploads/mock-product-1.png"],
+      duration_sec: 10
+    });
     expect(res.scene_prompt).toContain("约 10 秒");
   });
 
   it("BE 夹取 [5,120] 镜像：传 3 → 夹到 5；传 200 → 夹到 120（不 reject，mock 不比 BE 宽松）", async () => {
     expect(
-      (await generateScenePrompt({ product_image_keys: ["uploads/x.png"], duration_sec: 3 })).scene_prompt
+      (await confirmedScenePrompt({
+        product_image_keys: ["uploads/x.png"],
+        duration_sec: 3
+      })).scene_prompt
     ).toContain("约 5 秒");
     expect(
-      (await generateScenePrompt({ product_image_keys: ["uploads/x.png"], duration_sec: 200 })).scene_prompt
+      (await confirmedScenePrompt({
+        product_image_keys: ["uploads/x.png"],
+        duration_sec: 200
+      })).scene_prompt
     ).toContain("约 120 秒");
   });
 
   // FIX1（CB P1）防假绿：真 BE duration_sec 是 int，小数/字符串 → 422（不四舍五入放行；此前 round 5.5→6 是假绿，线上真 422）。
   it("小数 duration_sec(5.5/5.4) → 422（镜像 BE int，不放行）", async () => {
-    await expect(generateScenePrompt({ product_image_keys: ["uploads/x.png"], duration_sec: 5.5 })).rejects.toThrow();
-    await expect(generateScenePrompt({ product_image_keys: ["uploads/x.png"], duration_sec: 5.4 })).rejects.toThrow();
+    await expect(estimateScenePrompt({ product_image_keys: ["uploads/x.png"], duration_sec: 5.5 })).rejects.toThrow();
+    await expect(estimateScenePrompt({ product_image_keys: ["uploads/x.png"], duration_sec: 5.4 })).rejects.toThrow();
   });
 
   it("字符串 duration_sec('5.5') → 422（BE int 也拒字符串）", async () => {
     await expect(
       // @ts-expect-error 故意传非法类型：真 BE int 拒字符串，mock 须同样 422（防假绿）
-      generateScenePrompt({ product_image_keys: ["uploads/x.png"], duration_sec: "5.5" })
+      estimateScenePrompt({ product_image_keys: ["uploads/x.png"], duration_sec: "5.5" })
     ).rejects.toThrow();
   });
 });
@@ -198,6 +620,8 @@ describe("estimateVideo · video_gen 同门校验（Code Review 补）", () => {
       estimateVideo({ video_mode: "video_gen", duration_sec: 8, aspect_ratio: "2:3" })
     ).rejects.toThrow();
     const ok = await estimateVideo({ video_mode: "video_gen", duration_sec: 8, aspect_ratio: "auto" });
+    expect(ok.pricing_contract).toBe("legacy_estimate");
+    if (ok.pricing_contract !== "legacy_estimate") throw new Error("expected legacy estimate");
     expect(ok.estimated_credits).toBeGreaterThan(0);
   });
 });
@@ -227,6 +651,8 @@ describe("estimateVideo · V2V 同门校验（互斥/条数）", () => {
       estimateVideo({ video_mode: "video_gen", duration_sec: 8, reference_video_asset_ids: ["v1", "v2", "v3", "v4"] })
     ).rejects.toThrow();
     const ok = await estimateVideo({ video_mode: "video_gen", duration_sec: 8, reference_video_asset_ids: ["v1", "v2"] });
+    expect(ok.pricing_contract).toBe("legacy_estimate");
+    if (ok.pricing_contract !== "legacy_estimate") throw new Error("expected legacy estimate");
     expect(ok.estimated_credits).toBeGreaterThan(0);
   });
 });

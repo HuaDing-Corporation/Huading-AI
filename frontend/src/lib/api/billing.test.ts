@@ -164,6 +164,25 @@ describe("billing quote parsing", () => {
     expect(parsed?.pricing_shape).toBe("composite");
   });
 
+  it("accepts only the canonical CosyVoice sub-operation in a video composite quote", () => {
+    const videoComposite = (ttsOperation: string) =>
+      simpleQuote({
+        operation: "video_create",
+        pricing_shape: "composite",
+        unit: null,
+        quantity: null,
+        unit_credits: null,
+        rate_scope: null,
+        rate_source: null,
+        breakdown: [
+          line({ operation: "video_create", capability: "video", unit: "second" }),
+          line({ operation: ttsOperation, capability: "tts", unit: "character" })
+        ]
+      });
+    expect(parseBillingQuote(videoComposite("cosyvoice_brand_tts"))).not.toBeNull();
+    expect(parseBillingQuote(videoComposite("unrelated_operation"))).toBeNull();
+  });
+
   it.each([
     simpleQuote({ quantity: "NaN" }),
     simpleQuote({ unit_credits: "1e3" }),

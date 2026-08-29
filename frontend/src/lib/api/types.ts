@@ -187,17 +187,53 @@ export interface BgmTrack {
 export interface BgmLibraryResponse {
   items: BgmTrack[];
 }
-export interface VideoAccepted {
+interface VideoAcceptedBase {
   id: string;
+  /** Kept by the backend for older consumers; when present it aliases `id`. */
+  task_id?: string;
   status: string;
 }
 
-// POST /videos/estimate → 预计积分（"确定生成"确认窗用）；请求体同 CreateVideoRequest。
-export interface EstimateResponse {
+export type VideoAcceptedContract =
+  | (VideoAcceptedBase & {
+      pricing_contract: "billing_quote";
+      billing: BillingSummary;
+    })
+  | (VideoAcceptedBase & {
+      pricing_contract: "legacy_estimate";
+      billing?: never;
+    })
+  | (VideoAcceptedBase & {
+      pricing_contract: "deferred_unpriced";
+      billing?: never;
+    });
+
+export interface LegacyVideoEstimate {
+  pricing_contract: "legacy_estimate";
   estimated_credits: number;
-  unit: string;
-  note?: string;
+  unit: "credits";
+  note?: string | null;
+  billing?: never;
 }
+
+export interface DeferredUnpricedVideoEstimate {
+  pricing_contract: "deferred_unpriced";
+  estimated_credits: 0;
+  unit: "credits";
+  unpriced: true;
+  note?: string | null;
+  billing?: never;
+}
+
+/** Strict wire union returned by POST /videos/estimate. */
+export type VideoEstimateContract =
+  | BillingQuote
+  | LegacyVideoEstimate
+  | DeferredUnpricedVideoEstimate;
+
+/** Compatibility aliases for existing imports while consumers migrate to the contract names. */
+export type VideoAccepted = VideoAcceptedContract;
+export type EstimateResponse = VideoEstimateContract;
 
 // 音色来源 (BRAND-VOICE-UI-0001 §8)：系统预设 / 品牌音色(声音克隆)。
 export type VoiceSource = "preset" | "brand_voice";
@@ -230,6 +266,7 @@ export interface ScriptGenerateRequest {
 
 export interface ScriptGenerateResponse {
   script: string;
+  billing: BillingSummary;
 }
 
 // POST /videos/scene-prompt 请求（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.2）：从只发 topic → 发产品图 keys + 文案 + topic。
@@ -247,6 +284,7 @@ export interface ScenePromptRequest {
 export interface ScenePromptResponse {
   scene_prompt: string;
   negative_prompt: string; // 新增（契约 §4.2/req6）：luna 同产出负面提示词，前端自动填入负面框
+  billing: BillingSummary;
 }
 
 export interface UploadImageResponse {

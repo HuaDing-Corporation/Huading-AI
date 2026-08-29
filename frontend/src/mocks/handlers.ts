@@ -42,6 +42,530 @@ const PHOTO_IMAGE_KEY_RE = /^uploads\/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|webp)$/;
 const PHOTO_PROMPT_MAX = 20000;
 const overLen = (v: unknown): boolean => typeof v === "string" && v.length > PHOTO_PROMPT_MAX;
 
+// ── Authoritative pricing fixtures (Task 15) ────────────────────────────────
+// Quotes are bound to the complete normalized JSON body. The operation store
+// gives all priced mock endpoints the same confirmation, idempotency, replay,
+// and lookup behavior as the real billing coordinator.
+type MockPricedOperation =
+  | "script_generate"
+  | "scene_prompt"
+  | "ecom_cutout"
+  | "ecom_model"
+  | "video_create";
+
+interface MockQuoteRecord {
+  operation: MockPricedOperation;
+  fingerprint: string;
+  expiresAt: number;
+  payableCredits: number;
+  forcePriceChange: boolean;
+}
+
+interface MockOperationRecord {
+  operation: MockPricedOperation;
+  fingerprint: string;
+  accepted: unknown;
+  lookup: Record<string, unknown>;
+}
+
+const mockQuotes = new Map<string, MockQuoteRecord>();
+const mockBillingOperations = new Map<string, MockOperationRecord>();
+let mockQuoteSeq = 0;
+let mockBillingSeq = 0;
+
+const IDEMPOTENCY_KEY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function normalizedMockJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(normalizedMockJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${normalizedMockJson(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function mockFixture(body: unknown, marker: string): boolean {
+  return normalizedMockJson(body).includes(marker);
+}
+
+function mockOperationKey(operation: MockPricedOperation, idempotencyKey: string): string {
+  return `${operation}:${idempotencyKey}`;
+}
+
+function mockUuid(sequence: number): string {
+  return `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`;
+}
+
+function pricingErr(
+  status: number,
+  code: string,
+  message: string,
+  detail?: Record<string, unknown>
+) {
+  return HttpResponse.json(
+    {
+      data: null,
+      error: {
+        code,
+        message,
+        request_id: "mock-pricing-req",
+        ...(detail ? { detail } : {})
+      },
+      request_id: "mock-pricing-req"
+    },
+    { status }
+  );
+}
+
+function issueSimpleMockQuote({
+  operation,
+  body,
+  unit,
+  quantity,
+  unitCredits,
+  rateScope,
+  rateSource
+}: {
+  operation: Exclude<MockPricedOperation, "video_create">;
+  body: unknown;
+  unit: string;
+  quantity: number;
+  unitCredits: number;
+  rateScope: "tenant_overridable" | "platform_fixed";
+  rateSource: "tenant_rate" | "platform_rate" | "code_default" | "fixed_policy";
+}) {
+  const subtotal = unitCredits * quantity;
+  const payableCredits = Math.ceil(subtotal);
+  const token = `mock-${operation}-quote-${++mockQuoteSeq}`;
+  const expired = mockFixture(body, "__QUOTE_EXPIRED__");
+  const expiresAt = Date.now() + (expired ? -1_000 : 60_000);
+  mockQuotes.set(token, {
+    operation,
+    fingerprint: normalizedMockJson(body),
+    expiresAt,
+    payableCredits,
+    forcePriceChange: mockFixture(body, "__PRICE_CHANGED__")
+  });
+  return {
+    pricing_contract: "billing_quote",
+    pricing_shape: "simple",
+    operation,
+    unit,
+    quantity: String(quantity),
+    unit_credits: String(unitCredits),
+    subtotal_credits: String(subtotal),
+    payable_credits: payableCredits,
+    rate_scope: rateScope,
+    rate_source: rateSource,
+    breakdown: [],
+    disclosures: [],
+    quote_token: token,
+    expires_at: new Date(expiresAt).toISOString()
+  };
+}
+
+type MockConfirmationResult =
+  | {
+      ok: true;
+      idempotencyKey: string;
+      quote: MockQuoteRecord;
+      replay: MockOperationRecord | null;
+    }
+  | { ok: false; response: ReturnType<typeof pricingErr> };
+
+function confirmMockQuote(
+  request: Request,
+  operation: MockPricedOperation,
+  body: unknown
+): MockConfirmationResult {
+  const idempotencyKey = request.headers.get("Idempotency-Key");
+  const quoteToken = request.headers.get("X-Huading-Quote");
+  if (!idempotencyKey || !quoteToken) {
+    return {
+      ok: false,
+      response: pricingErr(422, "BILLING_HEADERS_REQUIRED", "缺少服务端报价确认信息")
+    };
+  }
+  if (!IDEMPOTENCY_KEY_RE.test(idempotencyKey)) {
+    return {
+      ok: false,
+      response: pricingErr(422, "INVALID_IDEMPOTENCY_KEY", "幂等键格式无效")
+    };
+  }
+  const fingerprint = normalizedMockJson(body);
+  const existing = mockBillingOperations.get(mockOperationKey(operation, idempotencyKey));
+  if (existing) {
+    if (existing.fingerprint !== fingerprint) {
+      return {
+        ok: false,
+        response: pricingErr(409, "IDEMPOTENCY_KEY_REUSED", "幂等键已绑定其他请求")
+      };
+    }
+    const replayQuote = mockQuotes.get(quoteToken);
+    return {
+      ok: true,
+      idempotencyKey,
+      quote: replayQuote ?? {
+        operation,
+        fingerprint,
+        expiresAt: Number.POSITIVE_INFINITY,
+        payableCredits: Number(existing.lookup.billing && (existing.lookup.billing as Record<string, unknown>).requested_credits) || 0,
+        forcePriceChange: false
+      },
+      replay: existing
+    };
+  }
+  const quote = mockQuotes.get(quoteToken);
+  if (!quote || quote.operation !== operation || quote.fingerprint !== fingerprint) {
+    return {
+      ok: false,
+      response: pricingErr(409, "PRICE_CHANGED", "请求已变化，请重新获取价格", {
+        requires_new_quote: true
+      })
+    };
+  }
+  if (quote.expiresAt <= Date.now()) {
+    return {
+      ok: false,
+      response: pricingErr(409, "QUOTE_EXPIRED", "报价已过期，请重新获取价格", {
+        requires_new_quote: true
+      })
+    };
+  }
+  if (quote.forcePriceChange) {
+    return {
+      ok: false,
+      response: pricingErr(409, "PRICE_CHANGED", "服务端费率已更新，请重新获取价格", {
+        requires_new_quote: true
+      })
+    };
+  }
+  return { ok: true, idempotencyKey, quote, replay: null };
+}
+
+function mockBillingSummary(
+  idempotencyKey: string,
+  requestedCredits: number,
+  status: "reserved" | "settled" | "partially_settled" | "released",
+  settledCredits = status === "settled" ? requestedCredits : 0
+) {
+  const releasedCredits = status === "released"
+    ? requestedCredits
+    : status === "partially_settled"
+      ? requestedCredits - settledCredits
+      : 0;
+  return {
+    operation_id: mockUuid(++mockBillingSeq),
+    idempotency_key: idempotencyKey,
+    status,
+    requested_credits: requestedCredits,
+    held_credits: status === "reserved" ? requestedCredits : 0,
+    settled_credits: settledCredits,
+    released_credits: releasedCredits
+  };
+}
+
+function storeMockOperation(
+  operation: MockPricedOperation,
+  idempotencyKey: string,
+  body: unknown,
+  accepted: unknown,
+  lookup: Record<string, unknown>
+) {
+  const record = {
+    operation,
+    fingerprint: normalizedMockJson(body),
+    accepted,
+    lookup
+  };
+  mockBillingOperations.set(mockOperationKey(operation, idempotencyKey), record);
+  return record;
+}
+
+function validateMockEcomBatch(body: Record<string, unknown>) {
+  if (!Array.isArray(body.items) || body.items.length < 1 || body.items.length > 20) {
+    return err(422, "VALIDATION_ERROR", "每批图片数量必须在 1–20 张之间");
+  }
+  return null;
+}
+
+function validateMockModelBody(body: Record<string, unknown>) {
+  if (Array.isArray(body.items)) return validateMockEcomBatch(body);
+  const allowed = [
+    "product_asset_ids", "model_asset_ids", "product_images_mode", "gender",
+    "style_id", "custom_style", "extra_prompt", "aspect_ratio", "apply_visible_label", "source_asset_id"
+  ];
+  const extra = Object.keys(body).filter((key) => !allowed.includes(key));
+  if (extra.length) return err(422, "VALIDATION_ERROR", `Extra inputs are not permitted: ${extra.join(",")}`);
+  if (body.product_images_mode !== "multi_angle" && body.product_images_mode !== "multi_item") {
+    return err(422, "VALIDATION_ERROR", "product_images_mode 非法（multi_angle / multi_item）");
+  }
+  const productIds = Array.isArray(body.product_asset_ids) ? body.product_asset_ids : [];
+  const modelIds = Array.isArray(body.model_asset_ids) ? body.model_asset_ids : [];
+  if (overLen(body.extra_prompt) || overLen(body.custom_style)) {
+    return err(422, "VALIDATION_ERROR", "自定义补充/自定义风格最多 20000 字符");
+  }
+  const hasStyle = typeof body.style_id === "string" && body.style_id.length > 0;
+  const hasCustom = typeof body.custom_style === "string" && body.custom_style.trim().length > 0;
+  if (hasStyle && hasCustom) {
+    return err(422, "VALIDATION_ERROR", "预设风格与自定义风格不能同时选择");
+  }
+  if (productIds.length < 1) return err(422, "VALIDATION_ERROR", "请至少上传一张商品图");
+  if (productIds.length + modelIds.length > 6) {
+    return err(422, "VALIDATION_ERROR", "商品图与模特图合计最多 6 张");
+  }
+  const validStyles = [
+    "studio_white", "lifestyle", "street", "office_commute", "resort_travel", "high_fashion"
+  ];
+  if (hasStyle && !validStyles.includes(body.style_id as string)) {
+    return err(422, "ECOM_MODEL_STYLE_INVALID", "Unknown AI model style.");
+  }
+  return null;
+}
+
+function mockEcomSourceItems(body: Record<string, unknown>): Array<{ source_asset_id: string }> {
+  if (Array.isArray(body.items)) {
+    return body.items.map((item) => ({
+      source_asset_id:
+        typeof item === "object" && item !== null && typeof (item as Record<string, unknown>).source_asset_id === "string"
+          ? String((item as Record<string, unknown>).source_asset_id)
+          : "mock-source"
+    }));
+  }
+  const productIds = Array.isArray(body.product_asset_ids) ? body.product_asset_ids : [];
+  return [{
+    source_asset_id:
+      typeof body.source_asset_id === "string"
+        ? body.source_asset_id
+        : typeof productIds[0] === "string"
+          ? productIds[0]
+          : "mock-source"
+  }];
+}
+
+function completeMockEcomOperation({
+  operation,
+  idempotencyKey,
+  payableCredits,
+  body,
+  accepted,
+  taskIds
+}: {
+  operation: "ecom_cutout" | "ecom_model";
+  idempotencyKey: string;
+  payableCredits: number;
+  body: Record<string, unknown>;
+  accepted: unknown;
+  taskIds: string[];
+}) {
+  const sources = mockEcomSourceItems(body);
+  const items = sources.map((item, index) => {
+    const failed = item.source_asset_id.includes("__FAIL__");
+    return {
+      item_index: index,
+      task_id: taskIds[index] ?? `mock-missing-task-${index}`,
+      source_asset_id: item.source_asset_id,
+      status: failed ? "failed" : "done",
+      asset_id: failed ? null : `mock-output-${index}`
+    };
+  });
+  const succeeded = items.filter((item) => item.status === "done").length;
+  const settledCredits = sources.length > 0
+    ? Math.round((payableCredits * succeeded) / sources.length)
+    : 0;
+  const billingStatus = succeeded === 0
+    ? "released"
+    : succeeded === sources.length
+      ? "settled"
+      : "partially_settled";
+  const billing = mockBillingSummary(
+    idempotencyKey,
+    payableCredits,
+    billingStatus,
+    settledCredits
+  );
+  const result = { items };
+  const resultId = mockUuid(++mockBillingSeq);
+  return storeMockOperation(operation, idempotencyKey, body, accepted, {
+    operation,
+    idempotency_key: idempotencyKey,
+    state: "completed",
+    completion_kind: "succeeded",
+    billing,
+    result_type: "ecom_image_batch",
+    result_id: resultId,
+    resource: result,
+    result,
+    failure: null
+  });
+}
+
+function validateMockScriptBody(body: Record<string, unknown>) {
+  if (typeof body.topic !== "string" || !body.topic.trim()) {
+    return err(422, "VALIDATION_ERROR", "topic is required");
+  }
+  if (badDuration(body.duration_sec)) {
+    return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
+  }
+  if (
+    body.length_tier !== undefined &&
+    (typeof body.length_tier !== "string" || !["short", "medium", "long"].includes(body.length_tier))
+  ) {
+    return err(422, "VALIDATION_ERROR", "length_tier 非法");
+  }
+  return null;
+}
+
+function validateMockScenePromptBody(body: Record<string, unknown>) {
+  if (!Array.isArray(body.product_image_keys) || body.product_image_keys.length < 1) {
+    return err(422, "VALIDATION_ERROR", "product_image_keys 至少 1 张");
+  }
+  if (badDuration(body.duration_sec)) {
+    return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
+  }
+  return null;
+}
+
+function completeMockInlineOperation({
+  operation,
+  idempotencyKey,
+  payableCredits,
+  body,
+  resultType,
+  result
+}: {
+  operation: "script_generate" | "scene_prompt";
+  idempotencyKey: string;
+  payableCredits: number;
+  body: Record<string, unknown>;
+  resultType: "script_generate_result" | "scene_prompt_result";
+  result: Record<string, unknown>;
+}) {
+  const billing = mockBillingSummary(idempotencyKey, payableCredits, "settled");
+  const accepted = { ...result, billing };
+  return storeMockOperation(operation, idempotencyKey, body, accepted, {
+    operation,
+    idempotency_key: idempotencyKey,
+    state: "completed",
+    completion_kind: "succeeded",
+    billing,
+    result_type: resultType,
+    result_id: null,
+    resource: null,
+    result,
+    failure: null
+  });
+}
+
+type MockVideoPricingContext =
+  | { pricingContract: "billing_quote"; brandProvider: string }
+  | { pricingContract: "legacy_estimate" | "deferred_unpriced"; brandProvider: null };
+
+function mockVideoPricingContext(body: Record<string, unknown>): MockVideoPricingContext {
+  const mode = typeof body.video_mode === "string"
+    ? body.video_mode
+    : body.voice_id || body.avatar_asset_id || body.avatar_video_asset_id
+      ? "avatar_talk"
+      : undefined;
+  if (mode === "static_template" || mode === "seedance_t2v") {
+    return { pricingContract: "deferred_unpriced", brandProvider: null };
+  }
+  if (mode !== "avatar_talk" && mode !== "seedance_i2v") {
+    return { pricingContract: "legacy_estimate", brandProvider: null };
+  }
+  const voice = typeof body.voice_id === "string" ? brandVoices.get(body.voice_id) : undefined;
+  if (
+    voice?.status !== "ready" ||
+    (voice.provider !== "doubao-voice-clone" && voice.provider !== "cosyvoice-voice-clone")
+  ) {
+    return { pricingContract: "legacy_estimate", brandProvider: null };
+  }
+  return { pricingContract: "billing_quote", brandProvider: voice.provider };
+}
+
+function mockVideoBaseQuantity(body: Record<string, unknown>, characterCount: number): number {
+  if (body.video_mode === "seedance_i2v") {
+    const requested = typeof body.duration_sec === "number" ? body.duration_sec : 15;
+    const target = Math.max(5, Math.min(120, Math.trunc(requested)));
+    return Math.max(5, Math.ceil(target / 5) * 5);
+  }
+  const speed = typeof body.speed === "number" && body.speed > 0 ? body.speed : 1;
+  return Math.max(3, Math.min(60, Math.ceil(Math.max(1, characterCount) / 5 / speed)));
+}
+
+function issueMockVideoQuote(body: Record<string, unknown>, brandProvider: string) {
+  const text = typeof body.script === "string" ? body.script.trim() : "";
+  const characterCount = Array.from(text).length;
+  const baseQuantity = mockVideoBaseQuantity(body, characterCount);
+  const baseSubtotal = baseQuantity * 100;
+  const breakdown = [
+    {
+      operation: "video_create",
+      capability: "video",
+      unit: "second",
+      quantity: String(baseQuantity),
+      unit_credits: "100.0000",
+      subtotal_credits: baseSubtotal.toFixed(4),
+      rate_scope: "tenant_overridable",
+      rate_source: "code_default",
+      rate_id: null,
+      effective_at: null,
+      policy_key: "video_create",
+      policy_version: 1,
+      label: "品牌视频"
+    }
+  ];
+  let subtotal = baseSubtotal;
+  if (brandProvider === "cosyvoice-voice-clone") {
+    const ttsSubtotal = characterCount * 0.1;
+    subtotal += ttsSubtotal;
+    breakdown.push({
+      operation: "cosyvoice_brand_tts",
+      capability: "tts",
+      unit: "character",
+      quantity: String(characterCount),
+      unit_credits: "0.1000",
+      subtotal_credits: ttsSubtotal.toFixed(4),
+      rate_scope: "tenant_overridable",
+      rate_source: "code_default",
+      rate_id: null,
+      effective_at: null,
+      policy_key: "cosyvoice_brand_tts",
+      policy_version: 1,
+      label: "CosyVoice 品牌音色"
+    });
+  }
+  const payableCredits = Math.ceil(subtotal);
+  const token = `mock-video_create-quote-${++mockQuoteSeq}`;
+  const expired = mockFixture(body, "__QUOTE_EXPIRED__");
+  const expiresAt = Date.now() + (expired ? -1_000 : 60_000);
+  mockQuotes.set(token, {
+    operation: "video_create",
+    fingerprint: normalizedMockJson(body),
+    expiresAt,
+    payableCredits,
+    forcePriceChange: mockFixture(body, "__PRICE_CHANGED__")
+  });
+  return {
+    pricing_contract: "billing_quote",
+    pricing_shape: "composite",
+    operation: "video_create",
+    unit: null,
+    quantity: null,
+    unit_credits: null,
+    rate_scope: null,
+    rate_source: null,
+    subtotal_credits: subtotal.toFixed(4),
+    payable_credits: payableCredits,
+    breakdown,
+    disclosures: [],
+    quote_token: token,
+    expires_at: new Date(expiresAt).toISOString()
+  };
+}
+
 // in-memory store so list/detail/SSE stay consistent within a session
 const videos = new Map<string, Record<string, unknown>>();
 // mock 种子（ECOM-FIXES-0001 ③ / cancelled 补 ECOM-HISTORY-CANCELLED-FIX-0001 ③）：预置电商(seedance_i2v)历史项，
@@ -1517,6 +2041,14 @@ const historyToItem = (r: MockHistRecord) => ({
 const VALID_HISTORY_CATEGORIES = new Set(["image_gen", "ecom_white", "ecom_model", "ecom_detail", "cover"]);
 
 export const handlers = [
+  http.get(`${BASE}/api/v1/billing/operations/by-idempotency/:operation/:key`, ({ params }) => {
+    const operation = String(params.operation) as MockPricedOperation;
+    const key = String(params.key);
+    const record = mockBillingOperations.get(mockOperationKey(operation, key));
+    return record
+      ? ok(record.lookup)
+      : err(404, "BILLING_OPERATION_NOT_FOUND", "未找到对应的计费操作");
+  }),
   // ── 图片历史·统一模块 (HISTORY-UI-0001)：list 分页 + detail 整套（list 先注册，避免被 /:category/:id 影子覆盖）──
   http.get(`${BASE}/api/v1/history/images`, ({ request }) => {
     const sp = new URL(request.url).searchParams;
@@ -1659,47 +2191,95 @@ export const handlers = [
   http.get(`${BASE}/api/v1/avatars/presets`, () =>
     ok({ items: [{ asset_id: "preset-1", display_name: "默认主播", thumbnail_url: "https://mock.local/p1.jpg" }], total: 1 })
   ),
+  http.post(`${BASE}/api/v1/scripts/estimate`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const validation = validateMockScriptBody(body);
+    if (validation) return validation;
+    return ok(issueSimpleMockQuote({
+      operation: "script_generate",
+      body,
+      unit: "request",
+      quantity: 1,
+      unitCredits: 1,
+      rateScope: "platform_fixed",
+      rateSource: "fixed_policy"
+    }));
+  }),
   http.post(`${BASE}/api/v1/scripts/generate`, async ({ request }) => {
-    const body = (await request.json()) as { topic?: string; length_tier?: string; duration_sec?: number };
+    const body = (await request.json()) as Record<string, unknown> & {
+      topic?: string;
+      length_tier?: string;
+      duration_sec?: number;
+    };
     // topic 必填（BE ScriptGenerateRequest.topic 非可选）——mock 不比 BE 宽松：缺/空即 422，守住前端两处调用方
     // （电商 onGenerateScript、口播 onGenerateScript）都在 topic 非空时才发。
-    if (!body.topic || !body.topic.trim()) {
-      return err(422, "VALIDATION_ERROR", "topic is required");
-    }
-    // FIX2（CB P1 · 机制）：BE ScriptGenerateRequest.duration_sec 是 int——小数 → 422。此前 scripts mock 没读该字段 =
-    // 「AI生成文案」发小数悄悄假绿的根因。任何接受 duration_sec 的 mock 都拒绝非整数，未加门的路径即在测试里响亮失败。
-    if (badDuration(body.duration_sec))
-      return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
-    // 字数档位（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.5）：可选，present 时须 short/medium/long（镜像 BE Literal，
-    // mock 不比 BE 宽松——非法枚举即 422，守住前端只发合法档位）。反映到 mock 文案长度供承重区分档位真接线。
-    if (body.length_tier !== undefined && !["short", "medium", "long"].includes(body.length_tier)) {
-      return err(422, "VALIDATION_ERROR", "length_tier 非法");
-    }
+    const validation = validateMockScriptBody(body);
+    if (validation) return validation;
+    const confirmation = confirmMockQuote(request, "script_generate", body);
+    if (!confirmation.ok) return confirmation.response;
+    if (confirmation.replay) return ok(confirmation.replay.accepted);
     const tierWords: Record<string, string> = { short: "（短）", medium: "（中）", long: "（长，更详尽的卖点展开……）" };
     const suffix = body.length_tier ? tierWords[body.length_tier] : "";
-    return ok({ script: `【${body.topic}】大家好，今天用一分钟带你了解……（mock 文案，可编辑）${suffix}` });
+    const result = { script: `【${body.topic}】大家好，今天用一分钟带你了解……（mock 文案，可编辑）${suffix}` };
+    const record = completeMockInlineOperation({
+      operation: "script_generate",
+      idempotencyKey: confirmation.idempotencyKey,
+      payableCredits: confirmation.quote.payableCredits,
+      body,
+      resultType: "script_generate_result",
+      result
+    });
+    return ok(record.accepted);
   }),
   // 「AI 生成画面」scene-prompt（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.2）：从只收 topic → 收产品图 keys + 文案 + topic。
   // 🔴 严格纪律「必须带产品图」——mock 不比 BE 宽松：product_image_keys 缺失/空 → 422（luna 多模态强制读图）。
   // 返回 {scene_prompt, negative_prompt}（新增 negative_prompt，前端自动填入负面框）。
+  http.post(`${BASE}/api/v1/videos/scene-prompt/estimate`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const validation = validateMockScenePromptBody(body);
+    if (validation) return validation;
+    return ok(issueSimpleMockQuote({
+      operation: "scene_prompt",
+      body,
+      unit: "request",
+      quantity: 1,
+      unitCredits: 30,
+      rateScope: "platform_fixed",
+      rateSource: "fixed_policy"
+    }));
+  }),
   http.post(`${BASE}/api/v1/videos/scene-prompt`, async ({ request }) => {
-    const body = (await request.json()) as { topic?: string; script?: string; product_image_keys?: string[]; duration_sec?: number };
-    if (!Array.isArray(body.product_image_keys) || body.product_image_keys.length < 1) {
-      return err(422, "VALIDATION_ERROR", "product_image_keys 至少 1 张");
-    }
+    const body = (await request.json()) as Record<string, unknown> & {
+      topic?: string;
+      script?: string;
+      product_image_keys?: string[];
+      duration_sec?: number;
+    };
+    const validation = validateMockScenePromptBody(body);
+    if (validation) return validation;
     // FIX1（CB P1）：duration_sec 是 int——小数/字符串 → 422（镜像 BE，不四舍五入放行；此前 round 5.5→6 是假绿，线上真 422）。
-    if (badDuration(body.duration_sec))
-      return err(422, "VALIDATION_ERROR", "duration_sec 必须为整数");
+    const confirmation = confirmMockQuote(request, "scene_prompt", body);
+    if (!confirmation.ok) return confirmation.response;
+    if (confirmation.replay) return ok(confirmation.replay.accepted);
     // SCENE-DURATION-FIX：duration_sec 可选整数，镜像 BE ScenePromptRequest._clamp_duration 夹取 [5,120]（不 reject 越界，仅夹取）。
     // 把生效时长回写进 scene_prompt 秒数——真 BE 由 luna 据时长写节奏，mock 以此如实反映「秒数随所选时长变化」（此前恒「约15秒」即原 bug）。
     const seconds =
       typeof body.duration_sec === "number"
         ? Math.max(5, Math.min(120, body.duration_sec))
         : 15; // 未传时回退 15（正是漏传 duration 的旧表现，便于承重/变异对照）
-    return ok({
+    const result = {
       scene_prompt: `白色大理石台面暖光特写，产品缓慢环绕运镜，浅景深突出材质，蒸汽轻升，节奏舒缓，约 ${seconds} 秒（mock 专业画面提示词，可编辑）`,
       negative_prompt: "低分辨率, 变形, 多余文字, 水印, 杂乱背景, 手部畸变"
+    };
+    const record = completeMockInlineOperation({
+      operation: "scene_prompt",
+      idempotencyKey: confirmation.idempotencyKey,
+      payableCredits: confirmation.quote.payableCredits,
+      body,
+      resultType: "scene_prompt_result",
+      result
     });
+    return ok(record.accepted);
   }),
   http.post(`${BASE}/api/v1/uploads/images`, () => {
     const n = ++imageUploadSeq;
@@ -1983,10 +2563,14 @@ export const handlers = [
   // 校验镜像 videos POST 同源（resolution 全模式 + seedance_i2v 产品图≥1/voice_id）——estimate 用同一 VideoGenerateRequest
   // (extra=forbid)，mock 不比 BE 宽松（防假绿：接线断/缺参在 estimate 阶段即暴露，不放到提交才红）。
   http.post(`${BASE}/api/v1/videos/estimate`, async ({ request }) => {
-    const body = (await request.json()) as {
+    const body = (await request.json()) as Record<string, unknown> & {
       video_mode?: string;
       product_image_keys?: string[];
       voice_id?: string;
+      script?: string;
+      speed?: number;
+      avatar_asset_id?: string;
+      avatar_video_asset_id?: string;
       duration_sec?: number;
       resolution?: string;
       aspect_ratio?: string; // VIDEO-GEN-PARAMS-UI-0001：estimate 与提交同校验（视频生成 7 值）
@@ -2025,21 +2609,40 @@ export const handlers = [
       }
       if (estVideos.length > 3) return err(422, "VIDEO_GEN_REFERENCE_VIDEO_COUNT_INVALID", "参考视频最多 3 条");
     }
+    const pricing = mockVideoPricingContext(body);
+    if (pricing.pricingContract === "billing_quote") {
+      if (typeof body.script !== "string" || !body.script.trim()) {
+        return pricingErr(422, "BILLABLE_TEXT_REQUIRED", "使用品牌音色前请先生成或填写口播文案");
+      }
+      return ok(issueMockVideoQuote(body, pricing.brandProvider));
+    }
+    if (pricing.pricingContract === "deferred_unpriced") {
+      return ok({
+        pricing_contract: "deferred_unpriced",
+        estimated_credits: 0,
+        unit: "credits",
+        unpriced: true,
+        note: "延期处理／尚未闭环"
+      });
+    }
     // estimated_credits 是后端按配额/时长算出的整数；mock 取时长派生一个正整数（默认 30s→12），仅需形状忠实（值非契约）。
     const estimatedCredits = typeof body.duration_sec === "number" && body.duration_sec > 0
       ? Math.max(1, Math.round(body.duration_sec / 2.5))
       : 12;
     return ok({
+      pricing_contract: "legacy_estimate",
       estimated_credits: estimatedCredits,
       unit: "credits",
       note: "Estimated reservation; final settlement uses actual generated duration."
     });
   }),
   http.post(`${BASE}/api/v1/videos`, async ({ request }) => {
-    const body = (await request.json()) as {
+    const body = (await request.json()) as Record<string, unknown> & {
       topic?: string;
       video_mode?: string;
       purpose?: string;
+      script?: string;
+      speed?: number;
       prompt?: string;
       reference_image_asset_ids?: string[];
       reference_video_asset_ids?: string[]; // 视频生视频（V2V-UI-0001，≤3、与参考图互斥 D8；mock 先行）
@@ -2178,11 +2781,68 @@ export const handlers = [
         return err(422, "PHOTO_INVALID", "image_resolution 须为 1k/2k/4k");
       }
     }
+    const pricing = mockVideoPricingContext(body);
+    if (
+      pricing.pricingContract === "billing_quote" &&
+      (typeof body.script !== "string" || !body.script.trim())
+    ) {
+      return pricingErr(422, "BILLABLE_TEXT_REQUIRED", "使用品牌音色前请先生成或填写口播文案");
+    }
+    const confirmation = pricing.pricingContract === "billing_quote"
+      ? confirmMockQuote(request, "video_create", body)
+      : null;
+    if (confirmation && !confirmation.ok) return confirmation.response;
+    if (confirmation?.ok && confirmation.replay) {
+      return HttpResponse.json(
+        { data: confirmation.replay.accepted, error: null, request_id: "mock-req" },
+        { status: 202 }
+      );
+    }
     const id = `mock-${++videoSeq}`;
     // video_gen 用 prompt 作展示标题；记 mode + kind(AI 封面 purpose=cover → kind=cover)，让 GET /videos 筛忠实回放
     const displayTopic = body.video_mode === "video_gen" ? (body.prompt ?? "") : (body.topic ?? "");
-    videos.set(id, { id, status: "queued", progress: 0, topic: displayTopic, mode: body.video_mode ?? "avatar_talk", kind: body.purpose === "cover" ? "cover" : null, created_at: new Date(0).toISOString(), script: displayTopic, voice_id: "v-zhixing", aspect_ratio: "9:16", subtitle_enabled: true, apply_visible_label: body.apply_visible_label ?? false });
-    return HttpResponse.json({ data: { id, status: "queued" }, error: null, request_id: "mock-req" }, { status: 202 });
+    videos.set(id, { id, status: "queued", progress: 0, topic: displayTopic, mode: body.video_mode ?? "avatar_talk", kind: body.purpose === "cover" ? "cover" : null, created_at: new Date(0).toISOString(), script: body.script ?? displayTopic, voice_id: body.voice_id ?? "v-zhixing", aspect_ratio: "9:16", subtitle_enabled: true, apply_visible_label: body.apply_visible_label ?? false });
+    if (pricing.pricingContract === "billing_quote" && confirmation?.ok) {
+      const billing = mockBillingSummary(
+        confirmation.idempotencyKey,
+        confirmation.quote.payableCredits,
+        "reserved"
+      );
+      const accepted = {
+        id,
+        task_id: id,
+        status: "queued",
+        pricing_contract: "billing_quote",
+        billing
+      };
+      const resource = { task_id: id, status: "queued" };
+      storeMockOperation("video_create", confirmation.idempotencyKey, body, accepted, {
+        operation: "video_create",
+        idempotency_key: confirmation.idempotencyKey,
+        state: "in_progress",
+        completion_kind: null,
+        billing,
+        result_type: "video_task",
+        result_id: id,
+        resource,
+        result: null,
+        failure: null
+      });
+      return HttpResponse.json(
+        { data: accepted, error: null, request_id: "mock-req" },
+        { status: 202 }
+      );
+    }
+    return HttpResponse.json({
+      data: {
+        id,
+        task_id: id,
+        status: "queued",
+        pricing_contract: pricing.pricingContract
+      },
+      error: null,
+      request_id: "mock-req"
+    }, { status: 202 });
   }),
   // 视频生成 配乐库 (VIDEOGEN-UI-0001, seam §3)
   http.get(`${BASE}/api/v1/bgm-library`, () => ok({ items: BGM_LIBRARY })),
@@ -2324,9 +2984,35 @@ export const handlers = [
 
   // ── 电商图扩展 Phase1 (ECOM-IMG-UI-0001) — 白底图/抠图(单张 + 批量) mock ──
   // 忠实后端：塞真 photo VideoTask(kind=ecom_cutout, done)进 videos store，使现有
-  // GET /videos/:id 轮询拿到 done + 图；批量 N clamp 1..20。非伪造掩盖(吸取历史教训)。
+  // GET /videos/:id 轮询拿到 done + 图；批量严格 1..20，整批拒绝第 21 项。
+  http.post(`${BASE}/api/v1/ecom-images/cutout/estimate`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    if ("items" in body) {
+      const validation = validateMockEcomBatch(body);
+      if (validation) return validation;
+    } else if (typeof body.source_asset_id !== "string" || body.source_asset_id.length < 1) {
+      return err(422, "VALIDATION_ERROR", "source_asset_id 必填");
+    }
+    const quantity = Array.isArray(body.items) ? body.items.length : 1;
+    return ok(issueSimpleMockQuote({
+      operation: "ecom_cutout",
+      body,
+      unit: "image",
+      quantity,
+      unitCredits: 80,
+      rateScope: "tenant_overridable",
+      rateSource: "tenant_rate"
+    }));
+  }),
   http.post(`${BASE}/api/v1/ecom-images/cutout`, async ({ request }) => {
-    const body = (await request.json()) as { source_asset_id: string; background: string; apply_visible_label?: boolean };
+    const body = (await request.json()) as Record<string, unknown> & {
+      source_asset_id: string;
+      background: string;
+      apply_visible_label?: boolean;
+    };
+    const confirmation = confirmMockQuote(request, "ecom_cutout", body);
+    if (!confirmation.ok) return confirmation.response;
+    if (confirmation.replay) return ok(confirmation.replay.accepted);
     const id = `mock-${++videoSeq}`;
     const url =
       body.background === "transparent"
@@ -2337,11 +3023,28 @@ export const handlers = [
       mode: "photo", kind: "ecom_cutout", created_at: new Date(0).toISOString(),
       playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url, apply_visible_label: body.apply_visible_label ?? false
     });
-    return ok({ task_id: id, status: "queued" });
+    const accepted = { task_id: id, status: "queued" };
+    completeMockEcomOperation({
+      operation: "ecom_cutout",
+      idempotencyKey: confirmation.idempotencyKey,
+      payableCredits: confirmation.quote.payableCredits,
+      body,
+      accepted,
+      taskIds: [id]
+    });
+    return ok(accepted);
   }),
   http.post(`${BASE}/api/v1/ecom-images/cutout/batch`, async ({ request }) => {
-    const body = (await request.json()) as { items: { source_asset_id: string; background: string; apply_visible_label?: boolean }[] };
-    const items = (body.items ?? []).slice(0, 20); // N clamp 上界 20
+    const body = (await request.json()) as Record<string, unknown> & {
+      items: { source_asset_id: string; background: string; apply_visible_label?: boolean }[];
+    };
+    const items = body.items ?? [];
+    if (items.length < 1 || items.length > 20) {
+      return err(422, "VALIDATION_ERROR", "每批图片数量必须在 1–20 张之间");
+    }
+    const confirmation = confirmMockQuote(request, "ecom_cutout", body);
+    if (!confirmation.ok) return confirmation.response;
+    if (confirmation.replay) return ok(confirmation.replay.accepted);
     const batchId = `batch-${++videoSeq}`;
     const tasks = items.map((it) => {
       const id = `mock-${++videoSeq}`;
@@ -2356,12 +3059,21 @@ export const handlers = [
       });
       return { task_id: id, source_asset_id: it.source_asset_id, status: "queued" };
     });
-    return ok({ batch_id: batchId, tasks });
+    const accepted = { batch_id: batchId, tasks };
+    completeMockEcomOperation({
+      operation: "ecom_cutout",
+      idempotencyKey: confirmation.idempotencyKey,
+      payableCredits: confirmation.quote.payableCredits,
+      body,
+      accepted,
+      taskIds: tasks.map((task) => task.task_id)
+    });
+    return ok(accepted);
   }),
 
   // ── 电商图扩展 Phase2 (ECOM-MODEL-UI-0001) — AI 模特(单张 + 批量) mock ──
   // 忠实后端：model-styles 返真列表；单张/批量塞真 photo VideoTask(kind=ecom_model, done)进
-  // videos store，使现有 GET /videos/:id 轮询拿到 done + 模特图；批量 N clamp 1..20。非伪造(吸取教训)。
+  // videos store，使现有 GET /videos/:id 轮询拿到 done + 模特图；批量严格 1..20。
   // 忠实后端 EcomModelStyle(仅 id+name)。ECOM-MODEL-OPTIMIZE-UI-0001 · D3：6 档风格。
   // 🔴 FIX1 真联调：id + name **逐字对齐 #210 合并源** routes/ecom_images.py:70-95 `_MODEL_STYLE_DEFINITIONS`
   //   （新增 3 档 id 修正为 office_commute / resort_travel / high_fashion——此前 mock 的 commute/vacation/editorial
@@ -2378,6 +3090,21 @@ export const handlers = [
       ]
     })
   ),
+  http.post(`${BASE}/api/v1/ecom-images/model/estimate`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const validation = validateMockModelBody(body);
+    if (validation) return validation;
+    const quantity = Array.isArray(body.items) ? body.items.length : 1;
+    return ok(issueSimpleMockQuote({
+      operation: "ecom_model",
+      body,
+      unit: "image",
+      quantity,
+      unitCredits: 80,
+      rateScope: "tenant_overridable",
+      rateSource: "tenant_rate"
+    }));
+  }),
   // ECOM-MODEL-OPTIMIZE-UI-0001 · 单张 AI 模特 mock —— 🔴 FIX1 真联调：逐字段/逐错误码对齐 **#210 合并源**
   //  （schemas/ecom_images.py:55-98 + routes/ecom_images.py:174-182）：extra=forbid → VALIDATION_ERROR；
   //  商品图 1–N(0→422) + 模特图 0–N + 合计 ≤6(超→422) + product_images_mode 合法值 + style_id 与 custom_style 互斥
@@ -2385,31 +3112,13 @@ export const handlers = [
   //  ECOM_MODEL_STYLE_INVALID(422，_model_style_prompt_or_raise)。友好消息文本逐字对齐 BE。
   http.post(`${BASE}/api/v1/ecom-images/model`, async ({ request }) => {
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown> & { apply_visible_label?: boolean };
-    const ALLOWED = [
-      "product_asset_ids", "model_asset_ids", "product_images_mode", "gender",
-      "style_id", "custom_style", "extra_prompt", "aspect_ratio", "apply_visible_label", "source_asset_id"
-    ];
-    // extra="forbid" 镜像（对齐本文件既有写法：列出多余键，报错信息可操作）。
-    const extra = Object.keys(body).filter((k) => !ALLOWED.includes(k));
-    if (extra.length) return err(422, "VALIDATION_ERROR", `Extra inputs are not permitted: ${extra.join(",")}`);
-    if (body.product_images_mode !== "multi_angle" && body.product_images_mode !== "multi_item")
-      return err(422, "VALIDATION_ERROR", "product_images_mode 非法（multi_angle / multi_item）");
-    const productIds = Array.isArray(body.product_asset_ids) ? (body.product_asset_ids as unknown[]) : [];
-    const modelIds = Array.isArray(body.model_asset_ids) ? (body.model_asset_ids as unknown[]) : [];
-    // extra_prompt / custom_style 反滥用上界 20000（BE _ECOM_MODEL_TEXT_LIMIT）→ 超限 422（非静默截断）。
-    const overText = (v: unknown) => typeof v === "string" && v.length > 20000;
-    if (overText(body.extra_prompt) || overText(body.custom_style))
-      return err(422, "VALIDATION_ERROR", "自定义补充/自定义风格最多 20000 字符");
+    const validation = validateMockModelBody(body);
+    if (validation) return validation;
     const hasStyle = typeof body.style_id === "string" && body.style_id.length > 0;
     const hasCustom = typeof body.custom_style === "string" && body.custom_style.trim().length > 0;
-    // 🔴 互斥：BE model_validator 是**拒绝**（非取其一），友好文案逐字对齐。
-    if (hasStyle && hasCustom) return err(422, "VALIDATION_ERROR", "预设风格与自定义风格不能同时选择");
-    if (productIds.length < 1) return err(422, "VALIDATION_ERROR", "请至少上传一张商品图");
-    if (productIds.length + modelIds.length > 6) return err(422, "VALIDATION_ERROR", "商品图与模特图合计最多 6 张");
-    // 未知 style_id → ECOM_MODEL_STYLE_INVALID（BE route 拼 prompt 时 _model_style_prompt_or_raise 抛）。
-    const VALID_STYLES = ["studio_white", "lifestyle", "street", "office_commute", "resort_travel", "high_fashion"];
-    if (hasStyle && !VALID_STYLES.includes(body.style_id as string))
-      return err(422, "ECOM_MODEL_STYLE_INVALID", "Unknown AI model style.");
+    const confirmation = confirmMockQuote(request, "ecom_model", body);
+    if (!confirmation.ok) return confirmation.response;
+    if (confirmation.replay) return ok(confirmation.replay.accepted);
     const id = `mock-${++videoSeq}`;
     // 风格 key 用于 mock 产物 url：自定义 > 预设 > 默认（三档 top-down，避免嵌套三元）。
     let styleKey = "studio";
@@ -2421,11 +3130,28 @@ export const handlers = [
       mode: "photo", kind: "ecom_model", created_at: new Date(0).toISOString(),
       playback_url: url, download_url: `${url}?dl=1`, thumbnail_url: url, apply_visible_label: body.apply_visible_label ?? false
     });
-    return ok({ task_id: id, status: "queued" });
+    const accepted = { task_id: id, status: "queued" };
+    completeMockEcomOperation({
+      operation: "ecom_model",
+      idempotencyKey: confirmation.idempotencyKey,
+      payableCredits: confirmation.quote.payableCredits,
+      body,
+      accepted,
+      taskIds: [id]
+    });
+    return ok(accepted);
   }),
   http.post(`${BASE}/api/v1/ecom-images/model/batch`, async ({ request }) => {
-    const body = (await request.json()) as { items: { source_asset_id: string; style_id: string; apply_visible_label?: boolean }[] };
-    const items = (body.items ?? []).slice(0, 20); // N clamp 上界 20
+    const body = (await request.json()) as Record<string, unknown> & {
+      items: { source_asset_id: string; style_id: string; apply_visible_label?: boolean }[];
+    };
+    const items = body.items ?? [];
+    if (items.length < 1 || items.length > 20) {
+      return err(422, "VALIDATION_ERROR", "每批图片数量必须在 1–20 张之间");
+    }
+    const confirmation = confirmMockQuote(request, "ecom_model", body);
+    if (!confirmation.ok) return confirmation.response;
+    if (confirmation.replay) return ok(confirmation.replay.accepted);
     const batchId = `batch-${++videoSeq}`;
     const tasks = items.map((it) => {
       const id = `mock-${++videoSeq}`;
@@ -2437,12 +3163,21 @@ export const handlers = [
       });
       return { task_id: id, source_asset_id: it.source_asset_id, status: "queued" };
     });
-    return ok({ batch_id: batchId, tasks });
+    const accepted = { batch_id: batchId, tasks };
+    completeMockEcomOperation({
+      operation: "ecom_model",
+      idempotencyKey: confirmation.idempotencyKey,
+      payableCredits: confirmation.quote.payableCredits,
+      body,
+      accepted,
+      taskIds: tasks.map((task) => task.task_id)
+    });
+    return ok(accepted);
   }),
 
   // ── 电商图扩展 Phase3 (ECOM-POSTER-UI-0001) — 营销海报(单张 + 批量) mock ──
   // 忠实后端：poster-templates 返列表(仅 id+name)；单张/批量塞真 photo VideoTask(kind=ecom_poster, done)
-  // 进 videos store，GET /videos/:id 轮询拿到 done + 海报图；批量 N clamp 1..20。非伪造(吸取教训)。
+  // 进 videos store，GET /videos/:id 轮询拿到 done + 海报图；批量严格 1..20，整批拒绝第 21 项。
   // 模板 id 逐字对齐后端真实预设(promo_bold/minimal/festival，ecom_images.py)，name 用中文展示名；
   // 真列表运行时来自 API，此处仅 dev/test 回放，不得用错 id 掩盖契约偏移(否则真后端 422)。
   http.get(`${BASE}/api/v1/ecom-images/poster-templates`, () =>
@@ -2467,7 +3202,10 @@ export const handlers = [
   }),
   http.post(`${BASE}/api/v1/ecom-images/poster/batch`, async ({ request }) => {
     const body = (await request.json()) as { items: { source_asset_id: string; template_id: string; apply_visible_label?: boolean }[] };
-    const items = (body.items ?? []).slice(0, 20); // N clamp 上界 20
+    const items = body.items ?? [];
+    if (items.length < 1 || items.length > 20) {
+      return err(422, "VALIDATION_ERROR", "每批图片数量必须在 1–20 张之间");
+    }
     const batchId = `batch-${++videoSeq}`;
     const tasks = items.map((it) => {
       const id = `mock-${++videoSeq}`;

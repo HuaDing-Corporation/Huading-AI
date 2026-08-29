@@ -53,13 +53,27 @@ import { uploadAudio } from "@/lib/api/brand-voices";
 import { listVoices } from "@/lib/api/voices";
 import { listSubtitleTemplates } from "@/lib/api/oral";
 import { createCoverFromFrame, getFrameCandidates } from "@/lib/api/covers";
-import { cutoutImage, cutoutImageBatch, listModelStyles, listPosterTemplates, modelImage, modelImageBatch, posterImage, posterImageBatch } from "@/lib/api/ecom-images";
+import {
+  createEcomCutout,
+  createEcomModel,
+  cutoutImage,
+  cutoutImageBatch,
+  estimateEcomCutout,
+  estimateEcomModel,
+  listModelStyles,
+  listPosterTemplates,
+  modelImage,
+  modelImageBatch,
+  posterImage,
+  posterImageBatch
+} from "@/lib/api/ecom-images";
 import { createBrandVoiceFromAudio, deleteBrandVoice, listBrandVoices } from "@/lib/api/brand-voices";
 import { getLabelSettings, updateLabelSettings } from "@/lib/api/label-settings";
 import { createPublishDrafts, deletePublishRecord, listPublishPlatforms, listPublishRecords, markPublished } from "@/lib/api/publish";
 import { clearVideos, createVideo, deleteVideo, estimateVideo, generateScenePrompt, getVideo, listVideos, listVideosPage } from "@/lib/api/videos";
 import type {
   BatchRequest,
+  BillingConfirmation,
   CopyDraftCreateRequest,
   CopyRewriteRequest,
   CopyTitlesRequest,
@@ -70,10 +84,14 @@ import type {
   CreateDraftsRequest,
   PublishPlatformId,
   CutoutBatchRequest,
+  CutoutBatchResponse,
   CutoutRequest,
+  CutoutResponse,
   LabelSettingsUpdate,
   ModelBatchRequest,
+  ModelBatchResponse,
   ModelRequest,
+  ModelResponse,
   PosterBatchRequest,
   PosterRequest,
   ScenePromptRequest,
@@ -197,10 +215,26 @@ export function useUploadAudio() {
   return useMutation({ mutationFn: (audio: Blob) => uploadAudio(audio) });
 }
 export function useScriptGenerate() {
-  return useMutation({ mutationFn: (params: ScriptGenerateRequest) => generateScript(params) });
+  return useMutation({
+    mutationFn: ({
+      params,
+      confirmation
+    }: {
+      params: ScriptGenerateRequest;
+      confirmation: BillingConfirmation;
+    }) => generateScript(params, confirmation)
+  });
 }
 export function useScenePromptGenerate() {
-  return useMutation({ mutationFn: (params: ScenePromptRequest) => generateScenePrompt(params) });
+  return useMutation({
+    mutationFn: ({
+      params,
+      confirmation
+    }: {
+      params: ScenePromptRequest;
+      confirmation: BillingConfirmation;
+    }) => generateScenePrompt(params, confirmation)
+  });
 }
 // ── 提示词反推 (REVERSE-PROMPT-UI-0001) — 预估 / 反推 / 重推 / 保存 ──
 /**
@@ -285,6 +319,25 @@ export function useCoverFromFrame() {
   return useMutation({ mutationFn: (body: CoverFromFrameRequest) => createCoverFromFrame(body) });
 }
 // ── 电商图扩展 Phase1 (ECOM-IMG-UI-0001) — 白底图/抠图(单张 + 批量 fan-out)──
+export function useEstimateEcomCutout() {
+  return useMutation({
+    mutationFn: (body: CutoutRequest | CutoutBatchRequest) => estimateEcomCutout(body)
+  });
+}
+export function useCreateEcomCutout() {
+  return useMutation({
+    mutationFn: ({
+      body,
+      confirmation
+    }: {
+      body: CutoutRequest | CutoutBatchRequest;
+      confirmation: BillingConfirmation;
+    }): Promise<CutoutResponse | CutoutBatchResponse> =>
+      "items" in body
+        ? createEcomCutout(body, confirmation)
+        : createEcomCutout(body, confirmation)
+  });
+}
 export function useCutoutImage() {
   return useMutation({ mutationFn: (body: CutoutRequest) => cutoutImage(body) });
 }
@@ -292,6 +345,25 @@ export function useCutoutBatch() {
   return useMutation({ mutationFn: (body: CutoutBatchRequest) => cutoutImageBatch(body) });
 }
 // ── 电商图扩展 Phase2 (ECOM-MODEL-UI-0001) — AI 模特风格预设 + 单张/批量生成 ──
+export function useEstimateEcomModel() {
+  return useMutation({
+    mutationFn: (body: ModelRequest | ModelBatchRequest) => estimateEcomModel(body)
+  });
+}
+export function useCreateEcomModel() {
+  return useMutation({
+    mutationFn: ({
+      body,
+      confirmation
+    }: {
+      body: ModelRequest | ModelBatchRequest;
+      confirmation: BillingConfirmation;
+    }): Promise<ModelResponse | ModelBatchResponse> =>
+      "items" in body
+        ? createEcomModel(body, confirmation)
+        : createEcomModel(body, confirmation)
+  });
+}
 export function useModelStyles() {
   const { session } = useAuth();
   return useQuery({ queryKey: ecomModelStylesKey, queryFn: listModelStyles, enabled: !!session });
