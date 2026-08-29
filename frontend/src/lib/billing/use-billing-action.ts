@@ -6,6 +6,7 @@ import {
   billingFromApiError,
   getBillingOperation,
   parseBillingOperationLookup,
+  parseBillingOperationLookupEnvelope,
   parseBillingQuote,
   parseBillingSummary,
   type BillingOperationLookupLike,
@@ -50,8 +51,24 @@ export type UseBillingActionOptions<
   TLookup extends BillingOperationLookupLike = BillingOperationLookup
 > = UseBillingActionOptionsBase<TInput, TQuote, TResult, TLookup> &
   ([TLookup] extends [BillingOperationLookup]
-    ? { parseLookup?: BillingOperationLookupParser<TLookup> }
+    ? [BillingOperationLookup] extends [TLookup]
+      ? { parseLookup?: never }
+      : { parseLookup: BillingOperationLookupParser<TLookup> }
     : { parseLookup: BillingOperationLookupParser<TLookup> });
+
+type CanonicalBillingActionOptions<TInput, TQuote, TResult> =
+  UseBillingActionOptionsBase<TInput, TQuote, TResult, BillingOperationLookup> & {
+    parseLookup?: never;
+  };
+
+type CustomBillingActionOptions<
+  TInput,
+  TQuote,
+  TResult,
+  TLookup extends BillingOperationLookupLike
+> = UseBillingActionOptionsBase<TInput, TQuote, TResult, TLookup> & {
+  parseLookup: BillingOperationLookupParser<TLookup>;
+};
 
 export interface UseBillingActionResult<
   TInput,
@@ -143,7 +160,24 @@ interface BoundAttempt<TInput, TResult, TLookup extends BillingOperationLookupLi
   run: number;
 }
 
+export function useBillingAction<TInput, TQuote, TResult>(
+  options: CanonicalBillingActionOptions<TInput, TQuote, TResult>
+): UseBillingActionResult<TInput, TQuote, TResult, BillingOperationLookup>;
 export function useBillingAction<
+  TInput,
+  TQuote,
+  TResult,
+  TLookup extends BillingOperationLookupLike
+>(
+  options: CustomBillingActionOptions<TInput, TQuote, TResult, TLookup>
+): UseBillingActionResult<TInput, TQuote, TResult, TLookup>;
+export function useBillingAction(options: unknown): unknown {
+  return useBillingActionInternal(
+    options as UseBillingActionOptions<unknown, unknown, unknown, BillingOperationLookup>
+  );
+}
+
+function useBillingActionInternal<
   TInput,
   TQuote,
   TResult,
@@ -304,8 +338,31 @@ export function useBillingAction<
     raw: unknown,
     attempt: BoundAttempt<TInput, TResult, TLookup>
   ): boolean => {
+    const envelope = parseBillingOperationLookupEnvelope(raw);
+    const matchingEnvelope =
+      envelope?.operation === attempt.operation &&
+      envelope.idempotency_key === attempt.confirmation.idempotency_key
+        ? envelope
+        : null;
+    if (matchingEnvelope) setBilling(matchingEnvelope.billing);
     const parsed = attempt.parseLookup(raw);
-    if (!parsed) return false;
+    if (
+      !parsed ||
+      parsed.operation !== attempt.operation ||
+      parsed.idempotency_key !== attempt.confirmation.idempotency_key
+    ) {
+      setLookupValue(null);
+      setResult(null);
+      setError(
+        new Error(
+          matchingEnvelope
+            ? "计费结果协议异常，请继续查询"
+            : "计费结果确认中"
+        )
+      );
+      setPhase("querying");
+      return true;
+    }
     setLookupValue(parsed);
     setBilling(parsed.billing);
     if (parsed.state === "in_progress") {
@@ -366,22 +423,24 @@ export function useBillingAction<
             attempt.confirmation.idempotency_key
           );
           if (!mounted.current || attempt.run !== runId.current) return;
-          const parsed = attempt.parseLookup(raw);
-          if (
-            !parsed ||
-            parsed.operation !== attempt.operation ||
-            parsed.idempotency_key !== attempt.confirmation.idempotency_key
-          ) {
-            setError(new Error("计费结果确认中"));
-            setPhase("querying");
-            return;
-          }
           onlyNotFound = false;
-          if (applyLookup(parsed, attempt)) return;
+          if (applyLookup(raw, attempt)) return;
         } catch (caught) {
           if (!mounted.current || attempt.run !== runId.current) return;
           if (!isApiError(caught) || caught.status !== 404) {
-            setError(new Error("计费结果确认中"));
+            const protocolBilling =
+              isApiError(caught) && caught.code === "INVALID_BILLING_RESPONSE"
+                ? billingFromApiError(caught)
+                : null;
+            if (
+              protocolBilling?.idempotency_key === attempt.confirmation.idempotency_key
+            ) {
+              setBilling(protocolBilling);
+              setResult(null);
+              setError(new Error("计费结果协议异常，请继续查询"));
+            } else {
+              setError(new Error("计费结果确认中"));
+            }
             setPhase("querying");
             return;
           }
@@ -490,7 +549,7 @@ export function useBillingAction<
 
   const queryOriginal = useCallback(async () => {
     const attempt = attemptRef.current;
-    if (!attempt) return;
+    if (!attempt || attemptClosed.current) return;
     await recoverUnknown(attempt);
   }, [recoverUnknown]);
 

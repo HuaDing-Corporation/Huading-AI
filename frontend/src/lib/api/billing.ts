@@ -299,6 +299,30 @@ const LOOKUP_KEYS = [
   "failure"
 ] as const;
 
+export interface BillingOperationLookupEnvelope {
+  operation: string;
+  idempotency_key: string;
+  billing: BillingSummary;
+}
+
+export function parseBillingOperationLookupEnvelope(
+  value: unknown
+): BillingOperationLookupEnvelope | null {
+  if (
+    !record(value) ||
+    !exactKeys(value, LOOKUP_KEYS) ||
+    !nonEmptyString(value.operation) ||
+    typeof value.idempotency_key !== "string" ||
+    !UUID.test(value.idempotency_key)
+  ) {
+    return null;
+  }
+  const billing = parseBillingSummary(value.billing);
+  return billing && billing.idempotency_key === value.idempotency_key
+    ? { operation: value.operation, idempotency_key: value.idempotency_key, billing }
+    : null;
+}
+
 function nullablePayload(value: unknown): boolean {
   return value === null || record(value);
 }
@@ -344,6 +368,84 @@ export type BillingOperationLookupLike =
 export type BillingOperationLookupParser<TLookup extends BillingOperationLookupLike> = (
   value: unknown
 ) => TLookup | null;
+
+const FORBIDDEN_REGISTRY_KEYS = new Set(["__proto__", "constructor", "prototype", "toString"]);
+
+function ownDataValue(value: Record<string, unknown>, key: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor && "value" in descriptor ? descriptor.value : undefined;
+}
+
+function parseExtensionSchema(value: unknown): BillingLookupResultSchema | null {
+  if (!record(value)) return null;
+  const allowedKeys = [
+    "operations",
+    "completionKinds",
+    "parse",
+    "validateResultId",
+    "validateContext"
+  ];
+  if (Object.keys(value).some((key) => !allowedKeys.includes(key))) return null;
+  const operations = ownDataValue(value, "operations");
+  const completionKinds = ownDataValue(value, "completionKinds");
+  const parse = ownDataValue(value, "parse");
+  const validateResultId = ownDataValue(value, "validateResultId");
+  const validateContextDescriptor = Object.getOwnPropertyDescriptor(value, "validateContext");
+  if (
+    !Array.isArray(operations) ||
+    operations.length === 0 ||
+    !operations.every(nonEmptyString) ||
+    !Array.isArray(completionKinds) ||
+    completionKinds.length === 0 ||
+    !completionKinds.every((kind) => kind === "succeeded" || kind === "rejected") ||
+    typeof parse !== "function" ||
+    typeof validateResultId !== "function" ||
+    (validateContextDescriptor !== undefined && !("value" in validateContextDescriptor))
+  ) {
+    return null;
+  }
+  const validateContext = validateContextDescriptor?.value;
+  if (validateContext !== undefined && typeof validateContext !== "function") return null;
+  return {
+    operations: operations as string[],
+    completionKinds: completionKinds as ("succeeded" | "rejected")[],
+    parse: parse as BillingLookupResultSchema["parse"],
+    validateResultId: validateResultId as BillingLookupResultSchema["validateResultId"],
+    validateContext: validateContext as BillingLookupResultSchema["validateContext"]
+  };
+}
+
+function lookupRegistry(
+  extensions?: BillingLookupResultRegistry
+): Map<string, BillingLookupResultSchema> | null {
+  const registry = new Map<string, BillingLookupResultSchema>(
+    Object.entries(defaultBillingLookupResultRegistry)
+  );
+  if (!extensions) return registry;
+  try {
+    const canonicalOperations = new Set(
+      [...registry.values()].flatMap((entry) => entry.operations)
+    );
+    for (const resultType of Object.getOwnPropertyNames(extensions)) {
+      if (
+        FORBIDDEN_REGISTRY_KEYS.has(resultType) ||
+        Object.hasOwn(defaultBillingLookupResultRegistry, resultType)
+      ) {
+        return null;
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(extensions, resultType);
+      if (!descriptor || !("value" in descriptor)) return null;
+      const schema = parseExtensionSchema(descriptor.value);
+      if (!schema || schema.operations.some((operation) => canonicalOperations.has(operation))) {
+        return null;
+      }
+      registry.set(resultType, schema);
+    }
+  } catch {
+    return null;
+  }
+  return registry;
+}
 
 function exactPayload(
   value: unknown,
@@ -631,41 +733,27 @@ export function parseBillingOperationLookup(
   value: unknown,
   extensions?: BillingLookupResultRegistry
 ): BillingOperationLookup | ExtendedBillingOperationLookup | null {
-  const canonicalOperations = new Set(
-    Object.values(defaultBillingLookupResultRegistry).flatMap((entry) => entry.operations)
-  );
-  if (
-    extensions &&
-    Object.entries(extensions).some(
-      ([resultType, schema]) =>
-        resultType in defaultBillingLookupResultRegistry ||
-        schema.operations.some((operation) => canonicalOperations.has(operation))
-    )
-  ) {
-    return null;
-  }
-  const registry = extensions
-    ? { ...defaultBillingLookupResultRegistry, ...extensions }
-    : defaultBillingLookupResultRegistry;
+  const envelope = parseBillingOperationLookupEnvelope(value);
+  const registry = lookupRegistry(extensions);
   if (
     !record(value) ||
-    !exactKeys(value, LOOKUP_KEYS) ||
-    !nonEmptyString(value.operation) ||
-    typeof value.idempotency_key !== "string" ||
-    !UUID.test(value.idempotency_key) ||
+    !envelope ||
+    !registry ||
     !resultId(value.result_id)
   ) {
     return null;
   }
-  const billing = parseBillingSummary(value.billing);
-  if (!billing || billing.idempotency_key !== value.idempotency_key) return null;
-  const schema = typeof value.result_type === "string" ? registry[value.result_type] : null;
-  const knownOperation = Object.values(registry).some((entry) =>
+  const billing = envelope.billing;
+  const schema =
+    typeof value.result_type === "string" && !FORBIDDEN_REGISTRY_KEYS.has(value.result_type)
+      ? registry.get(value.result_type) ?? null
+      : null;
+  const knownOperation = [...registry.values()].some((entry) =>
     entry.operations.includes(value.operation as string)
   );
   if (!knownOperation) return null;
   if (value.result_type !== null && !schema) return null;
-  if (schema && !schema.operations.includes(value.operation)) return null;
+  if (schema && !schema.operations.includes(envelope.operation)) return null;
 
   if (value.state === "in_progress") {
     if (
@@ -778,12 +866,24 @@ export async function getBillingOperation(
     `/api/v1/billing/operations/by-idempotency/${encodeURIComponent(operation)}/${encodeURIComponent(idempotencyKey)}`
   );
   const parsed = parseLookup(value);
+  const envelope = parseBillingOperationLookupEnvelope(value);
   if (
     !parsed ||
     parsed.operation !== operation ||
     parsed.idempotency_key.toLowerCase() !== idempotencyKey.toLowerCase()
   ) {
-    throw new ApiError("计费查询返回了无效数据。", "INVALID_BILLING_RESPONSE", 502);
+    const detail =
+      envelope &&
+      envelope.operation === operation &&
+      envelope.idempotency_key.toLowerCase() === idempotencyKey.toLowerCase()
+        ? { billing: envelope.billing }
+        : undefined;
+    throw new ApiError(
+      "计费结果协议异常，请继续查询",
+      "INVALID_BILLING_RESPONSE",
+      502,
+      detail
+    );
   }
   return parsed;
 }

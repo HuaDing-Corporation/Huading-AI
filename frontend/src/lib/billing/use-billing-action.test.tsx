@@ -3,6 +3,7 @@ import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 
 import { ApiError } from "@/lib/api/client";
 import {
+  getBillingOperation,
   parseBillingOperationLookup,
   type BillingLookupResultRegistry
 } from "@/lib/api/billing";
@@ -482,8 +483,85 @@ describe("useBillingAction", () => {
 
     expect(view.result.current.phase).toBe("querying");
     expect(view.result.current.result).toBeNull();
-    expect(view.result.current.errorMessage).toBe("计费结果确认中");
+    expect(view.result.current.errorMessage).toBe("计费结果协议异常，请继续查询");
     expect(mapResult).not.toHaveBeenCalled();
+  });
+
+  it("keeps valid billing visible for a malformed canonical payload and allows explicit lookup continuation", async () => {
+    const malformed = {
+      ...completedLookup(),
+      result: { ...completedLookup().result, status: "processing" },
+      resource: { ...completedLookup().resource, status: "processing" }
+    };
+    const lookup = vi
+      .fn()
+      .mockResolvedValueOnce(malformed)
+      .mockResolvedValueOnce(completedLookup());
+    const view = renderHook(() =>
+      useBillingAction(
+        options({
+          submit: vi.fn().mockRejectedValue(networkError()),
+          lookup
+        })
+      )
+    );
+    await act(() => view.result.current.estimate());
+    await act(() => view.result.current.confirm());
+
+    expect(view.result.current.phase).toBe("querying");
+    expect(view.result.current.billing).toEqual(billing("settled"));
+    expect(view.result.current.result).toBeNull();
+    expect(view.result.current.errorMessage).toBe("计费结果协议异常，请继续查询");
+
+    await act(() => view.result.current.continueLookup());
+    expect(view.result.current.phase).toBe("succeeded");
+    expect(view.result.current.result?.id).toBe("voice-1");
+    expect(lookup).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves billing from an HTTP 200 protocol error and recovers through the default transport", async () => {
+    const malformed = {
+      ...completedLookup(),
+      result_type: "unknown_result",
+      result_id: "unknown-1",
+      resource: { id: "unknown-1" },
+      result: { id: "unknown-1" }
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ data: malformed, error: null, request_id: "req-malformed" }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ data: completedLookup(), error: null, request_id: "req-valid" }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const view = renderHook(() =>
+      useBillingAction(
+        options({
+          submit: vi.fn().mockRejectedValue(networkError()),
+          lookup: undefined
+        })
+      )
+    );
+    await act(() => view.result.current.estimate());
+    await act(() => view.result.current.confirm());
+
+    expect(view.result.current.phase).toBe("querying");
+    expect(view.result.current.billing).toEqual(billing("settled"));
+    expect(view.result.current.result).toBeNull();
+    expect(view.result.current.errorMessage).toBe("计费结果协议异常，请继续查询");
+
+    await act(() => view.result.current.continueLookup());
+    expect(view.result.current.phase).toBe("succeeded");
+    expect(view.result.current.result?.id).toBe("voice-1");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the lookup parser and TResult mapper frozen during recovery", async () => {
@@ -829,11 +907,15 @@ describe("useBillingAction", () => {
   });
 
   it("treats a visible failed lookup returned with HTTP 200 as failure", async () => {
+    const lookup = vi
+      .fn()
+      .mockResolvedValueOnce(failedLookup())
+      .mockResolvedValueOnce(completedLookup());
     const view = renderHook(() =>
       useBillingAction(
         options({
           submit: vi.fn().mockRejectedValue(networkError()),
-          lookup: vi.fn().mockResolvedValue(failedLookup())
+          lookup
         })
       )
     );
@@ -842,6 +924,43 @@ describe("useBillingAction", () => {
     expect(view.result.current.phase).toBe("failed");
     expect(view.result.current.billing?.status).toBe("released");
     expect(view.result.current.error).toMatchObject({ code: "PROVIDER_FAILED" });
+
+    await act(() => view.result.current.continueLookup());
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(view.result.current.phase).toBe("failed");
+  });
+
+  it("requires a strict parser before narrowing the canonical lookup mapper type", () => {
+    type VoiceSucceeded = Extract<
+      BillingOperationLookup,
+      { completion_kind: "succeeded"; result_type: "brand_voice" }
+    >;
+    const voice = completedLookup() as VoiceSucceeded;
+    const useCompileContracts = () => {
+      // @ts-expect-error canonical brand_voice results cannot claim the video_create operation
+      const mismatchedOperation: VoiceSucceeded = { ...voice, operation: "video_create" };
+
+      // @ts-expect-error narrowing the canonical lookup generic requires an explicit strict parser
+      useBillingAction<TestInput, BillingQuote, TestResult, VoiceSucceeded>({
+        ...options(),
+        resultFromLookup: (lookup) => ({ id: lookup.result.id, billing: lookup.billing })
+      });
+
+      // @ts-expect-error a custom mapper is unavailable without its required strict parser
+      useBillingAction<TestInput, BillingQuote, TestResult, CustomLookup>({
+        operation: "custom_operation",
+        input: { text: "扩展请求" },
+        estimate: vi.fn().mockResolvedValue({ ...quote(), operation: "custom_operation" }),
+        submit: vi.fn().mockRejectedValue(networkError()),
+        resultFromLookup: (lookup) => ({ id: lookup.result.id, billing: lookup.billing })
+      });
+
+      // @ts-expect-error getBillingOperation narrowing also requires an explicit strict parser
+      getBillingOperation<VoiceSucceeded>("video_create", keyA);
+      return mismatchedOperation;
+    };
+
+    expect(useCompileContracts).toBeTypeOf("function");
   });
 
   it("clears PRICE_CHANGED and creates a new key only after explicit retry and re-estimate", async () => {

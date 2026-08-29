@@ -827,6 +827,40 @@ describe("billing operation lookup parsing", () => {
     });
   });
 
+  it("preserves only a valid data-envelope billing summary when the typed payload is malformed", async () => {
+    const malformed = lookupBase({
+      operation: "cosyvoice_brand_voice_create",
+      state: "completed",
+      completion_kind: "succeeded",
+      billing: summary("settled"),
+      result_type: "brand_voice",
+      result_id: "voice-1",
+      resource: brandVoicePayload({ status: "processing" }),
+      result: brandVoicePayload({ status: "processing" })
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            data: malformed,
+            billing: summary("released"),
+            error: null,
+            request_id: "req-1"
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      )
+    );
+
+    await expect(
+      getBillingOperation("cosyvoice_brand_voice_create", key)
+    ).rejects.toMatchObject({
+      code: "INVALID_BILLING_RESPONSE",
+      detail: { billing: summary("settled") }
+    });
+  });
+
   it("marks only explicitly registered lookup extensions as extended", () => {
     const registry: BillingLookupResultRegistry = {
       custom_result: {
@@ -921,5 +955,122 @@ describe("billing operation lookup parsing", () => {
         unrelated
       )
     ).toBeNull();
+  });
+
+  it.each(["toString", "constructor", "__proto__"])(
+    "rejects the prototype result type %s without throwing",
+    (resultType) => {
+      const candidate = lookupBase({
+        operation: "script_generate",
+        state: "completed",
+        completion_kind: "succeeded",
+        billing: summary("settled"),
+        result_type: resultType,
+        result_id: null,
+        resource: null,
+        result: { script: "成稿" }
+      });
+
+      expect(() => parseBillingOperationLookup(candidate)).not.toThrow();
+      expect(parseBillingOperationLookup(candidate)).toBeNull();
+    }
+  );
+
+  it("rejects an own prototype-key extension in a null-prototype registry", () => {
+    const registry = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(registry, "__proto__", {
+      enumerable: true,
+      value: {
+        operations: ["custom_operation"],
+        completionKinds: ["succeeded"],
+        parse: (value: unknown) =>
+          typeof value === "object" && value !== null
+            ? (value as Record<string, unknown>)
+            : null,
+        validateResultId: () => true
+      }
+    });
+    const candidate = lookupBase({
+      operation: "custom_operation",
+      state: "completed",
+      completion_kind: "succeeded",
+      billing: summary("settled"),
+      result_type: "__proto__",
+      result_id: "result-1",
+      resource: { id: "result-1" },
+      result: { id: "result-1" }
+    });
+
+    expect(() =>
+      parseBillingOperationLookup(candidate, registry as BillingLookupResultRegistry)
+    ).not.toThrow();
+    expect(
+      parseBillingOperationLookup(candidate, registry as BillingLookupResultRegistry)
+    ).toBeNull();
+  });
+
+  it("ignores inherited extension entries", () => {
+    const inheritedSchema = {
+      operations: ["inherited_operation"],
+      completionKinds: ["succeeded"] as const,
+      parse: (value: unknown) =>
+        typeof value === "object" && value !== null
+          ? (value as Record<string, unknown>)
+          : null,
+      validateResultId: () => true
+    };
+    const registry = Object.create({ inherited_result: inheritedSchema }) as BillingLookupResultRegistry;
+    const candidate = lookupBase({
+      operation: "inherited_operation",
+      state: "completed",
+      completion_kind: "succeeded",
+      billing: summary("settled"),
+      result_type: "inherited_result",
+      result_id: "result-1",
+      resource: { id: "result-1" },
+      result: { id: "result-1" }
+    });
+
+    expect(() => parseBillingOperationLookup(candidate, registry)).not.toThrow();
+    expect(parseBillingOperationLookup(candidate, registry)).toBeNull();
+  });
+
+  it("rejects extension registry getters without invoking them", () => {
+    let getterCalled = false;
+    const registry = Object.defineProperty({}, "custom_result", {
+      enumerable: true,
+      get() {
+        getterCalled = true;
+        throw new Error("registry getter must not run");
+      }
+    }) as BillingLookupResultRegistry;
+
+    expect(() => parseBillingOperationLookup(lookupBase(), registry)).not.toThrow();
+    expect(parseBillingOperationLookup(lookupBase(), registry)).toBeNull();
+    expect(getterCalled).toBe(false);
+  });
+
+  it("rejects extension schema getters without invoking them", () => {
+    let getterCalled = false;
+    const schema = Object.defineProperty(
+      {
+        completionKinds: ["succeeded"],
+        parse: () => null,
+        validateResultId: () => false
+      },
+      "operations",
+      {
+        enumerable: true,
+        get() {
+          getterCalled = true;
+          throw new Error("schema getter must not run");
+        }
+      }
+    );
+    const registry = { custom_result: schema } as unknown as BillingLookupResultRegistry;
+
+    expect(() => parseBillingOperationLookup(lookupBase(), registry)).not.toThrow();
+    expect(parseBillingOperationLookup(lookupBase(), registry)).toBeNull();
+    expect(getterCalled).toBe(false);
   });
 });

@@ -1092,6 +1092,29 @@ export interface BillingLookupPayloadMap {
 
 export type BillingKnownResultType = keyof BillingLookupPayloadMap;
 
+export type BillingKnownOperation =
+  | "script_generate"
+  | "scene_prompt"
+  | "ecom_cutout"
+  | "ecom_model"
+  | "video_create"
+  | "doubao_brand_voice_order_create"
+  | "doubao_brand_voice_order_renew"
+  | "cosyvoice_brand_voice_create";
+
+type BillingOperationForResult<K extends BillingKnownResultType> =
+  K extends "script_generate_result"
+    ? "script_generate"
+    : K extends "scene_prompt_result"
+      ? "scene_prompt"
+      : K extends "ecom_image_batch"
+        ? "ecom_cutout" | "ecom_model"
+        : K extends "video_task"
+          ? "video_create"
+          : K extends "brand_voice_order"
+            ? "doubao_brand_voice_order_create" | "doubao_brand_voice_order_renew"
+            : "cosyvoice_brand_voice_create";
+
 interface BillingInProgressPayloadMap {
   script_generate_result: BillingScriptResult;
   scene_prompt_result: BillingScenePromptResult;
@@ -1116,7 +1139,6 @@ type BillingSucceededResource<K extends BillingKnownResultType> =
   BillingResultId<K> extends null ? null : BillingSucceededPayloadMap[K];
 
 interface BillingOperationLookupBase {
-  operation: string;
   idempotency_key: string;
   billing: BillingSummary;
   result_id: string | null;
@@ -1124,6 +1146,7 @@ interface BillingOperationLookupBase {
 
 type BillingInProgressLookup =
   | (BillingOperationLookupBase & {
+      operation: BillingKnownOperation;
       state: "in_progress";
       completion_kind: null;
       result_type: null;
@@ -1144,6 +1167,7 @@ type BillingInProgressLookup =
     })
   | {
       [K in keyof BillingInProgressPayloadMap]: BillingOperationLookupBase & {
+        operation: BillingOperationForResult<K>;
         state: "in_progress";
         completion_kind: null;
         result_type: K;
@@ -1156,6 +1180,7 @@ type BillingInProgressLookup =
 
 type BillingSucceededLookup = {
   [K in BillingKnownResultType]: BillingOperationLookupBase & {
+    operation: BillingOperationForResult<K>;
     state: "completed";
     completion_kind: "succeeded";
     result_type: K;
@@ -1170,6 +1195,7 @@ export type BillingOperationLookup =
   | BillingInProgressLookup
   | BillingSucceededLookup
   | (BillingOperationLookupBase & {
+      operation: "doubao_brand_voice_order_create" | "doubao_brand_voice_order_renew";
       state: "completed";
       completion_kind: "rejected";
       result_type: "brand_voice_order";
@@ -1179,6 +1205,7 @@ export type BillingOperationLookup =
       failure: null;
     })
   | (BillingOperationLookupBase & {
+      operation: BillingKnownOperation;
       state: "completed";
       completion_kind: "failed";
       result_type: null;
@@ -1195,6 +1222,7 @@ export type BillingOperationLookup =
 /** Only returned when a caller explicitly supplies an extension registry/parser. */
 export type ExtendedBillingOperationLookup =
   | (BillingOperationLookupBase & {
+      operation: string;
       state: "in_progress";
       completion_kind: null;
       result_type: string;
@@ -1203,6 +1231,7 @@ export type ExtendedBillingOperationLookup =
       failure: null;
     })
   | (BillingOperationLookupBase & {
+      operation: string;
       state: "completed";
       completion_kind: "succeeded";
       result_type: string;
@@ -1211,6 +1240,7 @@ export type ExtendedBillingOperationLookup =
       failure: null;
     })
   | (BillingOperationLookupBase & {
+      operation: string;
       state: "completed";
       completion_kind: "rejected";
       result_type: string;
@@ -1219,6 +1249,7 @@ export type ExtendedBillingOperationLookup =
       failure: null;
     })
   | (BillingOperationLookupBase & {
+      operation: string;
       state: "completed";
       completion_kind: "failed";
       result_type: null;
