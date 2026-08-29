@@ -351,9 +351,7 @@ def test_zero_price_operation_is_idempotent_and_keeps_wallet_unchanged(
     assert db_session.scalar(select(func.count()).select_from(UsageRecord)) == 1
 
 
-def test_fixed_free_operation_allows_explicit_zero_actual_quantity(
-    db_session, zero_price_quote
-):
+def test_fixed_free_operation_allows_explicit_zero_actual_quantity(db_session, zero_price_quote):
     register_billing_result_schema("test_zero_actual_result", StoredResource)
     allocation = UsageAllocation(
         0,
@@ -398,9 +396,7 @@ def test_fixed_free_operation_allows_explicit_zero_actual_quantity(
     assert usage.credits == 0
 
 
-def test_actual_quantity_may_be_shorter_or_equal_but_never_greater(
-    db_session, verified_quote
-):
+def test_actual_quantity_may_be_shorter_or_equal_but_never_greater(db_session, verified_quote):
     register_billing_result_schema("test_quantity_result", EcomBatchResult)
     reserved = reserve_batch(db_session, verified_quote)
     completed = complete_succeeded(
@@ -476,7 +472,7 @@ def test_repeated_settle_and_release_are_terminal_noops(db_session, verified_quo
     assert db_session.get(Subscription, "subscription-a").quota_credits_used == 1
 
 
-def test_result_and_error_payload_bounds_and_sanitization(db_session, verified_quote):
+def test_result_and_error_payload_bounds_and_validation(db_session, verified_quote):
     register_billing_result_schema("test_large_result", LargeResult)
     reserved = reserve_batch(db_session, verified_quote)
     with pytest.raises(AppError) as result_error:
@@ -498,23 +494,22 @@ def test_result_and_error_payload_bounds_and_sanitization(db_session, verified_q
             operation_id=reserved.id,
             code="PROVIDER_FAILED",
             http_status=502,
-            sanitized_detail={"message": "x" * (16 * 1024)},
+            sanitized_detail={"reason": "x" * (16 * 1024)},
         )
     assert error_error.value.code == "BILLING_ERROR_PAYLOAD_TOO_LARGE"
     db_session.rollback()
 
     reserved = reserve_batch(db_session, verified_quote, key=uuid4())
-    failed = complete_failed(
-        db_session,
-        operation_id=reserved.id,
-        code="PROVIDER_FAILED",
-        http_status=502,
-        sanitized_detail={"api_key": "secret-value", "reason": "timeout"},
-    )
-    assert failed.error_payload == {
-        "detail": {"api_key": "[REDACTED]", "reason": "timeout"}
-    }
-    assert "secret-value" not in str(failed.error_payload)
+    with pytest.raises(AppError) as unknown_field_error:
+        complete_failed(
+            db_session,
+            operation_id=reserved.id,
+            code="PROVIDER_FAILED",
+            http_status=502,
+            sanitized_detail={"api_key": "secret-value", "reason": "timeout"},
+        )
+    assert unknown_field_error.value.code == "BILLING_ERROR_PAYLOAD_INVALID"
+    db_session.rollback()
 
     reserved = reserve_batch(db_session, verified_quote, key=uuid4())
     with pytest.raises(AppError) as raw_exception_error:
@@ -528,62 +523,121 @@ def test_result_and_error_payload_bounds_and_sanitization(db_session, verified_q
     assert raw_exception_error.value.code == "BILLING_ERROR_PAYLOAD_INVALID"
 
 
-def test_sensitive_nested_keys_and_log_strings_never_persist_or_replay(
-    db_session, verified_quote
-):
-    nested = reserve_batch(db_session, verified_quote)
-    nested_failed = complete_failed(
-        db_session,
-        operation_id=nested.id,
-        code="PROVIDER_FAILED",
-        http_status=502,
-        sanitized_detail={
-            "metadata": {
-                "supplier_api_key": "supplier-secret",
-                "reason": "timeout",
-            }
-        },
-    )
-    assert nested_failed.error_payload == {
-        "detail": {
-            "metadata": {
-                "supplier_api_key": "[REDACTED]",
-                "reason": "timeout",
-            }
-        }
-    }
-    assert "supplier-secret" not in str(nested_failed.error_payload)
-    db_session.commit()
+def test_error_payload_rejects_unknown_client_secret_field(db_session, verified_quote):
+    reserved = reserve_batch(db_session, verified_quote)
 
-    log_like = reserve_batch(db_session, verified_quote, key=uuid4())
-    log_failed = complete_failed(
+    with pytest.raises(AppError) as error:
+        complete_failed(
+            db_session,
+            operation_id=reserved.id,
+            code="PROVIDER_FAILED",
+            http_status=502,
+            sanitized_detail={"clientSecret": "secret"},
+        )
+
+    assert error.value.code == "BILLING_ERROR_PAYLOAD_INVALID"
+
+
+def test_error_payload_rejects_credential_shaped_reason(db_session, verified_quote):
+    reserved = reserve_batch(db_session, verified_quote)
+
+    with pytest.raises(AppError) as error:
+        complete_failed(
+            db_session,
+            operation_id=reserved.id,
+            code="PROVIDER_FAILED",
+            http_status=502,
+            sanitized_detail={"reason": "innocuous-key-secret-value"},
+        )
+
+    assert error.value.code == "BILLING_ERROR_PAYLOAD_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("detail", "expected_payload"),
+    [
+        ({"reason": "timeout"}, {"detail": {"reason": "timeout"}}),
+        (
+            {"requires_new_quote": True},
+            {"detail": {"requires_new_quote": True}},
+        ),
+        (None, {"detail": None}),
+    ],
+)
+def test_error_payload_persists_only_explicit_closed_fields(
+    db_session, verified_quote, detail, expected_payload
+):
+    reserved = reserve_batch(db_session, verified_quote)
+
+    failed = complete_failed(
         db_session,
-        operation_id=log_like.id,
+        operation_id=reserved.id,
         code="PROVIDER_FAILED",
         http_status=502,
-        sanitized_detail={
-            "message": (
+        sanitized_detail=detail,
+    )
+
+    assert failed.error_payload == expected_payload
+
+
+@pytest.mark.parametrize(
+    "unsafe_detail",
+    [
+        {"metadata": {"supplier_api_key": "supplier-secret"}},
+        {
+            "reason": (
                 "Authorization: Bearer supplier-token\n"
                 "Traceback (most recent call last): raw provider log"
             )
         },
+    ],
+)
+def test_error_payload_rejects_nested_maps_and_log_strings(
+    db_session, verified_quote, unsafe_detail
+):
+    reserved = reserve_batch(db_session, verified_quote)
+
+    with pytest.raises(AppError) as error:
+        complete_failed(
+            db_session,
+            operation_id=reserved.id,
+            code="PROVIDER_FAILED",
+            http_status=502,
+            sanitized_detail=unsafe_detail,
+        )
+
+    assert error.value.code == "BILLING_ERROR_PAYLOAD_INVALID"
+
+
+@pytest.mark.parametrize(
+    "unsafe_detail",
+    [
+        {"clientSecret": "secret"},
+        {"reason": "innocuous-key-secret-value"},
+        {"metadata": {"supplier_api_key": "supplier-secret"}},
+        {"reason": "Authorization: Bearer stored-raw-secret\nTraceback (raw log)"},
+    ],
+)
+def test_lookup_rejects_tampered_error_payload(db_session, verified_quote, unsafe_detail):
+    reserved = reserve_batch(db_session, verified_quote)
+    failed = complete_failed(
+        db_session,
+        operation_id=reserved.id,
+        code="PROVIDER_FAILED",
+        http_status=502,
+        sanitized_detail={"reason": "timeout"},
     )
-    assert log_failed.error_payload == {"detail": {"message": "[REDACTED]"}}
-    assert "supplier-token" not in str(log_failed.error_payload)
-    assert "Traceback" not in str(log_failed.error_payload)
+    db_session.commit()
+    failed.error_payload = {"detail": unsafe_detail}
     db_session.commit()
 
-    log_failed.error_payload = {
-        "detail": {"message": "Authorization: Bearer stored-raw-secret"}
-    }
-    db_session.commit()
     with pytest.raises(BillingInvariantError):
         lookup_operation(
             db_session,
             tenant_id="tenant-a",
             user_id="user-a",
-            operation=log_failed.operation,
-            idempotency_key=UUID(log_failed.idempotency_key),
+            operation=failed.operation,
+            idempotency_key=UUID(failed.idempotency_key),
         )
 
 
@@ -668,9 +722,7 @@ def test_lookup_returns_all_four_closed_union_states(db_session, verified_quote)
     assert rejected_lookup.resource.id == "order-1"
 
 
-def test_lookup_fails_closed_for_unknown_or_invalid_stored_payload(
-    db_session, verified_quote
-):
+def test_lookup_fails_closed_for_unknown_or_invalid_stored_payload(db_session, verified_quote):
     operation = reserve_batch(db_session, verified_quote)
     operation.result_type = "not_registered"
     operation.result_payload = {"raw": "must not escape"}
@@ -709,9 +761,7 @@ def test_lookup_fails_closed_for_unknown_or_invalid_stored_payload(
         "released_credits",
     ],
 )
-def test_terminal_lookup_rejects_corrupt_canonical_usage(
-    db_session, verified_quote, corruption
-):
+def test_terminal_lookup_rejects_corrupt_canonical_usage(db_session, verified_quote, corruption):
     register_billing_result_schema("test_terminal_integrity", EcomBatchResult)
     operation = reserve_batch(db_session, verified_quote)
     complete_succeeded(
@@ -752,6 +802,7 @@ def test_terminal_lookup_rejects_corrupt_canonical_usage(
             operation=operation.operation,
             idempotency_key=UUID(operation.idempotency_key),
         )
+
 
 def test_legacy_unassociated_reservation_coexists_with_operation_reservation(
     db_session, verified_quote

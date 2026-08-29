@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 import threading
 from collections.abc import Mapping, Sequence
@@ -12,7 +11,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 import structlog
-from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -39,40 +38,13 @@ logger = structlog.get_logger(__name__)
 _RESULT_SCHEMAS: dict[str, type[BaseModel]] = {}
 _RESULT_SCHEMAS_LOCK = threading.Lock()
 _SAFE_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
-_SENSITIVE_KEY_PARTS = frozenset(
-    {
-        "api",
-        "apikey",
-        "auth",
-        "authorization",
-        "cookie",
-        "credential",
-        "credentials",
-        "header",
-        "headers",
-        "key",
-        "log",
-        "logs",
-        "password",
-        "provider",
-        "secret",
-        "supplier",
-        "token",
-    }
-)
-_SENSITIVE_TEXT_PATTERNS = tuple(
-    re.compile(pattern, re.IGNORECASE)
-    for pattern in (
-        r"\bauthorization\s*:",
-        r"\bproxy-authorization\s*:",
-        r"\bbearer\s+[a-z0-9._~+/=-]+",
-        r"\bbasic\s+[a-z0-9+/=]+",
-        r"\b(?:api[ _-]?key|token|secret|password|credential)s?\s*[:=]",
-        r"\btraceback\s*\(",
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
-        r"\b(?:stack trace|provider log|supplier log)\b",
-        r"[\r\n]",
-    )
+_UNSAFE_ERROR_REASON = re.compile(
+    r"[\r\n]|"
+    r"\b(?:authorization|bearer|basic|cookie|credential|header|password|secret|token|traceback)\b|"
+    r"\bapi[ _-]?key\b|"
+    r"\b(?:stack trace|provider log|supplier log)\b|"
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    re.IGNORECASE,
 )
 
 
@@ -107,6 +79,20 @@ class _BillingModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class _ErrorDetail(_BillingModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    reason: str | None = None
+    requires_new_quote: bool | None = None
+
+    @field_validator("reason")
+    @classmethod
+    def reject_unsafe_reason(cls, value: str | None) -> str | None:
+        if value is not None and _UNSAFE_ERROR_REASON.search(value):
+            raise ValueError("reason contains unsafe text")
+        return value
+
+
 class BillingSummary(_BillingModel):
     operation_id: str
     idempotency_key: UUID
@@ -120,7 +106,7 @@ class BillingSummary(_BillingModel):
 class BillingFailure(_BillingModel):
     code: str
     original_http_status: int
-    detail: JsonValue | None
+    detail: _ErrorDetail | None
 
 
 class BillingInProgressLookup(_BillingModel):
@@ -176,15 +162,17 @@ class BillingFailedLookup(_BillingModel):
 
 
 BillingOperationLookup = (
-    BillingInProgressLookup
-    | BillingSucceededLookup
-    | BillingRejectedLookup
-    | BillingFailedLookup
+    BillingInProgressLookup | BillingSucceededLookup | BillingRejectedLookup | BillingFailedLookup
 )
 
 
 class _StoredErrorPayload(_BillingModel):
-    detail: JsonValue | None = None
+    detail: _ErrorDetail | None = None
+
+
+def _dump_error_payload(payload: _StoredErrorPayload) -> dict[str, object]:
+    detail = payload.detail
+    return {"detail": None if detail is None else detail.model_dump(mode="json", exclude_none=True)}
 
 
 def register_billing_result_schema(result_type: str, schema: type[BaseModel]) -> None:
@@ -217,9 +205,7 @@ def billing_summary(operation: BillingOperation) -> BillingSummary:
     if operation.status == "in_progress":
         if operation.completion_kind is not None or settled or released:
             raise BillingInvariantError("in-progress operation has terminal amounts")
-        status: Literal["reserved", "settled", "partially_settled", "released"] = (
-            "reserved"
-        )
+        status: Literal["reserved", "settled", "partially_settled", "released"] = "reserved"
     elif operation.status == "completed":
         if settled + released != requested:
             raise BillingInvariantError("terminal operation does not conserve requested credits")
@@ -344,9 +330,7 @@ def _finite_decimal(value: Decimal, *, field: str, allow_zero: bool) -> Decimal:
             f"Invalid {field}.", code="BILLING_ALLOCATION_INVALID", status_code=500
         ) from exc
     if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):
-        raise AppError(
-            f"Invalid {field}.", code="BILLING_ALLOCATION_INVALID", status_code=500
-        )
+        raise AppError(f"Invalid {field}.", code="BILLING_ALLOCATION_INVALID", status_code=500)
     return parsed
 
 
@@ -426,10 +410,10 @@ def _validate_allocations(
                     code="BILLING_ALLOCATION_INVALID",
                     status_code=500,
                 )
-    elif any(
-        item.item_index != item.pricing_line_index
-        for item in items
-    ) or len(items) != line_count:
+    elif (
+        any(item.item_index != item.pricing_line_index for item in items)
+        or len(items) != line_count
+    ):
         raise AppError(
             "Composite pricing must map one item to each line.",
             code="BILLING_ALLOCATION_INVALID",
@@ -659,65 +643,6 @@ def _validate_result_payload(result_type: str, payload: BaseModel) -> dict[str, 
     return stored
 
 
-def _sensitive_key(key: str) -> bool:
-    parts = {
-        part
-        for part in re.split(r"[^a-z0-9]+", key.casefold())
-        if part
-    }
-    compact = "".join(parts)
-    return bool(parts & _SENSITIVE_KEY_PARTS) or any(
-        fragment in compact
-        for fragment in ("apikey", "accesstoken", "refreshtoken", "privatekey")
-    )
-
-
-def _sanitize_detail(
-    value: object,
-    *,
-    key: str | None = None,
-    depth: int = 0,
-) -> JsonValue:
-    if depth > 5:
-        return "[REDACTED]"
-    if key is not None and _sensitive_key(key):
-        return "[REDACTED]"
-    if isinstance(value, str):
-        if any(pattern.search(value) for pattern in _SENSITIVE_TEXT_PATTERNS):
-            return "[REDACTED]"
-        return value
-    if value is None or isinstance(value, bool | int):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("non-finite detail")
-        return value
-    if isinstance(value, Decimal):
-        if not value.is_finite():
-            raise ValueError("non-finite detail")
-        return str(value)
-    if isinstance(value, BaseException):
-        raise ValueError("raw exceptions are not safe billing details")
-    if isinstance(value, Mapping):
-        if len(value) > 50:
-            raise ValueError("detail mapping is too large")
-        cleaned: dict[str, JsonValue] = {}
-        for nested_key, nested_value in value.items():
-            if not isinstance(nested_key, str):
-                raise ValueError("detail keys must be strings")
-            cleaned[nested_key] = _sanitize_detail(
-                nested_value,
-                key=nested_key,
-                depth=depth + 1,
-            )
-        return cleaned
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        if len(value) > 50:
-            raise ValueError("detail sequence is too large")
-        return [_sanitize_detail(item, depth=depth + 1) for item in value]
-    raise ValueError("detail is not schema-safe JSON")
-
-
 def _validated_error_payload(
     code: str,
     http_status: int,
@@ -730,8 +655,8 @@ def _validated_error_payload(
             status_code=500,
         )
     try:
-        payload = _StoredErrorPayload(detail=_sanitize_detail(detail)).model_dump(mode="json")
-    except (ValueError, ValidationError) as exc:
+        payload = _dump_error_payload(_StoredErrorPayload.model_validate({"detail": detail}))
+    except ValidationError as exc:
         raise AppError(
             "Billing error payload is invalid.",
             code="BILLING_ERROR_PAYLOAD_INVALID",
@@ -982,12 +907,9 @@ def _validate_stored_error_payload(operation: BillingOperation) -> _StoredErrorP
         raise BillingInvariantError("failed operation is missing its safe error")
     try:
         stored_error = _StoredErrorPayload.model_validate(operation.error_payload)
-        cleaned_detail = _sanitize_detail(stored_error.detail)
-    except (ValidationError, ValueError) as exc:
+    except ValidationError as exc:
         raise BillingInvariantError("stored error payload is invalid") from exc
-    if cleaned_detail != stored_error.detail:
-        raise BillingInvariantError("stored error payload is not sanitized")
-    if len(_payload_bytes(stored_error.model_dump(mode="json"))) > ERROR_PAYLOAD_MAX_BYTES:
+    if len(_payload_bytes(_dump_error_payload(stored_error))) > ERROR_PAYLOAD_MAX_BYTES:
         raise BillingInvariantError("stored error payload exceeds its byte limit")
     return stored_error
 
@@ -1001,11 +923,7 @@ def _validate_lookup_usages(
         raise BillingInvariantError("billing operation has no usage rows")
     ordered = sorted(
         usages,
-        key=lambda usage: (
-            usage.billing_item_index
-            if usage.billing_item_index is not None
-            else -1
-        ),
+        key=lambda usage: usage.billing_item_index if usage.billing_item_index is not None else -1,
     )
     if [usage.billing_item_index for usage in ordered] != list(range(len(ordered))):
         raise BillingInvariantError("billing usage item allocation is not contiguous")
@@ -1040,9 +958,7 @@ def _validate_lookup_usages(
         if line.unit_credits > 0 and quantity <= 0:
             raise BillingInvariantError("positive-price billing usage must have quantity")
         line_indexes.add(line_index)
-        quantities_by_line[line_index] = quantities_by_line.get(
-            line_index, Decimal("0")
-        ) + quantity
+        quantities_by_line[line_index] = quantities_by_line.get(line_index, Decimal("0")) + quantity
     if line_indexes != set(range(len(snapshot.pricing_lines))):
         raise BillingInvariantError("billing usage does not cover every pricing line")
     if snapshot.pricing_shape == "simple":
@@ -1063,8 +979,7 @@ def _validate_lookup_usages(
             ):
                 raise BillingInvariantError("settled per-item billing usage exceeds its quote")
     elif len(ordered) != len(snapshot.pricing_lines) or any(
-        usage.billing_item_index != usage.billing_pricing_line_index
-        for usage in ordered
+        usage.billing_item_index != usage.billing_pricing_line_index for usage in ordered
     ):
         raise BillingInvariantError("composite billing usage mapping is invalid")
     if operation.status == "in_progress":
@@ -1093,9 +1008,7 @@ def _validate_lookup_usages(
                     Decimal(usage.quantity) != line.quantity
                     or Decimal(usage.credits) != line.subtotal_credits
                 ):
-                    raise BillingInvariantError(
-                        "released composite usage differs from its quote"
-                    )
+                    raise BillingInvariantError("released composite usage differs from its quote")
         for line_index, line in enumerate(snapshot.pricing_lines):
             if quantities_by_line[line_index] > line.quantity:
                 raise BillingInvariantError("terminal usage exceeds quoted line quantity")
