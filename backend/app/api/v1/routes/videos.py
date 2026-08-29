@@ -13,10 +13,12 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
+    BillingSubmissionHeaders,
     CurrentUserDependency,
     DbSessionDependency,
     get_object_storage,
     get_progress_store,
+    require_billing_submission_headers,
     require_permission,
     scoped_task_id,
     tenant_storage_key,
@@ -29,6 +31,7 @@ from app.db.models import (
     Asset,
     BgmLibraryTrack,
     TaskAsset,
+    UsageRecord,
     User,
     VideoTask,
 )
@@ -42,6 +45,7 @@ from app.providers.base import (
     resolve_with_name,
     validate_image_provider_request,
 )
+from app.schemas.billing import BillingQuote
 from app.schemas.response import ApiResponse, ok
 from app.schemas.videos import (
     ScenePromptRequest,
@@ -56,6 +60,20 @@ from app.schemas.videos import (
 )
 from app.services import provider_costs
 from app.services.bgm_library import ensure_default_bgm_tracks
+from app.services.billing_operations import (
+    BillingFailedLookup,
+    BillingInProgressLookup,
+    BillingSucceededLookup,
+    ScenePromptStoredResult,
+    UsageAllocation,
+    billing_summary,
+    complete_failed,
+    complete_succeeded,
+    create_reserved_operation,
+    find_replay,
+    lookup_operation,
+)
+from app.services.billing_quotes import issue_quote, request_sha256, verify_quote
 from app.services.history import (
     clear_video_history,
     delete_video_task,
@@ -67,6 +85,7 @@ from app.services.plan_access import (
     require_doubao_voice_clone_access,
     uses_doubao_voice_clone,
 )
+from app.services.pricing import PRICING_POLICIES, build_simple_pricing, resolve_rate
 from app.services.progress import ProgressStore
 from app.services.quota import (
     QuotaEstimate,
@@ -105,6 +124,7 @@ router = APIRouter()
 logger = get_logger(__name__)
 ProgressStoreDependency = Depends(get_progress_store)
 ObjectStorageDependency = Depends(get_object_storage)
+BillingSubmissionHeadersDependency = Depends(require_billing_submission_headers)
 CreateVideoPermissionDependency = Depends(require_permission("video:create"))
 _video_task_tenants: dict[str, str] = {}
 
@@ -1187,14 +1207,133 @@ def _validate_product_image_storage_keys(
     return storage_keys
 
 
-@router.post("/scene-prompt", response_model=ApiResponse[ScenePromptResponse])
-def generate_scene_prompt(
+_SCENE_PROMPT_OPERATION = "scene_prompt"
+
+
+def _normalized_scene_prompt_request(payload: ScenePromptRequest) -> dict[str, object]:
+    return payload.model_dump(mode="json")
+
+
+def _scene_prompt_pricing_draft(db: Session, *, tenant_id: str):
+    policy = PRICING_POLICIES[_SCENE_PROMPT_OPERATION]
+    return build_simple_pricing(
+        policy=policy,
+        rate=resolve_rate(db, tenant_id=tenant_id, policy=policy),
+        quantity=Decimal("1"),
+    )
+
+
+def _scene_prompt_replay(
+    db: Session,
+    *,
+    user: User,
+    headers: BillingSubmissionHeaders,
+) -> ScenePromptResponse:
+    lookup = lookup_operation(
+        db,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        operation=_SCENE_PROMPT_OPERATION,
+        idempotency_key=headers.idempotency_key,
+    )
+    if isinstance(lookup, BillingSucceededLookup):
+        stored = ScenePromptStoredResult.model_validate(lookup.result)
+        return ScenePromptResponse(
+            scene_prompt=stored.scene_prompt,
+            negative_prompt=stored.negative_prompt,
+            billing=lookup.billing,
+        )
+    if isinstance(lookup, BillingInProgressLookup):
+        raise AppError(
+            "Scene prompt generation is still in progress.",
+            code="BILLING_OPERATION_IN_PROGRESS",
+            status_code=409,
+            detail={"billing": lookup.billing.model_dump(mode="json")},
+        )
+    if isinstance(lookup, BillingFailedLookup):
+        raise AppError(
+            "Scene prompt generation failed.",
+            code=lookup.failure.code,
+            status_code=lookup.failure.original_http_status,
+            detail={"billing": lookup.billing.model_dump(mode="json")},
+        )
+    raise AppError(
+        "Billing operation cannot be replayed.", code="BILLING_REPLAY_INVALID", status_code=500
+    )
+
+
+def _release_scene_prompt_failure(
+    db: Session,
+    *,
+    operation_id: str,
+    result: object | None,
+    code: str,
+    message: str,
+    http_status: int = 502,
+    cause: BaseException | None = None,
+) -> None:
+    usage = db.scalar(select(UsageRecord).where(UsageRecord.billing_operation_id == operation_id))
+    if usage is not None and result is not None:
+        provider_costs.attach_scene_prompt_usage(usage, result=result)
+        db.flush([usage])
+    operation = complete_failed(
+        db,
+        operation_id=operation_id,
+        code=code,
+        http_status=http_status,
+        sanitized_detail=None,
+    )
+    db.commit()
+    error = AppError(
+        message,
+        code=code,
+        status_code=http_status,
+        detail={"billing": billing_summary(operation).model_dump(mode="json")},
+    )
+    if cause is None:
+        raise error
+    raise error from cause
+
+
+@router.post("/scene-prompt/estimate", response_model=ApiResponse[BillingQuote])
+def estimate_scene_prompt(
     request: Request,
     payload: ScenePromptRequest,
     user: User = CreateVideoPermissionDependency,
     db: Session = DbSessionDependency,
+) -> ApiResponse[BillingQuote]:
+    return ok(
+        request,
+        issue_quote(
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            request_hash=request_sha256(_normalized_scene_prompt_request(payload)),
+            draft=_scene_prompt_pricing_draft(db, tenant_id=user.tenant_id),
+        ),
+    )
+
+
+@router.post("/scene-prompt", response_model=ApiResponse[ScenePromptResponse])
+def generate_scene_prompt(
+    request: Request,
+    payload: ScenePromptRequest,
+    headers: BillingSubmissionHeaders = BillingSubmissionHeadersDependency,
+    user: User = CreateVideoPermissionDependency,
+    db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[ScenePromptResponse]:
+    request_hash = request_sha256(_normalized_scene_prompt_request(payload))
+    replay = find_replay(
+        db,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        operation=_SCENE_PROMPT_OPERATION,
+        idempotency_key=headers.idempotency_key,
+        request_hash=request_hash,
+    )
+    if replay is not None:
+        return ok(request, _scene_prompt_replay(db, user=user, headers=headers))
+
     storage_keys = _validate_product_image_storage_keys(
         payload.product_image_keys,
         tenant_id=user.tenant_id,
@@ -1209,15 +1348,38 @@ def generate_scene_prompt(
         )
         for storage_key in storage_keys
     ]
+    verified_quote = verify_quote(
+        token=headers.quote_token,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        operation=_SCENE_PROMPT_OPERATION,
+        request_hash=request_hash,
+        current_draft=_scene_prompt_pricing_draft(db, tenant_id=user.tenant_id),
+    )
+    operation = create_reserved_operation(
+        db,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        operation=_SCENE_PROMPT_OPERATION,
+        idempotency_key=headers.idempotency_key,
+        request_hash=request_hash,
+        verified_quote=verified_quote,
+        usage_allocations=(
+            UsageAllocation(
+                item_index=0,
+                pricing_line_index=0,
+                quantity=Decimal("1"),
+                credits=verified_quote.snapshot.pricing_lines[0].subtotal_credits,
+                provider="apimart",
+                model=settings.engine_apimart_scene_prompt_model,
+                video_task_id=None,
+            ),
+        ),
+        result_type="scene_prompt_result",
+    )
+    db.commit()
     try:
         provider = resolve(db, tenant_id=user.tenant_id, capability="scene_prompt")
-    except ProviderResolutionError as exc:
-        raise AppError(
-            "Scene prompt provider is not configured.",
-            code="SCENE_PROMPT_PROVIDER_NOT_CONFIGURED",
-            status_code=503,
-        ) from exc
-    try:
         result = asyncio.run(
             invoke(
                 db,
@@ -1235,42 +1397,65 @@ def generate_scene_prompt(
                 timeout_seconds=None,
             )
         )
+    except ProviderResolutionError as exc:
+        _release_scene_prompt_failure(
+            db,
+            operation_id=operation.id,
+            result=None,
+            code="SCENE_PROMPT_PROVIDER_NOT_CONFIGURED",
+            message="Scene prompt provider is not configured.",
+            http_status=503,
+            cause=exc,
+        )
     except ProviderInvocationError as exc:
-        failure_usage = _provider_usage_result_from_error(exc)
-        if failure_usage is not None:
-            usage_record = provider_costs.record_scene_prompt_usage(
-                db,
-                tenant_id=user.tenant_id,
-                result=failure_usage,
-            )
-            if usage_record is not None:
-                db.commit()
-        raise AppError(
-            "Scene prompt provider failed.",
+        _release_scene_prompt_failure(
+            db,
+            operation_id=operation.id,
+            result=_provider_usage_result_from_error(exc),
             code="SCENE_PROMPT_PROVIDER_FAILED",
-            status_code=502,
-        ) from exc
-    usage_record = provider_costs.record_scene_prompt_usage(
-        db,
-        tenant_id=user.tenant_id,
-        result=result,
-    )
+            message="Scene prompt provider failed.",
+            cause=exc,
+        )
+    if not isinstance(result, dict):
+        _release_scene_prompt_failure(
+            db,
+            operation_id=operation.id,
+            result=None,
+            code="SCENE_PROMPT_EMPTY_RESULT",
+            message="Luna returned an incomplete scene prompt.",
+        )
     scene_prompt = str(result.get("scene_prompt") or "").strip()
     negative_prompt = str(result.get("negative_prompt") or "").strip()
     if not scene_prompt or not negative_prompt:
-        if usage_record is not None:
-            db.commit()
-        raise AppError(
-            "Luna returned an incomplete scene prompt.",
+        _release_scene_prompt_failure(
+            db,
+            operation_id=operation.id,
+            result=result,
             code="SCENE_PROMPT_EMPTY_RESULT",
-            status_code=502,
+            message="Luna returned an incomplete scene prompt.",
         )
+    usage = db.scalar(select(UsageRecord).where(UsageRecord.billing_operation_id == operation.id))
+    if usage is not None:
+        provider_costs.attach_scene_prompt_usage(usage, result=result)
+        db.flush([usage])
+    operation = complete_succeeded(
+        db,
+        operation_id=operation.id,
+        actual_quantities={0: Decimal("1")},
+        result_type="scene_prompt_result",
+        result_id=None,
+        result_payload=ScenePromptStoredResult(
+            scene_prompt=scene_prompt,
+            negative_prompt=negative_prompt,
+        ),
+    )
     db.commit()
     return ok(
         request,
         ScenePromptResponse(
             scene_prompt=scene_prompt,
             negative_prompt=negative_prompt,
+            billing=billing_summary(operation),
         ),
     )
 

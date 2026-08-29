@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -34,6 +34,7 @@ class DeepSeekUsageCost:
     prompt_cache_hit_tokens: int = 0
     prompt_cache_miss_tokens: int = 0
     cache_tokens_reported: bool = False
+    provider_cost_usd: Decimal | None = None
 
 
 _deepseek_usage_capture: ContextVar[list[DeepSeekUsageCost] | None] = ContextVar(
@@ -89,9 +90,7 @@ def seed_tts_cost_cents(characters: int | float | Decimal) -> int:
 def cosyvoice_tts_cost_cents(characters: int | float | Decimal) -> int:
     # Alibaba Cloud Bailian/DashScope CosyVoice direct CNY rate.
     safe_chars = max(0, Decimal(str(characters or 0)))
-    return cny_to_cents(
-        safe_chars * _decimal_setting(settings.engine_cosyvoice_tts_cny_per_char)
-    )
+    return cny_to_cents(safe_chars * _decimal_setting(settings.engine_cosyvoice_tts_cny_per_char))
 
 
 def tts_cost_cents(
@@ -114,9 +113,7 @@ def deepseek_cost_cny(
     prompt_cache_hit_tokens: int | None = None,
     prompt_cache_miss_tokens: int | None = None,
 ) -> Decimal:
-    normalized_model = str(
-        model or _DEEPSEEK_DEFAULT_PRICED_MODEL
-    ).strip().lower()
+    normalized_model = str(model or _DEEPSEEK_DEFAULT_PRICED_MODEL).strip().lower()
     rate_setting_names = _DEEPSEEK_RATE_SETTINGS_BY_MODEL.get(normalized_model)
     if rate_setting_names is None:
         raise DeepSeekCostError(
@@ -124,8 +121,7 @@ def deepseek_cost_cny(
             error_type="unknown_model",
         )
     input_rate, cache_hit_rate, output_rate = (
-        _decimal_setting(getattr(settings, setting_name))
-        for setting_name in rate_setting_names
+        _decimal_setting(getattr(settings, setting_name)) for setting_name in rate_setting_names
     )
     safe_prompt_tokens = max(0, int(prompt_tokens))
     cache_hit_tokens, cache_miss_tokens, _ = _deepseek_cache_breakdown(
@@ -133,21 +129,9 @@ def deepseek_cost_cny(
         prompt_cache_hit_tokens=prompt_cache_hit_tokens,
         prompt_cache_miss_tokens=prompt_cache_miss_tokens,
     )
-    cache_miss_cny = (
-        Decimal(cache_miss_tokens)
-        / Decimal("1000")
-        * input_rate
-    )
-    cache_hit_cny = (
-        Decimal(cache_hit_tokens)
-        / Decimal("1000")
-        * cache_hit_rate
-    )
-    output_cny = (
-        Decimal(max(0, int(completion_tokens)))
-        / Decimal("1000")
-        * output_rate
-    )
+    cache_miss_cny = Decimal(cache_miss_tokens) / Decimal("1000") * input_rate
+    cache_hit_cny = Decimal(cache_hit_tokens) / Decimal("1000") * cache_hit_rate
+    output_cny = Decimal(max(0, int(completion_tokens))) / Decimal("1000") * output_rate
     return cache_miss_cny + cache_hit_cny + output_cny
 
 
@@ -223,9 +207,7 @@ def _deepseek_cache_breakdown(
 ) -> tuple[int, int, bool]:
     cache_hit_tokens = _optional_nonnegative_int(prompt_cache_hit_tokens)
     cache_miss_tokens = _optional_nonnegative_int(prompt_cache_miss_tokens)
-    cache_tokens_reported = (
-        cache_hit_tokens is not None and cache_miss_tokens is not None
-    )
+    cache_tokens_reported = cache_hit_tokens is not None and cache_miss_tokens is not None
     if not cache_tokens_reported:
         return 0, prompt_tokens, False
     if cache_hit_tokens + cache_miss_tokens == prompt_tokens:
@@ -244,9 +226,7 @@ def deepseek_usage_from_result(result: Any) -> DeepSeekUsageCost | None:
         return None
     prompt_tokens = _int_from_usage(usage, "prompt_tokens")
     completion_tokens = _int_from_usage(usage, "completion_tokens")
-    total_tokens = _int_from_usage(usage, "total_tokens") or (
-        prompt_tokens + completion_tokens
-    )
+    total_tokens = _int_from_usage(usage, "total_tokens") or (prompt_tokens + completion_tokens)
     raw_prompt_cache_hit_tokens = _optional_nonnegative_int(
         usage.get("prompt_cache_hit_tokens")
         if isinstance(usage, dict)
@@ -274,11 +254,7 @@ def deepseek_usage_from_result(result: Any) -> DeepSeekUsageCost | None:
             f"DeepSeek cost capture cannot price provider {provider!r}.",
             error_type="unknown_provider",
         )
-    model = str(
-        result.get("model")
-        or settings.engine_llm_model
-        or _DEEPSEEK_DEFAULT_PRICED_MODEL
-    )
+    model = str(result.get("model") or settings.engine_llm_model or _DEEPSEEK_DEFAULT_PRICED_MODEL)
     if not cache_tokens_reported:
         logger.warning(
             "deepseek_cache_usage_unavailable",
@@ -304,6 +280,7 @@ def deepseek_usage_from_result(result: Any) -> DeepSeekUsageCost | None:
         prompt_cache_hit_tokens=prompt_cache_hit_tokens,
         prompt_cache_miss_tokens=prompt_cache_miss_tokens,
         cache_tokens_reported=cache_tokens_reported,
+        provider_cost_usd=_provider_cost_usd(result),
     )
 
 
@@ -438,19 +415,45 @@ def record_deepseek_usage(
     )
 
 
-def record_scene_prompt_usage(
-    db: Session,
-    *,
-    tenant_id: str,
-    result: Any,
-) -> UsageRecord | None:
+def _provider_cost_usd(result: Any) -> Decimal | None:
+    if not isinstance(result, dict):
+        return None
+    value = result.get("provider_cost_usd")
+    if value in (None, ""):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return parsed if parsed.is_finite() and parsed >= 0 else None
+
+
+def attach_deepseek_usage(record: UsageRecord, *, result: object) -> UsageRecord:
+    """Attach sanitized DeepSeek supplier telemetry without changing the allocation."""
+    try:
+        parsed = deepseek_usage_from_result(result)
+    except DeepSeekCostError:
+        return record
+    if parsed is None:
+        return record
+    record.provider = parsed.provider
+    record.model = parsed.model
+    record.provider_usage = {
+        "input_tokens": parsed.prompt_tokens,
+        "output_tokens": parsed.completion_tokens,
+        "total_tokens": parsed.total_tokens,
+    }
+    record.cost_cents = parsed.cost_cents
+    record.provider_cost_usd = parsed.provider_cost_usd
+    return record
+
+
+def _scene_prompt_supplier_fields(result: Any) -> tuple[str, str, dict[str, int], int] | None:
     if not isinstance(result, dict):
         return None
     prompt_tokens = _int_from_usage(result, "prompt_tokens")
     completion_tokens = _int_from_usage(result, "completion_tokens")
-    total_tokens = _int_from_usage(result, "total_tokens")
-    if total_tokens <= 0:
-        total_tokens = prompt_tokens + completion_tokens
+    total_tokens = _int_from_usage(result, "total_tokens") or (prompt_tokens + completion_tokens)
     model = str(result.get("model") or settings.engine_apimart_scene_prompt_model)
     explicit_cost_cents = _optional_nonnegative_int(result.get("cost_cents"))
     cost_cents = (
@@ -461,15 +464,50 @@ def record_scene_prompt_usage(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
-            cached_prompt_tokens=_optional_nonnegative_int(
-                result.get("cached_prompt_tokens")
-            ),
-            cache_write_tokens=_optional_nonnegative_int(
-                result.get("cache_write_tokens")
-            ),
+            cached_prompt_tokens=_optional_nonnegative_int(result.get("cached_prompt_tokens")),
+            cache_write_tokens=_optional_nonnegative_int(result.get("cache_write_tokens")),
             authoritative_credits=result.get("credits"),
         )
     )
+    if total_tokens <= 0 and cost_cents <= 0:
+        return None
+    usage = {
+        "input_tokens": prompt_tokens,
+        "output_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }
+    for key in ("cached_prompt_tokens", "cache_write_tokens"):
+        value = _optional_nonnegative_int(result.get(key))
+        if value is not None:
+            usage[key] = value
+    return str(result.get("provider") or "apimart"), model, usage, cost_cents
+
+
+def attach_scene_prompt_usage(record: UsageRecord, *, result: object) -> UsageRecord:
+    """Attach Luna/APIMart telemetry to its canonical billing allocation."""
+    parsed = _scene_prompt_supplier_fields(result)
+    if parsed is None:
+        return record
+    provider, model, usage, cost_cents = parsed
+    record.provider = provider
+    record.model = model
+    record.provider_usage = usage
+    record.cost_cents = cost_cents
+    record.provider_cost_usd = _provider_cost_usd(result)
+    return record
+
+
+def record_scene_prompt_usage(
+    db: Session,
+    *,
+    tenant_id: str,
+    result: Any,
+) -> UsageRecord | None:
+    parsed = _scene_prompt_supplier_fields(result)
+    if parsed is None:
+        return None
+    provider, model, _usage, cost_cents = parsed
+    total_tokens = _usage["total_tokens"]
     if total_tokens > 0:
         unit = "token"
         quantity = Decimal(total_tokens)
@@ -481,7 +519,7 @@ def record_scene_prompt_usage(
     record = UsageRecord(
         tenant_id=tenant_id,
         capability="scene_prompt",
-        provider=str(result.get("provider") or "apimart"),
+        provider=provider,
         model=model,
         unit=unit,
         quantity=quantity,

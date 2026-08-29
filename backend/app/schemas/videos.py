@@ -11,6 +11,7 @@ from app.core.image_aspect_ratio import (
     RequestedImageAspectRatio,
     image_aspect_ratio_from_legacy_size,
 )
+from app.services.billing_operations import BillingSummary
 from app.services.subtitle_styles import SUBTITLE_TEMPLATE_IDS, clamp_subtitle_font_size
 
 _ALLOWED_PIPELINES = {"standard", "custom"}
@@ -458,6 +459,7 @@ class ScenePromptRequest(BaseModel):
 class ScenePromptResponse(BaseModel):
     scene_prompt: str
     negative_prompt: str
+    billing: BillingSummary
 
 
 class VideoTaskStatus(BaseModel):

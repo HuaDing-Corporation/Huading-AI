@@ -169,6 +169,19 @@ def register_billing_result_schema(result_type: str, schema: type[BaseModel]) ->
         _RESULT_SCHEMAS[result_type] = schema
 
 
+class ScriptGenerateStoredResult(_BillingModel):
+    script: str
+
+
+class ScenePromptStoredResult(_BillingModel):
+    scene_prompt: str
+    negative_prompt: str
+
+
+register_billing_result_schema("script_generate_result", ScriptGenerateStoredResult)
+register_billing_result_schema("scene_prompt_result", ScenePromptStoredResult)
+
+
 def _integer_amount(value: Decimal, *, field: str) -> int:
     amount = Decimal(value)
     if not amount.is_finite() or amount < 0 or amount != amount.to_integral_value():

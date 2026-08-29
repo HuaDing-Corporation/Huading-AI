@@ -1,7 +1,20 @@
 import pytest
 from fastapi.testclient import TestClient
+from uuid import uuid4
 
 from app.providers.llm.deepseek import DeepSeekProvider
+
+
+def _script_submission_headers(
+    client: TestClient, auth_headers: dict[str, str], payload: dict
+) -> dict[str, str]:
+    quote = client.post("/api/v1/scripts/estimate", json=payload, headers=auth_headers)
+    assert quote.status_code == 200, quote.text
+    return {
+        **auth_headers,
+        "Idempotency-Key": str(uuid4()),
+        "X-Huading-Quote": quote.json()["data"]["quote_token"],
+    }
 
 
 @pytest.mark.asyncio
@@ -146,10 +159,12 @@ def test_scripts_generate_route_uses_provider_registry(monkeypatch, auth_context
     monkeypatch.setattr(scripts_route, "resolve", fake_resolve, raising=False)
     monkeypatch.setattr(scripts_route, "DeepSeekProvider", fail_direct_provider, raising=False)
 
-    resp = TestClient(app).post(
+    client = TestClient(app)
+    payload = {"topic": "cashmere coat"}
+    resp = client.post(
         "/api/v1/scripts/generate",
-        json={"topic": "cashmere coat"},
-        headers=auth_context["headers"],
+        json=payload,
+        headers=_script_submission_headers(client, auth_context["headers"], payload),
     )
 
     assert resp.status_code == 200
@@ -162,7 +177,11 @@ def test_scripts_generate_rejects_unknown_length_tier(auth_context) -> None:
     resp = TestClient(app).post(
         "/api/v1/scripts/generate",
         json={"topic": "cashmere coat", "length_tier": "extra-long"},
-        headers=auth_context["headers"],
+        headers={
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": "placeholder",
+        },
     )
 
     assert resp.status_code == 422
@@ -170,9 +189,7 @@ def test_scripts_generate_rejects_unknown_length_tier(auth_context) -> None:
     assert resp.json()["error"]["details"][0]["type"] == "literal_error"
 
 
-def test_scripts_generate_short_length_tier_reaches_prompt(
-    monkeypatch, auth_context
-) -> None:
+def test_scripts_generate_short_length_tier_reaches_prompt(monkeypatch, auth_context) -> None:
     from app.api.v1.routes import scripts as scripts_route
     from app.main import app
 
@@ -192,15 +209,17 @@ def test_scripts_generate_short_length_tier_reaches_prompt(
         lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
     )
 
-    resp = TestClient(app).post(
+    client = TestClient(app)
+    payload = {
+        "topic": "高腰阔腿裤",
+        "video_mode": "seedance_i2v",
+        "duration_sec": 10,
+        "length_tier": "short",
+    }
+    resp = client.post(
         "/api/v1/scripts/generate",
-        json={
-            "topic": "高腰阔腿裤",
-            "video_mode": "seedance_i2v",
-            "duration_sec": 10,
-            "length_tier": "short",
-        },
-        headers=auth_context["headers"],
+        json=payload,
+        headers=_script_submission_headers(client, auth_context["headers"], payload),
     )
 
     assert resp.status_code == 200
@@ -209,9 +228,7 @@ def test_scripts_generate_short_length_tier_reaches_prompt(
     assert "40-50字" in payloads[0]["user_prompt"]
 
 
-def test_scripts_generate_long_length_tier_reaches_prompt(
-    monkeypatch, auth_context
-) -> None:
+def test_scripts_generate_long_length_tier_reaches_prompt(monkeypatch, auth_context) -> None:
     from app.api.v1.routes import scripts as scripts_route
     from app.main import app
 
@@ -231,15 +248,17 @@ def test_scripts_generate_long_length_tier_reaches_prompt(
         lambda _db, *, tenant_id, capability: _FakeDeepSeek(),
     )
 
-    resp = TestClient(app).post(
+    client = TestClient(app)
+    payload = {
+        "topic": "高腰阔腿裤",
+        "video_mode": "seedance_i2v",
+        "duration_sec": 10,
+        "length_tier": "long",
+    }
+    resp = client.post(
         "/api/v1/scripts/generate",
-        json={
-            "topic": "高腰阔腿裤",
-            "video_mode": "seedance_i2v",
-            "duration_sec": 10,
-            "length_tier": "long",
-        },
-        headers=auth_context["headers"],
+        json=payload,
+        headers=_script_submission_headers(client, auth_context["headers"], payload),
     )
 
     assert resp.status_code == 200
@@ -298,10 +317,12 @@ def test_scripts_generate_records_deepseek_token_cost(
         raising=False,
     )
 
-    resp = TestClient(app).post(
+    client = TestClient(app)
+    payload = {"topic": "cashmere coat"}
+    resp = client.post(
         "/api/v1/scripts/generate",
-        json={"topic": "cashmere coat"},
-        headers=auth_context["headers"],
+        json=payload,
+        headers=_script_submission_headers(client, auth_context["headers"], payload),
     )
 
     assert resp.status_code == 200
@@ -310,15 +331,20 @@ def test_scripts_generate_records_deepseek_token_cost(
             select(UsageRecord).where(
                 UsageRecord.tenant_id == auth_context["tenant_id"],
                 UsageRecord.provider == "deepseek",
-                UsageRecord.unit == "token",
+                UsageRecord.unit == "call",
             )
         )
         assert usage is not None
         assert usage.model == "deepseek-v4-flash"
-        assert usage.quantity == Decimal("150000.000")
-        assert usage.credits == Decimal("0.00")
+        assert usage.quantity == Decimal("1.000")
+        assert usage.credits == Decimal("1.000000")
         assert usage.cost_cents == 20
         assert usage.status == "settled"
+        assert usage.provider_usage == {
+            "input_tokens": 100_000,
+            "output_tokens": 50_000,
+            "total_tokens": 150_000,
+        }
 
 
 def test_scripts_generate_seedance_i2v_uses_ecommerce_payload_and_cleans(
@@ -350,14 +376,16 @@ def test_scripts_generate_seedance_i2v_uses_ecommerce_payload_and_cleans(
         raising=False,
     )
 
-    resp = TestClient(app).post(
+    client = TestClient(app)
+    payload = {
+        "topic": "高腰阔腿裤，显瘦，通勤休闲都能穿",
+        "video_mode": "seedance_i2v",
+        "duration_sec": 10,
+    }
+    resp = client.post(
         "/api/v1/scripts/generate",
-        json={
-            "topic": "高腰阔腿裤，显瘦，通勤休闲都能穿",
-            "video_mode": "seedance_i2v",
-            "duration_sec": 10,
-        },
-        headers=auth_context["headers"],
+        json=payload,
+        headers=_script_submission_headers(client, auth_context["headers"], payload),
     )
 
     assert resp.status_code == 200
