@@ -22,7 +22,14 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure"
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+    {
+      name: "mobile-workbench",
+      testMatch: /pricing-workbench-doc\.smoke\.spec\.ts/,
+      use: { ...devices["Desktop Chrome"], viewport: { width: 390, height: 844 } }
+    }
+  ],
   webServer: {
     command: "npx next start -p 3100",
     url: "http://localhost:3100",

@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>华鼎 AI · 定价闭环工作台</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --gold: #bd9a59;
+      --gold-deep: #8c6f3a;
+      --bronze: #6e521f;
+      --champ: #e6d3a3;
+      --ink: #3a3320;
+      --ink-soft: #6f6650;
+      --ink-faint: #a89c80;
+      --page: #f5efe2;
+      --line: rgba(189, 154, 89, .38);
+      --glass-line: rgba(255, 255, 255, .78);
+      --glass: linear-gradient(158deg, rgba(255, 255, 255, .68), rgba(255, 255, 255, .51) 60%, rgba(231, 210, 162, .30));
+      --success-bg: rgba(106, 166, 127, .18);
+      --success-fg: #447d5f;
+      --waiting-bg: rgba(189, 154, 89, .18);
+      --waiting-fg: #8c6f3a;
+      --muted-bg: rgba(155, 128, 62, .12);
+      --offline-bg: rgba(193, 99, 74, .14);
+      --offline-fg: #9c3b28;
+    }
+    * { box-sizing: border-box; }
+    html { min-width: 0; background: var(--page); }
+    body {
+      min-width: 0;
+      margin: 0;
+      color: var(--ink);
+      background-color: var(--page);
+      background-image:
+        linear-gradient(rgba(189, 154, 89, .06) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(189, 154, 89, .06) 1px, transparent 1px),
+        radial-gradient(920px 620px at 48% -12%, rgba(255, 255, 255, .96), transparent 66%),
+        radial-gradient(760px 620px at 94% 18%, rgba(229, 210, 162, .44), transparent 62%);
+      background-size: 48px 48px, 48px 48px, auto, auto;
+      font-family: -apple-system, "SF Pro Display", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .freeze-banner {
+      position: sticky;
+      z-index: 10;
+      top: 0;
+      display: flex;
+      justify-content: center;
+      gap: 9px;
+      width: 100%;
+      padding: 10px 20px;
+      border-bottom: 1px solid rgba(156, 59, 40, .22);
+      background: rgba(250, 241, 222, .94);
+      color: var(--offline-fg);
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: .02em;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+    }
+    .freeze-banner::before { content: "◆"; font-size: 10px; transform: translateY(2px); }
+    main { width: min(1240px, calc(100% - 40px)); margin: 0 auto; padding: 34px 0 52px; }
+    .eyebrow { margin: 0 0 10px; color: var(--gold-deep); font-size: 11px; font-weight: 700; letter-spacing: .22em; }
+    .masthead { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 32px; margin-bottom: 24px; }
+    h1 { margin: 0; font-size: clamp(27px, 3vw, 40px); font-weight: 650; letter-spacing: .03em; line-height: 1.15; }
+    .lead { max-width: 720px; margin: 10px 0 0; color: var(--ink-soft); font-size: 13.5px; line-height: 1.75; }
+    .as-of { margin: 0; color: var(--ink-faint); font-size: 11px; line-height: 1.7; text-align: right; }
+    .glass {
+      border: 1px solid var(--glass-line);
+      background: var(--glass);
+      box-shadow: 8px 18px 48px -20px rgba(150, 118, 52, .26), inset 0 1px rgba(255, 255, 255, .88);
+      backdrop-filter: blur(26px) saturate(1.2);
+      -webkit-backdrop-filter: blur(26px) saturate(1.2);
+    }
+    .summary { display: grid; grid-template-columns: repeat(3, 1fr); overflow: hidden; margin-bottom: 18px; border-radius: 20px; }
+    .metric { position: relative; min-width: 0; padding: 20px 22px; }
+    .metric + .metric { border-left: 1px solid var(--line); }
+    .metric-label { display: block; color: var(--ink-soft); font-size: 12px; line-height: 1.5; }
+    .metric-value { display: block; margin-top: 6px; font-size: 31px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1; }
+    .metric-note { display: block; margin-top: 7px; color: var(--ink-faint); font-size: 11px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0 0 12px; padding: 0 2px; color: var(--ink-soft); font-size: 11.5px; }
+    .legend span { display: inline-flex; align-items: center; gap: 7px; }
+    .legend i { width: 8px; height: 8px; border-radius: 99px; background: var(--gold); }
+    .legend .deferred { background: var(--ink-faint); }
+    .legend .offline { background: var(--offline-fg); }
+    .ledger { overflow: hidden; border-radius: 20px; }
+    table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+    caption { padding: 17px 20px 15px; border-bottom: 1px solid var(--line); text-align: left; }
+    caption strong { display: block; font-size: 15px; font-weight: 650; }
+    caption span { display: block; margin-top: 4px; color: var(--ink-soft); font-size: 11.5px; font-weight: 400; }
+    th, td { padding: 13px 14px; border-bottom: 1px solid rgba(189, 154, 89, .24); text-align: left; vertical-align: middle; }
+    th { color: var(--ink-faint); font-size: 10.5px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: rgba(255, 255, 255, .28); }
+    .capability { display: flex; align-items: center; gap: 11px; min-width: 0; }
+    .index { display: grid; flex: 0 0 29px; height: 29px; place-items: center; border: 1px solid var(--line); border-radius: 10px; color: var(--gold-deep); font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .name { min-width: 0; }
+    .name strong { display: block; overflow-wrap: anywhere; font-size: 13px; font-weight: 620; }
+    .name code { display: block; overflow-wrap: anywhere; margin-top: 3px; color: var(--ink-faint); font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 10.5px; }
+    .price { color: var(--ink); font-size: 12.5px; font-weight: 620; font-variant-numeric: tabular-nums; }
+    .price.empty { color: var(--ink-faint); font-weight: 500; }
+    .settlement { color: var(--ink-soft); font-size: 11.5px; line-height: 1.55; }
+    .badges { display: flex; flex-wrap: wrap; gap: 6px; }
+    .badge { display: inline-flex; align-items: center; width: fit-content; min-height: 25px; padding: 4px 9px; border-radius: 10px; font-size: 10.5px; font-weight: 650; line-height: 1.35; }
+    .badge.waiting { background: var(--waiting-bg); color: var(--waiting-fg); }
+    .badge.deferred { background: var(--muted-bg); color: var(--ink-soft); }
+    .badge.offline { background: var(--offline-bg); color: var(--offline-fg); }
+    .badge.visible { background: var(--success-bg); color: var(--success-fg); }
+    .badge.hidden { border: 1px dashed rgba(111, 102, 80, .32); background: rgba(255, 255, 255, .30); color: var(--ink-soft); }
+    .notes { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 18px; border-radius: 20px; }
+    .note { padding: 17px 19px; }
+    .note + .note { border-left: 1px solid var(--line); }
+    .note b { display: block; margin-bottom: 6px; color: var(--gold-deep); font-size: 11.5px; }
+    .note p { margin: 0; color: var(--ink-soft); font-size: 11.5px; line-height: 1.65; }
+    .noscript { margin: 20px; color: var(--offline-fg); }
+    @media (max-width: 760px) {
+      main { width: min(100% - 24px, 560px); padding: 24px 0 36px; }
+      .freeze-banner { align-items: flex-start; justify-content: flex-start; padding: 9px 12px; font-size: 12px; }
+      .masthead { grid-template-columns: 1fr; gap: 8px; margin-bottom: 18px; }
+      .as-of { text-align: left; }
+      .summary { grid-template-columns: 1fr 1fr 1fr; }
+      .metric { padding: 14px 10px; }
+      .metric-label { font-size: 10.5px; }
+      .metric-value { font-size: 25px; }
+      .metric-note { display: none; }
+      .ledger { overflow: visible; background: transparent; border: 0; box-shadow: none; backdrop-filter: none; }
+      table, tbody { display: block; }
+      caption { display: block; margin-bottom: 10px; border: 1px solid var(--glass-line); border-radius: 17px; background: var(--glass); }
+      thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+      tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 12px; margin-bottom: 9px; padding: 14px; border: 1px solid var(--glass-line); border-radius: 17px; background: var(--glass); box-shadow: 4px 10px 28px -18px rgba(150, 118, 52, .30); }
+      td { display: block; padding: 0; border: 0; }
+      td:nth-child(1) { grid-column: 1 / -1; }
+      td:nth-child(2) { grid-column: 1 / -1; padding: 9px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+      td:nth-child(3) { grid-column: 1 / -1; }
+      td:nth-child(4) { grid-column: 1; }
+      td:nth-child(5) { grid-column: 2; }
+      .settlement::before { content: "结算 · "; color: var(--ink-faint); }
+      .notes { grid-template-columns: 1fr; }
+      .note + .note { border-top: 1px solid var(--line); border-left: 0; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; } }
+  </style>
+</head>
+<body>
+  <div class="freeze-banner" role="status">生产环境冻结；以下状态不代表已生效</div>
+  <main>
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">HUADING · PRICING CLOSURE</p>
+        <h1>定价闭环工作台</h1>
+        <p class="lead">用于研发、财务与运营共同核对能力价格、结算条件和入口可见性。价格、状态、可见性及统计均由下方同一数据源生成。</p>
+      </div>
+      <p class="as-of">SOURCE CONTROLLED<br>等待发布核对</p>
+    </header>
+
+    <section class="summary glass" aria-label="闭环状态统计">
+      <article class="metric">
+        <span class="metric-label">价格完成，待上线</span>
+        <strong class="metric-value" data-testid="count-priced-waiting-release">—</strong>
+        <span class="metric-note">仅表示实现闭环</span>
+      </article>
+      <article class="metric">
+        <span class="metric-label">延期处理／尚未闭环</span>
+        <strong class="metric-value" data-testid="count-deferred-unpriced">—</strong>
+        <span class="metric-note">不生成伪零价格</span>
+      </article>
+      <article class="metric">
+        <span class="metric-label">已下线</span>
+        <strong class="metric-value" data-testid="count-offline">—</strong>
+        <span class="metric-note">入口继续保持隐藏</span>
+      </article>
+    </section>
+
+    <p class="legend" aria-label="状态图例">
+      <span><i></i>价格完成，待上线</span>
+      <span><i class="deferred"></i>延期处理／尚未闭环</span>
+      <span><i class="offline"></i>已下线</span>
+    </p>
+
+    <section class="ledger glass" aria-labelledby="ledger-title">
+      <table>
+        <caption><strong id="ledger-title">能力闭环明细</strong><span>每一行独立记录闭环状态与入口可见性；未定价不等于免费。</span></caption>
+        <colgroup><col style="width:24%"><col style="width:18%"><col style="width:25%"><col style="width:19%"><col style="width:14%"></colgroup>
+        <thead><tr><th scope="col">能力</th><th scope="col">价格</th><th scope="col">结算条件</th><th scope="col">闭环状态</th><th scope="col">入口</th></tr></thead>
+        <tbody id="pricing-rows"></tbody>
+      </table>
+      <noscript><p class="noscript">请启用 JavaScript 以从规范数据源生成明细。</p></noscript>
+    </section>
+
+    <footer class="notes glass" aria-label="工作台口径">
+      <article class="note"><b>价格口径</b><p>仅展示规范数据中的价格字符串；所有合计均在运行时从同一数组计算。</p></article>
+      <article class="note"><b>结算口径</b><p>服务端报价、冻结、结算与释放是唯一权威；本页不参与客户扣费计算。</p></article>
+      <article class="note"><b>发布口径</b><p>“待上线”不等于“已上线”。生产解冻必须另走发布门禁与明确审批。</p></article>
+    </footer>
+  </main>
+  <script>
+    const pricingRows = [
+      { key: "script_generate", name: "AI 口播文案", closure: "priced_waiting_release", visibility: "visible", price: "1 积分/次", settlement: "成功返回合法文案后结算" },
+      { key: "scene_prompt", name: "画面提示词", closure: "priced_waiting_release", visibility: "visible", price: "30 积分/次", settlement: "成功返回正向与负向提示词后结算" },
+      { key: "ecom_cutout", name: "电商抠图", closure: "priced_waiting_release", visibility: "visible", price: "80 积分/张", settlement: "按成功图片聚合结算" },
+      { key: "ecom_model", name: "AI 模特图", closure: "priced_waiting_release", visibility: "visible", price: "80 积分/张", settlement: "按成功图片聚合结算" },
+      { key: "doubao_brand_voice", name: "豆包品牌音色", closure: "priced_waiting_release", visibility: "visible", price: "30000 积分/个/365 天", settlement: "先冻结，人工交付后结算" },
+      { key: "cosyvoice", name: "CosyVoice", closure: "priced_waiting_release", visibility: "visible", price: "创建免费；使用时 0.1 积分/字", settlement: "字符费随父视频成功结算" },
+      { key: "seedance_t2v", name: "seedance_t2v", closure: "deferred_unpriced", visibility: "visible", price: null, settlement: "延期处理／尚未闭环" },
+      { key: "static_template", name: "static_template", closure: "deferred_unpriced", visibility: "visible", price: null, settlement: "延期处理／尚未闭环" },
+      { key: "publish_draft", name: "发布草稿", closure: "deferred_unpriced", visibility: "hidden", price: null, settlement: "保持隐藏" },
+      { key: "marketing_poster", name: "电商营销海报", closure: "offline", visibility: "hidden", price: null, settlement: "已下线" },
+    ];
+
+    const countByClosure = (closure) => pricingRows.filter((row) => row.closure === closure).length;
+    const closureMeta = {
+      priced_waiting_release: { label: "价格完成，待上线", className: "waiting" },
+      deferred_unpriced: { label: "延期处理／尚未闭环", className: "deferred" },
+      offline: { label: "已下线", className: "offline" }
+    };
+    const visibilityMeta = {
+      visible: { label: "前台可见", className: "visible" },
+      hidden: { label: "保持隐藏", className: "hidden" }
+    };
+    const text = (value) => document.createTextNode(value);
+    const node = (tag, className, value) => {
+      const element = document.createElement(tag);
+      if (className) element.className = className;
+      if (value !== undefined) element.append(text(value));
+      return element;
+    };
+
+    document.querySelector('[data-testid="count-priced-waiting-release"]').textContent = countByClosure("priced_waiting_release");
+    document.querySelector('[data-testid="count-deferred-unpriced"]').textContent = countByClosure("deferred_unpriced");
+    document.querySelector('[data-testid="count-offline"]').textContent = countByClosure("offline");
+
+    const body = document.getElementById("pricing-rows");
+    pricingRows.forEach((row, index) => {
+      const tr = document.createElement("tr");
+      tr.dataset.testid = `pricing-row-${row.key}`;
+      tr.dataset.closure = row.closure;
+      tr.dataset.visibility = row.visibility;
+
+      const capabilityCell = document.createElement("td");
+      const capability = node("div", "capability");
+      capability.append(node("span", "index", String(index + 1).padStart(2, "0")));
+      const name = node("div", "name");
+      name.append(node("strong", "", row.name), node("code", "", row.key));
+      capability.append(name);
+      capabilityCell.append(capability);
+
+      const price = node("td", row.price ? "price" : "price empty", row.price || "未定价");
+      const settlement = node("td", "settlement", row.settlement);
+      const closure = document.createElement("td");
+      const closureBadge = closureMeta[row.closure];
+      closure.append(node("span", `badge ${closureBadge.className}`, closureBadge.label));
+      const visibility = document.createElement("td");
+      const visibilityBadge = visibilityMeta[row.visibility];
+      visibility.append(node("span", `badge ${visibilityBadge.className}`, visibilityBadge.label));
+      tr.append(capabilityCell, price, settlement, closure, visibility);
+      body.append(tr);
+    });
+  </script>
+</body>
+</html>
