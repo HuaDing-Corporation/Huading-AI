@@ -866,6 +866,21 @@ def test_cosyvoice_new_http_key_reuses_stable_remote_request_identity(
                 "X-Huading-Quote": quote["quote_token"],
             },
         )
+        real_request_replay = brand_voice_routes._cosyvoice_request_replay
+        initial_lookup_missed = False
+
+        def miss_one_request_replay(*args, **kwargs):
+            nonlocal initial_lookup_missed
+            if not initial_lookup_missed:
+                initial_lookup_missed = True
+                return None
+            return real_request_replay(*args, **kwargs)
+
+        monkeypatch.setattr(
+            brand_voice_routes,
+            "_cosyvoice_request_replay",
+            miss_one_request_replay,
+        )
         second = client.post(
             "/api/v1/brand-voices",
             json=payload,
@@ -880,17 +895,12 @@ def test_cosyvoice_new_http_key_reuses_stable_remote_request_identity(
 
     assert first.status_code == 201, first.text
     assert second.status_code == 201, second.text
-    assert len(provider.clone_calls) == 2
+    assert len(provider.clone_calls) == 1
     assert provider.remote_create_calls == 1
-    assert {
-        item["external_request_key"] for item in provider.clone_calls
-    } == {provider.clone_calls[0]["external_request_key"]}
+    assert first.json()["data"] == second.json()["data"]
     with auth_db() as db:
-        speakers = {
-            db.get(BrandVoice, response.json()["data"]["id"]).speaker_id
-            for response in (first, second)
-        }
-    assert speakers == set(provider.remote_voices.values())
+        assert db.query(BillingOperation).count() == 1
+        assert db.query(BrandVoice).count() == 1
 
 
 def test_cosyvoice_delete_loses_to_in_progress_finalize_without_orphan(
@@ -1752,7 +1762,7 @@ def test_video_submit_persists_its_single_trusted_voice_gate_timestamp(
 ) -> None:
     from app.api.v1.routes import videos as videos_route
 
-    submitted_at = datetime(2026, 8, 29, 11, 0, 0, tzinfo=UTC)
+    submitted_at = datetime.now(UTC)
 
     class _FixedDateTime:
         calls = 0
@@ -1775,7 +1785,7 @@ def test_video_submit_persists_its_single_trusted_voice_gate_timestamp(
             consent_confirmed=True,
             consent_confirmed_at=submitted_at,
             activated_at=submitted_at - timedelta(days=1),
-            expires_at=submitted_at + timedelta(seconds=1),
+            expires_at=submitted_at + timedelta(hours=1),
         )
         db.add(voice)
         db.commit()

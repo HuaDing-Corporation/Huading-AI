@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
@@ -198,6 +198,22 @@ def create_brand_voice(
     )
     if replay is not None:
         return ok(request, _cosyvoice_replay_response(replay.operation))
+    request_replay = _cosyvoice_request_replay(
+        db,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        request_hash=request_hash,
+    )
+    if request_replay is not None:
+        verify_quote(
+            token=headers.quote_token,
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            operation="cosyvoice_brand_voice_create",
+            request_hash=request_hash,
+            current_draft=_cosyvoice_pricing_draft(db, tenant_id=user.tenant_id),
+        )
+        return ok(request, _cosyvoice_replay_response(request_replay))
     if payload.consent_confirmed is not True:
         raise AppError(
             "Voice clone consent must be confirmed.",
@@ -270,6 +286,16 @@ def create_brand_voice(
                 status_code=500,
             )
         return ok(request, _cosyvoice_replay_response(replay.operation))
+    late_request_replay = _cosyvoice_request_replay(
+        db,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        request_hash=request_hash,
+        exclude_operation_id=operation.id,
+    )
+    if late_request_replay is not None:
+        db.rollback()
+        return ok(request, _cosyvoice_replay_response(late_request_replay))
     clone_payload = _clone_payload(
         tenant_id=user.tenant_id,
         brand_voice_id=brand_voice.id,
@@ -436,6 +462,33 @@ def _cosyvoice_replay_response(operation) -> BrandVoiceCreateResponse:
         code=operation.error_code or "VOICE_CLONE_FAILED",
         status_code=operation.error_http_status or 502,
         detail={"billing": billing_summary(operation).model_dump(mode="json")},
+    )
+
+
+def _cosyvoice_request_replay(
+    db: Session,
+    *,
+    tenant_id: str,
+    user_id: str,
+    request_hash: str,
+    exclude_operation_id: str | None = None,
+) -> BillingOperation | None:
+    statement = select(BillingOperation).where(
+        BillingOperation.tenant_id == tenant_id,
+        BillingOperation.user_id == user_id,
+        BillingOperation.operation == "cosyvoice_brand_voice_create",
+        BillingOperation.request_hash == request_hash,
+        or_(
+            BillingOperation.status == "in_progress",
+            BillingOperation.completion_kind == "succeeded",
+        ),
+    )
+    if exclude_operation_id is not None:
+        statement = statement.where(BillingOperation.id != exclude_operation_id)
+    return db.scalar(
+        statement
+        .order_by(BillingOperation.created_at.desc(), BillingOperation.id.desc())
+        .limit(1)
     )
 
 

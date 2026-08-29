@@ -19,6 +19,7 @@ _PROVIDER_NAME = "cosyvoice-voice-clone"
 _TTS_PROVIDER_NAME = "cosyvoice-tts"
 _DEFAULT_TARGET_MODEL = "cosyvoice-v3.5-plus"
 _SAFE_PREFIX_PATTERN = re.compile(r"[a-z0-9]+")
+_REQUEST_KEY_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 _DASHSCOPE_RUNTIME_LOCK = threading.RLock()
 
 logger = get_logger(__name__)
@@ -49,6 +50,7 @@ class CosyVoiceCloneProvider:
         self.output_dir = Path(output_dir) if output_dir else None
         self.base_url = _normalise_base_url(base_url)
         self.request_timeout_seconds = request_timeout_seconds
+        self._voice_id_by_request_key: dict[str, str] = {}
 
     async def clone_voice(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return await asyncio.to_thread(self.clone_voice_sync, payload)
@@ -63,20 +65,32 @@ class CosyVoiceCloneProvider:
         source_audio_url = str(payload.get("source_audio_url") or "").strip()
         if not source_audio_url:
             raise ValueError("CosyVoice source audio URL is required.")
+        request_key = str(payload.get("external_request_key") or "").strip()
+        if request_key and not _REQUEST_KEY_PATTERN.fullmatch(request_key):
+            raise CosyVoiceCloneError("CosyVoice external request key must be a full SHA-256 hash.")
         prefix = _safe_prefix(payload)
         with _dashscope_runtime(self.api_key, self.base_url):
-            voice_id = _recover_voice_id(self.enrollment, prefix=prefix)
-            if not voice_id:
-                try:
-                    voice_id = self.enrollment.create_voice(
-                        self.target_model,
-                        prefix,
-                        source_audio_url,
-                    )
-                except Exception:
-                    voice_id = _recover_voice_id(self.enrollment, prefix=prefix)
-                    if not voice_id:
-                        raise
+            if request_key and request_key in self._voice_id_by_request_key:
+                voice_id = self._voice_id_by_request_key[request_key]
+                return {"speaker_id": voice_id, "status": "ready", "provider": _PROVIDER_NAME}
+            existing_voice_ids = _remote_voice_ids(self.enrollment, prefix=prefix)
+            try:
+                voice_id = _create_voice_once(
+                    self.enrollment,
+                    self.target_model,
+                    prefix,
+                    source_audio_url,
+                )
+            except Exception:
+                voice_id = _recover_created_voice_id(
+                    self.enrollment,
+                    prefix=prefix,
+                    existing_voice_ids=existing_voice_ids,
+                )
+                if not voice_id:
+                    raise
+            if request_key:
+                self._voice_id_by_request_key[request_key] = str(voice_id)
         logger.info(
             "cosyvoice.clone_voice",
             tenant_id=str(payload.get("tenant_id") or ""),
@@ -150,6 +164,51 @@ def _create_enrollment_service(api_key: str) -> Any:
     return VoiceEnrollmentService(api_key=api_key)
 
 
+def _create_voice_once(
+    enrollment: Any,
+    target_model: str,
+    prefix: str,
+    source_audio_url: str,
+) -> str:
+    from dashscope.audio.tts_v2.enrollment import (
+        VoiceEnrollmentException,
+        VoiceEnrollmentService,
+    )
+
+    if not isinstance(enrollment, VoiceEnrollmentService):
+        return str(enrollment.create_voice(target_model, prefix, source_audio_url))
+
+    from dashscope.client.base_api import BaseApi
+    from dashscope.common.constants import ApiProtocol, HTTPMethod
+
+    response = BaseApi.call(
+        model=enrollment.model,
+        task_group="audio",
+        task="tts",
+        function="customization",
+        input={
+            "action": "create_voice",
+            "target_model": target_model,
+            "prefix": prefix,
+            "url": source_audio_url,
+        },
+        api_protocol=ApiProtocol.HTTP,
+        http_method=HTTPMethod.POST,
+        api_key=enrollment._api_key,
+        workspace=enrollment._workspace,
+        **enrollment._kwargs,
+    )
+    enrollment._last_request_id = response.request_id
+    if response.status_code == 200:
+        return str(response.output["voice_id"])
+    raise VoiceEnrollmentException(
+        response.request_id,
+        response.status_code,
+        response.code,
+        response.message,
+    )
+
+
 def _create_synthesizer(**kwargs: Any) -> Any:
     from dashscope.audio.tts_v2 import SpeechSynthesizer
 
@@ -218,18 +277,31 @@ def _safe_prefix(payload: Mapping[str, Any]) -> str:
     return f"bv{compact}"[:10]
 
 
-def _recover_voice_id(enrollment: Any, *, prefix: str) -> str:
+def _remote_voice_ids(enrollment: Any, *, prefix: str) -> set[str]:
     voices = enrollment.list_voices(prefix=prefix, page_index=0, page_size=100)
     if not isinstance(voices, list):
         raise CosyVoiceCloneError("CosyVoice voice recovery returned an invalid list.")
+    voice_ids: set[str] = set()
     for item in voices:
         if not isinstance(item, Mapping):
             continue
         voice_id = str(item.get("voice_id") or "").strip()
         item_prefix = str(item.get("prefix") or "").strip()
         if voice_id and (item_prefix == prefix or voice_id.startswith(prefix)):
-            return voice_id
-    return ""
+            voice_ids.add(voice_id)
+    return voice_ids
+
+
+def _recover_created_voice_id(
+    enrollment: Any,
+    *,
+    prefix: str,
+    existing_voice_ids: set[str],
+) -> str:
+    created_voice_ids = _remote_voice_ids(enrollment, prefix=prefix) - existing_voice_ids
+    if len(created_voice_ids) > 1:
+        raise CosyVoiceCloneError("CosyVoice voice recovery is ambiguous.")
+    return next(iter(created_voice_ids), "")
 
 
 def _cosyvoice_voice_clone_factory(config: ProviderConfig) -> CosyVoiceCloneProvider:

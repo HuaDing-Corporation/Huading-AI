@@ -118,6 +118,108 @@ async def test_cosyvoice_clone_recovers_remote_success_after_timeout_across_new_
 
 
 @pytest.mark.asyncio
+async def test_cosyvoice_clone_prevents_pinned_sdk_retry_after_remote_timeout(monkeypatch):
+    from dashscope.audio.tts_v2 import enrollment as enrollment_module
+    from dashscope.audio.tts_v2.enrollment import VoiceEnrollmentService
+    from dashscope.client.base_api import BaseApi
+
+    from app.providers.voice_clone.cosyvoice import CosyVoiceCloneProvider
+
+    remote_voices: list[dict[str, str]] = []
+    create_attempts = 0
+
+    class _Response:
+        def __init__(self, *, output):
+            self.request_id = "request-id"
+            self.status_code = 200
+            self.code = ""
+            self.message = ""
+            self.output = output
+
+    def fake_call(cls, *, input, **_kwargs):
+        nonlocal create_attempts
+        if input["action"] == "list_voice":
+            prefix = input.get("prefix")
+            return _Response(
+                output={
+                    "voice_list": [
+                        item for item in remote_voices if item["prefix"] == prefix
+                    ]
+                }
+            )
+        assert input["action"] == "create_voice"
+        create_attempts += 1
+        voice_id = f"{input['prefix']}-remote-{create_attempts}"
+        remote_voices.append({"voice_id": voice_id, "prefix": input["prefix"]})
+        if create_attempts == 1:
+            raise TimeoutError("response lost after remote commit")
+        return _Response(output={"voice_id": voice_id})
+
+    monkeypatch.setattr(BaseApi, "call", classmethod(fake_call))
+    monkeypatch.setattr(enrollment_module.time, "sleep", lambda _seconds: None)
+    provider = CosyVoiceCloneProvider(
+        api_key="dashscope-key",
+        target_model="cosyvoice-v3.5-plus",
+        enrollment_service=VoiceEnrollmentService(api_key="dashscope-key"),
+    )
+
+    result = await provider.clone_voice(
+        {
+            "external_request_key": "1" * 64,
+            "source_audio_url": "https://storage.test/audio.wav",
+        }
+    )
+
+    assert result["speaker_id"] == "bv11111111-remote-1"
+    assert create_attempts == 1
+    assert remote_voices == [
+        {"voice_id": "bv11111111-remote-1", "prefix": "bv11111111"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cosyvoice_clone_does_not_reuse_different_full_hash_with_same_old_prefix():
+    from app.providers.voice_clone.cosyvoice import CosyVoiceCloneProvider
+
+    class _CollidingPrefixEnrollment(_FakeEnrollment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.voices = [
+                {
+                    "voice_id": "bvdeadbeef-existing-other-request",
+                    "prefix": "bvdeadbeef",
+                }
+            ]
+
+        def create_voice(self, target_model: str, prefix: str, url: str) -> str:
+            self.create_calls.append(
+                {"target_model": target_model, "prefix": prefix, "url": url}
+            )
+            voice_id = f"{prefix}-new-request"
+            self.voices.append({"voice_id": voice_id, "prefix": prefix})
+            return voice_id
+
+        def list_voices(self, prefix=None, page_index=0, page_size=10):
+            return [item for item in self.voices if item["prefix"] == prefix]
+
+    enrollment = _CollidingPrefixEnrollment()
+    provider = CosyVoiceCloneProvider(
+        api_key="dashscope-key",
+        enrollment_service=enrollment,
+    )
+
+    result = await provider.clone_voice(
+        {
+            "external_request_key": "deadbeef" + "2" * 56,
+            "source_audio_url": "https://storage.test/audio.wav",
+        }
+    )
+
+    assert result["speaker_id"] == "bvdeadbeef-new-request"
+    assert len(enrollment.create_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_cosyvoice_delete_releases_remote_voice():
     from app.providers.voice_clone.cosyvoice import CosyVoiceCloneProvider
 

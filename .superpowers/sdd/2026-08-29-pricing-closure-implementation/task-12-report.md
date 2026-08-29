@@ -226,3 +226,118 @@ No output; exit 0.
 - Rechecked strict provider-result rejection for missing/wrong provider, missing/wrong status, missing/wrong speaker, wrong provider type, and extra fields.
 - Existing Starlette/httpx and Alembic path-separator warnings remain non-blocking. The previously deferred brand-voice list N+1 order-status lookup is unchanged.
 - No subagent, network/provider call, push, merge, deploy, migration, production/shared database write, Task 13 change, configuration write, or external side effect was performed.
+
+## Fix Round 2 — 2026-08-29
+
+### Status and changes
+
+The two open review items are closed without changing the already-approved ownership, timestamp, renewal, manual-provider, delete/finalize, or typed-result production behavior.
+
+- The adapter no longer calls DashScope 1.25.21 `VoiceEnrollmentService.create_voice()`. That SDK method routes through its private retry loop and can repeat a non-idempotent create after a remotely committed response is lost. For the pinned real SDK service, the adapter now sends the same create payload through one direct `BaseApi.call()` transport attempt and reconstructs the SDK's normal response/error contract without any create retry.
+- Before the one create attempt, the adapter snapshots the remote voice IDs returned for the supplier-compatible prefix. If the one attempt raises, recovery queries again and accepts only the unique new voice ID in the post-attempt set difference. No new voice re-raises the transport failure; multiple new voices fail closed as ambiguous.
+- The ten-character DashScope prefix remains only a supplier-required label/filter. It is no longer treated as request identity and no pre-existing prefix match is reused. The adapter accepts an external identity only when it is the complete 64-character lowercase SHA-256 hash and caches successful mappings by that exact full key.
+- The public route provides the durable, verifiable full mapping through `BillingOperation.request_hash`, scoped by tenant, payment user, and operation. A fresh HTTP idempotency key with an identical full request hash verifies its signed quote and replays the succeeded/in-progress canonical resource without resolving or calling the provider. A second full-hash lookup after reservation locking rolls back provisional BrandVoice/operation/usage rows if the initial lookup lost a race.
+- `test_video_submit_persists_its_single_trusted_voice_gate_timestamp` received a test-only determinism correction after the local wall clock crossed its hard-coded Fix Round 1 expiry during verification. It now captures the test's current UTC instant and uses a one-hour validity window; no Finding 2 production code changed.
+
+### Fix Round 2 RED evidence
+
+Pinned SDK internal-retry reproduction:
+
+```text
+uv run pytest tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_clone_prevents_pinned_sdk_retry_after_remote_timeout
+FAILED tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_clone_prevents_pinned_sdk_retry_after_remote_timeout
+AssertionError: assert 'bv11111111-remote-2' == 'bv11111111-remote-1'
+1 failed, 1 warning in 0.49s
+```
+
+The test instantiates the real pinned `VoiceEnrollmentService`, replaces only `BaseApi.call`, and models the exact sequence: the first create records the remote voice and raises `TimeoutError`; the SDK retry loop then issues a second create before returning control to the adapter.
+
+Old 32-bit-prefix collision reproduction:
+
+```text
+uv run pytest tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_clone_does_not_reuse_different_full_hash_with_same_old_prefix
+FAILED tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_clone_does_not_reuse_different_full_hash_with_same_old_prefix
+AssertionError: assert 'bvdeadbeef-existing-other-request' == 'bvdeadbeef-new-request'
+1 failed, 1 warning in 0.50s
+```
+
+The two request identities have different complete hashes but share the legacy first eight hex characters. The RED proves the prior prefix lookup incorrectly returned the other request's speaker without a create attempt.
+
+Durable fresh-key and late-race reproduction:
+
+```text
+uv run pytest tests/test_brand_voice_pipeline.py::test_cosyvoice_new_http_key_reuses_stable_remote_request_identity
+FAILED tests/test_brand_voice_pipeline.py::test_cosyvoice_new_http_key_reuses_stable_remote_request_identity
+AssertionError: assert 2 == 1
+1 failed, 1 warning in 0.78s
+```
+
+The test forces the second request's initial full-hash lookup to miss, representing requests that began together. Before the late recheck, two provider clone calls and two local resources were created.
+
+### Fix Round 2 GREEN evidence
+
+The two provider regressions after implementation:
+
+```text
+uv run pytest tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_clone_prevents_pinned_sdk_retry_after_remote_timeout tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_clone_does_not_reuse_different_full_hash_with_same_old_prefix
+2 passed, 1 warning in 0.14s
+```
+
+Public route durable/late replay:
+
+```text
+uv run pytest tests/test_brand_voice_pipeline.py::test_cosyvoice_new_http_key_reuses_stable_remote_request_identity
+1 passed, 1 warning in 0.28s
+```
+
+Complete provider file:
+
+```text
+uv run pytest tests/test_cosyvoice_voice_clone_provider.py
+10 passed, 1 warning in 0.24s
+```
+
+Complete provider plus brand-voice lifecycle files:
+
+```text
+uv run pytest tests/test_cosyvoice_voice_clone_provider.py tests/test_brand_voice_pipeline.py
+60 passed, 1 warning in 8.12s
+```
+
+Task 12 focused regression suite:
+
+```text
+uv run pytest tests/test_brand_voice_pipeline.py tests/test_batch_prod_pipeline.py tests/test_avatar_talk_worker.py tests/test_video_pipeline_quota.py tests/test_video_pricing_contract.py tests/test_cosyvoice_voice_clone_provider.py
+144 passed, 1 warning in 16.95s
+```
+
+Static verification:
+
+```text
+uv run ruff check app/providers/voice_clone/cosyvoice.py app/api/v1/routes/brand_voices.py tests/test_cosyvoice_voice_clone_provider.py tests/test_brand_voice_pipeline.py
+All checks passed!
+
+uv run python -m compileall -q app/providers/voice_clone/cosyvoice.py app/api/v1/routes/brand_voices.py
+No output; exit 0.
+
+git diff --check
+No output; exit 0.
+```
+
+### Files changed
+
+- `backend/app/providers/voice_clone/cosyvoice.py`
+- `backend/app/api/v1/routes/brand_voices.py`
+- `backend/tests/test_cosyvoice_voice_clone_provider.py`
+- `backend/tests/test_brand_voice_pipeline.py`
+- `.superpowers/sdd/2026-08-29-pricing-closure-implementation/task-12-report.md`
+
+### Fix-round self-review and concerns
+
+- Inspected the locked DashScope 1.25.21 source and `uv.lock`; only non-idempotent voice creation bypasses the SDK retry loop. Idempotent inventory queries retain the SDK behavior.
+- Confirmed normal create responses, transport-timeout recovery, repeated exact full keys, colliding old prefixes, provider errors, runtime global restoration, delete, and TTS paths remain covered through the provider's public methods.
+- Confirmed route replay is exact on the complete request hash and is scoped to tenant/user/operation. Failed prior operations are not treated as successful mappings, and provisional late-race rows/reservations are rolled back before provider resolution.
+- Confirmed the provider rechecks and stores its exact full-key map while holding the serialized DashScope runtime lock, so concurrent calls sharing one provider instance cannot both pass the mapping check and create.
+- The one-shot transport helper intentionally depends on private fields of the pinned DashScope 1.25.21 `VoiceEnrollmentService`; the real-SDK regression makes a future SDK incompatibility fail visibly. This should be re-audited when upgrading DashScope.
+- If post-timeout inventory contains more than one previously unseen matching voice, recovery fails closed rather than risking cross-request association.
+- Existing Starlette/httpx deprecation warning remains non-blocking. No subagent, network/provider call, push, merge, deploy, migration, production/shared database write, production configuration change, supplier registration write, Task 13 work, or external side effect was performed.
