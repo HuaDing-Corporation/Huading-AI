@@ -318,6 +318,87 @@ def test_customer_claim_allows_only_exact_active_same_voice_renewal(db_session) 
     assert retired.updated_at == datetime(2026, 8, 29, tzinfo=UTC)
 
 
+@pytest.mark.parametrize(
+    ("speaker_id", "provider"),
+    [
+        (None, "doubao-voice-clone"),
+        ("voice-different", "doubao-voice-clone"),
+        ("", "doubao-voice-clone"),
+        ("   ", "doubao-voice-clone"),
+        (" voice-owned ", "doubao-voice-clone"),
+        ("voice-owned", "cosyvoice"),
+    ],
+)
+def test_own_id_renewal_requires_exact_canonical_brand_voice_binding(
+    db_session,
+    speaker_id,
+    provider,
+) -> None:
+    from app.services.provider_voice_registry import claim_customer_provider_voice_id
+
+    _seed_brand_voice_order(db_session)
+    claimed = claim_customer_provider_voice_id(
+        db_session,
+        provider_voice_id="voice-owned",
+        brand_voice_id="brand-a",
+        order_id="order-a",
+    )
+    brand_voice = db_session.get(BrandVoice, "brand-a")
+    brand_voice.speaker_id = speaker_id
+    brand_voice.provider = provider
+    db_session.flush()
+    registry_before = (
+        claimed.provider,
+        claimed.normalized_provider_id,
+        claimed.kind,
+        claimed.brand_voice_id,
+        claimed.first_order_id,
+        claimed.status,
+        claimed.created_at,
+        claimed.updated_at,
+    )
+    brand_voice_before = (
+        brand_voice.provider,
+        brand_voice.speaker_id,
+        brand_voice.status,
+        brand_voice.created_at,
+        brand_voice.updated_at,
+        brand_voice.deleted_at,
+    )
+    registry_count = len(list(db_session.scalars(select(BrandVoiceProviderId))))
+    brand_voice_count = len(list(db_session.scalars(select(BrandVoice))))
+
+    with pytest.raises(AppError) as exc:
+        claim_customer_provider_voice_id(
+            db_session,
+            provider_voice_id="voice-owned",
+            brand_voice_id="brand-a",
+            order_id="order-a",
+        )
+
+    assert exc.value.code == "PROVIDER_VOICE_ID_CONFLICT"
+    assert (
+        claimed.provider,
+        claimed.normalized_provider_id,
+        claimed.kind,
+        claimed.brand_voice_id,
+        claimed.first_order_id,
+        claimed.status,
+        claimed.created_at,
+        claimed.updated_at,
+    ) == registry_before
+    assert (
+        brand_voice.provider,
+        brand_voice.speaker_id,
+        brand_voice.status,
+        brand_voice.created_at,
+        brand_voice.updated_at,
+        brand_voice.deleted_at,
+    ) == brand_voice_before
+    assert len(list(db_session.scalars(select(BrandVoiceProviderId)))) == registry_count
+    assert len(list(db_session.scalars(select(BrandVoice)))) == brand_voice_count
+
+
 def test_own_id_renewal_rejects_other_sources_without_registry_state_change(
     db_session,
     monkeypatch,

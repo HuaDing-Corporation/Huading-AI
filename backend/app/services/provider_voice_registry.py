@@ -272,6 +272,20 @@ def _same_voice_renewal_has_other_source(
     provider_voice_id: str,
     brand_voice_id: str,
 ) -> bool:
+    target_voice = db.scalar(
+        select(BrandVoice)
+        .where(BrandVoice.id == brand_voice_id)
+        .with_for_update()
+    )
+    if target_voice is None or target_voice.provider != DOUBAO_VOICE_CLONE_PROVIDER:
+        return True
+    raw_target_provider_id = target_voice.speaker_id
+    if (
+        raw_target_provider_id is None
+        or raw_target_provider_id != raw_target_provider_id.strip()
+        or raw_target_provider_id != provider_voice_id
+    ):
+        return True
     inventory = provider_voice_inventory(db)
     if provider_voice_id in (
         set(inventory.official_configured_ids)
