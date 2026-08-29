@@ -618,23 +618,45 @@ def record_tts_usage(
     return record
 
 
-def attach_tts_usage(record: UsageRecord, *, result: object) -> UsageRecord:
-    """Attach sanitized supplier telemetry to an existing character allocation."""
-    if not isinstance(result, dict):
-        return record
-    provider = str(result.get("provider") or "").strip()
-    if provider not in {"doubao-seed-tts", "cosyvoice-tts"}:
-        return record
+def attach_tts_usage(
+    record: UsageRecord,
+    *,
+    result: object,
+    expected_characters: int,
+) -> UsageRecord:
+    """Attach verified supplier telemetry to an existing character allocation."""
     try:
-        characters = max(0, int(result.get("characters") or 0))
-    except (TypeError, ValueError):
-        return record
-    if characters <= 0:
-        return record
+        reserved_characters = int(record.quantity)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expected character quantity is invalid") from exc
+    if (
+        Decimal(reserved_characters) != Decimal(record.quantity)
+        or reserved_characters <= 0
+        or expected_characters != reserved_characters
+    ):
+        raise ValueError("expected character quantity is invalid")
+    if not isinstance(result, dict):
+        raise ValueError("supplier character telemetry is missing")
+    provider = str(result.get("provider") or "").strip()
+    if provider != record.provider or provider not in {"doubao-seed-tts", "cosyvoice-tts"}:
+        raise ValueError("supplier character telemetry provider is invalid")
+    try:
+        raw_characters = result["characters"]
+        if isinstance(raw_characters, bool) or not isinstance(raw_characters, int):
+            raise ValueError
+        characters = int(raw_characters)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("supplier character telemetry is invalid") from exc
+    if characters != reserved_characters:
+        raise ValueError("supplier character telemetry does not match frozen text")
+    cost_cents = tts_cost_cents(characters, provider=provider)
     record.provider = provider
     record.model = _tts_model_from_result(result, provider)
-    record.provider_usage = {"characters": characters}
-    record.cost_cents = tts_cost_cents(characters, provider=provider)
+    record.provider_usage = {
+        "characters": characters,
+        "cost_cents": cost_cents,
+    }
+    record.cost_cents = cost_cents
     record.provider_cost_usd = _provider_cost_usd(result)
     return record
 

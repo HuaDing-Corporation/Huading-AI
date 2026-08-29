@@ -3,6 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1270,16 +1271,27 @@ def test_avatar_talk_accepts_brand_voice_and_worker_uses_speaker_id(
         lambda *args, **kwargs: None,
     )
     client = TestClient(app)
+    payload = {
+        "topic": "brand voice oral demo",
+        "script": "hello from brand voice",
+        "voice_id": brand_voice_id,
+        "avatar_asset_id": avatar_id,
+        "video_mode": "avatar_talk",
+    }
+    quote_resp = client.post(
+        "/api/v1/videos/estimate",
+        json=payload,
+        headers=auth_context["headers"],
+    )
+    assert quote_resp.status_code == 200
     create_resp = client.post(
         "/api/v1/videos",
-        json={
-            "topic": "brand voice oral demo",
-            "script": "hello from brand voice",
-            "voice_id": brand_voice_id,
-            "avatar_asset_id": avatar_id,
-            "video_mode": "avatar_talk",
+        json=payload,
+        headers={
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote_resp.json()["data"]["quote_token"],
         },
-        headers=auth_context["headers"],
     )
 
     assert create_resp.status_code == 202
@@ -1477,16 +1489,29 @@ def test_seedance_i2v_allows_cosyvoice_brand_voice_on_free_plan(
     storage.objects[f"tenants/{auth_context['tenant_id']}/uploads/product.png"] = b"image"
     app.dependency_overrides[get_object_storage] = lambda: storage
     try:
-        response = TestClient(app).post(
-            "/api/v1/videos",
-            json={
-                "topic": "free ecommerce voice",
-                "video_mode": "seedance_i2v",
-                "product_image_keys": ["uploads/product.png"],
-                "voice_id": brand_voice_id,
-                "duration_sec": 15,
-            },
+        client = TestClient(app)
+        payload = {
+            "topic": "free ecommerce voice",
+            "script": "free ecommerce narration",
+            "video_mode": "seedance_i2v",
+            "product_image_keys": ["uploads/product.png"],
+            "voice_id": brand_voice_id,
+            "duration_sec": 15,
+        }
+        quote_response = client.post(
+            "/api/v1/videos/estimate",
+            json=payload,
             headers=auth_context["headers"],
+        )
+        assert quote_response.status_code == 200
+        response = client.post(
+            "/api/v1/videos",
+            json=payload,
+            headers={
+                **auth_context["headers"],
+                "Idempotency-Key": str(uuid4()),
+                "X-Huading-Quote": quote_response.json()["data"]["quote_token"],
+            },
         )
     finally:
         app.dependency_overrides.pop(get_object_storage, None)

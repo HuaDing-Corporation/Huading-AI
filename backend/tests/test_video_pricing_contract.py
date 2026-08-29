@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -5,7 +7,18 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.core.exceptions import AppError
-from app.db.models import Asset, BillingOperation, BrandVoice, Plan, UsageRecord, User, VideoTask
+from app.db.models import (
+    Asset,
+    BillingOperation,
+    BrandVoice,
+    CreditRate,
+    Plan,
+    Subscription,
+    UsageRecord,
+    User,
+    VideoTask,
+    Voice,
+)
 from app.main import app
 from app.schemas.billing import BillingQuote
 from app.schemas.videos import VideoGenerateRequest
@@ -303,3 +316,365 @@ def test_brand_submit_commits_task_operation_and_allocations_before_enqueue(
     replay = client.post("/api/v1/videos", headers=submission_headers, json=payload)
     assert replay.status_code == 202, replay.text
     assert replay.json()["data"] == response.json()["data"]
+
+
+def test_late_idempotency_replay_does_not_enqueue_existing_video_again(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            name="Cosy",
+            provider="cosyvoice-voice-clone",
+            speaker_id="cosy-speaker",
+            status="ready",
+            consent_confirmed=True,
+        )
+        avatar = Asset(
+            tenant_id=auth_context["tenant_id"],
+            type="avatar_image",
+            source="upload",
+            storage_key=f"tenants/{auth_context['tenant_id']}/uploads/race-avatar.png",
+            mime_type="image/png",
+            status="ready",
+        )
+        db.add_all([voice, avatar])
+        db.commit()
+        voice_id, avatar_id = voice.id, avatar.id
+
+    from app.api.v1.routes import videos as videos_route
+
+    enqueued_task_ids: list[str] = []
+
+    class _FakeTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            enqueued_task_ids.append(task_id)
+            return type("Result", (), {"status": "PENDING"})()
+
+    monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _FakeTask())
+    payload = {
+        "video_mode": "avatar_talk",
+        "topic": "正文",
+        "voice_id": voice_id,
+        "avatar_asset_id": avatar_id,
+        "script": "你好，世界！",
+    }
+    client = TestClient(app)
+    quote = client.post("/api/v1/videos/estimate", headers=auth_context["headers"], json=payload)
+    headers = {
+        **auth_context["headers"],
+        "Idempotency-Key": str(uuid4()),
+        "X-Huading-Quote": quote.json()["data"]["quote_token"],
+    }
+    created = client.post("/api/v1/videos", headers=headers, json=payload)
+    assert created.status_code == 202, created.text
+
+    real_find_replay = videos_route.find_replay
+    top_level_missed = False
+
+    def miss_only_top_level_replay(*args, **kwargs):
+        nonlocal top_level_missed
+        if not top_level_missed:
+            top_level_missed = True
+            return None
+        return real_find_replay(*args, **kwargs)
+
+    monkeypatch.setattr(videos_route, "find_replay", miss_only_top_level_replay)
+    replayed = client.post("/api/v1/videos", headers=headers, json=payload)
+
+    assert replayed.status_code == 202, replayed.text
+    assert replayed.json()["data"] == created.json()["data"]
+    assert enqueued_task_ids == [created.json()["data"]["task_id"]]
+    with auth_db() as db:
+        assert db.query(VideoTask).count() == 1
+        assert db.query(BillingOperation).count() == 1
+
+
+def test_brand_video_enqueue_failure_completes_and_releases_operation(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            name="Cosy",
+            provider="cosyvoice-voice-clone",
+            speaker_id="cosy-speaker",
+            status="ready",
+            consent_confirmed=True,
+        )
+        avatar = Asset(
+            tenant_id=auth_context["tenant_id"],
+            type="avatar_image",
+            source="upload",
+            storage_key=f"tenants/{auth_context['tenant_id']}/uploads/enqueue-avatar.png",
+            mime_type="image/png",
+            status="ready",
+        )
+        db.add_all([voice, avatar])
+        db.commit()
+        voice_id, avatar_id = voice.id, avatar.id
+
+    from app.api.v1.routes import videos as videos_route
+
+    class _FailingTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            raise RuntimeError("queue unavailable")
+
+    monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _FailingTask())
+    payload = {
+        "video_mode": "avatar_talk",
+        "topic": "正文",
+        "voice_id": voice_id,
+        "avatar_asset_id": avatar_id,
+        "script": "你好，世界！",
+    }
+    client = TestClient(app)
+    quote = client.post("/api/v1/videos/estimate", headers=auth_context["headers"], json=payload)
+    response = client.post(
+        "/api/v1/videos",
+        headers={
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote.json()["data"]["quote_token"],
+        },
+        json=payload,
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["error"]["code"] == "VIDEO_ENQUEUE_FAILED"
+    with auth_db() as db:
+        task = db.query(VideoTask).one()
+        operation = db.query(BillingOperation).one()
+        usages = db.query(UsageRecord).filter_by(billing_operation_id=operation.id).all()
+        subscription = db.query(Subscription).filter_by(tenant_id=auth_context["tenant_id"]).one()
+        assert task.status == "failed"
+        assert task.error_code == "VIDEO_ENQUEUE_FAILED"
+        assert operation.status == "completed"
+        assert operation.completion_kind == "failed"
+        assert operation.settled_credits == 0
+        assert operation.released_credits == operation.requested_credits
+        assert subscription.quota_credits_reserved == 0
+        assert subscription.quota_credits_used == 0
+        assert len(usages) == 2
+        assert all(usage.status == "released" for usage in usages)
+
+
+def test_cosyvoice_video_quote_preserves_mixed_rate_provenance(db_session) -> None:
+    user = db_session.get(User, "user-a")
+    video_rate = CreditRate(
+        tenant_id=user.tenant_id,
+        capability="video",
+        unit="second",
+        credits_per_unit=Decimal("125.0000"),
+        effective_at=datetime.now(UTC),
+    )
+    tts_rate = CreditRate(
+        tenant_id=None,
+        capability="tts",
+        unit="character",
+        credits_per_unit=Decimal("0.2000"),
+        effective_at=datetime.now(UTC),
+    )
+    voice = BrandVoice(
+        tenant_id=user.tenant_id,
+        name="Cosy",
+        provider="cosyvoice-voice-clone",
+        speaker_id="cosy-speaker",
+        status="ready",
+        consent_confirmed=True,
+    )
+    db_session.add_all([video_rate, tts_rate, voice])
+    db_session.commit()
+
+    quote = build_video_estimate(
+        db_session,
+        user=user,
+        payload=VideoGenerateRequest.model_validate(
+            {
+                "video_mode": "avatar_talk",
+                "topic": "正文",
+                "voice_id": voice.id,
+                "avatar_asset_id": "asset-1",
+                "script": "你好，世界！",
+            }
+        ),
+    )
+
+    assert isinstance(quote, BillingQuote)
+    provenance = [
+        (line.capability, line.rate_source.value, line.rate_id)
+        for line in quote.breakdown
+    ]
+    assert provenance == [
+        ("video", "tenant_rate", video_rate.id),
+        ("tts", "platform_rate", tts_rate.id),
+    ]
+
+
+def test_legacy_and_deferred_submissions_ignore_forged_billing_headers(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        voice = Voice(
+            provider="doubao-seed-tts",
+            voice_code="preset-voice",
+            display_name="Preset",
+        )
+        avatar = Asset(
+            tenant_id=auth_context["tenant_id"],
+            type="avatar_image",
+            source="upload",
+            storage_key=f"tenants/{auth_context['tenant_id']}/uploads/preset-avatar.png",
+            mime_type="image/png",
+            status="ready",
+        )
+        db.add_all([voice, avatar])
+        db.commit()
+        voice_id, avatar_id = voice.id, avatar.id
+
+    from app.api.v1.routes import videos as videos_route
+
+    class _FakeTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            return type("Result", (), {"status": "PENDING"})()
+
+    monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _FakeTask())
+    monkeypatch.setattr(videos_route, "generate_video_task", _FakeTask())
+    client = TestClient(app)
+    forged_headers = {
+        **auth_context["headers"],
+        "Idempotency-Key": str(uuid4()),
+        "X-Huading-Quote": "forged-quote-token",
+    }
+    legacy = client.post(
+        "/api/v1/videos",
+        headers=forged_headers,
+        json={
+            "video_mode": "avatar_talk",
+            "topic": "正文",
+            "voice_id": voice_id,
+            "avatar_asset_id": avatar_id,
+            "script": "预设音色文案",
+        },
+    )
+    deferred = client.post(
+        "/api/v1/videos",
+        headers={**forged_headers, "Idempotency-Key": str(uuid4())},
+        json={"video_mode": "static_template", "topic": "正文", "script": "文案"},
+    )
+
+    assert legacy.status_code == 202, legacy.text
+    assert legacy.json()["data"]["pricing_contract"] == "legacy_estimate"
+    assert deferred.status_code == 202, deferred.text
+    assert deferred.json()["data"]["pricing_contract"] == "deferred_unpriced"
+    with auth_db() as db:
+        assert db.query(BillingOperation).count() == 0
+
+
+def test_doubao_seedance_brand_video_runs_full_billing_lifecycle(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        db.query(Plan).one().code = "huading"
+        voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            name="Doubao",
+            provider="doubao-voice-clone",
+            speaker_id="doubao-speaker",
+            status="ready",
+            consent_confirmed=True,
+        )
+        db.add(voice)
+        db.commit()
+        voice_id = voice.id
+
+    from app.api.v1.routes import videos as videos_route
+    from app.workers import avatar_talk
+
+    queued: list[str] = []
+
+    class _FakeTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            queued.append(task_id)
+            return type("Result", (), {"status": "PENDING"})()
+
+    class _Store:
+        def update(self, task_id, **fields):
+            return None
+
+    class _Storage:
+        bucket = "bucket"
+
+        def presign_get_url(self, key, *, expires_in, download_filename=None):
+            return f"https://storage.test/{key}"
+
+        def delete_object(self, key):
+            return None
+
+    monkeypatch.setattr(videos_route, "generate_seedance_i2v_task", _FakeTask())
+    monkeypatch.setattr(videos_route, "_validate_product_image_storage_keys", lambda *a, **k: None)
+    payload = {
+        "video_mode": "seedance_i2v",
+        "topic": "产品视频",
+        "voice_id": voice_id,
+        "product_image_keys": ["uploads/product.png"],
+        "script": "品牌文案",
+        "scene_prompt": "产品展示",
+        "duration_sec": 5,
+        "resolution": "480p",
+    }
+    client = TestClient(app)
+    quote = client.post("/api/v1/videos/estimate", headers=auth_context["headers"], json=payload)
+    assert quote.status_code == 200, quote.text
+    assert quote.json()["data"]["pricing_contract"] == "billing_quote"
+    created = client.post(
+        "/api/v1/videos",
+        headers={
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote.json()["data"]["quote_token"],
+        },
+        json=payload,
+    )
+    assert created.status_code == 202, created.text
+    task_id = created.json()["data"]["task_id"]
+    assert queued == [task_id]
+
+    def fake_step(ctx):
+        ctx.duration_sec = 4
+        ctx.seedance_billable_seconds = 4
+        ctx.provider_cost_cents = 321
+        ctx.storage_key = f"tenants/{auth_context['tenant_id']}/videos/{task_id}/final.mp4"
+        return ctx
+
+    monkeypatch.setattr(avatar_talk, "SessionLocal", auth_db)
+    monkeypatch.setattr(avatar_talk, "build_progress_store", lambda _url: _Store())
+    monkeypatch.setattr(avatar_talk, "create_object_storage", lambda _settings: _Storage())
+    monkeypatch.setattr(avatar_talk, "ECOM_I2V_STEPS", [("upload", 100, fake_step)])
+    result = avatar_talk.generate_seedance_i2v_task.apply(
+        args=[{"tenant_id": auth_context["tenant_id"], "video_task_id": task_id}],
+        task_id=task_id,
+    ).get()
+
+    assert result == {"task_id": task_id, "status": "done"}
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        operation = db.query(BillingOperation).filter_by(result_id=task_id).one()
+        usage = db.query(UsageRecord).filter_by(billing_operation_id=operation.id).one()
+        assert task.status == "done"
+        assert operation.completion_kind == "succeeded"
+        assert operation.requested_credits == Decimal("500")
+        assert operation.settled_credits == Decimal("400")
+        assert operation.released_credits == Decimal("100")
+        assert usage.status == "settled"
+        assert usage.quantity == Decimal("4")
+        assert usage.provider == "apimart"
+        assert usage.cost_cents == 321

@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
-from app.db.models import Asset, BrandVoice, TaskAsset, UsageRecord, VideoTask, Voice
+from app.db.models import Asset, TaskAsset, UsageRecord, VideoTask, Voice
 from app.db.session import SessionLocal
 from app.providers.base import invoke, resolve, resolve_named_provider
 from app.providers.url_guard import (
@@ -66,6 +66,7 @@ from app.services.synthetic_label import (
     synthetic_label_context,
 )
 from app.services.task_claims import claim_video_task_for_worker
+from app.services.voices import resolve_narration_voice
 from app.workers.celery_app import celery_app
 
 logger = get_logger(__name__)
@@ -890,7 +891,14 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         )
         if usage is None:
             raise BillingInvariantError("billed CosyVoice task is missing its TTS allocation")
-        provider_costs.attach_tts_usage(usage, result=result)
+        frozen_text = str((task.params or {}).get("billing_tts_text") or "")
+        if not frozen_text or task.script != frozen_text:
+            raise BillingInvariantError("billed video task text changed before TTS telemetry")
+        provider_costs.attach_tts_usage(
+            usage,
+            result=result,
+            expected_characters=len(frozen_text),
+        )
         ctx.db.flush([usage])
     audio_source_path = _tail_faded_tts_audio(Path(str(result["audio_path"])))
     audio_bytes = audio_source_path.read_bytes()
@@ -947,20 +955,34 @@ def _tts_voice_for_task(
     params = task.params or {}
     brand_voice_id = task.brand_voice_id or str(params.get("brand_voice_id") or "")
     if brand_voice_id:
-        if _billing_operation_id(task) is not None and not task.created_by_user_id:
+        billed = _billing_operation_id(task) is not None
+        if billed and not task.created_by_user_id:
             raise BillingInvariantError("billed video task is missing its payer user")
-        brand_voice = db.get(BrandVoice, brand_voice_id)
-        if (
-            brand_voice is None
-            or brand_voice.tenant_id != tenant_id
-            or brand_voice.deleted_at is not None
-            or brand_voice.status != "ready"
-        ):
+        try:
+            _voice, brand_voice = resolve_narration_voice(
+                db,
+                tenant_id=tenant_id,
+                voice_id=brand_voice_id,
+                user_id=task.created_by_user_id,
+                requested_at=task.created_at,
+            )
+        except AppError as exc:
+            if billed:
+                raise BillingInvariantError("billed brand voice is no longer valid") from exc
+            raise RuntimeError("Brand voice not found for video task.") from exc
+        if brand_voice is None:
+            if billed:
+                raise BillingInvariantError("billed task resolved a preset voice")
             raise RuntimeError("Brand voice not found for video task.")
         speaker_id = str(brand_voice.speaker_id or "").strip()
-        if not speaker_id:
-            raise RuntimeError("Brand voice speaker not found for video task.")
-        provider = str(brand_voice.provider or "doubao-voice-clone").strip()
+        provider = str(brand_voice.provider or "").strip()
+        if billed:
+            frozen_provider = str(params.get("brand_voice_provider") or "").strip()
+            frozen_speaker = str(params.get("tts_speaker_id") or "").strip()
+            if not frozen_provider or provider != frozen_provider:
+                raise BillingInvariantError("billed brand voice provider changed")
+            if not frozen_speaker or speaker_id != frozen_speaker:
+                raise BillingInvariantError("billed brand voice speaker changed")
         return speaker_id, "brand_voice", provider
 
     voice = db.get(Voice, task.voice_id) if task.voice_id else None
@@ -2174,11 +2196,21 @@ def _hide_billed_video_output(db: Session, *, task: VideoTask) -> None:
         asset.status = "failed"
 
 
+def _precise_billable_seconds(value: object) -> Decimal:
+    try:
+        seconds = Decimal(str(value if value is not None else 1))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise BillingInvariantError("billed video duration is invalid") from exc
+    if not seconds.is_finite() or seconds <= 0:
+        raise BillingInvariantError("billed video duration is invalid")
+    return max(Decimal("1.000"), seconds.quantize(Decimal("0.001"), rounding=ROUND_CEILING))
+
+
 def _complete_billing_quote_video(
     db: Session,
     *,
     task: VideoTask,
-    actual_seconds: int,
+    actual_seconds: Decimal,
     base_cost_cents: int,
     base_provider: str | None = None,
     base_model: str | None = None,
@@ -2201,6 +2233,7 @@ def _complete_billing_quote_video(
         base_usage.provider = base_provider
     if base_model:
         base_usage.model = base_model
+    db.flush([base_usage])
     actual_quantities = {int(base_usage.billing_item_index): Decimal(actual_seconds)}
     tts_usages = [usage for usage in usages if usage.capability == "tts"]
     if len(tts_usages) > 1:
@@ -2210,6 +2243,15 @@ def _complete_billing_quote_video(
         if not frozen_text or task.script != frozen_text:
             raise BillingInvariantError("billed video task text changed before settlement")
         tts_usage = tts_usages[0]
+        provider_usage = tts_usage.provider_usage or {}
+        provider_characters = provider_usage.get("characters")
+        if provider_characters != len(frozen_text):
+            raise BillingInvariantError("billed CosyVoice telemetry does not match frozen text")
+        if (
+            tts_usage.provider != "cosyvoice-tts"
+            or provider_usage.get("cost_cents") != tts_usage.cost_cents
+        ):
+            raise BillingInvariantError("billed CosyVoice supplier cost is inconsistent")
         actual_quantities[int(tts_usage.billing_item_index)] = Decimal(len(frozen_text))
     operation = complete_succeeded(
         db,
@@ -2302,7 +2344,12 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 task.size_bytes = ctx.size_bytes
             if ctx.duration_sec is not None:
                 task.duration_sec = float(ctx.duration_sec)
-            actual_seconds = max(1, int(round(ctx.duration_sec or 1)))
+            billed_operation_id = _billing_operation_id(task)
+            actual_seconds = (
+                _precise_billable_seconds(ctx.duration_sec)
+                if billed_operation_id is not None
+                else max(1, int(round(ctx.duration_sec or 1)))
+            )
             provider_model = getattr(ctx, "provider_model", None)
             if provider_model == _CHANGE_LIPS_MODEL:
                 cost_cents = provider_costs.omnihuman_change_lips_cost_cents(
@@ -2311,7 +2358,7 @@ def run_avatar_talk_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]:
                 )
             else:
                 cost_cents = provider_costs.omnihuman_cost_cents(actual_seconds)
-            if _billing_operation_id(task) is not None:
+            if billed_operation_id is not None:
                 _complete_billing_quote_video(
                     db,
                     task=task,
@@ -2451,17 +2498,22 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
                 task.size_bytes = ctx.size_bytes
             if ctx.duration_sec is not None:
                 task.duration_sec = float(ctx.duration_sec)
-            actual_seconds = max(
-                1,
-                int(round(getattr(ctx, "seedance_billable_seconds", ctx.duration_sec or 1))),
+            billed_operation_id = _billing_operation_id(task)
+            measured_seconds = getattr(ctx, "seedance_billable_seconds", ctx.duration_sec or 1)
+            actual_seconds = (
+                _precise_billable_seconds(measured_seconds)
+                if billed_operation_id is not None
+                else max(1, int(round(measured_seconds)))
             )
             cost_cents = int(getattr(ctx, "provider_cost_cents", 0) or 0)
             if cost_cents <= 0:
                 cost_cents = _seedance_i2v_fallback_cost_cents(
-                    actual_seconds=actual_seconds,
+                    actual_seconds=int(
+                        Decimal(actual_seconds).to_integral_value(rounding=ROUND_CEILING)
+                    ),
                     resolution=_seedance_i2v_resolution(task.params),
                 )
-            if _billing_operation_id(task) is not None:
+            if billed_operation_id is not None:
                 _complete_billing_quote_video(
                     db,
                     task=task,

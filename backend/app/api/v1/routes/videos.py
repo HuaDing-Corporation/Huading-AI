@@ -931,7 +931,7 @@ def _create_billing_quote_video(
     user: User,
     db: Session,
     storage: ObjectStorage,
-) -> tuple[VideoTask, object]:
+) -> tuple[VideoTask, object, bool]:
     if context.brand_voice is None or context.pricing_draft is None:
         raise RuntimeError("billing quote video context is incomplete")
     mode = context.effective_video_mode
@@ -1088,7 +1088,7 @@ def _create_billing_quote_video(
                 code="BILLING_REPLAY_INVALID",
                 status_code=500,
             )
-        return replay_task, replay.operation
+        return replay_task, replay.operation, False
     operation.result_payload = VideoTaskBillingResource(
         task_id=task.id,
         status="queued",
@@ -1096,7 +1096,7 @@ def _create_billing_quote_video(
     task.params = {**params, "billing_operation_id": operation.id}
     db.commit()
     _video_task_tenants[task.id] = user.tenant_id
-    return task, operation
+    return task, operation, True
 
 
 def _video_gen_reference_assets_or_404(
@@ -1764,7 +1764,7 @@ def create_video(
                 code="BILLING_HEADERS_REQUIRED",
                 status_code=422,
             )
-        task, operation = _create_billing_quote_video(
+        task, operation, created = _create_billing_quote_video(
             payload,
             context=pricing_context,
             headers=headers,
@@ -1772,6 +1772,11 @@ def create_video(
             db=db,
             storage=storage,
         )
+        if not created:
+            return ok(
+                request,
+                _billing_quote_video_replay(db, user=user, operation=operation),
+            )
         _prune_after_create(db, tenant_id=user.tenant_id, mode=effective_mode, storage=storage)
         params = _worker_params(payload)
         params["tenant_id"] = user.tenant_id
