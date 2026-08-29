@@ -904,6 +904,62 @@ def test_register_official_ids_requires_exact_config_and_is_idempotent(
     assert exc.value.code == "OFFICIAL_PROVIDER_VOICE_IDS_MISMATCH"
 
 
+def test_register_official_exact_list_only_adds_official_registry_rows(
+    db_session,
+    monkeypatch,
+) -> None:
+    from app.services import provider_voice_registry
+
+    _seed_brand_voice_order(db_session)
+    customer = _fulfill_seeded_registry(db_session, provider_voice_id="customer-preserved")
+    db_session.add(
+        ProviderConfig(
+            id="unrelated-config",
+            capability="chat",
+            provider="other-provider",
+            config={"api_key": "secret-must-not-appear"},
+            is_active=False,
+        )
+    )
+    db_session.flush()
+    before = (
+        [(row.normalized_provider_id, row.kind, row.status) for row in db_session.scalars(select(BrandVoiceProviderId)).all()],
+        [(row.id, row.provider, row.speaker_id, row.owner_user_id, row.activated_at, row.expires_at, row.deleted_at) for row in db_session.scalars(select(BrandVoice)).all()],
+        [(row.id, row.status, row.requested_credits, row.settled_credits, row.released_credits) for row in db_session.scalars(select(BillingOperation)).all()],
+        [(row.id, row.config) for row in db_session.scalars(select(ProviderConfig)).all()],
+    )
+    monkeypatch.setattr(provider_voice_registry.settings, "engine_doubao_official_voice_ids", ["official-b", "official-a"])
+
+    first = provider_voice_registry.register_official_provider_voice_ids(
+        db_session, provider_voice_ids=[" official-a ", "official-b"]
+    )
+    db_session.flush()
+    second = provider_voice_registry.register_official_provider_voice_ids(
+        db_session, provider_voice_ids=["official-b", "official-a"]
+    )
+    db_session.flush()
+
+    assert [(row.normalized_provider_id, row.kind, row.status, row.provider) for row in first] == [
+        ("official-a", "official", "active", "doubao-voice-clone"),
+        ("official-b", "official", "active", "doubao-voice-clone"),
+    ]
+    assert [row.id for row in second] == [row.id for row in first]
+    registry = list(db_session.scalars(select(BrandVoiceProviderId).order_by(BrandVoiceProviderId.normalized_provider_id)))
+    assert [(row.normalized_provider_id, row.kind, row.status) for row in registry] == [
+        ("customer-preserved", "customer", "active"),
+        ("official-a", "official", "active"),
+        ("official-b", "official", "active"),
+    ]
+    assert customer.normalized_provider_id == "customer-preserved"
+    after = (
+        [(row.normalized_provider_id, row.kind, row.status) for row in registry if row.kind == "customer"],
+        [(row.id, row.provider, row.speaker_id, row.owner_user_id, row.activated_at, row.expires_at, row.deleted_at) for row in db_session.scalars(select(BrandVoice)).all()],
+        [(row.id, row.status, row.requested_credits, row.settled_credits, row.released_credits) for row in db_session.scalars(select(BillingOperation)).all()],
+        [(row.id, row.config) for row in db_session.scalars(select(ProviderConfig)).all()],
+    )
+    assert after == ([("customer-preserved", "customer", "active")], *before[1:])
+
+
 def test_registry_readiness_fails_closed_in_production_for_empty_mismatch_and_unknown(
     db_session,
     monkeypatch,
