@@ -12,6 +12,41 @@ export type TenantStatus = "active" | "suspended" | "closed";
 export type AdminTaskFamily = "video" | "reverse_prompt" | "ecom_replicate";
 export type AdminTaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type AuditAction = "credits_adjust" | "plan_change" | "status_change" | "voice_slot_assign" | "task_retry";
+export type AdminBrandVoiceOrderStatus = "awaiting_fulfillment" | "fulfilled" | "rejected";
+export type AdminBrandVoiceOrderAction =
+  | { action: "fulfill"; provider_voice_id: string }
+  | { action: "reject"; rejection_reason: string };
+
+export interface AdminBrandVoiceOrderRead {
+  id: string;
+  tenant_id: string;
+  ordered_by_user_id: string;
+  order_type: "create" | "renew";
+  requested_name: string;
+  source_audio_asset_id: string;
+  existing_brand_voice_id: string | null;
+  status: AdminBrandVoiceOrderStatus;
+  fulfilled_brand_voice_id: string | null;
+  fulfilled_provider_voice_id: string | null;
+  rejection_reason: string | null;
+  fulfilled_at: string | null;
+  expires_at: string | null;
+  rejected_at: string | null;
+  created_at: string;
+  updated_at: string;
+  billing: import("@/lib/api/types").BillingSummary;
+  refund_disposition: "not_applicable" | "source_subscription_released" | "current_subscription_credited" | "pending_next_subscription";
+  refund_grant_status: "pending" | "applied" | null;
+  refund_applied_at: string | null;
+  source_audio_url?: string | null;
+}
+
+export interface AdminBrandVoiceOrderPage {
+  items: AdminBrandVoiceOrderRead[];
+  total: number;
+  page: number;
+  page_size: number;
+}
 
 /** 订阅额度快照（BE AdminSubscriptionSnapshot）。 */
 export interface AdminSubscriptionSnapshot {
@@ -235,6 +270,28 @@ export function changeTenantStatus(
 
 export function fetchAdminVoiceSlots(): Promise<AdminVoiceSlots> {
   return apiFetch<AdminVoiceSlots>(`${BASE}/voice-slots`, { method: "GET" });
+}
+
+export function listAdminBrandVoiceOrders(query: {
+  status?: AdminBrandVoiceOrderStatus | "";
+  page: number;
+  page_size: number;
+}): Promise<AdminBrandVoiceOrderPage> {
+  return apiFetch<AdminBrandVoiceOrderPage>(`${BASE}/brand-voice-orders?${qs(query)}`, { method: "GET" });
+}
+
+export function getAdminBrandVoiceOrder(orderId: string): Promise<AdminBrandVoiceOrderRead> {
+  return apiFetch<AdminBrandVoiceOrderRead>(`${BASE}/brand-voice-orders/${encodeURIComponent(orderId)}`, { method: "GET" });
+}
+
+export function resolveAdminBrandVoiceOrder(
+  orderId: string,
+  action: AdminBrandVoiceOrderAction
+): Promise<AdminBrandVoiceOrderRead> {
+  return apiFetch<AdminBrandVoiceOrderRead>(`${BASE}/brand-voice-orders/${encodeURIComponent(orderId)}/resolve`, {
+    method: "POST",
+    body: action
+  });
 }
 
 /** doubao speaker_id 前端预校验（BE pattern 权威）。 */

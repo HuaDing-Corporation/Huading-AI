@@ -11,6 +11,9 @@ import {
   fetchAdminTenants,
   fetchAdminUsage,
   fetchAdminVoiceSlots,
+  getAdminBrandVoiceOrder,
+  listAdminBrandVoiceOrders,
+  resolveAdminBrandVoiceOrder,
   retryAdminTask
 } from "@/lib/api/admin-console";
 import { ApiError, apiUrl, authHeaders } from "@/lib/api/client";
@@ -51,6 +54,9 @@ describe("门禁：非平台（新注册态）→ 全端点 403 PLATFORM_ADMIN_R
     await expect403(fetchAdminTenants(LIST));
     await expect403(fetchAdminTenantDetail("ten-acme"));
     await expect403(fetchAdminVoiceSlots());
+    await expect403(listAdminBrandVoiceOrders({ page: 1, page_size: 20 }));
+    await expect403(getAdminBrandVoiceOrder("bvo-awaiting"));
+    await expect403(resolveAdminBrandVoiceOrder("bvo-awaiting", { action: "reject", rejection_reason: "x" }));
     await expect403(fetchAdminUsage({ page: 1, page_size: 20 }));
     await expect403(fetchAdminTasks({ page: 1, page_size: 20 }));
     await expect403(fetchAdminAudit({ page: 1, page_size: 20 }));
@@ -105,6 +111,25 @@ describe("平台账号（默认）· 读端点确定值（真契约字段）", (
     expect(s.items.filter((i) => i.scope === "tenant")).toEqual([
       expect.objectContaining({ speaker_id: "S_acme_001", tenant_id: "ten-acme", occupied: true })
     ]);
+  });
+
+  it("人工音色订单：列表不泄露音频 URL，详情按需签名并记录访问审计", async () => {
+    const page = await listAdminBrandVoiceOrders({ status: "awaiting_fulfillment", page: 1, page_size: 20 });
+    expect(page.total).toBe(2);
+    expect(page.items.every((item) => !("source_audio_url" in item))).toBe(true);
+
+    const detail = await getAdminBrandVoiceOrder("bvo-awaiting");
+    expect(detail.source_audio_url).toContain("/signed/audio-awaiting?expires=900");
+    const sourceAudioUrl = detail.source_audio_url;
+    expect(sourceAudioUrl).toEqual(expect.any(String));
+    if (!sourceAudioUrl) throw new Error("missing signed source audio URL");
+    const audio = await fetch(sourceAudioUrl);
+    expect(audio.status).toBe(200);
+    expect(audio.headers.get("content-type")).toBe("audio/wav");
+    expect((await audio.arrayBuffer()).byteLength).toBe(44);
+    const audit = await fetchAdminAudit({ action: "brand_voice_order_audio_access" as never, page: 1, page_size: 20 });
+    expect(audit.total).toBe(1);
+    expect(audit.items[0]).toMatchObject({ target_id: "bvo-awaiting", action: "brand_voice_order_audio_access" });
   });
 
   it("usage：全量 6；tenant_id=ten-beta → 恰 1 条（u-3，真字段 tenant_slug/video_task_id）；status=released → 恰 1 条", async () => {
@@ -218,19 +243,11 @@ describe("平台账号 · 写端点确定值（响应 + 审计，真契约字段
     expect(audit.items[0]).toMatchObject({ before: { status: "suspended" }, after: { status: "active" } });
   });
 
-  // 🔴 P1-1 全局唯一承重（镜像 BE voice_slots.py 冲突检查）：平台池/其它租户已占用的 ID → 422，绝不 changed。
-  it("槽位全局唯一：beta 分配平台池 S_pool_002 → 422 VOICE_SLOT_ASSIGNMENT_FAILED（message 逐字）；分配他租户 S_acme_001 → 422；槽位表无插入", async () => {
-    const poolErr = await assignVoiceSlot("ten-beta", { speaker_id: "S_pool_002" }).catch((e) => e);
-    expect(poolErr).toBeInstanceOf(ApiError);
-    expect((poolErr as ApiError).status).toBe(422);
-    expect((poolErr as ApiError).code).toBe("VOICE_SLOT_ASSIGNMENT_FAILED");
-    expect((poolErr as ApiError).message).toBe("Speaker ID is already assigned to another tenant or the platform pool.");
-    const otherErr = await assignVoiceSlot("ten-beta", { speaker_id: "S_acme_001" }).catch((e) => e);
-    expect((otherErr as ApiError).status).toBe(422);
-    expect((otherErr as ApiError).code).toBe("VOICE_SLOT_ASSIGNMENT_FAILED");
-    // 冲突被拒 → 槽位表分文未动（beta 名下无任何槽）。
-    const slots = await fetchAdminVoiceSlots();
-    expect(slots.items.filter((s) => s.tenant_id === "ten-beta")).toHaveLength(0);
+  it("旧音色槽位写接口永久返回 410", async () => {
+    const retired = await assignVoiceSlot("ten-beta", { speaker_id: "S_beta_777" }).catch((e) => e);
+    expect(retired).toBeInstanceOf(ApiError);
+    expect((retired as ApiError).status).toBe(410);
+    expect((retired as ApiError).code).toBe("VOICE_SLOT_ASSIGNMENT_RETIRED");
   });
 
   // 🔴 P1-2 契约承重：reason >500 → 422（镜像 BE AdminCreditsAdjustRequest max_length=500），余额分文未动。
@@ -244,22 +261,25 @@ describe("平台账号 · 写端点确定值（响应 + 审计，真契约字段
     expect(detail.tenant.subscription?.total).toBe(20000);
   });
 
-  it("音色槽位分配幂等（POST /tenants/{id}/voice-slots）：首次 changed:true，重复 changed:false；审计**无条件**各落一条（镜像 BE）", async () => {
-    const first = await assignVoiceSlot("ten-beta", { speaker_id: "S_beta_777" });
-    expect(first).toEqual({ tenant_id: "ten-beta", speaker_id: "S_beta_777", changed: true, speaker_ids: ["S_beta_777"] });
-    const second = await assignVoiceSlot("ten-beta", { speaker_id: "S_beta_777" });
-    expect(second).toEqual({ tenant_id: "ten-beta", speaker_id: "S_beta_777", changed: false, speaker_ids: ["S_beta_777"] });
-    const slots = await fetchAdminVoiceSlots();
-    expect(slots.items.filter((s) => s.speaker_id === "S_beta_777")).toHaveLength(1);
-    const audit = await fetchAdminAudit({ action: "voice_slot_assign", page: 1, page_size: 20 });
-    expect(audit.total).toBe(3); // seed 1 + 两次分配各 1（BE record_audit 无条件写，幂等重复也记 changed:false）
-    expect(audit.items[0]).toMatchObject({ before: { speaker_ids: ["S_beta_777"] }, after: { speaker_id: "S_beta_777", changed: false, speaker_ids: ["S_beta_777"] } });
-    expect(audit.items[1]).toMatchObject({ before: { speaker_ids: [] }, after: { speaker_id: "S_beta_777", changed: true, speaker_ids: ["S_beta_777"] } });
+  it("人工订单交付支持同内容重放，终态冲突和 provider ID 冲突均返回 409", async () => {
+    const payload = { action: "fulfill" as const, provider_voice_id: "S_new_customer_001" };
+    const resolved = await resolveAdminBrandVoiceOrder("bvo-awaiting", payload);
+    expect(resolved).toMatchObject({ status: "fulfilled", fulfilled_provider_voice_id: "S_new_customer_001", expires_at: "2027-08-30T12:00:00Z" });
+    expect(resolved.billing).toMatchObject({ status: "settled", settled_credits: 30000, held_credits: 0 });
+    expect(await resolveAdminBrandVoiceOrder("bvo-awaiting", payload)).toEqual(resolved);
+
+    const conflict = await resolveAdminBrandVoiceOrder("bvo-awaiting", { action: "reject", rejection_reason: "changed" }).catch((e) => e);
+    expect((conflict as ApiError).status).toBe(409);
+    expect((conflict as ApiError).code).toBe("BRAND_VOICE_ORDER_ALREADY_RESOLVED");
+
+    const providerConflict = await resolveAdminBrandVoiceOrder("bvo-other-user", { action: "fulfill", provider_voice_id: "S_customer_001" }).catch((e) => e);
+    expect((providerConflict as ApiError).status).toBe(409);
+    expect((providerConflict as ApiError).code).toBe("PROVIDER_VOICE_ID_CONFLICT");
   });
 
-  it("speaker_id 非法（不带 S_ 前缀）→ 422", async () => {
-    const err = await assignVoiceSlot("ten-beta", { speaker_id: "bad_id" }).catch((e) => e);
-    expect((err as ApiError).status).toBe(422);
+  it("人工订单 resolve 使用互斥载荷校验", async () => {
+    const invalid = await resolveAdminBrandVoiceOrder("bvo-awaiting", { action: "reject", rejection_reason: "" }).catch((e) => e);
+    expect((invalid as ApiError).status).toBe(422);
   });
 
   it("重跑回执三态（202，真契约字段 id/task_family/tenant_id，无 estimate_basis）；审计各 1 条；重复重跑 → 409", async () => {

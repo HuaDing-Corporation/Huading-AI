@@ -50,7 +50,7 @@ test("creator + free（无 entitlement）：doubao 通路创建/选择均置灰 
   // ① /brand-voices 创建：doubao 卡置灰 + 提示；缺省切 cosyvoice（免费档可用）。
   await page.getByRole("link", { name: /我的品牌音色/ }).click();
   await page.waitForURL(/\/brand-voices$/, { timeout: 30_000 });
-  const doubaoCard = page.locator('button:has-text("升级版 VIP 永久高端定制音色")');
+  const doubaoCard = page.locator('button:has-text("升级版 VIP 人工交付音色")');
   const cosyCard = page.locator('button:has-text("免费开通私人专属音色")');
   await expect(doubaoCard).toBeVisible({ timeout: 15_000 });
   await expect(doubaoCard).toBeDisabled(); // VIP 门禁置灰
@@ -83,7 +83,7 @@ test("creator + huading（真实付费用户）：doubao 通路放行——创�
 
   await page.getByRole("link", { name: /我的品牌音色/ }).click();
   await page.waitForURL(/\/brand-voices$/, { timeout: 30_000 });
-  const doubaoCard = page.locator('button:has-text("升级版 VIP 永久高端定制音色")');
+  const doubaoCard = page.locator('button:has-text("升级版 VIP 人工交付音色")');
   await expect(doubaoCard).toBeVisible({ timeout: 15_000 });
   // 付费用户：doubao 卡**可选**、无锁提示。
   await expect(doubaoCard).toBeEnabled();

@@ -100,6 +100,7 @@ class BrandVoiceOrderRead(BaseModel):
     fulfilled_provider_voice_id: str | None
     rejection_reason: str | None
     fulfilled_at: datetime | None
+    expires_at: datetime | None
     rejected_at: datetime | None
     created_at: datetime
     updated_at: datetime

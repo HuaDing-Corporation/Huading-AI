@@ -1001,15 +1001,15 @@ export const copy = {
     providerSectionLabel: "克隆通路",
     providerCosyTitle: "免费开通私人专属音色",
     providerCosyDesc: "CosyVoice-v3.5-plus · 免费",
-    providerDoubaoTitle: "升级版 VIP 永久高端定制音色",
-    providerDoubaoDesc: "豆包 · 300 元（30000 积分）",
+    providerDoubaoTitle: "升级版 VIP 人工交付音色",
+    providerDoubaoDesc: "人工订单交付；交付后有效 365 天",
     // VIP 门禁（ADMIN-VIP-GATE-UI-0001 §二之二）：非 huading（且非 admin）→ doubao 卡置灰 + 此提示（与「仅 huading plan 用户可查看」同口径）
     providerVipLocked: "开通 huading plan 后可创建",
     // 「选我的音色」picker：doubao 音色无权限 → 置灰 + 此提示（区别于「暂无可用音色槽位」= 有权限池空）
     pickerVipLocked: "开通 huading plan 后可用",
     chargeConfirmTitle: "确认开通高端定制音色？",
     chargeConfirmMessage: (credits: number) =>
-      `将消耗 ${credits} 积分（约 300 元）开通豆包 VIP 永久高端定制音色，确认后立即扣费，克隆结果生成后不可退。`,
+      `将冻结 ${credits} 积分并提交豆包人工交付订单；交付后有效 365 天。订单拒绝时按服务端退款结果处理。`,
     chargeConfirmBtn: "确认扣费开通",
     // 列表
     listTitle: "我的品牌音色",

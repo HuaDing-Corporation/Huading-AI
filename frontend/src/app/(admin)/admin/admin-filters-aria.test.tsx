@@ -40,7 +40,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("admin 五页筛选器可及名（SelectTrigger aria-label 透传网）", () => {
+describe("admin 筛选器可及名（SelectTrigger aria-label 透传网）", () => {
   it("审计日志：动作筛选器可及名「动作」", async () => {
     renderPage(AuditPage);
     expect(await screen.findByRole("combobox", { name: "动作" })).toBeInTheDocument();
@@ -61,8 +61,9 @@ describe("admin 五页筛选器可及名（SelectTrigger aria-label 透传网）
     expect(await screen.findByRole("combobox", { name: "capability" })).toBeInTheDocument();
   });
 
-  it("音色槽位：分配租户筛选器可及名「租户」", async () => {
+  it("音色槽位已退役写操作，因此只显示库存且没有分配筛选器", async () => {
     renderPage(VoiceSlotsPage);
-    expect(await screen.findByRole("combobox", { name: "租户" })).toBeInTheDocument();
+    expect(await screen.findByText(/旧槽位分配入口已退役/)).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "租户" })).not.toBeInTheDocument();
   });
 });

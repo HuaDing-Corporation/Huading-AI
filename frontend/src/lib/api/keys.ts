@@ -29,6 +29,19 @@ export const brandVoiceKeys = {
   list: () => [...brandVoiceKeys.all, "list"] as const
 };
 
+export const brandVoiceOrderKeys = {
+  all: ["brand-voice-orders"] as const,
+  list: () => [...brandVoiceOrderKeys.all, "list"] as const,
+  detail: (id: string) => [...brandVoiceOrderKeys.all, "detail", id] as const
+};
+
+export const adminBrandVoiceOrderKeys = {
+  all: ["admin", "brand-voice-orders"] as const,
+  list: (status: string, page: number, pageSize: number) =>
+    [...adminBrandVoiceOrderKeys.all, "list", status, page, pageSize] as const,
+  detail: (id: string) => [...adminBrandVoiceOrderKeys.all, "detail", id] as const
+};
+
 // 深度合成标识设置 (LABEL-UI-0001)
 export const labelSettingsKey = ["tenant", "label-settings"] as const;
 

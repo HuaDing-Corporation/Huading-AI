@@ -325,6 +325,7 @@ function brandVoicePayload(overrides: Record<string, unknown> = {}) {
     status: "ready",
     order_status: null,
     delivery_status: "active",
+    expires_at: null,
     created_at: "2026-08-29T10:00:00Z",
     ...overrides
   };
@@ -347,6 +348,7 @@ function brandVoiceOrderPayload(
     fulfilled_provider_voice_id: status === "fulfilled" ? "provider-voice-1" : null,
     rejection_reason: status === "rejected" ? "音频不合格" : null,
     fulfilled_at: status === "fulfilled" ? "2026-08-29T10:02:00Z" : null,
+    expires_at: status === "fulfilled" ? "2027-08-29T10:02:00Z" : null,
     rejected_at: status === "rejected" ? "2026-08-29T10:02:00Z" : null,
     created_at: "2026-08-29T10:00:00Z",
     updated_at: "2026-08-29T10:02:00Z",

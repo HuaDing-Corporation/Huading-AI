@@ -86,12 +86,15 @@ describe("videoPricingContextForVoice", () => {
     gender: null,
     language: null
   };
-  const brand = (provider: string | null) => ({
+  const brand = (provider: string) => ({
     id: "brand-1",
     name: "品牌音色",
     status: "ready" as const,
     created_at: "2026-08-29T00:00:00Z",
-    provider
+    provider,
+    order_status: null,
+    delivery_status: "active" as const,
+    expires_at: null
   });
 
   it("derives canonical context from the selected records and fails closed for an unknown brand provider", () => {
@@ -101,7 +104,7 @@ describe("videoPricingContextForVoice", () => {
       .toEqual({ voice_kind: "brand", voice_provider: "doubao" });
     expect(videoPricingContextForVoice("standard-1", [voice], []))
       .toEqual({ voice_kind: "standard", voice_provider: "edge_tts" });
-    expect(videoPricingContextForVoice("brand-1", [voice], [brand(null)])).toBeNull();
+    expect(videoPricingContextForVoice("brand-1", [voice], [brand("unknown")])).toBeNull();
   });
 });
 

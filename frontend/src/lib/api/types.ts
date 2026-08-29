@@ -321,10 +321,14 @@ export interface UploadResponse {
 }
 
 export interface Quota {
+  has_active_subscription: boolean;
+  active_subscription_id: string | null;
   total: number;
   used: number;
   reserved: number;
   remaining: number;
+  manual_fulfillment_held_credits: number;
+  pending_refund_credits: number;
 }
 
 // SSE 新枚举帧（§8）+ 旧帧兜底字段
@@ -668,7 +672,9 @@ export interface PosterBatchResponse {
 }
 
 // ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001，FIX1 对齐后端 §8 真契约) ──
-export type BrandVoiceStatus = "processing" | "ready" | "failed"; // 处理中 / 可用 / 失败
+export type BrandVoiceStatus = "processing" | "ready" | "failed";
+export type BrandVoiceOrderStatus = "awaiting_fulfillment" | "fulfilled" | "rejected";
+export type BrandVoiceDeliveryStatus = "awaiting_fulfillment" | "active" | "expired" | "rejected";
 
 // 声音复刻通路（BRAND-VOICE-PICKER-UI-0001）：doubao（豆包）/ cosyvoice（免费通路 COSYVOICE-CLONE-0001）。
 // 字符串宽松兼容未来通路；**provider 可选**——接口暂无该字段时前端不显徽标、不报错（UI 可先于后端合并）。
@@ -681,7 +687,10 @@ export interface BrandVoice {
   name: string;
   status: BrandVoiceStatus;
   created_at: string;
-  provider?: BrandVoiceProvider | string | null;
+  provider: BrandVoiceProvider | string;
+  order_status: BrandVoiceOrderStatus | null;
+  delivery_status: BrandVoiceDeliveryStatus;
+  expires_at: string | null;
 }
 export interface BrandVoiceListResponse {
   items: BrandVoice[];
@@ -700,7 +709,7 @@ export interface BrandVoiceCreateBody {
   name: string; // 1–30 非空
   source_audio_asset_id: string;
   consent_confirmed: boolean;
-  provider: BrandVoiceProvider;
+  provider: BrandVoiceProvider | "doubao-voice-clone" | "cosyvoice-voice-clone";
 }
 // UI 侧入参（组件持有 Blob + 名称 + 授权勾选 + 通路）；经 createBrandVoiceFromAudio 编排上传→创建。
 export interface CreateBrandVoiceInput {
@@ -1058,6 +1067,7 @@ export interface BillingBrandVoiceResource extends BillingLookupPayload {
   status: "ready";
   order_status: null;
   delivery_status: "active";
+  expires_at: string | null;
   created_at: string;
 }
 
@@ -1071,6 +1081,7 @@ interface BillingBrandVoiceOrderBase extends BillingLookupPayload {
   existing_brand_voice_id: string | null;
   created_at: string;
   updated_at: string;
+  expires_at: string | null;
   billing: BillingSummary;
 }
 

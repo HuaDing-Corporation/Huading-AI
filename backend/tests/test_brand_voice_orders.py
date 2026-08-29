@@ -1442,7 +1442,9 @@ def test_submit_fails_closed_when_balance_changed_after_quote(auth_context, auth
 
 
 def test_fulfill_settles_and_starts_payment_user_voice_for_365_days(db_session):
+    from app.api.v1.routes.brand_voices import _brand_voice_read
     from app.services.brand_voice_orders import (
+        brand_voice_order_read,
         create_brand_voice_order,
         resolve_brand_voice_order,
     )
@@ -1494,6 +1496,8 @@ def test_fulfill_settles_and_starts_payment_user_voice_for_365_days(db_session):
     assert voice.owner_user_id == user.id
     assert voice.activated_at.replace(tzinfo=UTC) == now
     assert voice.expires_at.replace(tzinfo=UTC) == now + timedelta(days=365)
+    assert brand_voice_order_read(db_session, order=resolved).expires_at == voice.expires_at
+    assert _brand_voice_read(db_session, voice).expires_at == voice.expires_at
     db_session.refresh(subscription)
     assert subscription.quota_credits_reserved == 0
     assert subscription.quota_credits_used == 30_000
@@ -1504,6 +1508,65 @@ def test_fulfill_settles_and_starts_payment_user_voice_for_365_days(db_session):
     db_session.close()
     with db_session.get_bind().connect() as connection:
         connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+
+
+@pytest.mark.parametrize("invalid_delivery", ["missing", "wrong_owner", "missing_expiry"])
+def test_fulfilled_order_read_fails_closed_for_invalid_delivered_voice(
+    db_session,
+    invalid_delivery: str,
+) -> None:
+    from app.services.brand_voice_orders import (
+        brand_voice_order_read,
+        resolve_brand_voice_order,
+    )
+
+    order_id, _operation_id = _seed_manual_order_for_invariant_test(db_session)
+    resolved = resolve_brand_voice_order(
+        db_session,
+        actor=db_session.get(User, "user-a"),
+        order_id=order_id,
+        action="fulfill",
+        provider_voice_id=f"invalid-read-{invalid_delivery}",
+        now=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+    )
+    voice = db_session.get(BrandVoice, resolved.fulfilled_brand_voice_id)
+    if invalid_delivery == "missing":
+        resolved.fulfilled_brand_voice_id = "missing-delivered-voice"
+    elif invalid_delivery == "wrong_owner":
+        voice.owner_user_id = None
+    else:
+        voice.expires_at = None
+
+    with db_session.no_autoflush, pytest.raises(AppError) as captured:
+        brand_voice_order_read(db_session, order=resolved)
+
+    assert captured.value.code == "BILLING_INVARIANT_VIOLATION"
+    db_session.rollback()
+    db_session.close()
+    with db_session.get_bind().connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+
+
+def test_non_fulfilled_order_reads_never_expose_an_expiry(db_session) -> None:
+    from app.services.brand_voice_orders import (
+        brand_voice_order_read,
+        resolve_brand_voice_order,
+    )
+
+    order_id, _operation_id = _seed_manual_order_for_invariant_test(db_session)
+    order = db_session.get(BrandVoiceOrder, order_id)
+    assert brand_voice_order_read(db_session, order=order).expires_at is None
+
+    rejected = resolve_brand_voice_order(
+        db_session,
+        actor=db_session.get(User, "user-a"),
+        order_id=order_id,
+        action="reject",
+        rejection_reason="invalid source audio",
+        now=datetime(2026, 8, 29, 12, 1, tzinfo=UTC),
+    )
+
+    assert brand_voice_order_read(db_session, order=rejected).expires_at is None
 
 
 def test_reject_releases_hold_and_conflicting_replay_changes_nothing(db_session):

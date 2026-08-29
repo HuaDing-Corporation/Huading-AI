@@ -31,7 +31,7 @@ test("创建·两档切换 + 缺省 doubao 扣费确认 + 移动端显示", asyn
   await page.waitForURL(/\/brand-voices$/, { timeout: 30_000 });
 
   // 两档通路卡可见；**缺省 doubao 选中**（与现状一致），cosyvoice 未选。
-  const doubaoCard = page.locator('button:has-text("升级版 VIP 永久高端定制音色")');
+  const doubaoCard = page.locator('button:has-text("升级版 VIP 人工交付音色")');
   const cosyCard = page.locator('button:has-text("免费开通私人专属音色")');
   await expect(doubaoCard).toBeVisible({ timeout: 15_000 });
   await expect(cosyCard).toBeVisible();

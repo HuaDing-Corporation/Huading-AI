@@ -645,6 +645,7 @@ const BRAND_VOICE_KEYS = [
   "status",
   "order_status",
   "delivery_status",
+  "expires_at",
   "created_at"
 ] as const;
 
@@ -659,6 +660,7 @@ function parseBrandVoice(value: unknown): BillingLookupPayload | null {
     ["awaiting_fulfillment", "active", "expired", "rejected"].includes(
       payload.delivery_status as string
     ) &&
+    nullableIsoDate(payload.expires_at) &&
     isoDate(payload.created_at)
   );
 }
@@ -676,6 +678,7 @@ const BRAND_VOICE_ORDER_KEYS = [
   "fulfilled_provider_voice_id",
   "rejection_reason",
   "fulfilled_at",
+  "expires_at",
   "rejected_at",
   "created_at",
   "updated_at",
@@ -717,6 +720,7 @@ function parseBrandVoiceOrder(value: unknown): BillingLookupPayload | null {
       nullableString(payload.fulfilled_provider_voice_id) &&
       nullableString(payload.rejection_reason) &&
       nullableIsoDate(payload.fulfilled_at) &&
+      nullableIsoDate(payload.expires_at) &&
       nullableIsoDate(payload.rejected_at) &&
       isoDate(payload.created_at) &&
       isoDate(payload.updated_at) &&
@@ -739,6 +743,7 @@ function parseBrandVoiceOrder(value: unknown): BillingLookupPayload | null {
         payload.fulfilled_provider_voice_id === null &&
         payload.rejection_reason === null &&
         payload.fulfilled_at === null &&
+        payload.expires_at === null &&
         payload.rejected_at === null
       );
     }
@@ -748,6 +753,7 @@ function parseBrandVoiceOrder(value: unknown): BillingLookupPayload | null {
         nonEmptyString(payload.fulfilled_provider_voice_id) &&
         payload.rejection_reason === null &&
         isoDate(payload.fulfilled_at) &&
+        isoDate(payload.expires_at) &&
         payload.rejected_at === null
       );
     }
@@ -757,6 +763,7 @@ function parseBrandVoiceOrder(value: unknown): BillingLookupPayload | null {
       payload.fulfilled_provider_voice_id === null &&
       nonEmptyString(payload.rejection_reason) &&
       payload.fulfilled_at === null &&
+      payload.expires_at === null &&
       isoDate(payload.rejected_at)
     );
   });

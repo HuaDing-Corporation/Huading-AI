@@ -21,6 +21,7 @@ export interface PricingConfirmDialogProps {
   onEstimate: () => void;
   onConfirm: () => void;
   onCancel: () => void;
+  confirmLabel?: string;
 }
 
 export function PricingConfirmDialog({
@@ -34,7 +35,8 @@ export function PricingConfirmDialog({
   onContinueLookup,
   onEstimate,
   onConfirm,
-  onCancel
+  onCancel,
+  confirmLabel = "确认并继续"
 }: PricingConfirmDialogProps) {
   useEffect(() => {
     if (open && phase === "idle") onEstimate();
@@ -184,7 +186,7 @@ export function PricingConfirmDialog({
                 </Button>
               )}
               <Button
-                aria-label="确认并继续"
+                aria-label={confirmLabel}
                 onClick={onConfirm}
                 disabled={!confirmable || submitting}
               >
@@ -194,7 +196,7 @@ export function PricingConfirmDialog({
                     提交中…
                   </>
                 ) : (
-                  "确认并继续"
+                    confirmLabel
                 )}
               </Button>
             </>

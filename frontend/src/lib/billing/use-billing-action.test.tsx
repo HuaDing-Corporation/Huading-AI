@@ -77,6 +77,7 @@ function completedLookup(
       status: "ready",
       order_status: null,
       delivery_status: "active",
+      expires_at: null,
       created_at: "2026-08-29T10:00:00Z"
     },
     result: {
@@ -86,6 +87,7 @@ function completedLookup(
       status: "ready",
       order_status: null,
       delivery_status: "active",
+      expires_at: null,
       created_at: "2026-08-29T10:00:00Z"
     },
     failure: null

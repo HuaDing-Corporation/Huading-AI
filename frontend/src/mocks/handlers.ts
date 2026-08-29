@@ -51,7 +51,10 @@ type MockPricedOperation =
   | "scene_prompt"
   | "ecom_cutout"
   | "ecom_model"
-  | "video_create";
+  | "video_create"
+  | "doubao_brand_voice_order_create"
+  | "doubao_brand_voice_order_renew"
+  | "cosyvoice_brand_voice_create";
 
 interface MockQuoteRecord {
   operation: MockPricedOperation;
@@ -126,7 +129,8 @@ function issueSimpleMockQuote({
   quantity,
   unitCredits,
   rateScope,
-  rateSource
+  rateSource,
+  disclosures = []
 }: {
   operation: Exclude<MockPricedOperation, "video_create">;
   body: unknown;
@@ -135,6 +139,7 @@ function issueSimpleMockQuote({
   unitCredits: number;
   rateScope: "tenant_overridable" | "platform_fixed";
   rateSource: "tenant_rate" | "platform_rate" | "code_default" | "fixed_policy";
+  disclosures?: Record<string, unknown>[];
 }) {
   const subtotal = unitCredits * quantity;
   const payableCredits = Math.ceil(subtotal);
@@ -160,7 +165,7 @@ function issueSimpleMockQuote({
     rate_scope: rateScope,
     rate_source: rateSource,
     breakdown: [],
-    disclosures: [],
+    disclosures,
     quote_token: token,
     expires_at: new Date(expiresAt).toISOString()
   };
@@ -594,20 +599,78 @@ interface MockBrandVoice {
   status: "processing" | "ready" | "failed";
   created_at: string;
   _polls: number; // GET 轮询计数：processing 第 2 次轮询后翻 ready，模拟异步克隆完成
-  provider?: string; // canonical 长值（镜像 BE read 侧 _brand_voice_read）；部分项**故意缺省**以验证前端兼容不显徽标
+  provider: string;
+  owner_user_id: string | null;
+  order_status: "awaiting_fulfillment" | "fulfilled" | "rejected" | null;
+  delivery_status: "awaiting_fulfillment" | "active" | "expired" | "rejected";
+  expires_at: string | null;
 }
-// FE-INTEGRATION-0001 对齐真栈：BE read 侧 provider 返 canonical 长值（doubao-voice-clone / cosyvoice-voice-clone），
-// 请求侧收短值 Literal["doubao","cosyvoice"]（routes/brand_voices.py::_VOICE_CLONE_PROVIDER_ALIASES 归一化）。
-const VOICE_CLONE_CANONICAL: Record<string, string> = {
-  doubao: "doubao-voice-clone",
-  cosyvoice: "cosyvoice-voice-clone"
-};
 const brandVoices = new Map<string, MockBrandVoice>([
-  // provider：ready 项分别带 doubao/cosyvoice 的 canonical（picker 徽标 豆包/CosyVoice）；failed 项无 provider（picker 中隐藏，兼容缺省）。
-  ["bv-ready-1", { id: "bv-ready-1", name: "我的主播音", status: "ready", created_at: new Date(0).toISOString(), _polls: 99, provider: "doubao-voice-clone" }],
-  ["bv-ready-2", { id: "bv-ready-2", name: "免费复刻音", status: "ready", created_at: new Date(0).toISOString(), _polls: 99, provider: "cosyvoice-voice-clone" }],
-  ["bv-failed-1", { id: "bv-failed-1", name: "失败样例", status: "failed", created_at: new Date(0).toISOString(), _polls: 99 }]
+  ["bv-ready-1", { id: "bv-ready-1", name: "我的主播音", status: "ready", created_at: "2026-01-01T00:00:00Z", _polls: 99, provider: "doubao-voice-clone", owner_user_id: "u-mock", order_status: "fulfilled", delivery_status: "active", expires_at: "2027-01-01T00:00:00Z" }],
+  ["bv-ready-2", { id: "bv-ready-2", name: "免费复刻音", status: "ready", created_at: "2026-01-02T00:00:00Z", _polls: 99, provider: "cosyvoice-voice-clone", owner_user_id: null, order_status: null, delivery_status: "active", expires_at: null }],
+  ["bv-expired-1", { id: "bv-expired-1", name: "已过期购买音色", status: "ready", created_at: "2025-01-01T00:00:00Z", _polls: 99, provider: "doubao-voice-clone", owner_user_id: "u-mock", order_status: "fulfilled", delivery_status: "expired", expires_at: "2026-01-01T00:00:00Z" }],
+  ["bv-official-1", { id: "bv-official-1", name: "平台官方音色", status: "ready", created_at: "2026-01-03T00:00:00Z", _polls: 99, provider: "doubao-voice-clone", owner_user_id: null, order_status: null, delivery_status: "active", expires_at: null }],
+  ["bv-other-1", { id: "bv-other-1", name: "他人购买音色", status: "ready", created_at: "2026-01-04T00:00:00Z", _polls: 99, provider: "doubao-voice-clone", owner_user_id: "u-other", order_status: "fulfilled", delivery_status: "active", expires_at: "2027-01-04T00:00:00Z" }],
+  ["bv-failed-1", { id: "bv-failed-1", name: "失败样例", status: "failed", created_at: "2026-01-05T00:00:00Z", _polls: 99, provider: "cosyvoice-voice-clone", owner_user_id: null, order_status: null, delivery_status: "rejected", expires_at: null }]
 ]);
+
+type MockRefundDisposition = "not_applicable" | "source_subscription_released" | "current_subscription_credited" | "pending_next_subscription";
+interface MockBrandVoiceOrder {
+  id: string;
+  tenant_id: string;
+  ordered_by_user_id: string;
+  order_type: "create" | "renew";
+  requested_name: string;
+  source_audio_asset_id: string;
+  existing_brand_voice_id: string | null;
+  status: "awaiting_fulfillment" | "fulfilled" | "rejected";
+  fulfilled_brand_voice_id: string | null;
+  fulfilled_provider_voice_id: string | null;
+  rejection_reason: string | null;
+  fulfilled_at: string | null;
+  expires_at: string | null;
+  rejected_at: string | null;
+  created_at: string;
+  updated_at: string;
+  billing: ReturnType<typeof mockBillingSummary>;
+  refund_disposition: MockRefundDisposition;
+  refund_grant_status: "pending" | "applied" | null;
+  refund_applied_at: string | null;
+  _resolve_payload?: string;
+  _detail_polls?: number;
+}
+const seededBilling = (suffix: string, status: "reserved" | "settled" | "released") => ({
+  operation_id: `00000000-0000-4000-8000-1000000000${suffix}`,
+  idempotency_key: `00000000-0000-4000-8000-2000000000${suffix}`,
+  status,
+  requested_credits: 30000,
+  held_credits: status === "reserved" ? 30000 : 0,
+  settled_credits: status === "settled" ? 30000 : 0,
+  released_credits: status === "released" ? 30000 : 0
+});
+const brandVoiceOrderSeeds = (): MockBrandVoiceOrder[] => [
+  { id: "bvo-awaiting", tenant_id: "ten-mock", ordered_by_user_id: "u-mock", order_type: "create", requested_name: "待人工交付音色", source_audio_asset_id: "audio-awaiting", existing_brand_voice_id: null, status: "awaiting_fulfillment", fulfilled_brand_voice_id: null, fulfilled_provider_voice_id: null, rejection_reason: null, fulfilled_at: null, expires_at: null, rejected_at: null, created_at: "2026-08-29T10:00:00Z", updated_at: "2026-08-29T10:00:00Z", billing: seededBilling("01", "reserved"), refund_disposition: "not_applicable", refund_grant_status: null, refund_applied_at: null },
+  { id: "bvo-fulfilled", tenant_id: "ten-mock", ordered_by_user_id: "u-mock", order_type: "create", requested_name: "已交付音色", source_audio_asset_id: "audio-fulfilled", existing_brand_voice_id: null, status: "fulfilled", fulfilled_brand_voice_id: "bv-ready-1", fulfilled_provider_voice_id: "S_customer_001", rejection_reason: null, fulfilled_at: "2026-01-01T00:00:00Z", expires_at: "2027-01-01T00:00:00Z", rejected_at: null, created_at: "2025-12-31T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", billing: seededBilling("02", "settled"), refund_disposition: "not_applicable", refund_grant_status: null, refund_applied_at: null },
+  { id: "bvo-released", tenant_id: "ten-mock", ordered_by_user_id: "u-mock", order_type: "create", requested_name: "原订阅已释放", source_audio_asset_id: "audio-released", existing_brand_voice_id: null, status: "rejected", fulfilled_brand_voice_id: null, fulfilled_provider_voice_id: null, rejection_reason: "音频不合格", fulfilled_at: null, expires_at: null, rejected_at: "2026-08-28T00:00:00Z", created_at: "2026-08-27T00:00:00Z", updated_at: "2026-08-28T00:00:00Z", billing: seededBilling("03", "released"), refund_disposition: "source_subscription_released", refund_grant_status: null, refund_applied_at: null },
+  { id: "bvo-credited", tenant_id: "ten-mock", ordered_by_user_id: "u-mock", order_type: "create", requested_name: "当前订阅已补回", source_audio_asset_id: "audio-credited", existing_brand_voice_id: null, status: "rejected", fulfilled_brand_voice_id: null, fulfilled_provider_voice_id: null, rejection_reason: "供应商拒绝", fulfilled_at: null, expires_at: null, rejected_at: "2026-08-28T01:00:00Z", created_at: "2026-08-27T01:00:00Z", updated_at: "2026-08-28T01:00:00Z", billing: seededBilling("04", "released"), refund_disposition: "current_subscription_credited", refund_grant_status: "applied", refund_applied_at: "2026-08-28T01:00:00Z" },
+  { id: "bvo-pending", tenant_id: "ten-mock", ordered_by_user_id: "u-mock", order_type: "create", requested_name: "待下期补回", source_audio_asset_id: "audio-pending", existing_brand_voice_id: null, status: "rejected", fulfilled_brand_voice_id: null, fulfilled_provider_voice_id: null, rejection_reason: "材料不足", fulfilled_at: null, expires_at: null, rejected_at: "2026-08-28T02:00:00Z", created_at: "2026-08-27T02:00:00Z", updated_at: "2026-08-28T02:00:00Z", billing: seededBilling("05", "released"), refund_disposition: "pending_next_subscription", refund_grant_status: "pending", refund_applied_at: null, _detail_polls: 0 },
+  { id: "bvo-other-user", tenant_id: "ten-mock", ordered_by_user_id: "u-other", order_type: "create", requested_name: "他人订单", source_audio_asset_id: "audio-other", existing_brand_voice_id: null, status: "awaiting_fulfillment", fulfilled_brand_voice_id: null, fulfilled_provider_voice_id: null, rejection_reason: null, fulfilled_at: null, expires_at: null, rejected_at: null, created_at: "2026-08-30T00:00:00Z", updated_at: "2026-08-30T00:00:00Z", billing: seededBilling("06", "reserved"), refund_disposition: "not_applicable", refund_grant_status: null, refund_applied_at: null }
+];
+const brandVoiceOrders = new Map<string, MockBrandVoiceOrder>();
+brandVoiceOrderSeeds().forEach((order) => brandVoiceOrders.set(order.id, order));
+let brandVoiceOrderSeq = 0;
+const mockSilentWav = new Uint8Array([
+  82, 73, 70, 70, 36, 0, 0, 0, 87, 65, 86, 69,
+  102, 109, 116, 32, 16, 0, 0, 0, 1, 0, 1, 0,
+  64, 31, 0, 0, 128, 62, 0, 0, 2, 0, 16, 0,
+  100, 97, 116, 97, 0, 0, 0, 0
+]);
+const mockOrderRead = (order: MockBrandVoiceOrder) => {
+  const resource = { ...order } as Record<string, unknown>;
+  delete resource._resolve_payload;
+  delete resource._detail_polls;
+  return { ...resource, billing: { ...order.billing } };
+};
 let brandVoiceSeq = 0;
 let audioAssetSeq = 0;
 // 图片资产上传序号：每次 /uploads/images 返唯一 asset_id（贴近真后端 uuid），避免多图碰撞同 id。
@@ -1644,6 +1707,9 @@ export const resetAdminConsole = () => {
   adminAudit.length = 0;
   adminAudit.push(...adminAuditSeeds());
   auditSeq = 1; // → 每条测试里写出的审计 id / created_at 从同一起点递增，确定可预期
+  brandVoiceOrders.clear();
+  brandVoiceOrderSeeds().forEach((order) => brandVoiceOrders.set(order.id, order));
+  brandVoiceOrderSeq = 0;
 };
 resetAdminConsole();
 function pushAudit(action: string, target: MockAdminTenant, targetId: string | null, before: Record<string, unknown> | null, after: Record<string, unknown> | null, reason: string | null) {
@@ -1692,6 +1758,78 @@ function adminConsoleHandlers() {
   const activeSubOr422 = (t: MockAdminTenant) =>
     t.subscription ? null : err(404, "ACTIVE_SUBSCRIPTION_NOT_FOUND", "Tenant has no active subscription.");
   return [
+    http.get("https://mock.local/signed/:assetId", () =>
+      HttpResponse.arrayBuffer(mockSilentWav.buffer.slice(0), {
+        headers: { "Content-Type": "audio/wav" }
+      })
+    ),
+    http.get(`${C}/brand-voice-orders`, ({ request }) => {
+      const g = guard();
+      if (g) return g;
+      const url = new URL(request.url);
+      const status = url.searchParams.get("status");
+      const rows = [...brandVoiceOrders.values()]
+        .filter((order) => !status || order.status === status)
+        .sort((left, right) => right.created_at.localeCompare(left.created_at))
+        .map(mockOrderRead);
+      return ok(paginate(rows, url));
+    }),
+    http.get(`${C}/brand-voice-orders/:id`, ({ params }) => {
+      const g = guard();
+      if (g) return g;
+      const order = brandVoiceOrders.get(String(params.id));
+      if (!order) return err(404, "BRAND_VOICE_ORDER_NOT_FOUND", "Brand voice order not found.");
+      const tenant = adminTenants.get(order.tenant_id);
+      if (tenant) pushAudit("brand_voice_order_audio_access", tenant, order.id, null, null, null);
+      return ok({
+        ...mockOrderRead(order),
+        source_audio_url: `https://mock.local/signed/${order.source_audio_asset_id}?expires=900`
+      });
+    }),
+    http.post(`${C}/brand-voice-orders/:id/resolve`, async ({ params, request }) => {
+      const g = guard();
+      if (g) return g;
+      const order = brandVoiceOrders.get(String(params.id));
+      if (!order) return err(404, "BRAND_VOICE_ORDER_NOT_FOUND", "Brand voice order not found.");
+      const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+      const keys = Object.keys(body).sort().join(",");
+      const fulfill = body.action === "fulfill" && keys === "action,provider_voice_id" && typeof body.provider_voice_id === "string" && body.provider_voice_id.trim();
+      const reject = body.action === "reject" && keys === "action,rejection_reason" && typeof body.rejection_reason === "string" && body.rejection_reason.trim();
+      if (!fulfill && !reject) return err(422, "VALIDATION_ERROR", "Invalid brand voice order resolution request.");
+      const fingerprint = normalizedMockJson(body);
+      if (order.status !== "awaiting_fulfillment") {
+        return order._resolve_payload === fingerprint
+          ? ok(mockOrderRead(order))
+          : err(409, "BRAND_VOICE_ORDER_ALREADY_RESOLVED", "Brand voice order is already resolved.");
+      }
+      const now = "2026-08-30T12:00:00Z";
+      order._resolve_payload = fingerprint;
+      order.updated_at = now;
+      if (fulfill) {
+        const providerVoiceId = String(body.provider_voice_id).trim();
+        if ([...brandVoiceOrders.values()].some((candidate) => candidate.id !== order.id && candidate.fulfilled_provider_voice_id === providerVoiceId)) {
+          order._resolve_payload = undefined;
+          return err(409, "PROVIDER_VOICE_ID_CONFLICT", "Provider voice ID is already registered.");
+        }
+        const voiceId = `bv-delivered-${order.id}`;
+        order.status = "fulfilled";
+        order.fulfilled_brand_voice_id = voiceId;
+        order.fulfilled_provider_voice_id = providerVoiceId;
+        order.fulfilled_at = now;
+        order.expires_at = "2027-08-30T12:00:00Z";
+        order.billing = { ...order.billing, status: "settled", held_credits: 0, settled_credits: 30000, released_credits: 0 };
+        brandVoices.set(voiceId, { id: voiceId, name: order.requested_name, status: "ready", created_at: now, _polls: 99, provider: "doubao-voice-clone", owner_user_id: order.ordered_by_user_id, order_status: "fulfilled", delivery_status: "active", expires_at: order.expires_at });
+      } else {
+        order.status = "rejected";
+        order.rejection_reason = String(body.rejection_reason).trim();
+        order.rejected_at = now;
+        order.billing = { ...order.billing, status: "released", held_credits: 0, settled_credits: 0, released_credits: 30000 };
+        order.refund_disposition = "source_subscription_released";
+      }
+      const tenant = adminTenants.get(order.tenant_id);
+      if (tenant) pushAudit(fulfill ? "brand_voice_order_fulfill" : "brand_voice_order_reject", tenant, order.id, { status: "awaiting_fulfillment" }, { status: order.status }, reject ? order.rejection_reason : null);
+      return ok(mockOrderRead(order));
+    }),
     http.get(`${C}/tenants`, ({ request }) => {
       const g = guard();
       if (g) return g;
@@ -1791,32 +1929,9 @@ function adminConsoleHandlers() {
       const items = voiceSlots.map((s) => ({ ...s }));
       return ok({ items, total: items.length, remaining: items.filter((s) => !s.occupied).length });
     }),
-    // 分配专属槽位（POST /tenants/{id}/voice-slots，幂等：重复挂 changed:false）；审计 speaker_ids 前→后。
-    // 🔴 全局唯一（P1-1 镜像 BE voice_slots.py 冲突检查）：speaker_id 已属于平台池或任何**其它**租户 →
-    // 422 VOICE_SLOT_ASSIGNMENT_FAILED（message 逐字同 BE）。只有全局空闲（或本就属于该租户=幂等）才 200。
-    http.post(`${C}/tenants/:id/voice-slots`, async ({ params, request }) => {
-      const g = guard();
-      if (g) return g;
-      const t = adminTenants.get(params.id as string);
-      if (!t) return err(404, "TENANT_NOT_FOUND", "Tenant not found.");
-      const body = (await request.json()) as { speaker_id?: string; reason?: string };
-      if (!/^S_[A-Za-z0-9_-]{1,157}$/.test(body.speaker_id ?? "")) return err(422, "VALIDATION_ERROR", "speaker_id 格式不正确");
-      if ((body.reason ?? "").length > 500) return err(422, "VALIDATION_ERROR", "理由长度需在 500 字以内");
-      const conflict = voiceSlots.some(
-        (s) => s.speaker_id === body.speaker_id && (s.scope === "platform" || s.tenant_id !== t.tenant_id)
-      );
-      if (conflict)
-        return err(422, "VOICE_SLOT_ASSIGNMENT_FAILED", "Speaker ID is already assigned to another tenant or the platform pool.");
-      const mine = () => voiceSlots.filter((s) => s.scope === "tenant" && s.tenant_id === t.tenant_id).map((s) => s.speaker_id);
-      const beforeIds = mine();
-      const changed = !beforeIds.includes(body.speaker_id as string);
-      if (changed) {
-        voiceSlots.push({ speaker_id: body.speaker_id as string, scope: "tenant", sources: ["tenant_config"], tenant_id: t.tenant_id, tenant_slug: t.slug, tenant_name: t.name, occupied: false, brand_voice_id: null, brand_voice_name: null, brand_voice_status: null });
-      }
-      // 镜像 BE record_audit：**无条件**落审计（幂等重复分配也记一条，changed:false）。
-      pushAudit("voice_slot_assign", t, t.tenant_id, { speaker_ids: beforeIds }, { speaker_id: body.speaker_id as string, changed, speaker_ids: mine() }, body.reason ?? null);
-      return ok({ tenant_id: t.tenant_id, speaker_id: body.speaker_id as string, changed, speaker_ids: mine() });
-    }),
+    // Legacy slot assignment is permanently retired. Inventory remains read-only.
+    http.post(`${C}/tenants/:id/voice-slots`, () =>
+      err(410, "VOICE_SLOT_ASSIGNMENT_RETIRED", "Voice slot assignment has been retired.")),
     http.get(`${C}/usage`, ({ request }) => {
       const g = guard();
       if (g) return g;
@@ -2176,11 +2291,19 @@ export const handlers = [
       permissions: mockPermissions(state)
     });
   }),
-  http.get(`${BASE}/api/v1/quota`, () => ok({ total: 1000, used: 120, reserved: 36, remaining: 844 })),
+  http.get(`${BASE}/api/v1/quota`, () => {
+    const noActiveSubscription = readLS("hd_mock_active_subscription") === "0";
+    return ok(noActiveSubscription
+      ? { has_active_subscription: false, active_subscription_id: null, total: 0, used: 0, reserved: 0, remaining: 0, manual_fulfillment_held_credits: 0, pending_refund_credits: 30000 }
+      : { has_active_subscription: true, active_subscription_id: "sub-mock", total: 1000, used: 120, reserved: 36, remaining: 844, manual_fulfillment_held_credits: 30000, pending_refund_credits: 0 });
+  }),
   http.get(`${BASE}/api/v1/voices`, () => {
-    // 系统音色(source:preset) + ready 克隆音色(source:brand_voice，对应 brand-voices ready 记录)，供 picker 分组(§8)。
+    const state = resolveMockState();
+    const currentUserId = state.identity?.user.id ?? "u-mock";
+    // Only active, payer-authorized brand voices enter the narration picker.
     const clones = [...brandVoices.values()]
-      .filter((v) => v.status === "ready")
+      .filter((v) => v.status === "ready" && v.delivery_status === "active")
+      .filter((v) => v.provider !== "doubao-voice-clone" || v.owner_user_id === currentUserId)
       .map((v) => ({ id: v.id, provider: "clone", voice_code: v.id, display_name: v.name, gender: "neutral", language: "zh-CN", sample_url: null, source: "brand_voice" }));
     const items = [
       { id: "v-zhixing", provider: "edge_tts", voice_code: "zh-CN-XiaoxiaoNeural", display_name: "知性女声", gender: "female", language: "zh-CN", sample_url: null, source: "preset" },
@@ -3338,44 +3461,152 @@ export const handlers = [
   // 校验 consent_confirmed:true + source_audio_asset_id(缺/false→422)→{id,name,status,created_at}；
   // GET 列表 processing 轮询 2 次后翻 ready；DELETE→{deleted}。BrandVoiceRead 不含 sample_url/error_message。
   http.post(`${BASE}/api/v1/uploads/audio`, () => ok({ asset_id: `audio-asset-${++audioAssetSeq}` })),
+  http.post(`${BASE}/api/v1/brand-voice-orders/estimate`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const validCreate = body.order_type === "create" && body.existing_brand_voice_id === null;
+    const validRenew = body.order_type === "renew" && typeof body.existing_brand_voice_id === "string" && body.existing_brand_voice_id.trim();
+    if ((!validCreate && !validRenew) || typeof body.requested_name !== "string" || !body.requested_name.trim() || !body.source_audio_asset_id || body.consent_confirmed !== true) {
+      return err(422, "VALIDATION_ERROR", "Invalid brand voice order request.");
+    }
+    if (!mockHuadingAccess(resolveMockState())) return err(403, "VOICE_CLONE_PLAN_REQUIRED", "Voice clone (doubao) requires the huading plan.");
+    return ok(issueSimpleMockQuote({
+      operation: body.order_type === "renew" ? "doubao_brand_voice_order_renew" : "doubao_brand_voice_order_create",
+      body,
+      unit: "call",
+      quantity: 1,
+      unitCredits: 30000,
+      rateScope: "platform_fixed",
+      rateSource: "fixed_policy"
+    }));
+  }),
+  http.post(`${BASE}/api/v1/brand-voice-orders`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const operation = body.order_type === "renew" ? "doubao_brand_voice_order_renew" : "doubao_brand_voice_order_create";
+    const confirmation = confirmMockQuote(request, operation, body);
+    if (!confirmation.ok) return confirmation.response;
+    if (confirmation.replay) return HttpResponse.json({ data: confirmation.replay.accepted, error: null, request_id: "mock-req" }, { status: 201 });
+    const state = resolveMockState();
+    const id = `bvo-created-${++brandVoiceOrderSeq}`;
+    const billing = mockBillingSummary(confirmation.idempotencyKey, 30000, "reserved");
+    const order: MockBrandVoiceOrder = {
+      id,
+      tenant_id: state.identity?.tenant.id ?? "ten-mock",
+      ordered_by_user_id: state.identity?.user.id ?? "u-mock",
+      order_type: body.order_type === "renew" ? "renew" : "create",
+      requested_name: String(body.requested_name).trim(),
+      source_audio_asset_id: String(body.source_audio_asset_id),
+      existing_brand_voice_id: typeof body.existing_brand_voice_id === "string" ? body.existing_brand_voice_id : null,
+      status: "awaiting_fulfillment",
+      fulfilled_brand_voice_id: null,
+      fulfilled_provider_voice_id: null,
+      rejection_reason: null,
+      fulfilled_at: null,
+      expires_at: null,
+      rejected_at: null,
+      created_at: "2026-08-30T12:00:00Z",
+      updated_at: "2026-08-30T12:00:00Z",
+      billing,
+      refund_disposition: "not_applicable",
+      refund_grant_status: null,
+      refund_applied_at: null
+    };
+    brandVoiceOrders.set(id, order);
+    const accepted = mockOrderRead(order);
+    storeMockOperation(operation, confirmation.idempotencyKey, body, accepted, { operation, idempotency_key: confirmation.idempotencyKey, state: "in_progress", completion_kind: null, billing, result_type: "brand_voice_order", result_id: id, resource: accepted, result: null, failure: null });
+    return HttpResponse.json({ data: accepted, error: null, request_id: "mock-req" }, { status: 201 });
+  }),
+  http.get(`${BASE}/api/v1/brand-voice-orders`, () => {
+    const state = resolveMockState();
+    const tenantId = state.identity?.tenant.id ?? "ten-mock";
+    const userId = state.identity?.user.id ?? "u-mock";
+    const items = [...brandVoiceOrders.values()]
+      .filter((order) => order.tenant_id === tenantId && order.ordered_by_user_id === userId)
+      .sort((left, right) => right.created_at.localeCompare(left.created_at))
+      .map(mockOrderRead);
+    return ok({ items, total: items.length, page: null, page_size: null });
+  }),
+  http.get(`${BASE}/api/v1/brand-voice-orders/:id`, ({ params }) => {
+    const state = resolveMockState();
+    const tenantId = state.identity?.tenant.id ?? "ten-mock";
+    const userId = state.identity?.user.id ?? "u-mock";
+    const order = brandVoiceOrders.get(String(params.id));
+    if (!order || order.tenant_id !== tenantId || order.ordered_by_user_id !== userId) return err(404, "BRAND_VOICE_ORDER_NOT_FOUND", "Brand voice order not found.");
+    if (order.id === "bvo-pending") {
+      order._detail_polls = (order._detail_polls ?? 0) + 1;
+      if (order._detail_polls >= 2) {
+        order.refund_disposition = "current_subscription_credited";
+        order.refund_grant_status = "applied";
+        order.refund_applied_at = "2026-09-01T00:00:00Z";
+      }
+    }
+    return ok(mockOrderRead(order));
+  }),
+  http.post(`${BASE}/api/v1/brand-voices/estimate`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!body.source_audio_asset_id || body.consent_confirmed !== true) {
+      return err(422, "BRAND_VOICE_CONSENT_REQUIRED", "需确认授权并提供音频资源");
+    }
+    if (body.provider !== "cosyvoice" && body.provider !== "cosyvoice-voice-clone") {
+      return err(422, "DOUBAO_MANUAL_ORDER_REQUIRED", "豆包音色必须通过人工交付订单购买。");
+    }
+    return ok(issueSimpleMockQuote({
+      operation: "cosyvoice_brand_voice_create",
+      body,
+      unit: "voice",
+      quantity: 1,
+      unitCredits: 0,
+      rateScope: "platform_fixed",
+      rateSource: "fixed_policy",
+      disclosures: [{
+        key: "cosyvoice_tts_reference_rate",
+        rendered_text: "创建免费；使用该音色时当前参考费率为 0.2 积分/字，实际使用时重新报价。",
+        copy_version: 1,
+        unit: "character",
+        rate_scope: "tenant_overridable",
+        rate_source: "tenant_rate",
+        rate_id: "rate-mock-tenant-cosyvoice",
+        effective_at: "2026-08-30T00:00:00Z",
+        policy_key: null,
+        policy_version: null,
+        reference_unit_credits: "0.2"
+      }]
+    }));
+  }),
   http.get(`${BASE}/api/v1/brand-voices`, () => {
-    const items = [...brandVoices.values()].map((v) => {
+    const state = resolveMockState();
+    const currentUserId = state.identity?.user.id ?? "u-mock";
+    const items = [...brandVoices.values()]
+      .filter((voice) => voice.id !== "bv-official-1")
+      .filter((voice) => voice.provider !== "doubao-voice-clone" || voice.owner_user_id === currentUserId)
+      .map((v) => {
       if (v.status === "processing") {
         v._polls += 1;
         if (v._polls >= 2) v.status = "ready";
       }
-      // provider 透出（缺省则 null）——镜像 COSYVOICE-CLONE-0001 合并后真形状，前端兼容 null。
-      return { id: v.id, name: v.name, status: v.status, created_at: v.created_at, provider: v.provider ?? null };
+      return { id: v.id, name: v.name, status: v.status, created_at: v.created_at, provider: v.provider, order_status: v.order_status, delivery_status: v.delivery_status, expires_at: v.expires_at };
     });
     return ok({ items, total: items.length });
   }),
   http.post(`${BASE}/api/v1/brand-voices`, async ({ request }) => {
-    const body = (await request.json().catch(() => ({}))) as {
-      name?: string;
-      source_audio_asset_id?: string;
-      consent_confirmed?: boolean;
-      provider?: string; // 范围4：克隆通路 doubao/cosyvoice（COSYVOICE-CLONE-0001 合并后真契约）
-    };
-    // 真后端 extra=forbid + consent 校验：缺 source_audio_asset_id 或 consent_confirmed!==true → 422。
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     if (!body.source_audio_asset_id || body.consent_confirmed !== true) {
-      // 错误码逐字对齐后端 routes/brand_voices.py(BRAND_VOICE_CONSENT_REQUIRED)。
       return err(422, "BRAND_VOICE_CONSENT_REQUIRED", "需确认授权并提供音频资源");
     }
-    // 请求侧 schema Literal["doubao","cosyvoice"]（缺省 doubao）：非法值 → 422（镜像 pydantic Literal）。
-    if (body.provider !== undefined && !(body.provider in VOICE_CLONE_CANONICAL)) {
-      return err(422, "VALIDATION_ERROR", "provider 非法（doubao / cosyvoice）");
+    if (body.provider !== "cosyvoice" && body.provider !== "cosyvoice-voice-clone") {
+      return err(422, "DOUBAO_MANUAL_ORDER_REQUIRED", "豆包音色必须通过人工交付订单购买。");
     }
-    // 存/返 canonical 长值（镜像 BE：alias 归一化 → _brand_voice_read 返 canonical）。
-    const provider = VOICE_CLONE_CANONICAL[body.provider ?? "doubao"];
-    // VIP 门禁：doubao 通路对无 entitlement 用户 → 403 VOICE_CLONE_PLAN_REQUIRED（防选了再撞的兜底；正常前端已置灰）。
-    // entitlement 与 /me 同源（mockHuadingAccess = 平台租户 OR plan=huading，**不含 role==admin**）——新注册 free 用户在此被拦。
-    // cosyvoice 免费档不受门禁——任何用户可建（含 0 余额新注册）。
-    if (provider === "doubao-voice-clone" && !mockHuadingAccess(resolveMockState())) {
-      return err(403, "VOICE_CLONE_PLAN_REQUIRED", "Voice clone (doubao) requires the huading plan.");
-    }
+    const confirmation = confirmMockQuote(request, "cosyvoice_brand_voice_create", body);
+    if (!confirmation.ok) return confirmation.response;
+    if (confirmation.replay) return ok(confirmation.replay.accepted);
     const id = `bv-${++brandVoiceSeq}`;
-    brandVoices.set(id, { id, name: body.name || "未命名品牌音色", status: "processing", created_at: new Date(0).toISOString(), _polls: 0, provider });
-    return ok({ id, name: body.name || "未命名品牌音色", status: "processing", created_at: new Date(0).toISOString(), provider });
+    const createdAt = "2026-08-30T12:00:00Z";
+    const voice: MockBrandVoice = { id, name: typeof body.name === "string" ? body.name : "未命名品牌音色", status: "ready", created_at: createdAt, _polls: 99, provider: "cosyvoice-voice-clone", owner_user_id: null, order_status: null, delivery_status: "active", expires_at: null };
+    brandVoices.set(id, voice);
+    const billing = mockBillingSummary(confirmation.idempotencyKey, 0, "settled");
+    const resource = { id: voice.id, name: voice.name, provider: voice.provider, status: voice.status, order_status: voice.order_status, delivery_status: voice.delivery_status, expires_at: voice.expires_at, created_at: voice.created_at };
+    const accepted = { ...resource, billing };
+    storeMockOperation("cosyvoice_brand_voice_create", confirmation.idempotencyKey, body, accepted, { operation: "cosyvoice_brand_voice_create", idempotency_key: confirmation.idempotencyKey, state: "completed", completion_kind: "succeeded", billing, result_type: "brand_voice", result_id: id, resource, result: resource, failure: null });
+    return HttpResponse.json({ data: accepted, error: null, request_id: "mock-req" }, { status: 201 });
   }),
   http.delete(`${BASE}/api/v1/brand-voices/:id`, ({ params }) => {
     const id = params.id as string;

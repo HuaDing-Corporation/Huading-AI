@@ -51,6 +51,7 @@ class BrandVoiceRead(BaseModel):
     status: str
     order_status: Literal["awaiting_fulfillment", "fulfilled", "rejected"] | None
     delivery_status: Literal["awaiting_fulfillment", "active", "expired", "rejected"]
+    expires_at: datetime | None
     created_at: datetime
 
 

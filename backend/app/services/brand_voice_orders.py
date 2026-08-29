@@ -531,6 +531,7 @@ def brand_voice_order_read(db: Session, *, order: BrandVoiceOrder) -> BrandVoice
             status_code=500,
         )
     provider_voice_id = None
+    expires_at = None
     if order.fulfilled_provider_id is not None:
         registry = db.get(BrandVoiceProviderId, order.fulfilled_provider_id)
         if registry is None:
@@ -540,6 +541,26 @@ def brand_voice_order_read(db: Session, *, order: BrandVoiceOrder) -> BrandVoice
                 status_code=500,
             )
         provider_voice_id = registry.normalized_provider_id
+    if order.status == "fulfilled":
+        if order.fulfilled_brand_voice_id is None:
+            raise AppError(
+                "Fulfilled manual order is missing its delivered voice.",
+                code="BILLING_INVARIANT_VIOLATION",
+                status_code=500,
+            )
+        delivered_voice = db.get(BrandVoice, order.fulfilled_brand_voice_id)
+        if (
+            delivered_voice is None
+            or delivered_voice.tenant_id != order.tenant_id
+            or delivered_voice.owner_user_id != order.user_id
+            or delivered_voice.expires_at is None
+        ):
+            raise AppError(
+                "Fulfilled manual order has an invalid delivered voice expiry.",
+                code="BILLING_INVARIANT_VIOLATION",
+                status_code=500,
+            )
+        expires_at = delivered_voice.expires_at
     grant = db.scalar(
         select(CreditRefundGrant).where(CreditRefundGrant.billing_operation_id == operation.id)
     )
@@ -564,6 +585,7 @@ def brand_voice_order_read(db: Session, *, order: BrandVoiceOrder) -> BrandVoice
         fulfilled_provider_voice_id=provider_voice_id,
         rejection_reason=order.rejection_reason,
         fulfilled_at=order.fulfilled_at,
+        expires_at=expires_at,
         rejected_at=order.rejected_at,
         created_at=order.created_at,
         updated_at=order.updated_at,

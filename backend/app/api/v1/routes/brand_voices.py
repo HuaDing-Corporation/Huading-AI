@@ -865,5 +865,6 @@ def _brand_voice_read(
         status=brand_voice.status,
         order_status=order_status,
         delivery_status=delivery_status,
+        expires_at=brand_voice.expires_at,
         created_at=brand_voice.created_at,
     )

@@ -3,7 +3,7 @@
 import { useEffect, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ArrowLeft, ClipboardList, Gauge, LogOut, Mic2, ReceiptText, ShieldAlert, Users } from "lucide-react";
+import { ArrowLeft, ClipboardList, Gauge, LogOut, Mic2, PackageCheck, ReceiptText, ShieldAlert, Users } from "lucide-react";
 
 import { Glass } from "@/components/ui/glass";
 import { Logo } from "@/components/ui/logo";
@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 // owner 全是 role=admin，线上 P0 教训）。无权限 → 友好页（BE 端点也会真 403 PLATFORM_ADMIN_REQUIRED，双保险）。
 const NAV = [
   { href: "/admin/tenants", label: copy.admin.navTenants, icon: Users },
+  { href: "/admin/brand-voice-orders", label: "人工音色订单", icon: PackageCheck },
   { href: "/admin/voice-slots", label: copy.admin.navVoiceSlots, icon: Mic2 },
   { href: "/admin/usage", label: copy.admin.navUsage, icon: ReceiptText },
   { href: "/admin/tasks", label: copy.admin.navTasks, icon: Gauge },
@@ -63,15 +64,15 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
     <main className="min-h-screen p-5 md:p-7">
       <div className="mx-auto grid max-w-[1600px] grid-cols-1 grid-rows-[auto_1fr] gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
         {/* 后台自有顶栏：Logo + 「管理后台」徽标 + 返回控制台 + 退出 */}
-        <Glass className="col-span-full flex items-center gap-3 rounded-card px-4 py-[13px] sm:px-6">
+        <Glass className="col-span-full flex flex-wrap items-center gap-3 rounded-card px-4 py-[13px] sm:px-6">
           <Logo />
-          <span className="rounded-pill border border-line-gold bg-glass-soft px-2.5 py-1 text-[11.5px] font-medium text-gold-deep">
+          <span className="flex-none whitespace-nowrap rounded-pill border border-line-gold bg-glass-soft px-2.5 py-1 text-[11.5px] font-medium text-gold-deep">
             {copy.admin.consoleTitle}
           </span>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="flex w-full items-center justify-end gap-2 sm:ml-auto sm:w-auto">
             <Link
               href="/"
-              className="inline-flex items-center gap-1.5 rounded-field border border-line-gold bg-glass-fill px-3 py-1.5 text-[12.5px] text-ink-soft hover:bg-glass-hover"
+              className="inline-flex flex-none items-center gap-1.5 whitespace-nowrap rounded-field border border-line-gold bg-glass-fill px-3 py-1.5 text-[12.5px] text-ink-soft hover:bg-glass-hover"
             >
               <ArrowLeft size={14} strokeWidth={2} aria-hidden /> {copy.admin.backToWorkbench}
             </Link>
@@ -80,7 +81,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
               onClick={logout}
               aria-label="退出登录"
               title="退出登录"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-field text-ink-soft hover:bg-glass-hover"
+              className="inline-flex h-8 w-8 flex-none items-center justify-center rounded-field text-ink-soft hover:bg-glass-hover"
             >
               <LogOut size={16} strokeWidth={1.8} />
             </button>

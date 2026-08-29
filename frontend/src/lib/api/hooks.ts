@@ -12,6 +12,9 @@ import {
   fetchAdminTenants,
   fetchAdminUsage,
   fetchAdminVoiceSlots,
+  getAdminBrandVoiceOrder,
+  listAdminBrandVoiceOrders,
+  resolveAdminBrandVoiceOrder,
   retryAdminTask,
   type AdminTaskFamily,
   type AdminTaskStatus,
@@ -21,7 +24,7 @@ import {
   type PlanCode
 } from "@/lib/api/admin-console";
 import { listAvatarPresets } from "@/lib/api/avatars";
-import { analyticsKeys, avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, historyImageKeys, labelSettingsKey, meKey, publishKeys, quotaKey, reversePromptKeys, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
+import { adminBrandVoiceOrderKeys, analyticsKeys, avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, brandVoiceOrderKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, historyImageKeys, labelSettingsKey, meKey, publishKeys, quotaKey, reversePromptKeys, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
 import {
   clearHistoryImages,
   deleteHistoryImageSet,
@@ -67,7 +70,8 @@ import {
   posterImage,
   posterImageBatch
 } from "@/lib/api/ecom-images";
-import { createBrandVoiceFromAudio, deleteBrandVoice, listBrandVoices } from "@/lib/api/brand-voices";
+import { deleteBrandVoice, listBrandVoices } from "@/lib/api/brand-voices";
+import { listBrandVoiceOrders } from "@/lib/api/brand-voice-orders";
 import { getLabelSettings, updateLabelSettings } from "@/lib/api/label-settings";
 import { createPublishDrafts, deletePublishRecord, listPublishPlatforms, listPublishRecords, markPublished } from "@/lib/api/publish";
 import { clearVideos, createVideo, deleteVideo, estimateVideo, generateScenePrompt, getVideo, listVideos, listVideosPage } from "@/lib/api/videos";
@@ -80,7 +84,6 @@ import type {
   CopyTopicsRequest,
   CoverFromFrameRequest,
   CreateVideoRequest,
-  CreateBrandVoiceInput,
   CreateDraftsRequest,
   PublishPlatformId,
   CutoutBatchRequest,
@@ -396,17 +399,9 @@ export function useBrandVoices() {
     refetchInterval: (query) => (query.state.data?.some((v) => v.status === "processing") ? 3000 : false)
   });
 }
-export function useCreateBrandVoice() {
-  const qc = useQueryClient();
-  return useMutation({
-    // 三段式编排：上传音频 → JSON 创建(带 consent_confirmed)。
-    mutationFn: (input: CreateBrandVoiceInput) => createBrandVoiceFromAudio(input),
-    // 新建后失效品牌音色列表 + voices(ready 克隆音色会进口播 picker)。
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: brandVoiceKeys.all });
-      void qc.invalidateQueries({ queryKey: voicesKey });
-    }
-  });
+export function useBrandVoiceOrders() {
+  const { session } = useAuth();
+  return useQuery({ queryKey: brandVoiceOrderKeys.list(), queryFn: listBrandVoiceOrders, enabled: !!session });
 }
 export function useDeleteBrandVoice() {
   const qc = useQueryClient();
@@ -529,6 +524,33 @@ export function useMe() {
 export function useQuota() {
   const { session } = useAuth();
   return useQuery({ queryKey: quotaKey, queryFn: getQuota, enabled: !!session });
+}
+
+export function useAdminBrandVoiceOrders(status: import("@/lib/api/admin-console").AdminBrandVoiceOrderStatus | "", page = 1) {
+  return useQuery({
+    queryKey: adminBrandVoiceOrderKeys.list(status, page, 20),
+    queryFn: () => listAdminBrandVoiceOrders({ status, page, page_size: 20 })
+  });
+}
+
+export function useAdminBrandVoiceOrder(orderId: string | null) {
+  return useQuery({
+    queryKey: adminBrandVoiceOrderKeys.detail(orderId ?? ""),
+    queryFn: () => getAdminBrandVoiceOrder(orderId as string),
+    enabled: !!orderId
+  });
+}
+
+export function useResolveAdminBrandVoiceOrder() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ orderId, action }: { orderId: string; action: import("@/lib/api/admin-console").AdminBrandVoiceOrderAction }) =>
+      resolveAdminBrandVoiceOrder(orderId, action),
+    onSuccess: (result) => {
+      qc.setQueryData(adminBrandVoiceOrderKeys.detail(result.id), result);
+      void qc.invalidateQueries({ queryKey: adminBrandVoiceOrderKeys.all });
+    }
+  });
 }
 
 // ── 批量生产中心 (BATCH-PROD-UI-0001) ──

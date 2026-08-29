@@ -2,16 +2,20 @@
 
 import { ChevronLeft } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { useState } from "react";
 
 import { BrandVoiceCreate } from "@/components/brand-voice/brand-voice-create";
 import { BrandVoiceList } from "@/components/brand-voice/brand-voice-list";
+import { BrandVoiceOrderList } from "@/components/brand-voice/brand-voice-order-list";
 import { Sidebar } from "@/components/layout/sidebar";
 import { TopBar } from "@/components/layout/top-bar";
 import { copy } from "@/lib/copy";
+import type { BrandVoice } from "@/lib/api/types";
 
 /** 品牌音色管理页（BRAND-VOICE-UI-0001）—— 独立路由 /brand-voices。外壳仿工作台(TopBar+Sidebar)。 */
 export default function BrandVoicesPage() {
   const router = useRouter();
+  const [renewVoice, setRenewVoice] = useState<BrandVoice | null>(null);
   const onBack = () => {
     if (typeof window !== "undefined" && window.history.length > 1) router.back();
     else router.push("/");
@@ -42,8 +46,11 @@ export default function BrandVoicesPage() {
           </header>
 
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(320px,440px)_minmax(0,1fr)]">
-            <BrandVoiceCreate />
-            <BrandVoiceList />
+            <BrandVoiceCreate renewVoice={renewVoice} onFinished={() => setRenewVoice(null)} />
+            <div className="flex min-w-0 flex-col gap-5">
+              <BrandVoiceList onRenew={setRenewVoice} />
+              <BrandVoiceOrderList />
+            </div>
           </div>
         </section>
       </div>

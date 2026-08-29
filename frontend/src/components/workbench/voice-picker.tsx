@@ -2,7 +2,7 @@
 
 import { useId } from "react";
 import Link from "next/link";
-import { Loader2, Play } from "lucide-react";
+import { Play } from "lucide-react";
 
 import { SelectableOption } from "@/components/ui/selectable-option";
 import type { BrandVoice, Voice } from "@/lib/api/types";
@@ -29,10 +29,6 @@ export interface VoicePickerProps {
 }
 
 /** doubao 通路判定（兼容短值与 canonical 长值，同 providerLabel）。 */
-function isDoubaoProvider(provider?: string | null): boolean {
-  return provider === "doubao" || provider === "doubao-voice-clone";
-}
-
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 const groupClass = "mb-1.5 mt-2 block text-[11.5px] tracking-[.5px] text-ink-faint first:mt-0";
 const gridClass = "grid grid-cols-1 gap-2 sm:grid-cols-2";
@@ -92,27 +88,17 @@ function VoiceOption({ voice, selected, onSelect }: { voice: Voice; selected: bo
 function BrandVoiceOption({
   voice,
   selected,
-  onSelect,
-  vipLocked = false
+  onSelect
 }: {
   voice: BrandVoice;
   selected: boolean;
   onSelect: () => void;
-  vipLocked?: boolean;
 }) {
-  const processing = voice.status === "processing";
   const provider = providerLabel(voice.provider);
   return (
-    <SelectableOption selected={selected} disabled={processing || vipLocked} onSelect={onSelect}>
+    <SelectableOption selected={selected} onSelect={onSelect}>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-ink">{voice.name}</span>
-        {processing ? (
-          <span className="mt-0.5 flex items-center gap-1 text-[11.5px] text-ink-faint">
-            <Loader2 size={11} strokeWidth={2.2} className="animate-spin" /> {copy.brandVoice.pickerCloning}
-          </span>
-        ) : vipLocked ? (
-          <span className="mt-0.5 block text-[11.5px] text-ink-faint">{copy.brandVoice.pickerVipLocked}</span>
-        ) : null}
       </span>
       {provider && (
         <span className="flex-none rounded-pill border border-line-gold bg-glass-fill px-2 py-0.5 text-[11px] text-ink-soft">
@@ -130,7 +116,7 @@ function BrandVoiceOption({
  * 品牌组一律取自 brandVoices，避免重复渲染。
  * 不传 brandVoices → 完全退化为历史行为（按 voices.source 分组），保护未接入消费者（批量电商）零回归。
  */
-export function VoicePicker({ voices, value, onChange, brandVoices, brandVoicesLoading, canUseVip }: VoicePickerProps) {
+export function VoicePicker({ voices, value, onChange, brandVoices, brandVoicesLoading }: VoicePickerProps) {
   // WORKBENCH-KEEPALIVE-UI-0001：工作台面板改为常驻后，口播与电商带货两份 VoicePicker 会同时留在 DOM ——
   // 原先的字面量 id（voice-group-brand/standard）就成了重复 id，第二份的 aria-labelledby 会解析到**第一份
   // （隐藏面板）**的 span，而隐藏子树不在可及性树里 → 该分组失去无障碍名称。改用 useId 生成实例唯一 id。
@@ -138,8 +124,6 @@ export function VoicePicker({ voices, value, onChange, brandVoices, brandVoicesL
   const brandGroupId = `${uid}-voice-group-brand`;
   const standardGroupId = `${uid}-voice-group-standard`;
   const standard = voices.filter((v) => v.source !== "brand_voice");
-  const vipAllowed = canUseVip ?? true; // 缺省不门禁（零回归）
-  const brandVipLocked = (v: BrandVoice) => !vipAllowed && isDoubaoProvider(v.provider);
 
   // Legacy：不传 brandVoices → 忠实还原历史 VoicePicker（品牌组来自 voices 中 source==="brand_voice" 项）。
   if (brandVoices === undefined) {
@@ -173,9 +157,8 @@ export function VoicePicker({ voices, value, onChange, brandVoices, brandVoicesL
   }
 
   // Rich：品牌组取自 brandVoices（ready 可选 / processing 置灰 / failed 隐藏 / 空态引导）。
-  const ready = brandVoices.filter((v) => v.status === "ready");
-  const processing = brandVoices.filter((v) => v.status === "processing");
-  const hasBrandOptions = ready.length + processing.length > 0;
+  const ready = brandVoices.filter((v) => v.delivery_status === "active");
+  const hasBrandOptions = ready.length > 0;
 
   return (
     <fieldset className="mb-[15px] m-0 min-w-0 border-0 p-0">
@@ -204,11 +187,7 @@ export function VoicePicker({ voices, value, onChange, brandVoices, brandVoicesL
                 voice={v}
                 selected={value === v.id}
                 onSelect={() => onChange(v.id)}
-                vipLocked={brandVipLocked(v)}
               />
-            ))}
-            {processing.map((v) => (
-              <BrandVoiceOption key={v.id} voice={v} selected={false} onSelect={() => undefined} />
             ))}
           </div>
         )}

@@ -1,118 +1,75 @@
 "use client";
 
 import { useState } from "react";
-import { Loader2, Trash2 } from "lucide-react";
+import { Trash2 } from "lucide-react";
 
-import { errorText } from "@/lib/api/error-text";
-import { useBrandVoices, useDeleteBrandVoice } from "@/lib/api/hooks";
-import type { BrandVoice, BrandVoiceStatus } from "@/lib/api/types";
 import { Card, CardTitle } from "@/components/ui/card";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { errorText } from "@/lib/api/error-text";
+import { useBrandVoices, useDeleteBrandVoice } from "@/lib/api/hooks";
+import type { BrandVoice, BrandVoiceDeliveryStatus } from "@/lib/api/types";
 import { copy } from "@/lib/copy";
 
-const STATUS_LABEL: Record<BrandVoiceStatus, string> = {
-  processing: copy.brandVoice.statusProcessing,
-  ready: copy.brandVoice.statusReady,
-  failed: copy.brandVoice.statusFailed
-};
-// 状态徽章配色：token 化（处理中=柔金、可用=金深、失败=错误色），不硬编码 hex。
-const STATUS_CLASS: Record<BrandVoiceStatus, string> = {
-  processing: "border-line-gold bg-glass-fill text-ink-soft",
-  ready: "border-line-sel bg-chip-sel text-gold-deep",
-  failed: "border-line-gold bg-error-bg text-error-fg"
+const STATUS_LABEL: Record<BrandVoiceDeliveryStatus, string> = {
+  awaiting_fulfillment: "等待人工交付",
+  active: "可用",
+  expired: "已过期",
+  rejected: "已拒绝"
 };
 
-function StatusBadge({ status }: { status: BrandVoiceStatus }) {
-  return (
-    <span className={`inline-flex items-center gap-1 rounded-pill border px-2.5 py-0.5 text-[11.5px] ${STATUS_CLASS[status]}`}>
-      {status === "processing" && <Loader2 size={11} strokeWidth={2.2} className="animate-spin" />}
-      {STATUS_LABEL[status]}
-    </span>
-  );
-}
-
-/**
- * 品牌音色列表（BRAND-VOICE-UI-0001）—— GET /brand-voices，status 徽章(处理中/可用/失败)，
- * 处理中由 useBrandVoices 轮询；ready 可试听；删除经 ConfirmDialog(危险确认 + 防连点)。
- * 复用 ConfirmDialog/Card，唯一 hooks 调用方为列表自身。
- */
-export function BrandVoiceList() {
-  const { data, isLoading, isError, refetch } = useBrandVoices();
+export function BrandVoiceList({ onRenew }: { onRenew?: (voice: BrandVoice) => void }) {
+  const voices = useBrandVoices();
   const del = useDeleteBrandVoice();
   const [pendingDelete, setPendingDelete] = useState<BrandVoice | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const items = voices.data ?? [];
 
-  const items = data ?? [];
-
-  const onConfirmDelete = async () => {
+  const confirmDelete = async () => {
     if (!pendingDelete) return;
     setDeleteError(null);
     try {
       await del.mutateAsync(pendingDelete.id);
       setPendingDelete(null);
-    } catch (err) {
-      setDeleteError(errorText(err));
+    } catch (caught) {
+      setDeleteError(errorText(caught));
     }
   };
 
   return (
     <Card animateIn>
       <CardTitle className="mb-[14px]">{copy.brandVoice.listTitle}</CardTitle>
-
-      {isLoading ? (
-        <p className="text-[13px] text-ink-soft">{copy.brandVoice.listLoading}</p>
-      ) : isError ? (
-        <div className="text-[13px] text-error-fg">
-          {copy.brandVoice.listError}{" "}
-          <button type="button" onClick={() => void refetch()} className="text-gold-deep underline">
-            {copy.cover.retry}
-          </button>
-        </div>
-      ) : items.length === 0 ? (
-        <p className="text-[13px] text-ink-soft">{copy.brandVoice.listEmpty}</p>
-      ) : (
-        <ul className="flex flex-col gap-2">
-          {items.map((v) => (
-            <li
-              key={v.id}
-              className="flex items-center gap-3 rounded-field border border-line-gold bg-glass-fill px-3 py-2.5"
-            >
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="truncate text-[13px] text-ink">{v.name}</span>
-                  <StatusBadge status={v.status} />
+      {voices.isLoading ? <p className="text-[13px] text-ink-soft">{copy.brandVoice.listLoading}</p> : voices.isError ? (
+        <p role="alert" className="text-[13px] text-error-fg">{copy.brandVoice.listError}</p>
+      ) : items.length === 0 ? <p className="text-[13px] text-ink-soft">{copy.brandVoice.listEmpty}</p> : (
+        <ul className="space-y-2">
+          {items.map((voice) => (
+            <li key={voice.id} className="flex min-w-0 flex-wrap items-center gap-3 rounded-field border border-line-gold bg-glass-fill px-3 py-2.5">
+              <div className="min-w-[10rem] flex-1">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <span className="break-words text-[13px] text-ink">{voice.name}</span>
+                  <span className="rounded-pill border border-line-gold bg-glass-soft px-2 py-0.5 text-[11.5px] text-ink-soft">{STATUS_LABEL[voice.delivery_status]}</span>
                 </div>
-                {v.status === "processing" && (
-                  <p className="mt-0.5 text-[11.5px] text-ink-faint">{copy.brandVoice.processingHint}</p>
-                )}
-                {/* §8：失败态仅徽章「失败」，后端不返 error_message，不显额外原因。 */}
+                <p className="mt-1 text-[11.5px] text-ink-faint">{voice.provider.includes("doubao") ? "豆包人工交付" : "CosyVoice"}</p>
+                {voice.expires_at && <p className="mt-1 text-[11.5px] text-ink-soft">到期时间：{new Date(voice.expires_at).toLocaleString()}</p>}
+                {voice.delivery_status === "awaiting_fulfillment" && <p className="mt-1 text-[11.5px] text-queue-fg">等待平台人工交付，不会显示为供应商生成中</p>}
               </div>
-              {/* §8 v1：列表不试听克隆音色(后端不返 sample)；创建前的本地录音试听保留在创建区。 */}
-              <button
-                type="button"
-                onClick={() => {
-                  setDeleteError(null);
-                  setPendingDelete(v);
-                }}
-                aria-label={`${copy.brandVoice.delete} ${v.name}`}
-                className="flex h-8 w-8 flex-none items-center justify-center rounded-mark text-ink-soft hover:bg-error-bg hover:text-error-fg"
-              >
-                <Trash2 size={15} strokeWidth={2} />
-              </button>
+              {voice.delivery_status === "expired" && onRenew && (
+                <button type="button" onClick={() => onRenew(voice)} className="rounded-field border border-line-gold px-3 py-1.5 text-[12px] text-gold-deep hover:bg-glass-hover">使用新音频续期</button>
+              )}
+              <button type="button" aria-label={`${copy.brandVoice.delete} ${voice.name}`} onClick={() => setPendingDelete(voice)} className="flex h-8 w-8 items-center justify-center rounded-mark text-ink-soft hover:bg-error-bg hover:text-error-fg"><Trash2 size={15} /></button>
             </li>
           ))}
         </ul>
       )}
-
       <ConfirmDialog
         open={!!pendingDelete}
         title={copy.brandVoice.deleteConfirmTitle}
-        message={copy.brandVoice.deleteConfirmMessage}
+        message="删除只会移除该音色，不代表退款；任何退款均以人工订单返回状态为准。"
         confirmLabel={copy.brandVoice.deleteConfirmBtn}
         danger
         submitting={del.isPending}
         error={deleteError}
-        onConfirm={() => void onConfirmDelete()}
+        onConfirm={() => void confirmDelete()}
         onCancel={() => setPendingDelete(null)}
       />
     </Card>
