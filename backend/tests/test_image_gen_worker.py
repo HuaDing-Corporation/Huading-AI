@@ -10,7 +10,7 @@ import httpx
 import openai
 import pytest
 from PIL import Image
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 from app.db.models import (
     Asset,
@@ -455,6 +455,61 @@ def test_image_worker_text_to_image_finishes_and_settles_quota(
         "uploading",
         "done",
     ]
+
+
+def test_image_worker_rolls_back_output_asset_and_done_state_when_persistence_fails(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    task_id = "photo-atomic-persistence-failure"
+    with auth_db() as db:
+        _seed_reserved_photo(
+            db,
+            auth_context["tenant_id"],
+            auth_context["user_id"],
+            task_id,
+        )
+    storage = _FakeStorage()
+    store = _MemProgressStore()
+    provider = _FakeProvider(image_bytes=b"final-png")
+    image_gen = _patch_worker(monkeypatch, auth_db, storage, store, provider)
+
+    def fail_output_commit(session) -> None:
+        if any(isinstance(instance, TaskAsset) for instance in session.new):
+            raise RuntimeError("output persistence failed")
+
+    def session_with_output_commit_failure():
+        session = auth_db()
+        event.listen(session, "before_commit", fail_output_commit)
+        return session
+
+    monkeypatch.setattr(image_gen, "SessionLocal", session_with_output_commit_failure)
+
+    result = image_gen.run_image_generation(
+        {
+            "tenant_id": auth_context["tenant_id"],
+            "video_task_id": task_id,
+            "topic": "premium product photo",
+        }
+    )
+
+    output_key = f"tenants/{auth_context['tenant_id']}/photos/{task_id}/output.png"
+    assert result["status"] == "FAILURE"
+    assert provider.payloads
+    assert output_key in storage.saved
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        assert task is not None
+        assets = list(db.scalars(select(Asset).where(Asset.storage_key == output_key)))
+        task_assets = list(
+            db.scalars(select(TaskAsset).where(TaskAsset.video_task_id == task_id))
+        )
+
+    assert task.status == "failed"
+    assert task.storage_key is None
+    assert assets == []
+    assert task_assets == []
 
 
 def test_image_worker_heartbeats_during_provider_call_without_fake_progress(

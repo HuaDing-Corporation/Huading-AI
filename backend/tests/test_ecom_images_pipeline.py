@@ -8,6 +8,7 @@ from app.api.deps import get_object_storage
 from app.db.models import (
     Asset,
     BatchJob,
+    BillingOperation,
     ProviderConfig,
     Subscription,
     Tenant,
@@ -159,6 +160,189 @@ def test_ecom_poster_templates_returns_static_presets(auth_context) -> None:
 
     assert resp.status_code == 410
     assert resp.json()["error"]["code"] == "ECOM_POSTER_DISABLED"
+
+
+def test_ecom_cutout_insufficient_balance_rolls_back_everything(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        source = _seed_source_asset(
+            db, tenant_id=auth_context["tenant_id"], asset_id="insufficient-cutout-source"
+        )
+        subscription = db.scalars(select(Subscription)).one()
+        subscription.quota_credits_total = 0
+        subscription.quota_credits_used = 0
+        subscription.quota_credits_reserved = 0
+        db.commit()
+    enqueued = _stub_image_task(monkeypatch)
+
+    response = TestClient(app).post(
+        "/api/v1/ecom-images/cutout",
+        json={"source_asset_id": source["id"]},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "TENANT_QUOTA_EXCEEDED"
+    assert enqueued == []
+    with auth_db() as db:
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == 0
+        assert db.scalar(select(func.count()).select_from(BillingOperation)) == 0
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == 0
+
+
+def test_terminal_cutout_replay_returns_the_stored_success_without_new_side_effects(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.db.models import TaskAsset
+    from app.services.ecom_billing import try_finalize_ecom_operation
+
+    with auth_db() as db:
+        source = _seed_source_asset(
+            db, tenant_id=auth_context["tenant_id"], asset_id="terminal-replay-success-source"
+        )
+    payload = {"source_asset_id": source["id"]}
+    client = TestClient(app)
+    estimate = client.post(
+        "/api/v1/ecom-images/cutout/estimate", json=payload, headers=auth_context["headers"]
+    )
+    assert estimate.status_code == 200
+    headers = {
+        **auth_context["headers"],
+        "Idempotency-Key": str(uuid4()),
+        "X-Huading-Quote": estimate.json()["data"]["quote_token"],
+    }
+    enqueued = _stub_image_task(monkeypatch)
+
+    submitted = client.post("/api/v1/ecom-images/cutout", json=payload, headers=headers)
+
+    assert submitted.status_code == 202
+    task_id = submitted.json()["data"]["task_id"]
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        assert task is not None
+        operation_id = str(task.params["billing_operation_id"])
+        asset = Asset(
+            tenant_id=auth_context["tenant_id"],
+            type="generated_image",
+            source="generated",
+            storage_key=f"tenants/{auth_context['tenant_id']}/photos/{task.id}/output.png",
+            mime_type="image/png",
+            status="ready",
+        )
+        db.add(asset)
+        db.flush()
+        asset_id = asset.id
+        db.add(TaskAsset(video_task_id=task.id, asset_id=asset.id, role="output_image"))
+        task.status = "done"
+        task.progress = 100
+        db.commit()
+    with auth_db() as db:
+        assert try_finalize_ecom_operation(db, billing_operation_id=operation_id) is not None
+    with auth_db() as db:
+        counts_before = (
+            db.scalar(select(func.count()).select_from(VideoTask)),
+            db.scalar(select(func.count()).select_from(BillingOperation)),
+            db.scalar(select(func.count()).select_from(UsageRecord)),
+        )
+
+    replay = client.post("/api/v1/ecom-images/cutout", json=payload, headers=headers)
+
+    assert replay.status_code == 202
+    data = replay.json()["data"]
+    assert data["state"] == "completed"
+    assert data["completion_kind"] == "succeeded"
+    assert data["billing"]["held_credits"] == 0
+    assert data["result_type"] == "ecom_image_batch"
+    assert data["result"]["items"] == [
+        {
+            "item_index": 0,
+            "task_id": task_id,
+            "source_asset_id": source["id"],
+            "status": "done",
+            "asset_id": asset_id,
+        }
+    ]
+    assert len(enqueued) == 1
+    assert enqueued[0]["task_id"] == task_id
+    with auth_db() as db:
+        counts_after = (
+            db.scalar(select(func.count()).select_from(VideoTask)),
+            db.scalar(select(func.count()).select_from(BillingOperation)),
+            db.scalar(select(func.count()).select_from(UsageRecord)),
+        )
+    assert counts_after == counts_before
+
+
+def test_terminal_cutout_replay_returns_the_stored_failure_without_new_side_effects(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.services.ecom_billing import try_finalize_ecom_operation
+
+    with auth_db() as db:
+        source = _seed_source_asset(
+            db, tenant_id=auth_context["tenant_id"], asset_id="terminal-replay-failure-source"
+        )
+    payload = {"source_asset_id": source["id"]}
+    client = TestClient(app)
+    estimate = client.post(
+        "/api/v1/ecom-images/cutout/estimate", json=payload, headers=auth_context["headers"]
+    )
+    assert estimate.status_code == 200
+    headers = {
+        **auth_context["headers"],
+        "Idempotency-Key": str(uuid4()),
+        "X-Huading-Quote": estimate.json()["data"]["quote_token"],
+    }
+    enqueued = _stub_image_task(monkeypatch)
+
+    submitted = client.post("/api/v1/ecom-images/cutout", json=payload, headers=headers)
+
+    assert submitted.status_code == 202
+    task_id = submitted.json()["data"]["task_id"]
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        assert task is not None
+        operation_id = str(task.params["billing_operation_id"])
+        task.status = "failed"
+        task.progress = 1
+        db.commit()
+    with auth_db() as db:
+        assert try_finalize_ecom_operation(db, billing_operation_id=operation_id) is not None
+    with auth_db() as db:
+        counts_before = (
+            db.scalar(select(func.count()).select_from(VideoTask)),
+            db.scalar(select(func.count()).select_from(BillingOperation)),
+            db.scalar(select(func.count()).select_from(UsageRecord)),
+        )
+
+    replay = client.post("/api/v1/ecom-images/cutout", json=payload, headers=headers)
+
+    assert replay.status_code == 202
+    data = replay.json()["data"]
+    assert data["state"] == "completed"
+    assert data["completion_kind"] == "failed"
+    assert data["billing"]["held_credits"] == 0
+    assert data["failure"] == {
+        "code": "ECOM_IMAGE_BATCH_FAILED",
+        "original_http_status": 502,
+        "detail": None,
+    }
+    assert len(enqueued) == 1
+    assert enqueued[0]["task_id"] == task_id
+    with auth_db() as db:
+        counts_after = (
+            db.scalar(select(func.count()).select_from(VideoTask)),
+            db.scalar(select(func.count()).select_from(BillingOperation)),
+            db.scalar(select(func.count()).select_from(UsageRecord)),
+        )
+    assert counts_after == counts_before
 
 
 def test_ecom_poster_single_creates_photo_task_clamps_text_without_quota(
