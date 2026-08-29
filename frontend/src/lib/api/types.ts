@@ -893,3 +893,129 @@ export interface AnalyticsTimeseriesBucket {
 export interface AnalyticsTimeseries {
   buckets: AnalyticsTimeseriesBucket[];
 }
+
+// ── Authoritative billing confirmation + operation recovery ──
+// Decimal strings and payable_credits are server-owned display values. Callers must
+// never derive or round prices from these fields in JavaScript.
+export interface BillingConfirmation {
+  quote_token: string;
+  idempotency_key: string;
+}
+
+export interface BillingSummary {
+  operation_id: string;
+  idempotency_key: string;
+  status: "reserved" | "settled" | "partially_settled" | "released";
+  requested_credits: number;
+  held_credits: number;
+  settled_credits: number;
+  released_credits: number;
+}
+
+export interface BillingPricingLine {
+  operation: string;
+  capability: string;
+  unit: string;
+  quantity: string;
+  unit_credits: string;
+  subtotal_credits: string;
+  rate_scope: "tenant_overridable" | "platform_fixed";
+  rate_source: "tenant_rate" | "platform_rate" | "code_default" | "fixed_policy";
+  rate_id: string | null;
+  effective_at: string | null;
+  policy_key: string | null;
+  policy_version: number | null;
+  label: string;
+}
+
+export interface BillingDisclosure {
+  key: string;
+  rendered_text: string;
+  copy_version: number;
+  unit: string;
+  rate_scope: BillingPricingLine["rate_scope"];
+  rate_source: BillingPricingLine["rate_source"];
+  rate_id: string | null;
+  effective_at: string | null;
+  policy_key: string | null;
+  policy_version: number | null;
+  reference_unit_credits: string;
+}
+
+interface BillingQuoteBase {
+  pricing_contract: "billing_quote";
+  operation: string;
+  subtotal_credits: string;
+  payable_credits: number;
+  disclosures: BillingDisclosure[];
+  quote_token: string;
+  expires_at: string;
+}
+
+export type BillingQuote =
+  | (BillingQuoteBase & {
+      pricing_shape: "simple";
+      unit: string;
+      quantity: string;
+      unit_credits: string;
+      rate_scope: BillingPricingLine["rate_scope"];
+      rate_source: BillingPricingLine["rate_source"];
+      breakdown: [];
+    })
+  | (BillingQuoteBase & {
+      pricing_shape: "composite";
+      unit: null;
+      quantity: null;
+      unit_credits: null;
+      rate_scope: null;
+      rate_source: null;
+      breakdown: [BillingPricingLine, ...BillingPricingLine[]];
+    });
+
+export type BillingLookupPayload = Record<string, unknown>;
+
+interface BillingOperationLookupBase {
+  operation: string;
+  idempotency_key: string;
+  billing: BillingSummary;
+  result_id: string | null;
+}
+
+export type BillingOperationLookup =
+  | (BillingOperationLookupBase & {
+      state: "in_progress";
+      completion_kind: null;
+      result_type: string | null;
+      resource: BillingLookupPayload | null;
+      result: null;
+      failure: null;
+    })
+  | (BillingOperationLookupBase & {
+      state: "completed";
+      completion_kind: "succeeded";
+      result_type: string;
+      resource: BillingLookupPayload | null;
+      result: BillingLookupPayload;
+      failure: null;
+    })
+  | (BillingOperationLookupBase & {
+      state: "completed";
+      completion_kind: "rejected";
+      result_type: string;
+      resource: BillingLookupPayload;
+      result: null;
+      failure: null;
+    })
+  | (BillingOperationLookupBase & {
+      state: "completed";
+      completion_kind: "failed";
+      result_type: null;
+      result_id: null;
+      resource: null;
+      result: null;
+      failure: {
+        code: string;
+        original_http_status: number;
+        detail: { requires_new_quote: boolean | null } | null;
+      };
+    });

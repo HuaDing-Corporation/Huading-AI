@@ -1,0 +1,364 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { ApiError } from "./client";
+import {
+  billingFromApiError,
+  billingHeaders,
+  getBillingOperation,
+  parseBillingOperationLookup,
+  parseBillingQuote,
+  parseBillingSummary
+} from "./billing";
+
+const key = "11111111-1111-4111-8111-111111111111";
+
+afterEach(() => vi.unstubAllGlobals());
+
+function summary(
+  status: "reserved" | "settled" | "partially_settled" | "released"
+) {
+  const amounts = {
+    reserved: [30, 30, 0, 0],
+    settled: [30, 0, 30, 0],
+    partially_settled: [30, 0, 18, 12],
+    released: [30, 0, 0, 30]
+  }[status];
+  return {
+    operation_id: "op-1",
+    idempotency_key: key,
+    status,
+    requested_credits: amounts[0],
+    held_credits: amounts[1],
+    settled_credits: amounts[2],
+    released_credits: amounts[3]
+  };
+}
+
+describe("billing wire parsing", () => {
+  it.each(["reserved", "settled", "partially_settled", "released"] as const)(
+    "accepts a conserved %s summary",
+    (status) => expect(parseBillingSummary(summary(status))?.status).toBe(status)
+  );
+
+  it("accepts a legal zero-price settled operation", () => {
+    expect(
+      parseBillingSummary({
+        ...summary("settled"),
+        requested_credits: 0,
+        settled_credits: 0
+      })?.status
+    ).toBe("settled");
+  });
+
+  it("rejects a terminal summary whose money does not conserve", () => {
+    expect(
+      parseBillingSummary({ ...summary("settled"), settled_credits: 29 })
+    ).toBeNull();
+  });
+
+  it.each([
+    { ...summary("reserved"), held_credits: -1 },
+    { ...summary("settled"), settled_credits: 30.5 },
+    { ...summary("released"), status: "refunded" },
+    { ...summary("released"), idempotency_key: "not-a-uuid" },
+    { ...summary("released"), extra: true }
+  ])("rejects malformed or unknown summary data", (value) => {
+    expect(parseBillingSummary(value)).toBeNull();
+  });
+
+  it("reads billing from ApiError.detail but never from an envelope root", () => {
+    const error = new ApiError("失败", "supplier_failed", 502, {
+      billing: summary("released")
+    });
+    expect(billingFromApiError(error)?.status).toBe("released");
+    expect(billingFromApiError({ billing: summary("released") })).toBeNull();
+  });
+
+  it("uses only the two authoritative confirmation header names", () => {
+    expect(billingHeaders({ quote_token: "quote-token", idempotency_key: key })).toEqual({
+      "Idempotency-Key": key,
+      "X-Huading-Quote": "quote-token"
+    });
+  });
+});
+
+function disclosure(overrides: Record<string, unknown> = {}) {
+  return {
+    key: "pricing.voice.characters",
+    rendered_text: "按字符计费",
+    copy_version: 1,
+    unit: "character",
+    rate_scope: "tenant_overridable",
+    rate_source: "tenant_rate",
+    rate_id: "rate-1",
+    effective_at: "2026-08-29T10:00:00Z",
+    policy_key: null,
+    policy_version: null,
+    reference_unit_credits: "0.1",
+    ...overrides
+  };
+}
+
+function line(overrides: Record<string, unknown> = {}) {
+  return {
+    operation: "brand_voice_clone",
+    capability: "voice.clone",
+    unit: "character",
+    quantity: "100",
+    unit_credits: "0.1",
+    subtotal_credits: "10",
+    rate_scope: "tenant_overridable",
+    rate_source: "tenant_rate",
+    rate_id: "rate-1",
+    effective_at: "2026-08-29T10:00:00Z",
+    policy_key: null,
+    policy_version: null,
+    label: "声音克隆",
+    ...overrides
+  };
+}
+
+function simpleQuote(overrides: Record<string, unknown> = {}) {
+  return {
+    pricing_contract: "billing_quote",
+    operation: "brand_voice_clone",
+    pricing_shape: "simple",
+    unit: "character",
+    quantity: "100",
+    unit_credits: "0.1",
+    rate_scope: "tenant_overridable",
+    rate_source: "tenant_rate",
+    subtotal_credits: "10",
+    payable_credits: 10,
+    breakdown: [],
+    disclosures: [disclosure()],
+    quote_token: "signed-quote",
+    expires_at: "2026-08-29T10:05:00Z",
+    ...overrides
+  };
+}
+
+describe("billing quote parsing", () => {
+  it("accepts a simple quote without recalculating server money", () => {
+    const parsed = parseBillingQuote(simpleQuote({ unit_credits: "0.333", subtotal_credits: "10.01" }));
+    expect(parsed?.subtotal_credits).toBe("10.01");
+    expect(parsed?.payable_credits).toBe(10);
+  });
+
+  it("accepts a composite quote only with null top-level unit fields and a non-empty breakdown", () => {
+    const parsed = parseBillingQuote(
+      simpleQuote({
+        pricing_shape: "composite",
+        unit: null,
+        quantity: null,
+        unit_credits: null,
+        rate_scope: null,
+        rate_source: null,
+        breakdown: [line()]
+      })
+    );
+    expect(parsed?.pricing_shape).toBe("composite");
+  });
+
+  it.each([
+    simpleQuote({ quantity: "NaN" }),
+    simpleQuote({ unit_credits: "1e3" }),
+    simpleQuote({ subtotal_credits: "-1" }),
+    simpleQuote({ payable_credits: 10.5 }),
+    simpleQuote({ expires_at: "2026-02-30T10:00:00Z" }),
+    simpleQuote({ breakdown: [line()] }),
+    simpleQuote({ pricing_shape: "composite", breakdown: [] }),
+    simpleQuote({ rate_source: "unknown_rate" }),
+    simpleQuote({ pricing_contract: "legacy_estimate" }),
+    simpleQuote({ extra: "forbidden" })
+  ])("rejects malformed money, shape, contract, and unknown fields", (value) => {
+    expect(parseBillingQuote(value)).toBeNull();
+  });
+
+  it.each([
+    disclosure({ rate_id: null }),
+    disclosure({ effective_at: null }),
+    disclosure({ policy_key: "wrong" }),
+    disclosure({ rate_source: "fixed_policy", rate_id: "wrong", effective_at: null }),
+    disclosure({
+      rate_source: "fixed_policy",
+      rate_id: null,
+      effective_at: null,
+      policy_key: null,
+      policy_version: 1
+    }),
+    disclosure({
+      rate_source: "fixed_policy",
+      rate_id: null,
+      effective_at: null,
+      policy_key: "cosyvoice_free",
+      policy_version: 0
+    })
+  ])("rejects incomplete disclosure provenance", (value) => {
+    expect(parseBillingQuote(simpleQuote({ disclosures: [value] }))).toBeNull();
+  });
+
+  it("accepts complete fixed-policy provenance on lines and disclosures", () => {
+    const provenance = {
+      rate_source: "fixed_policy",
+      rate_scope: "platform_fixed",
+      rate_id: null,
+      effective_at: null,
+      policy_key: "cosyvoice_free",
+      policy_version: 1
+    };
+    expect(
+      parseBillingQuote(
+        simpleQuote({
+          pricing_shape: "composite",
+          unit: null,
+          quantity: null,
+          unit_credits: null,
+          rate_scope: null,
+          rate_source: null,
+          breakdown: [line(provenance)],
+          disclosures: [disclosure(provenance)],
+          payable_credits: 0,
+          subtotal_credits: "0"
+        })
+      )
+    ).not.toBeNull();
+  });
+
+  it("rejects malformed decimal and incomplete provenance inside a composite line", () => {
+    const composite = (entry: Record<string, unknown>) =>
+      simpleQuote({
+        pricing_shape: "composite",
+        unit: null,
+        quantity: null,
+        unit_credits: null,
+        rate_scope: null,
+        rate_source: null,
+        breakdown: [entry]
+      });
+    expect(parseBillingQuote(composite(line({ quantity: "Infinity" })))).toBeNull();
+    expect(parseBillingQuote(composite(line({ rate_id: null })))).toBeNull();
+  });
+});
+
+function lookupBase(overrides: Record<string, unknown> = {}) {
+  return {
+    operation: "brand_voice_clone",
+    idempotency_key: key,
+    state: "in_progress",
+    completion_kind: null,
+    billing: summary("reserved"),
+    result_type: null,
+    result_id: null,
+    resource: null,
+    result: null,
+    failure: null,
+    ...overrides
+  };
+}
+
+describe("billing operation lookup parsing", () => {
+  it("accepts all four closed lookup variants", () => {
+    const succeeded = lookupBase({
+      state: "completed",
+      completion_kind: "succeeded",
+      billing: summary("settled"),
+      result_type: "brand_voice",
+      result_id: "voice-1",
+      result: { id: "voice-1" }
+    });
+    const rejected = lookupBase({
+      state: "completed",
+      completion_kind: "rejected",
+      billing: summary("released"),
+      result_type: "brand_voice_order",
+      result_id: "order-1",
+      resource: { id: "order-1", status: "rejected" }
+    });
+    const failed = lookupBase({
+      state: "completed",
+      completion_kind: "failed",
+      billing: summary("released"),
+      failure: {
+        code: "PROVIDER_FAILED",
+        original_http_status: 502,
+        detail: { requires_new_quote: true }
+      }
+    });
+    expect(parseBillingOperationLookup(lookupBase())?.state).toBe("in_progress");
+    expect(parseBillingOperationLookup(succeeded)?.completion_kind).toBe("succeeded");
+    expect(parseBillingOperationLookup(rejected)?.completion_kind).toBe("rejected");
+    expect(parseBillingOperationLookup(failed)?.completion_kind).toBe("failed");
+  });
+
+  it.each([
+    lookupBase({ state: "pending" }),
+    lookupBase({ completion_kind: "succeeded" }),
+    lookupBase({
+      idempotency_key: "22222222-2222-4222-8222-222222222222",
+      billing: summary("reserved")
+    }),
+    lookupBase({ extra: true }),
+    lookupBase({
+      state: "completed",
+      completion_kind: "succeeded",
+      billing: summary("settled"),
+      result_type: "voice",
+      result: null
+    }),
+    lookupBase({
+      state: "completed",
+      completion_kind: "rejected",
+      billing: summary("released"),
+      result_type: "order",
+      resource: { id: "order-1" },
+      result: { forbidden: true }
+    }),
+    lookupBase({
+      state: "completed",
+      completion_kind: "failed",
+      billing: summary("released"),
+      result_type: "forbidden",
+      failure: { code: "provider failed", original_http_status: 502, detail: null }
+    })
+  ])("rejects unknown states and non-exclusive or inconsistent payloads", (value) => {
+    expect(parseBillingOperationLookup(value)).toBeNull();
+  });
+
+  it("queries the encoded by-idempotency route and validates the returned lookup", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: lookupBase({ operation: "voice/clone" }),
+          error: null,
+          request_id: "req-1"
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getBillingOperation("voice/clone", key)).resolves.toMatchObject({
+      state: "in_progress",
+      idempotency_key: key
+    });
+    expect(fetchMock.mock.calls[0][0]).toContain(
+      `/api/v1/billing/operations/by-idempotency/voice%2Fclone/${key}`
+    );
+  });
+
+  it("fails closed when a successful lookup response has an invalid wire shape", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({ data: { state: "completed" }, error: null, request_id: "req-1" }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      )
+    );
+    await expect(getBillingOperation("voice_clone", key)).rejects.toMatchObject({
+      code: "INVALID_BILLING_RESPONSE"
+    });
+  });
+});
