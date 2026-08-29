@@ -21,6 +21,7 @@ from app.services.billing_quotes import (
     QUOTE_SCHEMA_VERSION,
     QUOTE_TOKEN_AUDIENCE,
     QUOTE_TOKEN_MAX_BYTES,
+    QUOTE_TOKEN_TTL,
     QUOTE_TOKEN_TYPE,
     canonical_json,
     issue_quote,
@@ -108,6 +109,34 @@ def _quote(now: datetime):
     )
 
 
+def _resigned_token(now: datetime, **overrides: object) -> str:
+    claims = jwt.decode(
+        _quote(now).quote_token,
+        quote_signing_key(settings.jwt_secret_key),
+        algorithms=["HS256"],
+        options={"verify_exp": False, "verify_iat": False, "verify_aud": False},
+    )
+    claims.update(overrides)
+    return jwt.encode(
+        claims,
+        quote_signing_key(settings.jwt_secret_key),
+        algorithm="HS256",
+        headers={"typ": QUOTE_TOKEN_TYPE},
+    )
+
+
+def _verify(now: datetime, token: str) -> None:
+    verify_quote(
+        token=token,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        operation="scene_prompt",
+        request_hash="a" * 64,
+        current_draft=scene_prompt_draft(),
+        now=now,
+    )
+
+
 def test_canonical_json_is_stable_utf8_and_normalizes_decimals() -> None:
     left = {"z": Decimal("1.00"), "a": [Decimal("2.50"), "新品"]}
     right = {"a": [Decimal("2.5"), "新品"], "z": Decimal("1")}
@@ -178,6 +207,46 @@ def test_quote_expires_at_exact_ten_minute_boundary(now: datetime) -> None:
         )
 
     assert exc_info.value.code == "QUOTE_EXPIRED"
+
+
+def test_quote_normalizes_microsecond_issuance_to_signed_expiry(now: datetime) -> None:
+    quote = _quote(now.replace(microsecond=987_654))
+    claims = jwt.decode(
+        quote.quote_token,
+        quote_signing_key(settings.jwt_secret_key),
+        algorithms=["HS256"],
+        options={"verify_exp": False, "verify_iat": False, "verify_aud": False},
+    )
+
+    assert claims["exp"] - claims["iat"] == int(QUOTE_TOKEN_TTL.total_seconds())
+    assert quote.expires_at == datetime.fromtimestamp(claims["exp"], UTC)
+    assert quote.expires_at.microsecond == 0
+
+
+@pytest.mark.parametrize("invalid_iat", ["not-a-time", True, 1.5])
+def test_quote_rejects_non_integer_or_boolean_issued_at(now: datetime, invalid_iat: object) -> None:
+    with pytest.raises(AppError) as exc_info:
+        _verify(now, _resigned_token(now, iat=invalid_iat, exp=int(now.timestamp()) + 600))
+
+    assert exc_info.value.code == "QUOTE_TOKEN_INVALID"
+
+
+def test_quote_rejects_future_issued_at(now: datetime) -> None:
+    future_iat = int(now.timestamp()) + 1
+
+    with pytest.raises(AppError) as exc_info:
+        _verify(now, _resigned_token(now, iat=future_iat, exp=future_iat + 600))
+
+    assert exc_info.value.code == "QUOTE_TOKEN_INVALID"
+
+
+def test_quote_rejects_a_ttl_other_than_exactly_ten_minutes(now: datetime) -> None:
+    issued_at = int(now.timestamp())
+
+    with pytest.raises(AppError) as exc_info:
+        _verify(now, _resigned_token(now, iat=issued_at, exp=issued_at + 599))
+
+    assert exc_info.value.code == "QUOTE_TOKEN_INVALID"
 
 
 def test_quote_rejects_signature_tampering(now: datetime) -> None:
@@ -317,6 +386,25 @@ def test_quote_uses_fixed_claims_and_an_independent_derived_key(now: datetime) -
             audience=QUOTE_TOKEN_AUDIENCE,
             options={"verify_exp": False, "verify_iat": False},
         )
+
+
+@pytest.mark.parametrize(
+    ("claim", "value"),
+    [
+        ("aud", [QUOTE_TOKEN_AUDIENCE]),
+        ("schema", True),
+        ("schema", "1"),
+    ],
+)
+def test_quote_rejects_non_exact_fixed_claim_values(
+    now: datetime,
+    claim: str,
+    value: object,
+) -> None:
+    with pytest.raises(AppError) as exc_info:
+        _verify(now, _resigned_token(now, **{claim: value}))
+
+    assert exc_info.value.code == "QUOTE_TOKEN_INVALID"
 
 
 def test_twenty_item_quote_token_fits_the_header_limit(now: datetime) -> None:

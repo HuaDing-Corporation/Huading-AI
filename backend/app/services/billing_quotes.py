@@ -216,6 +216,14 @@ def _validate_request_hash(request_hash: str) -> None:
         raise ValueError("request_hash must be a lowercase SHA-256 digest")
 
 
+def _as_utc(value: datetime) -> datetime:
+    return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _issued_at(now: datetime | None) -> datetime:
+    return _as_utc(now or datetime.now(UTC)).replace(microsecond=0)
+
+
 def issue_quote(
     *,
     tenant_id: str,
@@ -227,7 +235,7 @@ def issue_quote(
     _validate_request_hash(request_hash)
     _, snapshot = _validated_snapshot(draft)
     pricing_hash = pricing_payload_sha256(draft)
-    issued_at = now or datetime.now(UTC)
+    issued_at = _issued_at(now)
     expires_at = issued_at + QUOTE_TOKEN_TTL
     claims: dict[str, Any] = {
         "tenant_id": tenant_id,
@@ -315,6 +323,7 @@ def _decode_quote(token: str) -> dict[str, object]:
             options={
                 "verify_exp": False,
                 "verify_iat": False,
+                "verify_aud": False,
                 "require": [
                     "tenant_id",
                     "user_id",
@@ -340,13 +349,13 @@ def _decode_quote(token: str) -> dict[str, object]:
     return claims
 
 
-def _claim_matches(claims: Mapping[str, object], key: str, expected: object) -> bool:
-    return claims.get(key) == expected
+def _claim_matches(claims: Mapping[str, object], key: str, expected: str | int) -> bool:
+    return type(claims.get(key)) is type(expected) and claims.get(key) == expected
 
 
 def _claim_time(claims: Mapping[str, object], key: str) -> datetime:
     value = claims.get(key)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if type(value) is not int:
         raise _invalid_quote()
     try:
         return datetime.fromtimestamp(value, UTC)
@@ -370,11 +379,17 @@ def verify_quote(
         not _claim_matches(claims, "tenant_id", tenant_id)
         or not _claim_matches(claims, "user_id", user_id)
         or not _claim_matches(claims, "operation", operation)
+        or not _claim_matches(claims, "aud", QUOTE_TOKEN_AUDIENCE)
         or not _claim_matches(claims, "typ", QUOTE_TOKEN_TYPE)
         or not _claim_matches(claims, "schema", QUOTE_SCHEMA_VERSION)
     ):
         raise _invalid_quote()
-    if _claim_time(claims, "exp") <= (now or datetime.now(UTC)):
+    verified_at = _as_utc(now or datetime.now(UTC))
+    issued_at = _claim_time(claims, "iat")
+    expires_at = _claim_time(claims, "exp")
+    if issued_at > verified_at or expires_at - issued_at != QUOTE_TOKEN_TTL:
+        raise _invalid_quote()
+    if expires_at <= verified_at:
         raise AppError("报价凭证已过期", code="QUOTE_EXPIRED", status_code=422)
     if not _claim_matches(claims, "request_sha256", request_hash):
         raise AppError("报价或请求已变化", code="PRICE_CHANGED", status_code=422)
