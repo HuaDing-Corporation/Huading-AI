@@ -46,7 +46,10 @@ from app.schemas.admin_console import (
 )
 from app.services import ecom_replicate, quota, reverse_prompt
 from app.services.plan_access import is_platform_tenant
-from app.services.subscription import lock_tenant_for_subscription_lifecycle
+from app.services.subscription import (
+    current_active_subscription_for_update,
+    lock_tenant_for_subscription_lifecycle,
+)
 from app.services.voice_slots import (
     DOUBAO_VOICE_CLONE_PROVIDER,
     speaker_ids,
@@ -207,18 +210,10 @@ def record_audit(
 
 def _active_subscription_for_update(db: Session, *, tenant_id: str) -> Subscription:
     now = datetime.now(UTC)
-    subscription = db.scalar(
-        select(Subscription)
-        .where(
-            Subscription.tenant_id == tenant_id,
-            Subscription.status == "active",
-            Subscription.period_start <= now,
-            Subscription.period_end >= now,
-        )
-        .order_by(Subscription.period_end.desc(), Subscription.created_at.desc())
-        .limit(1)
-        .with_for_update()
-        .execution_options(populate_existing=True)
+    subscription = current_active_subscription_for_update(
+        db,
+        tenant_id=tenant_id,
+        now=now,
     )
     if subscription is None:
         raise AppError(
