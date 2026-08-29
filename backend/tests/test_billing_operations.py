@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -10,7 +11,13 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, func, select
 
 from app.core.exceptions import AppError
-from app.db.models import BillingOperation, Subscription, UsageRecord, User
+from app.db.models import (
+    ERROR_PAYLOAD_MAX_BYTES,
+    BillingOperation,
+    Subscription,
+    UsageRecord,
+    User,
+)
 from app.services.billing_operations import (
     BillingInvariantError,
     UsageAllocation,
@@ -457,7 +464,7 @@ def test_repeated_settle_and_release_are_terminal_noops(db_session, verified_quo
         operation_id=reserved.id,
         code="PROVIDER_FAILED",
         http_status=502,
-        sanitized_detail={"reason": "later duplicate"},
+        sanitized_detail=None,
     )
     third = complete_succeeded(
         db_session,
@@ -472,7 +479,7 @@ def test_repeated_settle_and_release_are_terminal_noops(db_session, verified_quo
     assert db_session.get(Subscription, "subscription-a").quota_credits_used == 1
 
 
-def test_result_and_error_payload_bounds_and_validation(db_session, verified_quote):
+def test_result_payload_bound_and_error_payload_validation(db_session, verified_quote):
     register_billing_result_schema("test_large_result", LargeResult)
     reserved = reserve_batch(db_session, verified_quote)
     with pytest.raises(AppError) as result_error:
@@ -488,25 +495,13 @@ def test_result_and_error_payload_bounds_and_validation(db_session, verified_quo
     db_session.rollback()
 
     reserved = reserve_batch(db_session, verified_quote, key=uuid4())
-    with pytest.raises(AppError) as error_error:
-        complete_failed(
-            db_session,
-            operation_id=reserved.id,
-            code="PROVIDER_FAILED",
-            http_status=502,
-            sanitized_detail={"reason": "x" * (16 * 1024)},
-        )
-    assert error_error.value.code == "BILLING_ERROR_PAYLOAD_TOO_LARGE"
-    db_session.rollback()
-
-    reserved = reserve_batch(db_session, verified_quote, key=uuid4())
     with pytest.raises(AppError) as unknown_field_error:
         complete_failed(
             db_session,
             operation_id=reserved.id,
             code="PROVIDER_FAILED",
             http_status=502,
-            sanitized_detail={"api_key": "secret-value", "reason": "timeout"},
+            sanitized_detail={"api_key": "secret-value"},
         )
     assert unknown_field_error.value.code == "BILLING_ERROR_PAYLOAD_INVALID"
     db_session.rollback()
@@ -538,7 +533,14 @@ def test_error_payload_rejects_unknown_client_secret_field(db_session, verified_
     assert error.value.code == "BILLING_ERROR_PAYLOAD_INVALID"
 
 
-def test_error_payload_rejects_credential_shaped_reason(db_session, verified_quote):
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "routine upstream failure",
+        "Z8q4N2v7Lm3Xa9Pc6Rt1Wb5Yk0Jh",
+    ],
+)
+def test_error_payload_rejects_all_free_form_reason_strings(db_session, verified_quote, reason):
     reserved = reserve_batch(db_session, verified_quote)
 
     with pytest.raises(AppError) as error:
@@ -547,7 +549,7 @@ def test_error_payload_rejects_credential_shaped_reason(db_session, verified_quo
             operation_id=reserved.id,
             code="PROVIDER_FAILED",
             http_status=502,
-            sanitized_detail={"reason": "innocuous-key-secret-value"},
+            sanitized_detail={"reason": reason},
         )
 
     assert error.value.code == "BILLING_ERROR_PAYLOAD_INVALID"
@@ -556,11 +558,16 @@ def test_error_payload_rejects_credential_shaped_reason(db_session, verified_quo
 @pytest.mark.parametrize(
     ("detail", "expected_payload"),
     [
-        ({"reason": "timeout"}, {"detail": {"reason": "timeout"}}),
+        ({}, {"detail": {}}),
         (
             {"requires_new_quote": True},
             {"detail": {"requires_new_quote": True}},
         ),
+        (
+            {"requires_new_quote": False},
+            {"detail": {"requires_new_quote": False}},
+        ),
+        ({"requires_new_quote": None}, {"detail": {}}),
         (None, {"detail": None}),
     ],
 )
@@ -578,11 +585,26 @@ def test_error_payload_persists_only_explicit_closed_fields(
     )
 
     assert failed.error_payload == expected_payload
+    assert (
+        len(
+            json.dumps(
+                failed.error_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        < ERROR_PAYLOAD_MAX_BYTES
+    )
 
 
 @pytest.mark.parametrize(
     "unsafe_detail",
     [
+        "innocuous single-line detail",
+        b"opaque-bytes",
+        ["nested list"],
+        {"requires_new_quote": "true"},
+        {"requires_new_quote": 1},
         {"metadata": {"supplier_api_key": "supplier-secret"}},
         {
             "reason": (
@@ -592,9 +614,7 @@ def test_error_payload_persists_only_explicit_closed_fields(
         },
     ],
 )
-def test_error_payload_rejects_nested_maps_and_log_strings(
-    db_session, verified_quote, unsafe_detail
-):
+def test_error_payload_rejects_non_schema_shapes(db_session, verified_quote, unsafe_detail):
     reserved = reserve_batch(db_session, verified_quote)
 
     with pytest.raises(AppError) as error:
@@ -613,6 +633,9 @@ def test_error_payload_rejects_nested_maps_and_log_strings(
     "unsafe_detail",
     [
         {"clientSecret": "secret"},
+        "legacy free-text detail",
+        {"reason": "routine upstream failure"},
+        {"reason": "Z8q4N2v7Lm3Xa9Pc6Rt1Wb5Yk0Jh"},
         {"reason": "innocuous-key-secret-value"},
         {"metadata": {"supplier_api_key": "supplier-secret"}},
         {"reason": "Authorization: Bearer stored-raw-secret\nTraceback (raw log)"},
@@ -625,7 +648,7 @@ def test_lookup_rejects_tampered_error_payload(db_session, verified_quote, unsaf
         operation_id=reserved.id,
         code="PROVIDER_FAILED",
         http_status=502,
-        sanitized_detail={"reason": "timeout"},
+        sanitized_detail=None,
     )
     db_session.commit()
     failed.error_payload = {"detail": unsafe_detail}
@@ -681,7 +704,7 @@ def test_lookup_returns_all_four_closed_union_states(db_session, verified_quote)
         operation_id=failed.id,
         code="PROVIDER_FAILED",
         http_status=502,
-        sanitized_detail={"reason": "timeout"},
+        sanitized_detail={"requires_new_quote": True},
     )
     failed_lookup = lookup_operation(
         db_session,
@@ -693,6 +716,7 @@ def test_lookup_returns_all_four_closed_union_states(db_session, verified_quote)
     assert failed_lookup is not None
     assert failed_lookup.failure.code == "PROVIDER_FAILED"
     assert failed_lookup.failure.original_http_status == 502
+    assert failed_lookup.failure.detail.requires_new_quote is True
 
     rejected = reserve_batch(db_session, verified_quote, key=uuid4())
     rejected.status = "completed"
@@ -876,7 +900,7 @@ def test_lookup_route_hides_other_users_and_visible_failure_is_http_200(
             operation_id=visible.id,
             code="PROVIDER_FAILED",
             http_status=502,
-            sanitized_detail={"reason": "timeout"},
+            sanitized_detail=None,
         )
         succeeded = create_reserved_operation(
             db,

@@ -11,7 +11,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 import structlog
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -38,14 +38,6 @@ logger = structlog.get_logger(__name__)
 _RESULT_SCHEMAS: dict[str, type[BaseModel]] = {}
 _RESULT_SCHEMAS_LOCK = threading.Lock()
 _SAFE_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
-_UNSAFE_ERROR_REASON = re.compile(
-    r"[\r\n]|"
-    r"\b(?:authorization|bearer|basic|cookie|credential|header|password|secret|token|traceback)\b|"
-    r"\bapi[ _-]?key\b|"
-    r"\b(?:stack trace|provider log|supplier log)\b|"
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
-    re.IGNORECASE,
-)
 
 
 class BillingInvariantError(AppError):
@@ -82,15 +74,7 @@ class _BillingModel(BaseModel):
 class _ErrorDetail(_BillingModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    reason: str | None = None
     requires_new_quote: bool | None = None
-
-    @field_validator("reason")
-    @classmethod
-    def reject_unsafe_reason(cls, value: str | None) -> str | None:
-        if value is not None and _UNSAFE_ERROR_REASON.search(value):
-            raise ValueError("reason contains unsafe text")
-        return value
 
 
 class BillingSummary(_BillingModel):

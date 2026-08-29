@@ -98,9 +98,7 @@ def _enclosing_function_name(
     if not hasattr(node, "lineno"):
         return "<module>"
     enclosing = [
-        function
-        for function in functions
-        if function.lineno <= node.lineno <= function.end_lineno
+        function for function in functions if function.lineno <= node.lineno <= function.end_lineno
     ]
     return max(enclosing, key=lambda function: function.lineno).name if enclosing else "<module>"
 
@@ -124,9 +122,7 @@ def test_runtime_quota_writes_only_occur_in_locked_helpers() -> None:
                 allowed = allowed_by_function.get(function_name, set())
             for target in assignment_attributes:
                 if target.attr in _RUNTIME_QUOTA_FIELDS and target.attr not in allowed:
-                    violations.append(
-                        f"{relative}:{function_name}:{node.lineno}:{target.attr}"
-                    )
+                    violations.append(f"{relative}:{function_name}:{node.lineno}:{target.attr}")
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
@@ -136,9 +132,7 @@ def test_runtime_quota_writes_only_occur_in_locked_helpers() -> None:
                 allowed = allowed_by_function.get(function_name, set())
                 for keyword in node.keywords:
                     if keyword.arg in _RUNTIME_QUOTA_FIELDS and keyword.arg not in allowed:
-                        violations.append(
-                            f"{relative}:{function_name}:{node.lineno}:{keyword.arg}"
-                        )
+                        violations.append(f"{relative}:{function_name}:{node.lineno}:{keyword.arg}")
 
     assert violations == []
 
@@ -157,9 +151,7 @@ def _capture_postgresql_selects(db) -> list[str]:
 
 
 def _seed_sqlite_reservations(db, *, tenant_id: str) -> tuple[str, str]:
-    subscription = db.scalar(
-        select(Subscription).where(Subscription.tenant_id == tenant_id)
-    )
+    subscription = db.scalar(select(Subscription).where(Subscription.tenant_id == tenant_id))
     subscription.quota_credits_reserved = 110
     video = VideoTask(
         id="quota-lock-photo",
@@ -213,9 +205,7 @@ def _seed_sqlite_reservations(db, *, tenant_id: str) -> tuple[str, str]:
 
 def _assert_lock_order(statements: list[str], owner_table: str) -> None:
     owner_index = next(index for index, sql in enumerate(statements) if owner_table in sql)
-    usage_index = next(
-        index for index, sql in enumerate(statements) if "FROM usage_records" in sql
-    )
+    usage_index = next(index for index, sql in enumerate(statements) if "FROM usage_records" in sql)
     subscription_index = next(
         index for index, sql in enumerate(statements) if "FROM subscriptions" in sql
     )
@@ -649,9 +639,7 @@ def test_postgres_concurrent_release_preserves_both_decrements(
     with factory() as db:
         subscription = db.get(Subscription, subscription_id)
         records = list(
-            db.scalars(
-                select(UsageRecord).where(UsageRecord.video_task_id.in_(task_ids))
-            )
+            db.scalars(select(UsageRecord).where(UsageRecord.video_task_id.in_(task_ids)))
         )
         assert subscription.quota_credits_reserved == 0
         assert {record.status for record in records} == {"released"}
@@ -698,9 +686,7 @@ def test_postgres_concurrent_settlement_preserves_both_transitions(
     with factory() as db:
         subscription = db.get(Subscription, subscription_id)
         records = list(
-            db.scalars(
-                select(UsageRecord).where(UsageRecord.video_task_id.in_(task_ids))
-            )
+            db.scalars(select(UsageRecord).where(UsageRecord.video_task_id.in_(task_ids)))
         )
         assert subscription.quota_credits_reserved == 0
         assert subscription.quota_credits_used == 200
@@ -745,11 +731,7 @@ def test_postgres_concurrent_reverse_prompt_releases_preserve_both_decrements(
     with factory() as db:
         subscription = db.get(Subscription, subscription_id)
         records = list(
-            db.scalars(
-                select(UsageRecord).where(
-                    UsageRecord.reverse_prompt_job_id.in_(job_ids)
-                )
-            )
+            db.scalars(select(UsageRecord).where(UsageRecord.reverse_prompt_job_id.in_(job_ids)))
         )
         assert subscription.quota_credits_reserved == 0
         assert {record.status for record in records} == {"released"}
@@ -795,9 +777,7 @@ def test_postgres_concurrent_reverse_prompt_settlement_is_idempotent(
     assert errors == []
     with factory() as db:
         subscription = db.get(Subscription, subscription_id)
-        record = db.scalar(
-            select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id)
-        )
+        record = db.scalar(select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id))
         assert subscription.quota_credits_reserved == 0
         assert subscription.quota_credits_used == 100
         assert record.status == "settled"
@@ -912,9 +892,7 @@ def test_postgres_recovery_release_wins_against_worker_settlement(
     with factory() as db:
         subscription = db.get(Subscription, subscription_id)
         task = db.get(VideoTask, task_id)
-        record = db.scalar(
-            select(UsageRecord).where(UsageRecord.video_task_id == task_id)
-        )
+        record = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
         assert subscription.quota_credits_reserved == 0
         assert subscription.quota_credits_used == 0
         assert task.status == "failed"
@@ -1007,15 +985,13 @@ def test_operation_transitions_discover_ids_then_lock_operation_subscription_usa
             operation_id=operation_id,
             code="PROVIDER_FAILED",
             http_status=502,
-            sanitized_detail={"reason": "timeout"},
+            sanitized_detail=None,
         )
 
     operation_index = next(
         index for index, sql in enumerate(statements) if "FROM billing_operations" in sql
     )
-    usage_indexes = [
-        index for index, sql in enumerate(statements) if "FROM usage_records" in sql
-    ]
+    usage_indexes = [index for index, sql in enumerate(statements) if "FROM usage_records" in sql]
     subscription_index = next(
         index for index, sql in enumerate(statements) if "FROM subscriptions" in sql
     )
@@ -1043,6 +1019,7 @@ def test_postgres_concurrent_first_submission_reserves_once(
 
     def reserve() -> None:
         try:
+
             def transaction(db):
                 barrier.wait(timeout=5)
                 return create_reserved_operation(
@@ -1071,20 +1048,24 @@ def test_postgres_concurrent_first_submission_reserves_once(
     assert errors == []
     assert len(set(operation_ids)) == 1
     with factory() as db:
-        subscription = db.scalar(
-            select(Subscription).where(Subscription.tenant_id == tenant_id)
-        )
+        subscription = db.scalar(select(Subscription).where(Subscription.tenant_id == tenant_id))
         assert subscription.quota_credits_reserved == 3
-        assert db.scalar(
-            select(func.count()).select_from(BillingOperation).where(
-                BillingOperation.tenant_id == tenant_id
+        assert (
+            db.scalar(
+                select(func.count())
+                .select_from(BillingOperation)
+                .where(BillingOperation.tenant_id == tenant_id)
             )
-        ) == 1
-        assert db.scalar(
-            select(func.count()).select_from(UsageRecord).where(
-                UsageRecord.billing_operation_id == operation_ids[0]
+            == 1
+        )
+        assert (
+            db.scalar(
+                select(func.count())
+                .select_from(UsageRecord)
+                .where(UsageRecord.billing_operation_id == operation_ids[0])
             )
-        ) == 4
+            == 4
+        )
 
 
 def test_postgres_competing_settle_and_release_use_one_terminal_transition(
@@ -1125,7 +1106,7 @@ def test_postgres_competing_settle_and_release_use_one_terminal_transition(
                 operation_id=operation.id,
                 code="PROVIDER_FAILED",
                 http_status=502,
-                sanitized_detail={"reason": "duplicate callback"},
+                sanitized_detail=None,
             ),
         )
         release_was_blocked = not done.wait(timeout=0.4)
@@ -1142,9 +1123,7 @@ def test_postgres_competing_settle_and_release_use_one_terminal_transition(
     assert errors == []
     with factory() as db:
         stored = db.get(BillingOperation, operation.id)
-        subscription = db.scalar(
-            select(Subscription).where(Subscription.tenant_id == tenant_id)
-        )
+        subscription = db.scalar(select(Subscription).where(Subscription.tenant_id == tenant_id))
         assert stored.completion_kind == "succeeded"
         assert stored.settled_credits == 1
         assert stored.released_credits == 2
