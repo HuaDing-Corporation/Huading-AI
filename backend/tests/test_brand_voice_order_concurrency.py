@@ -208,7 +208,7 @@ def postgres_registry_factory(monkeypatch):
         engine.dispose()
 
 
-def _seed_postgres_order_lifecycle(factory) -> None:
+def _seed_postgres_order_lifecycle(factory, *, include_renewal_voice: bool = True) -> None:
     now = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
     with factory.begin() as db:
         db.add(Tenant(id="lifecycle-tenant", slug="lifecycle", name="Lifecycle"))
@@ -280,20 +280,21 @@ def _seed_postgres_order_lifecycle(factory) -> None:
             ]
         )
         db.flush()
-        db.add(
-            BrandVoice(
-                id="lifecycle-renew-voice",
-                tenant_id="lifecycle-tenant",
-                owner_user_id="lifecycle-user",
-                name="Expired lifecycle voice",
-                source_audio_asset_id="lifecycle-renew-old-audio",
-                provider="doubao-voice-clone",
-                speaker_id="lifecycle-old-provider-id",
-                status="ready",
-                consent_confirmed=True,
-                expires_at=now - timedelta(days=1),
+        if include_renewal_voice:
+            db.add(
+                BrandVoice(
+                    id="lifecycle-renew-voice",
+                    tenant_id="lifecycle-tenant",
+                    owner_user_id="lifecycle-user",
+                    name="Expired lifecycle voice",
+                    source_audio_asset_id="lifecycle-renew-old-audio",
+                    provider="doubao-voice-clone",
+                    speaker_id="lifecycle-old-provider-id",
+                    status="ready",
+                    consent_confirmed=True,
+                    expires_at=now - timedelta(days=1),
+                )
             )
-        )
 
 
 def _postgres_verified_quote(db, *, payload: BrandVoiceOrderCreateRequest):
@@ -615,7 +616,10 @@ def test_postgresql_fulfill_vs_reject_has_one_terminal_financial_change(
     postgres_registry_factory,
     first,
 ) -> None:
-    _seed_postgres_order_lifecycle(postgres_registry_factory)
+    _seed_postgres_order_lifecycle(
+        postgres_registry_factory,
+        include_renewal_voice=False,
+    )
     with postgres_registry_factory.begin() as db:
         order = _create_postgres_order(db)
         order_id = order.id
@@ -649,6 +653,7 @@ def test_postgresql_fulfill_vs_reject_has_one_terminal_financial_change(
         "rejected",
         "BRAND_VOICE_ORDER_ALREADY_RESOLVED",
     )
+    resolved_at = datetime(2026, 8, 29, 12, 2, tzinfo=UTC)
     with postgres_registry_factory() as db:
         order = db.get(BrandVoiceOrder, order_id)
         operation = db.get(BillingOperation, order.billing_operation_id)
@@ -656,18 +661,90 @@ def test_postgresql_fulfill_vs_reject_has_one_terminal_financial_change(
             select(UsageRecord).where(UsageRecord.billing_operation_id == operation.id)
         )
         subscription = db.get(Subscription, usage.subscription_id)
-        assert order.status in {"fulfilled", "rejected"}
+        audit = db.scalar(select(AdminAuditLog))
+        assert order.status == ("fulfilled" if first == "fulfill" else "rejected")
+        assert order.resolver_user_id == "lifecycle-user"
+        assert order.updated_at == resolved_at
         assert operation.status == "completed"
-        assert usage.status == ("settled" if order.status == "fulfilled" else "released")
+        assert operation.tenant_id == "lifecycle-tenant"
+        assert operation.user_id == "lifecycle-user"
+        assert operation.operation == "doubao_brand_voice_order_create"
+        assert operation.completion_kind == (
+            "succeeded" if first == "fulfill" else "rejected"
+        )
+        assert operation.completed_at == resolved_at
+        assert operation.updated_at == resolved_at
+        assert operation.result_type == "brand_voice_order"
+        assert operation.result_id == order_id
+        assert operation.result_payload["id"] == order_id
+        assert operation.result_payload["status"] == order.status
+        assert operation.requested_credits == 30_000
+        assert operation.settled_credits == (30_000 if first == "fulfill" else 0)
+        assert operation.released_credits == (0 if first == "fulfill" else 30_000)
+        assert usage.status == ("settled" if first == "fulfill" else "released")
+        assert usage.settled_at == resolved_at
+        assert usage.tenant_id == "lifecycle-tenant"
+        assert usage.subscription_id == "lifecycle-subscription"
+        assert usage.billing_operation_id == operation.id
+        assert usage.billing_item_index == 0
+        assert usage.billing_pricing_line_index == 0
+        assert usage.capability == "voice_clone"
+        assert usage.provider == "doubao-voice-clone"
+        assert usage.model == "manual_fulfillment"
+        assert usage.video_task_id is None
+        assert usage.unit == "call"
+        assert usage.quantity == 1
+        assert usage.credits == 30_000
+        assert subscription.quota_credits_total == 100_000
         assert subscription.quota_credits_reserved == 0
-        assert subscription.quota_credits_used == (
-            30_000 if order.status == "fulfilled" else 0
-        )
+        assert subscription.quota_credits_used == (30_000 if first == "fulfill" else 0)
         assert db.scalar(select(func.count()).select_from(AdminAuditLog)) == 1
+        assert audit.actor_user_id == "lifecycle-user"
+        assert audit.actor_tenant_id == "lifecycle-tenant"
+        assert audit.action == f"brand_voice_order_{first}"
+        assert audit.target_tenant_id == "lifecycle-tenant"
+        assert audit.target_id == order_id
+        assert audit.before == {"status": "awaiting_fulfillment"}
+        assert audit.after == {"status": order.status}
+        assert audit.reason == (None if first == "fulfill" else "race rejection")
+        assert audit.created_at == resolved_at
         assert db.scalar(select(func.count()).select_from(CreditRefundGrant)) == 0
-        assert db.scalar(select(func.count()).select_from(BrandVoiceProviderId)) == (
-            1 if order.status == "fulfilled" else 0
-        )
+        if first == "fulfill":
+            assert order.fulfilled_at == resolved_at
+            assert order.rejected_at is None
+            assert order.rejection_reason is None
+            registry = db.get(BrandVoiceProviderId, order.fulfilled_provider_id)
+            voice = db.get(BrandVoice, order.fulfilled_brand_voice_id)
+            assert order.fulfilled_provider_id == registry.id
+            assert order.fulfilled_brand_voice_id == voice.id
+            assert registry.provider == "doubao-voice-clone"
+            assert registry.normalized_provider_id == "lifecycle-new-provider-id"
+            assert registry.kind == "customer"
+            assert registry.brand_voice_id == voice.id
+            assert registry.first_order_id == order_id
+            assert registry.status == "active"
+            assert voice.tenant_id == "lifecycle-tenant"
+            assert voice.owner_user_id == "lifecycle-user"
+            assert voice.name == "Lifecycle create"
+            assert voice.source_audio_asset_id == "lifecycle-create-audio"
+            assert voice.provider == "doubao-voice-clone"
+            assert voice.speaker_id == "lifecycle-new-provider-id"
+            assert voice.status == "ready"
+            assert voice.consent_confirmed is True
+            assert voice.consent_confirmed_at == order.consent_confirmed_at
+            assert voice.activated_at == resolved_at
+            assert voice.expires_at == resolved_at + timedelta(days=365)
+            assert voice.deleted_at is None
+            assert db.scalar(select(func.count()).select_from(BrandVoiceProviderId)) == 1
+            assert db.scalar(select(func.count()).select_from(BrandVoice)) == 1
+        else:
+            assert order.fulfilled_at is None
+            assert order.fulfilled_brand_voice_id is None
+            assert order.fulfilled_provider_id is None
+            assert order.rejected_at == resolved_at
+            assert order.rejection_reason == "race rejection"
+            assert db.scalar(select(func.count()).select_from(BrandVoiceProviderId)) == 0
+            assert db.scalar(select(func.count()).select_from(BrandVoice)) == 0
 
 
 def _seed_postgres_customer_claims(factory) -> None:
