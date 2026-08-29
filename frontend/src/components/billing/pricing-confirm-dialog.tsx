@@ -4,8 +4,9 @@ import { useEffect } from "react";
 import { Clock3, Loader2, ReceiptText, TriangleAlert } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { BillingStatus } from "@/components/billing/billing-status";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import type { BillingQuote } from "@/lib/api/types";
+import type { BillingQuote, BillingSummary } from "@/lib/api/types";
 import type { BillingActionPhase } from "@/lib/billing/use-billing-action";
 
 export interface PricingConfirmDialogProps {
@@ -14,6 +15,9 @@ export interface PricingConfirmDialogProps {
   quote: BillingQuote | null;
   expiresInSeconds: number | null;
   errorMessage?: string | null;
+  billing?: BillingSummary | null;
+  billingQuerying?: boolean;
+  onContinueLookup?: () => void;
   onEstimate: () => void;
   onConfirm: () => void;
   onCancel: () => void;
@@ -24,6 +28,10 @@ export function PricingConfirmDialog({
   phase,
   quote,
   expiresInSeconds,
+  errorMessage,
+  billing = null,
+  billingQuerying = false,
+  onContinueLookup,
   onEstimate,
   onConfirm,
   onCancel
@@ -54,6 +62,14 @@ export function PricingConfirmDialog({
             请核对应付积分和计费明细。确认后将按本次服务端报价提交。
           </DialogDescription>
         </div>
+
+        {(billing || billingQuerying) && (
+          <BillingStatus
+            summary={billing}
+            querying={billingQuerying}
+            onContinueLookup={onContinueLookup}
+          />
+        )}
 
         <div
           data-testid="billing-price-layout"
@@ -150,7 +166,7 @@ export function PricingConfirmDialog({
         {phase === "failed" && quote && (
           <p role="alert" className="flex items-start gap-2 text-[13px] text-error-fg">
             <TriangleAlert aria-hidden size={16} className="mt-0.5 flex-none" />
-            操作未完成，请重新获取价格后再确认
+            {errorMessage ?? "操作未完成，请重新获取价格后再确认"}
           </p>
         )}
 

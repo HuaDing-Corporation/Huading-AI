@@ -628,6 +628,7 @@ function useBillingActionInternal<
         knownBilling &&
         knownBilling.idempotency_key === attempt.confirmation.idempotency_key
       ) {
+        setBilling(knownBilling);
         setError(caught);
         await recoverUnknown(attempt);
       } else if (isUnknownPostResult(caught)) {

@@ -7,7 +7,8 @@ import type {
   BillingOperationLookupFor,
   BillingQuote,
   BillingSummary,
-  ExtendedBillingOperationLookup
+  ExtendedBillingOperationLookup,
+  VideoPricingContext
 } from "./types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -232,6 +233,15 @@ function pricingLine(value: unknown, operation: string): boolean {
   );
 }
 
+function validVideoPricingContext(value: unknown): value is VideoPricingContext {
+  if (!record(value) || !exactKeys(value, ["voice_kind", "voice_provider"])) return false;
+  if (value.voice_kind === "brand") {
+    return value.voice_provider === "cosyvoice" || value.voice_provider === "doubao";
+  }
+  if (value.voice_kind === "standard") return nonEmptyString(value.voice_provider);
+  return value.voice_kind === "none" && value.voice_provider === null;
+}
+
 function disclosure(value: unknown): boolean {
   return (
     record(value) &&
@@ -247,7 +257,10 @@ function disclosure(value: unknown): boolean {
   );
 }
 
-export function parseBillingQuote(value: unknown): BillingQuote | null {
+export function parseBillingQuote(
+  value: unknown,
+  videoContext?: VideoPricingContext | null
+): BillingQuote | null {
   if (
     !record(value) ||
     !exactKeys(value, QUOTE_KEYS) ||
@@ -288,6 +301,20 @@ export function parseBillingQuote(value: unknown): BillingQuote | null {
     !value.breakdown.every((entry) => pricingLine(entry, value.operation as string))
   ) {
     return null;
+  }
+  if (value.operation === "video_create") {
+    if (!validVideoPricingContext(videoContext)) return null;
+    const videoLines = value.breakdown.filter(
+      (entry) => record(entry) && entry.operation === "video_create"
+    ).length;
+    const cosyvoiceLines = value.breakdown.filter(
+      (entry) => record(entry) && entry.operation === "cosyvoice_brand_tts"
+    ).length;
+    if (videoLines !== 1) return null;
+    const expectsCosyvoice =
+      videoContext.voice_kind === "brand" &&
+      videoContext.voice_provider === "cosyvoice";
+    if (cosyvoiceLines !== (expectsCosyvoice ? 1 : 0)) return null;
   }
   return value as unknown as BillingQuote;
 }

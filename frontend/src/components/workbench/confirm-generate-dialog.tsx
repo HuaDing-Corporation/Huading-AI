@@ -72,6 +72,9 @@ export function ConfirmGenerateDialog({
         quote={pricing.billingQuote}
         expiresInSeconds={pricing.expiresInSeconds}
         errorMessage={pricing.billingErrorMessage}
+        billing={pricing.billing}
+        billingQuerying={pricing.billingPhase === "querying"}
+        onContinueLookup={() => void pricing.continueBillingLookup()}
         onEstimate={() => void pricing.prepareBilling()}
         onConfirm={onConfirm}
         onCancel={onCancel}

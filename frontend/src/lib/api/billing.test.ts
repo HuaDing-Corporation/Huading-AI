@@ -164,23 +164,60 @@ describe("billing quote parsing", () => {
     expect(parsed?.pricing_shape).toBe("composite");
   });
 
-  it("accepts only the canonical CosyVoice sub-operation in a video composite quote", () => {
-    const videoComposite = (ttsOperation: string) =>
-      simpleQuote({
-        operation: "video_create",
-        pricing_shape: "composite",
-        unit: null,
-        quantity: null,
-        unit_credits: null,
-        rate_scope: null,
-        rate_source: null,
-        breakdown: [
-          line({ operation: "video_create", capability: "video", unit: "second" }),
-          line({ operation: ttsOperation, capability: "tts", unit: "character" })
-        ]
-      });
-    expect(parseBillingQuote(videoComposite("cosyvoice_brand_tts"))).not.toBeNull();
-    expect(parseBillingQuote(videoComposite("unrelated_operation"))).toBeNull();
+  const videoLine = () =>
+    line({ operation: "video_create", capability: "video", unit: "second" });
+  const cosyvoiceLine = () =>
+    line({ operation: "cosyvoice_brand_tts", capability: "tts", unit: "character" });
+  const videoComposite = (breakdown: Record<string, unknown>[]) =>
+    simpleQuote({
+      operation: "video_create",
+      pricing_shape: "composite",
+      unit: null,
+      quantity: null,
+      unit_credits: null,
+      rate_scope: null,
+      rate_source: null,
+      breakdown
+    });
+
+  it("requires exactly one video_create line", () => {
+    const doubao = { voice_kind: "brand", voice_provider: "doubao" } as const;
+    expect(
+      parseBillingQuote(
+        videoComposite([cosyvoiceLine()]),
+        { voice_kind: "brand", voice_provider: "cosyvoice" }
+      )
+    ).toBeNull();
+    expect(parseBillingQuote(videoComposite([videoLine(), videoLine()]), doubao)).toBeNull();
+  });
+
+  it("requires exactly one CosyVoice TTS line for the selected CosyVoice provider", () => {
+    const cosyvoice = { voice_kind: "brand", voice_provider: "cosyvoice" } as const;
+    expect(parseBillingQuote(videoComposite([videoLine()]), cosyvoice)).toBeNull();
+    expect(
+      parseBillingQuote(
+        videoComposite([videoLine(), cosyvoiceLine(), cosyvoiceLine()]),
+        cosyvoice
+      )
+    ).toBeNull();
+    expect(parseBillingQuote(videoComposite([videoLine(), cosyvoiceLine()]), cosyvoice))
+      .not.toBeNull();
+  });
+
+  it("rejects a fake CosyVoice TTS line for the selected Doubao provider", () => {
+    const doubao = { voice_kind: "brand", voice_provider: "doubao" } as const;
+    expect(parseBillingQuote(videoComposite([videoLine(), cosyvoiceLine()]), doubao)).toBeNull();
+    expect(parseBillingQuote(videoComposite([videoLine()]), doubao)).not.toBeNull();
+  });
+
+  it("fails closed for video quotes without selected-provider context", () => {
+    expect(parseBillingQuote(videoComposite([videoLine()]))).toBeNull();
+    expect(
+      parseBillingQuote(
+        videoComposite([videoLine()]),
+        { voice_kind: "brand", voice_provider: "unknown" } as never
+      )
+    ).toBeNull();
   });
 
   it.each([

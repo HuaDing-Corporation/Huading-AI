@@ -1,7 +1,7 @@
 import { ApiError, apiFetch, apiUrl, authHeaders } from "@/lib/api/client";
 import { billingHeaders, parseBillingQuote, parseBillingSummary } from "@/lib/api/billing";
 import { authStore } from "@/lib/auth/store";
-import type { BillingConfirmation, BillingQuote, ClearResult, CreateVideoRequest, DeleteResult, ScenePromptRequest, ScenePromptResponse, VideoAcceptedContract, VideoDetail, VideoEstimateContract, VideoEvent, VideoListItem, VideoListResponse } from "@/lib/api/types";
+import type { BillingConfirmation, BillingQuote, BrandVoice, ClearResult, CreateVideoRequest, DeleteResult, ScenePromptRequest, ScenePromptResponse, VideoAcceptedContract, VideoDetail, VideoEstimateContract, VideoEvent, VideoListItem, VideoListResponse, VideoPricingContext, Voice } from "@/lib/api/types";
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -16,12 +16,44 @@ function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+function canonicalBrandVoiceProvider(value: unknown): "cosyvoice" | "doubao" | null {
+  if (value === "cosyvoice" || value === "cosyvoice-voice-clone") return "cosyvoice";
+  if (value === "doubao" || value === "doubao-voice-clone") return "doubao";
+  return null;
+}
+
+/** Resolve quote-validation context from the actual selected voice records. */
+export function videoPricingContextForVoice(
+  voiceId: string | undefined,
+  voices: readonly Voice[],
+  brandVoices: readonly BrandVoice[]
+): VideoPricingContext | null {
+  if (!voiceId) return { voice_kind: "none", voice_provider: null };
+  const brandVoice = brandVoices.find((voice) => voice.id === voiceId);
+  if (brandVoice) {
+    const provider = canonicalBrandVoiceProvider(brandVoice.provider);
+    return provider ? { voice_kind: "brand", voice_provider: provider } : null;
+  }
+  const voice = voices.find((candidate) => candidate.id === voiceId);
+  if (!voice) return null;
+  if (voice.source === "brand_voice") {
+    const provider = canonicalBrandVoiceProvider(voice.provider);
+    return provider ? { voice_kind: "brand", voice_provider: provider } : null;
+  }
+  return nonEmptyString(voice.provider)
+    ? { voice_kind: "standard", voice_provider: voice.provider }
+    : null;
+}
+
 function optionalNote(value: Record<string, unknown>): boolean {
   return !Object.hasOwn(value, "note") || value.note === null || typeof value.note === "string";
 }
 
-export function parseVideoEstimateContract(value: unknown): VideoEstimateContract | null {
-  const quote = parseBillingQuote(value);
+export function parseVideoEstimateContract(
+  value: unknown,
+  pricingContext?: VideoPricingContext | null
+): VideoEstimateContract | null {
+  const quote = parseBillingQuote(value, pricingContext);
   if (quote) {
     return quote.operation === "video_create" && quote.pricing_shape === "composite" ? quote : null;
   }
@@ -106,9 +138,12 @@ export async function createVideo(
 }
 
 /** Estimate the credits a request would consume — shown in the 确定生成 dialog. */
-export async function estimateVideo(input: CreateVideoRequest): Promise<VideoEstimateContract> {
+export async function estimateVideo(
+  input: CreateVideoRequest,
+  pricingContext?: VideoPricingContext | null
+): Promise<VideoEstimateContract> {
   const value = await apiFetch<unknown>("/api/v1/videos/estimate", { method: "POST", body: input });
-  const estimate = parseVideoEstimateContract(value);
+  const estimate = parseVideoEstimateContract(value, pricingContext);
   if (!estimate) {
     throw new ApiError(
       "视频报价协议异常，请刷新后重试。",

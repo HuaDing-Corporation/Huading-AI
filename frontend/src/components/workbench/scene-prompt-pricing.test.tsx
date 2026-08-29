@@ -138,5 +138,9 @@ describe("scene prompt pricing confirmation", () => {
       quote: "scene-quote-token",
       key: expect.any(String)
     });
+    expect(screen.getByText("已结算 30 积分")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "AI 生成画面" }));
+    await waitFor(() => expect(screen.queryByText("已结算 30 积分")).not.toBeInTheDocument());
   });
 });

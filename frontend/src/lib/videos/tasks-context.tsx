@@ -10,18 +10,20 @@ import {
   type ReactNode
 } from "react";
 
-import { getBillingOperation } from "@/lib/api/billing";
+import { billingFromApiError, getBillingOperation, parseBillingSummary } from "@/lib/api/billing";
 import { ApiError } from "@/lib/api/client";
 import { createVideo, estimateVideo, getVideo, listVideos, streamVideoEvents } from "@/lib/api/videos";
 import type {
   BillingConfirmation,
   BillingOperationLookupFor,
+  BillingSummary,
   CreateVideoRequest,
   VideoAcceptedContract,
   VideoDetail,
   VideoEstimateContract,
   VideoEvent,
-  VideoListItem
+  VideoListItem,
+  VideoPricingContext
 } from "@/lib/api/types";
 import { useAuth } from "@/lib/auth/auth-context";
 import { HARD_CAP_MS, POLL_MS, STALL_MS } from "@/lib/sse/constants";
@@ -33,6 +35,7 @@ export type VideoPricingAttempt =
   | {
       estimate: Extract<VideoEstimateContract, { pricing_contract: "billing_quote" }>;
       confirmation: BillingConfirmation;
+      pricingContext: VideoPricingContext;
     }
   | {
       estimate: Extract<
@@ -92,6 +95,49 @@ interface StoredRequest {
   operation: "video_create" | null;
   confirmation: BillingConfirmation | null;
   estimate: VideoEstimateContract | null;
+  pricingContext: VideoPricingContext | null;
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function terminalBillingForAttempt(
+  error: unknown,
+  confirmation: BillingConfirmation
+): BillingSummary | null {
+  const billing = billingFromApiError(error);
+  return billing &&
+    billing.status !== "reserved" &&
+    billing.idempotency_key.toLowerCase() === confirmation.idempotency_key.toLowerCase()
+    ? billing
+    : null;
+}
+
+function videoFailureMessage(billing: BillingSummary): string {
+  if (billing.status === "settled" && billing.requested_credits === 0) {
+    return "视频生成未完成，本次为免费服务，未扣积分。";
+  }
+  if (billing.status === "settled") {
+    return `视频生成未完成，已结算 ${billing.settled_credits} 积分。`;
+  }
+  if (billing.status === "partially_settled") {
+    return `视频生成未完成，已结算 ${billing.settled_credits} 积分，已释放 ${billing.released_credits} 积分。`;
+  }
+  if (billing.status === "released") {
+    return `视频生成未完成，未扣款，已释放 ${billing.released_credits} 积分。`;
+  }
+  return "视频生成结果与计费仍在确认中。";
+}
+
+function withAuthoritativeBillingMessage(error: ApiError, billing: BillingSummary): ApiError {
+  return new ApiError(
+    videoFailureMessage(billing),
+    error.code,
+    error.status,
+    error.detail,
+    error.outcome
+  );
 }
 
 function isUnknownVideoPost(error: unknown): boolean {
@@ -109,11 +155,20 @@ function acceptedFromVideoLookup(
   lookup: BillingOperationLookupFor<"video_create">
 ): VideoAcceptedContract | null {
   if (lookup.state === "completed" && lookup.completion_kind === "failed") {
+    const billing = parseBillingSummary(lookup.billing);
+    if (!billing) {
+      throw new ApiError("计费结果确认中", "INVALID_BILLING_RESPONSE", 502, {
+        billing: lookup.billing
+      });
+    }
+    const detail = record(lookup.failure.detail)
+      ? { ...lookup.failure.detail, billing }
+      : { failure_detail: lookup.failure.detail, billing };
     throw new ApiError(
-      "视频生成未完成，冻结积分已释放。",
+      videoFailureMessage(billing),
       lookup.failure.code,
       lookup.failure.original_http_status,
-      lookup.failure.detail
+      detail
     );
   }
   if (
@@ -349,7 +404,8 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
       pricing_contract: accepted.pricing_contract,
       operation: accepted.pricing_contract === "billing_quote" ? "video_create" : null,
       confirmation: pricing?.confirmation ?? null,
-      estimate: pricing?.estimate ?? null
+      estimate: pricing?.estimate ?? null,
+      pricingContext: pricing && "pricingContext" in pricing ? pricing.pricingContext : null
     });
     setTasks((prev) => [
       {
@@ -387,6 +443,12 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
       try {
         accepted = await createVideo(req, confirmation);
       } catch (caught) {
+        if (confirmation) {
+          const terminalBilling = terminalBillingForAttempt(caught, confirmation);
+          if (terminalBilling && caught instanceof ApiError) {
+            throw withAuthoritativeBillingMessage(caught, terminalBilling);
+          }
+        }
         if (!confirmation || !isUnknownVideoPost(caught)) throw caught;
         accepted = await recoverUnknownBilledVideo(confirmation);
       }
@@ -450,14 +512,22 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
 
       // Explicit retry always starts a new pricing attempt. The stored token/key
       // remain available only for recovering the original POST and are never reused.
-      const freshEstimate = await estimateVideo(stored.req);
+      const freshEstimate = await estimateVideo(stored.req, stored.pricingContext);
       let pricing: VideoPricingAttempt;
       if (freshEstimate.pricing_contract === "billing_quote") {
+        if (!stored.pricingContext) {
+          throw new ApiError(
+            "缺少原任务的音色报价校验信息。",
+            "INVALID_VIDEO_PRICING_CONTEXT",
+            409
+          );
+        }
         if (Date.parse(freshEstimate.expires_at) <= Date.now()) {
           throw new ApiError("报价已过期，请重新获取价格。", "QUOTE_EXPIRED", 409);
         }
         pricing = {
           estimate: freshEstimate,
+          pricingContext: stored.pricingContext,
           confirmation: {
             quote_token: freshEstimate.quote_token,
             idempotency_key: globalThis.crypto.randomUUID()

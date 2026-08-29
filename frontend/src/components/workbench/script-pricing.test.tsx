@@ -124,6 +124,10 @@ describe("script pricing confirmation", () => {
       quote: "script-quote-token",
       key: expect.any(String)
     });
+    expect(screen.getByText("已结算 1 积分")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "重写文案" }));
+    await waitFor(() => expect(screen.queryByText("已结算 1 积分")).not.toBeInTheDocument());
   });
 
   it("binds the e-commerce script quote to duration, mode, and length tier", async () => {
@@ -183,5 +187,9 @@ describe("script pricing confirmation", () => {
       quote: "script-quote-token",
       key: expect.any(String)
     });
+    expect(screen.getByText("已结算 1 积分")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "AI生成文案" }));
+    await waitFor(() => expect(screen.queryByText("已结算 1 积分")).not.toBeInTheDocument());
   });
 });

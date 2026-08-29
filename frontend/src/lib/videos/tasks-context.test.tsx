@@ -35,10 +35,10 @@ vi.mock("@/lib/sse/constants", async (orig) => ({
   POLL_MS: 10_000
 }));
 
-import { getBillingOperation } from "@/lib/api/billing";
+import { billingFromApiError, getBillingOperation } from "@/lib/api/billing";
 import { createVideo, estimateVideo, listVideos, streamVideoEvents } from "@/lib/api/videos";
 import { ApiError } from "@/lib/api/client";
-import type { BillingOperationLookupFor, VideoEstimateContract } from "@/lib/api/types";
+import type { BillingOperationLookupFor, BillingSummary, VideoEstimateContract } from "@/lib/api/types";
 import type { VideoPricingAttempt } from "./tasks-context";
 
 import { VideoTasksProvider, useVideoTasks } from "./tasks-context";
@@ -84,8 +84,27 @@ const billedQuote = (
 
 const billedAttempt: VideoPricingAttempt = {
   estimate: billedQuote(),
-  confirmation: oldConfirmation
+  confirmation: oldConfirmation,
+  pricingContext: { voice_kind: "brand", voice_provider: "doubao" }
 };
+
+function terminalBilling(
+  status: "settled" | "released" | "partially_settled",
+  requested = 100
+): BillingSummary {
+  const amounts = {
+    settled: { held_credits: 0, settled_credits: requested, released_credits: 0 },
+    released: { held_credits: 0, settled_credits: 0, released_credits: requested },
+    partially_settled: { held_credits: 0, settled_credits: 40, released_credits: 60 }
+  }[status];
+  return {
+    operation_id: `operation-${status}`,
+    idempotency_key: oldConfirmation.idempotency_key,
+    status,
+    requested_credits: requested,
+    ...amounts
+  };
+}
 
 const pendingVideoLookup = (): BillingOperationLookupFor<"video_create"> => ({
   operation: "video_create",
@@ -131,20 +150,14 @@ const succeededVideoLookup = (
   failure: null
 });
 
-const failedVideoLookup = (): BillingOperationLookupFor<"video_create"> => ({
+const failedVideoLookup = (
+  billing: BillingSummary = terminalBilling("released")
+): BillingOperationLookupFor<"video_create"> => ({
   operation: "video_create",
   idempotency_key: oldConfirmation.idempotency_key,
   state: "completed",
   completion_kind: "failed",
-  billing: {
-    operation_id: "operation-failed",
-    idempotency_key: oldConfirmation.idempotency_key,
-    status: "released",
-    requested_credits: 100,
-    held_credits: 0,
-    settled_credits: 0,
-    released_credits: 100
-  },
+  billing,
   result_type: null,
   result_id: null,
   resource: null,
@@ -279,6 +292,7 @@ function PricedHarness() {
   const [result, setResult] = useState("-");
   const [error, setError] = useState("-");
   const [errorMessage, setErrorMessage] = useState("-");
+  const [billingStatus, setBillingStatus] = useState("-");
   return (
     <div>
       <button
@@ -290,6 +304,7 @@ function PricedHarness() {
           ).then((accepted) => setResult(accepted.id)).catch((caught) => {
             setError((caught as ApiError).code);
             setErrorMessage((caught as Error).message);
+            setBillingStatus(billingFromApiError(caught)?.status ?? "-");
           });
         }}
       >
@@ -298,6 +313,7 @@ function PricedHarness() {
       <span data-testid="priced-result">{result}</span>
       <span data-testid="priced-error">{error}</span>
       <span data-testid="priced-error-message">{errorMessage}</span>
+      <span data-testid="priced-billing-status">{billingStatus}</span>
       <span data-testid="priced-task">{tasks[0]?.taskId ?? "-"}</span>
     </div>
   );
@@ -312,6 +328,45 @@ describe("tasks-context priced operation recovery", () => {
     (streamVideoEvents as Mock)
       .mockReset()
       .mockImplementation(() => new Promise<void>(() => {}));
+  });
+
+  it.each([
+    {
+      label: "settled",
+      billing: terminalBilling("settled"),
+      message: "视频生成未完成，已结算 100 积分。"
+    },
+    {
+      label: "released",
+      billing: terminalBilling("released"),
+      message: "视频生成未完成，未扣款，已释放 100 积分。"
+    },
+    {
+      label: "partially settled",
+      billing: terminalBilling("partially_settled"),
+      message: "视频生成未完成，已结算 40 积分，已释放 60 积分。"
+    },
+    {
+      label: "legal zero-price",
+      billing: terminalBilling("settled", 0),
+      message: "视频生成未完成，本次为免费服务，未扣积分。"
+    }
+  ])("trusts authoritative $label POST billing and skips recovery lookup", async ({ billing, message }) => {
+    (createVideo as Mock).mockRejectedValueOnce(
+      new ApiError("gateway", "PROVIDER_FAILED", 503, { billing })
+    );
+
+    const view = render(
+      <VideoTasksProvider>
+        <PricedHarness />
+      </VideoTasksProvider>
+    );
+    await act(async () => view.getByText("priced").click());
+
+    await waitFor(() => expect(view.getByTestId("priced-error-message")).toHaveTextContent(message));
+    expect(view.getByTestId("priced-billing-status")).toHaveTextContent(billing.status);
+    expect(getBillingOperation).not.toHaveBeenCalled();
+    expect(estimateVideo).not.toHaveBeenCalled();
   });
   afterEach(() => {
     vi.clearAllTimers();
@@ -459,14 +514,38 @@ describe("tasks-context priced operation recovery", () => {
 
     expect(view.getByTestId("priced-error")).toHaveTextContent("PROVIDER_FAILED");
     expect(view.getByTestId("priced-error-message")).toHaveTextContent(
-      "视频生成未完成，冻结积分已释放。"
+      "视频生成未完成，未扣款，已释放 100 积分。"
     );
+    expect(view.getByTestId("priced-billing-status")).toHaveTextContent("released");
     expect((getBillingOperation as Mock).mock.calls).toEqual([
       ["video_create", oldConfirmation.idempotency_key],
       ["video_create", oldConfirmation.idempotency_key]
     ]);
     expect(createVideo).toHaveBeenCalledTimes(1);
     expect(estimateVideo).not.toHaveBeenCalled();
+  });
+
+  it("uses completed-failure billing instead of blindly claiming release", async () => {
+    (createVideo as Mock).mockRejectedValueOnce(new ApiError("network", "NETWORK_ERROR", 0));
+    (getBillingOperation as Mock).mockResolvedValueOnce(
+      failedVideoLookup(terminalBilling("partially_settled"))
+    );
+
+    const view = render(
+      <VideoTasksProvider>
+        <PricedHarness />
+      </VideoTasksProvider>
+    );
+    await act(async () => view.getByText("priced").click());
+
+    await waitFor(() => expect(view.getByTestId("priced-error-message")).toHaveTextContent(
+      "视频生成未完成，已结算 40 积分，已释放 60 积分。"
+    ));
+    expect(view.getByTestId("priced-billing-status")).toHaveTextContent("partially_settled");
+    expect(getBillingOperation).toHaveBeenCalledWith(
+      "video_create",
+      oldConfirmation.idempotency_key
+    );
   });
 
   it("stops bounded lookup failures as uncertain without resubmitting or re-estimating", async () => {

@@ -1,6 +1,6 @@
 "use client";
 
-import { CircleCheck, CircleDashed, CircleDollarSign, LockKeyhole, RotateCw, Undo2 } from "lucide-react";
+import { CircleCheck, CircleDashed, CircleDollarSign, LockKeyhole, RotateCw, Undo2, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { parseBillingSummary } from "@/lib/api/billing";
@@ -10,6 +10,7 @@ export interface BillingStatusProps {
   summary: unknown;
   querying?: boolean;
   onContinueLookup?: () => void;
+  onDismiss?: () => void;
   className?: string;
 }
 
@@ -17,6 +18,7 @@ export function BillingStatus({
   summary,
   querying = false,
   onContinueLookup,
+  onDismiss,
   className
 }: BillingStatusProps) {
   const parsed = parseBillingSummary(summary);
@@ -85,16 +87,25 @@ export function BillingStatus({
       )}
     >
       {content}
-      {querying && onContinueLookup && (
-        <Button
-          type="button"
-          variant="soft"
-          size="sm"
-          className="ml-auto flex-none"
-          onClick={onContinueLookup}
-        >
-          继续查询
-        </Button>
+      {((querying && onContinueLookup) || onDismiss) && (
+        <div className="ml-auto flex flex-none items-center gap-2">
+          {querying && onContinueLookup && (
+            <Button type="button" variant="soft" size="sm" onClick={onContinueLookup}>
+              继续查询
+            </Button>
+          )}
+          {onDismiss && (
+            <Button
+              type="button"
+              variant="soft"
+              size="sm"
+              aria-label="关闭计费结果"
+              onClick={onDismiss}
+            >
+              <X aria-hidden size={14} />
+            </Button>
+          )}
+        </div>
       )}
     </div>
   );

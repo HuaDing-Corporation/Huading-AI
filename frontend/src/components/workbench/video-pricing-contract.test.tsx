@@ -4,6 +4,7 @@ import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
+import { BillingStatus } from "@/components/billing/billing-status";
 import { createVideo } from "@/lib/api/videos";
 import type { BillingConfirmation, VideoEstimateContract } from "@/lib/api/types";
 import { useGenerateConfirm } from "@/lib/api/use-generate-confirm";
@@ -70,11 +71,12 @@ function quote(withTts = true) {
   };
 }
 
-function Harness({ onSubmit }: {
+function Harness({ onSubmit, voiceProvider = "cosyvoice" }: {
   onSubmit?: (
     estimate: VideoEstimateContract | undefined,
     confirmation: BillingConfirmation | undefined
   ) => void;
+  voiceProvider?: "cosyvoice" | "doubao";
 }) {
   const control = useGenerateConfirm(async (body, estimate, confirmation) => {
     onSubmit?.(estimate, confirmation);
@@ -82,7 +84,14 @@ function Harness({ onSubmit }: {
   }, { authoritativePricing: true });
   return (
     <>
-      <button onClick={() => control.requestConfirm(request)}>生成视频</button>
+      <button
+        onClick={() => control.requestConfirm(request, {
+          voice_kind: "brand",
+          voice_provider: voiceProvider
+        })}
+      >
+        生成视频
+      </button>
       <ConfirmGenerateDialog
         open={control.open}
         request={control.request}
@@ -91,15 +100,19 @@ function Harness({ onSubmit }: {
         onConfirm={() => void control.confirm()}
         onCancel={control.cancel}
       />
+      {control.billing && !control.open && <BillingStatus summary={control.billing} />}
     </>
   );
 }
 
-function renderHarness(onSubmit?: Parameters<typeof Harness>[0]["onSubmit"]) {
+function renderHarness(
+  onSubmit?: Parameters<typeof Harness>[0]["onSubmit"],
+  voiceProvider?: "cosyvoice" | "doubao"
+) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <Harness onSubmit={onSubmit} />
+      <Harness onSubmit={onSubmit} voiceProvider={voiceProvider} />
     </QueryClientProvider>
   );
 }
@@ -134,10 +147,10 @@ describe("video pricing contract UI", () => {
             billing: {
               operation_id: "operation-1",
               idempotency_key: key,
-              status: "reserved",
+              status: "settled",
               requested_credits: 101,
-              held_credits: 101,
-              settled_credits: 0,
+              held_credits: 0,
+              settled_credits: 101,
               released_credits: 0
             }
           },
@@ -164,6 +177,12 @@ describe("video pricing contract UI", () => {
       quote: "signed-video-quote",
       key: expect.stringMatching(/^[0-9a-f-]{36}$/i)
     });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "确认价格并继续" }))
+      .not.toBeInTheDocument());
+    expect(screen.getByText("已结算 101 积分")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
+    await waitFor(() => expect(screen.queryByText("已结算 101 积分")).not.toBeInTheDocument());
   });
 
   it("keeps a Doubao branded quote simple with no invented CosyVoice character line", async () => {
@@ -172,11 +191,56 @@ describe("video pricing contract UI", () => {
         HttpResponse.json({ data: quote(false), error: null, request_id: "doubao" })
       )
     );
-    renderHarness();
+    renderHarness(undefined, "doubao");
     fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
     expect(await screen.findByText("品牌视频")).toBeVisible();
     expect(screen.queryByText(/character/)).not.toBeInTheDocument();
     expect(screen.getByText("100 积分")).toBeVisible();
+  });
+
+  it("keeps authoritative partial billing visible when the POST result lookup is uncertain", async () => {
+    server.use(
+      http.post(`${API}/api/v1/videos/estimate`, () =>
+        HttpResponse.json({ data: quote(true), error: null, request_id: "partial-estimate" })
+      ),
+      http.post(`${API}/api/v1/videos`, ({ request: incoming }) => {
+        const key = incoming.headers.get("Idempotency-Key");
+        return HttpResponse.json({
+          data: null,
+          error: {
+            code: "PROVIDER_FAILED",
+            message: "视频生成未完成",
+            detail: {
+              billing: {
+                operation_id: "partial-operation",
+                idempotency_key: key,
+                status: "partially_settled",
+                requested_credits: 101,
+                held_credits: 0,
+                settled_credits: 60,
+                released_credits: 41
+              }
+            }
+          },
+          request_id: "partial-submit"
+        }, { status: 503 });
+      }),
+      http.get(`${API}/api/v1/billing/operations/by-idempotency/video_create/:key`, () =>
+        HttpResponse.json({
+          data: null,
+          error: { code: "HTTP_ERROR", message: "lookup unavailable" },
+          request_id: "partial-lookup"
+        }, { status: 503 })
+      )
+    );
+
+    renderHarness();
+    fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
+    await screen.findByText("CosyVoice 品牌音色");
+    fireEvent.click(screen.getByRole("button", { name: "确认并继续" }));
+
+    expect(await screen.findByText("部分结算 60 积分，已释放 41 积分")).toBeVisible();
+    expect(screen.getByRole("button", { name: "继续查询" })).toBeVisible();
   });
 
   it("submits legacy without billing headers after showing the server estimate", async () => {

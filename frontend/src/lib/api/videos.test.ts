@@ -4,7 +4,13 @@ import { describe, expect, it, vi } from "vitest";
 import { server } from "@/mocks/server";
 
 import { getBillingOperation } from "@/lib/api/billing";
-import { createVideo, estimateScenePrompt, estimateVideo, generateScenePrompt } from "@/lib/api/videos";
+import {
+  createVideo,
+  estimateScenePrompt,
+  estimateVideo,
+  generateScenePrompt,
+  videoPricingContextForVoice
+} from "@/lib/api/videos";
 
 const API = "http://localhost:8000";
 const sceneConfirmation = {
@@ -71,6 +77,34 @@ const videoBilling = {
   released_credits: 0
 };
 
+describe("videoPricingContextForVoice", () => {
+  const voice = {
+    id: "standard-1",
+    provider: "edge_tts",
+    voice_code: "standard-1",
+    display_name: "标准音色",
+    gender: null,
+    language: null
+  };
+  const brand = (provider: string | null) => ({
+    id: "brand-1",
+    name: "品牌音色",
+    status: "ready" as const,
+    created_at: "2026-08-29T00:00:00Z",
+    provider
+  });
+
+  it("derives canonical context from the selected records and fails closed for an unknown brand provider", () => {
+    expect(videoPricingContextForVoice("brand-1", [voice], [brand("cosyvoice-voice-clone")]))
+      .toEqual({ voice_kind: "brand", voice_provider: "cosyvoice" });
+    expect(videoPricingContextForVoice("brand-1", [voice], [brand("doubao")]))
+      .toEqual({ voice_kind: "brand", voice_provider: "doubao" });
+    expect(videoPricingContextForVoice("standard-1", [voice], []))
+      .toEqual({ voice_kind: "standard", voice_provider: "edge_tts" });
+    expect(videoPricingContextForVoice("brand-1", [voice], [brand(null)])).toBeNull();
+  });
+});
+
 // ECOM-VIDEO-OPTIMIZE-UI-0001 · FIX2 · P1：确认窗打开必调 POST /videos/estimate。此前缺 mock handler →
 // MSW 放行到真后端 → CI net::ERR_FAILED（#203 红）。本测真走 apiFetch → 全局 MSW（vitest.setup 已 server.listen），
 // 非 stub：验响应契约形状（对齐 #202 VideoEstimateResponse）+ 防假绿（estimate 与提交同一 VideoGenerateRequest 校验，
@@ -84,7 +118,10 @@ describe("estimateVideo · POST /videos/estimate（apiFetch 真走 MSW · FIX2 P
       voice_id: "bv-ready-2",
       avatar_asset_id: "avatar-1"
     };
-    const quote = await estimateVideo(input);
+    const quote = await estimateVideo(input, {
+      voice_kind: "brand",
+      voice_provider: "cosyvoice"
+    });
     expect(quote).toMatchObject({
       pricing_contract: "billing_quote",
       pricing_shape: "composite",
@@ -123,13 +160,16 @@ describe("estimateVideo · POST /videos/estimate（apiFetch 真走 MSW · FIX2 P
   });
 
   it("default MSW keeps a Doubao branded quote free of CosyVoice character pricing", async () => {
-    const quote = await estimateVideo({
-      video_mode: "avatar_talk",
-      topic: "豆包品牌口播",
-      script: "真实文案",
-      voice_id: "bv-ready-1",
-      avatar_asset_id: "avatar-1"
-    });
+    const quote = await estimateVideo(
+      {
+        video_mode: "avatar_talk",
+        topic: "豆包品牌口播",
+        script: "真实文案",
+        voice_id: "bv-ready-1",
+        avatar_asset_id: "avatar-1"
+      },
+      { voice_kind: "brand", voice_provider: "doubao" }
+    );
     expect(quote).toMatchObject({
       pricing_contract: "billing_quote",
       pricing_shape: "composite",
@@ -150,7 +190,10 @@ describe("estimateVideo · POST /videos/estimate（apiFetch 真走 MSW · FIX2 P
       voice_id: "bv-ready-2",
       avatar_asset_id: "avatar-1"
     };
-    await expect(estimateVideo(branded)).rejects.toMatchObject({
+    await expect(estimateVideo(branded, {
+      voice_kind: "brand",
+      voice_provider: "cosyvoice"
+    })).rejects.toMatchObject({
       code: "BILLABLE_TEXT_REQUIRED",
       status: 422
     });
@@ -242,7 +285,12 @@ describe("estimateVideo · POST /videos/estimate（apiFetch 真走 MSW · FIX2 P
       })
     );
 
-    await expect(estimateVideo({ topic: "billing" })).resolves.toEqual(videoQuote);
+    await expect(
+      estimateVideo(
+        { topic: "billing", voice_id: "brand-voice" },
+        { voice_kind: "brand", voice_provider: "doubao" }
+      )
+    ).resolves.toEqual(videoQuote);
     await expect(estimateVideo({ topic: "legacy" })).resolves.toMatchObject({
       pricing_contract: "legacy_estimate",
       estimated_credits: 12

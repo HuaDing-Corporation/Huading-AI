@@ -15,6 +15,7 @@ import {
 } from "@/lib/api/hooks";
 import { estimateScript, generateScript } from "@/lib/api/scripts";
 import { useGenerateConfirm } from "@/lib/api/use-generate-confirm";
+import { videoPricingContextForVoice } from "@/lib/api/videos";
 import { useTrackedUpload } from "@/lib/api/use-tracked-upload";
 import type {
   BillingOperationLookupFor,
@@ -23,7 +24,8 @@ import type {
   ScriptGenerateRequest,
   ScriptGenerateResponse,
   SubtitleStyle,
-  VideoEstimateContract
+  VideoEstimateContract,
+  VideoPricingContext
 } from "@/lib/api/types";
 import { useBillingAction } from "@/lib/billing/use-billing-action";
 import { useVideoTasks } from "@/lib/videos/tasks-context";
@@ -31,6 +33,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
 import { PricingConfirmDialog } from "@/components/billing/pricing-confirm-dialog";
+import { BillingStatus } from "@/components/billing/billing-status";
 import { Input } from "@/components/ui/input";
 import { SelectableOption } from "@/components/ui/selectable-option";
 import { ImagePicker } from "@/components/workbench/image-picker";
@@ -128,26 +131,30 @@ export function NewVideoForm({
 
   const scriptBillingPhase = scriptBilling.phase;
   const scriptBillingResult = scriptBilling.result;
-  const resetScriptBilling = scriptBilling.reset;
 
   useEffect(() => {
     if (scriptBillingPhase !== "succeeded" || !scriptBillingResult) return;
     setScript(scriptBillingResult.script);
     setScriptPricingOpen(false);
-    resetScriptBilling();
-  }, [resetScriptBilling, scriptBillingPhase, scriptBillingResult]);
+  }, [scriptBillingPhase, scriptBillingResult]);
 
   // Actual submit — runs only after the 确定生成 confirmation; owns its own errors.
   const submit = async (
     req: CreateVideoRequest,
     estimate?: VideoEstimateContract,
-    confirmation?: BillingConfirmation
+    confirmation?: BillingConfirmation,
+    pricingContext?: VideoPricingContext | null
   ) => {
     setError(null);
     try {
       if (estimate?.pricing_contract === "billing_quote") {
         if (!confirmation) throw new Error("缺少视频报价确认信息");
-        return await createAndTrack(req, req.topic ?? "", { estimate, confirmation });
+        if (!pricingContext) throw new Error("缺少视频报价校验信息");
+        return await createAndTrack(req, req.topic ?? "", {
+          estimate,
+          confirmation,
+          pricingContext
+        });
       }
       if (estimate) return await createAndTrack(req, req.topic ?? "", { estimate });
       await createAndTrack(req, req.topic ?? "");
@@ -183,6 +190,7 @@ export function NewVideoForm({
     const trimmed = topic.trim();
     if (!trimmed || scriptBilling.phase === "submitting" || scriptBilling.phase === "querying") return;
     setError(null);
+    scriptBilling.reset();
     setScriptPricingOpen(true);
   };
 
@@ -194,7 +202,7 @@ export function NewVideoForm({
     const trimmed = topic.trim();
     if (!trimmed || !voiceId || !activeSourceValue) return;
     setError(null);
-    confirm.requestConfirm({
+    const request: CreateVideoRequest = {
       topic: trimmed,
       script: script.trim() || undefined,
       voice_id: voiceId,
@@ -206,7 +214,11 @@ export function NewVideoForm({
       subtitle_enabled: true,
       subtitle_style: subtitleStyle, // 不选 = undefined → JSON.stringify 丢弃 → 不回归 0001
       apply_visible_label: applyLabel
-    });
+    };
+    confirm.requestConfirm(
+      request,
+      videoPricingContextForVoice(voiceId, voiceList ?? [], brandVoices.data ?? [])
+    );
   };
 
   const generateDisabled =
@@ -304,6 +316,24 @@ export function NewVideoForm({
         </p>
       )}
 
+      {scriptBilling.billing && !scriptPricingOpen && (
+        <BillingStatus
+          summary={scriptBilling.billing}
+          querying={scriptBilling.phase === "querying"}
+          onContinueLookup={() => void scriptBilling.continueLookup()}
+          onDismiss={scriptBilling.reset}
+          className="mb-3"
+        />
+      )}
+
+      {confirm.billing && !confirm.open && (
+        <BillingStatus
+          summary={confirm.billing}
+          onDismiss={confirm.dismissBilling}
+          className="mb-3"
+        />
+      )}
+
       <Button
         variant="primary"
         size="lg"
@@ -329,6 +359,9 @@ export function NewVideoForm({
         quote={scriptBilling.quote}
         expiresInSeconds={scriptBilling.expiresInSeconds}
         errorMessage={scriptBilling.errorMessage}
+        billing={scriptBilling.billing}
+        billingQuerying={scriptBilling.phase === "querying"}
+        onContinueLookup={() => void scriptBilling.continueLookup()}
         onEstimate={() => void scriptBilling.estimate()}
         onConfirm={() => void scriptBilling.confirm()}
         onCancel={() => {

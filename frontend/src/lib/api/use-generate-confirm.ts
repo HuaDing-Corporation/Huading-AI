@@ -3,14 +3,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError } from "@/lib/api/client";
+import { parseBillingQuote } from "@/lib/api/billing";
 import { estimateVideo } from "@/lib/api/videos";
 import type {
   BillingConfirmation,
   BillingOperationLookupFor,
   BillingQuote,
+  BillingSummary,
   CreateVideoRequest,
   VideoAcceptedContract,
-  VideoEstimateContract
+  VideoEstimateContract,
+  VideoPricingContext
 } from "@/lib/api/types";
 import { useBillingAction, type BillingActionPhase } from "@/lib/billing/use-billing-action";
 
@@ -23,9 +26,11 @@ export interface GenerateConfirmPricing {
   errorMessage: string | null;
   billingPhase: BillingActionPhase;
   billingQuote: BillingQuote | null;
+  billing: BillingSummary | null;
   billingErrorMessage: string | null;
   expiresInSeconds: number | null;
   prepareBilling: () => Promise<void>;
+  continueBillingLookup: () => Promise<void>;
   retryEstimate: () => Promise<void>;
 }
 
@@ -33,14 +38,18 @@ export interface GenerateConfirm {
   open: boolean;
   request: CreateVideoRequest | null;
   submitting: boolean;
+  /** Last authoritative billing result, retained after the dialog closes. */
+  billing: BillingSummary | null;
   /** Present for video forms that opt in to the authoritative three-branch contract. */
   pricing: GenerateConfirmPricing | null;
   /** Open the confirm dialog with the exact validated request snapshot. */
-  requestConfirm: (req: CreateVideoRequest) => void;
+  requestConfirm: (req: CreateVideoRequest, pricingContext?: VideoPricingContext | null) => void;
   /** Confirm the already-fetched contract; the estimate endpoint is never called here. */
   confirm: () => Promise<void>;
   /** Close without submitting (no-op while a submit/recovery is in flight). */
   cancel: () => void;
+  /** Explicitly dismiss the retained billing result. */
+  dismissBilling: () => void;
 }
 
 export interface GenerateConfirmOptions {
@@ -51,7 +60,8 @@ export interface GenerateConfirmOptions {
 type GenerateSubmit = (
   request: CreateVideoRequest,
   estimate?: VideoEstimateContract,
-  confirmation?: BillingConfirmation
+  confirmation?: BillingConfirmation,
+  pricingContext?: VideoPricingContext | null
 ) => Promise<VideoAcceptedContract | void>;
 
 function errorMessage(error: unknown): string {
@@ -73,6 +83,7 @@ export function useGenerateConfirm(
   const optionsRef = useRef(options);
   const estimateRun = useRef(0);
   const cachedEstimate = useRef<VideoEstimateContract | null>(null);
+  const pricingContextRef = useRef<VideoPricingContext | null>(null);
   const billingPrepareStarted = useRef(false);
   const [open, setOpen] = useState(false);
   const [request, setRequest] = useState<CreateVideoRequest | null>(null);
@@ -101,12 +112,17 @@ export function useGenerateConfirm(
       }
       return value;
     },
+    parseQuote: (quote) => parseBillingQuote(quote, pricingContextRef.current),
     submit: async (input, confirmation) => {
       const value = cachedEstimate.current;
       if (!value || value.pricing_contract !== "billing_quote") {
         throw new ApiError("报价数据无效，请重新获取价格。", "INVALID_BILLING_QUOTE", 502);
       }
-      const accepted = await submitRef.current(input, value, confirmation);
+      const context = pricingContextRef.current;
+      if (!context) {
+        throw new ApiError("缺少所选音色的报价校验信息。", "INVALID_VIDEO_PRICING_CONTEXT", 502);
+      }
+      const accepted = await submitRef.current(input, value, confirmation, context);
       if (!accepted || accepted.pricing_contract !== "billing_quote") {
         throw new ApiError(
           "视频创建响应的定价协议异常，请稍后查询任务状态。",
@@ -136,16 +152,20 @@ export function useGenerateConfirm(
   const estimateBilling = billing.estimate;
   const resetBilling = billing.reset;
 
-  const fetchEstimate = useCallback(async (snapshot: CreateVideoRequest) => {
+  const fetchEstimate = useCallback(async (
+    snapshot: CreateVideoRequest,
+    pricingContext: VideoPricingContext | null
+  ) => {
     const run = ++estimateRun.current;
     cachedEstimate.current = null;
+    pricingContextRef.current = pricingContext;
     billingPrepareStarted.current = false;
     setEstimate(null);
     setEstimateError(null);
     setEstimatePhase("estimating");
     resetBilling();
     try {
-      const value = await estimateVideo(snapshot);
+      const value = await estimateVideo(snapshot, pricingContext);
       if (run !== estimateRun.current) return;
       cachedEstimate.current = value;
       setEstimate(value);
@@ -175,16 +195,20 @@ export function useGenerateConfirm(
     }
   }, [billing.phase, enabled, estimate, prepareBilling]);
 
-  const requestConfirm = useCallback((snapshot: CreateVideoRequest) => {
+  const requestConfirm = useCallback((
+    snapshot: CreateVideoRequest,
+    pricingContext: VideoPricingContext | null = null
+  ) => {
     setRequest(snapshot);
     setOpen(true);
     setLegacySubmitting(false);
-    if (enabled) void fetchEstimate(snapshot);
+    if (enabled) void fetchEstimate(snapshot, pricingContext);
   }, [enabled, fetchEstimate]);
 
   const close = useCallback(() => {
     estimateRun.current += 1;
     cachedEstimate.current = null;
+    pricingContextRef.current = null;
     billingPrepareStarted.current = false;
     setOpen(false);
     setRequest(null);
@@ -196,8 +220,8 @@ export function useGenerateConfirm(
   }, [resetBilling]);
 
   useEffect(() => {
-    if (enabled && open && billing.phase === "succeeded") close();
-  }, [billing.phase, close, enabled, open]);
+    if (enabled && open && billing.phase === "succeeded") setOpen(false);
+  }, [billing.phase, enabled, open]);
 
   const submitting =
     legacySubmitting ||
@@ -231,7 +255,7 @@ export function useGenerateConfirm(
 
     setLegacySubmitting(true);
     try {
-      await submitRef.current(request, contract);
+      await submitRef.current(request, contract, undefined, pricingContextRef.current);
     } catch {
       // The form owns user-facing legacy/deferred errors.
     } finally {
@@ -241,13 +265,18 @@ export function useGenerateConfirm(
 
   const retryEstimate = useCallback(async () => {
     if (!request || submitting) return;
-    await fetchEstimate(request);
+    await fetchEstimate(request, pricingContextRef.current);
   }, [fetchEstimate, request, submitting]);
+
+  const dismissBilling = useCallback(() => {
+    close();
+  }, [close]);
 
   return {
     open,
     request,
     submitting,
+    billing: billing.billing,
     pricing: enabled
       ? {
           estimate,
@@ -256,14 +285,17 @@ export function useGenerateConfirm(
           errorMessage: estimateError ? errorMessage(estimateError) : null,
           billingPhase: billing.phase,
           billingQuote: billing.quote,
+          billing: billing.billing,
           billingErrorMessage: billing.errorMessage,
           expiresInSeconds: billing.expiresInSeconds,
           prepareBilling,
+          continueBillingLookup: billing.continueLookup,
           retryEstimate
         }
       : null,
     requestConfirm,
     confirm,
-    cancel
+    cancel,
+    dismissBilling
   };
 }

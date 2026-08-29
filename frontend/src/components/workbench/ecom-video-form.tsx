@@ -7,7 +7,7 @@ import { errorText } from "@/lib/api/error-text";
 import { isApiError } from "@/lib/api/client";
 import { useBrandVoices, useUploadProductImage, useVoices } from "@/lib/api/hooks";
 import { estimateScript, generateScript } from "@/lib/api/scripts";
-import { estimateScenePrompt, generateScenePrompt } from "@/lib/api/videos";
+import { estimateScenePrompt, generateScenePrompt, videoPricingContextForVoice } from "@/lib/api/videos";
 import { useGenerateConfirm } from "@/lib/api/use-generate-confirm";
 import type {
   BillingOperationLookupFor,
@@ -19,7 +19,8 @@ import type {
   ScriptGenerateResponse,
   ScriptLengthTier,
   VideoEstimateContract,
-  VideoGenResolution
+  VideoGenResolution,
+  VideoPricingContext
 } from "@/lib/api/types";
 import { useBillingAction } from "@/lib/billing/use-billing-action";
 import { useVideoTasks } from "@/lib/videos/tasks-context";
@@ -28,6 +29,7 @@ import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
 import { AiTextField } from "@/components/workbench/ai-text-field";
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
 import { PricingConfirmDialog } from "@/components/billing/pricing-confirm-dialog";
+import { BillingStatus } from "@/components/billing/billing-status";
 import { Input } from "@/components/ui/input";
 import { DurationPicker, isValidDuration } from "@/components/workbench/duration-picker";
 import { IMAGE_COUNT_MAX, isValidImageCount, ProductImageCountPicker } from "@/components/workbench/product-image-count-picker";
@@ -189,31 +191,28 @@ export function EcomVideoForm({
 
   const scriptBillingPhase = scriptBilling.phase;
   const scriptBillingResult = scriptBilling.result;
-  const resetScriptBilling = scriptBilling.reset;
   const sceneBillingPhase = sceneBilling.phase;
   const sceneBillingResult = sceneBilling.result;
-  const resetSceneBilling = sceneBilling.reset;
 
   useEffect(() => {
     if (scriptBillingPhase !== "succeeded" || !scriptBillingResult) return;
     setScript(scriptBillingResult.script);
     setScriptPricingOpen(false);
-    resetScriptBilling();
-  }, [resetScriptBilling, scriptBillingPhase, scriptBillingResult]);
+  }, [scriptBillingPhase, scriptBillingResult]);
 
   useEffect(() => {
     if (sceneBillingPhase !== "succeeded" || !sceneBillingResult) return;
     setScenePrompt(sceneBillingResult.scene_prompt);
     setNegativePrompt(sceneBillingResult.negative_prompt);
     setScenePricingOpen(false);
-    resetSceneBilling();
-  }, [resetSceneBilling, sceneBillingPhase, sceneBillingResult]);
+  }, [sceneBillingPhase, sceneBillingResult]);
 
   // Actual submit — runs only after the 确定生成 confirmation; owns its own errors.
   const submit = async (
     req: CreateVideoRequest,
     estimate?: VideoEstimateContract,
-    confirmation?: BillingConfirmation
+    confirmation?: BillingConfirmation,
+    pricingContext?: VideoPricingContext | null
   ) => {
     setError(null);
     try {
@@ -221,7 +220,8 @@ export function EcomVideoForm({
       const title = req.topic || copy.workbench.ecomTitle;
       if (estimate?.pricing_contract === "billing_quote") {
         if (!confirmation) throw new Error("缺少视频报价确认信息");
-        return await createAndTrack(req, title, { estimate, confirmation });
+        if (!pricingContext) throw new Error("缺少视频报价校验信息");
+        return await createAndTrack(req, title, { estimate, confirmation, pricingContext });
       }
       if (estimate) return await createAndTrack(req, title, { estimate });
       await createAndTrack(req, title);
@@ -270,6 +270,7 @@ export function EcomVideoForm({
       scriptBilling.phase === "querying"
     ) return;
     setError(null);
+    scriptBilling.reset();
     setScriptPricingOpen(true);
   };
 
@@ -283,6 +284,7 @@ export function EcomVideoForm({
       sceneBilling.phase === "querying"
     ) return;
     setError(null);
+    sceneBilling.reset();
     setScenePricingOpen(true);
   };
 
@@ -290,7 +292,7 @@ export function EcomVideoForm({
   const onGenerate = () => {
     if (!canGenerate) return; // req1/决策2：产品图≥1+未越限+张数合法+音色+合法时长（与 generateDisabled 同判据）
     setError(null);
-    confirm.requestConfirm({
+    const request: CreateVideoRequest = {
       topic: topic.trim() || undefined, // req1：可选，空则不带
       script: script.trim() || undefined,
       video_mode: "seedance_i2v",
@@ -304,7 +306,11 @@ export function EcomVideoForm({
       aspect_ratio: "9:16",
       subtitle_enabled: true,
       apply_visible_label: applyLabel
-    });
+    };
+    confirm.requestConfirm(
+      request,
+      videoPricingContextForVoice(voiceId, voiceList ?? [], brandVoices.data ?? [])
+    );
   };
 
   const generateDisabled = uploadProduct.isPending || !canGenerate;
@@ -425,6 +431,34 @@ export function EcomVideoForm({
         </p>
       )}
 
+      {scriptBilling.billing && !scriptPricingOpen && (
+        <BillingStatus
+          summary={scriptBilling.billing}
+          querying={scriptBilling.phase === "querying"}
+          onContinueLookup={() => void scriptBilling.continueLookup()}
+          onDismiss={scriptBilling.reset}
+          className="mb-3"
+        />
+      )}
+
+      {sceneBilling.billing && !scenePricingOpen && (
+        <BillingStatus
+          summary={sceneBilling.billing}
+          querying={sceneBilling.phase === "querying"}
+          onContinueLookup={() => void sceneBilling.continueLookup()}
+          onDismiss={sceneBilling.reset}
+          className="mb-3"
+        />
+      )}
+
+      {confirm.billing && !confirm.open && (
+        <BillingStatus
+          summary={confirm.billing}
+          onDismiss={confirm.dismissBilling}
+          className="mb-3"
+        />
+      )}
+
       <Button
         variant="primary"
         size="lg"
@@ -450,6 +484,9 @@ export function EcomVideoForm({
         quote={scriptBilling.quote}
         expiresInSeconds={scriptBilling.expiresInSeconds}
         errorMessage={scriptBilling.errorMessage}
+        billing={scriptBilling.billing}
+        billingQuerying={scriptBilling.phase === "querying"}
+        onContinueLookup={() => void scriptBilling.continueLookup()}
         onEstimate={() => void scriptBilling.estimate()}
         onConfirm={() => void scriptBilling.confirm()}
         onCancel={() => {
@@ -464,6 +501,9 @@ export function EcomVideoForm({
         quote={sceneBilling.quote}
         expiresInSeconds={sceneBilling.expiresInSeconds}
         errorMessage={sceneBilling.errorMessage}
+        billing={sceneBilling.billing}
+        billingQuerying={sceneBilling.phase === "querying"}
+        onContinueLookup={() => void sceneBilling.continueLookup()}
         onEstimate={() => void sceneBilling.estimate()}
         onConfirm={() => void sceneBilling.confirm()}
         onCancel={() => {

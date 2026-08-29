@@ -235,6 +235,16 @@ export type VideoEstimateContract =
 export type VideoAccepted = VideoAcceptedContract;
 export type EstimateResponse = VideoEstimateContract;
 
+/**
+ * Client-only context used to validate the shape of a video composite quote.
+ * It is derived from the selected voice record and is never sent as pricing
+ * authority to the backend.
+ */
+export type VideoPricingContext =
+  | { voice_kind: "brand"; voice_provider: "cosyvoice" | "doubao" }
+  | { voice_kind: "standard"; voice_provider: string }
+  | { voice_kind: "none"; voice_provider: null };
+
 // 音色来源 (BRAND-VOICE-UI-0001 §8)：系统预设 / 品牌音色(声音克隆)。
 export type VoiceSource = "preset" | "brand_voice";
 export interface Voice {

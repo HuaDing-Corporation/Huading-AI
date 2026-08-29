@@ -71,4 +71,12 @@ describe("BillingStatus", () => {
     fireEvent.click(button, { detail: 0 });
     expect(onContinueLookup).toHaveBeenCalledTimes(1);
   });
+
+  it("offers an explicit dismissal for a retained final result", () => {
+    const onDismiss = vi.fn();
+    render(<BillingStatus summary={summary("settled")} onDismiss={onDismiss} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭计费结果" }));
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
 });
