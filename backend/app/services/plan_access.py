@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.utils import normalize_tenant_slug
-from app.db.models import Plan, Subscription, Tenant
+from app.db.models import Plan, Role, Subscription, Tenant
 
 _HUADING_PLAN_CODE = "huading"
 _DOUBAO_VOICE_CLONE_PROVIDERS = {"doubao", "doubao-voice-clone"}
@@ -106,13 +106,20 @@ def has_huading_access(db: Session, *, tenant_id: str) -> bool:
     return tenant_plan_access(db, tenant_id=tenant_id).has_huading
 
 
-def tenant_entitlements(db: Session, *, tenant_id: str) -> set[str]:
+def tenant_entitlements(
+    db: Session,
+    *,
+    tenant_id: str,
+    role: Role | str | None = None,
+) -> set[str]:
     access = tenant_plan_access(db, tenant_id=tenant_id)
     entitlements: set[str] = set()
     if access.has_huading:
         entitlements.update({"voice_clone_vip", "analytics_view"})
     if access.is_platform:
-        entitlements.update({"analytics_platform", "admin_console"})
+        entitlements.add("analytics_platform")
+        if role is not None and Role(role) is Role.ADMIN:
+            entitlements.add("admin_console")
     return entitlements
 
 

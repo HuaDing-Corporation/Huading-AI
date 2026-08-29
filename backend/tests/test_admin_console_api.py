@@ -128,6 +128,47 @@ def test_admin_console_entitlement_is_derived_only_for_platform_tenant(
     assert "admin_console" in response.json()["data"]["permissions"]
 
 
+@pytest.mark.parametrize("role", ["creator", "ops"])
+def test_platform_non_admin_cannot_read_admin_console_or_receive_entitlement(
+    auth_context,
+    auth_db,
+    platform_acme,
+    role,
+) -> None:
+    with auth_db() as db:
+        user = db.get(User, auth_context["user_id"])
+        user.role = role
+        db.commit()
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/v1/admin/console/tenants",
+        headers=auth_context["headers"],
+    )
+    session = client.get("/api/v1/auth/me", headers=auth_context["headers"])
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "PLATFORM_ADMIN_REQUIRED"
+    assert "admin_console" not in session.json()["data"]["permissions"]
+
+
+def test_legacy_voice_slot_write_is_gone(
+    auth_context,
+    auth_db,
+    platform_acme,
+) -> None:
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+
+    response = TestClient(app).post(
+        f"/api/v1/admin/console/tenants/{fixture['tenant_id']}/voice-slots",
+        headers=auth_context["headers"],
+        json={"speaker_id": "voice-new"},
+    )
+
+    assert response.status_code == 410
+    assert response.json()["error"]["code"] == "VOICE_SLOT_ASSIGNMENT_RETIRED"
+
+
 def test_admin_audit_log_model_and_migration_are_declared() -> None:
     audit_model = getattr(models, "AdminAuditLog", None)
     assert audit_model is not None
@@ -788,15 +829,15 @@ def test_admin_console_tenant_mutations_are_transactional_and_audited(
         json={"speaker_id": "S_admin_api_slot", "reason": "purchased slot"},
         headers=headers,
     )
-    assert slot.status_code == 200
-    assert slot.json()["data"]["changed"] is True
+    assert slot.status_code == 410
+    assert slot.json()["error"]["code"] == "VOICE_SLOT_ASSIGNMENT_RETIRED"
     repeated_slot = client.post(
         f"/api/v1/admin/console/tenants/{fixture['tenant_id']}/voice-slots",
         json={"speaker_id": "S_admin_api_slot", "reason": "idempotency probe"},
         headers=headers,
     )
-    assert repeated_slot.status_code == 200
-    assert repeated_slot.json()["data"]["changed"] is False
+    assert repeated_slot.status_code == 410
+    assert repeated_slot.json()["error"]["code"] == "VOICE_SLOT_ASSIGNMENT_RETIRED"
 
     status_response = client.patch(
         f"/api/v1/admin/console/tenants/{fixture['tenant_id']}/status",
@@ -829,9 +870,9 @@ def test_admin_console_tenant_mutations_are_transactional_and_audited(
         assert target.status == "suspended"
         assert actions.count("credits_adjust") == 1
         assert actions.count("plan_change") == 2  # fixture + API change
-        assert actions.count("voice_slot_assign") == 2
+        assert actions.count("voice_slot_assign") == 0
         assert actions.count("status_change") == 1
-        assert len(actions) == 6
+        assert len(actions) == 4
 
 
 def test_credit_adjustment_uses_for_update_and_independent_commits_do_not_lose_updates(

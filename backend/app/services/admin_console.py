@@ -41,7 +41,6 @@ from app.schemas.admin_console import (
     AdminTenantItem,
     AdminTenantStatusResponse,
     AdminUsageItem,
-    AdminVoiceSlotAssignResponse,
     AdminVoiceSlotItem,
     AdminVoiceSlotsResponse,
 )
@@ -49,7 +48,6 @@ from app.services import ecom_replicate, quota, reverse_prompt
 from app.services.plan_access import is_platform_tenant
 from app.services.voice_slots import (
     DOUBAO_VOICE_CLONE_PROVIDER,
-    assign_speaker_slot,
     speaker_ids,
 )
 
@@ -351,45 +349,6 @@ def change_tenant_status(
         reason=reason,
     )
     return AdminTenantStatusResponse(tenant_id=tenant.id, status=tenant.status)
-
-
-def assign_tenant_voice_slot(
-    db: Session,
-    *,
-    actor: User,
-    tenant_id: str,
-    speaker_id: str,
-    reason: str | None,
-) -> AdminVoiceSlotAssignResponse:
-    tenant = db.get(Tenant, tenant_id)
-    if tenant is None or tenant.deleted_at is not None:
-        raise AppError("Tenant not found.", code="TENANT_NOT_FOUND", status_code=404)
-    summary = assign_speaker_slot(
-        db,
-        tenant_slug=tenant.slug,
-        speaker_id=speaker_id,
-        apply=True,
-    )
-    record_audit(
-        db,
-        actor=actor,
-        action="voice_slot_assign",
-        target_tenant_id=tenant.id,
-        target_id=tenant.id,
-        before={"speaker_ids": list(summary.previous_speaker_ids)},
-        after={
-            "speaker_ids": list(summary.speaker_ids),
-            "speaker_id": summary.speaker_id,
-            "changed": summary.changed,
-        },
-        reason=reason,
-    )
-    return AdminVoiceSlotAssignResponse(
-        tenant_id=tenant.id,
-        speaker_id=summary.speaker_id,
-        changed=summary.changed,
-        speaker_ids=list(summary.speaker_ids),
-    )
 
 
 def _credit_units(value: Decimal) -> int:

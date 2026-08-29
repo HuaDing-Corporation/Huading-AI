@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-import hashlib
 import re
 from dataclasses import dataclass
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.exceptions import AppError
 from app.db.models import ProviderConfig, Tenant
+from app.services.provider_voice_registry import (
+    lock_provider_voice_ids,
+    provider_voice_lock_key,
+)
 
 DOUBAO_VOICE_CLONE_PROVIDER = "doubao-voice-clone"
 SPEAKER_ID_PATTERN = re.compile(r"^S_[A-Za-z0-9_-]{1,157}$")
@@ -43,6 +47,12 @@ def assign_speaker_slot(
     apply: bool = False,
     platform_speaker_ids: object | None = None,
 ) -> SpeakerSlotAssignmentSummary:
+    if apply:
+        raise AppError(
+            "Legacy voice-slot assignment has been retired.",
+            code="VOICE_SLOT_ASSIGNMENT_RETIRED",
+            status_code=410,
+        )
     slug = tenant_slug.strip()
     normalized_speaker_id = speaker_id.strip()
     if not slug:
@@ -137,14 +147,12 @@ def assign_speaker_slot(
 
 
 def _speaker_slot_lock_id(speaker_id: str) -> int:
-    digest = hashlib.sha256(f"huading:voice-slot:{speaker_id}".encode()).digest()
-    return int.from_bytes(digest[:8], byteorder="big", signed=True)
+    return provider_voice_lock_key(speaker_id)
 
 
 def _lock_speaker_slot(db: Session, speaker_id: str) -> None:
-    if db.get_bind().dialect.name != "postgresql":
-        return
-    db.execute(
-        text("SELECT pg_advisory_xact_lock(:lock_id)"),
-        {"lock_id": _speaker_slot_lock_id(speaker_id)},
+    lock_provider_voice_ids(
+        db,
+        provider=DOUBAO_VOICE_CLONE_PROVIDER,
+        provider_voice_ids=[speaker_id],
     )

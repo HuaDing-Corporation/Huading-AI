@@ -155,6 +155,9 @@ class Settings(BaseSettings):
     engine_doubao_voice_clone_speaker_ids: Annotated[list[str], NoDecode] = Field(
         default_factory=list
     )
+    engine_doubao_official_voice_ids: Annotated[list[str], NoDecode] = Field(
+        default_factory=list
+    )
     engine_doubao_voice_clone_resource_id: str = "volc.megatts.voiceclone"
     engine_doubao_voice_clone_endpoint: str = (
         "https://openspeech.bytedance.com/api/v1/mega_tts/audio/upload"
@@ -291,6 +294,7 @@ class Settings(BaseSettings):
         "cors_origins",
         "engine_cors_origins",
         "engine_doubao_voice_clone_speaker_ids",
+        "engine_doubao_official_voice_ids",
         mode="before",
     )
     @classmethod

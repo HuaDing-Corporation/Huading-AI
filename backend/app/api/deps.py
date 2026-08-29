@@ -147,7 +147,9 @@ def permissions_for_role(role: Role | str) -> set[str]:
 
 def session_permissions_for_user(db: Session, *, user: User) -> set[str]:
     permissions = set(permissions_for_role(user.role))
-    permissions.update(tenant_entitlements(db, tenant_id=user.tenant_id))
+    permissions.update(
+        tenant_entitlements(db, tenant_id=user.tenant_id, role=user.role)
+    )
     return permissions
 
 
@@ -264,7 +266,10 @@ def require_platform_admin(
     db: Session = DbSessionDependency,
     user: User = CurrentUserDependency,
 ) -> User:
-    if is_platform_tenant(db, tenant_id=user.tenant_id):
+    if (
+        is_platform_tenant(db, tenant_id=user.tenant_id)
+        and user.role == Role.ADMIN.value
+    ):
         return user
     raise AppError(
         "Platform administrator access is required.",

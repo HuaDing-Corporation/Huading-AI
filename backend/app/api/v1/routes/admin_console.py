@@ -28,13 +28,11 @@ from app.schemas.admin_console import (
     AdminTenantStatusRequest,
     AdminTenantStatusResponse,
     AdminUsagePage,
-    AdminVoiceSlotAssignRequest,
     AdminVoiceSlotAssignResponse,
     AdminVoiceSlotsResponse,
 )
 from app.schemas.response import ApiResponse, ok
 from app.services import admin_console
-from app.services.voice_slots import SpeakerSlotAssignmentError
 from app.workers.avatar_talk import generate_avatar_talk_task, generate_seedance_i2v_task
 from app.workers.image_gen import generate_ecom_replicate_task, generate_image_task
 from app.workers.reverse_prompt import generate_reverse_prompt_video_task
@@ -189,30 +187,13 @@ def get_voice_slots(
 def assign_voice_slot(
     request: Request,
     tenant_id: str,
-    payload: AdminVoiceSlotAssignRequest,
-    user: User = CurrentUserDependency,
-    db: Session = DbSessionDependency,
 ) -> ApiResponse[AdminVoiceSlotAssignResponse]:
-    try:
-        result = admin_console.assign_tenant_voice_slot(
-            db,
-            actor=user,
-            tenant_id=tenant_id,
-            speaker_id=payload.speaker_id,
-            reason=payload.reason,
-        )
-        db.commit()
-    except SpeakerSlotAssignmentError as exc:
-        db.rollback()
-        raise AppError(
-            str(exc),
-            code="VOICE_SLOT_ASSIGNMENT_FAILED",
-            status_code=422,
-        ) from exc
-    except Exception:
-        db.rollback()
-        raise
-    return ok(request, result)
+    del request, tenant_id
+    raise AppError(
+        "Legacy voice-slot assignment has been retired.",
+        code="VOICE_SLOT_ASSIGNMENT_RETIRED",
+        status_code=410,
+    )
 
 
 @router.get("/usage", response_model=ApiResponse[AdminUsagePage])

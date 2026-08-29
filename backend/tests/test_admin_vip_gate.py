@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app.core.exceptions import AppError
 from app.db.models import (
     Asset,
     Plan,
@@ -450,7 +451,7 @@ def test_billing_reset_cli_requires_backup_and_defaults_to_dry_run(
         assert subscription.quota_credits_reserved == 0
 
 
-def test_assign_speaker_slot_is_idempotent_and_does_not_touch_platform_pool(auth_db) -> None:
+def test_assign_speaker_slot_apply_is_retired_and_does_not_touch_provider_config(auth_db) -> None:
     from scripts.ops.reset_billing_and_admin import (
         SpeakerSlotAssignmentError,
         assign_speaker_slot,
@@ -486,27 +487,14 @@ def test_assign_speaker_slot_is_idempotent_and_does_not_touch_platform_pool(auth
             select(ProviderConfig).where(ProviderConfig.tenant_id == tenant_id)
         ) is None
 
-        applied = assign_speaker_slot(
-            db,
-            tenant_slug="vip-studio",
-            speaker_id="S_tenant_exclusive_001",
-            apply=True,
-        )
-        db.commit()
-        assert applied.apply is True
-        assert applied.changed is True
-        assert applied.config_created is True
-
-        repeated = assign_speaker_slot(
-            db,
-            tenant_slug="vip-studio",
-            speaker_id="S_tenant_exclusive_001",
-            apply=True,
-        )
-        db.commit()
-        assert repeated.changed is False
-        assert repeated.config_created is False
-        assert repeated.speaker_ids == ("S_tenant_exclusive_001",)
+        with pytest.raises(AppError) as exc:
+            assign_speaker_slot(
+                db,
+                tenant_slug="vip-studio",
+                speaker_id="S_tenant_exclusive_001",
+                apply=True,
+            )
+        assert exc.value.code == "VOICE_SLOT_ASSIGNMENT_RETIRED"
 
         tenant_config = db.scalar(
             select(ProviderConfig).where(
@@ -515,8 +503,7 @@ def test_assign_speaker_slot_is_idempotent_and_does_not_touch_platform_pool(auth
                 ProviderConfig.provider == "doubao-voice-clone",
             )
         )
-        assert tenant_config is not None
-        assert tenant_config.config == {"speaker_ids": ["S_tenant_exclusive_001"]}
+        assert tenant_config is None
         db.refresh(platform_config)
         assert platform_config.config == {
             "speaker_ids": ["S_platform_001"],
@@ -526,16 +513,14 @@ def test_assign_speaker_slot_is_idempotent_and_does_not_touch_platform_pool(auth
         other_tenant = Tenant(slug="other-vip-studio", name="Other VIP Studio")
         db.add(other_tenant)
         db.commit()
-        with pytest.raises(
-            SpeakerSlotAssignmentError,
-            match="another tenant",
-        ):
+        with pytest.raises(AppError) as other_exc:
             assign_speaker_slot(
                 db,
                 tenant_slug="other-vip-studio",
                 speaker_id="S_tenant_exclusive_001",
                 apply=True,
             )
+        assert other_exc.value.code == "VOICE_SLOT_ASSIGNMENT_RETIRED"
         assert db.scalar(
             select(ProviderConfig).where(
                 ProviderConfig.tenant_id == other_tenant.id,
@@ -544,7 +529,7 @@ def test_assign_speaker_slot_is_idempotent_and_does_not_touch_platform_pool(auth
         ) is None
 
 
-def test_assign_speaker_slot_rejects_slot_from_env_platform_pool(
+def test_assign_speaker_slot_apply_retires_before_env_platform_pool_scan(
     auth_db,
     monkeypatch,
 ) -> None:
@@ -563,10 +548,7 @@ def test_assign_speaker_slot_rejects_slot_from_env_platform_pool(
         db.add(tenant)
         db.commit()
 
-        with pytest.raises(
-            ops.SpeakerSlotAssignmentError,
-            match="platform pool",
-        ):
+        with pytest.raises(AppError) as exc:
             ops.assign_speaker_slot(
                 db,
                 tenant_slug="env-pool-vip",
@@ -574,6 +556,7 @@ def test_assign_speaker_slot_rejects_slot_from_env_platform_pool(
                 apply=True,
             )
 
+        assert exc.value.code == "VOICE_SLOT_ASSIGNMENT_RETIRED"
         assert db.scalar(
             select(ProviderConfig).where(ProviderConfig.tenant_id == tenant.id)
         ) is None
@@ -616,13 +599,10 @@ def test_assign_speaker_slot_cli_defaults_to_dry_run_and_requires_apply(
             select(ProviderConfig).where(ProviderConfig.tenant_id == tenant_id)
         ) is None
 
-    assert ops.main([*base_args, "--apply"]) == 0
-    applied = json.loads(capsys.readouterr().out)
-    assert applied["apply"] is True
-    assert applied["speaker_ids"] == ["S_cli_exclusive_001"]
+    assert ops.main([*base_args, "--apply"]) != 0
+    assert "VOICE_SLOT_ASSIGNMENT_RETIRED" in capsys.readouterr().err
     with auth_db() as db:
         config = db.scalar(
             select(ProviderConfig).where(ProviderConfig.tenant_id == tenant_id)
         )
-        assert config is not None
-        assert config.config == {"speaker_ids": ["S_cli_exclusive_001"]}
+        assert config is None
