@@ -12,10 +12,12 @@ from sqlalchemy import func, select
 
 from app.api.deps import get_object_storage
 from app.core.config import settings
+from app.core.security import create_access_token
 from app.db.models import (
     Asset,
     BatchJob,
     BrandVoice,
+    Plan,
     Subscription,
     TaskAsset,
     UsageRecord,
@@ -98,6 +100,22 @@ def _set_quota(db, tenant_id: str, *, total: int) -> None:
     subscription.quota_credits_reserved = 0
 
 
+def _grant_huading(db, tenant_id: str) -> None:
+    plan = db.scalar(select(Plan).where(Plan.code == "huading"))
+    if plan is None:
+        plan = Plan(
+            code="huading",
+            name="Huading Plan",
+            price_cents=0,
+            period="monthly",
+            quota_credits=0,
+            is_active=True,
+        )
+        db.add(plan)
+        db.flush()
+    _subscription(db, tenant_id).plan_id = plan.id
+
+
 def _seed_voice(db) -> Voice:
     voice = Voice(
         id="voice-batch",
@@ -140,6 +158,21 @@ def _seed_audio_asset(db, *, tenant_id: str, asset_id: str = "asset-batch-bgm") 
     )
     db.add(asset)
     return asset
+
+
+def _same_tenant_headers(db, *, tenant_id: str, email: str) -> dict[str, str]:
+    user = User(
+        tenant_id=tenant_id,
+        email=email,
+        password_hash="unused",
+        role="creator",
+        is_active=True,
+        status="active",
+    )
+    db.add(user)
+    db.commit()
+    token = create_access_token(user_id=user.id, tenant_id=tenant_id, role=user.role)
+    return {"Authorization": f"Bearer {token}"}
 
 
 def _stub_batch_tasks(monkeypatch):
@@ -423,6 +456,7 @@ def test_batch_estimate_ecom_table_sums_row_tts_characters(
 ) -> None:
     with auth_db() as db:
         _set_quota(db, auth_context["tenant_id"], total=5000)
+        _seed_voice(db)
         db.commit()
 
     resp = TestClient(app).post(
@@ -459,6 +493,129 @@ def test_batch_estimate_ecom_table_sums_row_tts_characters(
         "insufficient": False,
         "balance_credits": 5000,
     }
+
+
+def test_batch_estimate_rejects_another_users_paid_doubao_voice(
+    auth_context,
+    auth_db,
+) -> None:
+    now = datetime.now(UTC)
+    with auth_db() as db:
+        _set_quota(db, auth_context["tenant_id"], total=5000)
+        colleague_headers = _same_tenant_headers(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            email="batch-colleague@example.com",
+        )
+        voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            owner_user_id=auth_context["user_id"],
+            name="Owner-only batch voice",
+            provider="doubao-voice-clone",
+            speaker_id="batch-owner-only-speaker",
+            status="ready",
+            consent_confirmed=True,
+            consent_confirmed_at=now,
+            activated_at=now - timedelta(days=1),
+            expires_at=now + timedelta(days=1),
+        )
+        db.add(voice)
+        db.commit()
+        voice_id = voice.id
+
+    response = TestClient(app).post(
+        "/api/v1/batches/estimate",
+        json={
+            "kind": "ecom_table",
+            "rows": [
+                {
+                    "product_name": "private voice product",
+                    "selling_points": "owner only",
+                    "image_asset_id": "not-needed-for-estimate",
+                }
+            ],
+            "common": {
+                "video_mode": "seedance_i2v",
+                "voice_id": voice_id,
+                "duration_sec": 5,
+                "resolution": "480p",
+            },
+        },
+        headers=colleague_headers,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "VOICE_NOT_FOUND"
+
+
+@pytest.mark.parametrize(
+    ("offset", "expected_status"),
+    [
+        (timedelta(microseconds=-1), 200),
+        (timedelta(0), 404),
+        (timedelta(microseconds=1), 404),
+    ],
+)
+def test_batch_estimate_uses_exact_paid_voice_expiry_boundary(
+    offset,
+    expected_status,
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import batches as batches_route
+
+    expires_at = datetime(2026, 8, 29, 12, 0, 0, tzinfo=UTC)
+
+    class _FixedDateTime:
+        @classmethod
+        def now(cls, tz=None):
+            return expires_at + offset
+
+    with auth_db() as db:
+        _set_quota(db, auth_context["tenant_id"], total=5000)
+        _grant_huading(db, auth_context["tenant_id"])
+        voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            owner_user_id=auth_context["user_id"],
+            name="Exact boundary batch voice",
+            provider="doubao-voice-clone",
+            speaker_id="batch-exact-boundary-speaker",
+            status="ready",
+            consent_confirmed=True,
+            consent_confirmed_at=expires_at - timedelta(days=1),
+            activated_at=expires_at - timedelta(days=1),
+            expires_at=expires_at,
+        )
+        db.add(voice)
+        db.commit()
+        voice_id = voice.id
+
+    monkeypatch.setattr(batches_route, "datetime", _FixedDateTime)
+    response = TestClient(app).post(
+        "/api/v1/batches/estimate",
+        json={
+            "kind": "ecom_table",
+            "rows": [
+                {
+                    "product_name": "boundary product",
+                    "selling_points": "exact expiry",
+                    "image_asset_id": "not-needed-for-estimate",
+                }
+            ],
+            "common": {
+                "video_mode": "seedance_i2v",
+                "voice_id": voice_id,
+                "duration_sec": 5,
+                "resolution": "480p",
+            },
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == expected_status
+    if expected_status == 404:
+        assert response.json()["error"]["code"] == "VOICE_NOT_FOUND"
 
 
 def test_batch_create_prompt_set_fans_out_video_gen_tasks_on_video_queue(
@@ -1043,6 +1200,95 @@ def test_batch_ecom_allows_cosyvoice_brand_voice_on_free_plan(
         assert task.params["voice_source"] == "brand_voice"
         assert task.params["tts_speaker_id"] == "batch-cosy-speaker"
         assert task.params["brand_voice_provider"] == "cosyvoice-voice-clone"
+
+
+def test_batch_submit_uses_one_timestamp_for_gate_and_every_created_task(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import batches as batches_route
+
+    accepted_at = datetime(2026, 8, 29, 10, 0, 0, tzinfo=UTC)
+    after_expiry = accepted_at + timedelta(seconds=2)
+
+    class _CrossingDateTime:
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            return accepted_at if cls.calls == 1 else after_expiry
+
+    seedance_calls, _video_calls = _stub_batch_tasks(monkeypatch)
+    with auth_db() as db:
+        _set_quota(db, auth_context["tenant_id"], total=5000)
+        _grant_huading(db, auth_context["tenant_id"])
+        voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            owner_user_id=auth_context["user_id"],
+            name="Boundary batch voice",
+            provider="doubao-voice-clone",
+            speaker_id="batch-boundary-speaker",
+            status="ready",
+            consent_confirmed=True,
+            consent_confirmed_at=accepted_at,
+            activated_at=accepted_at - timedelta(days=1),
+            expires_at=accepted_at + timedelta(seconds=1),
+        )
+        first = _seed_image_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="batch-boundary-first",
+        )
+        second = _seed_image_asset(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            asset_id="batch-boundary-second",
+        )
+        db.add(voice)
+        db.commit()
+        voice_id = voice.id
+        first_id = first.id
+        second_id = second.id
+
+    monkeypatch.setattr(batches_route, "datetime", _CrossingDateTime)
+    response = TestClient(app).post(
+        "/api/v1/batches",
+        json={
+            "kind": "ecom_table",
+            "rows": [
+                {
+                    "product_name": "first boundary product",
+                    "selling_points": "accepted before expiry",
+                    "image_asset_id": first_id,
+                },
+                {
+                    "product_name": "second boundary product",
+                    "selling_points": "same request time",
+                    "image_asset_id": second_id,
+                },
+            ],
+            "common": {
+                "video_mode": "seedance_i2v",
+                "voice_id": voice_id,
+                "duration_sec": 5,
+                "resolution": "480p",
+            },
+        },
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 202
+    assert len(seedance_calls) == 2
+    with auth_db() as db:
+        tasks = list(
+            db.scalars(
+                select(VideoTask).where(VideoTask.id.in_(response.json()["data"]["task_ids"]))
+            )
+        )
+        assert {task.created_at.replace(tzinfo=UTC) for task in tasks} == {accepted_at}
+    assert _CrossingDateTime.calls == 1
 
 
 def test_batch_cancel_releases_queued_tasks_and_leaves_running_tasks(

@@ -92,7 +92,12 @@ def estimate_batch_endpoint(
     user: User = BatchPermissionDependency,
     db: Session = DbSessionDependency,
 ) -> ApiResponse[BatchEstimateResponse]:
-    per_row, total_units, balance = estimate_batch(db, tenant_id=user.tenant_id, payload=payload)
+    per_row, total_units, balance = estimate_batch(
+        db,
+        user=user,
+        payload=payload,
+        requested_at=datetime.now(UTC),
+    )
     return ok(
         request,
         BatchEstimateResponse(
@@ -117,7 +122,13 @@ def create_batch_endpoint(
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
 ) -> ApiResponse[BatchCreateResponse]:
-    _per_row, total_units, balance = estimate_batch(db, tenant_id=user.tenant_id, payload=payload)
+    submitted_at = datetime.now(UTC)
+    _per_row, total_units, balance = estimate_batch(
+        db,
+        user=user,
+        payload=payload,
+        requested_at=submitted_at,
+    )
     if balance < total_units:
         raise _insufficient_credits()
 
@@ -131,8 +142,8 @@ def create_batch_endpoint(
         succeeded=0,
         failed=0,
         common_params=payload.common.model_dump(exclude_none=True),
-        created_at=datetime.now(UTC),
-        updated_at=datetime.now(UTC),
+        created_at=submitted_at,
+        updated_at=submitted_at,
     )
     db.add(batch)
     db.flush()
@@ -148,6 +159,7 @@ def create_batch_endpoint(
                     payload=payload,
                     storage=storage,
                     queued_payloads=queued_payloads,
+                    submitted_at=submitted_at,
                 )
             )
         else:
@@ -159,6 +171,7 @@ def create_batch_endpoint(
                     payload=payload,
                     storage=storage,
                     queued_payloads=queued_payloads,
+                    submitted_at=submitted_at,
                 )
             )
         refresh_batch_job(db, batch_id=batch.id)
@@ -186,6 +199,7 @@ def _create_prompt_set_tasks(
     payload: BatchRequest,
     storage: ObjectStorage,
     queued_payloads: list[tuple[str, dict[str, object], object]],
+    submitted_at: datetime,
 ) -> list[str]:
     rows = prompt_rows_or_raise(payload)
     common = payload.common
@@ -241,6 +255,7 @@ def _create_prompt_set_tasks(
             duration_sec=float(common.duration_sec or 5),
             batch_id=batch.id,
             params=params,
+            created_at=submitted_at,
         )
         db.add(task)
         db.flush()
@@ -303,6 +318,7 @@ def _create_ecom_table_tasks(
     payload: BatchRequest,
     storage: ObjectStorage,
     queued_payloads: list[tuple[str, dict[str, object], object]],
+    submitted_at: datetime,
 ) -> list[str]:
     rows = ecom_rows_or_raise(payload)
     common = payload.common
@@ -310,7 +326,7 @@ def _create_ecom_table_tasks(
         db,
         user=user,
         voice_id=common.voice_id,
-        requested_at=datetime.now(UTC),
+        requested_at=submitted_at,
     )
     if brand_voice is not None and uses_doubao_voice_clone(brand_voice.provider):
         require_doubao_voice_clone_access(
@@ -376,6 +392,7 @@ def _create_ecom_table_tasks(
                     "resolution": common.resolution,
                     **brand_voice_params,
                 },
+                created_at=submitted_at,
             )
             db.add(failed)
             db.flush()
@@ -411,6 +428,7 @@ def _create_ecom_table_tasks(
             duration_sec=target_duration_sec,
             batch_id=batch.id,
             params=params,
+            created_at=submitted_at,
         )
         db.add(task)
         db.flush()

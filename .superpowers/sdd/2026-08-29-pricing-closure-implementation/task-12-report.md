@@ -112,3 +112,117 @@ Static verification across every changed Python file returned `All checks passed
 - Existing Starlette/httpx TestClient and Alembic path-separator deprecation warnings remain non-blocking.
 - Customer list serialization performs an order-status lookup per visible voice; this preserves correctness and can be optimized separately if catalog volume warrants it.
 - No network/provider call, push, merge, deploy, production migration, production/shared database write, provider-ID registration, configuration write, or production routing change was performed during implementation or verification.
+
+## Fix Round 1 — 2026-08-29
+
+### Status and findings closed
+
+All seven Important review findings are addressed:
+
+1. Batch estimate and submit now resolve the selected narration voice through the same owner, activation/expiry, and Huading-plan gate. The exact paid-voice expiry boundary is `activated_at <= requested_at < expires_at`.
+2. Video submit and batch submit each capture one trusted server timestamp. The same value drives acceptance, quote/rate resolution, every repeated voice check, and every created `VideoTask.created_at`; worker revalidation therefore continues to use the accepted submission instant.
+3. Brand-voice reads associate both create fulfillment and renewals, and select the latest order by `created_at DESC, id DESC`. Awaiting, rejected, and fulfilled renewals override an older fulfilled create order, including equal-timestamp rows.
+4. Omitted/Doubao providers are rejected as `DOUBAO_MANUAL_ORDER_REQUIRED` before optional billing-header parsing. Missing, partial, and malformed billing headers cannot mask the provider policy or create billing/provider side effects.
+5. CosyVoice clone payloads carry the stable request hash as the provider idempotency identity. The adapter checks remote inventory before creation and reconciles a transport exception by checking again; a fresh HTTP/local key for the same payload therefore cannot create a second remote voice.
+6. CosyVoice finalization and deletion use the same `BillingOperation -> BrandVoice` row-lock order. Delete returns `BRAND_VOICE_CREATION_IN_PROGRESS` while creation is in progress; after successful finalization, delete soft-deletes locally and releases the remote speaker exactly once.
+7. Provider success is accepted only through strict `CosyVoiceCloneResult` validation: canonical provider, exact ready status, nonblank string speaker ID, strict optional telemetry types, and no extra fields. Safely typed provider cost is preserved on the canonical usage even when the result is rejected.
+
+The file-boundary concern is also closed. `backend/tests/test_video_pipeline_quota.py` now submits real public parent videos and inspects persisted canonical billing rows: CosyVoice has exactly one `video/second` row plus one `tts/character` row, Doubao has only the video row, and operation credits equal the canonical usage sum without a duplicate character fee. The Doubao case also proves same-tenant non-owner and expired-owner rejection. `app/services/plan_access.py` remains unchanged because the existing `uses_doubao_voice_clone()` to `require_doubao_voice_clone_access()` path is already the authoritative gate reused by video and batch estimate/submit; changing it would add no behavior.
+
+### Fix Round 1 RED evidence
+
+Each production change followed a failing behavior test. These are the exact focused commands and observations recorded before the corresponding implementation:
+
+```text
+uv run pytest tests/test_batch_prod_pipeline.py::test_batch_estimate_rejects_another_users_paid_doubao_voice -q
+FAILED: the other payer's voice was accepted (HTTP 200 instead of 404).
+
+uv run pytest tests/test_batch_prod_pipeline.py::test_batch_submit_uses_one_timestamp_for_gate_and_every_created_task -q
+FAILED: the second current-clock voice check crossed expiry and returned HTTP 404 instead of accepting the request at the first trusted timestamp.
+
+uv run pytest tests/test_brand_voice_pipeline.py::test_video_submit_persists_its_single_trusted_voice_gate_timestamp -q
+FAILED: the task persisted an ORM-generated time rather than the route-captured voice-gate timestamp.
+
+uv run pytest tests/test_brand_voice_pipeline.py::test_brand_voice_delivery_status_uses_latest_awaiting_renewal_order -q
+FAILED: the API returned the older fulfilled create order instead of the latest awaiting renewal.
+
+uv run pytest tests/test_brand_voice_pipeline.py::test_legacy_doubao_create_requires_manual_order_without_side_effects -q
+9 failed, 3 passed: partial/malformed header combinations returned BILLING_HEADERS_REQUIRED or INVALID_IDEMPOTENCY_KEY before DOUBAO_MANUAL_ORDER_REQUIRED.
+
+uv run pytest tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_clone_recovers_remote_success_after_timeout_across_new_local_key -q
+FAILED: the adapter propagated TimeoutError after the supplier had already created the remote voice.
+
+uv run pytest tests/test_brand_voice_pipeline.py::test_cosyvoice_delete_loses_to_in_progress_finalize_without_orphan -q
+FAILED: DELETE returned HTTP 204 while the operation was in progress; the outer finalizer then succeeded, producing the forbidden deleted-local/live-remote combination.
+
+uv run pytest tests/test_brand_voice_pipeline.py::test_cosyvoice_create_rejects_result_without_explicit_canonical_provider -q
+FAILED: a provider result with no explicit canonical provider was accepted with HTTP 201.
+```
+
+The renewal RED was subsequently expanded and renamed to the three-state deterministic matrix `test_brand_voice_delivery_status_uses_latest_renewal_order`. The strict-result RED was expanded and renamed to the eight-case matrix `test_cosyvoice_create_rejects_invalid_typed_provider_result`.
+
+### Fix Round 1 GREEN evidence
+
+Finding-specific reruns after implementation:
+
+```text
+uv run pytest tests/test_batch_prod_pipeline.py::test_batch_estimate_rejects_another_users_paid_doubao_voice tests/test_batch_prod_pipeline.py::test_batch_estimate_uses_exact_paid_voice_expiry_boundary
+4 passed, 1 warning in 0.59s
+
+uv run pytest tests/test_batch_prod_pipeline.py::test_batch_submit_uses_one_timestamp_for_gate_and_every_created_task tests/test_brand_voice_pipeline.py::test_video_submit_persists_its_single_trusted_voice_gate_timestamp tests/test_avatar_talk_worker.py::test_worker_uses_submission_time_for_paid_voice_expiry
+3 passed, 1 warning in 0.46s
+
+uv run pytest tests/test_brand_voice_pipeline.py::test_brand_voice_delivery_status_uses_latest_renewal_order
+3 passed, 1 warning in 0.48s
+
+uv run pytest tests/test_brand_voice_pipeline.py::test_legacy_doubao_create_requires_manual_order_without_side_effects
+12 passed, 1 warning in 1.75s
+
+uv run pytest tests/test_cosyvoice_voice_clone_provider.py::test_cosyvoice_clone_recovers_remote_success_after_timeout_across_new_local_key tests/test_brand_voice_pipeline.py::test_cosyvoice_new_http_key_reuses_stable_remote_request_identity
+2 passed, 1 warning in 0.38s
+
+uv run pytest tests/test_brand_voice_pipeline.py::test_cosyvoice_delete_loses_to_in_progress_finalize_without_orphan tests/test_brand_voice_pipeline.py::test_cosyvoice_delete_after_finalize_releases_remote_once
+2 passed, 1 warning in 0.43s
+
+uv run pytest tests/test_brand_voice_pipeline.py::test_cosyvoice_create_rejects_invalid_typed_provider_result
+8 passed, 1 warning in 1.44s
+
+uv run pytest tests/test_video_pipeline_quota.py::test_cosyvoice_parent_video_reserves_one_character_usage_without_duplicate_fee tests/test_video_pipeline_quota.py::test_doubao_parent_video_has_no_character_usage_and_enforces_payer_time_gate
+2 passed, 1 warning in 0.42s
+```
+
+Combined review-specific selection:
+
+```text
+uv run pytest tests/test_batch_prod_pipeline.py::test_batch_estimate_uses_exact_paid_voice_expiry_boundary tests/test_batch_prod_pipeline.py::test_batch_submit_uses_one_timestamp_for_gate_and_every_created_task tests/test_brand_voice_pipeline.py::test_brand_voice_delivery_status_uses_latest_renewal_order tests/test_brand_voice_pipeline.py::test_cosyvoice_new_http_key_reuses_stable_remote_request_identity tests/test_brand_voice_pipeline.py::test_cosyvoice_delete_loses_to_in_progress_finalize_without_orphan tests/test_brand_voice_pipeline.py::test_cosyvoice_delete_after_finalize_releases_remote_once tests/test_brand_voice_pipeline.py::test_cosyvoice_create_rejects_invalid_typed_provider_result tests/test_cosyvoice_voice_clone_provider.py tests/test_video_pipeline_quota.py::test_cosyvoice_parent_video_reserves_one_character_usage_without_duplicate_fee tests/test_video_pipeline_quota.py::test_doubao_parent_video_has_no_character_usage_and_enforces_payer_time_gate
+28 passed, 1 warning in 3.58s
+```
+
+### Verification
+
+```text
+uv run pytest tests/test_brand_voice_pipeline.py tests/test_batch_prod_pipeline.py tests/test_avatar_talk_worker.py tests/test_video_pipeline_quota.py tests/test_video_pricing_contract.py tests/test_cosyvoice_voice_clone_provider.py
+142 passed, 1 warning in 16.66s
+
+uv run pytest tests/test_video_pipeline_contract.py -k "brand_voice or cosyvoice or voice" -q
+4 passed, 1 warning
+
+uv run pytest
+1804 passed, 54 skipped, 3 warnings in 173.34s (0:02:53)
+
+uv run ruff check app/api/v1/routes/batches.py app/api/v1/routes/brand_voices.py app/api/v1/routes/videos.py app/providers/voice_clone/cosyvoice.py app/schemas/brand_voices.py app/services/batches.py tests/test_batch_prod_pipeline.py tests/test_brand_voice_pipeline.py tests/test_cosyvoice_voice_clone_provider.py tests/test_video_pipeline_quota.py
+All checks passed!
+
+git diff --check
+No output; exit 0.
+```
+
+### Fix-round self-review and concerns
+
+- Rechecked both batch routes, every video creation branch, and queued/failed batch rows for the single trusted timestamp; no worker-facing task retains an acceptance-time default.
+- Rechecked the provider gate ordering across all twelve omitted/Doubao header combinations and confirmed zero BrandVoice, operation, usage, wallet, slot, and provider side effects.
+- Rechecked both delete/finalize orderings and the failure/invalid-result finalizers under the shared lock order; terminal succeeded operations remain terminal after later deletion.
+- Rechecked stable provider recovery at both adapter and public-route boundaries. Different HTTP idempotency keys can create distinct local operation/history rows, but the stable external request identity resolves to one remote speaker and only one supplier create call.
+- Rechecked strict provider-result rejection for missing/wrong provider, missing/wrong status, missing/wrong speaker, wrong provider type, and extra fields.
+- Existing Starlette/httpx and Alembic path-separator warnings remain non-blocking. The previously deferred brand-voice list N+1 order-status lookup is unchanged.
+- No subagent, network/provider call, push, merge, deploy, migration, production/shared database write, Task 13 change, configuration write, or external side effect was performed.

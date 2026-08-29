@@ -6,11 +6,11 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response, status
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
-    BillingSubmissionHeaders,
     CurrentUserDependency,
     DbSessionDependency,
     get_object_storage,
@@ -21,7 +21,7 @@ from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
 from app.core.utils import base_mime
-from app.db.models import Asset, BrandVoice, BrandVoiceOrder, UsageRecord, User
+from app.db.models import Asset, BillingOperation, BrandVoice, BrandVoiceOrder, UsageRecord, User
 from app.providers.base import ProviderResolutionError, resolve_named_provider
 from app.schemas.billing import BillingQuote
 from app.schemas.brand_voices import (
@@ -30,6 +30,7 @@ from app.schemas.brand_voices import (
     BrandVoiceListResponse,
     BrandVoiceRead,
     BrandVoiceUpdateRequest,
+    CosyVoiceCloneResult,
 )
 from app.schemas.response import ApiResponse, ok
 from app.services.asset_retention import assert_brand_voice_not_held_by_manual_order
@@ -60,7 +61,6 @@ router = APIRouter()
 logger = get_logger(__name__)
 CreateBrandVoicePermissionDependency = Depends(require_permission("video:create"))
 ObjectStorageDependency = Depends(get_object_storage)
-OptionalBillingHeadersDependency = Depends(optional_billing_submission_headers)
 
 _ALLOWED_AUDIO_TYPES = {
     "audio/aac",
@@ -175,9 +175,12 @@ def create_brand_voice(
     user: User = CreateBrandVoicePermissionDependency,
     db: Session = DbSessionDependency,
     storage: ObjectStorage = ObjectStorageDependency,
-    headers: BillingSubmissionHeaders | None = OptionalBillingHeadersDependency,
 ) -> ApiResponse[BrandVoiceCreateResponse]:
     _require_explicit_cosyvoice(payload)
+    headers = optional_billing_submission_headers(
+        idempotency_key=request.headers.get("Idempotency-Key"),
+        quote_token=request.headers.get("X-Huading-Quote"),
+    )
     if headers is None:
         raise AppError(
             "Idempotency-Key and X-Huading-Quote are required.",
@@ -274,6 +277,7 @@ def create_brand_voice(
         provider=_COSYVOICE_CLONE_PROVIDER,
         source_audio=source_audio,
         storage=storage,
+        external_request_key=request_hash,
     )
     operation_id = operation.id
     brand_voice_id = brand_voice.id
@@ -318,12 +322,35 @@ def create_brand_voice(
         )
         raise AssertionError("unreachable") from exc
 
-    if not isinstance(result, dict):
-        result = {}
-    speaker_id = str(result.get("speaker_id") or "").strip()
-    provider_name = str(result.get("provider") or _COSYVOICE_CLONE_PROVIDER).strip()
-    provider_status = str(result.get("status") or "").strip().lower()
-    if not speaker_id or provider_name != _COSYVOICE_CLONE_PROVIDER or provider_status != "ready":
+    locked_operation = _lock_cosyvoice_operation(db, operation_id=operation_id)
+    if locked_operation is None:
+        raise AppError(
+            "Stored brand voice operation is missing.",
+            code="BILLING_INVARIANT_VIOLATION",
+            status_code=500,
+        )
+    brand_voice = db.scalar(
+        select(BrandVoice).where(BrandVoice.id == brand_voice_id).with_for_update()
+    )
+    if brand_voice is None:
+        raise AppError(
+            "Stored brand voice is missing.",
+            code="BILLING_INVARIANT_VIOLATION",
+            status_code=500,
+        )
+    usage = db.scalar(select(UsageRecord).where(UsageRecord.billing_operation_id == operation_id))
+    if usage is None:
+        raise AppError(
+            "Stored brand voice usage is missing.",
+            code="BILLING_INVARIANT_VIOLATION",
+            status_code=500,
+        )
+    raw_result = result if isinstance(result, dict) else {}
+    try:
+        parsed_result = CosyVoiceCloneResult.model_validate(result)
+    except ValidationError as exc:
+        _attach_cosyvoice_provider_cost(usage, result=raw_result)
+        db.flush()
         _complete_cosyvoice_failure(
             db,
             brand_voice_id=brand_voice_id,
@@ -332,24 +359,42 @@ def create_brand_voice(
             status_code=502,
             error="invalid provider result",
         )
-    brand_voice = db.get(BrandVoice, brand_voice_id)
-    if brand_voice is None:
-        raise AppError(
-            "Stored brand voice is missing.",
-            code="BILLING_INVARIANT_VIOLATION",
-            status_code=500,
+        raise AssertionError("unreachable") from exc
+    result = parsed_result.model_dump(mode="python", exclude_none=True)
+    speaker_id = parsed_result.speaker_id
+    provider_name = parsed_result.provider
+    if brand_voice.deleted_at is not None:
+        try:
+            asyncio.run(
+                provider.delete_voice(
+                    {
+                        "tenant_id": user.tenant_id,
+                        "brand_voice_id": brand_voice.id,
+                        "speaker_id": speaker_id,
+                        "voice_clone_provider": _COSYVOICE_CLONE_PROVIDER,
+                    }
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "brand_voice.orphan_cleanup_failed",
+                brand_voice_id=brand_voice.id,
+                error=str(exc),
+            )
+        _attach_cosyvoice_provider_cost(usage, result=result)
+        db.flush()
+        _complete_cosyvoice_failure(
+            db,
+            brand_voice_id=brand_voice_id,
+            operation_id=operation_id,
+            code="BRAND_VOICE_DELETED_DURING_CREATION",
+            status_code=409,
+            error="brand voice was deleted during creation",
         )
     brand_voice.speaker_id = speaker_id
     brand_voice.provider = provider_name
     brand_voice.status = "ready"
     brand_voice.updated_at = datetime.now(UTC)
-    usage = db.scalar(select(UsageRecord).where(UsageRecord.billing_operation_id == operation_id))
-    if usage is None:
-        raise AppError(
-            "Stored brand voice usage is missing.",
-            code="BILLING_INVARIANT_VIOLATION",
-            status_code=500,
-        )
     _attach_cosyvoice_provider_cost(usage, result=result)
     db.flush()
     stored_voice = _brand_voice_read(db, brand_voice)
@@ -403,7 +448,16 @@ def _complete_cosyvoice_failure(
     status_code: int,
     error: str,
 ) -> None:
-    brand_voice = db.get(BrandVoice, brand_voice_id)
+    operation = _lock_cosyvoice_operation(db, operation_id=operation_id)
+    if operation is None:
+        raise AppError(
+            "Stored brand voice operation is missing.",
+            code="BILLING_INVARIANT_VIOLATION",
+            status_code=500,
+        )
+    brand_voice = db.scalar(
+        select(BrandVoice).where(BrandVoice.id == brand_voice_id).with_for_update()
+    )
     if brand_voice is not None:
         brand_voice.status = "failed"
         brand_voice.error_code = code
@@ -506,6 +560,11 @@ def delete_brand_voice(
     user: User = CurrentUserDependency,
     db: Session = DbSessionDependency,
 ) -> Response:
+    operation = _lock_cosyvoice_operation(
+        db,
+        brand_voice_id=brand_voice_id,
+        tenant_id=user.tenant_id,
+    )
     brand_voice = db.scalar(
         select(BrandVoice)
         .where(BrandVoice.id == brand_voice_id, BrandVoice.tenant_id == user.tenant_id)
@@ -517,6 +576,12 @@ def delete_brand_voice(
         brand_voice=brand_voice,
     ):
         raise AppError("Brand voice not found.", code="BRAND_VOICE_NOT_FOUND", status_code=404)
+    if operation is not None and operation.status == "in_progress":
+        raise AppError(
+            "Brand voice creation is still in progress.",
+            code="BRAND_VOICE_CREATION_IN_PROGRESS",
+            status_code=409,
+        )
     assert_brand_voice_not_held_by_manual_order(db, brand_voice_id=brand_voice.id)
     provider_name = _voice_clone_provider_name(brand_voice.provider)
     if brand_voice.speaker_id and not _uses_doubao_clone_slot(provider_name):
@@ -536,6 +601,31 @@ def _brand_voice_or_404(db: Session, *, user: User, brand_voice_id: str) -> Bran
     ):
         raise AppError("Brand voice not found.", code="BRAND_VOICE_NOT_FOUND", status_code=404)
     return brand_voice
+
+
+def _lock_cosyvoice_operation(
+    db: Session,
+    *,
+    brand_voice_id: str | None = None,
+    operation_id: str | None = None,
+    tenant_id: str | None = None,
+) -> BillingOperation | None:
+    statement = select(BillingOperation).where(
+        BillingOperation.operation == "cosyvoice_brand_voice_create"
+    )
+    if tenant_id is not None:
+        statement = statement.where(BillingOperation.tenant_id == tenant_id)
+    if operation_id is not None:
+        statement = statement.where(BillingOperation.id == operation_id)
+    elif brand_voice_id is not None:
+        statement = statement.where(BillingOperation.result_id == brand_voice_id)
+    else:
+        raise ValueError("operation_id or brand_voice_id is required")
+    return db.scalar(
+        statement.order_by(BillingOperation.created_at.desc(), BillingOperation.id.desc())
+        .limit(1)
+        .with_for_update()
+    )
 
 
 def _release_remote_speaker(db: Session, *, user: User, brand_voice: BrandVoice) -> None:
@@ -654,6 +744,7 @@ def _clone_payload(
     provider: str,
     source_audio: Asset,
     storage: ObjectStorage,
+    external_request_key: str,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "tenant_id": tenant_id,
@@ -663,6 +754,7 @@ def _clone_payload(
         "source_audio_storage_key": source_audio.storage_key,
         "source_audio_mime_type": source_audio.mime_type,
         "voice_clone_provider": provider,
+        "external_request_key": external_request_key,
     }
     payload["source_audio_url"] = presign_tenant_storage_key(
         storage,
@@ -679,8 +771,11 @@ def _brand_voice_read(
 ) -> BrandVoiceRead:
     order_status = db.scalar(
         select(BrandVoiceOrder.status)
-        .where(BrandVoiceOrder.fulfilled_brand_voice_id == brand_voice.id)
-        .order_by(BrandVoiceOrder.created_at.desc())
+        .where(
+            (BrandVoiceOrder.fulfilled_brand_voice_id == brand_voice.id)
+            | (BrandVoiceOrder.existing_brand_voice_id == brand_voice.id)
+        )
+        .order_by(BrandVoiceOrder.created_at.desc(), BrandVoiceOrder.id.desc())
         .limit(1)
     )
     now = datetime.now(UTC)

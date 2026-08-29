@@ -18,6 +18,9 @@ class _FakeEnrollment:
     def delete_voice(self, voice_id: str) -> None:
         self.delete_calls.append(voice_id)
 
+    def list_voices(self, prefix=None, page_index=0, page_size=10):
+        return []
+
 
 class _FakeSynthesizer:
     instances = []
@@ -63,6 +66,55 @@ async def test_cosyvoice_clone_uses_generated_safe_prefix_and_audio_url():
             "url": "https://storage.test/audio.wav",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_cosyvoice_clone_recovers_remote_success_after_timeout_across_new_local_key():
+    from app.providers.voice_clone.cosyvoice import CosyVoiceCloneProvider
+
+    class _RemoteSuccessTimeoutEnrollment(_FakeEnrollment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.voices: list[dict[str, str]] = []
+
+        def create_voice(self, target_model: str, prefix: str, url: str) -> str:
+            self.create_calls.append(
+                {"target_model": target_model, "prefix": prefix, "url": url}
+            )
+            self.voices.append({"voice_id": f"{prefix}-remote-001", "prefix": prefix})
+            raise TimeoutError("response lost after remote commit")
+
+        def list_voices(self, prefix=None, page_index=0, page_size=10):
+            return [item for item in self.voices if item["prefix"] == prefix]
+
+    enrollment = _RemoteSuccessTimeoutEnrollment()
+    provider = CosyVoiceCloneProvider(
+        api_key="dashscope-key",
+        target_model="cosyvoice-v3.5-plus",
+        enrollment_service=enrollment,
+    )
+    stable_request_key = "f" * 64
+    first = await provider.clone_voice(
+        {
+            "brand_voice_id": "first-local-row",
+            "external_request_key": stable_request_key,
+            "source_audio_url": "https://storage.test/audio.wav",
+        }
+    )
+    second = await provider.clone_voice(
+        {
+            "brand_voice_id": "second-local-row-new-http-key",
+            "external_request_key": stable_request_key,
+            "source_audio_url": "https://storage.test/audio.wav",
+        }
+    )
+
+    assert first == second == {
+        "speaker_id": "bvffffffff-remote-001",
+        "status": "ready",
+        "provider": "cosyvoice-voice-clone",
+    }
+    assert len(enrollment.create_calls) == 1
 
 
 @pytest.mark.asyncio

@@ -713,6 +713,7 @@ def _create_avatar_talk_video(
     user: User,
     db: Session,
     storage: ObjectStorage,
+    submitted_at: datetime,
 ) -> str:
     if not payload.voice_id:
         raise AppError("avatar_talk requires voice_id.", code="VALIDATION_ERROR", status_code=422)
@@ -726,7 +727,7 @@ def _create_avatar_talk_video(
         db,
         user=user,
         voice_id=payload.voice_id,
-        requested_at=datetime.now(UTC),
+        requested_at=submitted_at,
     )
     if brand_voice is not None and uses_doubao_voice_clone(brand_voice.provider):
         require_doubao_voice_clone_access(
@@ -792,6 +793,7 @@ def _create_avatar_talk_video(
         aspect_ratio=payload.aspect_ratio,
         subtitle_enabled=payload.subtitle_enabled,
         params=params,
+        created_at=submitted_at,
     )
     # Persist the parent video_task BEFORE inserting rows that FK-reference it
     # (task_asset, and the usage_record created in reserve_*). Without this flush
@@ -818,6 +820,7 @@ def _create_seedance_i2v_video(
     user: User,
     db: Session,
     storage: ObjectStorage,
+    submitted_at: datetime,
 ) -> str:
     if not payload.voice_id:
         raise AppError("seedance_i2v requires voice_id.", code="VALIDATION_ERROR", status_code=422)
@@ -825,7 +828,7 @@ def _create_seedance_i2v_video(
         db,
         user=user,
         voice_id=payload.voice_id,
-        requested_at=datetime.now(UTC),
+        requested_at=submitted_at,
     )
     if brand_voice is not None and uses_doubao_voice_clone(brand_voice.provider):
         require_doubao_voice_clone_access(
@@ -879,6 +882,7 @@ def _create_seedance_i2v_video(
         subtitle_enabled=payload.subtitle_enabled,
         duration_sec=target_duration_sec,
         params=params,
+        created_at=submitted_at,
     )
     db.add(task)
     db.flush()
@@ -933,6 +937,7 @@ def _create_billing_quote_video(
     user: User,
     db: Session,
     storage: ObjectStorage,
+    submitted_at: datetime,
 ) -> tuple[VideoTask, object, bool]:
     if context.brand_voice is None or context.pricing_draft is None:
         raise RuntimeError("billing quote video context is incomplete")
@@ -1031,6 +1036,7 @@ def _create_billing_quote_video(
             seedance_i2v_target_seconds(payload.duration_sec) if mode == "seedance_i2v" else None
         ),
         params=params,
+        created_at=submitted_at,
     )
     db.add(task)
     db.flush()
@@ -1226,6 +1232,7 @@ def _create_video_gen_video(
     user: User,
     db: Session,
     storage: ObjectStorage,
+    submitted_at: datetime,
 ) -> str:
     reference_assets = _video_gen_reference_assets_or_404(
         db,
@@ -1266,6 +1273,7 @@ def _create_video_gen_video(
         aspect_ratio=payload.aspect_ratio,
         duration_sec=float(payload.duration_sec or 5),
         params=params,
+        created_at=submitted_at,
     )
     db.add(task)
     db.flush()
@@ -1293,6 +1301,7 @@ def _create_photo_video(
     image_provider: str,
     user: User,
     db: Session,
+    submitted_at: datetime,
 ) -> str:
     task_id = str(uuid4())
     params = {
@@ -1329,6 +1338,7 @@ def _create_photo_video(
         progress=0,
         aspect_ratio=payload.aspect_ratio,
         params=params,
+        created_at=submitted_at,
     )
     db.add(task)
     db.flush()
@@ -1742,6 +1752,7 @@ def create_video(
     storage: ObjectStorage = ObjectStorageDependency,
     headers: BillingSubmissionHeaders | None = OptionalBillingSubmissionHeadersDependency,
 ) -> ApiResponse[VideoAccepted]:
+    submitted_at = datetime.now(UTC)
     effective_mode = resolve_effective_video_mode(payload)
     request_hash = video_pricing_request_hash(payload)
     if headers is not None and effective_mode in {"avatar_talk", "seedance_i2v"}:
@@ -1758,7 +1769,12 @@ def create_video(
                 request,
                 _billing_quote_video_replay(db, user=user, operation=replay.operation),
             )
-    pricing_context = resolve_video_pricing_context(db, user=user, payload=payload)
+    pricing_context = resolve_video_pricing_context(
+        db,
+        user=user,
+        payload=payload,
+        requested_at=submitted_at,
+    )
     if pricing_context.pricing_contract == "billing_quote":
         if headers is None:
             raise AppError(
@@ -1773,6 +1789,7 @@ def create_video(
             user=user,
             db=db,
             storage=storage,
+            submitted_at=submitted_at,
         )
         if not created:
             return ok(
@@ -1828,6 +1845,7 @@ def create_video(
             image_provider=selection.name,
             user=user,
             db=db,
+            submitted_at=submitted_at,
         )
         _prune_after_create(db, tenant_id=user.tenant_id, mode="photo", storage=storage)
         params = _worker_params(payload)
@@ -1841,7 +1859,13 @@ def create_video(
         )
 
     if effective_mode == "seedance_i2v":
-        task_id = _create_seedance_i2v_video(payload, user=user, db=db, storage=storage)
+        task_id = _create_seedance_i2v_video(
+            payload,
+            user=user,
+            db=db,
+            storage=storage,
+            submitted_at=submitted_at,
+        )
         _prune_after_create(db, tenant_id=user.tenant_id, mode="seedance_i2v", storage=storage)
         params = _worker_params(payload)
         params["tenant_id"] = user.tenant_id
@@ -1853,7 +1877,13 @@ def create_video(
         )
 
     if effective_mode == "video_gen":
-        task_id = _create_video_gen_video(payload, user=user, db=db, storage=storage)
+        task_id = _create_video_gen_video(
+            payload,
+            user=user,
+            db=db,
+            storage=storage,
+            submitted_at=submitted_at,
+        )
         _prune_after_create(db, tenant_id=user.tenant_id, mode="video_gen", storage=storage)
         params = _video_gen_worker_params(payload)
         params["tenant_id"] = user.tenant_id
@@ -1865,7 +1895,13 @@ def create_video(
         )
 
     if _is_avatar_talk_requested(payload):
-        task_id = _create_avatar_talk_video(payload, user=user, db=db, storage=storage)
+        task_id = _create_avatar_talk_video(
+            payload,
+            user=user,
+            db=db,
+            storage=storage,
+            submitted_at=submitted_at,
+        )
         _prune_after_create(db, tenant_id=user.tenant_id, mode="avatar_talk", storage=storage)
         params = _worker_params(payload)
         params["tenant_id"] = user.tenant_id
@@ -1886,6 +1922,7 @@ def create_video(
         video_mode=payload.video_mode,
         progress=0,
         params={"apply_visible_label": payload.apply_visible_label},
+        created_at=submitted_at,
     )
     db.add(task)
     db.commit()

@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
@@ -55,6 +56,25 @@ class BrandVoiceRead(BaseModel):
 
 class BrandVoiceCreateResponse(BrandVoiceRead):
     billing: BrandVoiceOrderBillingSummary
+
+
+class CosyVoiceCloneResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    speaker_id: str = Field(min_length=1)
+    status: Literal["ready"]
+    provider: Literal["cosyvoice-voice-clone"]
+    model: str | None = None
+    cost_cents: int = Field(default=0, ge=0)
+    provider_cost_usd: Decimal | None = Field(default=None, ge=0)
+
+    @field_validator("speaker_id")
+    @classmethod
+    def _strip_speaker_id(cls, value: str) -> str:
+        speaker_id = value.strip()
+        if not speaker_id:
+            raise ValueError("speaker_id must not be blank")
+        return speaker_id
 
 
 class BrandVoiceListResponse(BaseModel):

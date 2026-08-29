@@ -1,12 +1,25 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.core.exceptions import AppError
-from app.db.models import Asset, CreditRate, Plan, Subscription, UsageRecord, VideoTask, Voice
+from app.core.security import create_access_token
+from app.db.models import (
+    Asset,
+    BillingOperation,
+    BrandVoice,
+    CreditRate,
+    Plan,
+    Subscription,
+    UsageRecord,
+    User,
+    VideoTask,
+    Voice,
+)
 from app.main import app
 from app.services import quota
 
@@ -490,3 +503,229 @@ def test_reserve_image_generation_quota_creates_reserved_usage(auth_context, aut
     assert record.provider == "apimart"
     assert record.unit == "image"
     assert record.quantity == Decimal("1.000")
+
+
+def test_cosyvoice_parent_video_reserves_one_character_usage_without_duplicate_fee(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    class _QueuedTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            return type("Result", (), {"status": "PENDING"})()
+
+    monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _QueuedTask())
+    with auth_db() as db:
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"],
+                Subscription.status == "active",
+            )
+        )
+        assert subscription is not None
+        subscription.quota_credits_total = 100_000
+        subscription.quota_credits_used = 0
+        subscription.quota_credits_reserved = 0
+        voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            name="Cosy quota voice",
+            provider="cosyvoice-voice-clone",
+            speaker_id="cosy-quota-speaker",
+            status="ready",
+            consent_confirmed=True,
+        )
+        avatar = Asset(
+            tenant_id=auth_context["tenant_id"],
+            type="avatar_image",
+            source="upload",
+            storage_key=f"tenants/{auth_context['tenant_id']}/uploads/cosy-quota-avatar.png",
+            mime_type="image/png",
+            status="ready",
+        )
+        db.add_all([voice, avatar])
+        db.commit()
+        voice_id, avatar_id = voice.id, avatar.id
+
+    script = "1234567890"
+    payload = {
+        "video_mode": "avatar_talk",
+        "topic": "Cosy quota",
+        "voice_id": voice_id,
+        "avatar_asset_id": avatar_id,
+        "script": script,
+    }
+    client = TestClient(app)
+    quote = client.post(
+        "/api/v1/videos/estimate",
+        headers=auth_context["headers"],
+        json=payload,
+    )
+    assert quote.status_code == 200, quote.text
+    created = client.post(
+        "/api/v1/videos",
+        headers={
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote.json()["data"]["quote_token"],
+        },
+        json=payload,
+    )
+    assert created.status_code == 202, created.text
+
+    with auth_db() as db:
+        task_id = created.json()["data"]["task_id"]
+        operation = db.scalar(
+            select(BillingOperation).where(BillingOperation.result_id == task_id)
+        )
+        assert operation is not None
+        usages = list(
+            db.scalars(
+                select(UsageRecord)
+                .where(UsageRecord.video_task_id == task_id)
+                .order_by(UsageRecord.billing_item_index)
+            )
+        )
+
+    assert [(item.capability, item.unit) for item in usages] == [
+        ("video", "second"),
+        ("tts", "character"),
+    ]
+    tts_usages = [item for item in usages if (item.capability, item.unit) == ("tts", "character")]
+    assert len(tts_usages) == 1
+    assert tts_usages[0].quantity == Decimal(len(script))
+    assert operation.requested_credits == sum(
+        (item.credits for item in usages),
+        Decimal("0"),
+    )
+
+
+def test_doubao_parent_video_has_no_character_usage_and_enforces_payer_time_gate(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.api.v1.routes import videos as videos_route
+
+    class _QueuedTask:
+        def apply_async(self, *, args, task_id, queue=None):
+            return type("Result", (), {"status": "PENDING"})()
+
+    monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _QueuedTask())
+    now = datetime.now(UTC)
+    with auth_db() as db:
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"],
+                Subscription.status == "active",
+            )
+        )
+        assert subscription is not None
+        plan = db.get(Plan, subscription.plan_id)
+        assert plan is not None
+        plan.code = "huading"
+        subscription.quota_credits_total = 100_000
+        subscription.quota_credits_used = 0
+        subscription.quota_credits_reserved = 0
+        colleague = User(
+            tenant_id=auth_context["tenant_id"],
+            email="quota-colleague@example.com",
+            password_hash="unused",
+            role="creator",
+            is_active=True,
+            status="active",
+        )
+        voice = BrandVoice(
+            tenant_id=auth_context["tenant_id"],
+            owner_user_id=auth_context["user_id"],
+            name="Doubao quota voice",
+            provider="doubao-voice-clone",
+            speaker_id="doubao-quota-speaker",
+            status="ready",
+            consent_confirmed=True,
+            activated_at=now - timedelta(days=1),
+            expires_at=now + timedelta(days=1),
+        )
+        avatar = Asset(
+            tenant_id=auth_context["tenant_id"],
+            type="avatar_image",
+            source="upload",
+            storage_key=f"tenants/{auth_context['tenant_id']}/uploads/doubao-quota-avatar.png",
+            mime_type="image/png",
+            status="ready",
+        )
+        db.add_all([colleague, voice, avatar])
+        db.commit()
+        voice_id, avatar_id, colleague_id = voice.id, avatar.id, colleague.id
+
+    colleague_headers = {
+        "Authorization": (
+            "Bearer "
+            + create_access_token(
+                user_id=colleague_id,
+                tenant_id=auth_context["tenant_id"],
+                role="creator",
+            )
+        )
+    }
+    script = "1234567890"
+    payload = {
+        "video_mode": "avatar_talk",
+        "topic": "Doubao quota",
+        "voice_id": voice_id,
+        "avatar_asset_id": avatar_id,
+        "script": script,
+    }
+    client = TestClient(app)
+    colleague_quote = client.post(
+        "/api/v1/videos/estimate",
+        headers=colleague_headers,
+        json=payload,
+    )
+    assert colleague_quote.status_code == 404
+    assert colleague_quote.json()["error"]["code"] == "VOICE_NOT_FOUND"
+
+    quote = client.post(
+        "/api/v1/videos/estimate",
+        headers=auth_context["headers"],
+        json=payload,
+    )
+    assert quote.status_code == 200, quote.text
+    created = client.post(
+        "/api/v1/videos",
+        headers={
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote.json()["data"]["quote_token"],
+        },
+        json=payload,
+    )
+    assert created.status_code == 202, created.text
+
+    with auth_db() as db:
+        task_id = created.json()["data"]["task_id"]
+        operation = db.scalar(
+            select(BillingOperation).where(BillingOperation.result_id == task_id)
+        )
+        assert operation is not None
+        usages = list(
+            db.scalars(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
+        )
+        usage_shape = [(item.capability, item.unit) for item in usages]
+        usage_credits = sum((item.credits for item in usages), Decimal("0"))
+        requested_credits = operation.requested_credits
+        voice = db.get(BrandVoice, voice_id)
+        assert voice is not None
+        voice.expires_at = datetime.now(UTC) - timedelta(microseconds=1)
+        db.commit()
+
+    assert usage_shape == [("video", "second")]
+    assert requested_credits == usage_credits
+    expired_quote = client.post(
+        "/api/v1/videos/estimate",
+        headers=auth_context["headers"],
+        json=payload,
+    )
+    assert expired_quote.status_code == 404
+    assert expired_quote.json()["error"]["code"] == "VOICE_NOT_FOUND"

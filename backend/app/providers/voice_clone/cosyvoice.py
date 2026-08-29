@@ -65,11 +65,18 @@ class CosyVoiceCloneProvider:
             raise ValueError("CosyVoice source audio URL is required.")
         prefix = _safe_prefix(payload)
         with _dashscope_runtime(self.api_key, self.base_url):
-            voice_id = self.enrollment.create_voice(
-                self.target_model,
-                prefix,
-                source_audio_url,
-            )
+            voice_id = _recover_voice_id(self.enrollment, prefix=prefix)
+            if not voice_id:
+                try:
+                    voice_id = self.enrollment.create_voice(
+                        self.target_model,
+                        prefix,
+                        source_audio_url,
+                    )
+                except Exception:
+                    voice_id = _recover_voice_id(self.enrollment, prefix=prefix)
+                    if not voice_id:
+                        raise
         logger.info(
             "cosyvoice.clone_voice",
             tenant_id=str(payload.get("tenant_id") or ""),
@@ -200,7 +207,8 @@ def _dashscope_runtime(api_key: str, base_url: str):
 
 def _safe_prefix(payload: Mapping[str, Any]) -> str:
     raw = (
-        str(payload.get("brand_voice_id") or "")
+        str(payload.get("external_request_key") or "")
+        or str(payload.get("brand_voice_id") or "")
         or str(payload.get("source_audio_asset_id") or "")
         or str(payload.get("name") or "")
     ).lower()
@@ -208,6 +216,20 @@ def _safe_prefix(payload: Mapping[str, Any]) -> str:
     if not compact:
         compact = "voice"
     return f"bv{compact}"[:10]
+
+
+def _recover_voice_id(enrollment: Any, *, prefix: str) -> str:
+    voices = enrollment.list_voices(prefix=prefix, page_index=0, page_size=100)
+    if not isinstance(voices, list):
+        raise CosyVoiceCloneError("CosyVoice voice recovery returned an invalid list.")
+    for item in voices:
+        if not isinstance(item, Mapping):
+            continue
+        voice_id = str(item.get("voice_id") or "").strip()
+        item_prefix = str(item.get("prefix") or "").strip()
+        if voice_id and (item_prefix == prefix or voice_id.startswith(prefix)):
+            return voice_id
+    return ""
 
 
 def _cosyvoice_voice_clone_factory(config: ProviderConfig) -> CosyVoiceCloneProvider:
