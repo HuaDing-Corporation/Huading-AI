@@ -112,6 +112,22 @@ def lock_active_subscription(db: Session, *, tenant_id: str) -> Subscription:
     return _active_subscription_for_update(db, tenant_id)
 
 
+def reserve_locked_subscription_credits(
+    subscription: Subscription,
+    *,
+    requested_credits: int,
+) -> None:
+    if requested_credits < 0:
+        raise ValueError("requested_credits must be non-negative")
+    if remaining_credits(subscription) < requested_credits:
+        raise AppError(
+            "Insufficient tenant quota.",
+            code="TENANT_QUOTA_EXCEEDED",
+            status_code=403,
+        )
+    subscription.quota_credits_reserved += requested_credits
+
+
 def _subscription_for_update(
     db: Session,
     subscription_id: str,
@@ -122,6 +138,39 @@ def _subscription_for_update(
         .with_for_update()
         .execution_options(populate_existing=True)
     )
+
+
+def lock_subscription_for_billing(
+    db: Session,
+    *,
+    subscription_id: str,
+) -> Subscription:
+    subscription = _subscription_for_update(db, subscription_id)
+    if subscription is None:
+        raise AppError(
+            "Billing subscription not found.",
+            code="BILLING_INVARIANT_VIOLATION",
+            status_code=500,
+        )
+    return subscription
+
+
+def settle_locked_subscription_credits(
+    subscription: Subscription,
+    *,
+    requested_credits: int,
+    settled_credits: int,
+) -> None:
+    if not 0 <= settled_credits <= requested_credits:
+        raise ValueError("settled credits must be within the reservation")
+    if subscription.quota_credits_reserved < requested_credits:
+        raise AppError(
+            "Billing reservation is not conserved.",
+            code="BILLING_INVARIANT_VIOLATION",
+            status_code=500,
+        )
+    subscription.quota_credits_reserved -= requested_credits
+    subscription.quota_credits_used += settled_credits
 
 
 def _lock_video_task_for_quota(

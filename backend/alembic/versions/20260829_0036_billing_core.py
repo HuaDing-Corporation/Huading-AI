@@ -71,7 +71,11 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=32), nullable=False, server_default="in_progress"),
         sa.Column("completion_kind", sa.String(length=32), nullable=True),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("result_type", sa.String(length=64), nullable=True),
+        sa.Column("result_id", sa.String(length=128), nullable=True),
         sa.Column("result_payload", _json_type(), nullable=True),
+        sa.Column("error_code", sa.String(length=64), nullable=True),
+        sa.Column("error_http_status", sa.Integer(), nullable=True),
         sa.Column("error_payload", _json_type(), nullable=True),
         sa.Column(
             "created_at",

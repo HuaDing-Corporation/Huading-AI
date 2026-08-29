@@ -480,9 +480,13 @@ class BillingOperation(Base):
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), default=None
     )
+    result_type: Mapped[str | None] = mapped_column(String(64), default=None)
+    result_id: Mapped[str | None] = mapped_column(String(128), default=None)
     result_payload: Mapped[dict[str, object] | None] = mapped_column(
         _json_type(), default=None
     )
+    error_code: Mapped[str | None] = mapped_column(String(64), default=None)
+    error_http_status: Mapped[int | None] = mapped_column(Integer, default=None)
     error_payload: Mapped[dict[str, object] | None] = mapped_column(
         _json_type(), default=None
     )

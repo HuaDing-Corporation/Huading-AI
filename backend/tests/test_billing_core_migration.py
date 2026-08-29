@@ -308,6 +308,12 @@ def test_billing_core_migration_creates_schema_and_refuses_downgrade_with_rows()
         inspector = sa.inspect(connection)
         assert "billing_operations" in inspector.get_table_names()
         assert {
+            "result_type",
+            "result_id",
+            "error_code",
+            "error_http_status",
+        } <= {column["name"] for column in inspector.get_columns("billing_operations")}
+        assert {
             "billing_operation_id",
             "billing_item_index",
             "billing_pricing_line_index",

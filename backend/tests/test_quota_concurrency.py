@@ -9,13 +9,15 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, event, select, text
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy import create_engine, event, func, select, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import sessionmaker
 
 from app.core.exceptions import AppError
 from app.db.models import (
     Base,
+    BillingOperation,
     Plan,
     ReversePromptJob,
     Subscription,
@@ -25,6 +27,22 @@ from app.db.models import (
     VideoTask,
 )
 from app.services import admin_console, quota
+from app.services.billing_operations import (
+    UsageAllocation,
+    complete_failed,
+    complete_succeeded,
+    create_reserved_operation,
+    register_billing_result_schema,
+)
+from app.services.billing_quotes import VerifiedQuote
+from app.services.pricing import (
+    PricingLine,
+    PricingSnapshot,
+    RateScope,
+    RateSource,
+    ResolvedRate,
+)
+from app.services.transaction_retry import run_db_transaction_with_retry
 
 _RUNTIME_QUOTA_FIELDS = {
     "quota_credits_total",
@@ -49,6 +67,11 @@ _ALLOWED_RUNTIME_WRITES_BY_FUNCTION = {
             "quota_credits_reserved",
         },
         "settle_reserved_quota": {
+            "quota_credits_used",
+            "quota_credits_reserved",
+        },
+        "reserve_locked_subscription_credits": {"quota_credits_reserved"},
+        "settle_locked_subscription_credits": {
             "quota_credits_used",
             "quota_credits_reserved",
         },
@@ -896,3 +919,229 @@ def test_postgres_recovery_release_wins_against_worker_settlement(
         assert subscription.quota_credits_used == 0
         assert task.status == "failed"
         assert record.status == "released"
+
+
+class _ConcurrentBillingResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_ids: list[str]
+
+
+def _concurrent_billing_quote() -> VerifiedQuote:
+    rate = ResolvedRate(
+        unit_credits=Decimal("0.6000"),
+        source=RateSource.TENANT_RATE,
+        rate_id="concurrent-rate",
+        effective_at=datetime(2026, 8, 29, tzinfo=UTC),
+        policy_key=None,
+        policy_version=None,
+    )
+    line = PricingLine(
+        operation="ecom_cutout",
+        capability="image",
+        unit="image",
+        quantity=Decimal("4"),
+        unit_credits=rate.unit_credits,
+        subtotal_credits=Decimal("2.4"),
+        rate_scope=RateScope.TENANT_OVERRIDABLE,
+        rate=rate,
+        label="concurrent batch",
+    )
+    return VerifiedQuote(
+        snapshot=PricingSnapshot(
+            operation="ecom_cutout",
+            pricing_shape="simple",
+            pricing_lines=(line,),
+            disclosures=(),
+            subtotal_credits=Decimal("2.4"),
+            payable_credits=3,
+        ),
+        quote_hash="b" * 64,
+        pricing_payload_hash="c" * 64,
+    )
+
+
+def _concurrent_billing_allocations() -> list[UsageAllocation]:
+    return [
+        UsageAllocation(index, 0, Decimal("1"), Decimal("0.6"), "apimart", None, None)
+        for index in range(4)
+    ]
+
+
+def _seed_postgres_billing_owner(factory) -> tuple[str, str]:
+    subscription_id, tenant_id = _seed_postgres_subscription(factory, total=100)
+    with factory() as db:
+        user = User(
+            tenant_id=tenant_id,
+            email=f"billing-{uuid4().hex[:8]}@example.com",
+            password_hash="hash",
+            role="creator",
+        )
+        db.add(user)
+        db.commit()
+        return tenant_id, user.id
+
+
+def test_operation_transitions_lock_operation_usage_then_subscription(
+    auth_db,
+    auth_context,
+) -> None:
+    with auth_db() as db:
+        operation = create_reserved_operation(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            user_id=auth_context["user_id"],
+            operation="ecom_cutout",
+            idempotency_key=uuid4(),
+            request_hash="a" * 64,
+            verified_quote=_concurrent_billing_quote(),
+            usage_allocations=_concurrent_billing_allocations(),
+        )
+        db.commit()
+        operation_id = operation.id
+
+    with auth_db() as db:
+        statements = _capture_postgresql_selects(db)
+        complete_failed(
+            db,
+            operation_id=operation_id,
+            code="PROVIDER_FAILED",
+            http_status=502,
+            sanitized_detail={"reason": "timeout"},
+        )
+
+    operation_index = next(
+        index for index, sql in enumerate(statements) if "FROM billing_operations" in sql
+    )
+    usage_index = next(
+        index for index, sql in enumerate(statements) if "FROM usage_records" in sql
+    )
+    subscription_index = next(
+        index for index, sql in enumerate(statements) if "FROM subscriptions" in sql
+    )
+    assert operation_index < usage_index < subscription_index
+    assert "FOR UPDATE" in statements[operation_index]
+    assert "FOR UPDATE" in statements[usage_index]
+    assert "FOR UPDATE" in statements[subscription_index]
+
+
+def test_postgres_concurrent_first_submission_reserves_once(
+    postgres_session_factory,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id, user_id = _seed_postgres_billing_owner(factory)
+    quote = _concurrent_billing_quote()
+    key = uuid4()
+    barrier = threading.Barrier(2)
+    operation_ids: list[str] = []
+    errors: list[BaseException] = []
+
+    def reserve() -> None:
+        try:
+            def transaction(db):
+                barrier.wait(timeout=5)
+                return create_reserved_operation(
+                    db,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    operation="ecom_cutout",
+                    idempotency_key=key,
+                    request_hash="a" * 64,
+                    verified_quote=quote,
+                    usage_allocations=_concurrent_billing_allocations(),
+                )
+
+            operation = run_db_transaction_with_retry(factory, transaction)
+            operation_ids.append(operation.id)
+        except BaseException as exc:  # noqa: BLE001 - thread evidence.
+            errors.append(exc)
+
+    threads = [threading.Thread(target=reserve, daemon=True) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert len(set(operation_ids)) == 1
+    with factory() as db:
+        subscription = db.scalar(
+            select(Subscription).where(Subscription.tenant_id == tenant_id)
+        )
+        assert subscription.quota_credits_reserved == 3
+        assert db.scalar(
+            select(func.count()).select_from(BillingOperation).where(
+                BillingOperation.tenant_id == tenant_id
+            )
+        ) == 1
+        assert db.scalar(
+            select(func.count()).select_from(UsageRecord).where(
+                UsageRecord.billing_operation_id == operation_ids[0]
+            )
+        ) == 4
+
+
+def test_postgres_competing_settle_and_release_use_one_terminal_transition(
+    postgres_session_factory,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id, user_id = _seed_postgres_billing_owner(factory)
+    register_billing_result_schema("concurrent_billing_result", _ConcurrentBillingResult)
+    operation = run_db_transaction_with_retry(
+        factory,
+        lambda db: create_reserved_operation(
+            db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            operation="ecom_cutout",
+            idempotency_key=uuid4(),
+            request_hash="a" * 64,
+            verified_quote=_concurrent_billing_quote(),
+            usage_allocations=_concurrent_billing_allocations(),
+        ),
+    )
+
+    first = factory()
+    release_thread = None
+    try:
+        complete_succeeded(
+            first,
+            operation_id=operation.id,
+            actual_quantities={0: Decimal("1")},
+            result_type="concurrent_billing_result",
+            result_id=None,
+            result_payload=_ConcurrentBillingResult(item_ids=["a"]),
+        )
+        release_thread, done, errors = _start_transition(
+            factory,
+            lambda db: complete_failed(
+                db,
+                operation_id=operation.id,
+                code="PROVIDER_FAILED",
+                http_status=502,
+                sanitized_detail={"reason": "duplicate callback"},
+            ),
+        )
+        release_was_blocked = not done.wait(timeout=0.4)
+        first.commit()
+        release_thread.join(timeout=5)
+    finally:
+        first.rollback()
+        first.close()
+        if release_thread is not None:
+            release_thread.join(timeout=5)
+
+    assert release_was_blocked
+    assert not release_thread.is_alive()
+    assert errors == []
+    with factory() as db:
+        stored = db.get(BillingOperation, operation.id)
+        subscription = db.scalar(
+            select(Subscription).where(Subscription.tenant_id == tenant_id)
+        )
+        assert stored.completion_kind == "succeeded"
+        assert stored.settled_credits == 1
+        assert stored.released_credits == 2
+        assert subscription.quota_credits_reserved == 0
+        assert subscription.quota_credits_used == 1

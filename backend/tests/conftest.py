@@ -1,5 +1,6 @@
 import os
 from collections.abc import Generator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,7 +12,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-test-secret-test-secret-32"
 
 from app.api.deps import get_db_session
 from app.core.config import settings
-from app.db.models import Base, Plan
+from app.db.models import Base, Plan, Subscription, Tenant, User
 from app.main import app
 
 
@@ -53,6 +54,62 @@ def auth_db():
     finally:
         app.dependency_overrides.pop(get_db_session, None)
         Base.metadata.drop_all(engine)
+
+
+@pytest.fixture
+def db_session():
+    """Small wallet-backed database used by billing service tests."""
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _enable_billing_sqlite_fk(dbapi_connection, _record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    session = factory()
+    now = datetime.now(UTC)
+    tenant = Tenant(id="tenant-a", slug="billing-a", name="Billing A")
+    user = User(
+        id="user-a",
+        tenant_id=tenant.id,
+        email="billing-a@example.com",
+        password_hash="hash",
+        role="creator",
+    )
+    plan = Plan(
+        id="plan-a",
+        code="billing-plan-a",
+        name="Billing Plan",
+        price_cents=0,
+        period="monthly",
+        quota_credits=100,
+    )
+    subscription = Subscription(
+        id="subscription-a",
+        tenant_id=tenant.id,
+        plan_id=plan.id,
+        status="active",
+        period_start=now - timedelta(days=1),
+        period_end=now + timedelta(days=30),
+        quota_credits_total=100,
+        quota_credits_used=0,
+        quota_credits_reserved=0,
+    )
+    session.add_all([tenant, plan])
+    session.flush()
+    session.add_all([user, subscription])
+    session.commit()
+    try:
+        yield session
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
 
 
 @pytest.fixture
