@@ -9,10 +9,12 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.exceptions import AppError
 from app.db.models import (
+    Asset,
     Base,
     BillingOperation,
     BrandVoice,
     Subscription,
+    TaskAsset,
     Tenant,
     UsageRecord,
     User,
@@ -732,6 +734,127 @@ def test_billed_avatar_overage_hides_output_and_releases_without_debit(monkeypat
         assert subscription.quota_credits_used == 0
         assert subscription.quota_credits_reserved == 0
         assert all(usage.status == "released" for usage in usages)
+
+
+def test_billed_avatar_real_tts_overage_releases_before_avatar_supplier(
+    monkeypatch,
+    worker_db,
+    tmp_path,
+):
+    tenant_id, task_id = _seed_billed_avatar_task(
+        worker_db,
+        task_id="billed-avatar-pre-supplier-overage",
+        reserved_seconds=5,
+    )
+    with worker_db() as db:
+        avatar = Asset(
+            id=f"asset-{task_id}",
+            tenant_id=tenant_id,
+            type="avatar_image",
+            source="upload",
+            storage_key=f"tenants/{tenant_id}/assets/avatar.png",
+            mime_type="image/png",
+            status="ready",
+        )
+        db.add(avatar)
+        db.flush()
+        db.add(TaskAsset(video_task_id=task_id, asset_id=avatar.id, role="input_avatar"))
+        tts_usage = db.query(UsageRecord).filter_by(
+            video_task_id=task_id,
+            capability="tts",
+        ).one()
+        tts_usage.provider_usage = None
+        tts_usage.cost_cents = 0
+        tts_usage.model = None
+        db.commit()
+
+    store = _RecordingStore()
+    storage = _Storage()
+    calls = {"tts": 0, "avatar": 0}
+
+    class _TtsProvider:
+        async def synthesize_speech(self, payload):
+            calls["tts"] += 1
+            audio_path = tmp_path / "overage.mp3"
+            audio_path.write_bytes(b"real-tts-audio")
+            return {
+                "audio_path": str(audio_path),
+                "duration_ms": 5_400,
+                "timeline": [],
+                "provider": "cosyvoice-tts",
+                "model": "cosyvoice-v3.5-plus",
+                "characters": len(payload["text"]),
+            }
+
+    class _AvatarProvider:
+        async def generate_avatar(self, _payload):
+            calls["avatar"] += 1
+            raise RuntimeError("avatar supplier must not be called")
+
+    monkeypatch.setattr(avatar_talk, "SessionLocal", worker_db)
+    monkeypatch.setattr(avatar_talk, "build_progress_store", lambda _url: store)
+    monkeypatch.setattr(avatar_talk, "create_object_storage", lambda _settings: storage)
+    monkeypatch.setattr(
+        avatar_talk,
+        "AVATAR_TALK_STEPS",
+        [("tts", 20, avatar_talk.tts_step), ("avatar", 85, avatar_talk.avatar_step)],
+    )
+    monkeypatch.setattr(
+        avatar_talk,
+        "_tts_provider_for_voice",
+        lambda _db, *, tenant_id, brand_voice_provider: (_TtsProvider(), "voice_clone"),
+    )
+    monkeypatch.setattr(
+        avatar_talk,
+        "resolve",
+        lambda _db, *, tenant_id, capability: _AvatarProvider(),
+    )
+    monkeypatch.setattr(avatar_talk, "_tail_faded_tts_audio", lambda path: path)
+    monkeypatch.setattr(avatar_talk, "_audio_duration_sec", lambda _path: 5.4)
+    monkeypatch.setattr(
+        avatar_talk.provider_costs.settings,
+        "engine_cosyvoice_tts_cny_per_char",
+        Decimal("0.1"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        avatar_talk,
+        "_apply_synthetic_label",
+        lambda _ctx, content, *, kind, suffix: (content, {}),
+    )
+
+    with pytest.raises(AppError) as caught:
+        avatar_talk.generate_avatar_talk_task.apply(
+            args=[{"tenant_id": tenant_id, "video_task_id": task_id}],
+            task_id=task_id,
+        ).get(propagate=True)
+
+    assert caught.value.code == "BILLING_QUOTE_EXCEEDED"
+    assert calls == {"tts": 1, "avatar": 0}
+    with worker_db() as db:
+        task = db.get(VideoTask, task_id)
+        operation = db.query(BillingOperation).filter_by(
+            id=task.params["billing_operation_id"]
+        ).one()
+        subscription = db.get(Subscription, f"sub-{task_id}")
+        usages = db.query(UsageRecord).filter_by(video_task_id=task_id).all()
+        tts_usage = next(usage for usage in usages if usage.capability == "tts")
+        assert task.status == "failed"
+        assert task.storage_key is None
+        assert operation.completion_kind == "failed"
+        assert operation.error_code == "BILLING_QUOTE_EXCEEDED"
+        assert operation.settled_credits == 0
+        assert operation.released_credits == operation.requested_credits
+        assert subscription.quota_credits_used == 0
+        assert subscription.quota_credits_reserved == 0
+        assert all(usage.status == "released" for usage in usages)
+        assert tts_usage.provider == "cosyvoice-tts"
+        assert tts_usage.model == "cosyvoice-v3.5-plus"
+        assert tts_usage.provider_usage == {
+            "characters": 6,
+            "cost_cents": tts_usage.cost_cents,
+        }
+        assert tts_usage.cost_cents > 0
 
 
 def test_billed_seedance_fractional_overage_hides_output_and_releases(monkeypatch, worker_db):

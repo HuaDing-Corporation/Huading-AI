@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.utils import normalize_tenant_slug
-from app.db.models import Plan, Role, Subscription, Tenant
+from app.db.models import Plan, Role, Subscription, Tenant, User
 
 _HUADING_PLAN_CODE = "huading"
 _DOUBAO_VOICE_CLONE_PROVIDERS = {"doubao", "doubao-voice-clone"}
@@ -52,6 +52,29 @@ def is_platform_tenant(db: Session, *, tenant_id: str) -> bool:
         return False
     tenant_slug = db.scalar(select(Tenant.slug).where(Tenant.id == tenant_id))
     return is_platform_tenant_slug(tenant_slug)
+
+
+def is_authorized_platform_admin(
+    db: Session,
+    *,
+    user: User | None,
+    expected_tenant_id: str,
+) -> bool:
+    """Pure request/service predicate for the existing platform-admin semantics."""
+    if (
+        user is None
+        or user.tenant_id != expected_tenant_id
+        or not user.is_active
+        or user.role != Role.ADMIN.value
+    ):
+        return False
+    tenant = db.get(Tenant, expected_tenant_id)
+    return bool(
+        tenant is not None
+        and tenant.status == "active"
+        and tenant.deleted_at is None
+        and is_platform_tenant(db, tenant_id=expected_tenant_id)
+    )
 
 
 def configured_platform_tenant_slugs() -> set[str]:

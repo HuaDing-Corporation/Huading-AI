@@ -1,6 +1,7 @@
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -27,6 +28,17 @@ from app.db.models import (
 from app.schemas.brand_voice_orders import BrandVoiceOrderCreateRequest
 from app.services.billing_quotes import VerifiedQuote, _validated_snapshot
 from app.services.pricing import PRICING_POLICIES, build_simple_pricing, resolve_rate
+
+
+@pytest.fixture(autouse=True)
+def _configure_service_level_platform_admin(db_session, monkeypatch) -> None:
+    """Service tests explicitly supply the request layer's authorized principal."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "engine_platform_tenant_slugs", {"billing-a"})
+    actor = db_session.get(User, "user-a")
+    actor.role = "admin"
+    db_session.commit()
 
 
 def _verified_order_quote(db, *, user: User, payload: BrandVoiceOrderCreateRequest):
@@ -412,6 +424,60 @@ def test_manual_order_state_snapshot_captures_every_resolve_surface(db_session) 
         "brand_voices",
         "assets",
     }
+
+
+@pytest.mark.parametrize("terminal_replay", [False, True])
+def test_resolve_revalidates_revoked_platform_admin_before_replay_or_mutation(
+    db_session,
+    monkeypatch,
+    terminal_replay: bool,
+) -> None:
+    from app.core.config import settings
+    from app.services.brand_voice_orders import resolve_brand_voice_order
+
+    monkeypatch.setattr(settings, "engine_platform_tenant_slugs", {"billing-a"})
+    order_id, _operation_id = _seed_manual_order_for_invariant_test(db_session)
+    actor = db_session.get(User, "user-a")
+    actor.role = "admin"
+    db_session.commit()
+    if terminal_replay:
+        resolve_brand_voice_order(
+            db_session,
+            actor=actor,
+            order_id=order_id,
+            action="reject",
+            rejection_reason="terminal before revocation",
+            now=datetime(2026, 8, 29, 12, 1, tzinfo=UTC),
+        )
+        db_session.commit()
+    stale_authenticated_actor = SimpleNamespace(
+        id=actor.id,
+        tenant_id=actor.tenant_id,
+        role="admin",
+        is_active=True,
+    )
+    actor.role = "creator"
+    db_session.commit()
+    before = _manual_order_state(db_session, order_id=order_id)
+
+    with pytest.raises(AppError) as captured:
+        resolve_brand_voice_order(
+            db_session,
+            actor=stale_authenticated_actor,
+            order_id=order_id,
+            action="reject",
+            rejection_reason=(
+                "terminal before revocation"
+                if terminal_replay
+                else "must not mutate after revocation"
+            ),
+            now=datetime(2026, 8, 29, 12, 2, tzinfo=UTC),
+        )
+
+    assert captured.value.code == "PLATFORM_ADMIN_REQUIRED"
+    db_session.expire_all()
+    assert db_session.get(User, "user-a").role == "creator"
+    assert _manual_order_state(db_session, order_id=order_id) == before
 
 
 def _assert_resolve_failure_preserves_every_surface(

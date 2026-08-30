@@ -298,6 +298,104 @@ def test_recovery_closes_each_operation_transaction_before_returning(db_session)
     assert not db_session.in_transaction()
 
 
+def _seed_synchronous_billing_operation(
+    db_session,
+    *,
+    operation_id: str,
+    operation_name: str,
+    created_at: datetime,
+) -> BillingOperation:
+    capability, credits = {
+        "script_generate": ("script_generate", "1.0000"),
+        "scene_prompt": ("scene_prompt", "30.0000"),
+    }[operation_name]
+    snapshot = _pricing_snapshot(operation=operation_name, credits=credits)
+    snapshot["pricing_lines"][0]["capability"] = capability
+    snapshot["pricing_lines"][0]["unit"] = "call"
+    snapshot["payable_credits"] = int(Decimal(credits))
+    requested_credits = Decimal(credits)
+    operation = BillingOperation(
+        id=operation_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        operation=operation_name,
+        idempotency_key=operation_id,
+        request_hash="s" * 64,
+        quote_hash="t" * 64,
+        pricing_snapshot=snapshot,
+        requested_credits=requested_credits,
+        settled_credits=Decimal("0"),
+        released_credits=Decimal("0"),
+        status="in_progress",
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    subscription = db_session.get(Subscription, "subscription-a")
+    subscription.quota_credits_reserved = int(requested_credits)
+    usage = UsageRecord(
+        id=f"{operation_id}-usage",
+        tenant_id="tenant-a",
+        subscription_id=subscription.id,
+        billing_operation_id=operation.id,
+        billing_item_index=0,
+        billing_pricing_line_index=0,
+        capability=capability,
+        provider="test",
+        unit="call",
+        quantity=Decimal("1"),
+        credits=requested_credits,
+        cost_cents=0,
+        status="reserved",
+    )
+    db_session.add_all([operation, usage])
+    db_session.commit()
+    return operation
+
+
+@pytest.mark.parametrize("operation_name", ["script_generate", "scene_prompt"])
+@pytest.mark.parametrize(
+    ("elapsed_seconds", "expected_outcome"),
+    [(60, "held"), (7_200, "released")],
+)
+def test_recovery_applies_stale_deadline_to_synchronous_automatic_operations(
+    db_session,
+    monkeypatch,
+    operation_name: str,
+    elapsed_seconds: int,
+    expected_outcome: str,
+) -> None:
+    from app.core.config import settings
+    from app.services.task_recovery import recover_stale_billing_operations
+
+    monkeypatch.setattr(settings, "engine_orphan_task_stale_seconds", 3_600)
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    operation = _seed_synchronous_billing_operation(
+        db_session,
+        operation_id=f"{operation_name}-{expected_outcome}",
+        operation_name=operation_name,
+        created_at=created_at,
+    )
+
+    summary = recover_stale_billing_operations(
+        db_session,
+        now=created_at + timedelta(seconds=elapsed_seconds),
+    )
+
+    if expected_outcome == "held":
+        assert summary.held_operation_ids == (operation.id,)
+        assert summary.released_operation_ids == ()
+        assert operation.status == "in_progress"
+    else:
+        assert summary.released_operation_ids == (operation.id,)
+        assert summary.held_operation_ids == ()
+        assert operation.status == "completed"
+        assert operation.completion_kind == "failed"
+        assert operation.released_credits == operation.requested_credits
+        usage = db_session.get(UsageRecord, f"{operation.id}-usage")
+        assert usage.status == "released"
+
+
+
 def test_recovery_releases_stale_queued_video_operation_after_enqueue_failure(
     db_session,
 ) -> None:

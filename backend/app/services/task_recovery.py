@@ -25,6 +25,8 @@ from app.db.models import (
     VideoTask,
 )
 from app.db.session import SessionLocal
+from app.providers.base import ProviderResolutionError, resolve_named_provider
+from app.providers.voice_clone.cosyvoice import _request_recovery_marker
 from app.services import ecom_replicate, quota
 from app.services.aibrain import recover_stale_reasoning_reservations
 from app.services.batches import refresh_batch_job
@@ -35,6 +37,7 @@ from app.services.billing_operations import (
     _validate_stored_result,
     complete_failed,
 )
+from app.services.cosyvoice_recovery import reconcile_cosyvoice_operation
 from app.services.ecom_billing import try_finalize_ecom_operation
 from app.services.quota import (
     recover_stale_copy_quota_reservations,
@@ -60,6 +63,7 @@ _MANUAL_DOUBAO_OPERATIONS = {
     "doubao_brand_voice_order_renew",
 }
 _ECOM_OPERATIONS = {"ecom_cutout", "ecom_model"}
+_SYNCHRONOUS_AUTOMATIC_OPERATIONS = {"script_generate", "scene_prompt"}
 
 
 @dataclass(frozen=True)
@@ -120,6 +124,15 @@ def _operation_tasks_for_update(
 
 def _task_is_stale(task: VideoTask, *, timeout_seconds: float, now: datetime) -> bool:
     changed_at = task.updated_at or task.created_at
+    return _timestamp_is_stale(changed_at, timeout_seconds=timeout_seconds, now=now)
+
+
+def _timestamp_is_stale(
+    changed_at: datetime,
+    *,
+    timeout_seconds: float,
+    now: datetime,
+) -> bool:
     if changed_at.tzinfo is None:
         changed_at = changed_at.replace(tzinfo=UTC)
     return changed_at <= now - timedelta(seconds=timeout_seconds)
@@ -285,7 +298,14 @@ def _recover_stale_billing_operations_once(
                 continue
 
         if not tasks:
-            # Synchronous paths have no durable worker state to recover here.
+            if operation.operation in _SYNCHRONOUS_AUTOMATIC_OPERATIONS and _timestamp_is_stale(
+                operation.updated_at or operation.created_at,
+                timeout_seconds=_billing_task_timeout_seconds(operation, None),
+                now=now,
+            ):
+                _release_stale_operation(db, operation_id=operation.id)
+                released.append(operation.id)
+                continue
             held.append(operation.id)
             continue
         timeout = max(
@@ -336,7 +356,7 @@ def recover_stale_billing_operations(
     *,
     now: datetime,
 ) -> RecoverySummary:
-    """Run recovery in a bounded retryable transaction with no supplier calls."""
+    """Recover automatic reservations; CosyVoice performs inventory reads, never POSTs."""
     candidate_ids = list(
         db.scalars(
             select(BillingOperation.id)
@@ -352,6 +372,38 @@ def recover_stale_billing_operations(
     exempt: list[str] = []
     held: list[str] = []
     for operation_id in candidate_ids:
+        identity = db.execute(
+            select(BillingOperation.operation, BillingOperation.tenant_id).where(
+                BillingOperation.id == operation_id
+            )
+        ).one_or_none()
+        db.commit()
+        if identity is not None and identity[0] == "cosyvoice_brand_voice_create":
+            try:
+                provider = resolve_named_provider(
+                    db,
+                    tenant_id=identity[1],
+                    capability="voice_clone",
+                    provider="cosyvoice-voice-clone",
+                )
+            except ProviderResolutionError:
+                provider = None
+            finally:
+                db.rollback()
+            outcome = reconcile_cosyvoice_operation(
+                db,
+                operation_id=operation_id,
+                provider=provider,
+                now=now,
+                marker_for_request=_request_recovery_marker,
+            )
+            if outcome.state == "succeeded":
+                settled.append(operation_id)
+            elif outcome.state == "failed":
+                released.append(operation_id)
+            else:
+                held.append(operation_id)
+            continue
         for attempt in range(3):
             try:
                 with db.begin():

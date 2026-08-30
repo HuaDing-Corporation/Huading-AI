@@ -185,6 +185,11 @@ def postgres_registry_factory(monkeypatch):
     monkeypatch.setattr(provider_voice_registry.settings, "environment", "test")
     monkeypatch.setattr(
         provider_voice_registry.settings,
+        "engine_platform_tenant_slugs",
+        {"lifecycle"},
+    )
+    monkeypatch.setattr(
+        provider_voice_registry.settings,
         "engine_doubao_official_voice_ids",
         [],
     )

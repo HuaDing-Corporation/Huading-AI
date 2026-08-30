@@ -905,6 +905,308 @@ def test_cosyvoice_new_http_key_reuses_stable_remote_request_identity(
         assert db.query(BrandVoice).count() == 1
 
 
+@pytest.mark.parametrize(
+    (
+        "add_ambiguous_match",
+        "force_reservation_race",
+        "expected_status",
+        "expected_code",
+    ),
+    [
+        pytest.param(False, False, 201, None, id="unique-top-level-replay"),
+        pytest.param(
+            True,
+            False,
+            502,
+            "VOICE_CLONE_RECOVERY_AMBIGUOUS",
+            id="ambiguous-top-level-replay",
+        ),
+        pytest.param(False, True, 201, None, id="unique-reservation-race-replay"),
+    ],
+)
+def test_cosyvoice_replay_reconciles_remote_commit_without_duplicate_post(
+    auth_context,
+    auth_db,
+    monkeypatch,
+    add_ambiguous_match: bool,
+    force_reservation_race: bool,
+    expected_status: int,
+    expected_code: str | None,
+) -> None:
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+    from app.db import session as db_session_module
+    from app.providers.voice_clone import cosyvoice as cosyvoice_module
+    from app.providers.voice_clone.cosyvoice import CosyVoiceCloneProvider
+
+    class _ProcessDeath(BaseException):
+        pass
+
+    class _Enrollment:
+        def __init__(self) -> None:
+            self.voices: list[dict[str, str]] = []
+            self.create_calls = 0
+            self.list_calls = 0
+
+        def list_voices(self, prefix=None, page_index=0, page_size=100):
+            self.list_calls += 1
+            return [item.copy() for item in self.voices if item["prefix"] == prefix]
+
+        def create_voice(self, target_model: str, prefix: str, url: str) -> str:
+            self.create_calls += 1
+            voice_id = f"{prefix}-remote-{self.create_calls}"
+            self.voices.append({"voice_id": voice_id, "prefix": prefix})
+            return voice_id
+
+    class _CrashAfterRemoteCommit(CosyVoiceCloneProvider):
+        async def clone_voice(self, payload):
+            await super().clone_voice(payload)
+            raise _ProcessDeath()
+
+    enrollment = _Enrollment()
+    provider_holder = [
+        _CrashAfterRemoteCommit(
+            api_key="dashscope-key",
+            enrollment_service=enrollment,
+        )
+    ]
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "resolve_named_provider",
+        lambda *_args, **_kwargs: provider_holder[0],
+    )
+    monkeypatch.setattr(db_session_module, "SessionLocal", auth_db)
+    monkeypatch.setattr(
+        cosyvoice_module,
+        "_dashscope_runtime",
+        lambda *_args: nullcontext(),
+    )
+    with auth_db() as db:
+        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
+    payload = {
+        "name": "Crash recovery voice",
+        "source_audio_asset_id": asset_id,
+        "consent_confirmed": True,
+        "provider": "cosyvoice",
+    }
+    app.dependency_overrides[get_object_storage] = lambda: _Storage()
+    try:
+        client = TestClient(app)
+        crash_client = TestClient(app, raise_server_exceptions=False)
+        quote = client.post(
+            "/api/v1/brand-voices/estimate",
+            json=payload,
+            headers=auth_context["headers"],
+        ).json()["data"]
+        headers = {
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote["quote_token"],
+        }
+        crashed = crash_client.post("/api/v1/brand-voices", json=payload, headers=headers)
+        assert crashed.status_code == 500
+        assert enrollment.create_calls == 1
+        if add_ambiguous_match:
+            marker = enrollment.voices[0]["prefix"]
+            enrollment.voices.append(
+                {"voice_id": f"{marker}-ambiguous", "prefix": marker}
+            )
+        provider_holder[0] = CosyVoiceCloneProvider(
+            api_key="dashscope-key",
+            enrollment_service=enrollment,
+        )
+        if force_reservation_race:
+            real_find_replay = brand_voice_routes.find_replay
+            real_request_replay = brand_voice_routes._cosyvoice_request_replay
+            top_level_lookup_missed = False
+            request_lookup_missed = False
+
+            def miss_top_level_lookup_once(*args, **kwargs):
+                nonlocal top_level_lookup_missed
+                if not top_level_lookup_missed:
+                    top_level_lookup_missed = True
+                    return None
+                return real_find_replay(*args, **kwargs)
+
+            def miss_request_lookup_once(*args, **kwargs):
+                nonlocal request_lookup_missed
+                if not request_lookup_missed:
+                    request_lookup_missed = True
+                    return None
+                return real_request_replay(*args, **kwargs)
+
+            monkeypatch.setattr(
+                brand_voice_routes,
+                "find_replay",
+                miss_top_level_lookup_once,
+            )
+            monkeypatch.setattr(
+                brand_voice_routes,
+                "_cosyvoice_request_replay",
+                miss_request_lookup_once,
+            )
+
+        replay = client.post("/api/v1/brand-voices", json=payload, headers=headers)
+        inventory_calls_after_reconciliation = enrollment.list_calls
+        terminal_replay = client.post(
+            "/api/v1/brand-voices",
+            json=payload,
+            headers=headers,
+        )
+        from app.services.cosyvoice_recovery import reconcile_cosyvoice_operation
+
+        with auth_db() as reconciliation_db:
+            terminal_outcome = reconcile_cosyvoice_operation(
+                reconciliation_db,
+                operation_id=reconciliation_db.scalar(
+                    select(BillingOperation.id).where(
+                        BillingOperation.operation == "cosyvoice_brand_voice_create"
+                    )
+                ),
+                provider=provider_holder[0],
+                now=datetime.now(UTC),
+                marker_for_request=cosyvoice_module._request_recovery_marker,
+            )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert replay.status_code == expected_status, replay.text
+    assert terminal_replay.status_code == expected_status, terminal_replay.text
+    assert enrollment.create_calls == 1
+    assert enrollment.list_calls == inventory_calls_after_reconciliation
+    assert terminal_outcome.state == ("succeeded" if expected_code is None else "failed")
+    with auth_db() as db:
+        operation = db.scalar(select(BillingOperation))
+        usage = db.scalar(select(UsageRecord))
+        voice = db.scalar(select(BrandVoice))
+        if expected_code is None:
+            assert operation.completion_kind == "succeeded"
+            assert usage.status == "settled"
+            assert voice.status == "ready"
+            assert voice.speaker_id == enrollment.voices[0]["voice_id"]
+            assert replay.json()["data"]["id"] == voice.id
+        else:
+            assert replay.json()["error"]["code"] == expected_code
+            assert operation.completion_kind == "failed"
+            assert usage.status == "released"
+            assert voice.status == "failed"
+
+
+def test_cosyvoice_missing_remote_evidence_holds_then_periodic_recovery_expires(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    from app.api.v1.routes import brand_voices as brand_voice_routes
+    from app.core.config import settings
+    from app.db import session as db_session_module
+    from app.providers.voice_clone import cosyvoice as cosyvoice_module
+    from app.providers.voice_clone.cosyvoice import CosyVoiceCloneProvider
+    from app.services import task_recovery
+
+    class _ProcessDeath(BaseException):
+        pass
+
+    class _DieBeforeRemotePost:
+        async def clone_voice(self, _payload):
+            raise _ProcessDeath()
+
+    class _EmptyEnrollment:
+        def __init__(self) -> None:
+            self.create_calls = 0
+            self.list_calls = 0
+
+        def list_voices(self, prefix=None, page_index=0, page_size=100):
+            self.list_calls += 1
+            return []
+
+        def create_voice(self, target_model: str, prefix: str, url: str) -> str:
+            self.create_calls += 1
+            raise AssertionError("reconciliation must never repeat the supplier POST")
+
+    enrollment = _EmptyEnrollment()
+    provider_holder = [_DieBeforeRemotePost()]
+    monkeypatch.setattr(
+        brand_voice_routes,
+        "resolve_named_provider",
+        lambda *_args, **_kwargs: provider_holder[0],
+    )
+    monkeypatch.setattr(
+        task_recovery,
+        "resolve_named_provider",
+        lambda *_args, **_kwargs: provider_holder[0],
+        raising=False,
+    )
+    monkeypatch.setattr(db_session_module, "SessionLocal", auth_db)
+    monkeypatch.setattr(
+        cosyvoice_module,
+        "_dashscope_runtime",
+        lambda *_args: nullcontext(),
+    )
+    monkeypatch.setattr(settings, "engine_orphan_task_stale_seconds", 3_600)
+    with auth_db() as db:
+        _seed_brand_voice_billing(db, auth_context["tenant_id"])
+        asset_id = _seed_audio_asset(db, auth_context["tenant_id"])
+    payload = {
+        "name": "Missing recovery evidence",
+        "source_audio_asset_id": asset_id,
+        "consent_confirmed": True,
+        "provider": "cosyvoice",
+    }
+    app.dependency_overrides[get_object_storage] = lambda: _Storage()
+    try:
+        client = TestClient(app)
+        crash_client = TestClient(app, raise_server_exceptions=False)
+        quote = client.post(
+            "/api/v1/brand-voices/estimate",
+            json=payload,
+            headers=auth_context["headers"],
+        ).json()["data"]
+        headers = {
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote["quote_token"],
+        }
+        crashed = crash_client.post("/api/v1/brand-voices", json=payload, headers=headers)
+        assert crashed.status_code == 500
+        provider_holder[0] = CosyVoiceCloneProvider(
+            api_key="dashscope-key",
+            enrollment_service=enrollment,
+        )
+
+        held = client.post("/api/v1/brand-voices", json=payload, headers=headers)
+        assert held.status_code == 409, held.text
+        assert held.json()["error"]["code"] == "BILLING_OPERATION_IN_PROGRESS"
+        assert enrollment.list_calls == 1
+        monkeypatch.setattr(settings, "engine_orphan_task_stale_seconds", 0)
+        with auth_db() as recovery_db:
+            summary = task_recovery.recover_stale_billing_operations(
+                recovery_db,
+                now=datetime.now(UTC) + timedelta(seconds=1),
+            )
+        inventory_calls_after_recovery = enrollment.list_calls
+        terminal_replay = client.post(
+            "/api/v1/brand-voices",
+            json=payload,
+            headers=headers,
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert summary.released_operation_ids
+    assert terminal_replay.status_code == 504, terminal_replay.text
+    assert terminal_replay.json()["error"]["code"] == "VOICE_CLONE_RECOVERY_EXPIRED"
+    assert enrollment.create_calls == 0
+    assert enrollment.list_calls == inventory_calls_after_recovery
+    with auth_db() as db:
+        operation = db.scalar(select(BillingOperation))
+        usage = db.scalar(select(UsageRecord))
+        voice = db.scalar(select(BrandVoice))
+        assert operation.completion_kind == "failed"
+        assert usage.status == "released"
+        assert voice.status == "failed"
+
+
 def test_cosyvoice_route_fails_closed_before_provider_on_durable_true_marker_collision(
     auth_context,
     auth_db,
@@ -1183,18 +1485,33 @@ def test_cosyvoice_create_failure_releases_zero_and_replays_without_remote_call(
 
     failed = client.post("/api/v1/brand-voices", json=payload, headers=headers)
     replay = client.post("/api/v1/brand-voices", json=payload, headers=headers)
+    explicit_retry = client.post(
+        "/api/v1/brand-voices",
+        json=payload,
+        headers={
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote["quote_token"],
+        },
+    )
 
     assert failed.status_code == 502
     assert replay.status_code == 502
-    assert provider.calls == 1
+    assert explicit_retry.status_code == 502
+    assert provider.calls == 2
     with auth_db() as db:
-        operation = db.scalar(select(BillingOperation))
-        usage = db.scalar(select(UsageRecord))
-        assert operation.status == "completed"
-        assert operation.completion_kind == "failed"
-        assert (operation.requested_credits, operation.released_credits) == (0, 0)
-        assert usage.status == "released"
-        assert usage.credits == 0
+        operations = list(db.scalars(select(BillingOperation).order_by(BillingOperation.id)))
+        usages = list(db.scalars(select(UsageRecord).order_by(UsageRecord.id)))
+        assert len(operations) == 2
+        assert len(usages) == 2
+        assert all(operation.status == "completed" for operation in operations)
+        assert all(operation.completion_kind == "failed" for operation in operations)
+        assert all(
+            (operation.requested_credits, operation.released_credits) == (0, 0)
+            for operation in operations
+        )
+        assert all(usage.status == "released" for usage in usages)
+        assert all(usage.credits == 0 for usage in usages)
 
 
 @pytest.mark.parametrize(

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.responses import StreamingResponse
@@ -906,6 +906,42 @@ def _billing_quote_video_replay(
     user: User,
     operation,
 ) -> BillingQuoteVideoAccepted:
+    if operation.status == "completed" and operation.completion_kind == "failed":
+        lookup = lookup_operation(
+            db,
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            operation="video_create",
+            idempotency_key=UUID(operation.idempotency_key),
+        )
+        if not isinstance(lookup, BillingFailedLookup):
+            raise AppError(
+                "Video billing replay is invalid.",
+                code="BILLING_REPLAY_INVALID",
+                status_code=500,
+            )
+        detail = (
+            lookup.failure.detail.model_dump(mode="json", exclude_none=True)
+            if lookup.failure.detail is not None
+            else {}
+        )
+        detail["billing"] = lookup.billing.model_dump(mode="json")
+        raise AppError(
+            (
+                "Video queue submission failed."
+                if lookup.failure.code == "VIDEO_ENQUEUE_FAILED"
+                else "Video generation failed."
+            ),
+            code=lookup.failure.code,
+            status_code=lookup.failure.original_http_status,
+            detail=detail,
+        )
+    if operation.status == "completed" and operation.completion_kind != "succeeded":
+        raise AppError(
+            "Video billing replay is invalid.",
+            code="BILLING_REPLAY_INVALID",
+            status_code=500,
+        )
     task_id = operation.result_id
     if not task_id:
         task_id = db.scalar(

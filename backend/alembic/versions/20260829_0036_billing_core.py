@@ -170,9 +170,25 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    bind = op.get_bind()
     billing_operation_count = int(
-        op.get_bind().scalar(sa.text("SELECT COUNT(*) FROM billing_operations")) or 0
+        bind.scalar(sa.text("SELECT COUNT(*) FROM billing_operations")) or 0
     )
+    provider_usage_count = int(
+        bind.scalar(
+            sa.text(
+                "SELECT COUNT(*) FROM usage_records "
+                "WHERE provider_usage IS NOT NULL"
+            )
+        )
+        or 0
+    )
+    if provider_usage_count:
+        raise RuntimeError(
+            "Cannot downgrade 20260829_0036: "
+            f"{provider_usage_count} usage record rows retain provider_usage JSON. "
+            "Provider telemetry was not modified."
+        )
     if billing_operation_count:
         raise RuntimeError(
             "Cannot downgrade 20260829_0036: "

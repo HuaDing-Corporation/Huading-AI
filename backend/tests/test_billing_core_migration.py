@@ -421,6 +421,137 @@ def test_billing_core_migration_creates_schema_and_refuses_downgrade_with_rows()
 
 
 @pytest.mark.parametrize(
+    "stored_json",
+    [
+        pytest.param("null", id="json-null"),
+        pytest.param("{}", id="empty-object"),
+        pytest.param('{"input_tokens":41}', id="standalone-provider-telemetry"),
+    ],
+)
+def test_billing_core_migration_refuses_to_drop_standalone_provider_usage(
+    stored_json: str,
+) -> None:
+    migration = _load_migration()
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(sa.text("CREATE TABLE tenants (id VARCHAR(36) PRIMARY KEY)"))
+        connection.execute(sa.text("CREATE TABLE users (id VARCHAR(36) PRIMARY KEY)"))
+        connection.execute(
+            sa.text(
+                "CREATE TABLE usage_records ("
+                "id VARCHAR(36) PRIMARY KEY, tenant_id VARCHAR(36) NOT NULL)"
+            )
+        )
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+        connection.execute(
+            sa.text(
+                "INSERT INTO usage_records (id, tenant_id, provider_usage) "
+                "VALUES ('standalone-usage', 'tenant-a', :provider_usage)"
+            ),
+            {"provider_usage": stored_json},
+        )
+
+        with pytest.raises(RuntimeError, match="provider_usage"):
+            migration.downgrade()
+
+        assert "provider_usage" in {
+            column["name"] for column in sa.inspect(connection).get_columns("usage_records")
+        }
+        assert connection.scalar(
+            sa.text(
+                "SELECT provider_usage FROM usage_records WHERE id = 'standalone-usage'"
+            )
+        ) == stored_json
+        assert connection.scalar(sa.text("SELECT COUNT(*) FROM billing_operations")) == 0
+    engine.dispose()
+
+
+def test_billing_core_migration_allows_downgrade_when_provider_usage_is_sql_null() -> None:
+    migration = _load_migration()
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(sa.text("CREATE TABLE tenants (id VARCHAR(36) PRIMARY KEY)"))
+        connection.execute(sa.text("CREATE TABLE users (id VARCHAR(36) PRIMARY KEY)"))
+        connection.execute(
+            sa.text(
+                "CREATE TABLE usage_records ("
+                "id VARCHAR(36) PRIMARY KEY, tenant_id VARCHAR(36) NOT NULL)"
+            )
+        )
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+        connection.execute(
+            sa.text(
+                "INSERT INTO usage_records (id, tenant_id, provider_usage) "
+                "VALUES ('sql-null-usage', 'tenant-a', NULL)"
+            )
+        )
+
+        migration.downgrade()
+
+        assert "provider_usage" not in {
+            column["name"] for column in sa.inspect(connection).get_columns("usage_records")
+        }
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "json_expression",
+    [
+        pytest.param("CAST('null' AS JSONB)", id="jsonb-null"),
+        pytest.param("CAST('{}' AS JSONB)", id="jsonb-empty-object"),
+        pytest.param(
+            "CAST('{\"input_tokens\":41}' AS JSONB)",
+            id="jsonb-provider-telemetry",
+        ),
+    ],
+)
+def test_real_postgresql_migration_refuses_stored_provider_usage_json(
+    postgres_billing_domain_schema,
+    json_expression: str,
+) -> None:
+    engine, schema = postgres_billing_domain_schema
+    with _schema_transaction(engine, schema) as connection:
+        migration = _load_migration()
+        migration.op = Operations(MigrationContext.configure(connection))
+        connection.execute(
+            sa.text(
+                "INSERT INTO usage_records (id, tenant_id, provider_usage) "
+                f"VALUES ('postgres-provider-usage', 'tenant-a', {json_expression})"
+            )
+        )
+
+        with pytest.raises(RuntimeError, match="provider_usage"):
+            migration.downgrade()
+
+        assert "provider_usage" in {
+            column["name"] for column in sa.inspect(connection).get_columns("usage_records")
+        }
+
+
+def test_real_postgresql_migration_treats_sql_null_as_absent_provider_usage(
+    postgres_billing_domain_schema,
+) -> None:
+    engine, schema = postgres_billing_domain_schema
+    with _schema_transaction(engine, schema) as connection:
+        migration = _load_migration()
+        migration.op = Operations(MigrationContext.configure(connection))
+        connection.execute(
+            sa.text(
+                "INSERT INTO usage_records (id, tenant_id, provider_usage) "
+                "VALUES ('postgres-sql-null', 'tenant-a', NULL)"
+            )
+        )
+
+        migration.downgrade()
+
+        assert "provider_usage" not in {
+            column["name"] for column in sa.inspect(connection).get_columns("usage_records")
+        }
+
+
+@pytest.mark.parametrize(
     "value",
     [
         pytest.param(float("inf"), id="sqlite-inf-spelling"),

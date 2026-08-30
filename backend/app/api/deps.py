@@ -18,7 +18,7 @@ from app.db.session import SessionLocal
 from app.services.plan_access import (
     AnalyticsScope,
     analytics_scope_for_tenant,
-    is_platform_tenant,
+    is_authorized_platform_admin,
     tenant_entitlements,
 )
 from app.services.progress import ProgressStore, build_progress_store
@@ -266,9 +266,10 @@ def require_platform_admin(
     db: Session = DbSessionDependency,
     user: User = CurrentUserDependency,
 ) -> User:
-    if (
-        is_platform_tenant(db, tenant_id=user.tenant_id)
-        and user.role == Role.ADMIN.value
+    if is_authorized_platform_admin(
+        db,
+        user=user,
+        expected_tenant_id=user.tenant_id,
     ):
         return user
     raise AppError(

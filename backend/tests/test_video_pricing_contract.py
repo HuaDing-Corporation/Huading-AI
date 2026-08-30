@@ -627,8 +627,12 @@ def test_brand_video_enqueue_failure_completes_and_releases_operation(
 
     from app.api.v1.routes import videos as videos_route
 
+    enqueue_attempts = 0
+
     class _FailingTask:
         def apply_async(self, *, args, task_id, queue=None):
+            nonlocal enqueue_attempts
+            enqueue_attempts += 1
             raise RuntimeError("queue unavailable")
 
     monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _FailingTask())
@@ -641,18 +645,35 @@ def test_brand_video_enqueue_failure_completes_and_releases_operation(
     }
     client = TestClient(app)
     quote = client.post("/api/v1/videos/estimate", headers=auth_context["headers"], json=payload)
+    submission_headers = {
+        **auth_context["headers"],
+        "Idempotency-Key": str(uuid4()),
+        "X-Huading-Quote": quote.json()["data"]["quote_token"],
+    }
     response = client.post(
         "/api/v1/videos",
-        headers={
-            **auth_context["headers"],
-            "Idempotency-Key": str(uuid4()),
-            "X-Huading-Quote": quote.json()["data"]["quote_token"],
-        },
+        headers=submission_headers,
+        json=payload,
+    )
+    replay = client.post(
+        "/api/v1/videos",
+        headers=submission_headers,
         json=payload,
     )
 
     assert response.status_code == 503, response.text
     assert response.json()["error"]["code"] == "VIDEO_ENQUEUE_FAILED"
+    assert replay.status_code == 503, replay.text
+    assert {
+        key: value
+        for key, value in replay.json()["error"].items()
+        if key != "request_id"
+    } == {
+        key: value
+        for key, value in response.json()["error"].items()
+        if key != "request_id"
+    }
+    assert enqueue_attempts == 1
     with auth_db() as db:
         task = db.query(VideoTask).one()
         operation = db.query(BillingOperation).one()

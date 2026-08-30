@@ -44,6 +44,8 @@ export function PricingConfirmDialog({
 
   const estimating = phase === "estimating";
   const submitting = phase === "submitting";
+  const querying = phase === "querying";
+  const interactionLocked = submitting || querying;
   const expired = phase === "expired" || expiresInSeconds === 0;
   const estimateFailed = phase === "failed" && quote === null;
   const confirmable = phase === "ready" && quote !== null && !expired;
@@ -52,7 +54,7 @@ export function PricingConfirmDialog({
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        if (!next && !submitting) onCancel();
+        if (!next && !interactionLocked) onCancel();
       }}
     >
       <DialogContent className="flex max-h-[90vh] min-w-0 flex-col gap-5 overflow-y-auto p-5 sm:p-6">
@@ -173,11 +175,11 @@ export function PricingConfirmDialog({
         )}
 
         <div className="flex flex-col-reverse gap-2.5 sm:flex-row sm:justify-end">
-          <Button variant="soft" onClick={onCancel} disabled={submitting}>
+          <Button variant="soft" onClick={onCancel} disabled={interactionLocked}>
             取消
           </Button>
           {expired ? (
-            <Button onClick={onEstimate}>重新获取价格</Button>
+            <Button onClick={onEstimate} disabled={interactionLocked}>重新获取价格</Button>
           ) : (
             <>
               {phase === "failed" && (
@@ -188,7 +190,7 @@ export function PricingConfirmDialog({
               <Button
                 aria-label={confirmLabel}
                 onClick={onConfirm}
-                disabled={!confirmable || submitting}
+                disabled={!confirmable || interactionLocked}
               >
                 {submitting ? (
                   <>

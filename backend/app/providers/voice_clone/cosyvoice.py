@@ -32,6 +32,10 @@ class CosyVoiceCloneError(RuntimeError):
     pass
 
 
+class CosyVoiceRecoveryAmbiguousError(CosyVoiceCloneError):
+    pass
+
+
 class CosyVoiceCloneProvider:
     def __init__(
         self,
@@ -60,6 +64,13 @@ class CosyVoiceCloneProvider:
 
     async def delete_voice(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return await asyncio.to_thread(self.delete_voice_sync, payload)
+
+    async def query_recovery_voice(
+        self,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Query marker inventory while the caller owns the durable marker lock."""
+        return await asyncio.to_thread(self.query_recovery_voice_sync, payload)
 
     async def synthesize_speech(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return await asyncio.to_thread(self.synthesize_speech_sync, payload)
@@ -96,21 +107,24 @@ class CosyVoiceCloneProvider:
                         "provider": _PROVIDER_NAME,
                     }
                 existing_voice_ids = _remote_voice_ids(self.enrollment, prefix=prefix)
-                try:
-                    voice_id = _create_voice_once(
-                        self.enrollment,
-                        self.target_model,
-                        prefix,
-                        source_audio_url,
-                    )
-                except Exception:
-                    voice_id = _recover_created_voice_id(
-                        self.enrollment,
-                        prefix=prefix,
-                        existing_voice_ids=existing_voice_ids,
-                    )
-                    if not voice_id:
-                        raise
+                if request_key and existing_voice_ids:
+                    voice_id = _unique_recovery_voice_id(existing_voice_ids)
+                else:
+                    try:
+                        voice_id = _create_voice_once(
+                            self.enrollment,
+                            self.target_model,
+                            prefix,
+                            source_audio_url,
+                        )
+                    except Exception:
+                        voice_id = _recover_created_voice_id(
+                            self.enrollment,
+                            prefix=prefix,
+                            existing_voice_ids=existing_voice_ids,
+                        )
+                        if not voice_id:
+                            raise
                 if request_key:
                     self._voice_id_by_request_key[request_key] = str(voice_id)
         logger.info(
@@ -121,6 +135,27 @@ class CosyVoiceCloneProvider:
             prefix=prefix,
         )
         return {"speaker_id": str(voice_id), "status": "ready", "provider": _PROVIDER_NAME}
+
+    def query_recovery_voice_sync(
+        self,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        request_key = str(payload.get("external_request_key") or "").strip()
+        operation_id = str(payload.get("billing_operation_id") or "").strip()
+        if not _REQUEST_KEY_PATTERN.fullmatch(request_key) or not operation_id:
+            raise CosyVoiceCloneError("CosyVoice recovery identity is invalid.")
+        prefix = _request_recovery_marker(request_key)
+        with _dashscope_runtime(self.api_key, self.base_url):
+            voice_ids = _remote_voice_ids(self.enrollment, prefix=prefix)
+        if not voice_ids:
+            return None
+        voice_id = _unique_recovery_voice_id(voice_ids)
+        return {
+            "speaker_id": voice_id,
+            "status": "ready",
+            "provider": _PROVIDER_NAME,
+            "model": self.target_model,
+        }
 
     def delete_voice_sync(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         speaker_id = str(payload.get("speaker_id") or "").strip()
@@ -361,8 +396,14 @@ def _recover_created_voice_id(
 ) -> str:
     created_voice_ids = _remote_voice_ids(enrollment, prefix=prefix) - existing_voice_ids
     if len(created_voice_ids) > 1:
-        raise CosyVoiceCloneError("CosyVoice voice recovery is ambiguous.")
+        raise CosyVoiceRecoveryAmbiguousError("CosyVoice voice recovery is ambiguous.")
     return next(iter(created_voice_ids), "")
+
+
+def _unique_recovery_voice_id(voice_ids: set[str]) -> str:
+    if len(voice_ids) != 1:
+        raise CosyVoiceRecoveryAmbiguousError("CosyVoice voice recovery is ambiguous.")
+    return next(iter(voice_ids))
 
 
 def _cosyvoice_voice_clone_factory(config: ProviderConfig) -> CosyVoiceCloneProvider:

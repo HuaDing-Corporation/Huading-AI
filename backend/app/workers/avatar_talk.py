@@ -1004,6 +1004,39 @@ def _billing_operation_id(task: VideoTask) -> str | None:
     return value
 
 
+def _enforce_billed_avatar_duration_quote(
+    ctx: AvatarTalkContext,
+    *,
+    task: VideoTask,
+) -> None:
+    operation_id = _billing_operation_id(task)
+    if operation_id is None:
+        return
+    base_usage = ctx.db.scalar(
+        select(UsageRecord).where(
+            UsageRecord.billing_operation_id == operation_id,
+            UsageRecord.billing_item_index == 0,
+        )
+    )
+    if (
+        base_usage is None
+        or base_usage.capability != _billing_video_base_capability(task=task)
+        or base_usage.unit != "second"
+    ):
+        raise BillingInvariantError("billed video task is missing its base allocation")
+    actual_seconds = _precise_billable_seconds(ctx.duration_sec)
+    if actual_seconds <= Decimal(base_usage.quantity):
+        return
+    _persist_billing_actual_seconds(task=task, actual_seconds=actual_seconds)
+    _complete_billing_quote_video(
+        ctx.db,
+        task=task,
+        actual_seconds=actual_seconds,
+        base_cost_cents=0,
+    )
+    raise BillingInvariantError("billed avatar overage did not terminate the operation")
+
+
 def _tts_provider_for_voice(
     db: Session,
     *,
@@ -1024,12 +1057,13 @@ def _tts_provider_for_voice(
 
 
 def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
+    task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
+    _enforce_billed_avatar_duration_quote(ctx, task=task)
     avatar = _input_avatar_asset(ctx)
     audio_key = getattr(ctx, "audio_key", None)
     if not audio_key:
         raise RuntimeError("TTS audio is missing for avatar generation.")
     provider = resolve(ctx.db, tenant_id=ctx.tenant_id, capability="avatar")
-    task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
     if avatar.type == "video":
         tier = _change_lips_tier()
         _validate_change_lips_tts_duration(float(ctx.duration_sec or 0), tier=tier)

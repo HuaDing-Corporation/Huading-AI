@@ -385,6 +385,7 @@ function useBillingActionInternal<
   }, [phase, quoteValue]);
 
   const estimate = useCallback(async () => {
+    if (attemptRef.current !== null && !attemptClosed.current) return;
     const estimateOptions = optionsRef.current;
     const input = estimateOptions.input;
     const operation = estimateOptions.operation;
@@ -652,7 +653,11 @@ function useBillingActionInternal<
   }, [recoverUnknown]);
 
   const confirm = useCallback(async () => {
-    if (submitOwner.current !== null || attemptClosed.current) return;
+    if (
+      submitOwner.current !== null ||
+      attemptClosed.current ||
+      attemptRef.current !== null
+    ) return;
     const input = optionsRef.current.input;
     const rawQuote = quoteRef.current;
     const parsedQuote = parsedQuoteRef.current;
@@ -711,7 +716,10 @@ function useBillingActionInternal<
     }
   }, [clearAttempt, submitBound]);
 
-  const retry = useCallback(() => clearAttempt(), [clearAttempt]);
+  const clearUserAttempt = useCallback(() => {
+    if (attemptRef.current !== null && !attemptClosed.current) return;
+    clearAttempt();
+  }, [clearAttempt]);
 
   const expired = phase === "expired" || expiresInSeconds === 0;
   return {
@@ -730,7 +738,7 @@ function useBillingActionInternal<
     estimate,
     confirm,
     continueLookup: queryOriginal,
-    retry,
-    reset: clearAttempt
+    retry: clearUserAttempt,
+    reset: clearUserAttempt
   };
 }

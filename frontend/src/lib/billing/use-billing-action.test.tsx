@@ -388,6 +388,40 @@ describe("useBillingAction", () => {
     expect(view.result.current.phase).toBe("succeeded");
   });
 
+  it("preserves a querying attempt and its original key when a caller resets", async () => {
+    const createIdempotencyKey = vi.fn().mockReturnValueOnce(keyA).mockReturnValueOnce(keyB);
+    const estimate = vi.fn().mockResolvedValue(quote());
+    const submit = vi.fn().mockRejectedValue(networkError());
+    const lookup = vi
+      .fn()
+      .mockRejectedValueOnce(networkError())
+      .mockResolvedValueOnce(completedLookup());
+    const view = renderHook(() =>
+      useBillingAction(options({ createIdempotencyKey, estimate, submit, lookup }))
+    );
+
+    await act(() => view.result.current.estimate());
+    await act(() => view.result.current.confirm());
+    expect(view.result.current.phase).toBe("querying");
+    expect(view.result.current.idempotencyKey).toBe(keyA);
+
+    act(() => view.result.current.reset());
+    expect(view.result.current.phase).toBe("querying");
+    expect(view.result.current.idempotencyKey).toBe(keyA);
+    expect(view.result.current.quote).not.toBeNull();
+    await act(() => view.result.current.estimate());
+    await act(() => view.result.current.confirm());
+    expect(view.result.current.phase).toBe("querying");
+
+    await act(() => view.result.current.continueLookup());
+    expect(view.result.current.phase).toBe("succeeded");
+    expect(lookup).toHaveBeenNthCalledWith(1, "cosyvoice_brand_voice_create", keyA);
+    expect(lookup).toHaveBeenNthCalledWith(2, "cosyvoice_brand_voice_create", keyA);
+    expect(createIdempotencyKey).toHaveBeenCalledTimes(1);
+    expect(estimate).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
   it("fails closed when the operation-specific lookup result parser returns null", async () => {
     const view = renderHook(() =>
       useBillingAction(

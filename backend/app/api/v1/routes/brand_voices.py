@@ -23,6 +23,7 @@ from app.core.logging import get_logger
 from app.core.utils import base_mime
 from app.db.models import Asset, BillingOperation, BrandVoice, BrandVoiceOrder, UsageRecord, User
 from app.providers.base import ProviderResolutionError, resolve_named_provider
+from app.providers.voice_clone.cosyvoice import _request_recovery_marker
 from app.schemas.billing import BillingQuote
 from app.schemas.brand_voices import (
     BrandVoiceCreateRequest,
@@ -44,6 +45,7 @@ from app.services.billing_operations import (
     register_billing_result_schema,
 )
 from app.services.billing_quotes import issue_quote, request_sha256, verify_quote
+from app.services.cosyvoice_recovery import reconcile_cosyvoice_operation
 from app.services.pricing import (
     PRICING_POLICIES,
     PricingDisclosure,
@@ -197,7 +199,8 @@ def create_brand_voice(
         request_hash=request_hash,
     )
     if replay is not None:
-        return ok(request, _cosyvoice_replay_response(replay.operation))
+        operation = _reconcile_cosyvoice_replay(db, operation=replay.operation)
+        return ok(request, _cosyvoice_replay_response(operation))
     request_replay = _cosyvoice_request_replay(
         db,
         tenant_id=user.tenant_id,
@@ -213,6 +216,7 @@ def create_brand_voice(
             request_hash=request_hash,
             current_draft=_cosyvoice_pricing_draft(db, tenant_id=user.tenant_id),
         )
+        request_replay = _reconcile_cosyvoice_replay(db, operation=request_replay)
         return ok(request, _cosyvoice_replay_response(request_replay))
     if payload.consent_confirmed is not True:
         raise AppError(
@@ -285,7 +289,11 @@ def create_brand_voice(
                 code="BILLING_REPLAY_INVALID",
                 status_code=500,
             )
-        return ok(request, _cosyvoice_replay_response(replay.operation))
+        replay_operation = _reconcile_cosyvoice_replay(
+            db,
+            operation=replay.operation,
+        )
+        return ok(request, _cosyvoice_replay_response(replay_operation))
     late_request_replay = _cosyvoice_request_replay(
         db,
         tenant_id=user.tenant_id,
@@ -295,6 +303,10 @@ def create_brand_voice(
     )
     if late_request_replay is not None:
         db.rollback()
+        late_request_replay = _reconcile_cosyvoice_replay(
+            db,
+            operation=late_request_replay,
+        )
         return ok(request, _cosyvoice_replay_response(late_request_replay))
     clone_payload = _clone_payload(
         tenant_id=user.tenant_id,
@@ -468,6 +480,44 @@ def _cosyvoice_replay_response(operation) -> BrandVoiceCreateResponse:
         status_code=operation.error_http_status or 502,
         detail={"billing": billing_summary(operation).model_dump(mode="json")},
     )
+
+
+def _reconcile_cosyvoice_replay(
+    db: Session,
+    *,
+    operation: BillingOperation,
+) -> BillingOperation:
+    if operation.status != "in_progress":
+        return operation
+    operation_id = operation.id
+    tenant_id = operation.tenant_id
+    db.rollback()
+    try:
+        provider = resolve_named_provider(
+            db,
+            tenant_id=tenant_id,
+            capability="voice_clone",
+            provider=_COSYVOICE_CLONE_PROVIDER,
+        )
+    except ProviderResolutionError:
+        provider = None
+    finally:
+        db.rollback()
+    reconcile_cosyvoice_operation(
+        db,
+        operation_id=operation_id,
+        provider=provider,
+        now=datetime.now(UTC),
+        marker_for_request=_request_recovery_marker,
+    )
+    reconciled = db.get(BillingOperation, operation_id)
+    if reconciled is None:
+        raise AppError(
+            "Stored brand voice operation is missing.",
+            code="BILLING_INVARIANT_VIOLATION",
+            status_code=500,
+        )
+    return reconciled
 
 
 def _cosyvoice_request_replay(

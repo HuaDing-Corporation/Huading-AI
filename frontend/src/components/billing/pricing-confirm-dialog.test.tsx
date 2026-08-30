@@ -75,6 +75,27 @@ describe("PricingConfirmDialog", () => {
     expect(props.onConfirm).not.toHaveBeenCalled();
   });
 
+  it("prevents closing or starting a new estimate while the result is querying", () => {
+    const view = renderDialog({ phase: "querying" });
+    const cancel = screen.getByRole("button", { name: "取消" });
+    expect(cancel).toBeDisabled();
+    fireEvent.click(cancel);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(view.props.onCancel).not.toHaveBeenCalled();
+
+    view.rerender(
+      <PricingConfirmDialog
+        {...view.props}
+        phase="querying"
+        expiresInSeconds={0}
+      />
+    );
+    const reestimate = screen.getByRole("button", { name: "重新获取价格" });
+    expect(reestimate).toBeDisabled();
+    fireEvent.click(reestimate);
+    expect(view.props.onEstimate).not.toHaveBeenCalled();
+  });
+
   it("recognizes loading, submitting, and expiry without changing the accessible action name", () => {
     const view = renderDialog({ phase: "estimating", quote: null });
     expect(screen.getByText("正在获取价格…")).toBeInTheDocument();

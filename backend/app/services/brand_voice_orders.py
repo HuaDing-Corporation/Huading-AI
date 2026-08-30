@@ -37,7 +37,10 @@ from app.services.billing_operations import (
     register_billing_result_schema,
 )
 from app.services.billing_quotes import VerifiedQuote, request_sha256
-from app.services.plan_access import require_doubao_voice_clone_access
+from app.services.plan_access import (
+    is_authorized_platform_admin,
+    require_doubao_voice_clone_access,
+)
 from app.services.pricing import (
     PRICING_POLICIES,
     RateScope,
@@ -924,7 +927,24 @@ def _resolve_in_transaction(
     rejection_reason: str | None,
     transaction_now: datetime,
 ) -> BrandVoiceOrder:
-    lock_tenant_for_subscription_lifecycle(db, tenant_id=locator.tenant_id)
+    for tenant_id in sorted({locator.tenant_id, actor_tenant_id}):
+        lock_tenant_for_subscription_lifecycle(db, tenant_id=tenant_id)
+    locked_actor = db.scalar(
+        select(User)
+        .where(User.id == actor_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not is_authorized_platform_admin(
+        db,
+        user=locked_actor,
+        expected_tenant_id=actor_tenant_id,
+    ):
+        raise AppError(
+            "Platform administrator access is required.",
+            code="PLATFORM_ADMIN_REQUIRED",
+            status_code=403,
+        )
     operation = _operation_for_update(db, operation_id=locator.operation_id)
     replay = _terminal_replay(
         db,
