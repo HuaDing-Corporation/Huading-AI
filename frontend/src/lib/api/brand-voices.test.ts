@@ -1,9 +1,11 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createBrandVoiceOrder, estimateBrandVoiceOrder, getBrandVoiceOrder, listBrandVoiceOrders } from "./brand-voice-orders";
 import { createBrandVoice, estimateBrandVoice, listBrandVoices, uploadAudio } from "./brand-voices";
 import { getQuota } from "./quota";
+import { resetBrandVoiceOrders } from "@/mocks/handlers";
 
+beforeEach(() => resetBrandVoiceOrders());
 afterEach(() => localStorage.removeItem("hd_mock_active_subscription"));
 
 describe("brand voices billed API", () => {
@@ -51,7 +53,10 @@ describe("brand voices billed API", () => {
   });
 
   it("returns the exact quota schema and a zero wallet without an active subscription", async () => {
-    expect(await getQuota()).toEqual({ has_active_subscription: true, active_subscription_id: "sub-mock", total: 1000, used: 120, reserved: 36, remaining: 844, manual_fulfillment_held_credits: 30000, pending_refund_credits: 0 });
+    const held = (await listBrandVoiceOrders())
+      .filter((order) => order.status === "awaiting_fulfillment")
+      .reduce((sum, order) => sum + order.billing.held_credits, 0);
+    expect(await getQuota()).toEqual({ has_active_subscription: true, active_subscription_id: "sub-mock", total: 1000, used: 120, reserved: 36, remaining: 844, manual_fulfillment_held_credits: held, pending_refund_credits: 0 });
     localStorage.setItem("hd_mock_active_subscription", "0");
     expect(await getQuota()).toEqual({ has_active_subscription: false, active_subscription_id: null, total: 0, used: 0, reserved: 0, remaining: 0, manual_fulfillment_held_credits: 0, pending_refund_credits: 30000 });
   });

@@ -658,8 +658,13 @@ const brandVoiceOrderSeeds = (): MockBrandVoiceOrder[] => [
   { id: "bvo-other-user", tenant_id: "ten-mock", ordered_by_user_id: "u-other", order_type: "create", requested_name: "他人订单", source_audio_asset_id: "audio-other", existing_brand_voice_id: null, status: "awaiting_fulfillment", fulfilled_brand_voice_id: null, fulfilled_provider_voice_id: null, rejection_reason: null, fulfilled_at: null, expires_at: null, rejected_at: null, created_at: "2026-08-30T00:00:00Z", updated_at: "2026-08-30T00:00:00Z", billing: seededBilling("06", "reserved"), refund_disposition: "not_applicable", refund_grant_status: null, refund_applied_at: null }
 ];
 const brandVoiceOrders = new Map<string, MockBrandVoiceOrder>();
-brandVoiceOrderSeeds().forEach((order) => brandVoiceOrders.set(order.id, order));
 let brandVoiceOrderSeq = 0;
+export const resetBrandVoiceOrders = () => {
+  brandVoiceOrders.clear();
+  brandVoiceOrderSeeds().forEach((order) => brandVoiceOrders.set(order.id, order));
+  brandVoiceOrderSeq = 0;
+};
+resetBrandVoiceOrders();
 const mockSilentWav = new Uint8Array([
   82, 73, 70, 70, 36, 0, 0, 0, 87, 65, 86, 69,
   102, 109, 116, 32, 16, 0, 0, 0, 1, 0, 1, 0,
@@ -2158,6 +2163,22 @@ const historyToItem = (r: MockHistRecord) => ({
 const VALID_HISTORY_CATEGORIES = new Set(["image_gen", "ecom_white", "ecom_model", "ecom_detail", "cover"]);
 
 export const handlers = [
+  // Deterministic media fixtures for mock-only URLs. Service-worker initiated
+  // media loads bypass Playwright page routes, so handle them here instead of
+  // globally suppressing net::ERR_FAILED in interaction tests.
+  http.get("https://mock.local/*", ({ request }) => {
+    const pathname = new URL(request.url).pathname;
+    if (pathname.includes("/signed/") || /\.(?:mp3|wav)$/i.test(pathname)) {
+      return HttpResponse.arrayBuffer(mockSilentWav.buffer.slice(0), {
+        headers: { "Content-Type": "audio/wav" }
+      });
+    }
+    if (/\.mp4$/i.test(pathname)) return new HttpResponse(null, { status: 204 });
+    return HttpResponse.text(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="#ddd"/></svg>',
+      { headers: { "Content-Type": "image/svg+xml" } }
+    );
+  }),
   http.get(`${BASE}/api/v1/billing/operations/by-idempotency/:operation/:key`, ({ params }) => {
     const operation = String(params.operation) as MockPricedOperation;
     const key = String(params.key);
@@ -2295,9 +2316,19 @@ export const handlers = [
   }),
   http.get(`${BASE}/api/v1/quota`, () => {
     const noActiveSubscription = readLS("hd_mock_active_subscription") === "0";
+    const state = resolveMockState();
+    const tenantId = state.identity?.tenant.id ?? "ten-mock";
+    const userId = state.identity?.user.id ?? "u-mock";
+    const manualFulfillmentHeldCredits = [...brandVoiceOrders.values()]
+      .filter((order) =>
+        order.tenant_id === tenantId &&
+        order.ordered_by_user_id === userId &&
+        order.status === "awaiting_fulfillment"
+      )
+      .reduce((sum, order) => sum + order.billing.held_credits, 0);
     return ok(noActiveSubscription
       ? { has_active_subscription: false, active_subscription_id: null, total: 0, used: 0, reserved: 0, remaining: 0, manual_fulfillment_held_credits: 0, pending_refund_credits: 30000 }
-      : { has_active_subscription: true, active_subscription_id: "sub-mock", total: 1000, used: 120, reserved: 36, remaining: 844, manual_fulfillment_held_credits: 30000, pending_refund_credits: 0 });
+      : { has_active_subscription: true, active_subscription_id: "sub-mock", total: 1000, used: 120, reserved: 36, remaining: 844, manual_fulfillment_held_credits: manualFulfillmentHeldCredits, pending_refund_credits: 0 });
   }),
   http.get(`${BASE}/api/v1/voices`, () => {
     const state = resolveMockState();
