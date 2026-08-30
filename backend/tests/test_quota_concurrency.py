@@ -750,7 +750,7 @@ def test_postgres_concurrent_image_reservations_allow_exactly_one_order(
     postgres_session_factory,
 ) -> None:
     factory = postgres_session_factory
-    subscription_id, tenant_id = _seed_postgres_subscription(factory, total=10)
+    subscription_id, tenant_id = _seed_postgres_subscription(factory, total=80)
     task_ids = _seed_postgres_video_tasks(factory, tenant_id=tenant_id, count=2)
     first = factory()
     thread = None
@@ -794,7 +794,7 @@ def test_postgres_concurrent_image_reservations_allow_exactly_one_order(
                 )
             )
         )
-        assert subscription.quota_credits_reserved == 10
+        assert subscription.quota_credits_reserved == 80
         assert len(records) == 1
 
 

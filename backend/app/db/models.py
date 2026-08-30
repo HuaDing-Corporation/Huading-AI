@@ -734,7 +734,7 @@ class CreditRefundGrant(Base):
     target_subscription_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("subscriptions.id", ondelete="RESTRICT"), nullable=True
     )
-    amount_credits: Mapped[int] = mapped_column(Integer)
+    amount_credits: Mapped[Decimal] = mapped_column(Numeric())
     status: Mapped[Literal["pending", "applied"]] = mapped_column(String(16), default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

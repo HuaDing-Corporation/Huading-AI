@@ -518,12 +518,17 @@ def test_postgres_executes_manual_voice_schema_contract(postgres_manual_voice_sc
                 connection.execute(sa.text(f'SET LOCAL search_path TO "{schema}"'))
                 connection.execute(sa.text(statement))
 
-    assert_rejected(
-        "INSERT INTO credit_refund_grants "
-        "(id, billing_operation_id, tenant_id, user_id, source_subscription_id, "
-        "amount_credits, status) VALUES "
-        "('bad-refund', 'operation', 'tenant', 'user', 'source-sub', 1.5, 'pending')"
-    )
+    for refund_id, invalid_amount in (
+        ("rounded-refund", "1.0000000000000000000000000000000000000001"),
+        ("bad-refund", "1.5"),
+    ):
+        assert_rejected(
+            "INSERT INTO credit_refund_grants "
+            "(id, billing_operation_id, tenant_id, user_id, source_subscription_id, "
+            "amount_credits, status) VALUES "
+            f"('{refund_id}', 'operation', 'tenant', 'user', 'source-sub', "
+            f"{invalid_amount}, 'pending')"
+        )
     for statement in (
         "DELETE FROM assets WHERE id = 'asset'",
         "DELETE FROM brand_voices WHERE id = 'voice'",
@@ -532,6 +537,16 @@ def test_postgres_executes_manual_voice_schema_contract(postgres_manual_voice_sc
         assert_rejected(statement)
     with engine.begin() as connection:
         connection.execute(sa.text(f'SET LOCAL search_path TO "{schema}"'))
+        refund_amount_column = connection.execute(
+            sa.text(
+                "SELECT data_type, numeric_precision, numeric_scale "
+                "FROM information_schema.columns "
+                "WHERE table_schema = :schema AND table_name = 'credit_refund_grants' "
+                "AND column_name = 'amount_credits'"
+            ),
+            {"schema": schema},
+        ).one()
+        assert refund_amount_column == ("numeric", None, None)
         assert (
             connection.scalar(
                 sa.text(

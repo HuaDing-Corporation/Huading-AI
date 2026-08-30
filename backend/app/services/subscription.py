@@ -151,6 +151,20 @@ def refund_subscriptions_for_update(
     )
 
 
+def _refund_grant_amount(grant: CreditRefundGrant) -> int:
+    amount = grant.amount_credits
+    if isinstance(amount, bool):
+        raise _billing_invariant("Stored refund amount is invalid.")
+    decimal_amount = amount if isinstance(amount, Decimal) else Decimal(amount)
+    if (
+        not decimal_amount.is_finite()
+        or decimal_amount <= 0
+        or decimal_amount != decimal_amount.to_integral_value()
+    ):
+        raise _billing_invariant("Stored refund amount is invalid.")
+    return int(decimal_amount)
+
+
 def decide_credit_refund(
     db: Session,
     *,
@@ -197,11 +211,12 @@ def decide_credit_refund(
         .with_for_update()
         .execution_options(populate_existing=True)
     )
+    stored_amount = _refund_grant_amount(grant) if grant is not None else None
     if grant is not None and (
         grant.tenant_id != tenant_id
         or grant.user_id != user_id
         or grant.source_subscription_id != subscriptions.source_subscription.id
-        or grant.amount_credits != amount_credits
+        or stored_amount != amount_credits
     ):
         raise _billing_invariant("Existing refund grant conflicts with the operation.")
     if (
@@ -222,7 +237,7 @@ def decide_credit_refund(
             kind="applied",
             grant_id=grant.id,
             target_subscription_id=grant.target_subscription_id,
-            amount_credits=grant.amount_credits,
+            amount_credits=stored_amount,
         )
     if (
         grant is not None
@@ -233,7 +248,7 @@ def decide_credit_refund(
             kind="pending",
             grant_id=grant.id,
             target_subscription_id=None,
-            amount_credits=grant.amount_credits,
+            amount_credits=stored_amount,
         )
     if (
         grant is not None
@@ -241,7 +256,7 @@ def decide_credit_refund(
         and subscriptions.current_subscription is not None
     ):
         target = subscriptions.current_subscription
-        target.quota_credits_total += grant.amount_credits
+        target.quota_credits_total += stored_amount
         target.updated_at = decided_at
         grant.status = "applied"
         grant.target_subscription_id = target.id
@@ -251,7 +266,7 @@ def decide_credit_refund(
             kind="applied",
             grant_id=grant.id,
             target_subscription_id=target.id,
-            amount_credits=grant.amount_credits,
+            amount_credits=stored_amount,
         )
     if subscriptions.current_subscription is None and grant is None:
         grant = CreditRefundGrant(
@@ -259,7 +274,7 @@ def decide_credit_refund(
             tenant_id=tenant_id,
             user_id=user_id,
             source_subscription_id=subscriptions.source_subscription.id,
-            amount_credits=amount_credits,
+            amount_credits=Decimal(amount_credits),
             status="pending",
         )
         db.add(grant)
@@ -278,7 +293,7 @@ def decide_credit_refund(
             user_id=user_id,
             source_subscription_id=subscriptions.source_subscription.id,
             target_subscription_id=target.id,
-            amount_credits=amount_credits,
+            amount_credits=Decimal(amount_credits),
             status="applied",
             applied_at=decided_at,
         )
@@ -314,7 +329,7 @@ def apply_pending_refund_grants(
             .execution_options(populate_existing=True)
         )
     )
-    applied_credits = sum(grant.amount_credits for grant in grants)
+    applied_credits = sum(_refund_grant_amount(grant) for grant in grants)
     if applied_credits:
         target_subscription.quota_credits_total += applied_credits
         target_subscription.updated_at = applied_at

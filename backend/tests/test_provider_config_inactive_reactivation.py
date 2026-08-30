@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import os
-from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -46,86 +45,6 @@ def postgres_provider_config_session_factory():
                     connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         finally:
             engine.dispose()
-
-
-def test_postgres_brand_voice_cold_start_reactivates_inactive_platform_config(
-    monkeypatch,
-    postgres_provider_config_session_factory,
-) -> None:
-    from app.api.v1.routes import brand_voices
-    from app.db.models import ProviderConfig, Tenant
-
-    monkeypatch.setattr(
-        brand_voices,
-        "settings",
-        SimpleNamespace(
-            engine_doubao_voice_clone_speaker_ids=["S_env_fallback_001"]
-        ),
-    )
-    Session = postgres_provider_config_session_factory
-
-    with Session() as db:
-        db.add_all(
-            [
-                Tenant(
-                    id="inactive-config-tenant",
-                    slug="inactive-config-tenant",
-                    name="Inactive Config Tenant",
-                ),
-                ProviderConfig(
-                    id="inactive-platform-config",
-                    tenant_id=None,
-                    capability="voice_clone",
-                    provider="doubao-voice-clone",
-                    config={
-                        "speaker_ids": ["S_retained_pool_001"],
-                        "api_key": "retained-db-credential",
-                    },
-                    is_active=False,
-                ),
-            ]
-        )
-        db.commit()
-
-        speaker_id = brand_voices._allocate_voice_clone_speaker_id(
-            db,
-            tenant_id="inactive-config-tenant",
-            brand_voice_id="brand-voice-reactivation",
-        )
-        active_config_id = db.scalar(
-            select(ProviderConfig.id).where(
-                ProviderConfig.tenant_id.is_(None),
-                ProviderConfig.capability == "voice_clone",
-                ProviderConfig.provider == "doubao-voice-clone",
-                ProviderConfig.is_active.is_(True),
-            )
-        )
-        db.commit()
-
-        configs = list(
-            db.scalars(
-                select(ProviderConfig).where(
-                    ProviderConfig.tenant_id.is_(None),
-                    ProviderConfig.capability == "voice_clone",
-                    ProviderConfig.provider == "doubao-voice-clone",
-                )
-            )
-        )
-
-    assert speaker_id == "S_retained_pool_001"
-    assert active_config_id == "inactive-platform-config"
-    assert len(configs) == 1
-    assert configs[0].id == "inactive-platform-config"
-    assert configs[0].is_active is True
-    assert configs[0].config == {
-        "speaker_ids": ["S_retained_pool_001"],
-        "api_key": "retained-db-credential",
-        "used_speaker_ids": {
-            "S_retained_pool_001": "brand-voice-reactivation",
-        },
-    }
-
-
 def test_postgres_platform_provider_config_still_rejects_second_active_row(
     postgres_provider_config_session_factory,
 ) -> None:

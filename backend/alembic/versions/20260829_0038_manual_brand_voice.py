@@ -216,7 +216,7 @@ def upgrade() -> None:
         sa.Column("user_id", sa.String(length=36), nullable=False),
         sa.Column("source_subscription_id", sa.String(length=36), nullable=False),
         sa.Column("target_subscription_id", sa.String(length=36), nullable=True),
-        sa.Column("amount_credits", sa.Integer(), nullable=False),
+        sa.Column("amount_credits", sa.Numeric(), nullable=False),
         sa.Column("status", sa.String(length=16), nullable=False, server_default="pending"),
         sa.Column(
             "created_at",

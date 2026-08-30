@@ -390,6 +390,8 @@ def test_refund_decision_creates_pending_grant_without_current_target(
         assert replay == disposition
         assert disposition.target_subscription_id is None
         assert disposition.amount_credits == 30_000
+        assert type(disposition.amount_credits) is int
+        assert type(replay.amount_credits) is int
         assert grant.status == "pending"
         assert grant.source_subscription_id == source.id
         assert grant.target_subscription_id is None
@@ -452,6 +454,8 @@ def test_refund_decision_applies_immediately_to_current_target(
         assert replay == disposition
         assert disposition.target_subscription_id == target.id
         assert disposition.amount_credits == 30_000
+        assert type(disposition.amount_credits) is int
+        assert type(replay.amount_credits) is int
         assert refreshed_target.quota_credits_total == target_total_before + 30_000
         assert grant.status == "applied"
         assert grant.target_subscription_id == target.id
@@ -460,7 +464,14 @@ def test_refund_decision_applies_immediately_to_current_target(
 
 @pytest.mark.parametrize(
     ("user_id", "amount_credits"),
-    (("wrong-user", 30_000), (None, 0), (None, 29_999)),
+    (
+        ("wrong-user", 30_000),
+        (None, True),
+        (None, Decimal("30000")),
+        (None, 1.5),
+        (None, 0),
+        (None, 29_999),
+    ),
 )
 def test_refund_decision_fails_closed_for_ownership_or_amount_mismatch(
     auth_db,
