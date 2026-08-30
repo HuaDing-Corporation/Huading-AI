@@ -2180,10 +2180,9 @@ export const handlers = [
       });
     }
     if (/\.mp4$/i.test(pathname)) {
-      const referrer = request.referrer && request.referrer !== "about:client"
-        ? request.referrer
-        : globalThis.location.href;
-      return HttpResponse.redirect(new URL("/mock-v2v-1080p-2s.mp4", referrer));
+      return HttpResponse.redirect(
+        new URL("/mock-v2v-1080p-2s.mp4", globalThis.location.origin)
+      );
     }
     return HttpResponse.text(
       '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="#ddd"/></svg>',

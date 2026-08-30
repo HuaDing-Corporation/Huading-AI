@@ -185,13 +185,14 @@ function watchErrors(page: Page) {
 }
 
 test("mock MP4 boundary provides decodable video metadata", async ({ page }) => {
-  const mediaResponses: Array<{ status: number; contentType: string | undefined }> = [];
+  const mediaResponses: Array<{ status: number; contentType: string | undefined; url: string }> = [];
   const mediaFailures: string[] = [];
   page.on("response", (response) => {
     if (!response.url().includes("mock-v2v-1080p-2s.mp4")) return;
     mediaResponses.push({
       status: response.status(),
-      contentType: response.headers()["content-type"]
+      contentType: response.headers()["content-type"],
+      url: response.url()
     });
   });
   page.on("requestfailed", (request) => {
@@ -202,6 +203,7 @@ test("mock MP4 boundary provides decodable video metadata", async ({ page }) => 
 
   await page.goto("/login");
   await page.waitForFunction(() => !!navigator.serviceWorker?.controller);
+  const pageOrigin = new URL(page.url()).origin;
   const metadata = await page.evaluate(() => new Promise<{
     duration: number;
     readyState: number;
@@ -232,9 +234,11 @@ test("mock MP4 boundary provides decodable video metadata", async ({ page }) => 
   expect(metadata.videoHeight).toBeGreaterThan(0);
   expect(mediaResponses).toContainEqual({
     status: expect.any(Number),
-    contentType: expect.stringMatching(/^video\/mp4(?:;|$)/i)
+    contentType: expect.stringMatching(/^video\/mp4(?:;|$)/i),
+    url: expect.any(String)
   });
   expect(mediaResponses.every(({ status }) => status === 200 || status === 206)).toBe(true);
+  expect(mediaResponses.every(({ url }) => new URL(url).origin === pageOrigin)).toBe(true);
   expect(mediaFailures).toEqual([]);
 });
 
