@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from contextlib import contextmanager
 from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select, text
@@ -17,6 +21,30 @@ def _session_scope(session):
         yield session
 
     return scope
+
+
+def test_readiness_direct_script_help_reaches_argparse_without_app_import_failure() -> None:
+    backend_root = Path(__file__).resolve().parents[1]
+    script = backend_root / "scripts" / "ops" / "pricing_closure_readiness.py"
+    child_env = {
+        key: os.environ[key]
+        for key in ("SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP")
+        if key in os.environ
+    }
+    child_env["JWT_SECRET_KEY"] = "task18-local-readiness-secret-at-least-32-characters"
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=backend_root,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "audit" in result.stdout
+    assert "register-official" in result.stdout
 
 
 def test_readiness_fails_on_unknown_historic_doubao_id(db_session) -> None:

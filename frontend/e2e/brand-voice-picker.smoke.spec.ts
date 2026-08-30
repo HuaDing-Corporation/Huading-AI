@@ -50,8 +50,9 @@ test("口播「选我的音色」：品牌组+徽标；选中后 POST /videos �
   const brandBtn = page.locator('button:has-text("我的主播音")');
   await expect(brandBtn).toHaveAttribute("aria-pressed", "false");
 
-  // 填主题 + 传形象（满足生成前置）。
+  // 填主题/口播文案 + 传形象（品牌音色权威报价要求真实可计费文案）。
   await page.locator("#video-topic").fill("咖啡测评");
+  await page.locator("#video-script").fill("今天用这杯咖啡演示我的品牌音色。");
   await page.locator('input[type="file"]').first().setInputFiles({
     name: "avatar.png",
     mimeType: "image/png",
@@ -63,22 +64,21 @@ test("口播「选我的音色」：品牌组+徽标；选中后 POST /videos �
   await expect(brandBtn).toHaveAttribute("aria-pressed", "true");
   await expect(presetBtn).toHaveAttribute("aria-pressed", "false");
 
-  // 捕获生成请求体 voice_id。
-  let voiceId: string | null = null;
-  page.on("request", (req) => {
-    if (req.method() === "POST" && new URL(req.url()).pathname.endsWith("/api/v1/videos")) {
-      try {
-        voiceId = (req.postDataJSON() as { voice_id?: string })?.voice_id ?? null;
-      } catch {
-        /* ignore */
-      }
-    }
-  });
-
-  // 生成 → 确认窗 → 确定，触发 POST /videos。
+  // 生成 → 服务端权威报价确认 → POST /videos；验收响应、品牌音色 id 与两条必需计费头。
   await page.getByRole("button", { name: "生成视频" }).click();
-  await page.getByRole("button", { name: "确定" }).click();
-  await expect.poll(() => voiceId, { timeout: 15_000 }).toBe("bv-ready-1");
+  await expect(page.getByText("服务端应付积分")).toBeVisible({ timeout: 15_000 });
+  const [videoResponse] = await Promise.all([
+    page.waitForResponse((response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/v1/videos"
+    ),
+    page.getByRole("button", { name: "确认并继续" }).click()
+  ]);
+  expect(videoResponse.status()).toBe(202);
+  const videoRequest = videoResponse.request();
+  expect((videoRequest.postDataJSON() as { voice_id?: string }).voice_id).toBe("bv-ready-1");
+  expect(await videoRequest.headerValue("X-Huading-Quote")).toMatch(/^mock-video_create-quote-/);
+  expect(await videoRequest.headerValue("Idempotency-Key")).toMatch(/^[0-9a-f-]{36}$/i);
 
   expect(errors, `page errors：\n${errors.join("\n")}`).toEqual([]);
 });

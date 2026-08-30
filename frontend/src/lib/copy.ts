@@ -554,7 +554,7 @@ export const copy = {
     estimatePrefix: "预计消耗 ",
     estimateSuffix: " 积分",
     estimateNote: "按实际生成时长结算",
-    estimateUnavailable: "暂无法预估，按实际结算",
+    estimateUnavailable: "暂时无法获取价格，请稍后重试",
     warning: "确定生成即会消耗积分，生成过程中无法取消！",
     confirm: "确定",
     confirming: "提交中…",

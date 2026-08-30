@@ -453,7 +453,6 @@ def test_billing_reset_cli_requires_backup_and_defaults_to_dry_run(
 
 def test_assign_speaker_slot_apply_is_retired_and_does_not_touch_provider_config(auth_db) -> None:
     from scripts.ops.reset_billing_and_admin import (
-        SpeakerSlotAssignmentError,
         assign_speaker_slot,
     )
 

@@ -3,8 +3,8 @@ import { expect, test, type Page } from "@playwright/test";
 /**
  * ADMIN-VIP-GATE-UI-0001 §二之二 · FIX1 交互冒烟（生产构建，走 MSW）：VIP entitlement 按「角色 + 套餐」派生
  * （localStorage hd_mock_role / hd_mock_plan → login/me 派生 permissions，镜像真实 BE）：
- *  ① creator + free（无 entitlement）：/brand-voices doubao「升级版 VIP」置灰 + 「开通 huading plan 后可创建」，
- *     缺省切 cosyvoice；工作台「选我的音色」doubao 品牌音色置灰 + 「开通 huading plan 后可用」（区别于「槽位空」）；移动端 375。
+ *  ① creator + free（无 entitlement）：/brand-voices doubao「升级版 VIP」新权利创建置灰 + 「开通 huading plan 后可创建」，
+ *     缺省切 cosyvoice；其已 owner 绑定且 active 的客户音色仍可用，跨账号与 expired/inactive 音色不可见；移动端 375。
  *  ② creator + huading（真实付费用户）：doubao 通路**放行**——创建卡可选、无锁提示（不误伤）。
  * 全程无 #130 / 无 /api/api 双前缀。需 NEXT_PUBLIC_USE_MOCK=1 构建后 next start。
  */
@@ -43,7 +43,7 @@ async function loginAs(page: Page, role: "admin" | "creator", plan: "huading" | 
   await page.waitForURL("http://localhost:3100/", { timeout: 30_000 });
 }
 
-test("creator + free（无 entitlement）：doubao 通路创建/选择均置灰 + 提示；免费档可用；移动端", async ({ page }) => {
+test("creator + free（无 entitlement）：新权利创建置灰，但 owner 已有 active 音色可用；移动端", async ({ page }) => {
   const g = watch(page);
   await loginAs(page, "creator", "free");
 
@@ -58,15 +58,20 @@ test("creator + free（无 entitlement）：doubao 通路创建/选择均置灰 
   await expect(cosyCard).toBeEnabled();
   await expect(cosyCard).toHaveAttribute("aria-pressed", "true"); // 缺省自动切 cosyvoice
 
-  // ② 工作台口播「选我的音色」：doubao 品牌音色（我的主播音）置灰 + 「开通 huading plan 后可用」。
+  // ② 工作台口播「选我的音色」：已 owner 绑定且 active 的客户音色仍可用。
   await page.goto("/");
   await expect(page.getByRole("button", { name: "生成视频" })).toBeVisible({ timeout: 20_000 });
-  const doubaoVoice = page.locator('button:has-text("我的主播音")');
+  const avatar = page.getByTestId("panel-avatar_talk");
+  const doubaoVoice = avatar.locator('button:has-text("我的主播音")');
   await expect(doubaoVoice).toBeVisible({ timeout: 15_000 });
-  await expect(doubaoVoice).toBeDisabled();
-  await expect(page.getByText("开通 huading plan 后可用")).toBeVisible();
-  // 区别于「暂无可用音色槽位」——不应出现槽位空文案（这是"有权限池空"，非本场景）。
-  await expect(page.getByText(/暂无可用音色槽位/)).toHaveCount(0);
+  await expect(doubaoVoice).toBeEnabled();
+  await doubaoVoice.click();
+  await expect(doubaoVoice).toHaveAttribute("aria-pressed", "true");
+  await expect(avatar.getByText("开通 huading plan 后可用")).toHaveCount(0);
+  // 服务端 owner 边界 + 状态边界：他人、expired 与 inactive/rejected 音色不能进入可用选择面。
+  await expect(avatar.getByText("他人购买音色", { exact: true })).toHaveCount(0);
+  await expect(avatar.getByText("已过期购买音色", { exact: true })).toHaveCount(0);
+  await expect(avatar.getByText("失败样例", { exact: true })).toHaveCount(0);
 
   // ③ 移动端 375：创建页 doubao 仍置灰。
   await page.setViewportSize({ width: 375, height: 812 });

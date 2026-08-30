@@ -106,6 +106,8 @@ test("电商图 · AI 模特优化：额度联动 + 组合语义 + 风格互斥 
 
   // ⑤ 生成 → 结果模特图落地（mock 返回 done task，trackExisting 轮询拿到产物）。
   await model.getByRole("button", { name: "生成" }).click();
+  await expect(page.getByText("服务端应付积分")).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("button", { name: "确认并继续" }).click();
   await expect(model.locator('img[src*="mock.local/model-"]').first()).toBeVisible({ timeout: 15_000 });
 
   await g.waitApiIdle();

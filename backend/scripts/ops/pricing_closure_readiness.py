@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import defaultdict
 from contextlib import redirect_stdout
 from dataclasses import asdict, dataclass
@@ -13,6 +14,9 @@ from pathlib import Path
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import String, cast, select
 from sqlalchemy.orm import Session
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.core.config import settings
 from app.db.models import BillingOperation, CreditRate, Subscription, UsageRecord
