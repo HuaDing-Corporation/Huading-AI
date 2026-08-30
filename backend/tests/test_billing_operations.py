@@ -12,6 +12,7 @@ from sqlalchemy import delete, func, select
 
 from app.core.exceptions import AppError
 from app.db.models import (
+    BILLING_CREDITS_MAX,
     ERROR_PAYLOAD_MAX_BYTES,
     BillingOperation,
     Subscription,
@@ -21,6 +22,7 @@ from app.db.models import (
 from app.services.billing_operations import (
     BillingInvariantError,
     UsageAllocation,
+    _integer_amount,
     billing_summary,
     complete_failed,
     complete_succeeded,
@@ -158,6 +160,99 @@ def reserve_batch(db_session, verified_quote, *, key=None, request_hash="a" * 64
     return operation
 
 
+def test_wallet_integer_amount_accepts_billing_storage_maximum() -> None:
+    assert (
+        _integer_amount(Decimal("999999999999"), field="requested_credits")
+        == BILLING_CREDITS_MAX
+    )
+
+
+def test_wallet_integer_amount_rejects_first_value_above_billing_storage_maximum() -> None:
+    with pytest.raises(BillingInvariantError) as error:
+        _integer_amount(Decimal("1000000000000"), field="requested_credits")
+
+    assert error.value.code == "BILLING_INVARIANT_VIOLATION"
+
+
+def test_reservation_rejects_individual_allocation_scale_before_wallet_or_rows(
+    db_session,
+) -> None:
+    rate = ResolvedRate(
+        unit_credits=Decimal("0.0001"),
+        source=RateSource.TENANT_RATE,
+        rate_id="rate-allocation-scale",
+        effective_at=datetime(2026, 8, 30, tzinfo=UTC),
+        policy_key=None,
+        policy_version=None,
+    )
+    line = PricingLine(
+        operation="cosyvoice_brand_tts",
+        capability="tts",
+        unit="character",
+        quantity=Decimal("0.010"),
+        unit_credits=rate.unit_credits,
+        subtotal_credits=Decimal("0.000001"),
+        rate_scope=RateScope.TENANT_OVERRIDABLE,
+        rate=rate,
+        label="TTS allocation scale",
+    )
+    quote = VerifiedQuote(
+        snapshot=PricingSnapshot(
+            operation="cosyvoice_brand_tts",
+            pricing_shape="simple",
+            pricing_lines=(line,),
+            disclosures=(),
+            subtotal_credits=Decimal("0.000001"),
+            payable_credits=1,
+        ),
+        quote_hash="6" * 64,
+        pricing_payload_hash="5" * 64,
+    )
+    allocations = [
+        UsageAllocation(
+            item_index=index,
+            pricing_line_index=0,
+            quantity=Decimal("0.001"),
+            credits=Decimal("0.0000001"),
+            provider="cosyvoice",
+            model="tts-model",
+            video_task_id=None,
+        )
+        for index in range(10)
+    ]
+    subscription = db_session.get(Subscription, "subscription-a")
+    wallet_before = (
+        subscription.quota_credits_total,
+        subscription.quota_credits_used,
+        subscription.quota_credits_reserved,
+    )
+    operation_count_before = db_session.scalar(select(func.count()).select_from(BillingOperation))
+    usage_count_before = db_session.scalar(select(func.count()).select_from(UsageRecord))
+
+    with pytest.raises(AppError) as error:
+        create_reserved_operation(
+            db_session,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            operation="cosyvoice_brand_tts",
+            idempotency_key=uuid4(),
+            request_hash="4" * 64,
+            verified_quote=quote,
+            usage_allocations=allocations,
+        )
+
+    assert error.value.code == "BILLING_ALLOCATION_INVALID"
+    assert (
+        subscription.quota_credits_total,
+        subscription.quota_credits_used,
+        subscription.quota_credits_reserved,
+    ) == wallet_before
+    assert db_session.scalar(select(func.count()).select_from(BillingOperation)) == (
+        operation_count_before
+    )
+    assert db_session.scalar(select(func.count()).select_from(UsageRecord)) == usage_count_before
+
+
 def test_partial_success_rounds_success_subtotal_once(db_session, verified_quote):
     register_billing_result_schema("test_ecom_batch", EcomBatchResult)
     reserved = reserve_batch(db_session, verified_quote)
@@ -179,6 +274,91 @@ def test_partial_success_rounds_success_subtotal_once(db_session, verified_quote
     subscription = db_session.get(Subscription, "subscription-a")
     assert subscription.quota_credits_reserved == 0
     assert subscription.quota_credits_used == 2
+
+
+def test_settlement_releases_when_exact_usage_credits_exceed_storage_scale(db_session) -> None:
+    register_billing_result_schema("test_settlement_scale", EcomBatchResult)
+    subscription = db_session.get(Subscription, "subscription-a")
+    subscription.quota_credits_total = 1_000
+    db_session.commit()
+    rate = ResolvedRate(
+        unit_credits=Decimal("180.0001"),
+        source=RateSource.TENANT_RATE,
+        rate_id="rate-settlement-scale",
+        effective_at=datetime(2026, 8, 30, tzinfo=UTC),
+        policy_key=None,
+        policy_version=None,
+    )
+    line = PricingLine(
+        operation="video_create",
+        capability="avatar",
+        unit="second",
+        quantity=Decimal("2.000"),
+        unit_credits=rate.unit_credits,
+        subtotal_credits=Decimal("360.0002"),
+        rate_scope=RateScope.TENANT_OVERRIDABLE,
+        rate=rate,
+        label="Avatar",
+    )
+    quote = VerifiedQuote(
+        snapshot=PricingSnapshot(
+            operation="video_create",
+            pricing_shape="simple",
+            pricing_lines=(line,),
+            disclosures=(),
+            subtotal_credits=Decimal("360.0002"),
+            payable_credits=361,
+        ),
+        quote_hash="9" * 64,
+        pricing_payload_hash="8" * 64,
+    )
+    operation = create_reserved_operation(
+        db_session,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        operation="video_create",
+        idempotency_key=uuid4(),
+        request_hash="7" * 64,
+        verified_quote=quote,
+        usage_allocations=[
+            UsageAllocation(
+                item_index=0,
+                pricing_line_index=0,
+                quantity=Decimal("2.000"),
+                credits=Decimal("360.0002"),
+                provider="avatar-provider",
+                model="avatar-model",
+                video_task_id=None,
+            )
+        ],
+    )
+    db_session.commit()
+
+    completed = complete_succeeded(
+        db_session,
+        operation_id=operation.id,
+        actual_quantities={0: Decimal("1.001")},
+        result_type="test_settlement_scale",
+        result_id=None,
+        result_payload=EcomBatchResult(item_ids=["avatar-result"]),
+    )
+    db_session.commit()
+    db_session.expire_all()
+
+    usage = db_session.scalar(
+        select(UsageRecord).where(UsageRecord.billing_operation_id == operation.id)
+    )
+    subscription = db_session.get(Subscription, "subscription-a")
+    completed = db_session.get(BillingOperation, completed.id)
+    assert completed.completion_kind == "failed"
+    assert completed.error_code == "BILLING_SETTLEMENT_AMOUNT_INVALID"
+    assert completed.settled_credits == 0
+    assert completed.released_credits == 361
+    assert usage.status == "released"
+    assert usage.quantity == Decimal("2.000")
+    assert usage.credits == Decimal("360.0002")
+    assert subscription.quota_credits_reserved == 0
+    assert subscription.quota_credits_used == 0
 
 
 def test_same_key_same_request_does_not_reserve_twice(db_session, verified_quote):

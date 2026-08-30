@@ -589,7 +589,7 @@ def test_cosyvoice_parent_video_reserves_one_character_usage_without_duplicate_f
         )
 
     assert [(item.capability, item.unit) for item in usages] == [
-        ("video", "second"),
+        ("avatar", "second"),
         ("tts", "character"),
     ]
     tts_usages = [item for item in usages if (item.capability, item.unit) == ("tts", "character")]
@@ -720,7 +720,7 @@ def test_doubao_parent_video_has_no_character_usage_and_enforces_payer_time_gate
         voice.expires_at = datetime.now(UTC) - timedelta(microseconds=1)
         db.commit()
 
-    assert usage_shape == [("video", "second")]
+    assert usage_shape == [("avatar", "second")]
     assert requested_credits == usage_credits
     expired_quote = client.post(
         "/api/v1/videos/estimate",

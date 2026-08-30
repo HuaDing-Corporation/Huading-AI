@@ -50,6 +50,7 @@ from app.services.plan_access import (
     require_doubao_voice_clone_access,
     uses_doubao_voice_clone,
 )
+from app.services.pricing import PricingInvariantError, video_create_parent_policy
 from app.services.progress import ProgressStore, build_progress_store
 from app.services.quota import release_reserved_quota, settle_reserved_quota
 from app.services.storage.base import ObjectStorage
@@ -2237,6 +2238,13 @@ def _authoritative_billing_actual_seconds(*, task: VideoTask) -> Decimal:
     return _precise_billable_seconds(value)
 
 
+def _billing_video_base_capability(*, task: VideoTask) -> str:
+    try:
+        return video_create_parent_policy(task.video_mode).capability
+    except PricingInvariantError as exc:
+        raise BillingInvariantError("billed video task has an unsupported pricing mode") from exc
+
+
 def _complete_billing_quote_video(
     db: Session,
     *,
@@ -2256,7 +2264,8 @@ def _complete_billing_quote_video(
             .order_by(UsageRecord.billing_item_index)
         )
     )
-    if not usages or usages[0].capability != "video":
+    expected_capability = _billing_video_base_capability(task=task)
+    if not usages or usages[0].capability != expected_capability:
         raise BillingInvariantError("billed video task is missing its base allocation")
     base_usage = usages[0]
     if base_usage.unit != "second":

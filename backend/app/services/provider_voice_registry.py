@@ -569,4 +569,5 @@ def assert_doubao_registry_ready(
                 ],
                 "unknown_ids": list(inventory.unknown_ids),
             },
+            expose_detail=False,
         )

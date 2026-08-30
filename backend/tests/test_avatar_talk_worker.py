@@ -29,6 +29,7 @@ from app.services.pricing import (
     build_composite_pricing,
     build_simple_pricing,
     code_default_rate,
+    video_create_parent_policy,
 )
 from app.workers import avatar_talk
 
@@ -250,9 +251,10 @@ def _seed_billed_avatar_task(
         )
         db.add_all([brand_voice, task, sub])
         db.flush()
+        avatar_policy = video_create_parent_policy("avatar_talk")
         base = build_simple_pricing(
-            policy=PRICING_POLICIES["video_create"],
-            rate=code_default_rate(PRICING_POLICIES["video_create"]),
+            policy=avatar_policy,
+            rate=code_default_rate(avatar_policy),
             quantity=Decimal(reserved_seconds),
         )
         tts = build_simple_pricing(
@@ -594,7 +596,7 @@ def test_billed_avatar_task_settles_actual_without_duplicate_tts_usage(monkeypat
         usages = db.query(UsageRecord).filter_by(video_task_id=task_id).all()
         assert task.status == "done"
         assert operation.completion_kind == "succeeded"
-        assert operation.settled_credits == Decimal("401")
+        assert operation.settled_credits == Decimal("721")
         assert len(usages) == 2
         assert [usage.status for usage in usages] == ["settled", "settled"]
         assert usages[0].quantity == Decimal("4")

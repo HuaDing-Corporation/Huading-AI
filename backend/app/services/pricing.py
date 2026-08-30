@@ -10,7 +10,7 @@ from typing import Literal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import CreditRate
+from app.db.models import BILLING_CREDITS_MAX, CreditRate
 
 
 class PricingInvariantError(ValueError):
@@ -194,17 +194,44 @@ DEFAULT_RATE_CREDITS: dict[tuple[str, str], Decimal] = {
 }
 
 
+_VIDEO_CREATE_PARENT_POLICIES: dict[str, PricingPolicy] = {
+    "avatar_talk": PricingPolicy(
+        operation="video_create",
+        capability="avatar",
+        unit="second",
+        default_unit_credits=DEFAULT_RATE_CREDITS[("avatar", "second")],
+        scope=RateScope.TENANT_OVERRIDABLE,
+        zero_rule=ZeroRule.REQUIRE_POSITIVE,
+        policy_key="video_create",
+        policy_version=1,
+    ),
+    "seedance_i2v": PRICING_POLICIES["video_create"],
+}
+_LINE_POLICIES = (*PRICING_POLICIES.values(), _VIDEO_CREATE_PARENT_POLICIES["avatar_talk"])
+
+
 _RATE_SCALE = 4
+_RATE_PRECISION = 12
 _QUANTITY_SCALE = 3
+_QUANTITY_PRECISION = 12
 _SUBTOTAL_SCALE = 6
+_SUBTOTAL_PRECISION = 18
 _DATABASE_SOURCES = {RateSource.TENANT_RATE, RateSource.PLATFORM_RATE}
 _POLICY_SOURCES = {RateSource.CODE_DEFAULT, RateSource.FIXED_POLICY}
+
+
+def video_create_parent_policy(mode: str) -> PricingPolicy:
+    try:
+        return _VIDEO_CREATE_PARENT_POLICIES[mode]
+    except KeyError as exc:
+        raise PricingInvariantError(f"unsupported priced video mode: {mode}") from exc
 
 
 def _decimal(
     value: object,
     *,
     field: str,
+    precision: int,
     scale: int,
     allow_zero: bool,
 ) -> Decimal:
@@ -227,6 +254,9 @@ def _decimal(
     fractional_digits = max(0, -result.as_tuple().exponent)
     if fractional_digits > scale:
         raise PricingInvariantError(f"{field} exceeds {scale} decimal places")
+    integer_digits = max(0, result.adjusted() + 1)
+    if integer_digits > precision - scale:
+        raise PricingInvariantError(f"{field} exceeds NUMERIC({precision},{scale}) range")
     return result
 
 
@@ -250,6 +280,7 @@ def _validate_rate(rate: ResolvedRate, *, zero_rule: ZeroRule) -> Decimal:
     return _decimal(
         rate.unit_credits,
         field="unit_credits",
+        precision=_RATE_PRECISION,
         scale=_RATE_SCALE,
         allow_zero=zero_rule is ZeroRule.ALLOW_ZERO,
     )
@@ -371,7 +402,18 @@ def resolve_rate(
 
 
 def _validate_line(line: PricingLine) -> None:
-    policy = PRICING_POLICIES.get(line.operation)
+    operation_policies = tuple(
+        policy for policy in _LINE_POLICIES if policy.operation == line.operation
+    )
+    policy = next(
+        (
+            candidate
+            for candidate in operation_policies
+            if (line.capability, line.unit, line.rate_scope)
+            == (candidate.capability, candidate.unit, candidate.scope)
+        ),
+        None,
+    )
     zero_rule = policy.zero_rule if policy is not None else ZeroRule.REQUIRE_POSITIVE
     unit_credits = _validate_rate(line.rate, zero_rule=zero_rule)
     if line.rate.unit_credits != line.unit_credits or unit_credits != line.unit_credits:
@@ -379,23 +421,21 @@ def _validate_line(line: PricingLine) -> None:
     quantity = _decimal(
         line.quantity,
         field="quantity",
+        precision=_QUANTITY_PRECISION,
         scale=_QUANTITY_SCALE,
         allow_zero=False,
     )
     subtotal = _decimal(
         line.subtotal_credits,
         field="subtotal_credits",
+        precision=_SUBTOTAL_PRECISION,
         scale=_SUBTOTAL_SCALE,
         allow_zero=zero_rule is ZeroRule.ALLOW_ZERO,
     )
     if unit_credits * quantity != subtotal:
         raise PricingInvariantError("line arithmetic mismatch")
-    if policy is not None:
-        if (line.capability, line.unit, line.rate_scope) != (
-            policy.capability,
-            policy.unit,
-            policy.scope,
-        ):
+    if operation_policies:
+        if policy is None:
             raise PricingInvariantError("line does not match its pricing policy")
         if zero_rule is ZeroRule.ALLOW_ZERO and (
             quantity != Decimal("1")
@@ -412,9 +452,17 @@ def _validate_disclosure(disclosure: PricingDisclosure) -> None:
     _decimal(
         disclosure.rate.unit_credits,
         field="reference_unit_credits",
+        precision=_RATE_PRECISION,
         scale=_RATE_SCALE,
         allow_zero=True,
     )
+
+
+def _payable_credits(subtotal: Decimal) -> int:
+    payable = int(subtotal.to_integral_value(rounding=ROUND_CEILING))
+    if payable > BILLING_CREDITS_MAX:
+        raise PricingInvariantError("payable_credits exceeds billing storage maximum")
+    return payable
 
 
 def build_simple_pricing(
@@ -428,6 +476,7 @@ def build_simple_pricing(
     validated_quantity = _decimal(
         quantity,
         field="quantity",
+        precision=_QUANTITY_PRECISION,
         scale=_QUANTITY_SCALE,
         allow_zero=False,
     )
@@ -453,7 +502,7 @@ def build_simple_pricing(
         breakdown=(),
         disclosures=disclosures,
         subtotal_credits=subtotal,
-        payable_credits=int(subtotal.to_integral_value(rounding=ROUND_CEILING)),
+        payable_credits=_payable_credits(subtotal),
     )
 
 
@@ -475,6 +524,7 @@ def build_composite_pricing(
     _decimal(
         subtotal,
         field="subtotal_credits",
+        precision=_SUBTOTAL_PRECISION,
         scale=_SUBTOTAL_SCALE,
         allow_zero=False,
     )
@@ -485,7 +535,7 @@ def build_composite_pricing(
         breakdown=pricing_lines,
         disclosures=disclosures,
         subtotal_credits=subtotal,
-        payable_credits=int(subtotal.to_integral_value(rounding=ROUND_CEILING)),
+        payable_credits=_payable_credits(subtotal),
     )
 
 
@@ -533,6 +583,7 @@ def _parse_rate(mapping: Mapping[str, object]) -> ResolvedRate:
         unit_credits=_decimal(
             _required(mapping, "unit_credits"),
             field="unit_credits",
+            precision=_RATE_PRECISION,
             scale=_RATE_SCALE,
             allow_zero=True,
         ),
@@ -540,7 +591,9 @@ def _parse_rate(mapping: Mapping[str, object]) -> ResolvedRate:
         rate_id=str(mapping["rate_id"]) if mapping.get("rate_id") is not None else None,
         effective_at=effective_at,
         policy_key=(
-            str(mapping["policy_key"]) if mapping.get("policy_key") is not None else None
+            str(mapping["policy_key"])
+            if mapping.get("policy_key") is not None
+            else None
         ),
         policy_version=version_value,
     )
@@ -562,6 +615,7 @@ def _parse_line(value: object) -> PricingLine:
         quantity=_decimal(
             _required(mapping, "quantity"),
             field="quantity",
+            precision=_QUANTITY_PRECISION,
             scale=_QUANTITY_SCALE,
             allow_zero=False,
         ),
@@ -569,6 +623,7 @@ def _parse_line(value: object) -> PricingLine:
         subtotal_credits=_decimal(
             _required(mapping, "subtotal_credits"),
             field="subtotal_credits",
+            precision=_SUBTOTAL_PRECISION,
             scale=_SUBTOTAL_SCALE,
             allow_zero=True,
         ),
@@ -631,6 +686,7 @@ def validate_pricing_snapshot(snapshot: Mapping[str, object]) -> PricingSnapshot
     subtotal = _decimal(
         _required(snapshot, "subtotal_credits"),
         field="subtotal_credits",
+        precision=_SUBTOTAL_PRECISION,
         scale=_SUBTOTAL_SCALE,
         allow_zero=operation == "cosyvoice_brand_voice_create",
     )
@@ -638,9 +694,14 @@ def validate_pricing_snapshot(snapshot: Mapping[str, object]) -> PricingSnapshot
     if line_sum != subtotal:
         raise PricingInvariantError("snapshot aggregate arithmetic mismatch")
     payable = _required(snapshot, "payable_credits")
-    if isinstance(payable, bool) or not isinstance(payable, int) or payable < 0:
+    if (
+        isinstance(payable, bool)
+        or not isinstance(payable, int)
+        or payable < 0
+        or payable > BILLING_CREDITS_MAX
+    ):
         raise PricingInvariantError("invalid payable_credits")
-    if payable != int(subtotal.to_integral_value(rounding=ROUND_CEILING)):
+    if payable != _payable_credits(subtotal):
         raise PricingInvariantError("snapshot payable arithmetic mismatch")
     if snapshot.get("rounding") != "ROUND_CEILING":
         raise PricingInvariantError("unsupported pricing rounding")
@@ -665,6 +726,7 @@ def validate_credit_rate_candidate(
     value = _decimal(
         credits_per_unit,
         field="credits_per_unit",
+        precision=_RATE_PRECISION,
         scale=_RATE_SCALE,
         allow_zero=True,
     )

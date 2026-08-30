@@ -44,9 +44,30 @@ AND
 """
 
 BILLING_FINITE_CHECK = """
-CAST(requested_credits AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')
-AND CAST(settled_credits AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')
-AND CAST(released_credits AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')
+LOWER(CAST(requested_credits AS TEXT))
+  NOT IN ('nan', 'infinity', '-infinity', 'inf', '-inf')
+AND LOWER(CAST(settled_credits AS TEXT))
+  NOT IN ('nan', 'infinity', '-infinity', 'inf', '-inf')
+AND LOWER(CAST(released_credits AS TEXT))
+  NOT IN ('nan', 'infinity', '-infinity', 'inf', '-inf')
+"""
+
+BILLING_UPPER_BOUND_CHECK = """
+requested_credits < 1000000000000
+AND settled_credits < 1000000000000
+AND released_credits < 1000000000000
+"""
+
+BILLING_SCALE_CHECK = """
+requested_credits = ROUND(requested_credits, 6)
+AND settled_credits = ROUND(settled_credits, 6)
+AND released_credits = ROUND(released_credits, 6)
+"""
+
+BILLING_AMOUNT_DOMAIN_CHECK = f"""
+requested_credits >= 0 AND settled_credits >= 0 AND released_credits >= 0
+AND ({BILLING_UPPER_BOUND_CHECK})
+AND ({BILLING_SCALE_CHECK})
 """
 
 
@@ -65,9 +86,9 @@ def upgrade() -> None:
         sa.Column("request_hash", sa.String(length=64), nullable=False),
         sa.Column("quote_hash", sa.String(length=64), nullable=False),
         sa.Column("pricing_snapshot", _json_type(), nullable=False),
-        sa.Column("requested_credits", sa.Numeric(18, 6), nullable=False),
-        sa.Column("settled_credits", sa.Numeric(18, 6), nullable=False, server_default="0"),
-        sa.Column("released_credits", sa.Numeric(18, 6), nullable=False, server_default="0"),
+        sa.Column("requested_credits", sa.Numeric(), nullable=False),
+        sa.Column("settled_credits", sa.Numeric(), nullable=False, server_default="0"),
+        sa.Column("released_credits", sa.Numeric(), nullable=False, server_default="0"),
         sa.Column("status", sa.String(length=32), nullable=False, server_default="in_progress"),
         sa.Column("completion_kind", sa.String(length=32), nullable=True),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
@@ -106,7 +127,7 @@ def upgrade() -> None:
         sa.CheckConstraint(BILLING_COMPLETION_CHECK, name="ck_billing_operations_completion"),
         sa.CheckConstraint(BILLING_FINITE_CHECK, name="ck_billing_operations_amounts_finite"),
         sa.CheckConstraint(
-            "requested_credits >= 0 AND settled_credits >= 0 AND released_credits >= 0",
+            BILLING_AMOUNT_DOMAIN_CHECK,
             name="ck_billing_operations_amounts_nonnegative",
         ),
     )

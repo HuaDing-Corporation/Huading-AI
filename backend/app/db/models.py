@@ -40,6 +40,10 @@ def _json_type():
     return JSON().with_variant(JSONB(), "postgresql")
 
 
+def _guarded_numeric(*, precision: int, scale: int):
+    return Numeric().with_variant(Numeric(precision, scale), "sqlite")
+
+
 class Role(StrEnum):
     ADMIN = "admin"
     OPS = "ops"
@@ -357,8 +361,10 @@ class CreditRate(Base):
             name="ck_credit_rates_unit",
         ),
         CheckConstraint(
-            "credits_per_unit >= 0 AND "
-            "CAST(credits_per_unit AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')",
+            "credits_per_unit >= 0 AND credits_per_unit <= 99999999.9999 AND "
+            "credits_per_unit = ROUND(credits_per_unit, 4) AND "
+            "LOWER(CAST(credits_per_unit AS TEXT)) NOT IN "
+            "('nan', 'infinity', '-infinity', 'inf', '-inf')",
             name="ck_credit_rates_credits_per_unit_valid",
         ),
         Index("ix_credit_rates_tenant_capability_unit", "tenant_id", "capability", "unit"),
@@ -387,13 +393,16 @@ class CreditRate(Base):
     )
     capability: Mapped[str] = mapped_column(String(32))
     unit: Mapped[str] = mapped_column(String(32))
-    credits_per_unit: Mapped[Decimal] = mapped_column(Numeric(12, 4))
+    credits_per_unit: Mapped[Decimal] = mapped_column(
+        _guarded_numeric(precision=12, scale=4)
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 RESULT_PAYLOAD_MAX_BYTES = 64 * 1024
 ERROR_PAYLOAD_MAX_BYTES = 16 * 1024
+BILLING_CREDITS_MAX = 999_999_999_999
 
 
 BILLING_STATE_CHECK = """
@@ -427,9 +436,30 @@ AND
 """
 
 BILLING_FINITE_CHECK = """
-CAST(requested_credits AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')
-AND CAST(settled_credits AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')
-AND CAST(released_credits AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')
+LOWER(CAST(requested_credits AS TEXT))
+  NOT IN ('nan', 'infinity', '-infinity', 'inf', '-inf')
+AND LOWER(CAST(settled_credits AS TEXT))
+  NOT IN ('nan', 'infinity', '-infinity', 'inf', '-inf')
+AND LOWER(CAST(released_credits AS TEXT))
+  NOT IN ('nan', 'infinity', '-infinity', 'inf', '-inf')
+"""
+
+BILLING_UPPER_BOUND_CHECK = """
+requested_credits < 1000000000000
+AND settled_credits < 1000000000000
+AND released_credits < 1000000000000
+"""
+
+BILLING_SCALE_CHECK = """
+requested_credits = ROUND(requested_credits, 6)
+AND settled_credits = ROUND(settled_credits, 6)
+AND released_credits = ROUND(released_credits, 6)
+"""
+
+BILLING_AMOUNT_DOMAIN_CHECK = f"""
+requested_credits >= 0 AND settled_credits >= 0 AND released_credits >= 0
+AND ({BILLING_UPPER_BOUND_CHECK})
+AND ({BILLING_SCALE_CHECK})
 """
 
 
@@ -450,7 +480,7 @@ class BillingOperation(Base):
         CheckConstraint(BILLING_COMPLETION_CHECK, name="ck_billing_operations_completion"),
         CheckConstraint(BILLING_FINITE_CHECK, name="ck_billing_operations_amounts_finite"),
         CheckConstraint(
-            "requested_credits >= 0 AND settled_credits >= 0 AND released_credits >= 0",
+            BILLING_AMOUNT_DOMAIN_CHECK,
             name="ck_billing_operations_amounts_nonnegative",
         ),
         Index("ix_billing_operations_tenant_created_at", "tenant_id", "created_at"),
@@ -468,9 +498,15 @@ class BillingOperation(Base):
     request_hash: Mapped[str] = mapped_column(String(64))
     quote_hash: Mapped[str] = mapped_column(String(64))
     pricing_snapshot: Mapped[dict[str, object]] = mapped_column(_json_type())
-    requested_credits: Mapped[Decimal] = mapped_column(Numeric(18, 6))
-    settled_credits: Mapped[Decimal] = mapped_column(Numeric(18, 6), default=Decimal("0"))
-    released_credits: Mapped[Decimal] = mapped_column(Numeric(18, 6), default=Decimal("0"))
+    requested_credits: Mapped[Decimal] = mapped_column(
+        _guarded_numeric(precision=18, scale=6)
+    )
+    settled_credits: Mapped[Decimal] = mapped_column(
+        _guarded_numeric(precision=18, scale=6), default=Decimal("0")
+    )
+    released_credits: Mapped[Decimal] = mapped_column(
+        _guarded_numeric(precision=18, scale=6), default=Decimal("0")
+    )
     status: Mapped[Literal["in_progress", "completed"]] = mapped_column(
         String(32), default="in_progress"
     )
@@ -1254,9 +1290,14 @@ class UsageRecord(Base):
             name="ck_usage_records_unit",
         ),
         CheckConstraint(
-            "quantity >= 0 AND credits >= 0 AND "
-            "CAST(quantity AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity') AND "
-            "CAST(credits AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')",
+            "quantity >= 0 AND quantity <= 999999999.999 AND "
+            "quantity = ROUND(quantity, 3) AND "
+            "credits >= 0 AND credits < 1000000000000 AND "
+            "credits = ROUND(credits, 6) AND "
+            "LOWER(CAST(quantity AS TEXT)) NOT IN "
+            "('nan', 'infinity', '-infinity', 'inf', '-inf') AND "
+            "LOWER(CAST(credits AS TEXT)) NOT IN "
+            "('nan', 'infinity', '-infinity', 'inf', '-inf')",
             name="ck_usage_records_amounts_valid",
         ),
         CheckConstraint(
@@ -1320,8 +1361,8 @@ class UsageRecord(Base):
     provider: Mapped[str] = mapped_column(String(40))
     model: Mapped[str | None] = mapped_column(String(80), default=None)
     unit: Mapped[str] = mapped_column(String(32))
-    quantity: Mapped[Decimal] = mapped_column(Numeric(12, 3))
-    credits: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    quantity: Mapped[Decimal] = mapped_column(_guarded_numeric(precision=12, scale=3))
+    credits: Mapped[Decimal] = mapped_column(_guarded_numeric(precision=18, scale=6))
     cost_cents: Mapped[int] = mapped_column(Integer)
     provider_cost_usd: Mapped[Decimal | None] = mapped_column(
         Numeric(18, 8), default=None

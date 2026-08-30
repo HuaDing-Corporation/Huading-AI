@@ -7,10 +7,11 @@ from decimal import ROUND_CEILING, Decimal
 import pytest
 import sqlalchemy as sa
 from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app.db.models import Base, CreditRate, Tenant
+from app.db.models import Base, CreditRate, Tenant, UsageRecord
 from app.schemas.billing import BillingQuote
 from app.services.pricing import (
     PRICING_POLICIES,
@@ -128,6 +129,71 @@ def test_composite_rounds_once_after_aggregation():
     )
     assert draft.subtotal_credits == Decimal("1.2")
     assert draft.payable_credits == 2
+
+
+def _maximum_payable_overflow_lines() -> tuple[PricingLine, PricingLine]:
+    avatar_rate = ResolvedRate(
+        unit_credits=Decimal("1000"),
+        source=RateSource.TENANT_RATE,
+        rate_id="avatar-overflow-rate",
+        effective_at=datetime(2026, 8, 30, tzinfo=UTC),
+        policy_key=None,
+        policy_version=None,
+    )
+    avatar_line = PricingLine(
+        operation="video_create",
+        capability="avatar",
+        unit="second",
+        quantity=Decimal("999999999.999"),
+        unit_credits=Decimal("1000"),
+        subtotal_credits=Decimal("999999999999.000"),
+        rate_scope=RateScope.TENANT_OVERRIDABLE,
+        rate=avatar_rate,
+        label="Avatar",
+    )
+    return avatar_line, _make_line("0.5")
+
+
+def _snapshot_line(line: PricingLine) -> dict[str, object]:
+    return {
+        "operation": line.operation,
+        "capability": line.capability,
+        "unit": line.unit,
+        "quantity": str(line.quantity),
+        "unit_credits": str(line.unit_credits),
+        "subtotal_credits": str(line.subtotal_credits),
+        "rate_scope": line.rate_scope.value,
+        "rate_source": line.rate.source.value,
+        "rate_id": line.rate.rate_id,
+        "effective_at": line.rate.effective_at,
+        "policy_key": line.rate.policy_key,
+        "policy_version": line.rate.policy_version,
+        "label": line.label,
+    }
+
+
+def test_composite_rejects_payable_above_billing_storage_maximum() -> None:
+    with pytest.raises(PricingInvariantError, match="payable_credits"):
+        build_composite_pricing(
+            operation="video_create",
+            lines=_maximum_payable_overflow_lines(),
+        )
+
+
+def test_snapshot_rejects_payable_above_billing_storage_maximum() -> None:
+    lines = _maximum_payable_overflow_lines()
+    snapshot = {
+        "operation": "video_create",
+        "pricing_shape": "composite",
+        "pricing_lines": [_snapshot_line(line) for line in lines],
+        "disclosures": [],
+        "subtotal_credits": "999999999999.500",
+        "payable_credits": 1_000_000_000_000,
+        "rounding": "ROUND_CEILING",
+    }
+
+    with pytest.raises(PricingInvariantError, match="payable_credits"):
+        validate_pricing_snapshot(snapshot)
 
 
 @pytest.mark.parametrize(
@@ -361,7 +427,15 @@ def test_cosyvoice_creation_is_the_exact_fixed_zero_exception() -> None:
 
 @pytest.mark.parametrize("is_active", [True, False])
 def test_candidate_rejects_negative_nonfinite_and_overprecision(is_active: bool) -> None:
-    for value in (Decimal("-0.0001"), Decimal("NaN"), Decimal("Infinity"), Decimal("1.00001")):
+    for value in (
+        Decimal("-0.0001"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        Decimal("-Infinity"),
+        Decimal("1.00001"),
+        Decimal("100000000.0000"),
+        Decimal("1E+100"),
+    ):
         with pytest.raises(PricingInvariantError):
             validate_credit_rate_candidate(
                 tenant_id=None,
@@ -370,6 +444,111 @@ def test_candidate_rejects_negative_nonfinite_and_overprecision(is_active: bool)
                 credits_per_unit=value,
                 is_active=is_active,
             )
+
+
+def test_candidate_accepts_numeric_12_4_maximum_boundary() -> None:
+    validate_credit_rate_candidate(
+        tenant_id=None,
+        capability="image",
+        unit="image",
+        credits_per_unit=Decimal("99999999.9999"),
+        is_active=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(Decimal("Infinity"), id="positive-infinity"),
+        pytest.param(Decimal("-Infinity"), id="negative-infinity"),
+        pytest.param(Decimal("NaN"), id="nan"),
+        pytest.param(Decimal("1.00001"), id="fractional-scale-overflow"),
+        pytest.param(Decimal("100000000.0000"), id="integer-boundary-overflow"),
+        pytest.param(Decimal("1E+100"), id="precision-overflow"),
+    ],
+)
+def test_sqlite_orm_rejects_credit_rates_outside_numeric_12_4_domain(
+    db: Session,
+    value: Decimal,
+) -> None:
+    with pytest.raises(IntegrityError):
+        with db.begin_nested():
+            db.add(
+                CreditRate(
+                    id=f"invalid-{str(value)}",
+                    capability="image",
+                    unit="image",
+                    credits_per_unit=value,
+                    is_active=False,
+                    effective_at=datetime.now(UTC),
+                )
+            )
+            db.flush()
+
+
+def test_sqlite_orm_accepts_credit_rate_numeric_12_4_maximum(db: Session) -> None:
+    row = CreditRate(
+        id="maximum-numeric-12-4",
+        capability="image",
+        unit="image",
+        credits_per_unit=Decimal("99999999.9999"),
+        is_active=False,
+        effective_at=datetime.now(UTC),
+    )
+    db.add(row)
+    db.commit()
+    db.expire_all()
+
+    assert db.get(CreditRate, row.id).credits_per_unit == Decimal("99999999.9999")
+
+
+@pytest.mark.parametrize(
+    "credits",
+    [
+        pytest.param(Decimal("1.0000001"), id="fractional-scale-overflow"),
+        pytest.param(Decimal("1000000000000.000000"), id="first-integer-overflow"),
+        pytest.param(Decimal("1000000000000.000001"), id="rounded-fractional-overflow"),
+    ],
+)
+def test_sqlite_orm_rejects_usage_credits_outside_numeric_18_6_domain(
+    db: Session,
+    credits: Decimal,
+) -> None:
+    with pytest.raises(IntegrityError):
+        with db.begin_nested():
+            db.add(
+                UsageRecord(
+                    id=f"invalid-usage-{credits}",
+                    tenant_id="tenant-a",
+                    capability="image",
+                    provider="test",
+                    unit="image",
+                    quantity=Decimal("1"),
+                    credits=credits,
+                    cost_cents=0,
+                    status="reserved",
+                )
+            )
+            db.flush()
+
+
+def test_sqlite_orm_rejects_usage_quantity_fractional_scale_overflow(db: Session) -> None:
+    with pytest.raises(IntegrityError):
+        with db.begin_nested():
+            db.add(
+                UsageRecord(
+                    id="invalid-usage-quantity-scale",
+                    tenant_id="tenant-a",
+                    capability="image",
+                    provider="test",
+                    unit="image",
+                    quantity=Decimal("1.0001"),
+                    credits=Decimal("1"),
+                    cost_cents=0,
+                    status="reserved",
+                )
+            )
+            db.flush()
 
 
 def test_candidate_rejects_active_zero_for_positive_policy() -> None:

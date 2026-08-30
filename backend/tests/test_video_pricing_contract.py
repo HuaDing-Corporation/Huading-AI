@@ -128,6 +128,209 @@ def test_cosyvoice_video_quote_has_exactly_one_character_line(db_session) -> Non
     assert tts_lines[0].unit_credits == "0.1000"
 
 
+@pytest.mark.parametrize(
+    ("provider", "mode", "expected_base", "expected_tts_lines"),
+    [
+        pytest.param(
+            "cosyvoice-voice-clone",
+            "avatar_talk",
+            ("avatar", "second", "3", "180.0000", "540.0000", "code_default"),
+            1,
+            id="cosyvoice-avatar-180",
+        ),
+        pytest.param(
+            "doubao-voice-clone",
+            "avatar_talk",
+            ("avatar", "second", "3", "180.0000", "540.0000", "code_default"),
+            0,
+            id="doubao-avatar-180",
+        ),
+        pytest.param(
+            "cosyvoice-voice-clone",
+            "seedance_i2v",
+            ("video", "second", "10", "100.0000", "1000.0000", "code_default"),
+            1,
+            id="cosyvoice-seedance-100",
+        ),
+        pytest.param(
+            "doubao-voice-clone",
+            "seedance_i2v",
+            ("video", "second", "10", "100.0000", "1000.0000", "code_default"),
+            0,
+            id="doubao-seedance-100",
+        ),
+    ],
+)
+def test_brand_video_parent_line_uses_effective_mode_capability_and_fixed_composite_shape(
+    db_session,
+    provider: str,
+    mode: str,
+    expected_base: tuple[str, str, str, str, str, str],
+    expected_tts_lines: int,
+) -> None:
+    user = db_session.get(User, "user-a")
+    if provider == "doubao-voice-clone":
+        db_session.get(Plan, "plan-a").code = "huading"
+    voice = BrandVoice(
+        id=f"{provider}-{mode}",
+        tenant_id=user.tenant_id,
+        owner_user_id=user.id,
+        name="Brand voice",
+        provider=provider,
+        speaker_id=f"speaker-{provider}-{mode}",
+        status="ready",
+        consent_confirmed=True,
+        activated_at=datetime.now(UTC) - timedelta(days=1),
+        expires_at=datetime.now(UTC) + timedelta(days=364),
+    )
+    db_session.add(voice)
+    db_session.commit()
+    common = {
+        "video_mode": mode,
+        "topic": "正文",
+        "voice_id": voice.id,
+        "script": "123456789012345",
+    }
+    mode_fields = (
+        {"avatar_asset_id": "asset-1"}
+        if mode == "avatar_talk"
+        else {
+            "product_image_keys": ["uploads/product.png"],
+            "scene_prompt": "产品展示",
+            "duration_sec": 6,
+            "resolution": "480p",
+        }
+    )
+
+    estimate = build_video_estimate(
+        db_session,
+        user=user,
+        payload=VideoGenerateRequest.model_validate({**common, **mode_fields}),
+    )
+
+    assert isinstance(estimate, BillingQuote)
+    assert estimate.operation == "video_create"
+    assert estimate.pricing_shape == "composite"
+    assert (
+        estimate.unit,
+        estimate.quantity,
+        estimate.unit_credits,
+        estimate.rate_scope,
+        estimate.rate_source,
+    ) == (None, None, None, None, None)
+    base_lines = [line for line in estimate.breakdown if line.capability != "tts"]
+    assert len(base_lines) == 1
+    base = base_lines[0]
+    assert (
+        base.capability,
+        base.unit,
+        base.quantity,
+        base.unit_credits,
+        base.subtotal_credits,
+        base.rate_source.value,
+    ) == expected_base
+    tts_lines = [line for line in estimate.breakdown if line.capability == "tts"]
+    assert len(tts_lines) == expected_tts_lines
+    if tts_lines:
+        assert (
+            tts_lines[0].unit,
+            tts_lines[0].quantity,
+            tts_lines[0].unit_credits,
+            tts_lines[0].subtotal_credits,
+        ) == ("character", "15", "0.1000", "1.5000")
+
+
+def test_brand_video_parent_rate_keeps_capability_specific_platform_and_tenant_provenance(
+    db_session,
+) -> None:
+    user = db_session.get(User, "user-a")
+    now = datetime.now(UTC)
+    voice = BrandVoice(
+        id="capability-specific-cosy",
+        tenant_id=user.tenant_id,
+        name="Cosy",
+        provider="cosyvoice-voice-clone",
+        speaker_id="capability-specific-speaker",
+        status="ready",
+        consent_confirmed=True,
+    )
+    rates = [
+        CreditRate(
+            id="platform-avatar-181",
+            tenant_id=None,
+            capability="avatar",
+            unit="second",
+            credits_per_unit=Decimal("181.0000"),
+            effective_at=now,
+        ),
+        CreditRate(
+            id="platform-video-101",
+            tenant_id=None,
+            capability="video",
+            unit="second",
+            credits_per_unit=Decimal("101.0000"),
+            effective_at=now,
+        ),
+        CreditRate(
+            id="tenant-video-102",
+            tenant_id=user.tenant_id,
+            capability="video",
+            unit="second",
+            credits_per_unit=Decimal("102.0000"),
+            effective_at=now,
+        ),
+    ]
+    db_session.add_all([voice, *rates])
+    db_session.commit()
+
+    avatar_quote = build_video_estimate(
+        db_session,
+        user=user,
+        payload=VideoGenerateRequest.model_validate(
+            {
+                "video_mode": "avatar_talk",
+                "topic": "正文",
+                "voice_id": voice.id,
+                "avatar_asset_id": "asset-1",
+                "script": "123456789012345",
+            }
+        ),
+    )
+    seedance_quote = build_video_estimate(
+        db_session,
+        user=user,
+        payload=VideoGenerateRequest.model_validate(
+            {
+                "video_mode": "seedance_i2v",
+                "topic": "正文",
+                "voice_id": voice.id,
+                "product_image_keys": ["uploads/product.png"],
+                "scene_prompt": "产品展示",
+                "duration_sec": 6,
+                "resolution": "480p",
+                "script": "123456789012345",
+            }
+        ),
+    )
+
+    assert isinstance(avatar_quote, BillingQuote)
+    assert isinstance(seedance_quote, BillingQuote)
+    avatar_base = next(line for line in avatar_quote.breakdown if line.capability != "tts")
+    seedance_base = next(line for line in seedance_quote.breakdown if line.capability != "tts")
+    assert (
+        avatar_base.capability,
+        avatar_base.unit_credits,
+        avatar_base.rate_source.value,
+        avatar_base.rate_id,
+    ) == ("avatar", "181.0000", "platform_rate", "platform-avatar-181")
+    assert (
+        seedance_base.capability,
+        seedance_base.unit_credits,
+        seedance_base.rate_source.value,
+        seedance_base.rate_id,
+    ) == ("video", "102.0000", "tenant_rate", "tenant-video-102")
+
+
 def test_true_deferred_and_legacy_estimates_do_not_issue_tokens(db_session) -> None:
     user = db_session.get(User, "user-a")
     deferred = build_video_estimate(
@@ -182,10 +385,11 @@ def test_doubao_brand_video_has_no_character_component(db_session) -> None:
     estimate = build_video_estimate(db_session, user=user, payload=payload)
 
     assert isinstance(estimate, BillingQuote)
-    assert estimate.pricing_shape == "simple"
+    assert estimate.pricing_shape == "composite"
     assert estimate.operation == "video_create"
-    assert estimate.breakdown == []
-    assert estimate.unit == "second"
+    assert len(estimate.breakdown) == 1
+    assert estimate.breakdown[0].capability == "avatar"
+    assert estimate.breakdown[0].unit == "second"
 
 
 def test_cosyvoice_brand_video_requires_frozen_script(auth_context, auth_db) -> None:
@@ -309,7 +513,7 @@ def test_brand_submit_commits_task_operation_and_allocations_before_enqueue(
     assert task.script == "你好，世界！"
     assert task.params["billing_tts_text"] == task.script
     assert [(usage.capability, usage.unit) for usage in usages] == [
-        ("video", "second"),
+        ("avatar", "second"),
         ("tts", "character"),
     ]
 
@@ -468,9 +672,9 @@ def test_brand_video_enqueue_failure_completes_and_releases_operation(
 
 def test_cosyvoice_video_quote_preserves_mixed_rate_provenance(db_session) -> None:
     user = db_session.get(User, "user-a")
-    video_rate = CreditRate(
+    avatar_rate = CreditRate(
         tenant_id=user.tenant_id,
-        capability="video",
+        capability="avatar",
         unit="second",
         credits_per_unit=Decimal("125.0000"),
         effective_at=datetime.now(UTC),
@@ -490,7 +694,7 @@ def test_cosyvoice_video_quote_preserves_mixed_rate_provenance(db_session) -> No
         status="ready",
         consent_confirmed=True,
     )
-    db_session.add_all([video_rate, tts_rate, voice])
+    db_session.add_all([avatar_rate, tts_rate, voice])
     db_session.commit()
 
     quote = build_video_estimate(
@@ -513,7 +717,7 @@ def test_cosyvoice_video_quote_preserves_mixed_rate_provenance(db_session) -> No
         for line in quote.breakdown
     ]
     assert provenance == [
-        ("video", "tenant_rate", video_rate.id),
+        ("avatar", "tenant_rate", avatar_rate.id),
         ("tts", "platform_rate", tts_rate.id),
     ]
 

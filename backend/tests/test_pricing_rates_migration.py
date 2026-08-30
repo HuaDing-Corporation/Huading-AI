@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from io import StringIO
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 
-from app.db.models import Base, CreditRate, UsageRecord
+from app.db.models import Base, BillingOperation, CreditRate, UsageRecord
 
 MIGRATION_PATH = (
     Path(__file__).resolve().parents[1]
@@ -42,7 +46,7 @@ def _create_legacy_schema(connection) -> None:
                 unit VARCHAR(32) NOT NULL,
                 credits_per_unit NUMERIC(12, 4) NOT NULL,
                 is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                effective_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                effective_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 CONSTRAINT ck_credit_rates_capability CHECK (
                     capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr',
                     'publish', 'voice_clone', 'video_gen', 'reverse_prompt',
@@ -50,6 +54,28 @@ def _create_legacy_schema(connection) -> None:
                 ),
                 CONSTRAINT ck_credit_rates_unit CHECK (
                     unit IN ('second', 'call', 'token', 'image', 'character')
+                )
+            )
+            """
+        )
+    )
+    connection.execute(
+        sa.text(
+            """
+            CREATE TABLE billing_operations (
+                id VARCHAR(36) PRIMARY KEY,
+                requested_credits NUMERIC(18, 6) NOT NULL,
+                settled_credits NUMERIC(18, 6) NOT NULL,
+                released_credits NUMERIC(18, 6) NOT NULL,
+                CONSTRAINT ck_billing_operations_amounts_finite CHECK (
+                    CAST(requested_credits AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')
+                    AND CAST(settled_credits AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')
+                    AND CAST(released_credits AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')
+                ),
+                CONSTRAINT ck_billing_operations_amounts_nonnegative CHECK (
+                    requested_credits >= 0
+                    AND settled_credits >= 0
+                    AND released_credits >= 0
                 )
             )
             """
@@ -94,6 +120,41 @@ def _run_upgrade(engine) -> None:
     with engine.begin() as connection:
         migration.op = Operations(MigrationContext.configure(connection))
         migration.upgrade()
+
+
+@contextmanager
+def _schema_transaction(engine, schema: str):
+    with engine.begin() as connection:
+        connection.execute(sa.text(f'SET LOCAL search_path TO "{schema}"'))
+        yield connection
+
+
+@pytest.fixture
+def postgres_pricing_domain_schema():
+    database_url = os.getenv("TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("TEST_POSTGRES_URL is required for the real PostgreSQL pricing test.")
+    url = make_url(database_url)
+    if url.host not in {"localhost", "127.0.0.1"} or not str(url.database).startswith(
+        "huading_pricing_test_"
+    ):
+        pytest.fail("TEST_POSTGRES_URL must target an isolated local huading_pricing_test_* DB")
+
+    engine = sa.create_engine(url, pool_pre_ping=True)
+    schema = f"pricing_amount_domain_{uuid4().hex}"
+    with engine.begin() as connection:
+        connection.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
+    try:
+        with _schema_transaction(engine, schema) as connection:
+            _create_legacy_schema(connection)
+            migration = _load_migration()
+            migration.op = Operations(MigrationContext.configure(connection))
+            migration.upgrade()
+        yield engine, schema
+    finally:
+        with engine.begin() as connection:
+            connection.execute(sa.text(f'DROP SCHEMA "{schema}" CASCADE'))
+        engine.dispose()
 
 
 def _seed_rate(connection, **overrides: object) -> None:
@@ -261,6 +322,11 @@ def test_model_metadata_matches_0037_capabilities_units_guards_and_indexes() -> 
         for constraint in UsageRecord.__table__.constraints
         if isinstance(constraint, sa.CheckConstraint)
     }
+    billing_checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in BillingOperation.__table__.constraints
+        if isinstance(constraint, sa.CheckConstraint)
+    }
     indexes = {index.name: index for index in CreditRate.__table__.indexes}
 
     assert "script_generate" in credit_checks["ck_credit_rates_capability"]
@@ -273,6 +339,14 @@ def test_model_metadata_matches_0037_capabilities_units_guards_and_indexes() -> 
     assert "'character'" in usage_checks["ck_usage_records_unit"]
     assert "quantity >= 0" in usage_checks["ck_usage_records_amounts_valid"]
     assert "credits >= 0" in usage_checks["ck_usage_records_amounts_valid"]
+    assert "credits < 1000000000000" in usage_checks["ck_usage_records_amounts_valid"]
+    assert "'inf'" in billing_checks["ck_billing_operations_amounts_finite"]
+    assert "requested_credits < 1000000000000" in billing_checks[
+        "ck_billing_operations_amounts_nonnegative"
+    ]
+    assert "requested_credits = ROUND(requested_credits, 6)" in billing_checks[
+        "ck_billing_operations_amounts_nonnegative"
+    ]
     for name in (
         "uq_credit_rates_platform_active_capability_unit",
         "uq_credit_rates_tenant_active_capability_unit",
@@ -290,10 +364,22 @@ def test_model_metadata_matches_0037_capabilities_units_guards_and_indexes() -> 
     model_usage_checks = " ".join(
         str(item["sqltext"]) for item in inspector.get_check_constraints("usage_records")
     )
+    model_billing_checks = {
+        str(item["name"]): str(item["sqltext"])
+        for item in inspector.get_check_constraints("billing_operations")
+    }
     assert "script_generate" in model_credit_checks
     assert "scene_prompt" in model_credit_checks
     assert "script_generate" in model_usage_checks
     assert "character" in model_usage_checks
+    assert "credits < 1000000000000" in model_usage_checks
+    assert set(model_billing_checks) >= {
+        "ck_billing_operations_amounts_finite",
+        "ck_billing_operations_amounts_nonnegative",
+    }
+    assert "requested_credits < 1000000000000" in model_billing_checks[
+        "ck_billing_operations_amounts_nonnegative"
+    ]
     engine.dispose()
 
 
@@ -330,10 +416,46 @@ def test_upgrade_reports_duplicate_active_ids_and_performs_no_updates(sqlite_eng
             "zero-active-rate",
         ),
         (
+            "credit_rates",
+            "id, tenant_id, capability, unit, credits_per_unit, is_active",
+            "'overflow-rate', NULL, 'image', 'image', 100000000, FALSE",
+            "overflow-rate",
+        ),
+        (
             "usage_records",
             "id, capability, unit, quantity, credits",
             "'negative-usage', 'image', 'image', -1, 80",
             "negative-usage",
+        ),
+        (
+            "usage_records",
+            "id, capability, unit, quantity, credits",
+            "'overflow-usage', 'image', 'image', 1, 1000000000000",
+            "overflow-usage",
+        ),
+        (
+            "credit_rates",
+            "id, tenant_id, capability, unit, credits_per_unit, is_active",
+            "'scale-rate', NULL, 'image', 'image', 1.00001, FALSE",
+            "scale-rate",
+        ),
+        (
+            "usage_records",
+            "id, capability, unit, quantity, credits",
+            "'scale-quantity', 'image', 'image', 1.0001, 1",
+            "scale-quantity",
+        ),
+        (
+            "usage_records",
+            "id, capability, unit, quantity, credits",
+            "'scale-credits', 'image', 'image', 1, 1.0000001",
+            "scale-credits",
+        ),
+        (
+            "billing_operations",
+            "id, requested_credits, settled_credits, released_credits",
+            "'scale-billing', 1.0000001, 0, 0",
+            "scale-billing",
         ),
     ],
 )
@@ -396,6 +518,128 @@ def test_sqlite_constraints_accept_both_tts_units_and_reject_invalid_amounts(
             )
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(float("inf"), id="positive-infinity"),
+        pytest.param(float("-inf"), id="negative-infinity"),
+        pytest.param(float("nan"), id="nan"),
+        pytest.param("1.00001", id="fractional-scale-overflow"),
+        pytest.param(100_000_000.0, id="integer-boundary-overflow"),
+        pytest.param(1e100, id="precision-overflow"),
+    ],
+)
+def test_upgraded_sqlite_rejects_credit_rates_outside_numeric_12_4_domain(
+    sqlite_engine,
+    value: object,
+) -> None:
+    _run_upgrade(sqlite_engine)
+
+    with sqlite_engine.begin() as connection, pytest.raises(IntegrityError):
+        connection.execute(
+            sa.text(
+                "INSERT INTO credit_rates "
+                "(id, tenant_id, capability, unit, credits_per_unit, is_active) "
+                "VALUES ('invalid-domain-rate', 'tenant-domain', 'image', 'image', "
+                ":value, FALSE)"
+            ),
+            {"value": value},
+        )
+
+
+@pytest.mark.parametrize("column", ["quantity", "credits"])
+def test_upgraded_sqlite_rejects_positive_infinity_usage_amounts(
+    sqlite_engine,
+    column: str,
+) -> None:
+    _run_upgrade(sqlite_engine)
+    values = {"quantity": 1.0, "credits": 1.0, column: float("inf")}
+
+    with sqlite_engine.begin() as connection, pytest.raises(IntegrityError):
+        connection.execute(
+            sa.text(
+                "INSERT INTO usage_records (id, capability, unit, quantity, credits) "
+                "VALUES ('invalid-domain-usage', 'image', 'image', :quantity, :credits)"
+            ),
+            values,
+        )
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        pytest.param("quantity", "1.0001", id="quantity-scale"),
+        pytest.param("credits", "1.0000001", id="credits-scale"),
+    ],
+)
+def test_upgraded_sqlite_rejects_usage_fractional_scale_overflow(
+    sqlite_engine,
+    column: str,
+    value: str,
+) -> None:
+    _run_upgrade(sqlite_engine)
+    values = {"quantity": "1", "credits": "1", column: value}
+
+    with sqlite_engine.begin() as connection, pytest.raises(IntegrityError):
+        connection.execute(
+            sa.text(
+                "INSERT INTO usage_records (id, capability, unit, quantity, credits) "
+                "VALUES ('invalid-scale-usage', 'image', 'image', :quantity, :credits)"
+            ),
+            values,
+        )
+
+
+@pytest.mark.parametrize(
+    "credits",
+    [
+        pytest.param("1000000000000.000000", id="first-integer-overflow"),
+        pytest.param("1000000000000.000001", id="rounded-fractional-overflow"),
+    ],
+)
+def test_upgraded_sqlite_rejects_usage_credits_outside_numeric_18_6_domain(
+    sqlite_engine,
+    credits: str,
+) -> None:
+    _run_upgrade(sqlite_engine)
+
+    with sqlite_engine.begin() as connection, pytest.raises(IntegrityError):
+        connection.execute(
+            sa.text(
+                "INSERT INTO usage_records (id, capability, unit, quantity, credits) "
+                "VALUES ('invalid-domain-usage', 'image', 'image', 1, :credits)"
+            ),
+            {"credits": credits},
+        )
+
+
+def test_upgraded_sqlite_accepts_numeric_12_4_maximum_and_rejects_next_integer(
+    sqlite_engine,
+) -> None:
+    _run_upgrade(sqlite_engine)
+
+    with sqlite_engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                "INSERT INTO credit_rates "
+                "(id, tenant_id, capability, unit, credits_per_unit, is_active) "
+                "VALUES ('maximum-domain-rate', 'tenant-domain', 'image', 'image', "
+                ":value, FALSE)"
+            ),
+            {"value": "99999999.9999"},
+        )
+        with pytest.raises(IntegrityError):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO credit_rates "
+                    "(id, tenant_id, capability, unit, credits_per_unit, is_active) "
+                    "VALUES ('overflow-domain-rate', 'tenant-domain', 'image', 'image', "
+                    ":value, FALSE)"
+                ),
+                {"value": "100000000.0000"},
+            )
+
+
 def test_partial_unique_indexes_enforce_platform_and_tenant_active_rates(
     sqlite_engine,
 ) -> None:
@@ -440,8 +684,120 @@ def test_postgresql_dialect_emits_finite_guards_partial_indexes_and_both_tts_uni
     migration._apply_schema_changes()
 
     statements = output.getvalue()
+    lowered = statements.lower()
     assert "'char'" in statements
     assert "'character'" in statements
-    assert "NaN" in statements and "Infinity" in statements
+    assert "'nan'" in lowered and "'infinity'" in lowered and "'inf'" in lowered
+    assert "99999999.9999" in statements
+    assert "credits < 1000000000000" in statements
+    assert "ALTER COLUMN requested_credits TYPE NUMERIC" in statements
+    assert "DROP CONSTRAINT ck_billing_operations_amounts_finite" in statements
+    assert "DROP CONSTRAINT ck_billing_operations_amounts_nonnegative" in statements
+    assert "requested_credits < 1000000000000" in statements
+    assert "requested_credits = ROUND(requested_credits, 6)" in statements
     assert "WHERE tenant_id IS NULL AND is_active" in statements
     assert "WHERE tenant_id IS NOT NULL AND is_active" in statements
+
+
+def test_real_postgresql_0037_widens_already_applied_0036_billing_amounts(
+    postgres_pricing_domain_schema,
+) -> None:
+    engine, schema = postgres_pricing_domain_schema
+    with _schema_transaction(engine, schema) as connection:
+        columns = {
+            str(column["name"]): column["type"]
+            for column in sa.inspect(connection).get_columns("billing_operations")
+        }
+        for name in ("requested_credits", "settled_credits", "released_credits"):
+            amount_type = columns[name]
+            assert isinstance(amount_type, sa.Numeric)
+            assert amount_type.precision is None
+            assert amount_type.scale is None
+
+
+@pytest.mark.parametrize(
+    ("table", "columns", "values"),
+    [
+        pytest.param(
+            "credit_rates",
+            "id, tenant_id, capability, unit, credits_per_unit, is_active",
+            {
+                "id": "postgres-scale-rate",
+                "tenant_id": "tenant-scale",
+                "capability": "image",
+                "unit": "image",
+                "credits_per_unit": Decimal("1.00001"),
+                "is_active": False,
+            },
+            id="rate-scale",
+        ),
+        pytest.param(
+            "usage_records",
+            "id, capability, unit, quantity, credits",
+            {
+                "id": "postgres-scale-quantity",
+                "capability": "image",
+                "unit": "image",
+                "quantity": Decimal("1.0001"),
+                "credits": Decimal("1"),
+            },
+            id="quantity-scale",
+        ),
+        pytest.param(
+            "usage_records",
+            "id, capability, unit, quantity, credits",
+            {
+                "id": "postgres-scale-credits",
+                "capability": "image",
+                "unit": "image",
+                "quantity": Decimal("1"),
+                "credits": Decimal("1.0000001"),
+            },
+            id="credits-scale",
+        ),
+        pytest.param(
+            "billing_operations",
+            "id, requested_credits, settled_credits, released_credits",
+            {
+                "id": "postgres-scale-billing",
+                "requested_credits": Decimal("1.0000001"),
+                "settled_credits": Decimal("0"),
+                "released_credits": Decimal("0"),
+            },
+            id="billing-scale",
+        ),
+    ],
+)
+def test_real_postgresql_rejects_fractional_scale_before_fixed_scale_rounding(
+    postgres_pricing_domain_schema,
+    table: str,
+    columns: str,
+    values: dict[str, object],
+) -> None:
+    engine, schema = postgres_pricing_domain_schema
+    placeholders = ", ".join(f":{name}" for name in values)
+    with _schema_transaction(engine, schema) as connection, pytest.raises(IntegrityError):
+        with connection.begin_nested():
+            connection.execute(
+                sa.text(f"INSERT INTO {table} ({columns}) VALUES ({placeholders})"),
+                values,
+            )
+
+
+def test_0037_downgrade_preserves_billing_hardening_from_amended_0036(
+    sqlite_engine,
+) -> None:
+    migration = _load_migration()
+    with sqlite_engine.begin() as connection:
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+        migration.downgrade()
+
+        with pytest.raises(IntegrityError):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO billing_operations "
+                    "(id, requested_credits, settled_credits, released_credits) "
+                    "VALUES ('downgrade-scale-billing', 1.0000001, 0, 0)"
+                )
+            )

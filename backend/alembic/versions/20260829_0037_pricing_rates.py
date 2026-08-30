@@ -38,13 +38,37 @@ _USAGE_CAPABILITIES_LEGACY = (
 _USAGE_UNITS = "unit IN ('second', 'call', 'token', 'image', 'char', 'character')"
 _USAGE_UNITS_LEGACY = "unit IN ('second', 'call', 'token', 'image', 'char')"
 _RATE_AMOUNT_GUARD = (
-    "credits_per_unit >= 0 AND "
-    "CAST(credits_per_unit AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')"
+    "credits_per_unit >= 0 AND credits_per_unit <= 99999999.9999 AND "
+    "credits_per_unit = ROUND(credits_per_unit, 4) AND "
+    "LOWER(CAST(credits_per_unit AS TEXT)) NOT IN "
+    "('nan', 'infinity', '-infinity', 'inf', '-inf')"
 )
 _USAGE_AMOUNT_GUARD = (
-    "quantity >= 0 AND credits >= 0 AND "
-    "CAST(quantity AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity') AND "
-    "CAST(credits AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')"
+    "quantity >= 0 AND quantity <= 999999999.999 AND "
+    "quantity = ROUND(quantity, 3) AND "
+    "credits >= 0 AND credits < 1000000000000 AND "
+    "credits = ROUND(credits, 6) AND "
+    "LOWER(CAST(quantity AS TEXT)) NOT IN "
+    "('nan', 'infinity', '-infinity', 'inf', '-inf') AND "
+    "LOWER(CAST(credits AS TEXT)) NOT IN "
+    "('nan', 'infinity', '-infinity', 'inf', '-inf')"
+)
+_BILLING_FINITE_GUARD = (
+    "LOWER(CAST(requested_credits AS TEXT)) NOT IN "
+    "('nan', 'infinity', '-infinity', 'inf', '-inf') AND "
+    "LOWER(CAST(settled_credits AS TEXT)) NOT IN "
+    "('nan', 'infinity', '-infinity', 'inf', '-inf') AND "
+    "LOWER(CAST(released_credits AS TEXT)) NOT IN "
+    "('nan', 'infinity', '-infinity', 'inf', '-inf')"
+)
+_BILLING_AMOUNT_DOMAIN_GUARD = (
+    "requested_credits >= 0 AND settled_credits >= 0 AND released_credits >= 0 AND "
+    "requested_credits < 1000000000000 AND "
+    "settled_credits < 1000000000000 AND "
+    "released_credits < 1000000000000 AND "
+    "requested_credits = ROUND(requested_credits, 6) AND "
+    "settled_credits = ROUND(settled_credits, 6) AND "
+    "released_credits = ROUND(released_credits, 6)"
 )
 _PLATFORM_ACTIVE_INDEX = "uq_credit_rates_platform_active_capability_unit"
 _TENANT_ACTIVE_INDEX = "uq_credit_rates_tenant_active_capability_unit"
@@ -138,6 +162,8 @@ def _audit_existing_data() -> None:
             """
             SELECT id FROM credit_rates
             WHERE credits_per_unit < 0
+               OR credits_per_unit > 99999999.9999
+               OR credits_per_unit <> ROUND(credits_per_unit, 4)
                OR LOWER(CAST(credits_per_unit AS TEXT)) IN
                   ('nan', 'infinity', '-infinity', 'inf', '-inf')
             ORDER BY id
@@ -151,7 +177,10 @@ def _audit_existing_data() -> None:
         sa.text(
             """
             SELECT id FROM usage_records
-            WHERE quantity < 0 OR credits < 0
+            WHERE quantity < 0 OR quantity > 999999999.999
+               OR quantity <> ROUND(quantity, 3)
+               OR credits < 0 OR credits >= 1000000000000
+               OR credits <> ROUND(credits, 6)
                OR LOWER(CAST(quantity AS TEXT)) IN
                   ('nan', 'infinity', '-infinity', 'inf', '-inf')
                OR LOWER(CAST(credits AS TEXT)) IN
@@ -162,6 +191,29 @@ def _audit_existing_data() -> None:
     ).all()
     if invalid_usage_rows:
         raise RuntimeError(f"Invalid usage amount IDs: {_ids(invalid_usage_rows)}")
+
+    invalid_billing_rows = connection.execute(
+        sa.text(
+            """
+            SELECT id FROM billing_operations
+            WHERE requested_credits < 0 OR requested_credits >= 1000000000000
+               OR requested_credits <> ROUND(requested_credits, 6)
+               OR settled_credits < 0 OR settled_credits >= 1000000000000
+               OR settled_credits <> ROUND(settled_credits, 6)
+               OR released_credits < 0 OR released_credits >= 1000000000000
+               OR released_credits <> ROUND(released_credits, 6)
+               OR LOWER(CAST(requested_credits AS TEXT)) IN
+                  ('nan', 'infinity', '-infinity', 'inf', '-inf')
+               OR LOWER(CAST(settled_credits AS TEXT)) IN
+                  ('nan', 'infinity', '-infinity', 'inf', '-inf')
+               OR LOWER(CAST(released_credits AS TEXT)) IN
+                  ('nan', 'infinity', '-infinity', 'inf', '-inf')
+            ORDER BY id
+            """
+        )
+    ).all()
+    if invalid_billing_rows:
+        raise RuntimeError(f"Invalid billing amount IDs: {_ids(invalid_billing_rows)}")
 
     zero_ids: list[tuple[str]] = []
     for capability, unit in sorted(_POSITIVE_RATE_PAIRS):
@@ -206,8 +258,45 @@ def _audit_existing_data() -> None:
 
 
 def _apply_schema_changes() -> None:
+    # 0036 may already be applied with fixed-scale NUMERIC columns. Widen the
+    # physical type before installing scale checks so PostgreSQL cannot round
+    # invalid input before the constraint sees it. The stable 0036 constraint
+    # names are retained for both fresh and in-place upgrade paths.
+    with op.batch_alter_table("billing_operations") as batch_op:
+        batch_op.drop_constraint(
+            "ck_billing_operations_amounts_finite", type_="check"
+        )
+        batch_op.drop_constraint(
+            "ck_billing_operations_amounts_nonnegative", type_="check"
+        )
+        for column_name in (
+            "requested_credits",
+            "settled_credits",
+            "released_credits",
+        ):
+            batch_op.alter_column(
+                column_name,
+                existing_type=sa.Numeric(18, 6),
+                type_=sa.Numeric(),
+                existing_nullable=False,
+            )
+        batch_op.create_check_constraint(
+            "ck_billing_operations_amounts_finite",
+            _BILLING_FINITE_GUARD,
+        )
+        batch_op.create_check_constraint(
+            "ck_billing_operations_amounts_nonnegative",
+            _BILLING_AMOUNT_DOMAIN_GUARD,
+        )
+
     with op.batch_alter_table("credit_rates") as batch_op:
         batch_op.drop_constraint("ck_credit_rates_capability", type_="check")
+        batch_op.alter_column(
+            "credits_per_unit",
+            existing_type=sa.Numeric(12, 4),
+            type_=sa.Numeric(),
+            existing_nullable=False,
+        )
         batch_op.create_check_constraint(
             "ck_credit_rates_capability", _CREDIT_RATE_CAPABILITIES
         )
@@ -218,6 +307,18 @@ def _apply_schema_changes() -> None:
     with op.batch_alter_table("usage_records") as batch_op:
         batch_op.drop_constraint("ck_usage_records_capability", type_="check")
         batch_op.drop_constraint("ck_usage_records_unit", type_="check")
+        batch_op.alter_column(
+            "quantity",
+            existing_type=sa.Numeric(12, 3),
+            type_=sa.Numeric(),
+            existing_nullable=False,
+        )
+        batch_op.alter_column(
+            "credits",
+            existing_type=sa.Numeric(18, 6),
+            type_=sa.Numeric(),
+            existing_nullable=False,
+        )
         batch_op.create_check_constraint(
             "ck_usage_records_capability", _USAGE_CAPABILITIES
         )
@@ -254,7 +355,7 @@ def _seed_platform_rates() -> None:
         "(id, tenant_id, capability, unit, credits_per_unit, is_active, effective_at) "
         "VALUES (:id, NULL, :capability, :unit, :target, TRUE, :effective_at)"
     ).bindparams(
-        sa.bindparam("target", type_=sa.Numeric(12, 4)),
+        sa.bindparam("target", type_=sa.Numeric()),
         sa.bindparam("effective_at", type_=sa.DateTime(timezone=True)),
     )
     for rate_id, capability, unit, target, allowed_values in _TARGETS:
@@ -288,7 +389,7 @@ def _seed_platform_rates() -> None:
                 "WHERE id = :id AND tenant_id IS NULL "
                 "AND capability = :capability AND unit = :unit "
                 "AND is_active IS TRUE AND credits_per_unit = :expected"
-            ).bindparams(sa.bindparam("expected", type_=sa.Numeric(12, 4)))
+            ).bindparams(sa.bindparam("expected", type_=sa.Numeric()))
             result = connection.execute(
                 verify_or_deactivate,
                 {
@@ -323,6 +424,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Billing amount hardening belongs to the amended 0036 contract and is
+    # intentionally retained when the 0037 pricing-rate changes are reverted.
     connection = op.get_bind()
     incompatible_usage = connection.execute(
         sa.text(
@@ -361,6 +464,18 @@ def downgrade() -> None:
         batch_op.drop_constraint("ck_usage_records_amounts_valid", type_="check")
         batch_op.drop_constraint("ck_usage_records_capability", type_="check")
         batch_op.drop_constraint("ck_usage_records_unit", type_="check")
+        batch_op.alter_column(
+            "quantity",
+            existing_type=sa.Numeric(),
+            type_=sa.Numeric(12, 3),
+            existing_nullable=False,
+        )
+        batch_op.alter_column(
+            "credits",
+            existing_type=sa.Numeric(),
+            type_=sa.Numeric(18, 6),
+            existing_nullable=False,
+        )
         batch_op.create_check_constraint(
             "ck_usage_records_capability", _USAGE_CAPABILITIES_LEGACY
         )
@@ -368,6 +483,12 @@ def downgrade() -> None:
     with op.batch_alter_table("credit_rates") as batch_op:
         batch_op.drop_constraint("ck_credit_rates_credits_per_unit_valid", type_="check")
         batch_op.drop_constraint("ck_credit_rates_capability", type_="check")
+        batch_op.alter_column(
+            "credits_per_unit",
+            existing_type=sa.Numeric(),
+            type_=sa.Numeric(12, 4),
+            existing_nullable=False,
+        )
         batch_op.create_check_constraint(
             "ck_credit_rates_capability", _CREDIT_RATE_CAPABILITIES_LEGACY
         )

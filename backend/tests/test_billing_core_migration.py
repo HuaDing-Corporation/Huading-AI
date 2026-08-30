@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from io import StringIO
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
@@ -12,6 +15,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import create_engine, event
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -31,6 +35,50 @@ def _load_migration():
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
     return migration
+
+
+@contextmanager
+def _schema_transaction(engine, schema: str):
+    with engine.begin() as connection:
+        connection.execute(sa.text(f'SET LOCAL search_path TO "{schema}"'))
+        yield connection
+
+
+@pytest.fixture
+def postgres_billing_domain_schema():
+    database_url = os.getenv("TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("TEST_POSTGRES_URL is required for the real PostgreSQL billing test.")
+    url = make_url(database_url)
+    if url.host not in {"localhost", "127.0.0.1"} or not str(url.database).startswith(
+        "huading_pricing_test_"
+    ):
+        pytest.fail("TEST_POSTGRES_URL must target an isolated local huading_pricing_test_* DB")
+
+    engine = sa.create_engine(url, pool_pre_ping=True)
+    schema = f"billing_amount_domain_{uuid4().hex}"
+    with engine.begin() as connection:
+        connection.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
+    try:
+        with _schema_transaction(engine, schema) as connection:
+            connection.execute(sa.text("CREATE TABLE tenants (id VARCHAR(36) PRIMARY KEY)"))
+            connection.execute(sa.text("CREATE TABLE users (id VARCHAR(36) PRIMARY KEY)"))
+            connection.execute(
+                sa.text(
+                    "CREATE TABLE usage_records ("
+                    "id VARCHAR(36) PRIMARY KEY, tenant_id VARCHAR(36) NOT NULL)"
+                )
+            )
+            connection.execute(sa.text("INSERT INTO tenants (id) VALUES ('tenant-a')"))
+            connection.execute(sa.text("INSERT INTO users (id) VALUES ('user-a')"))
+            migration = _load_migration()
+            migration.op = Operations(MigrationContext.configure(connection))
+            migration.upgrade()
+        yield engine, schema
+    finally:
+        with engine.begin() as connection:
+            connection.execute(sa.text(f'DROP SCHEMA "{schema}" CASCADE'))
+        engine.dispose()
 
 
 @pytest.fixture
@@ -176,6 +224,24 @@ def test_billing_operation_rejects_negative_amounts(db_session, field, value):
 
 
 @pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(Decimal("Infinity"), id="sqlite-inf-spelling"),
+        pytest.param(Decimal("1.0000001"), id="fractional-scale-overflow"),
+        pytest.param(Decimal("1000000000000"), id="integer-boundary-overflow"),
+    ],
+)
+def test_billing_operation_rejects_requested_amounts_outside_numeric_18_6_domain(
+    db_session,
+    value: Decimal,
+) -> None:
+    with pytest.raises(IntegrityError):
+        with db_session.begin_nested():
+            db_session.add(make_billing_operation(requested_credits=value))
+            db_session.flush()
+
+
+@pytest.mark.parametrize(
     "overrides",
     [
         {"completion_kind": "succeeded"},
@@ -307,6 +373,22 @@ def test_billing_core_migration_creates_schema_and_refuses_downgrade_with_rows()
 
         inspector = sa.inspect(connection)
         assert "billing_operations" in inspector.get_table_names()
+        billing_checks = {
+            str(constraint["name"]): str(constraint["sqltext"])
+            for constraint in inspector.get_check_constraints("billing_operations")
+        }
+        assert {
+            "ck_billing_operations_amounts_finite",
+            "ck_billing_operations_amounts_nonnegative",
+        } <= set(billing_checks)
+        assert "ck_billing_operations_amounts_upper_bound" not in billing_checks
+        assert "ck_billing_operations_amounts_scale" not in billing_checks
+        assert "requested_credits < 1000000000000" in billing_checks[
+            "ck_billing_operations_amounts_nonnegative"
+        ]
+        assert "requested_credits = ROUND(requested_credits, 6)" in billing_checks[
+            "ck_billing_operations_amounts_nonnegative"
+        ]
         assert {
             "result_type",
             "result_id",
@@ -338,6 +420,66 @@ def test_billing_core_migration_creates_schema_and_refuses_downgrade_with_rows()
             migration.downgrade()
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(float("inf"), id="sqlite-inf-spelling"),
+        pytest.param("1.0000001", id="fractional-scale-overflow"),
+        pytest.param(1_000_000_000_000, id="integer-boundary-overflow"),
+    ],
+)
+def test_billing_core_migration_rejects_requested_amounts_outside_domain(value: object) -> None:
+    migration = _load_migration()
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(sa.text("PRAGMA foreign_keys=ON"))
+        connection.execute(sa.text("CREATE TABLE tenants (id VARCHAR(36) PRIMARY KEY)"))
+        connection.execute(sa.text("CREATE TABLE users (id VARCHAR(36) PRIMARY KEY)"))
+        connection.execute(sa.text("INSERT INTO tenants (id) VALUES ('tenant-a')"))
+        connection.execute(sa.text("INSERT INTO users (id) VALUES ('user-a')"))
+        connection.execute(
+            sa.text(
+                "CREATE TABLE usage_records ("
+                "id VARCHAR(36) PRIMARY KEY, tenant_id VARCHAR(36) NOT NULL)"
+            )
+        )
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+
+        with pytest.raises(IntegrityError):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO billing_operations ("
+                    "id, tenant_id, user_id, operation, idempotency_key, request_hash, quote_hash, "
+                    "pricing_snapshot, requested_credits, settled_credits, released_credits, "
+                    "status) "
+                    "VALUES ('invalid-op', 'tenant-a', 'user-a', 'scene_prompt', 'invalid-key', "
+                    "'a', 'b', '{}', :value, 0, 0, 'in_progress')"
+                ),
+                {"value": value},
+            )
+    engine.dispose()
+
+
+def test_real_postgresql_billing_migration_rejects_fractional_scale_before_rounding(
+    postgres_billing_domain_schema,
+) -> None:
+    engine, schema = postgres_billing_domain_schema
+    with _schema_transaction(engine, schema) as connection, pytest.raises(IntegrityError):
+        with connection.begin_nested():
+            connection.execute(
+                sa.text(
+                    "INSERT INTO billing_operations ("
+                    "id, tenant_id, user_id, operation, idempotency_key, request_hash, quote_hash, "
+                    "pricing_snapshot, requested_credits, settled_credits, released_credits, "
+                    "status) "
+                    "VALUES ('postgres-invalid-op', 'tenant-a', 'user-a', 'scene_prompt', "
+                    "'postgres-invalid-key', 'a', 'b', '{}', :value, 0, 0, 'in_progress')"
+                ),
+                {"value": Decimal("1.0000001")},
+            )
+
+
 def test_postgresql_schema_path_emits_finite_amount_and_allocation_guards():
     migration = _load_migration()
     billing_model_ddl = str(
@@ -360,13 +502,22 @@ def test_postgresql_schema_path_emits_finite_amount_and_allocation_guards():
 
     statements = output.getvalue()
     assert "JSONB" in billing_model_ddl
-    assert "CAST(requested_credits AS TEXT) NOT IN" in billing_model_ddl
+    assert "requested_credits NUMERIC NOT NULL" in billing_model_ddl
+    assert "LOWER(CAST(requested_credits AS TEXT))" in billing_model_ddl
+    assert "requested_credits < 1000000000000" in billing_model_ddl
+    assert "requested_credits = ROUND(requested_credits, 6)" in billing_model_ddl
+    assert "ck_billing_operations_amounts_upper_bound" not in billing_model_ddl
+    assert "ck_billing_operations_amounts_scale" not in billing_model_ddl
     assert "billing_operation_id IS NULL" in usage_model_ddl
     assert "billing_item_index IS NOT NULL" in usage_model_ddl
     assert "billing_pricing_line_index IS NOT NULL" in usage_model_ddl
-    assert "CAST(requested_credits AS TEXT) NOT IN" in statements
-    assert "CAST(settled_credits AS TEXT) NOT IN" in statements
-    assert "'NaN', 'Infinity', '-Infinity'" in statements
+    assert "LOWER(CAST(requested_credits AS TEXT))" in statements
+    assert "LOWER(CAST(settled_credits AS TEXT))" in statements
+    assert "'nan', 'infinity', '-infinity', 'inf', '-inf'" in statements
+    assert "requested_credits < 1000000000000" in statements
+    assert "released_credits = ROUND(released_credits, 6)" in statements
+    assert "ck_billing_operations_amounts_upper_bound" not in statements
+    assert "ck_billing_operations_amounts_scale" not in statements
     assert "billing_operation_id IS NULL" in statements
     assert "billing_item_index IS NOT NULL" in statements
     assert "billing_pricing_line_index IS NOT NULL" in statements

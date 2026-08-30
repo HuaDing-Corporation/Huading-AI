@@ -255,12 +255,14 @@ def _recover_stale_billing_operations_once(
                     # evidence of delivered usage.
                     from app.workers.avatar_talk import (
                         _authoritative_billing_actual_seconds,
+                        _billing_video_base_capability,
                         _complete_billing_quote_video,
                     )
 
                     usages = _usage_for_update(db, operation.id)
+                    expected_capability = _billing_video_base_capability(task=task)
                     base_usage = next(
-                        usage for usage in usages if usage.capability == "video"
+                        usage for usage in usages if usage.capability == expected_capability
                     )
                     _complete_billing_quote_video(
                         db,

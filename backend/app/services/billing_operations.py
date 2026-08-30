@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
 from app.db.models import (
+    BILLING_CREDITS_MAX,
     ERROR_PAYLOAD_MAX_BYTES,
     RESULT_PAYLOAD_MAX_BYTES,
     BillingOperation,
@@ -39,6 +40,10 @@ logger = structlog.get_logger(__name__)
 _RESULT_SCHEMAS: dict[str, type[BaseModel]] = {}
 _RESULT_SCHEMAS_LOCK = threading.Lock()
 _SAFE_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_QUANTITY_SCALE = 3
+_QUANTITY_UPPER_BOUND = Decimal("1000000000")
+_CREDITS_SCALE = 6
+_CREDITS_UPPER_BOUND = Decimal("1000000000000")
 
 
 class BillingInvariantError(AppError):
@@ -205,7 +210,12 @@ register_billing_result_schema("brand_voice_order", BrandVoiceOrderRead)
 
 def _integer_amount(value: Decimal, *, field: str) -> int:
     amount = Decimal(value)
-    if not amount.is_finite() or amount < 0 or amount != amount.to_integral_value():
+    if (
+        not amount.is_finite()
+        or amount < 0
+        or amount > BILLING_CREDITS_MAX
+        or amount != amount.to_integral_value()
+    ):
         raise BillingInvariantError(f"{field} is not a non-negative wallet integer")
     return int(amount)
 
@@ -340,14 +350,32 @@ def _stored_snapshot(snapshot: PricingSnapshot) -> dict[str, object]:
     return json.loads(canonical_json(payload).decode("utf-8"))
 
 
-def _finite_decimal(value: Decimal, *, field: str, allow_zero: bool) -> Decimal:
+def _finite_decimal(
+    value: Decimal,
+    *,
+    field: str,
+    allow_zero: bool,
+    scale: int,
+    upper_bound: Decimal,
+) -> Decimal:
     try:
         parsed = Decimal(value)
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise AppError(
             f"Invalid {field}.", code="BILLING_ALLOCATION_INVALID", status_code=500
         ) from exc
-    if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):
+    quantum = Decimal(1).scaleb(-scale)
+    try:
+        scale_is_valid = parsed == parsed.quantize(quantum)
+    except InvalidOperation:
+        scale_is_valid = False
+    if (
+        not parsed.is_finite()
+        or parsed < 0
+        or parsed >= upper_bound
+        or not scale_is_valid
+        or (not allow_zero and parsed == 0)
+    ):
         raise AppError(f"Invalid {field}.", code="BILLING_ALLOCATION_INVALID", status_code=500)
     return parsed
 
@@ -387,8 +415,20 @@ def _validate_allocations(
                 code="BILLING_ALLOCATION_INVALID",
                 status_code=500,
             )
-        quantity = _finite_decimal(item.quantity, field="quantity", allow_zero=False)
-        credits = _finite_decimal(item.credits, field="credits", allow_zero=True)
+        quantity = _finite_decimal(
+            item.quantity,
+            field="quantity",
+            allow_zero=False,
+            scale=_QUANTITY_SCALE,
+            upper_bound=_QUANTITY_UPPER_BOUND,
+        )
+        credits = _finite_decimal(
+            item.credits,
+            field="credits",
+            allow_zero=True,
+            scale=_CREDITS_SCALE,
+            upper_bound=_CREDITS_UPPER_BOUND,
+        )
         line = snapshot.pricing_lines[item.pricing_line_index]
         if credits != quantity * line.unit_credits:
             raise AppError(
@@ -790,6 +830,7 @@ def complete_succeeded(
     usage_by_item = {int(usage.billing_item_index): usage for usage in usages}
     exact_subtotal = Decimal("0")
     parsed_actual: dict[int, Decimal] = {}
+    parsed_credits: dict[int, Decimal] = {}
     invalid_code: str | None = None
     for item_index, value in actual_quantities.items():
         if isinstance(item_index, bool) or not isinstance(item_index, int):
@@ -805,6 +846,8 @@ def complete_succeeded(
                 value,
                 field="actual quantity",
                 allow_zero=_is_explicit_fixed_zero_line(snapshot, line),
+                scale=_QUANTITY_SCALE,
+                upper_bound=_QUANTITY_UPPER_BOUND,
             )
         except AppError:
             invalid_code = "BILLING_ACTUAL_QUANTITY_INVALID"
@@ -812,10 +855,27 @@ def complete_succeeded(
         if actual > Decimal(usage.quantity):
             invalid_code = "BILLING_QUOTE_EXCEEDED"
             break
+        try:
+            actual_credits = _finite_decimal(
+                actual * line.unit_credits,
+                field="actual credits",
+                allow_zero=_is_explicit_fixed_zero_line(snapshot, line),
+                scale=_CREDITS_SCALE,
+                upper_bound=_CREDITS_UPPER_BOUND,
+            )
+        except AppError:
+            invalid_code = "BILLING_SETTLEMENT_AMOUNT_INVALID"
+            break
         parsed_actual[item_index] = actual
-        exact_subtotal += actual * line.unit_credits
+        parsed_credits[item_index] = actual_credits
+        exact_subtotal += actual_credits
     if not parsed_actual:
         invalid_code = invalid_code or "BILLING_NO_SUCCESSFUL_ALLOCATION"
+    if (
+        invalid_code is None
+        and exact_subtotal.to_integral_value(rounding=ROUND_CEILING) > BILLING_CREDITS_MAX
+    ):
+        invalid_code = "BILLING_SETTLEMENT_AMOUNT_INVALID"
     if invalid_code is not None:
         error_payload = _validated_error_payload(
             invalid_code,
@@ -830,7 +890,10 @@ def complete_succeeded(
             http_status=409,
             error_payload=error_payload,
         )
-    settled = int(exact_subtotal.to_integral_value(rounding=ROUND_CEILING))
+    settled = _integer_amount(
+        exact_subtotal.to_integral_value(rounding=ROUND_CEILING),
+        field="settled_credits",
+    )
     requested = _integer_amount(operation.requested_credits, field="requested_credits")
     if settled > requested:
         raise BillingInvariantError("settlement exceeds the immutable reservation")
@@ -842,9 +905,8 @@ def complete_succeeded(
     now = datetime.now(UTC)
     for item_index, usage in usage_by_item.items():
         if item_index in parsed_actual:
-            line = snapshot.pricing_lines[int(usage.billing_pricing_line_index)]
             usage.quantity = parsed_actual[item_index]
-            usage.credits = parsed_actual[item_index] * line.unit_credits
+            usage.credits = parsed_credits[item_index]
             usage.status = "settled"
         else:
             usage.status = "released"

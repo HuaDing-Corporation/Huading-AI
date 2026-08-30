@@ -26,6 +26,7 @@ from app.services.pricing import (
     build_composite_pricing,
     build_simple_pricing,
     resolve_rate,
+    video_create_parent_policy,
 )
 from app.services.quota import (
     estimate_avatar_talk_quota,
@@ -109,7 +110,7 @@ def _brand_pricing_draft(
     requested_at: datetime | None,
 ) -> tuple[PricingDraft, Decimal]:
     quantity = _base_quantity(payload, mode=mode, text=text)
-    video_policy = PRICING_POLICIES["video_create"]
+    video_policy = video_create_parent_policy(mode)
     base = build_simple_pricing(
         policy=video_policy,
         rate=resolve_rate(
@@ -120,24 +121,24 @@ def _brand_pricing_draft(
         ),
         quantity=quantity,
     )
-    if brand_voice.provider != "cosyvoice-voice-clone":
-        return base, quantity
-
-    tts_policy = PRICING_POLICIES["cosyvoice_brand_tts"]
-    tts = build_simple_pricing(
-        policy=tts_policy,
-        rate=resolve_rate(
-            db,
-            tenant_id=tenant_id,
+    lines = [base.pricing_lines[0]]
+    if brand_voice.provider == "cosyvoice-voice-clone":
+        tts_policy = PRICING_POLICIES["cosyvoice_brand_tts"]
+        tts = build_simple_pricing(
             policy=tts_policy,
-            now=requested_at,
-        ),
-        quantity=Decimal(len(text)),
-    )
+            rate=resolve_rate(
+                db,
+                tenant_id=tenant_id,
+                policy=tts_policy,
+                now=requested_at,
+            ),
+            quantity=Decimal(len(text)),
+        )
+        lines.append(tts.pricing_lines[0])
     return (
         build_composite_pricing(
             operation="video_create",
-            lines=(base.pricing_lines[0], tts.pricing_lines[0]),
+            lines=lines,
         ),
         quantity,
     )

@@ -381,7 +381,7 @@ def test_brand_voice_delivery_status_uses_latest_renewal_order(
     auth_context,
     auth_db,
 ) -> None:
-    now = datetime(2026, 8, 29, 12, 0, 0, tzinfo=UTC)
+    now = datetime.now(UTC)
     with auth_db() as db:
         _seed_brand_voice_billing(db, auth_context["tenant_id"])
         audio_id = _seed_audio_asset(db, auth_context["tenant_id"])
@@ -1872,19 +1872,10 @@ def test_video_submit_persists_its_single_trusted_voice_gate_timestamp(
 ) -> None:
     from app.api.v1.routes import videos as videos_route
 
-    submitted_at = datetime.now(UTC)
-
-    class _FixedDateTime:
-        calls = 0
-
-        @classmethod
-        def now(cls, tz=None):
-            cls.calls += 1
-            return submitted_at
-
     with auth_db() as db:
         _seed_brand_voice_billing(db, auth_context["tenant_id"])
         avatar_id = _seed_avatar_asset(db, auth_context["tenant_id"])
+        submitted_at = datetime.now(UTC)
         voice = BrandVoice(
             tenant_id=auth_context["tenant_id"],
             owner_user_id=auth_context["user_id"],
@@ -1900,6 +1891,14 @@ def test_video_submit_persists_its_single_trusted_voice_gate_timestamp(
         db.add(voice)
         db.commit()
         voice_id = voice.id
+
+    class _FixedDateTime:
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            return submitted_at
 
     client = TestClient(app)
     payload = {

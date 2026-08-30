@@ -22,11 +22,13 @@ class AppError(Exception):
         code: str = "APP_ERROR",
         status_code: int = status.HTTP_400_BAD_REQUEST,
         detail: object | None = None,
+        expose_detail: bool = True,
     ) -> None:
         self.message = message
         self.code = code
         self.status_code = status_code
         self.detail = detail
+        self.expose_detail = expose_detail
         super().__init__(message)
 
 
@@ -86,12 +88,20 @@ def _error_response(
 
 
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
+    if exc.detail is not None and not exc.expose_detail:
+        logger.warning(
+            "app_error_private_detail",
+            code=exc.code,
+            status_code=exc.status_code,
+            detail=exc.detail,
+            request_id=_request_id(request),
+        )
     return _error_response(
         request,
         status_code=exc.status_code,
         code=exc.code,
         message=exc.message,
-        detail=exc.detail,
+        detail=exc.detail if exc.expose_detail else None,
     )
 
 

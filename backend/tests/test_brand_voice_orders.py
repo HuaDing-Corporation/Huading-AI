@@ -986,7 +986,8 @@ def test_resolve_each_terminal_action_writes_exact_consistent_state(
 ) -> None:
     from app.services.brand_voice_orders import resolve_brand_voice_order
 
-    resolved_at = datetime(2026, 8, 29, 12, 2, tzinfo=UTC)
+    source_subscription = db_session.get(Subscription, "subscription-a")
+    resolved_at = source_subscription.period_start.replace(tzinfo=UTC) + timedelta(minutes=1)
     order_id, operation_id = _seed_manual_order_for_invariant_test(db_session)
     resolve_brand_voice_order(
         db_session,
@@ -1383,6 +1384,132 @@ def test_submit_creates_awaiting_order_with_reserved_billing(auth_context, auth_
         assert db.scalar(select(func.count()).select_from(UsageRecord)) == 1
         subscription = db.scalar(select(Subscription))
         assert subscription.quota_credits_reserved == 30_000
+
+
+def test_customer_submit_registry_503_redacts_inventory_while_ops_audit_keeps_diagnostics(
+    auth_context,
+    auth_db,
+    monkeypatch,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    from app.services import provider_voice_registry
+    from scripts.ops.pricing_closure_readiness import pricing_closure_readiness
+
+    official_id = "sensitive-official-provider-id"
+    unknown_id = "sensitive-unknown-provider-id"
+    blocker_id = "sensitive-blocker-provider-id"
+    blocker_row_id = "sensitive-blocker-registry-row"
+    blocker_provider = "sensitive-noncanonical-provider"
+    monkeypatch.setattr(provider_voice_registry.settings, "environment", "production")
+    monkeypatch.setattr(
+        provider_voice_registry.settings,
+        "engine_doubao_official_voice_ids",
+        [official_id],
+    )
+    with auth_db() as db:
+        subscription = db.scalar(select(Subscription))
+        db.get(Plan, subscription.plan_id).code = "huading"
+        subscription.quota_credits_total = 100_000
+        db.add(
+            Asset(
+                id="registry-redaction-audio",
+                tenant_id=auth_context["tenant_id"],
+                type="audio",
+                source="upload",
+                storage_key=(f"tenants/{auth_context['tenant_id']}/uploads/registry-redaction.wav"),
+                mime_type="audio/wav",
+                duration_ms=10_000,
+                status="ready",
+            )
+        )
+        provider_voice_registry.register_official_provider_voice_ids(
+            db,
+            provider_voice_ids=[official_id],
+        )
+        db.add_all(
+            [
+                BrandVoiceProviderId(
+                    id=blocker_row_id,
+                    provider=blocker_provider,
+                    normalized_provider_id=blocker_id,
+                    kind="official",
+                    status="active",
+                ),
+                ProviderConfig(
+                    id="registry-redaction-provider-config",
+                    tenant_id=None,
+                    capability="voice_clone",
+                    provider="registry-redaction-config-provider",
+                    config={"speaker_ids": [unknown_id]},
+                    is_active=False,
+                ),
+            ]
+        )
+        db.commit()
+
+    client = TestClient(app)
+    payload = {
+        "order_type": "create",
+        "requested_name": "Registry redaction voice",
+        "source_audio_asset_id": "registry-redaction-audio",
+        "consent_confirmed": True,
+    }
+    quote = client.post(
+        "/api/v1/brand-voice-orders/estimate",
+        headers=auth_context["headers"],
+        json=payload,
+    )
+    assert quote.status_code == 200, quote.text
+    response = client.post(
+        "/api/v1/brand-voice-orders",
+        headers={
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote.json()["data"]["quote_token"],
+        },
+        json=payload,
+    )
+
+    assert response.status_code == 503, response.text
+    error = response.json()["error"]
+    assert error["code"] == "DOUBAO_REGISTRY_NOT_READY"
+    assert error["message"] == "Doubao provider voice registry is not ready."
+    assert error.get("detail") is None
+    for private_value in (
+        official_id,
+        unknown_id,
+        blocker_id,
+        blocker_row_id,
+        blocker_provider,
+    ):
+        assert private_value not in response.text
+
+    with auth_db() as db:
+        report = pricing_closure_readiness(db, production_mode=True)
+        assert official_id in report.provider_inventory["official_configured_ids"]
+        assert official_id in report.provider_inventory["active_official_registry_ids"]
+        assert [item.provider_voice_id for item in report.inventory_unknown_ids] == [unknown_id]
+        assert ("DOUBAO_REGISTRY_INVARIANT_FAILURE", (blocker_row_id,)) in {
+            (item.code, item.record_ids) for item in report.blockers
+        }
+        with pytest.raises(AppError) as internal:
+            provider_voice_registry.assert_doubao_registry_ready(db)
+        assert internal.value.detail == {
+            "official_configured_ids": [official_id],
+            "official_registered_ids": [official_id],
+            "registry_blockers": [
+                {
+                    "provider_voice_id": blocker_id,
+                    "provider": blocker_provider,
+                    "kind": "official",
+                    "status": "active",
+                    "reason": "provider_not_canonical",
+                }
+            ],
+            "unknown_ids": [unknown_id],
+        }
 
 
 def test_submit_fails_closed_when_balance_changed_after_quote(auth_context, auth_db):

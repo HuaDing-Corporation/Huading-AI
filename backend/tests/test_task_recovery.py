@@ -434,13 +434,20 @@ def _seed_done_video_recovery_operation(
     duration_sec: float = 1.0,
     with_deliverable: bool = True,
     base_unit: str = "second",
+    video_mode: str = "seedance_i2v",
 ) -> tuple[BillingOperation, VideoTask]:
     created_at = datetime(2026, 1, 1, tzinfo=UTC)
-    snapshot = _pricing_snapshot(operation="video_create", credits="100.0000")
+    base_capability = "avatar" if video_mode == "avatar_talk" else "video"
+    unit_credits = Decimal("180.0000") if video_mode == "avatar_talk" else Decimal("100.0000")
+    reserved_credits = unit_credits * Decimal("8")
+    snapshot = _pricing_snapshot(operation="video_create", credits=format(unit_credits, "f"))
+    snapshot["pricing_lines"][0]["capability"] = base_capability
+    if video_mode == "avatar_talk":
+        snapshot["pricing_shape"] = "composite"
     snapshot["pricing_lines"][0]["quantity"] = "8"
-    snapshot["pricing_lines"][0]["subtotal_credits"] = "800.0000"
-    snapshot["subtotal_credits"] = "800.0000"
-    snapshot["payable_credits"] = 800
+    snapshot["pricing_lines"][0]["subtotal_credits"] = format(reserved_credits, "f")
+    snapshot["subtotal_credits"] = format(reserved_credits, "f")
+    snapshot["payable_credits"] = int(reserved_credits)
     operation = BillingOperation(
         id=operation_id,
         tenant_id="tenant-a",
@@ -450,7 +457,7 @@ def _seed_done_video_recovery_operation(
         request_hash="v" * 64,
         quote_hash="w" * 64,
         pricing_snapshot=snapshot,
-        requested_credits=Decimal("800"),
+        requested_credits=reserved_credits,
         settled_credits=Decimal("0"),
         released_credits=Decimal("0"),
         status="in_progress",
@@ -467,8 +474,8 @@ def _seed_done_video_recovery_operation(
         id=f"{operation_id}-task",
         tenant_id="tenant-a",
         status="done",
-        mode="seedance_i2v",
-        video_mode="seedance_i2v",
+        mode=video_mode,
+        video_mode=video_mode,
         params=params,
         storage_key=f"tenants/tenant-a/videos/{operation_id}/output.mp4",
         duration_sec=duration_sec,
@@ -476,7 +483,7 @@ def _seed_done_video_recovery_operation(
         updated_at=created_at,
     )
     subscription = db_session.get(Subscription, "subscription-a")
-    subscription.quota_credits_reserved = 800
+    subscription.quota_credits_reserved = int(reserved_credits)
     db_session.add_all([operation, task])
     db_session.flush()
     db_session.add(
@@ -488,11 +495,11 @@ def _seed_done_video_recovery_operation(
             billing_operation_id=operation.id,
             billing_item_index=0,
             billing_pricing_line_index=0,
-            capability="video",
+            capability=base_capability,
             provider="apimart",
             unit=base_unit,
             quantity=Decimal("8"),
-            credits=Decimal("800"),
+            credits=reserved_credits,
             cost_cents=0,
             status="reserved",
         )
@@ -571,6 +578,31 @@ def test_recovery_settles_done_seedance_video_from_persisted_actual_meter(db_ses
         usage.quantity,
     )
     assert stored.settled_credits == Decimal("600")
+    assert usage.quantity == Decimal("6.000")
+
+
+def test_recovery_settles_done_avatar_video_from_persisted_actual_meter(db_session) -> None:
+    from app.services.task_recovery import recover_stale_billing_operations
+
+    operation, _task = _seed_done_video_recovery_operation(
+        db_session,
+        operation_id="done-avatar-meter",
+        actual_meter="6.000",
+        video_mode="avatar_talk",
+    )
+
+    summary = recover_stale_billing_operations(
+        db_session,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert summary.settled_operation_ids == (operation.id,), summary
+    db_session.expire_all()
+    stored = db_session.get(BillingOperation, operation.id)
+    usage = db_session.get(UsageRecord, f"{operation.id}-usage")
+    assert stored.completion_kind == "succeeded"
+    assert stored.settled_credits == Decimal("1080")
+    assert usage.capability == "avatar"
     assert usage.quantity == Decimal("6.000")
 
 
