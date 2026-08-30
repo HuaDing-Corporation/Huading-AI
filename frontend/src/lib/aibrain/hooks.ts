@@ -14,7 +14,7 @@ import {
   topupWallet
 } from "@/lib/aibrain/api";
 import { aibrainKeys } from "@/lib/aibrain/keys";
-import type { ReasoningWallet, SendMessageRequest } from "@/lib/aibrain/types";
+import type { Conversation, ConversationDetail, ReasoningWallet, SendMessageRequest } from "@/lib/aibrain/types";
 
 export function useConversations() {
   const { session } = useAuth();
@@ -39,7 +39,10 @@ export function useCreateConversation() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => createConversation(),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: aibrainKeys.conversations() })
+    onSuccess: (conversation) => {
+      qc.setQueryData<ConversationDetail>(aibrainKeys.conversation(conversation.id), conversation);
+      void qc.invalidateQueries({ queryKey: aibrainKeys.conversations() });
+    }
   });
 }
 
@@ -66,7 +69,7 @@ export function useClearConversations() {
 
 /**
  * 发消息。conversationId 走**变量**（支持「首条消息先建会话再发」的链）。答完后：
- * ① 失效本会话详情（拿到新消息）② 失效会话列表（标题/updated_at 可能变）
+ * ① 用响应权威更新本会话详情（并隔离旧详情请求）② 失效会话列表（标题/updated_at 可能变）
  * ③ 把响应里的**整份钱包**（BE `wallet`，非 balance）回填缓存（多退少补后的真实余额，不必再拉一次）。
  */
 export function useSendMessage() {
@@ -74,8 +77,29 @@ export function useSendMessage() {
   return useMutation({
     mutationFn: (vars: { conversationId: string; body: SendMessageRequest }) =>
       sendMessage(vars.conversationId, vars.body),
-    onSuccess: (res, vars) => {
-      void qc.invalidateQueries({ queryKey: aibrainKeys.conversation(vars.conversationId) });
+    onSuccess: async (res, vars) => {
+      const detailKey = aibrainKeys.conversation(vars.conversationId);
+      await qc.cancelQueries({ queryKey: detailKey });
+      const summary = qc
+        .getQueryData<Conversation[]>(aibrainKeys.conversations())
+        ?.find((conversation) => conversation.id === vars.conversationId);
+      qc.setQueryData<ConversationDetail>(detailKey, (conversation) => {
+        const detail = conversation ?? (summary ? { ...summary, messages: [] } : undefined);
+        if (!detail) return detail;
+        const responseMessages = [res.user_message, res.assistant_message];
+        const responseById = new Map(responseMessages.map((message) => [message.id, message]));
+        const cachedIds = new Set(detail.messages.map((message) => message.id));
+        return {
+          ...detail,
+          messages: [
+            ...detail.messages.map((message) => responseById.get(message.id) ?? message),
+            ...responseMessages.filter((message) => !cachedIds.has(message.id))
+          ]
+        };
+      });
+      // The immediate cache write keeps the POST response visible. This post-commit read restores
+      // older history/metadata when only a list summary was available; a refetch error keeps data.
+      void qc.invalidateQueries({ queryKey: detailKey });
       void qc.invalidateQueries({ queryKey: aibrainKeys.conversations() });
       qc.setQueryData<ReasoningWallet>(aibrainKeys.wallet(), res.wallet);
     }

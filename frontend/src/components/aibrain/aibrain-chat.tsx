@@ -203,7 +203,7 @@ export function AibrainChat() {
         <ConversationList activeId={activeId} onSelect={setActiveId} />
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col rounded-card border border-line-gold bg-glass-soft p-4">
-          {convQuery.isError ? (
+          {convQuery.isError && !convQuery.data ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
               <p role="alert" className="text-[13px] text-error-fg">{copy.aibrain.loadError}</p>
               <Button variant="soft" size="sm" onClick={() => void convQuery.refetch()}>{copy.aibrain.retry}</Button>

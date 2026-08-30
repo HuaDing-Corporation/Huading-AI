@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ChatMessage } from "@/lib/aibrain/types";
 
 // ── PRICING-UI-0001-FIX1 · **402 分流**承重（CB 复审第 1 点：aibrain-chat.tsx 把所有 402 当成
 //    普通预留不足，缺 `AIBRAIN_OUTSTANDING_BALANCE` 分流）───────────────────────────────────────
@@ -19,14 +20,20 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hooks = vi.hoisted(() => ({
   sendMutateAsync: vi.fn(),
-  wallet: { available_credits: 0 } as { available_credits: number } | undefined
+  wallet: { available_credits: 0 } as { available_credits: number } | undefined,
+  conversationMessages: [] as ChatMessage[],
+  conversationError: false
 }));
 
 vi.mock("@/lib/aibrain/hooks", () => ({
   useWallet: () => ({ data: hooks.wallet }),
   useCreateConversation: () => ({ mutateAsync: vi.fn().mockResolvedValue({ id: "conv-1" }), isPending: false }),
   useSendMessage: () => ({ mutateAsync: hooks.sendMutateAsync, isPending: false }),
-  useConversation: () => ({ data: { messages: [] }, isError: false, refetch: vi.fn() }),
+  useConversation: () => ({
+    data: { messages: hooks.conversationMessages },
+    isError: hooks.conversationError,
+    refetch: vi.fn()
+  }),
   // ⚠️ `useConversations()` 的 data **就是数组**（conversation-list.tsx:31 `const items = data ?? []`），
   //    不是 `{items,total}` 信封 —— 按信封写会得到 `items.map is not a function`。
   useConversations: () => ({ data: [], isLoading: false, isError: false, refetch: vi.fn() }),
@@ -74,7 +81,33 @@ async function typeAndSend(text = "你好") {
 beforeEach(() => {
   vi.clearAllMocks();
   hooks.wallet = { available_credits: 500 }; // 正余额 → 预检放行，让请求真发出去，由 BE 的码分流
+  hooks.conversationMessages = [];
+  hooks.conversationError = false;
   hooks.sendMutateAsync.mockResolvedValue({});
+});
+
+describe("详情后台刷新失败", () => {
+  it("已有缓存回答时继续显示消息，不用阻断式加载错误替换消息流", () => {
+    hooks.conversationMessages = [
+      {
+        id: "message-assistant-cached",
+        conversation_id: "conv-1",
+        role: "assistant",
+        content: "（高档 · gpt-5.6-sol）已收到",
+        attachments: [],
+        tier: "high",
+        model: "gpt-5.6-sol",
+        status: "completed",
+        created_at: "2026-08-30T10:00:02Z"
+      }
+    ];
+    hooks.conversationError = true;
+
+    renderChat();
+
+    expect(screen.getByText(/已收到/)).toBeVisible();
+    expect(screen.queryByText(copy.aibrain.loadError)).not.toBeInTheDocument();
+  });
 });
 
 describe("402 分流：欠费 vs 预留不足（CB 第 1 点）", () => {
