@@ -2179,7 +2179,12 @@ export const handlers = [
         headers: { "Content-Type": "audio/wav" }
       });
     }
-    if (/\.mp4$/i.test(pathname)) return new HttpResponse(null, { status: 204 });
+    if (/\.mp4$/i.test(pathname)) {
+      const referrer = request.referrer && request.referrer !== "about:client"
+        ? request.referrer
+        : globalThis.location.href;
+      return HttpResponse.redirect(new URL("/mock-v2v-1080p-2s.mp4", referrer));
+    }
     return HttpResponse.text(
       '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="#ddd"/></svg>',
       { headers: { "Content-Type": "image/svg+xml" } }

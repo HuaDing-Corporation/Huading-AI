@@ -184,6 +184,60 @@ function watchErrors(page: Page) {
   };
 }
 
+test("mock MP4 boundary provides decodable video metadata", async ({ page }) => {
+  const mediaResponses: Array<{ status: number; contentType: string | undefined }> = [];
+  const mediaFailures: string[] = [];
+  page.on("response", (response) => {
+    if (!response.url().includes("mock-v2v-1080p-2s.mp4")) return;
+    mediaResponses.push({
+      status: response.status(),
+      contentType: response.headers()["content-type"]
+    });
+  });
+  page.on("requestfailed", (request) => {
+    if (/\.mp4(?:\?|$)/i.test(request.url())) {
+      mediaFailures.push(`${request.url()}: ${request.failure()?.errorText ?? "unknown failure"}`);
+    }
+  });
+
+  await page.goto("/login");
+  await page.waitForFunction(() => !!navigator.serviceWorker?.controller);
+  const metadata = await page.evaluate(() => new Promise<{
+    duration: number;
+    readyState: number;
+    videoHeight: number;
+    videoWidth: number;
+  }>((resolve, reject) => {
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.muted = true;
+    video.addEventListener("loadedmetadata", () => resolve({
+      duration: video.duration,
+      readyState: video.readyState,
+      videoHeight: video.videoHeight,
+      videoWidth: video.videoWidth
+    }), { once: true });
+    video.addEventListener("error", () => reject(new Error(
+      `Mock MP4 failed to load metadata (MediaError ${video.error?.code ?? "unknown"}).`
+    )), { once: true });
+    video.src = "https://mock.local/v.mp4";
+    document.body.append(video);
+    video.load();
+  }));
+
+  expect(Number.isFinite(metadata.duration)).toBe(true);
+  expect(metadata.duration).toBeGreaterThan(0);
+  expect(metadata.readyState).toBeGreaterThanOrEqual(1);
+  expect(metadata.videoWidth).toBeGreaterThan(0);
+  expect(metadata.videoHeight).toBeGreaterThan(0);
+  expect(mediaResponses).toContainEqual({
+    status: expect.any(Number),
+    contentType: expect.stringMatching(/^video\/mp4(?:;|$)/i)
+  });
+  expect(mediaResponses.every(({ status }) => status === 200 || status === 206)).toBe(true);
+  expect(mediaFailures).toEqual([]);
+});
+
 test("unknown script result recovers once, preserves billing headers and invalidates edited quotes", async ({ page }) => {
   const errorWatch = watchErrors(page);
   await login(page);
