@@ -93,7 +93,14 @@ test("manual Doubao orders transition awaiting to fulfilled and rejected with pa
     if (message.type() === "error") errors.push(message.text());
   });
   page.on("requestfailed", (request) => {
-    errors.push(`requestfailed ${request.method()} ${new URL(request.url()).pathname}: ${request.failure()?.errorText ?? "unknown"}`);
+    const errorText = request.failure()?.errorText ?? "unknown";
+    const isExpectedHomeVideoNavigationAbort =
+      request.method() === "GET" &&
+      request.resourceType() === "media" &&
+      request.url() === "http://localhost:3100/mock-v2v-1080p-2s.mp4" &&
+      errorText === "net::ERR_ABORTED";
+    if (isExpectedHomeVideoNavigationAbort) return;
+    errors.push(`requestfailed ${request.method()} ${new URL(request.url()).pathname}: ${errorText}`);
   });
   await login(page);
   await page.getByRole("link", { name: "我的品牌音色" }).click();
