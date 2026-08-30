@@ -150,7 +150,7 @@ describe("BrandVoiceCreate · 录音态（mock useAudioRecorder）", () => {
         existing_brand_voice_id: null
       },
       {
-        idempotency_key: expect.any(String),
+        idempotency_key: expect.stringMatching(/\S/),
         quote_token: "quote-recorder"
       }
     );
