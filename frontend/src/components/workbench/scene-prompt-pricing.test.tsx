@@ -118,7 +118,7 @@ describe("scene prompt pricing confirmation", () => {
     fireEvent.click(button);
 
     const dialog = await screen.findByRole("dialog", { name: "确认价格并继续" });
-    expect(within(dialog).getAllByText("30 积分").length).toBeGreaterThan(0);
+    expect((await within(dialog).findAllByText("30 积分")).length).toBeGreaterThan(0);
     expect(estimates).toEqual([
       {
         topic: "保温杯",

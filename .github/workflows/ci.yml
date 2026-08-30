@@ -57,7 +57,7 @@ jobs:
       - name: PostgreSQL concurrency guard
         run: >-
           uv run pytest -vv
-          tests/test_voice_slot_concurrency.py::test_postgres_admin_path_uses_advisory_lock_before_existing_config_rows
+          tests/test_voice_slot_concurrency.py::test_postgres_official_registration_serializes_against_customer_claim
 
       - name: Test
         run: uv run pytest

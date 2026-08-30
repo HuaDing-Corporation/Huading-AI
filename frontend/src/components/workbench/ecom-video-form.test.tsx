@@ -161,6 +161,12 @@ function uploadProductImages(n = 1) {
   fireEvent.change(input, { target: { files } });
 }
 
+async function confirmVideoGeneration() {
+  const confirm = await screen.findByRole("button", { name: "确定" });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  fireEvent.click(confirm);
+}
+
 describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () => {
   it("renders 视频时长 above the 主题/卖点 input (duration-first layout)", () => {
     render(<EcomVideoForm />);
@@ -187,7 +193,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     expect(screen.queryByText("请上传产品图后再生成")).not.toBeInTheDocument();
 
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     const [request] = taskMocks.createAndTrack.mock.calls[0];
     expect(request.topic).toBeUndefined(); // 空则不带：topic:undefined 被 createVideo 的 JSON.stringify 丢弃 → 请求体不含 topic
@@ -205,7 +211,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
 
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     const [request, topic] = taskMocks.createAndTrack.mock.calls[0];
@@ -240,7 +246,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
 
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0].product_image_keys).toEqual([
@@ -274,7 +280,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0].resolution).toBe("1080p");
   });
@@ -286,7 +292,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0].apply_visible_label).toBe(true);
   });
@@ -300,7 +306,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
 
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0]).toMatchObject({
@@ -326,7 +332,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     fireEvent.change(durationInput, { target: { value: "90" } });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
 
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0]).toMatchObject({ duration_sec: 90 });
@@ -419,7 +425,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0]).toMatchObject({
       video_mode: "seedance_i2v",
@@ -554,7 +560,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0].negative_prompt).toBe("禁止文字水印");
   });

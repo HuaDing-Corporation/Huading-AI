@@ -111,7 +111,7 @@ describe("script pricing confirmation", () => {
     fireEvent.click(screen.getByRole("button", { name: "重写文案" }));
 
     const dialog = await screen.findByRole("dialog", { name: "确认价格并继续" });
-    expect(within(dialog).getAllByText("1 积分").length).toBeGreaterThan(0);
+    expect((await within(dialog).findAllByText("1 积分")).length).toBeGreaterThan(0);
     expect(estimates).toEqual([{ topic: "保温杯" }]);
     expect(submits).toHaveLength(0);
 
@@ -168,7 +168,7 @@ describe("script pricing confirmation", () => {
     fireEvent.click(screen.getByRole("button", { name: "AI生成文案" }));
 
     const dialog = await screen.findByRole("dialog", { name: "确认价格并继续" });
-    expect(within(dialog).getAllByText("1 积分").length).toBeGreaterThan(0);
+    expect((await within(dialog).findAllByText("1 积分")).length).toBeGreaterThan(0);
     expect(estimates).toEqual([
       {
         topic: "保温杯",

@@ -42,7 +42,9 @@ async function fillAndSubmit() {
   fireEvent.change(screen.getByPlaceholderText(/输入一句话主题/), { target: { value: "咖啡" } });
   fireEvent.click(screen.getByText("默认主播")); // select preset avatar; voice auto-defaults
   fireEvent.click(screen.getByRole("button", { name: /生成视频/ }));
-  fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+  const confirm = await screen.findByRole("button", { name: "确定" });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  fireEvent.click(confirm);
 }
 
 describe("NewVideoForm error display (P2)", () => {
