@@ -1,8 +1,9 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { copy } from "@/lib/copy";
+import type { BillingQuote } from "@/lib/api/types";
 
 // 录音态依赖（error/durationSec/blob）需可控 → mock useAudioRecorder（上传路径整合见
 // brand-voice-create.test.tsx 用真 hook）。
@@ -21,6 +22,22 @@ const api = vi.hoisted(() => ({
   estimateCosy: vi.fn(),
   createCosy: vi.fn()
 }));
+const RECORDER_QUOTE: BillingQuote = {
+  pricing_contract: "billing_quote",
+  operation: "doubao_brand_voice_order_create",
+  pricing_shape: "simple",
+  unit: "call",
+  quantity: "1",
+  unit_credits: "30000",
+  rate_scope: "platform_fixed",
+  rate_source: "fixed_policy",
+  subtotal_credits: "30000",
+  payable_credits: 30000,
+  breakdown: [],
+  disclosures: [],
+  quote_token: "quote-recorder",
+  expires_at: "2030-08-30T00:00:00Z"
+};
 
 vi.mock("@/lib/media/use-audio-recorder", () => ({
   useAudioRecorder: () => ({ ...recorderState, start: vi.fn(), stop: vi.fn(), setExternal: vi.fn(), reset: vi.fn() })
@@ -52,22 +69,7 @@ beforeEach(() => {
   recorderState.durationSec = 0;
   recorderState.error = null;
   api.upload.mockReset().mockResolvedValue({ asset_id: "asset-recorder" });
-  api.estimateOrder.mockReset().mockResolvedValue({
-    pricing_contract: "billing_quote",
-    operation: "doubao_brand_voice_order_create",
-    pricing_shape: "simple",
-    unit: "call",
-    quantity: "1",
-    unit_credits: "30000",
-    rate_scope: "platform_fixed",
-    rate_source: "fixed_policy",
-    subtotal_credits: "30000",
-    payable_credits: 30000,
-    breakdown: [],
-    disclosures: [],
-    quote_token: "quote-recorder",
-    expires_at: "2030-08-30T00:00:00Z"
-  });
+  api.estimateOrder.mockReset().mockResolvedValue(RECORDER_QUOTE);
   api.createOrder.mockReset().mockImplementation((_input, confirmation) => Promise.resolve({
     id: "order-recorder",
     status: "awaiting_fulfillment",
@@ -103,6 +105,11 @@ describe("BrandVoiceCreate · 录音态（mock useAudioRecorder）", () => {
   });
 
   it("录音 ≥5s + 名称 + 授权：上传后提交人工订单（durationSec 不拦截）", async () => {
+    let resolveQuote!: (quote: BillingQuote) => void;
+    const quotePending = new Promise<BillingQuote>((resolve) => {
+      resolveQuote = resolve;
+    });
+    api.estimateOrder.mockReturnValueOnce(quotePending);
     const blob = new Blob(["x"], { type: "audio/webm" });
     recorderState.blob = blob;
     recorderState.url = "blob:mock";
@@ -112,12 +119,40 @@ describe("BrandVoiceCreate · 录音态（mock useAudioRecorder）", () => {
     fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "录音音色" } });
     fireEvent.click(screen.getByRole("checkbox"));
     fireEvent.click(screen.getByRole("button", { name: "提交开通" }));
-    fireEvent.click(await screen.findByRole("button", { name: "确认并提交人工开通" }));
+    const confirm = await screen.findByRole("button", { name: "确认并提交人工开通" });
+
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(api.createOrder).not.toHaveBeenCalled();
+    await waitFor(() => expect(api.estimateOrder).toHaveBeenCalledWith({
+      order_type: "create",
+      requested_name: "录音音色",
+      source_audio_asset_id: "asset-recorder",
+      consent_confirmed: true,
+      existing_brand_voice_id: null
+    }));
+
+    await act(async () => {
+      resolveQuote(RECORDER_QUOTE);
+      await quotePending;
+    });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
 
     expect(api.upload).toHaveBeenCalledWith(blob);
-    await waitFor(() => expect(api.createOrder).toHaveBeenCalledWith(
-      expect.objectContaining({ requested_name: "录音音色", source_audio_asset_id: "asset-recorder", consent_confirmed: true, order_type: "create" }),
-      expect.objectContaining({ quote_token: "quote-recorder" })
-    ));
+    await waitFor(() => expect(api.createOrder).toHaveBeenCalledTimes(1));
+    expect(api.createOrder).toHaveBeenCalledWith(
+      {
+        order_type: "create",
+        requested_name: "录音音色",
+        source_audio_asset_id: "asset-recorder",
+        consent_confirmed: true,
+        existing_brand_voice_id: null
+      },
+      {
+        idempotency_key: expect.any(String),
+        quote_token: "quote-recorder"
+      }
+    );
   });
 });
