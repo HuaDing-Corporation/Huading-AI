@@ -1,6 +1,7 @@
 import { http, HttpResponse } from "msw";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { getMockSupplierInvocations, resetMockSupplierInvocations } from "@/mocks/handlers";
 import { server } from "@/mocks/server";
 import { getBillingOperation } from "./billing";
 import type {
@@ -49,6 +50,8 @@ function ecomQuote(operation: "ecom_cutout" | "ecom_model", quantity = 1) {
 }
 
 let confirmedRequestSequence = 0;
+
+beforeEach(() => resetMockSupplierInvocations());
 
 function nextConfirmation(quoteToken: string) {
   confirmedRequestSequence += 1;
@@ -177,6 +180,22 @@ describe("ecom-images authoritative billing API", () => {
         }
       ]
     ]);
+  });
+
+  it("rejects 21 cutout items before any supplier invocation", async () => {
+    await confirmedCutout({ source_asset_id: "supplier-baseline", background: "white" });
+    const beforeInvalid = getMockSupplierInvocations().ecom_cutout;
+    expect(beforeInvalid).toBe(1);
+    const invalid = {
+      items: Array.from({ length: 21 }, (_, index) => ({
+        source_asset_id: `asset-${index + 1}`,
+        background: "white" as const
+      }))
+    };
+
+    await expect(estimateEcomCutout(invalid)).rejects.toMatchObject({ status: 422, code: "VALIDATION_ERROR" });
+    await expect(createEcomCutout(invalid, nextConfirmation("invalid-quote"))).rejects.toMatchObject({ status: 422, code: "VALIDATION_ERROR" });
+    expect(getMockSupplierInvocations().ecom_cutout).toBe(beforeInvalid);
   });
 
   it("routes one model request through estimate and submit with the same body and confirmation", async () => {

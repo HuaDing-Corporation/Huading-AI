@@ -16,9 +16,9 @@ type Probe = {
 };
 
 type ExpectedFault = {
-  endpoint: string;
-  status?: number;
-  message?: string;
+  method: "POST";
+  url: string;
+  status: number;
 };
 
 async function installBillingProbe(page: Page) {
@@ -130,35 +130,55 @@ async function login(page: Page) {
 
 function watchErrors(page: Page) {
   const errors: string[] = [];
-  let expectedFault: ExpectedFault | null = null;
+  let expectedFault: (ExpectedFault & { observed: boolean; consoleBudget: number; requestFailureBudget: number }) | null = null;
   page.on("pageerror", (error) => errors.push(error.message));
+  page.on("response", (response) => {
+    if (
+      expectedFault &&
+      !expectedFault.observed &&
+      response.request().method() === expectedFault.method &&
+      response.url() === expectedFault.url &&
+      response.status() === expectedFault.status
+    ) {
+      expectedFault.observed = true;
+      expectedFault.consoleBudget = 1;
+    }
+  });
   page.on("console", (message) => {
     if (message.type() !== "error") return;
     const text = message.text();
     const locationUrl = message.location().url;
-    const locationPath = locationUrl ? new URL(locationUrl, "http://localhost:3100").pathname : "";
-    const endpointMatches = expectedFault && (
-      locationPath === expectedFault.endpoint || text.includes(expectedFault.endpoint)
-    );
-    const isExpectedMessage = expectedFault?.message && text.includes(expectedFault.message);
-    const isExpectedStatus = expectedFault?.status && endpointMatches && (
+    const endpointMatches = expectedFault && (locationUrl === expectedFault.url || text.includes(expectedFault.url));
+    const isExpectedStatus = expectedFault && endpointMatches && (
       text.includes(`status of ${expectedFault.status}`) ||
       text.includes(`${expectedFault.status} (`)
     );
-    if (!isExpectedMessage && !isExpectedStatus) errors.push(text);
+    if (expectedFault?.observed && expectedFault.consoleBudget > 0 && isExpectedStatus) {
+      expectedFault.consoleBudget -= 1;
+      return;
+    }
+    errors.push(text);
   });
   page.on("requestfailed", (request) => {
-    const pathname = new URL(request.url()).pathname;
-    if (expectedFault && request.method() === "POST" && pathname === expectedFault.endpoint) return;
-    errors.push(`requestfailed ${request.method()} ${pathname}: ${request.failure()?.errorText ?? "unknown"}`);
+    if (
+      expectedFault?.observed &&
+      expectedFault.requestFailureBudget > 0 &&
+      request.method() === expectedFault.method &&
+      request.url() === expectedFault.url
+    ) {
+      expectedFault.requestFailureBudget -= 1;
+      return;
+    }
+    errors.push(`requestfailed ${request.method()} ${new URL(request.url()).pathname}: ${request.failure()?.errorText ?? "unknown"}`);
   });
   return {
     errors,
     begin(fault: ExpectedFault) {
       expect(expectedFault).toBeNull();
-      expectedFault = fault;
+      expectedFault = { ...fault, observed: false, consoleBudget: 0, requestFailureBudget: 1 };
     },
     end() {
+      expect(expectedFault?.observed).toBe(true);
       expectedFault = null;
     }
   };
@@ -184,13 +204,19 @@ test("unknown script result recovers once, preserves billing headers and invalid
   expect(secondQuote).not.toBe(firstQuote);
 
   await page.evaluate(() => { (window as typeof window & { __dropNextScript: boolean }).__dropNextScript = true; });
-  errorWatch.begin({ endpoint: "/api/v1/scripts/generate", message: "Failed to fetch after supplier completion" });
+  errorWatch.begin({ method: "POST", url: "http://localhost:8000/api/v1/scripts/generate", status: 200 });
+  await page.evaluate(() => console.error("Failed to fetch after supplier completion"));
+  await expect.poll(() => errorWatch.errors.filter((error) => error.includes("Failed to fetch after supplier completion")).length).toBe(1);
+  errorWatch.errors.splice(errorWatch.errors.findIndex((error) => error.includes("Failed to fetch after supplier completion")), 1);
   await page.getByRole("button", { name: "确认并继续" }).click();
   await expect(page.getByText("计费结果确认中")).toBeVisible();
   for (const disclaimer of ["未扣费", "未扣款", "未收费", "不会扣费", "不扣费"]) {
     await expect(page.getByText(disclaimer, { exact: false })).toHaveCount(0);
   }
   await expect(page.getByText("已结算 1 积分")).toBeVisible();
+  await page.evaluate(() => console.error("Failed to fetch after supplier completion"));
+  await expect.poll(() => errorWatch.errors.filter((error) => error.includes("Failed to fetch after supplier completion")).length).toBe(1);
+  errorWatch.errors.splice(errorWatch.errors.findIndex((error) => error.includes("Failed to fetch after supplier completion")), 1);
   errorWatch.end();
   await expect(page.locator("#video-script")).toContainText("编辑后的定价主题");
 
@@ -232,10 +258,8 @@ test("video contracts expose legacy, deferred and CosyVoice billing while estima
 
   await page.evaluate(() => { (window as typeof window & { __failNextVideoEstimate: boolean }).__failNextVideoEstimate = true; });
   await page.locator("#vg-prompt").fill("估价失败必须阻断");
-  errorWatch.begin({ endpoint: "/api/v1/videos/estimate", status: 503 });
   await page.getByRole("button", { name: "生成视频" }).click();
   await expect(page.getByText("暂时无法获取价格，请稍后重试")).toBeVisible();
-  errorWatch.end();
   await expect(page.getByRole("button", { name: "确定", exact: true })).toBeDisabled();
   expect(observedPosts.filter((post) => post.path === "/api/v1/videos")).toHaveLength(1);
   await page.getByRole("button", { name: "取消" }).click();
@@ -270,7 +294,7 @@ test("video contracts expose legacy, deferred and CosyVoice billing while estima
   await page.locator("#video-topic").fill("品牌音色视频");
   await page.getByRole("button", { name: "默认主播" }).click();
   await page.getByRole("button", { name: /免费复刻音/ }).click();
-  errorWatch.begin({ endpoint: "/api/v1/videos/estimate", status: 422 });
+  errorWatch.begin({ method: "POST", url: "http://localhost:8000/api/v1/videos/estimate", status: 422 });
   await page.getByRole("button", { name: "生成视频" }).click();
   await expect(page.getByText("使用品牌音色前请先生成或填写口播文案", { exact: true })).toBeVisible();
   errorWatch.end();
@@ -342,7 +366,11 @@ test("ecom batch accepts 20, rejects 21 and explains partial settlement", async 
     const body = { items: Array.from({ length: 21 }, () => ({ ...item })) };
     return { before: before.data.total, body };
   }, validItem);
-  errorWatch.begin({ endpoint: "/api/v1/ecom-images/cutout/estimate", status: 422 });
+  const supplierInvocationsBeforeInvalid = await page.evaluate(async () => {
+    const response = await fetch("http://localhost:8000/api/v1/__mock__/supplier-invocations");
+    return response.json().then((payload) => payload.data.ecom_cutout as number);
+  });
+  errorWatch.begin({ method: "POST", url: "http://localhost:8000/api/v1/ecom-images/cutout/estimate", status: 422 });
   const invalidEstimate = await page.evaluate(async (body) => {
     const response = await fetch("http://localhost:8000/api/v1/ecom-images/cutout/estimate", {
       method: "POST",
@@ -352,7 +380,7 @@ test("ecom batch accepts 20, rejects 21 and explains partial settlement", async 
     return { status: response.status, payload: await response.json() };
   }, invalidBoundary.body);
   errorWatch.end();
-  errorWatch.begin({ endpoint: "/api/v1/ecom-images/cutout/batch", status: 422 });
+  errorWatch.begin({ method: "POST", url: "http://localhost:8000/api/v1/ecom-images/cutout/batch", status: 422 });
   const invalidSubmit = await page.evaluate(async (body) => {
     const response = await fetch("http://localhost:8000/api/v1/ecom-images/cutout/batch", {
       method: "POST",
@@ -363,13 +391,18 @@ test("ecom batch accepts 20, rejects 21 and explains partial settlement", async 
   }, invalidBoundary.body);
   errorWatch.end();
   const afterInvalid = await page.evaluate(async () => {
-    const response = await fetch("http://localhost:8000/api/v1/videos?mode=photo");
-    return response.json();
+    const [tasksResponse, supplierResponse] = await Promise.all([
+      fetch("http://localhost:8000/api/v1/videos?mode=photo"),
+      fetch("http://localhost:8000/api/v1/__mock__/supplier-invocations")
+    ]);
+    const [tasks, supplier] = await Promise.all([tasksResponse.json(), supplierResponse.json()]);
+    return { tasks, supplierInvocations: supplier.data.ecom_cutout as number };
   });
   expect(invalidEstimate).toMatchObject({ status: 422, payload: { data: null, error: { code: "VALIDATION_ERROR" } } });
   expect(invalidSubmit).toMatchObject({ status: 422, payload: { data: null, error: { code: "VALIDATION_ERROR" } } });
   expect(invalidSubmit.payload.data).not.toEqual(expect.objectContaining({ tasks: expect.any(Array) }));
-  expect(afterInvalid.data.total).toBe(invalidBoundary.before);
+  expect(afterInvalid.tasks.data.total).toBe(invalidBoundary.before);
+  expect(afterInvalid.supplierInvocations).toBe(supplierInvocationsBeforeInvalid);
 
   for (let index = 0; index < 20; index += 1) await page.getByRole("button", { name: "移除图片" }).first().click();
   await page.locator("#ecom-cutout-batch").setInputFiles([

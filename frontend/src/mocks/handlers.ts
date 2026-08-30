@@ -588,6 +588,11 @@ for (const v of ECOM_HISTORY_SEED) videos.set(v.id, v);
 const copyDrafts: Record<string, unknown>[] = [];
 // 单调递增 id 计数器：删后重建不复用 id（videos+covers 共享 Map 故共用一个），避免碰撞/重复(HIST-UI-0001 RV)
 let videoSeq = 0;
+const mockSupplierInvocations = { ecom_cutout: 0 };
+export const resetMockSupplierInvocations = () => {
+  mockSupplierInvocations.ecom_cutout = 0;
+};
+export const getMockSupplierInvocations = () => ({ ...mockSupplierInvocations });
 let draftSeq = 0;
 
 // ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001，FIX1 对齐后端 §8) mock store ──
@@ -2163,6 +2168,7 @@ const historyToItem = (r: MockHistRecord) => ({
 const VALID_HISTORY_CATEGORIES = new Set(["image_gen", "ecom_white", "ecom_model", "ecom_detail", "cover"]);
 
 export const handlers = [
+  http.get(`${BASE}/api/v1/__mock__/supplier-invocations`, () => ok(getMockSupplierInvocations())),
   // Deterministic media fixtures for mock-only URLs. Service-worker initiated
   // media loads bypass Playwright page routes, so handle them here instead of
   // globally suppressing net::ERR_FAILED in interaction tests.
@@ -3169,6 +3175,7 @@ export const handlers = [
     const confirmation = confirmMockQuote(request, "ecom_cutout", body);
     if (!confirmation.ok) return confirmation.response;
     if (confirmation.replay) return ok(confirmation.replay.accepted);
+    mockSupplierInvocations.ecom_cutout += 1;
     const id = `mock-${++videoSeq}`;
     const url =
       body.background === "transparent"
@@ -3201,6 +3208,7 @@ export const handlers = [
     const confirmation = confirmMockQuote(request, "ecom_cutout", body);
     if (!confirmation.ok) return confirmation.response;
     if (confirmation.replay) return ok(confirmation.replay.accepted);
+    mockSupplierInvocations.ecom_cutout += items.length;
     const batchId = `batch-${++videoSeq}`;
     const tasks = items.map((it) => {
       const id = `mock-${++videoSeq}`;
