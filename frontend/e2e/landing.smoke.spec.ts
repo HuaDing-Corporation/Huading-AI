@@ -75,7 +75,7 @@ test("未登录进站=落地页；登录→控制台；已登录访 /landing=头
   // 于是「加了开通额度入口把顶栏撑爆、退出按钮被挤出首屏」逃过了 CI（Codex B 实测 scroll 457px）。
   // 变异：把完整品牌/搜索/动作文字/单行布局提前恢复到 sm(640px) → 640/641/768 的 scrollWidth
   // 立即大于视口；只测 320/375 与 1280 会漏掉这个断点跳变。
-  for (const width of [320, 360, 375, 639, 640, 641, 768, 1023]) {
+  for (const width of [320, 360, 375, 639, 640, 641, 768, 1023, 1024, 1025]) {
     await page.setViewportSize({ width, height: 812 });
     await page.goto("/"); // 确保在工作台（TopBar 所在）
     await expect(page.getByRole("button", { name: "生成视频" })).toBeVisible({ timeout: 20_000 });
@@ -111,11 +111,12 @@ test("未登录进站=落地页；登录→控制台；已登录访 /landing=头
       `头像不在 ${width}px 首屏内：${JSON.stringify(avatarBox)}`
     ).toBe(true);
 
-    // 紧凑套件持续覆盖到 1023px；桌面套件在下面的 1280px 真实桌面视口单独验收。
-    await expect(page.getByText("华鼎 AI", { exact: true })).toBeHidden();
-    await expect(page.getByRole("textbox", { name: "搜索" })).toBeHidden();
-    await expect(page.getByRole("button", { name: "通知" })).toBeHidden();
-    await expect(page.getByRole("button", { name: "设置" })).toBeHidden();
+    // 1024px 恢复完整桌面套件；精确边界与 +1 都钉住，避免桌面内容恢复后横向溢出。
+    const desktopTopBar = width >= 1024;
+    await expect(page.getByText("华鼎 AI", { exact: true })).toBeVisible({ visible: desktopTopBar });
+    await expect(page.getByRole("textbox", { name: "搜索" })).toBeVisible({ visible: desktopTopBar });
+    await expect(page.getByRole("button", { name: "通知" })).toBeVisible({ visible: desktopTopBar });
+    await expect(page.getByRole("button", { name: "设置" })).toBeVisible({ visible: desktopTopBar });
   }
   await page.setViewportSize({ width: 1280, height: 800 }); // 切回桌面继续 ③
   await page.goto("/");
