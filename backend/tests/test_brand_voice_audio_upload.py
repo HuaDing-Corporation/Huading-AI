@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.api.deps import get_object_storage
-from app.db.models import Asset, BrandVoice, Plan, ProviderConfig, Subscription
+from app.db.models import Asset, BrandVoice
 from app.main import app
 
 
@@ -38,33 +38,37 @@ class _CloneProvider:
     async def clone_voice(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.clone_calls.append(dict(payload))
         return {
-            "speaker_id": str(payload.get("speaker_id") or "brand-speaker-upload"),
+            "speaker_id": "brand-speaker-upload",
             "status": "ready",
-            "provider": "doubao-voice-clone",
+            "provider": "cosyvoice-voice-clone",
         }
 
     async def delete_voice(self, payload: dict[str, Any]) -> dict[str, Any]:
         return {"released": True}
 
 
-def _grant_huading_access(db, tenant_id: str) -> None:
-    plan = db.scalar(select(Plan).where(Plan.code == "huading"))
-    if plan is None:
-        plan = Plan(
-            code="huading",
-            name="Huading Plan",
-            price_cents=0,
-            period="monthly",
-            quota_credits=0,
-            is_active=True,
-        )
-        db.add(plan)
-        db.flush()
-    subscription = db.scalar(
-        select(Subscription).where(Subscription.tenant_id == tenant_id)
+def _create_cosyvoice(
+    client: TestClient,
+    *,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    idempotency_key: str,
+):
+    estimate = client.post(
+        "/api/v1/brand-voices/estimate",
+        json=payload,
+        headers=headers,
     )
-    assert subscription is not None
-    subscription.plan_id = plan.id
+    assert estimate.status_code == 200
+    return client.post(
+        "/api/v1/brand-voices",
+        json=payload,
+        headers={
+            **headers,
+            "Idempotency-Key": idempotency_key,
+            "X-Huading-Quote": estimate.json()["data"]["quote_token"],
+        },
+    )
 
 
 def test_upload_audio_creates_tenant_scoped_audio_asset(auth_context, auth_db, monkeypatch):
@@ -221,18 +225,6 @@ def test_upload_audio_then_create_brand_voice_without_direct_db_audio_seed(
         lambda _db, *, tenant_id, capability, provider: provider_obj,
     )
     provider_obj = provider
-    with auth_db() as db:
-        _grant_huading_access(db, auth_context["tenant_id"])
-        db.add(
-            ProviderConfig(
-                tenant_id=None,
-                capability="voice_clone",
-                provider="doubao-voice-clone",
-                config={"speaker_ids": ["S_upload_slot_001"]},
-                is_active=True,
-            )
-        )
-        db.commit()
     app.dependency_overrides[get_object_storage] = lambda: storage
     client = TestClient(app)
     try:
@@ -243,24 +235,29 @@ def test_upload_audio_then_create_brand_voice_without_direct_db_audio_seed(
         )
         assert upload_resp.status_code == 201
 
-        create_resp = client.post(
-            "/api/v1/brand-voices",
-            json={
+        create_resp = _create_cosyvoice(
+            client,
+            headers=auth_context["headers"],
+            idempotency_key="11111111-1111-4111-8111-111111111111",
+            payload={
                 "name": "Uploaded Voice",
                 "source_audio_asset_id": upload_resp.json()["data"]["asset_id"],
                 "consent_confirmed": True,
+                "provider": "cosyvoice",
             },
-            headers=auth_context["headers"],
         )
     finally:
         app.dependency_overrides.pop(get_object_storage, None)
 
-    assert create_resp.status_code == 201
+    assert create_resp.status_code == 201, create_resp.json()
     created = create_resp.json()["data"]
     assert created["status"] == "ready"
-    assert provider.clone_calls[0]["speaker_id"] == "S_upload_slot_001"
-    assert provider.clone_calls[0]["source_audio_bytes"] == b"ID3 fake mp3 bytes"
-    assert "source_audio_url" not in provider.clone_calls[0]
+    assert created["billing"]["requested_credits"] == 0
+    assert provider.clone_calls[0]["source_audio_url"].startswith(
+        f"https://storage.test/tenants/{auth_context['tenant_id']}/uploads/"
+    )
+    assert provider.clone_calls[0]["source_audio_url"].endswith(".mp3")
+    assert "source_audio_bytes" not in provider.clone_calls[0]
     with auth_db() as db:
         audio_assets = list(db.scalars(select(Asset).where(Asset.type == "audio")))
         assert len(audio_assets) == 1
@@ -286,16 +283,6 @@ def test_create_brand_voice_accepts_historical_codec_param_audio_asset(
     )
     provider_obj = provider
     with auth_db() as db:
-        _grant_huading_access(db, auth_context["tenant_id"])
-        db.add(
-            ProviderConfig(
-                tenant_id=None,
-                capability="voice_clone",
-                provider="doubao-voice-clone",
-                config={"speaker_ids": ["S_legacy_slot_001"]},
-                is_active=True,
-            )
-        )
         asset = Asset(
             tenant_id=auth_context["tenant_id"],
             type="audio",
@@ -317,19 +304,22 @@ def test_create_brand_voice_accepts_historical_codec_param_audio_asset(
     )
     client = TestClient(app)
     try:
-        create_resp = client.post(
-            "/api/v1/brand-voices",
-            json={
+        create_resp = _create_cosyvoice(
+            client,
+            headers=auth_context["headers"],
+            idempotency_key="22222222-2222-4222-8222-222222222222",
+            payload={
                 "name": "Legacy WebM Voice",
                 "source_audio_asset_id": asset_id,
                 "consent_confirmed": True,
+                "provider": "cosyvoice",
             },
-            headers=auth_context["headers"],
         )
     finally:
         app.dependency_overrides.pop(get_object_storage, None)
 
-    assert create_resp.status_code == 201
+    assert create_resp.status_code == 201, create_resp.json()
     assert provider.clone_calls[0]["source_audio_asset_id"] == asset_id
-    assert provider.clone_calls[0]["speaker_id"] == "S_legacy_slot_001"
-    assert provider.clone_calls[0]["source_audio_bytes"] == b"legacy webm bytes"
+    assert provider.clone_calls[0]["source_audio_url"].endswith(
+        f"tenants/{auth_context['tenant_id']}/uploads/legacy.webm"
+    )

@@ -7,6 +7,7 @@ const est = vi.hoisted(() => ({
   mutate: vi.fn(),
   reset: vi.fn(),
   isPending: false,
+  isError: false,
   data: undefined as { estimated_credits: number; unit: string; note?: string } | undefined
 }));
 
@@ -15,6 +16,7 @@ vi.mock("@/lib/api/hooks", () => ({
     mutate: est.mutate,
     reset: est.reset,
     isPending: est.isPending,
+    isError: est.isError,
     data: est.data
   })
 }));
@@ -27,6 +29,7 @@ beforeEach(() => {
   est.mutate.mockClear();
   est.reset.mockClear();
   est.isPending = false;
+  est.isError = false;
   est.data = undefined;
 });
 afterEach(() => vi.clearAllMocks());
@@ -62,16 +65,20 @@ describe("ConfirmGenerateDialog", () => {
     expect(screen.getByText("估算中…")).toBeInTheDocument();
   });
 
-  it("falls back gracefully when the estimate is unavailable (404/error), still confirmable", () => {
+  it("fails closed when the estimate is unavailable and never confirms an unpriced request", () => {
+    est.isError = true;
     est.data = undefined;
     const onConfirm = vi.fn();
     renderDialog({ onConfirm });
-    expect(screen.getByText("暂无法预估，按实际结算")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "确定" }));
-    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("alert")).toHaveTextContent("暂时无法获取价格，请稍后重试");
+    const confirm = screen.getByRole("button", { name: "确定" });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 
   it("确定 → onConfirm, 取消 → onCancel", () => {
+    est.data = { estimated_credits: 12, unit: "credits" };
     const onConfirm = vi.fn();
     const onCancel = vi.fn();
     renderDialog({ onConfirm, onCancel });

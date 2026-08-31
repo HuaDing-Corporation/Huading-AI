@@ -404,6 +404,40 @@ def test_scene_prompt_usage_skips_results_without_usage_or_cost() -> None:
     assert record is None
 
 
+def test_scene_prompt_attachment_rejects_invalid_supplier_telemetry() -> None:
+    """Negative or fractional supplier values must not be silently converted to zero."""
+    from app.db.models import UsageRecord
+    from app.services.provider_costs import attach_scene_prompt_usage
+
+    record = UsageRecord(
+        tenant_id="tenant-1",
+        capability="scene_prompt",
+        provider="quoted-provider",
+        model="quoted-model",
+        unit="call",
+        quantity=Decimal("1"),
+        credits=Decimal("30"),
+        cost_cents=0,
+        status="reserved",
+    )
+
+    attach_scene_prompt_usage(
+        record,
+        result={
+            "provider": "apimart",
+            "model": "gpt-5.6-luna",
+            "prompt_tokens": -1,
+            "completion_tokens": 1.5,
+            "cost_cents": -3,
+        },
+    )
+
+    assert record.provider == "quoted-provider"
+    assert record.model == "quoted-model"
+    assert record.provider_usage is None
+    assert record.cost_cents == 0
+
+
 def test_scene_prompt_provider_resolves_with_platform_config_overrides() -> None:
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",

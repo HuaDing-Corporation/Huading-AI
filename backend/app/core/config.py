@@ -64,6 +64,7 @@ class Settings(BaseSettings):
 
     jwt_secret_key: str = Field(min_length=32)
     jwt_algorithm: str = "HS256"
+    quote_token_algorithm: Literal["HS256"] = "HS256"
     access_token_expire_minutes: int = 1440
 
     # Readiness probe timeouts so an unreachable dependency degrades fast
@@ -152,6 +153,9 @@ class Settings(BaseSettings):
     engine_doubao_voice_clone_access_token: str = ""
     engine_doubao_voice_clone_api_key: str = ""
     engine_doubao_voice_clone_speaker_ids: Annotated[list[str], NoDecode] = Field(
+        default_factory=list
+    )
+    engine_doubao_official_voice_ids: Annotated[list[str], NoDecode] = Field(
         default_factory=list
     )
     engine_doubao_voice_clone_resource_id: str = "volc.megatts.voiceclone"
@@ -290,6 +294,7 @@ class Settings(BaseSettings):
         "cors_origins",
         "engine_cors_origins",
         "engine_doubao_voice_clone_speaker_ids",
+        "engine_doubao_official_voice_ids",
         mode="before",
     )
     @classmethod

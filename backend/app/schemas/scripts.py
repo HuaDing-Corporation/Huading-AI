@@ -2,6 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.services.billing_operations import BillingSummary
+
 
 class ScriptGenerateRequest(BaseModel):
     topic: str = Field(min_length=1, max_length=500)
@@ -17,3 +19,4 @@ class ScriptGenerateRequest(BaseModel):
 
 class ScriptGenerateResponse(BaseModel):
     script: str
+    billing: BillingSummary

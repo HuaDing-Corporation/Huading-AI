@@ -10,19 +10,54 @@ import {
   type ReactNode
 } from "react";
 
+import { billingFromApiError, getBillingOperation, parseBillingSummary } from "@/lib/api/billing";
 import { ApiError } from "@/lib/api/client";
-import { createVideo, getVideo, listVideos, streamVideoEvents } from "@/lib/api/videos";
-import type { CreateVideoRequest, VideoDetail, VideoEvent, VideoListItem } from "@/lib/api/types";
+import { createVideo, estimateVideo, getVideo, listVideos, streamVideoEvents } from "@/lib/api/videos";
+import type {
+  BillingConfirmation,
+  BillingOperationLookupFor,
+  BillingSummary,
+  CreateVideoRequest,
+  VideoAcceptedContract,
+  VideoDetail,
+  VideoEstimateContract,
+  VideoEvent,
+  VideoListItem,
+  VideoPricingContext
+} from "@/lib/api/types";
 import { useAuth } from "@/lib/auth/auth-context";
 import { HARD_CAP_MS, POLL_MS, STALL_MS } from "@/lib/sse/constants";
-import { eventToProgress, fromVideoRead, TERMINAL, type TrackedTask } from "@/lib/sse/progress-mapping";
+import { eventToProgress, fromVideoRead, labelFor, mapSseStatus, TERMINAL, type TrackedTask } from "@/lib/sse/progress-mapping";
 
 export type { TrackedTask, UiStatus } from "@/lib/sse/progress-mapping";
+
+export type VideoPricingAttempt =
+  | {
+      estimate: Extract<VideoEstimateContract, { pricing_contract: "billing_quote" }>;
+      confirmation: BillingConfirmation;
+      pricingContext: VideoPricingContext;
+    }
+  | {
+      estimate: Extract<
+        VideoEstimateContract,
+        { pricing_contract: "legacy_estimate" | "deferred_unpriced" }
+      >;
+      confirmation?: never;
+    };
+
+interface CreateAndTrack {
+  (req: CreateVideoRequest, topic: string): Promise<string>;
+  (
+    req: CreateVideoRequest,
+    topic: string,
+    pricing: VideoPricingAttempt
+  ): Promise<VideoAcceptedContract>;
+}
 
 interface TasksContextValue {
   tasks: TrackedTask[];
   /** Submit a video; resolves to the task id or throws an ApiError. */
-  createAndTrack: (req: CreateVideoRequest, topic: string) => Promise<string>;
+  createAndTrack: CreateAndTrack;
   /** Re-fetch one video (e.g. to refresh an expired presigned playback URL). */
   refreshTask: (taskId: string) => Promise<void>;
   /**
@@ -43,6 +78,8 @@ const TasksContext = createContext<TasksContextValue | null>(null);
 // Watchdog cadence: tick at most every second in production (STALL_MS is large),
 // but follow a tiny STALL_MS in tests so a forced stall is detected promptly.
 const WATCHDOG_TICK_MS = Math.min(1000, STALL_MS);
+const VIDEO_RECOVERY_LOOKUP_ATTEMPTS = 3;
+const VIDEO_RECOVERY_LOOKUP_INTERVAL_MS = 1_000;
 
 interface TaskMeta {
   lastProgressAt: number;
@@ -51,13 +88,151 @@ interface TaskMeta {
   lastStep: string | null;
 }
 
+interface StoredRequest {
+  req: CreateVideoRequest;
+  topic: string;
+  pricing_contract: VideoAcceptedContract["pricing_contract"];
+  operation: "video_create" | null;
+  confirmation: BillingConfirmation | null;
+  estimate: VideoEstimateContract | null;
+  pricingContext: VideoPricingContext | null;
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function terminalBillingForAttempt(
+  error: unknown,
+  confirmation: BillingConfirmation
+): BillingSummary | null {
+  const billing = billingFromApiError(error);
+  return billing &&
+    billing.status !== "reserved" &&
+    billing.idempotency_key.toLowerCase() === confirmation.idempotency_key.toLowerCase()
+    ? billing
+    : null;
+}
+
+function videoFailureMessage(billing: BillingSummary): string {
+  if (billing.status === "settled" && billing.requested_credits === 0) {
+    return "视频生成未完成，本次为免费服务，未扣积分。";
+  }
+  if (billing.status === "settled") {
+    return `视频生成未完成，已结算 ${billing.settled_credits} 积分。`;
+  }
+  if (billing.status === "partially_settled") {
+    return `视频生成未完成，已结算 ${billing.settled_credits} 积分，已释放 ${billing.released_credits} 积分。`;
+  }
+  if (billing.status === "released") {
+    return `视频生成未完成，未扣款，已释放 ${billing.released_credits} 积分。`;
+  }
+  return "视频生成结果与计费仍在确认中。";
+}
+
+function withAuthoritativeBillingMessage(error: ApiError, billing: BillingSummary): ApiError {
+  return new ApiError(
+    videoFailureMessage(billing),
+    error.code,
+    error.status,
+    error.detail,
+    error.outcome
+  );
+}
+
+function isUnknownVideoPost(error: unknown): boolean {
+  return (
+    !(error instanceof ApiError) ||
+    error.status === 0 ||
+    error.status === 502 ||
+    error.status === 503 ||
+    error.status === 504 ||
+    error.code === "INVALID_VIDEO_ACCEPTED_CONTRACT"
+  );
+}
+
+function acceptedFromVideoLookup(
+  lookup: BillingOperationLookupFor<"video_create">
+): VideoAcceptedContract | null {
+  if (lookup.state === "completed" && lookup.completion_kind === "failed") {
+    const billing = parseBillingSummary(lookup.billing);
+    if (!billing) {
+      throw new ApiError("计费结果确认中", "INVALID_BILLING_RESPONSE", 502, {
+        billing: lookup.billing
+      });
+    }
+    const detail = record(lookup.failure.detail)
+      ? { ...lookup.failure.detail, billing }
+      : { failure_detail: lookup.failure.detail, billing };
+    throw new ApiError(
+      videoFailureMessage(billing),
+      lookup.failure.code,
+      lookup.failure.original_http_status,
+      detail
+    );
+  }
+  if (
+    lookup.state === "completed" &&
+    lookup.completion_kind === "succeeded" &&
+    lookup.result_type === "video_task"
+  ) {
+    return {
+      id: lookup.result.task_id,
+      task_id: lookup.result.task_id,
+      status: lookup.result.status,
+      pricing_contract: "billing_quote",
+      billing: lookup.billing
+    };
+  }
+  if (
+    lookup.state === "in_progress" &&
+    lookup.result_type === "video_task" &&
+    lookup.resource
+  ) {
+    return {
+      id: lookup.resource.task_id,
+      task_id: lookup.resource.task_id,
+      status: lookup.resource.status,
+      pricing_contract: "billing_quote",
+      billing: lookup.billing
+    };
+  }
+  return null;
+}
+
+function waitForNextVideoRecoveryLookup(): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, VIDEO_RECOVERY_LOOKUP_INTERVAL_MS);
+  });
+}
+
+async function recoverUnknownBilledVideo(
+  confirmation: BillingConfirmation
+): Promise<VideoAcceptedContract> {
+  for (let attempt = 0; attempt < VIDEO_RECOVERY_LOOKUP_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) await waitForNextVideoRecoveryLookup();
+
+    let lookup: BillingOperationLookupFor<"video_create">;
+    try {
+      lookup = await getBillingOperation("video_create", confirmation.idempotency_key);
+    } catch {
+      continue;
+    }
+
+    const recovered = acceptedFromVideoLookup(lookup);
+    if (recovered) return recovered;
+  }
+
+  throw new ApiError("计费结果确认中", "BILLING_RESULT_PENDING", 0);
+}
+
 export function VideoTasksProvider({ children }: { children: ReactNode }) {
   const [tasks, setTasks] = useState<TrackedTask[]>([]);
   const controllers = useRef<Map<string, AbortController>>(new Map());
   const timers = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
   const meta = useRef<Map<string, TaskMeta>>(new Map());
-  /** Original CreateVideoRequest keyed by taskId — used to re-submit on retry. */
-  const requests = useRef<Map<string, { req: CreateVideoRequest; topic: string }>>(new Map());
+  /** Original request + pricing attempt keyed by taskId — used for recovery/retry. */
+  const requests = useRef<Map<string, StoredRequest>>(new Map());
   const hydratedRef = useRef(false);
   const { session } = useAuth();
 
@@ -216,30 +391,80 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
     [applyEvent, pollFallback, refreshTask, startWatchdog, stopWatchdog]
   );
 
+  const registerAccepted = useCallback((
+    accepted: VideoAcceptedContract,
+    req: CreateVideoRequest,
+    topic: string,
+    pricing?: VideoPricingAttempt
+  ) => {
+    const status = mapSseStatus(accepted.status);
+    requests.current.set(accepted.id, {
+      req,
+      topic,
+      pricing_contract: accepted.pricing_contract,
+      operation: accepted.pricing_contract === "billing_quote" ? "video_create" : null,
+      confirmation: pricing?.confirmation ?? null,
+      estimate: pricing?.estimate ?? null,
+      pricingContext: pricing && "pricingContext" in pricing ? pricing.pricingContext : null
+    });
+    setTasks((prev) => [
+      {
+        taskId: accepted.id,
+        topic,
+        mode: req.video_mode ?? null,
+        status,
+        progress: status === "done" ? 100 : 0,
+        statusLabel: labelFor(status, status === "done" ? 100 : 0),
+        applyVisibleLabel: req.apply_visible_label ?? false,
+        startedAt: Date.now(),
+        retryable: true
+      },
+      ...prev.filter((task) => task.taskId !== accepted.id)
+    ]);
+    if (!TERMINAL.includes(status)) subscribe(accepted.id);
+  }, [subscribe]);
+
   const createAndTrack = useCallback(
-    async (req: CreateVideoRequest, topic: string): Promise<string> => {
-      const accepted = await createVideo(req);
-      // Store the original request so retryTask can re-submit it later.
-      requests.current.set(accepted.id, { req, topic });
-      setTasks((prev) => [
-        {
-          taskId: accepted.id,
-          topic,
-          mode: req.video_mode ?? null,
-          status: "queued",
-          progress: 0,
-          statusLabel: "排队中",
-          applyVisibleLabel: req.apply_visible_label ?? false, // session 卡即时徽标（LABEL-TOGGLE-UI-0001）
-          startedAt: Date.now(), // 诚实计时基准（GEN-HEARTBEAT-UI-0001）；随后 reconcile 会用 BE created_at 校准
-          retryable: true // we hold this request → retry can re-submit it (P2-1)
-        },
-        ...prev
-      ]);
-      subscribe(accepted.id);
-      return accepted.id;
+    async (
+      req: CreateVideoRequest,
+      topic: string,
+      pricing?: VideoPricingAttempt
+    ): Promise<string | VideoAcceptedContract> => {
+      const confirmation =
+        pricing?.estimate.pricing_contract === "billing_quote" ? pricing.confirmation : undefined;
+      if (
+        pricing?.estimate.pricing_contract === "billing_quote" &&
+        Date.parse(pricing.estimate.expires_at) <= Date.now()
+      ) {
+        throw new ApiError("报价已过期，请重新获取价格。", "QUOTE_EXPIRED", 409);
+      }
+
+      let accepted: VideoAcceptedContract;
+      try {
+        accepted = await createVideo(req, confirmation);
+      } catch (caught) {
+        if (confirmation) {
+          const terminalBilling = terminalBillingForAttempt(caught, confirmation);
+          if (terminalBilling && caught instanceof ApiError) {
+            throw withAuthoritativeBillingMessage(caught, terminalBilling);
+          }
+        }
+        if (!confirmation || !isUnknownVideoPost(caught)) throw caught;
+        accepted = await recoverUnknownBilledVideo(confirmation);
+      }
+
+      if (pricing && accepted.pricing_contract !== pricing.estimate.pricing_contract) {
+        throw new ApiError(
+          "视频创建响应与已确认的定价分支不一致。",
+          "INVALID_VIDEO_ACCEPTED_CONTRACT",
+          502
+        );
+      }
+      registerAccepted(accepted, req, topic, pricing);
+      return pricing ? accepted : accepted.id;
     },
-    [subscribe]
-  );
+    [registerAccepted]
+  ) as CreateAndTrack;
 
   // Track a backend-created task (cutout/batch) by id — reuse subscribe()'s full
   // SSE/poll/watchdog/reconcile machinery; product lands in TaskList + image history.
@@ -280,9 +505,41 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
       if (!stored) {
         throw new Error(`No stored request for task ${taskId}`);
       }
-      return createAndTrack(stored.req, stored.topic);
+      const current = tasks.find((task) => task.taskId === taskId);
+      if (!current || current.status !== "failed") {
+        throw new ApiError("只有失败任务可以重新尝试。", "VIDEO_RETRY_NOT_ALLOWED", 409);
+      }
+
+      // Explicit retry always starts a new pricing attempt. The stored token/key
+      // remain available only for recovering the original POST and are never reused.
+      const freshEstimate = await estimateVideo(stored.req, stored.pricingContext);
+      let pricing: VideoPricingAttempt;
+      if (freshEstimate.pricing_contract === "billing_quote") {
+        if (!stored.pricingContext) {
+          throw new ApiError(
+            "缺少原任务的音色报价校验信息。",
+            "INVALID_VIDEO_PRICING_CONTEXT",
+            409
+          );
+        }
+        if (Date.parse(freshEstimate.expires_at) <= Date.now()) {
+          throw new ApiError("报价已过期，请重新获取价格。", "QUOTE_EXPIRED", 409);
+        }
+        pricing = {
+          estimate: freshEstimate,
+          pricingContext: stored.pricingContext,
+          confirmation: {
+            quote_token: freshEstimate.quote_token,
+            idempotency_key: globalThis.crypto.randomUUID()
+          }
+        };
+      } else {
+        pricing = { estimate: freshEstimate };
+      }
+      const accepted = await createAndTrack(stored.req, stored.topic, pricing);
+      return accepted.id;
     },
-    [createAndTrack]
+    [createAndTrack, tasks]
   );
 
   // Hydrate the list once we have a session (B4) and resume in-flight tasks.

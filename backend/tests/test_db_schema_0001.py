@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 from app.db.models import (
     Asset,
     Base,
+    BillingOperation,
     CreditRate,
     Plan,
     Subscription,
@@ -232,6 +233,62 @@ def test_db_schema_0001_usage_record_money_and_credit_columns() -> None:
         and "char" in str(constraint.sqltext)
         for constraint in usage_records.constraints
         if isinstance(constraint, CheckConstraint)
+    )
+
+
+def test_db_schema_0001_billing_operation_ledger_contract() -> None:
+    operations = Base.metadata.tables["billing_operations"]
+    usage_records = Base.metadata.tables["usage_records"]
+
+    assert operations is BillingOperation.__table__
+    assert {
+        "id",
+        "tenant_id",
+        "user_id",
+        "operation",
+        "idempotency_key",
+        "request_hash",
+        "quote_hash",
+        "pricing_snapshot",
+        "requested_credits",
+        "settled_credits",
+        "released_credits",
+        "status",
+        "completion_kind",
+        "completed_at",
+        "result_type",
+        "result_id",
+        "result_payload",
+        "error_code",
+        "error_http_status",
+        "error_payload",
+        "created_at",
+        "updated_at",
+    } <= set(operations.c.keys())
+    assert {
+        "billing_operation_id",
+        "billing_item_index",
+        "billing_pricing_line_index",
+        "provider_usage",
+    } <= set(usage_records.c.keys())
+    assert {
+        "uq_billing_operations_tenant_user_operation_idempotency_key"
+    } <= {constraint.name for constraint in operations.constraints}
+    assert {
+        "uq_usage_records_billing_operation_item_index"
+    } <= {constraint.name for constraint in usage_records.constraints}
+    assert any(
+        constraint.name == "ck_billing_operations_state"
+        and "settled_credits + released_credits = requested_credits"
+        in str(constraint.sqltext)
+        for constraint in operations.constraints
+        if isinstance(constraint, CheckConstraint)
+    )
+    assert any(
+        foreign_key.column.table.name == "billing_operations"
+        and foreign_key.ondelete == "RESTRICT"
+        for foreign_key in usage_records.foreign_keys
+        if foreign_key.parent.name == "billing_operation_id"
     )
 
 

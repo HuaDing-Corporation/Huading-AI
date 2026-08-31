@@ -1,23 +1,27 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.exceptions import AppError
 from app.db.models import (
     Asset,
+    BillingOperation,
     CreditRate,
+    CreditRefundGrant,
     ReversePromptJob,
     Subscription,
     UsageRecord,
     VideoTask,
 )
 from app.services import provider_costs
+from app.services.pricing import DEFAULT_RATE_CREDITS, PRICING_POLICIES, resolve_rate
 
 _SCRIPT_CPS = Decimal("5")
 _MIN_SECONDS = Decimal("3")
@@ -39,7 +43,6 @@ _IMAGE_RESOLUTION_MULTIPLIERS = {
     "4k": Decimal("2.2500"),
 }
 _COSYVOICE_CLONE_PROVIDER = "cosyvoice-voice-clone"
-_VOICE_CLONE_DEFAULT_CREDITS = Decimal("30000.0000")
 _REVERSE_PROMPT_VIDEO_SHORT_MAX_DURATION_MS = 60_000
 _REVERSE_PROMPT_VIDEO_MAX_DURATION_MS = 180_000
 
@@ -59,6 +62,18 @@ class Reservation:
     usage_record: UsageRecord
     estimated_seconds: int
     estimated_credits: Decimal
+
+
+@dataclass(frozen=True)
+class TenantQuotaSnapshot:
+    has_active_subscription: bool
+    active_subscription_id: str | None
+    total: int
+    used: int
+    reserved: int
+    remaining: int
+    manual_fulfillment_held_credits: int
+    pending_refund_credits: int
 
 
 def active_subscription(db: Session, tenant_id: str) -> Subscription:
@@ -112,6 +127,22 @@ def lock_active_subscription(db: Session, *, tenant_id: str) -> Subscription:
     return _active_subscription_for_update(db, tenant_id)
 
 
+def reserve_locked_subscription_credits(
+    subscription: Subscription,
+    *,
+    requested_credits: int,
+) -> None:
+    if requested_credits < 0:
+        raise ValueError("requested_credits must be non-negative")
+    if remaining_credits(subscription) < requested_credits:
+        raise AppError(
+            "Insufficient tenant quota.",
+            code="TENANT_QUOTA_EXCEEDED",
+            status_code=403,
+        )
+    subscription.quota_credits_reserved += requested_credits
+
+
 def _subscription_for_update(
     db: Session,
     subscription_id: str,
@@ -122,6 +153,58 @@ def _subscription_for_update(
         .with_for_update()
         .execution_options(populate_existing=True)
     )
+
+
+def lock_subscription_for_billing(
+    db: Session,
+    *,
+    subscription_id: str,
+) -> Subscription:
+    subscription = _subscription_for_update(db, subscription_id)
+    if subscription is None:
+        raise AppError(
+            "Billing subscription not found.",
+            code="BILLING_INVARIANT_VIOLATION",
+            status_code=500,
+        )
+    return subscription
+
+
+def lock_subscriptions_for_billing(
+    db: Session,
+    *,
+    subscription_ids: Sequence[str],
+) -> list[Subscription]:
+    ordered_ids = sorted(set(subscription_ids))
+    if not ordered_ids:
+        return []
+    return list(
+        db.scalars(
+            select(Subscription)
+            .where(Subscription.id.in_(ordered_ids))
+            .order_by(Subscription.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    )
+
+
+def settle_locked_subscription_credits(
+    subscription: Subscription,
+    *,
+    requested_credits: int,
+    settled_credits: int,
+) -> None:
+    if not 0 <= settled_credits <= requested_credits:
+        raise ValueError("settled credits must be within the reservation")
+    if subscription.quota_credits_reserved < requested_credits:
+        raise AppError(
+            "Billing reservation is not conserved.",
+            code="BILLING_INVARIANT_VIOLATION",
+            status_code=500,
+        )
+    subscription.quota_credits_reserved -= requested_credits
+    subscription.quota_credits_used += settled_credits
 
 
 def _lock_video_task_for_quota(
@@ -219,6 +302,62 @@ def quota_payload(subscription: Subscription) -> dict[str, int]:
         "reserved": subscription.quota_credits_reserved,
         "remaining": remaining_credits(subscription),
     }
+
+
+def tenant_quota_snapshot(db: Session, *, tenant_id: str) -> TenantQuotaSnapshot:
+    now = datetime.now(UTC)
+    subscription = db.scalar(
+        select(Subscription)
+        .where(
+            Subscription.tenant_id == tenant_id,
+            Subscription.status == "active",
+            Subscription.period_start <= now,
+            Subscription.period_end >= now,
+        )
+        .order_by(Subscription.period_end.desc(), Subscription.id)
+        .limit(1)
+    )
+    held_credits = db.scalar(
+        select(func.coalesce(func.sum(BillingOperation.requested_credits), 0)).where(
+            BillingOperation.tenant_id == tenant_id,
+            BillingOperation.status == "in_progress",
+            BillingOperation.operation.in_(
+                (
+                    "doubao_brand_voice_order_create",
+                    "doubao_brand_voice_order_renew",
+                )
+            ),
+            select(UsageRecord.id)
+            .where(
+                UsageRecord.billing_operation_id == BillingOperation.id,
+                UsageRecord.status == "reserved",
+            )
+            .exists(),
+        )
+    )
+    pending_refund_credits = db.scalar(
+        select(func.coalesce(func.sum(CreditRefundGrant.amount_credits), 0)).where(
+            CreditRefundGrant.tenant_id == tenant_id,
+            CreditRefundGrant.status == "pending",
+        )
+    )
+    if subscription is None:
+        total = used = reserved = remaining = 0
+    else:
+        total = int(subscription.quota_credits_total)
+        used = int(subscription.quota_credits_used)
+        reserved = int(subscription.quota_credits_reserved)
+        remaining = total - used - reserved
+    return TenantQuotaSnapshot(
+        has_active_subscription=subscription is not None,
+        active_subscription_id=subscription.id if subscription is not None else None,
+        total=total,
+        used=used,
+        reserved=reserved,
+        remaining=remaining,
+        manual_fulfillment_held_credits=int(held_credits or 0),
+        pending_refund_credits=int(pending_refund_credits or 0),
+    )
 
 
 def _rate(
@@ -324,14 +463,14 @@ def estimate_avatar_talk_quota(
         tenant_id=tenant_id,
         capability="avatar",
         unit="second",
-        default=Decimal("150.0000"),
+        default=DEFAULT_RATE_CREDITS[("avatar", "second")],
     )
     tts_rate = _rate(
         db,
         tenant_id=tenant_id,
         capability="tts",
         unit="character",
-        default=Decimal("0.1000"),
+        default=DEFAULT_RATE_CREDITS[("tts", "character")],
     )
     credits = (
         Decimal(seconds) * avatar_rate + Decimal(len(script or "")) * tts_rate
@@ -362,14 +501,14 @@ def estimate_seedance_i2v_quota(
         tenant_id=tenant_id,
         capability="video",
         unit="second",
-        default=Decimal("80.0000"),
+        default=DEFAULT_RATE_CREDITS[("video", "second")],
     )
     tts_rate = _rate(
         db,
         tenant_id=tenant_id,
         capability="tts",
         unit="character",
-        default=Decimal("0.1000"),
+        default=DEFAULT_RATE_CREDITS[("tts", "character")],
     )
     credits = (
         Decimal(seconds) * video_rate * _video_resolution_multiplier(resolution)
@@ -405,7 +544,7 @@ def estimate_video_gen_quota(
         tenant_id=tenant_id,
         capability="video_gen",
         unit="second",
-        default=Decimal("80.0000"),
+        default=DEFAULT_RATE_CREDITS[("video_gen", "second")],
     )
     credits = (Decimal(seconds) * video_rate * multiplier).quantize(Decimal("0.01"))
     return QuotaEstimate(
@@ -430,7 +569,7 @@ def estimate_image_generation_quota(
         tenant_id=tenant_id,
         capability="image",
         unit="image",
-        default=Decimal("10.0000"),
+        default=DEFAULT_RATE_CREDITS[("image", "image")],
     )
     credits = (
         Decimal(count) * image_rate * _image_resolution_multiplier(resolution)
@@ -453,13 +592,11 @@ def estimate_voice_clone_quota(
     if provider == _COSYVOICE_CLONE_PROVIDER:
         credits = Decimal("0.00")
     else:
-        clone_rate = _rate(
+        clone_rate = resolve_rate(
             db,
             tenant_id=tenant_id,
-            capability="voice_clone",
-            unit="call",
-            default=_VOICE_CLONE_DEFAULT_CREDITS,
-        )
+            policy=PRICING_POLICIES["doubao_brand_voice_order_create"],
+        ).unit_credits
         credits = clone_rate.quantize(Decimal("0.01"))
     return QuotaEstimate(
         estimated_seconds=1,
@@ -504,7 +641,7 @@ def estimate_reverse_prompt_quota(
         tenant_id=tenant_id,
         capability="reverse_prompt",
         unit="call",
-        default=Decimal("1.0000"),
+        default=DEFAULT_RATE_CREDITS[("reverse_prompt", "call")],
     )
     credits = reverse_prompt_rate.quantize(Decimal("0.01"))
     return QuotaEstimate(
@@ -1290,7 +1427,7 @@ def _settled_componentized_credits(
         tenant_id=tenant_id,
         capability="tts",
         unit="character",
-        default=Decimal("0.1000"),
+        default=DEFAULT_RATE_CREDITS[("tts", "character")],
     )
     tts_credits = Decimal(_script_chars(task)) * tts_rate
     if record.capability == "avatar":
@@ -1299,7 +1436,7 @@ def _settled_componentized_credits(
             tenant_id=tenant_id,
             capability="avatar",
             unit="second",
-            default=Decimal("150.0000"),
+            default=DEFAULT_RATE_CREDITS[("avatar", "second")],
         )
     elif record.capability == "video" and (task.video_mode or task.mode) == "seedance_i2v":
         resolution = str((task.params or {}).get("resolution") or "720p")
@@ -1309,7 +1446,7 @@ def _settled_componentized_credits(
                 tenant_id=tenant_id,
                 capability="video",
                 unit="second",
-                default=Decimal("80.0000"),
+                default=DEFAULT_RATE_CREDITS[("video", "second")],
             )
             * _video_resolution_multiplier(resolution)
         )

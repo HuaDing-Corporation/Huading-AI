@@ -37,7 +37,7 @@ def _set_plan(db, *, tenant_id: str, plan_code: str) -> None:
     db.commit()
 
 
-def _assert_me_matches_doubao_gate(
+def _assert_me_entitlements_and_manual_doubao_order(
     client: TestClient,
     *,
     headers: dict[str, str],
@@ -63,16 +63,11 @@ def _assert_me_matches_doubao_gate(
         },
         headers=headers,
     )
-    error_code = clone_response.json()["error"]["code"]
-    if expected_entitlement:
-        assert clone_response.status_code == 404
-        assert error_code == "SOURCE_AUDIO_ASSET_NOT_FOUND"
-    else:
-        assert clone_response.status_code == 403
-        assert error_code == "VOICE_CLONE_PLAN_REQUIRED"
+    assert clone_response.status_code == 422
+    assert clone_response.json()["error"]["code"] == "DOUBAO_MANUAL_ORDER_REQUIRED"
 
 
-def test_creator_me_entitlement_tracks_live_plan_and_matches_doubao_gate(
+def test_creator_me_entitlement_tracks_live_plan_while_doubao_stays_manual(
     auth_context,
     auth_db,
 ) -> None:
@@ -83,7 +78,7 @@ def test_creator_me_entitlement_tracks_live_plan_and_matches_doubao_gate(
         user.role = "creator"
         db.commit()
 
-    _assert_me_matches_doubao_gate(
+    _assert_me_entitlements_and_manual_doubao_order(
         client,
         headers=auth_context["headers"],
         expected_entitlement=False,
@@ -92,7 +87,7 @@ def test_creator_me_entitlement_tracks_live_plan_and_matches_doubao_gate(
 
     with auth_db() as db:
         _set_plan(db, tenant_id=auth_context["tenant_id"], plan_code="huading")
-    _assert_me_matches_doubao_gate(
+    _assert_me_entitlements_and_manual_doubao_order(
         client,
         headers=auth_context["headers"],
         expected_entitlement=True,
@@ -101,7 +96,7 @@ def test_creator_me_entitlement_tracks_live_plan_and_matches_doubao_gate(
 
     with auth_db() as db:
         _set_plan(db, tenant_id=auth_context["tenant_id"], plan_code="free")
-    _assert_me_matches_doubao_gate(
+    _assert_me_entitlements_and_manual_doubao_order(
         client,
         headers=auth_context["headers"],
         expected_entitlement=False,
@@ -129,7 +124,7 @@ def test_platform_tenant_me_has_entitlements_without_subscription(
         db.delete(_active_subscription(db, auth_context["tenant_id"]))
         db.commit()
 
-    _assert_me_matches_doubao_gate(
+    _assert_me_entitlements_and_manual_doubao_order(
         TestClient(app),
         headers=auth_context["headers"],
         expected_entitlement=True,

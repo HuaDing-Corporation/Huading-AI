@@ -1,9 +1,12 @@
 import os
 from collections.abc import Generator
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event
+from sqlalchemy import String, cast, create_engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -11,7 +14,22 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-test-secret-test-secret-32"
 
 from app.api.deps import get_db_session
 from app.core.config import settings
-from app.db.models import Base, Plan
+from app.db.models import (
+    Asset,
+    Base,
+    BillingOperation,
+    BrandVoice,
+    BrandVoiceOrder,
+    BrandVoiceProviderId,
+    CreditRate,
+    CreditRefundGrant,
+    Plan,
+    ProviderConfig,
+    Subscription,
+    Tenant,
+    UsageRecord,
+    User,
+)
 from app.main import app
 
 
@@ -53,6 +71,394 @@ def auth_db():
     finally:
         app.dependency_overrides.pop(get_db_session, None)
         Base.metadata.drop_all(engine)
+
+
+@pytest.fixture
+def db_session():
+    """Small wallet-backed database used by billing service tests."""
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _enable_billing_sqlite_fk(dbapi_connection, _record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    session = factory()
+    now = datetime.now(UTC)
+    tenant = Tenant(id="tenant-a", slug="billing-a", name="Billing A")
+    user = User(
+        id="user-a",
+        tenant_id=tenant.id,
+        email="billing-a@example.com",
+        password_hash="hash",
+        role="creator",
+    )
+    plan = Plan(
+        id="plan-a",
+        code="billing-plan-a",
+        name="Billing Plan",
+        price_cents=0,
+        period="monthly",
+        quota_credits=100,
+    )
+    subscription = Subscription(
+        id="subscription-a",
+        tenant_id=tenant.id,
+        plan_id=plan.id,
+        status="active",
+        period_start=now - timedelta(days=1),
+        period_end=now + timedelta(days=30),
+        quota_credits_total=100,
+        quota_credits_used=0,
+        quota_credits_reserved=0,
+    )
+    session.add_all([tenant, plan])
+    session.flush()
+    session.add_all([user, subscription])
+    session.commit()
+    try:
+        yield session
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def _pricing_closure_snapshot(db: Session) -> dict[str, tuple[tuple[object, ...], ...]]:
+    def rows(*columns) -> tuple[tuple[object, ...], ...]:
+        return tuple(
+            tuple(row)
+            for row in db.execute(select(*columns).order_by(columns[0]))
+        )
+
+    return deepcopy(
+        {
+            "credit_rates": rows(
+                CreditRate.id,
+                CreditRate.tenant_id,
+                CreditRate.capability,
+                CreditRate.unit,
+                cast(CreditRate.credits_per_unit, String),
+                CreditRate.is_active,
+                CreditRate.effective_at,
+            ),
+            "subscriptions": rows(
+                Subscription.id,
+                Subscription.tenant_id,
+                Subscription.plan_id,
+                Subscription.status,
+                Subscription.period_start,
+                Subscription.period_end,
+                Subscription.quota_credits_total,
+                Subscription.quota_credits_used,
+                Subscription.quota_credits_reserved,
+                Subscription.created_at,
+                Subscription.updated_at,
+            ),
+            "billing_operations": rows(
+                BillingOperation.id,
+                BillingOperation.tenant_id,
+                BillingOperation.user_id,
+                BillingOperation.operation,
+                BillingOperation.idempotency_key,
+                BillingOperation.request_hash,
+                BillingOperation.quote_hash,
+                BillingOperation.pricing_snapshot,
+                BillingOperation.requested_credits,
+                BillingOperation.settled_credits,
+                BillingOperation.released_credits,
+                BillingOperation.status,
+                BillingOperation.completion_kind,
+                BillingOperation.completed_at,
+                BillingOperation.result_type,
+                BillingOperation.result_id,
+                BillingOperation.result_payload,
+                BillingOperation.error_code,
+                BillingOperation.error_http_status,
+                BillingOperation.error_payload,
+                BillingOperation.created_at,
+                BillingOperation.updated_at,
+            ),
+            "usage_records": rows(
+                UsageRecord.id,
+                UsageRecord.tenant_id,
+                UsageRecord.subscription_id,
+                UsageRecord.video_task_id,
+                UsageRecord.reverse_prompt_job_id,
+                UsageRecord.chat_message_id,
+                UsageRecord.billing_operation_id,
+                UsageRecord.billing_item_index,
+                UsageRecord.billing_pricing_line_index,
+                UsageRecord.capability,
+                UsageRecord.provider,
+                UsageRecord.model,
+                UsageRecord.unit,
+                UsageRecord.quantity,
+                UsageRecord.credits,
+                UsageRecord.cost_cents,
+                UsageRecord.provider_cost_usd,
+                UsageRecord.provider_usage,
+                UsageRecord.currency,
+                UsageRecord.status,
+                UsageRecord.created_at,
+                UsageRecord.settled_at,
+            ),
+            "credit_refund_grants": rows(
+                CreditRefundGrant.id,
+                CreditRefundGrant.billing_operation_id,
+                CreditRefundGrant.tenant_id,
+                CreditRefundGrant.user_id,
+                CreditRefundGrant.source_subscription_id,
+                CreditRefundGrant.target_subscription_id,
+                CreditRefundGrant.amount_credits,
+                CreditRefundGrant.status,
+                CreditRefundGrant.created_at,
+                CreditRefundGrant.applied_at,
+            ),
+            "provider_configs": rows(
+                ProviderConfig.id,
+                ProviderConfig.tenant_id,
+                ProviderConfig.capability,
+                ProviderConfig.provider,
+                ProviderConfig.config,
+                ProviderConfig.is_active,
+            ),
+            "provider_voice_registry": rows(
+                BrandVoiceProviderId.id,
+                BrandVoiceProviderId.provider,
+                BrandVoiceProviderId.normalized_provider_id,
+                BrandVoiceProviderId.kind,
+                BrandVoiceProviderId.brand_voice_id,
+                BrandVoiceProviderId.first_order_id,
+                BrandVoiceProviderId.status,
+                BrandVoiceProviderId.created_at,
+                BrandVoiceProviderId.updated_at,
+            ),
+            "brand_voices": rows(
+                BrandVoice.id,
+                BrandVoice.tenant_id,
+                BrandVoice.owner_user_id,
+                BrandVoice.name,
+                BrandVoice.source_audio_asset_id,
+                BrandVoice.provider,
+                BrandVoice.speaker_id,
+                BrandVoice.status,
+                BrandVoice.consent_confirmed,
+                BrandVoice.consent_confirmed_at,
+                BrandVoice.activated_at,
+                BrandVoice.expires_at,
+                BrandVoice.error_code,
+                BrandVoice.error_message,
+                BrandVoice.created_at,
+                BrandVoice.updated_at,
+                BrandVoice.deleted_at,
+            ),
+            "brand_voice_orders": rows(
+                BrandVoiceOrder.id,
+                BrandVoiceOrder.tenant_id,
+                BrandVoiceOrder.user_id,
+                BrandVoiceOrder.order_type,
+                BrandVoiceOrder.requested_name,
+                BrandVoiceOrder.source_audio_asset_id,
+                BrandVoiceOrder.source_metadata_snapshot,
+                BrandVoiceOrder.consent_confirmed_at,
+                BrandVoiceOrder.existing_brand_voice_id,
+                BrandVoiceOrder.billing_operation_id,
+                BrandVoiceOrder.status,
+                BrandVoiceOrder.fulfilled_brand_voice_id,
+                BrandVoiceOrder.fulfilled_provider_id,
+                BrandVoiceOrder.resolver_user_id,
+                BrandVoiceOrder.fulfilled_at,
+                BrandVoiceOrder.rejected_at,
+                BrandVoiceOrder.rejection_reason,
+                BrandVoiceOrder.created_at,
+                BrandVoiceOrder.updated_at,
+            ),
+            "source_assets": rows(
+                Asset.id,
+                Asset.tenant_id,
+                Asset.type,
+                Asset.source,
+                Asset.provider,
+                Asset.storage_key,
+                Asset.mime_type,
+                Asset.size_bytes,
+                Asset.duration_ms,
+                Asset.width,
+                Asset.height,
+                Asset.status,
+                Asset.metadata_,
+                Asset.created_at,
+                Asset.deleted_at,
+            ),
+        }
+    )
+
+
+@pytest.fixture
+def pricing_closure_snapshot():
+    return _pricing_closure_snapshot
+
+
+@pytest.fixture
+def seed_pricing_closure_state():
+    seeded_sessions: list[Session] = []
+
+    def seed(db: Session) -> dict[str, str]:
+        from app.services import provider_voice_registry
+
+        now = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+        secret = "provider-config-secret-value"
+        source_url = "https://private.example/source-audio.wav?signature=secret"
+        subscription = db.get(Subscription, "subscription-a")
+        subscription.quota_credits_reserved = 3
+        db.add_all(
+            [
+                Asset(
+                    id="cli-source-asset",
+                    tenant_id="tenant-a",
+                    type="audio",
+                    source="upload",
+                    provider="private-storage",
+                    storage_key="tenants/tenant-a/private/source-audio.wav",
+                    mime_type="audio/wav",
+                    size_bytes=1234,
+                    duration_ms=5000,
+                    status="ready",
+                    metadata_={"source_url": source_url},
+                ),
+                CreditRate(
+                    id="cli-preserved-rate",
+                    capability="image",
+                    unit="image",
+                    credits_per_unit=Decimal("7.0000"),
+                    is_active=False,
+                ),
+                BillingOperation(
+                    id="cli-billing-operation",
+                    tenant_id="tenant-a",
+                    user_id="user-a",
+                    operation="cosyvoice_brand_voice_create",
+                    idempotency_key="00000000-0000-0000-0000-000000000013",
+                    request_hash="r" * 64,
+                    quote_hash="q" * 64,
+                    pricing_snapshot={},
+                    requested_credits=Decimal("0"),
+                    settled_credits=Decimal("0"),
+                    released_credits=Decimal("0"),
+                    status="completed",
+                    completion_kind="succeeded",
+                    completed_at=now,
+                ),
+                ProviderConfig(
+                    id="cli-preserved-provider-config",
+                    capability="chat",
+                    provider="private-provider",
+                    config={
+                        "api_key": secret,
+                        "source_url": source_url,
+                        "nested": {"preserve": "exact-config-content"},
+                    },
+                    is_active=False,
+                ),
+                BrandVoice(
+                    id="cli-customer-brand-voice",
+                    tenant_id="tenant-a",
+                    owner_user_id="user-a",
+                    name="CLI Customer Voice",
+                    source_audio_asset_id="cli-source-asset",
+                    provider="doubao-voice-clone",
+                    status="ready",
+                    consent_confirmed=True,
+                    consent_confirmed_at=now,
+                    activated_at=now,
+                    expires_at=now + timedelta(days=30),
+                ),
+            ]
+        )
+        db.flush()
+        db.add_all(
+            [
+                UsageRecord(
+                    id="cli-preserved-usage",
+                    tenant_id="tenant-a",
+                    subscription_id="subscription-a",
+                    capability="image",
+                    provider="private-provider",
+                    model="private-model",
+                    unit="image",
+                    quantity=Decimal("1"),
+                    credits=Decimal("3"),
+                    cost_cents=0,
+                    provider_cost_usd=Decimal("0.01000000"),
+                    provider_usage={"trace": "usage-trace-secret"},
+                    status="reserved",
+                ),
+                CreditRefundGrant(
+                    id="cli-preserved-refund",
+                    billing_operation_id="cli-billing-operation",
+                    tenant_id="tenant-a",
+                    user_id="user-a",
+                    source_subscription_id="subscription-a",
+                    amount_credits=2,
+                    status="pending",
+                ),
+                BrandVoiceOrder(
+                    id="cli-brand-voice-order",
+                    tenant_id="tenant-a",
+                    user_id="user-a",
+                    order_type="create",
+                    requested_name="CLI Customer Voice",
+                    source_audio_asset_id="cli-source-asset",
+                    source_metadata_snapshot={"source_url": source_url},
+                    consent_confirmed_at=now,
+                    billing_operation_id="cli-billing-operation",
+                    status="awaiting_fulfillment",
+                ),
+            ]
+        )
+        db.flush()
+        customer = provider_voice_registry.claim_customer_provider_voice_id(
+            db,
+            provider_voice_id="cli-customer-provider-id",
+            brand_voice_id="cli-customer-brand-voice",
+            order_id="cli-brand-voice-order",
+        )
+        voice = db.get(BrandVoice, "cli-customer-brand-voice")
+        order = db.get(BrandVoiceOrder, "cli-brand-voice-order")
+        voice.speaker_id = customer.normalized_provider_id
+        order.status = "fulfilled"
+        order.fulfilled_brand_voice_id = voice.id
+        order.fulfilled_provider_id = customer.id
+        order.resolver_user_id = "user-a"
+        order.fulfilled_at = now
+        db.commit()
+        seeded_sessions.append(db)
+        return {
+            "secret": secret,
+            "source_url": source_url,
+            "customer_provider_id": customer.normalized_provider_id,
+            "other_provider": "private-provider",
+        }
+
+    yield seed
+
+    # The registry and fulfilled order intentionally form the production FK
+    # cycle. Clear this in-memory fixture after assertions so metadata teardown
+    # does not have to break that committed cycle.
+    for db in seeded_sessions:
+        db.rollback()
+        dbapi_connection = db.connection().connection.driver_connection
+        dbapi_connection.execute("PRAGMA foreign_keys=OFF")
+        for table in reversed(Base.metadata.sorted_tables):
+            dbapi_connection.execute(f'DELETE FROM "{table.name}"')
+        dbapi_connection.commit()
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
 
 @pytest.fixture

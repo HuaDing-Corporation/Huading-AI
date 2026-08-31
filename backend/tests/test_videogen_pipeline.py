@@ -488,8 +488,8 @@ def test_video_gen_1080p_quota_estimate_uses_resolution_multiplier(
         )
 
     assert estimate.estimated_seconds == 15
-    assert estimate.estimated_credits == Decimal("6000.00")
-    assert estimate.reservation_units == 6000
+    assert estimate.estimated_credits == Decimal("7500.00")
+    assert estimate.reservation_units == 7500
 
 
 def test_create_video_gen_validates_assets_reserves_quota_and_enqueues(
@@ -582,9 +582,9 @@ def test_create_video_gen_validates_assets_reserves_quota_and_enqueues(
         assert usage.model == "doubao-seedance-2.0"
         assert usage.status == "reserved"
         assert usage.quantity == Decimal("15")
-        assert usage.credits == Decimal("1200.00")
+        assert usage.credits == Decimal("1500.00")
         subscription = _subscription(db, auth_context["tenant_id"])
-        assert subscription.quota_credits_reserved == 1200
+        assert subscription.quota_credits_reserved == 1500
         assert subscription.quota_credits_used == 0
 
 
@@ -645,8 +645,8 @@ def test_create_video_gen_preserves_custom_provider_params_and_four_second_quota
         usage = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
         assert usage is not None
         assert usage.quantity == Decimal("4")
-        assert usage.credits == Decimal("320.00")
-        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 320
+        assert usage.credits == Decimal("400.00")
+        assert _subscription(db, auth_context["tenant_id"]).quota_credits_reserved == 400
 
 
 @pytest.mark.parametrize("duration_sec", [3, 16, 20])

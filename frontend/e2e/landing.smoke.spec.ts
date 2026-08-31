@@ -81,7 +81,10 @@ test("未登录进站=落地页；登录→控制台；已登录访 /landing=头
     await expect(page.getByRole("button", { name: "生成视频" })).toBeVisible({ timeout: 20_000 });
     // QuotaBadge 异步请求：必须等 mock 的真实长数字余额落屏后再量宽。少这一步会在余额尚未渲染时
     // 假绿，只有并行 E2E 稍慢时才偶发抓到 844/1000 把头像推到视口之外。
-    await expect(page.getByText("余额 844/1000", { exact: true })).toBeVisible();
+    await expect(page.getByText("当前余额 844/1000", { exact: true })).toBeVisible();
+    await expect(page.getByText("运行任务冻结 36", { exact: true })).toBeVisible();
+    await expect(page.getByText("人工交付冻结 30000", { exact: true })).toBeVisible();
+    await expect(page.getByText("待下期到账 0", { exact: true })).toBeVisible();
     // 无横向溢出：文档滚动宽度 = 视口宽度（多 1px 都算溢出）。
     const scrollW = await page.evaluate(() => document.documentElement.scrollWidth);
     expect(scrollW, `已登录 ${width}px 顶栏横向溢出：scrollWidth=${scrollW} > ${width}`).toBeLessThanOrEqual(width);
@@ -108,7 +111,7 @@ test("未登录进站=落地页；登录→控制台；已登录访 /landing=头
       `头像不在 ${width}px 首屏内：${JSON.stringify(avatarBox)}`
     ).toBe(true);
 
-    // 1024px 才恢复完整桌面套件；精确边界与 +1 都要钉住，避免以后又在 640px 一次性展开 849px 内容。
+    // 1024px 恢复完整桌面套件；精确边界与 +1 都钉住，避免桌面内容恢复后横向溢出。
     const desktopTopBar = width >= 1024;
     await expect(page.getByText("华鼎 AI", { exact: true })).toBeVisible({ visible: desktopTopBar });
     await expect(page.getByRole("textbox", { name: "搜索" })).toBeVisible({ visible: desktopTopBar });
@@ -116,6 +119,16 @@ test("未登录进站=落地页；登录→控制台；已登录访 /landing=头
     await expect(page.getByRole("button", { name: "设置" })).toBeVisible({ visible: desktopTopBar });
   }
   await page.setViewportSize({ width: 1280, height: 800 }); // 切回桌面继续 ③
+  await page.goto("/");
+  await expect(page.getByText("当前余额 844/1000", { exact: true })).toBeVisible();
+  await expect(page.getByText("运行任务冻结 36", { exact: true })).toBeVisible();
+  await expect(page.getByText("人工交付冻结 30000", { exact: true })).toBeVisible();
+  await expect(page.getByText("待下期到账 0", { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1280);
+  await expect(page.getByText("华鼎 AI", { exact: true })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "搜索" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "通知" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "设置" })).toBeVisible();
 
   // ③ 已登录显式访问 /landing → 头像态（首字圆标），下拉「进控制台」回 `/`。
   await page.goto("/landing");

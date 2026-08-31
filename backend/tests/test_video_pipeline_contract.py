@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -52,6 +53,24 @@ class _FakeStorage:
     ) -> str:
         suffix = "&download=1" if download_filename else ""
         return f"https://storage.test/{key}?ttl={expires_in}{suffix}"
+
+
+def _scene_submission_headers(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    payload: dict,
+) -> dict[str, str]:
+    quote = client.post(
+        "/api/v1/videos/scene-prompt/estimate",
+        json=payload,
+        headers=auth_headers,
+    )
+    assert quote.status_code == 200, quote.text
+    return {
+        **auth_headers,
+        "Idempotency-Key": str(uuid4()),
+        "X-Huading-Quote": quote.json()["data"]["quote_token"],
+    }
 
 
 def _tenant_storage(tenant_id: str, *relative_keys: str) -> _FakeStorage:
@@ -235,17 +254,21 @@ def test_avatar_talk_schema_accepts_exactly_one_avatar_source() -> None:
 
 def test_quota_returns_current_subscription_totals(auth_context, auth_db) -> None:
     with auth_db() as db:
-        _seed_billing(db, auth_context["tenant_id"])
+        subscription_id = _seed_billing(db, auth_context["tenant_id"]).id
 
     client = TestClient(app)
     resp = client.get("/api/v1/quota", headers=auth_context["headers"])
 
     assert resp.status_code == 200
     assert resp.json()["data"] == {
+        "has_active_subscription": True,
+        "active_subscription_id": subscription_id,
         "total": 100,
         "used": 25,
         "reserved": 5,
         "remaining": 70,
+        "manual_fulfillment_held_credits": 0,
+        "pending_refund_credits": 0,
     }
 
 
@@ -1907,6 +1930,7 @@ def test_video_estimate_seedance_i2v_matches_reserved_quota_with_tenant_rate(
 
     assert estimate_resp.status_code == 200
     assert estimate_resp.json()["data"] == {
+        "pricing_contract": "legacy_estimate",
         "estimated_credits": 183,
         "unit": "credits",
         "note": "Estimated reservation; final settlement uses actual generated duration.",
@@ -1970,6 +1994,7 @@ def test_video_estimate_photo_matches_resolution_tier_reservation(
 
     assert estimate_resp.status_code == 200
     assert estimate_resp.json()["data"] == {
+        "pricing_contract": "legacy_estimate",
         "estimated_credits": 180,
         "unit": "credits",
         "note": "Estimated reservation; final settlement uses actual generated duration.",
@@ -2655,7 +2680,7 @@ def test_scene_prompt_response_openapi_requires_unbounded_prompts() -> None:
 
     assert resp.status_code == 200
     schema = resp.json()["components"]["schemas"]["ScenePromptResponse"]
-    assert set(schema["required"]) == {"scene_prompt", "negative_prompt"}
+    assert set(schema["required"]) == {"scene_prompt", "negative_prompt", "billing"}
     assert "maxLength" not in schema["properties"]["scene_prompt"]
     assert "maxLength" not in schema["properties"]["negative_prompt"]
 
@@ -2792,33 +2817,28 @@ def test_scene_prompt_endpoint_generates_visual_prompt_without_creating_video(
 
     try:
         client = TestClient(app)
+        payload = {
+            "topic": "premium ceramic mug",
+            "script": "Show the glaze, comfortable handle, and gift-ready finish.",
+            "product_image_keys": ["uploads/product-front.png", "uploads/product-side.webp"],
+            "duration_sec": 30,
+        }
         resp = client.post(
             "/api/v1/videos/scene-prompt",
-            json={
-                "topic": "premium ceramic mug",
-                "script": "Show the glaze, comfortable handle, and gift-ready finish.",
-                "product_image_keys": [
-                    "uploads/product-front.png",
-                    "uploads/product-side.webp",
-                ],
-                "duration_sec": 30,
-            },
-            headers=auth_context["headers"],
+            json=payload,
+            headers=_scene_submission_headers(client, auth_context["headers"], payload),
         )
     finally:
         app.dependency_overrides.pop(get_object_storage, None)
 
     assert resp.status_code == 200
-    assert resp.json()["data"] == {
-        "scene_prompt": "Bright tabletop product video with slow push-in.",
-        "negative_prompt": "No warped mug, no extra handles, no text.",
-    }
+    assert resp.json()["data"]["scene_prompt"] == "Bright tabletop product video with slow push-in."
+    assert resp.json()["data"]["negative_prompt"] == "No warped mug, no extra handles, no text."
+    assert resp.json()["data"]["billing"]["status"] == "settled"
     assert payloads[0]["video_mode"] == "seedance_i2v"
     assert payloads[0]["target_duration_sec"] == 30
     assert payloads[0]["topic"] == "premium ceramic mug"
-    assert payloads[0]["script"] == (
-        "Show the glaze, comfortable handle, and gift-ready finish."
-    )
+    assert payloads[0]["script"] == ("Show the glaze, comfortable handle, and gift-ready finish.")
     assert payloads[0]["image_urls"] == [
         (
             "https://storage.test/tenants/"
@@ -2837,9 +2857,9 @@ def test_scene_prompt_endpoint_generates_visual_prompt_without_creating_video(
     assert after == before
     assert usage.provider == "apimart"
     assert usage.model == "gpt-5.6-luna"
-    assert usage.unit == "token"
-    assert usage.quantity == Decimal("200")
-    assert usage.credits == Decimal("0")
+    assert usage.unit == "call"
+    assert usage.quantity == Decimal("1")
+    assert usage.credits == Decimal("30")
     assert usage.cost_cents == 90
     assert usage.status == "settled"
 
@@ -2883,9 +2903,11 @@ def test_scene_prompt_endpoint_maps_provider_resolution_failure_to_503(
         auth_context["tenant_id"], "uploads/product.png"
     )
     try:
-        resp = TestClient(app).post(
-            "/api/v1/videos/scene-prompt",
-            json={"product_image_keys": ["uploads/product.png"]},
+        client = TestClient(app)
+        payload = {"product_image_keys": ["uploads/product.png"]}
+        resp = client.post(
+            "/api/v1/videos/scene-prompt/estimate",
+            json=payload,
             headers=auth_context["headers"],
         )
     finally:
@@ -2921,14 +2943,13 @@ def test_scene_prompt_endpoint_rejects_missing_product_image_before_provider_res
     monkeypatch.setattr(videos_route, "resolve", resolve_provider)
     app.dependency_overrides[get_object_storage] = lambda: storage
     try:
-        resp = TestClient(app).post(
-            "/api/v1/videos/scene-prompt",
-            json={
-                "product_image_keys": [
-                    "uploads/product-front.png",
-                    "uploads/product-missing.png",
-                ]
-            },
+        client = TestClient(app)
+        payload = {
+            "product_image_keys": ["uploads/product-front.png", "uploads/product-missing.png"]
+        }
+        resp = client.post(
+            "/api/v1/videos/scene-prompt/estimate",
+            json=payload,
             headers=auth_context["headers"],
         )
     finally:
@@ -2968,9 +2989,11 @@ def test_scene_prompt_endpoint_rejects_cross_tenant_product_image_before_provide
     )
     app.dependency_overrides[get_object_storage] = lambda: storage
     try:
-        resp = TestClient(app).post(
-            "/api/v1/videos/scene-prompt",
-            json={"product_image_keys": ["uploads/product.png"]},
+        client = TestClient(app)
+        payload = {"product_image_keys": ["uploads/product.png"]}
+        resp = client.post(
+            "/api/v1/videos/scene-prompt/estimate",
+            json=payload,
             headers=auth_context["headers"],
         )
     finally:
@@ -3023,10 +3046,12 @@ def test_scene_prompt_endpoint_maps_provider_invocation_failure_to_502(
         auth_context["tenant_id"], "uploads/product.png"
     )
     try:
-        resp = TestClient(app).post(
+        client = TestClient(app)
+        payload = {"product_image_keys": ["uploads/product.png"]}
+        resp = client.post(
             "/api/v1/videos/scene-prompt",
-            json={"product_image_keys": ["uploads/product.png"]},
-            headers=auth_context["headers"],
+            json=payload,
+            headers=_scene_submission_headers(client, auth_context["headers"], payload),
         )
     finally:
         app.dependency_overrides.pop(get_object_storage, None)
@@ -3036,8 +3061,8 @@ def test_scene_prompt_endpoint_maps_provider_invocation_failure_to_502(
     assert invoke_timeouts == [None]
     with auth_db() as db:
         usage = db.query(UsageRecord).filter_by(capability="scene_prompt").one()
-    assert usage.quantity == Decimal("150")
-    assert usage.credits == Decimal("0")
+    assert usage.quantity == Decimal("1")
+    assert usage.credits == Decimal("30")
     assert usage.cost_cents == 45
 
 
@@ -3070,10 +3095,12 @@ def test_scene_prompt_endpoint_records_usage_for_incomplete_provider_result(
         auth_context["tenant_id"], "uploads/product.png"
     )
     try:
-        resp = TestClient(app).post(
+        client = TestClient(app)
+        payload = {"product_image_keys": ["uploads/product.png"]}
+        resp = client.post(
             "/api/v1/videos/scene-prompt",
-            json={"product_image_keys": ["uploads/product.png"]},
-            headers=auth_context["headers"],
+            json=payload,
+            headers=_scene_submission_headers(client, auth_context["headers"], payload),
         )
     finally:
         app.dependency_overrides.pop(get_object_storage, None)
@@ -3082,8 +3109,8 @@ def test_scene_prompt_endpoint_records_usage_for_incomplete_provider_result(
     assert resp.json()["error"]["code"] == "SCENE_PROMPT_EMPTY_RESULT"
     with auth_db() as db:
         usage = db.query(UsageRecord).filter_by(capability="scene_prompt").one()
-    assert usage.quantity == Decimal("100")
-    assert usage.credits == Decimal("0")
+    assert usage.quantity == Decimal("1")
+    assert usage.credits == Decimal("30")
     assert usage.cost_cents == 30
 
 
@@ -3113,10 +3140,11 @@ def test_scene_prompt_endpoint_allows_images_without_topic_or_script(
     )
     try:
         client = TestClient(app)
+        payload = {"product_image_keys": ["uploads/product.png"]}
         resp = client.post(
             "/api/v1/videos/scene-prompt",
-            json={"product_image_keys": ["uploads/product.png"]},
-            headers=auth_context["headers"],
+            json=payload,
+            headers=_scene_submission_headers(client, auth_context["headers"], payload),
         )
     finally:
         app.dependency_overrides.pop(get_object_storage, None)

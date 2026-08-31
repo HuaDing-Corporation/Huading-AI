@@ -1,9 +1,12 @@
 from collections.abc import Generator
+from typing import Annotated
+from uuid import UUID
 
 import redis
 import structlog
-from fastapi import Depends, Request, status
+from fastapi import Depends, Header, Request, status
 from fastapi.security import OAuth2PasswordBearer
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -15,12 +18,73 @@ from app.db.session import SessionLocal
 from app.services.plan_access import (
     AnalyticsScope,
     analytics_scope_for_tenant,
-    is_platform_tenant,
+    is_authorized_platform_admin,
     tenant_entitlements,
 )
 from app.services.progress import ProgressStore, build_progress_store
 from app.services.storage.base import ObjectStorage
 from app.services.storage.factory import create_object_storage
+
+
+class BillingSubmissionHeaders(BaseModel):
+    idempotency_key: UUID
+    quote_token: str
+
+
+def _validated_quote_token(quote_token: str) -> str:
+    from app.services.billing_quotes import QUOTE_TOKEN_MAX_BYTES
+
+    try:
+        encoded = quote_token.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise AppError(
+            "报价凭证格式无效",
+            code="QUOTE_TOKEN_INVALID",
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        ) from exc
+    if len(encoded) > QUOTE_TOKEN_MAX_BYTES:
+        raise AppError(
+            "报价凭证过长",
+            code="QUOTE_TOKEN_TOO_LARGE",
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
+    return quote_token
+
+
+def require_billing_submission_headers(
+    idempotency_key: Annotated[UUID, Header(alias="Idempotency-Key")],
+    quote_token: Annotated[str, Header(alias="X-Huading-Quote", min_length=1)],
+) -> BillingSubmissionHeaders:
+    return BillingSubmissionHeaders(
+        idempotency_key=idempotency_key,
+        quote_token=_validated_quote_token(quote_token),
+    )
+
+
+def optional_billing_submission_headers(
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    quote_token: Annotated[str | None, Header(alias="X-Huading-Quote")] = None,
+) -> BillingSubmissionHeaders | None:
+    if idempotency_key is None and quote_token is None:
+        return None
+    if idempotency_key is None or quote_token is None or not quote_token:
+        raise AppError(
+            "Idempotency-Key and X-Huading-Quote must be provided together.",
+            code="BILLING_HEADERS_REQUIRED",
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
+    try:
+        parsed_idempotency_key = UUID(idempotency_key)
+    except ValueError as exc:
+        raise AppError(
+            "Idempotency-Key is invalid.",
+            code="INVALID_IDEMPOTENCY_KEY",
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        ) from exc
+    return BillingSubmissionHeaders(
+        idempotency_key=parsed_idempotency_key,
+        quote_token=_validated_quote_token(quote_token),
+    )
 
 
 def get_settings_dependency() -> Settings:
@@ -83,7 +147,9 @@ def permissions_for_role(role: Role | str) -> set[str]:
 
 def session_permissions_for_user(db: Session, *, user: User) -> set[str]:
     permissions = set(permissions_for_role(user.role))
-    permissions.update(tenant_entitlements(db, tenant_id=user.tenant_id))
+    permissions.update(
+        tenant_entitlements(db, tenant_id=user.tenant_id, role=user.role)
+    )
     return permissions
 
 
@@ -200,7 +266,11 @@ def require_platform_admin(
     db: Session = DbSessionDependency,
     user: User = CurrentUserDependency,
 ) -> User:
-    if is_platform_tenant(db, tenant_id=user.tenant_id):
+    if is_authorized_platform_admin(
+        db,
+        user=user,
+        expected_tenant_id=user.tenant_id,
+    ):
         return user
     raise AppError(
         "Platform administrator access is required.",

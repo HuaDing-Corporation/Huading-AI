@@ -1,4 +1,5 @@
 import { ApiError, apiFetch, apiUrl, authHeaders } from "@/lib/api/client";
+import { parseBrandVoiceOrderResource } from "@/lib/api/billing";
 
 // 管理员后台 adapter（ADMIN-CONSOLE-UI-0001 · FIX1 已按**真实 BE #165** 逐字段对齐）。
 // 契约源：backend/app/schemas/admin_console.py + routes/admin_console.py（merge 618d7b94）。
@@ -12,6 +13,49 @@ export type TenantStatus = "active" | "suspended" | "closed";
 export type AdminTaskFamily = "video" | "reverse_prompt" | "ecom_replicate";
 export type AdminTaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type AuditAction = "credits_adjust" | "plan_change" | "status_change" | "voice_slot_assign" | "task_retry";
+export type AdminBrandVoiceOrderStatus = "awaiting_fulfillment" | "fulfilled" | "rejected";
+export type AdminBrandVoiceOrderAction =
+  | { action: "fulfill"; provider_voice_id: string }
+  | { action: "reject"; rejection_reason: string };
+
+export interface AdminBrandVoiceOrderRead {
+  id: string;
+  tenant_id: string;
+  ordered_by_user_id: string;
+  order_type: "create" | "renew";
+  requested_name: string;
+  source_audio_asset_id: string;
+  existing_brand_voice_id: string | null;
+  status: AdminBrandVoiceOrderStatus;
+  fulfilled_brand_voice_id: string | null;
+  fulfilled_provider_voice_id: string | null;
+  rejection_reason: string | null;
+  fulfilled_at: string | null;
+  expires_at: string | null;
+  rejected_at: string | null;
+  created_at: string;
+  updated_at: string;
+  billing: import("@/lib/api/types").BillingSummary;
+  refund_disposition: "not_applicable" | "source_subscription_released" | "current_subscription_credited" | "pending_next_subscription";
+  refund_grant_status: "pending" | "applied" | null;
+  refund_applied_at: string | null;
+  source_audio_url?: string | null;
+}
+
+export interface AdminBrandVoiceOrderPage {
+  items: AdminBrandVoiceOrderRead[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+function invalidBrandVoiceOrderResponse(): never {
+  throw new ApiError("品牌音色订单响应不符合契约。", "INVALID_BRAND_VOICE_ORDER_RESPONSE", 502);
+}
+
+function parseAdminBrandVoiceOrder(value: unknown, allowSourceAudioUrl = false): AdminBrandVoiceOrderRead {
+  return parseBrandVoiceOrderResource(value, { allowSourceAudioUrl }) ?? invalidBrandVoiceOrderResponse();
+}
 
 /** 订阅额度快照（BE AdminSubscriptionSnapshot）。 */
 export interface AdminSubscriptionSnapshot {
@@ -235,6 +279,45 @@ export function changeTenantStatus(
 
 export function fetchAdminVoiceSlots(): Promise<AdminVoiceSlots> {
   return apiFetch<AdminVoiceSlots>(`${BASE}/voice-slots`, { method: "GET" });
+}
+
+export async function listAdminBrandVoiceOrders(query: {
+  status?: AdminBrandVoiceOrderStatus | "";
+  page: number;
+  page_size: number;
+}): Promise<AdminBrandVoiceOrderPage> {
+  const page = await apiFetch<unknown>(`${BASE}/brand-voice-orders?${qs(query)}`, { method: "GET" });
+  if (
+    typeof page !== "object" || page === null || Array.isArray(page) ||
+    Object.keys(page).length !== 4 ||
+    !["items", "total", "page", "page_size"].every((key) => Object.prototype.hasOwnProperty.call(page, key))
+  ) invalidBrandVoiceOrderResponse();
+  const candidate = page as Record<string, unknown>;
+  if (!Array.isArray(candidate.items) || !Number.isSafeInteger(candidate.total) || !Number.isSafeInteger(candidate.page) || !Number.isSafeInteger(candidate.page_size)) invalidBrandVoiceOrderResponse();
+  return {
+    items: candidate.items.map((item) => parseAdminBrandVoiceOrder(item)),
+    total: candidate.total as number,
+    page: candidate.page as number,
+    page_size: candidate.page_size as number
+  };
+}
+
+export async function getAdminBrandVoiceOrder(orderId: string): Promise<AdminBrandVoiceOrderRead> {
+  return parseAdminBrandVoiceOrder(
+    await apiFetch<unknown>(`${BASE}/brand-voice-orders/${encodeURIComponent(orderId)}`, { method: "GET" }),
+    true
+  );
+}
+
+export async function resolveAdminBrandVoiceOrder(
+  orderId: string,
+  action: AdminBrandVoiceOrderAction
+): Promise<AdminBrandVoiceOrderRead> {
+  const value = await apiFetch<unknown>(`${BASE}/brand-voice-orders/${encodeURIComponent(orderId)}/resolve`, {
+    method: "POST",
+    body: action
+  });
+  return parseAdminBrandVoiceOrder(value);
 }
 
 /** doubao speaker_id 前端预校验（BE pattern 权威）。 */

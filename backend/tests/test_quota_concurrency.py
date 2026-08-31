@@ -9,13 +9,16 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, event, select, text
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy import create_engine, event, func, select, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import sessionmaker
 
 from app.core.exceptions import AppError
 from app.db.models import (
     Base,
+    BillingOperation,
+    CreditRefundGrant,
     Plan,
     ReversePromptJob,
     Subscription,
@@ -25,6 +28,29 @@ from app.db.models import (
     VideoTask,
 )
 from app.services import admin_console, quota
+from app.services.billing_operations import (
+    UsageAllocation,
+    complete_failed,
+    complete_succeeded,
+    create_reserved_operation,
+    register_billing_result_schema,
+)
+from app.services.billing_quotes import VerifiedQuote
+from app.services.pricing import (
+    PricingLine,
+    PricingSnapshot,
+    RateScope,
+    RateSource,
+    ResolvedRate,
+)
+from app.services.subscription import (
+    activate_subscription,
+    activate_subscription_with_retry,
+    decide_credit_refund,
+    lock_tenant_for_subscription_lifecycle,
+    refund_subscriptions_for_update,
+)
+from app.services.transaction_retry import run_db_transaction_with_retry
 
 _RUNTIME_QUOTA_FIELDS = {
     "quota_credits_total",
@@ -52,9 +78,18 @@ _ALLOWED_RUNTIME_WRITES_BY_FUNCTION = {
             "quota_credits_used",
             "quota_credits_reserved",
         },
+        "reserve_locked_subscription_credits": {"quota_credits_reserved"},
+        "settle_locked_subscription_credits": {
+            "quota_credits_used",
+            "quota_credits_reserved",
+        },
     },
     "app/services/admin_console.py": {
         "adjust_credits": {"quota_credits_total"},
+    },
+    "app/services/subscription.py": {
+        "apply_pending_refund_grants": {"quota_credits_total"},
+        "decide_credit_refund": {"quota_credits_total"},
     },
 }
 
@@ -75,9 +110,7 @@ def _enclosing_function_name(
     if not hasattr(node, "lineno"):
         return "<module>"
     enclosing = [
-        function
-        for function in functions
-        if function.lineno <= node.lineno <= function.end_lineno
+        function for function in functions if function.lineno <= node.lineno <= function.end_lineno
     ]
     return max(enclosing, key=lambda function: function.lineno).name if enclosing else "<module>"
 
@@ -101,9 +134,7 @@ def test_runtime_quota_writes_only_occur_in_locked_helpers() -> None:
                 allowed = allowed_by_function.get(function_name, set())
             for target in assignment_attributes:
                 if target.attr in _RUNTIME_QUOTA_FIELDS and target.attr not in allowed:
-                    violations.append(
-                        f"{relative}:{function_name}:{node.lineno}:{target.attr}"
-                    )
+                    violations.append(f"{relative}:{function_name}:{node.lineno}:{target.attr}")
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
@@ -113,9 +144,7 @@ def test_runtime_quota_writes_only_occur_in_locked_helpers() -> None:
                 allowed = allowed_by_function.get(function_name, set())
                 for keyword in node.keywords:
                     if keyword.arg in _RUNTIME_QUOTA_FIELDS and keyword.arg not in allowed:
-                        violations.append(
-                            f"{relative}:{function_name}:{node.lineno}:{keyword.arg}"
-                        )
+                        violations.append(f"{relative}:{function_name}:{node.lineno}:{keyword.arg}")
 
     assert violations == []
 
@@ -134,9 +163,7 @@ def _capture_postgresql_selects(db) -> list[str]:
 
 
 def _seed_sqlite_reservations(db, *, tenant_id: str) -> tuple[str, str]:
-    subscription = db.scalar(
-        select(Subscription).where(Subscription.tenant_id == tenant_id)
-    )
+    subscription = db.scalar(select(Subscription).where(Subscription.tenant_id == tenant_id))
     subscription.quota_credits_reserved = 110
     video = VideoTask(
         id="quota-lock-photo",
@@ -190,9 +217,7 @@ def _seed_sqlite_reservations(db, *, tenant_id: str) -> tuple[str, str]:
 
 def _assert_lock_order(statements: list[str], owner_table: str) -> None:
     owner_index = next(index for index, sql in enumerate(statements) if owner_table in sql)
-    usage_index = next(
-        index for index, sql in enumerate(statements) if "FROM usage_records" in sql
-    )
+    usage_index = next(index for index, sql in enumerate(statements) if "FROM usage_records" in sql)
     subscription_index = next(
         index for index, sql in enumerate(statements) if "FROM subscriptions" in sql
     )
@@ -229,6 +254,190 @@ def test_quota_transitions_lock_owner_record_then_subscription(
         )
         _assert_lock_order(statements, "FROM reverse_prompt_jobs")
 
+
+def test_admin_subscription_mutations_lock_tenant_before_subscription(
+    auth_db,
+    auth_context,
+) -> None:
+    with auth_db() as db:
+        actor = db.get(User, auth_context["user_id"])
+        db.add(
+            Plan(
+                code="free",
+                name="Lock Order Target",
+                price_cents=1,
+                period="monthly",
+                quota_credits=123,
+            )
+        )
+        db.commit()
+
+    with auth_db() as db:
+        actor = db.get(User, auth_context["user_id"])
+        statements = _capture_postgresql_selects(db)
+        admin_console.change_plan(
+            db,
+            actor=actor,
+            tenant_id=auth_context["tenant_id"],
+            plan_code="free",
+            reason="lock audit",
+        )
+        locked = [sql for sql in statements if "FOR UPDATE" in sql]
+        assert "FROM tenants" in locked[0]
+        assert "FROM subscriptions" in locked[1]
+        assert "ORDER BY subscriptions.id" in locked[1]
+
+    with auth_db() as db:
+        actor = db.get(User, auth_context["user_id"])
+        statements = _capture_postgresql_selects(db)
+        admin_console.adjust_credits(
+            db,
+            actor=actor,
+            tenant_id=auth_context["tenant_id"],
+            delta=1,
+            reason="lock audit",
+        )
+        locked = [sql for sql in statements if "FOR UPDATE" in sql]
+        assert "FROM tenants" in locked[0]
+        assert "FROM subscriptions" in locked[1]
+        assert "ORDER BY subscriptions.id" in locked[1]
+
+
+def test_activation_locks_tenant_subscription_and_grants_in_order(
+    auth_db,
+    auth_context,
+) -> None:
+    now = datetime.now(UTC)
+    with auth_db() as db:
+        source = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        source.status = "expired"
+        source.period_end = now - timedelta(seconds=1)
+        plan_id = source.plan_id
+        db.commit()
+
+    with auth_db() as db:
+        statements = _capture_postgresql_selects(db)
+        activate_subscription(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            plan=db.get(Plan, plan_id),
+            period_start=now,
+        )
+        locked = [sql for sql in statements if "FOR UPDATE" in sql]
+        assert "FROM tenants" in locked[0]
+        assert "FROM subscriptions" in locked[1]
+        assert "FROM credit_refund_grants" in locked[2]
+        assert "ORDER BY subscriptions.id" in locked[1]
+        assert "ORDER BY credit_refund_grants.id" in locked[2]
+
+
+def test_refund_decision_composes_with_full_global_lock_order(
+    auth_db,
+    auth_context,
+) -> None:
+    now = datetime.now(UTC)
+    with auth_db() as db:
+        target = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"]
+            )
+        )
+        source = Subscription(
+            tenant_id=auth_context["tenant_id"],
+            plan_id=target.plan_id,
+            status="expired",
+            period_start=now - timedelta(days=60),
+            period_end=now - timedelta(days=30),
+            quota_credits_total=30_000,
+            quota_credits_used=0,
+            quota_credits_reserved=30_000,
+        )
+        operation = BillingOperation(
+            tenant_id=auth_context["tenant_id"],
+            user_id=auth_context["user_id"],
+            operation="doubao_brand_voice_order_create",
+            idempotency_key=str(uuid4()),
+            request_hash="a" * 64,
+            quote_hash="b" * 64,
+            pricing_snapshot={},
+            requested_credits=Decimal("30000"),
+            settled_credits=Decimal("0"),
+            released_credits=Decimal("30000"),
+            status="completed",
+            completion_kind="rejected",
+            completed_at=now,
+        )
+        db.add_all([source, operation])
+        db.flush()
+        usage = UsageRecord(
+            tenant_id=auth_context["tenant_id"],
+            subscription_id=source.id,
+            billing_operation_id=operation.id,
+            billing_item_index=0,
+            billing_pricing_line_index=0,
+            capability="voice_clone",
+            provider="manual",
+            unit="call",
+            quantity=Decimal("1"),
+            credits=Decimal("30000"),
+            cost_cents=0,
+            status="reserved",
+        )
+        db.add(usage)
+        db.commit()
+        source_id = source.id
+        operation_id = operation.id
+
+    with auth_db() as db:
+        statements = _capture_postgresql_selects(db)
+        lock_tenant_for_subscription_lifecycle(
+            db,
+            tenant_id=auth_context["tenant_id"],
+        )
+        locked_operation = db.scalar(
+            select(BillingOperation)
+            .where(BillingOperation.id == operation_id)
+            .order_by(BillingOperation.id)
+            .with_for_update()
+        )
+        context = refund_subscriptions_for_update(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            source_subscription_id=source_id,
+            now=now,
+        )
+        db.scalars(
+            select(UsageRecord)
+            .where(UsageRecord.billing_operation_id == operation_id)
+            .order_by(UsageRecord.id)
+            .with_for_update()
+        ).all()
+        decide_credit_refund(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            user_id=auth_context["user_id"],
+            billing_operation=locked_operation,
+            subscriptions=context,
+            amount_credits=30_000,
+            decided_at=now,
+        )
+
+        locked = [sql for sql in statements if "FOR UPDATE" in sql]
+        assert [
+            "FROM tenants" in locked[0],
+            "FROM billing_operations" in locked[1],
+            "FROM subscriptions" in locked[2],
+            "FROM usage_records" in locked[3],
+            "FROM credit_refund_grants" in locked[4],
+        ] == [True] * 5
+        assert "ORDER BY billing_operations.id" in locked[1]
+        assert "ORDER BY subscriptions.id" in locked[2]
+        assert "ORDER BY usage_records.id" in locked[3]
+        assert "ORDER BY credit_refund_grants.id" in locked[4]
 
 @pytest.fixture(scope="module")
 def postgres_session_factory():
@@ -541,7 +750,7 @@ def test_postgres_concurrent_image_reservations_allow_exactly_one_order(
     postgres_session_factory,
 ) -> None:
     factory = postgres_session_factory
-    subscription_id, tenant_id = _seed_postgres_subscription(factory, total=10)
+    subscription_id, tenant_id = _seed_postgres_subscription(factory, total=80)
     task_ids = _seed_postgres_video_tasks(factory, tenant_id=tenant_id, count=2)
     first = factory()
     thread = None
@@ -585,7 +794,7 @@ def test_postgres_concurrent_image_reservations_allow_exactly_one_order(
                 )
             )
         )
-        assert subscription.quota_credits_reserved == 10
+        assert subscription.quota_credits_reserved == 80
         assert len(records) == 1
 
 
@@ -626,9 +835,7 @@ def test_postgres_concurrent_release_preserves_both_decrements(
     with factory() as db:
         subscription = db.get(Subscription, subscription_id)
         records = list(
-            db.scalars(
-                select(UsageRecord).where(UsageRecord.video_task_id.in_(task_ids))
-            )
+            db.scalars(select(UsageRecord).where(UsageRecord.video_task_id.in_(task_ids)))
         )
         assert subscription.quota_credits_reserved == 0
         assert {record.status for record in records} == {"released"}
@@ -675,9 +882,7 @@ def test_postgres_concurrent_settlement_preserves_both_transitions(
     with factory() as db:
         subscription = db.get(Subscription, subscription_id)
         records = list(
-            db.scalars(
-                select(UsageRecord).where(UsageRecord.video_task_id.in_(task_ids))
-            )
+            db.scalars(select(UsageRecord).where(UsageRecord.video_task_id.in_(task_ids)))
         )
         assert subscription.quota_credits_reserved == 0
         assert subscription.quota_credits_used == 200
@@ -722,11 +927,7 @@ def test_postgres_concurrent_reverse_prompt_releases_preserve_both_decrements(
     with factory() as db:
         subscription = db.get(Subscription, subscription_id)
         records = list(
-            db.scalars(
-                select(UsageRecord).where(
-                    UsageRecord.reverse_prompt_job_id.in_(job_ids)
-                )
-            )
+            db.scalars(select(UsageRecord).where(UsageRecord.reverse_prompt_job_id.in_(job_ids)))
         )
         assert subscription.quota_credits_reserved == 0
         assert {record.status for record in records} == {"released"}
@@ -772,9 +973,7 @@ def test_postgres_concurrent_reverse_prompt_settlement_is_idempotent(
     assert errors == []
     with factory() as db:
         subscription = db.get(Subscription, subscription_id)
-        record = db.scalar(
-            select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id)
-        )
+        record = db.scalar(select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id))
         assert subscription.quota_credits_reserved == 0
         assert subscription.quota_credits_used == 100
         assert record.status == "settled"
@@ -889,10 +1088,411 @@ def test_postgres_recovery_release_wins_against_worker_settlement(
     with factory() as db:
         subscription = db.get(Subscription, subscription_id)
         task = db.get(VideoTask, task_id)
-        record = db.scalar(
-            select(UsageRecord).where(UsageRecord.video_task_id == task_id)
-        )
+        record = db.scalar(select(UsageRecord).where(UsageRecord.video_task_id == task_id))
         assert subscription.quota_credits_reserved == 0
         assert subscription.quota_credits_used == 0
         assert task.status == "failed"
         assert record.status == "released"
+
+
+class _ConcurrentBillingResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_ids: list[str]
+
+
+def _concurrent_billing_quote() -> VerifiedQuote:
+    rate = ResolvedRate(
+        unit_credits=Decimal("0.6000"),
+        source=RateSource.TENANT_RATE,
+        rate_id="concurrent-rate",
+        effective_at=datetime(2026, 8, 29, tzinfo=UTC),
+        policy_key=None,
+        policy_version=None,
+    )
+    line = PricingLine(
+        operation="ecom_cutout",
+        capability="image",
+        unit="image",
+        quantity=Decimal("4"),
+        unit_credits=rate.unit_credits,
+        subtotal_credits=Decimal("2.4"),
+        rate_scope=RateScope.TENANT_OVERRIDABLE,
+        rate=rate,
+        label="concurrent batch",
+    )
+    return VerifiedQuote(
+        snapshot=PricingSnapshot(
+            operation="ecom_cutout",
+            pricing_shape="simple",
+            pricing_lines=(line,),
+            disclosures=(),
+            subtotal_credits=Decimal("2.4"),
+            payable_credits=3,
+        ),
+        quote_hash="b" * 64,
+        pricing_payload_hash="c" * 64,
+    )
+
+
+def _concurrent_billing_allocations() -> list[UsageAllocation]:
+    return [
+        UsageAllocation(index, 0, Decimal("1"), Decimal("0.6"), "apimart", None, None)
+        for index in range(4)
+    ]
+
+
+def _seed_postgres_billing_owner(factory) -> tuple[str, str]:
+    subscription_id, tenant_id = _seed_postgres_subscription(factory, total=100)
+    with factory() as db:
+        user = User(
+            tenant_id=tenant_id,
+            email=f"billing-{uuid4().hex[:8]}@example.com",
+            password_hash="hash",
+            role="creator",
+        )
+        db.add(user)
+        db.commit()
+        return tenant_id, user.id
+
+
+def test_operation_transitions_discover_ids_then_lock_operation_subscription_usage(
+    auth_db,
+    auth_context,
+) -> None:
+    with auth_db() as db:
+        operation = create_reserved_operation(
+            db,
+            tenant_id=auth_context["tenant_id"],
+            user_id=auth_context["user_id"],
+            operation="ecom_cutout",
+            idempotency_key=uuid4(),
+            request_hash="a" * 64,
+            verified_quote=_concurrent_billing_quote(),
+            usage_allocations=_concurrent_billing_allocations(),
+        )
+        db.commit()
+        operation_id = operation.id
+
+    with auth_db() as db:
+        statements = _capture_postgresql_selects(db)
+        complete_failed(
+            db,
+            operation_id=operation_id,
+            code="PROVIDER_FAILED",
+            http_status=502,
+            sanitized_detail=None,
+        )
+
+    operation_index = next(
+        index for index, sql in enumerate(statements) if "FROM billing_operations" in sql
+    )
+    usage_indexes = [index for index, sql in enumerate(statements) if "FROM usage_records" in sql]
+    subscription_index = next(
+        index for index, sql in enumerate(statements) if "FROM subscriptions" in sql
+    )
+    assert len(usage_indexes) == 2
+    discovery_index, locked_usage_index = usage_indexes
+    assert discovery_index < operation_index < subscription_index < locked_usage_index
+    assert "FOR UPDATE" not in statements[discovery_index]
+    assert "FOR UPDATE" in statements[operation_index]
+    assert "FOR UPDATE" in statements[subscription_index]
+    assert "ORDER BY subscriptions.id" in statements[subscription_index]
+    assert "FOR UPDATE" in statements[locked_usage_index]
+    assert "ORDER BY usage_records.id" in statements[locked_usage_index]
+
+
+def test_postgres_concurrent_first_submission_reserves_once(
+    postgres_session_factory,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id, user_id = _seed_postgres_billing_owner(factory)
+    quote = _concurrent_billing_quote()
+    key = uuid4()
+    barrier = threading.Barrier(2)
+    operation_ids: list[str] = []
+    errors: list[BaseException] = []
+
+    def reserve() -> None:
+        try:
+
+            def transaction(db):
+                barrier.wait(timeout=5)
+                return create_reserved_operation(
+                    db,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    operation="ecom_cutout",
+                    idempotency_key=key,
+                    request_hash="a" * 64,
+                    verified_quote=quote,
+                    usage_allocations=_concurrent_billing_allocations(),
+                )
+
+            operation = run_db_transaction_with_retry(factory, transaction)
+            operation_ids.append(operation.id)
+        except BaseException as exc:  # noqa: BLE001 - thread evidence.
+            errors.append(exc)
+
+    threads = [threading.Thread(target=reserve, daemon=True) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert len(set(operation_ids)) == 1
+    with factory() as db:
+        subscription = db.scalar(select(Subscription).where(Subscription.tenant_id == tenant_id))
+        assert subscription.quota_credits_reserved == 3
+        assert (
+            db.scalar(
+                select(func.count())
+                .select_from(BillingOperation)
+                .where(BillingOperation.tenant_id == tenant_id)
+            )
+            == 1
+        )
+        assert (
+            db.scalar(
+                select(func.count())
+                .select_from(UsageRecord)
+                .where(UsageRecord.billing_operation_id == operation_ids[0])
+            )
+            == 4
+        )
+
+
+def test_postgres_concurrent_activation_applies_pending_grant_once(
+    postgres_session_factory,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id, user_id = _seed_postgres_billing_owner(factory)
+    now = datetime.now(UTC)
+    with factory() as db:
+        source = db.scalar(
+            select(Subscription).where(Subscription.tenant_id == tenant_id)
+        )
+        plan_id = source.plan_id
+        plan_quota = source.quota_credits_total
+        source.status = "expired"
+        source.period_end = now - timedelta(seconds=1)
+        operation = BillingOperation(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            operation="doubao_brand_voice_order_create",
+            idempotency_key=str(uuid4()),
+            request_hash="a" * 64,
+            quote_hash="b" * 64,
+            pricing_snapshot={},
+            requested_credits=Decimal("30000"),
+            settled_credits=Decimal("0"),
+            released_credits=Decimal("30000"),
+            status="completed",
+            completion_kind="rejected",
+            completed_at=now,
+        )
+        db.add(operation)
+        db.flush()
+        grant = CreditRefundGrant(
+            billing_operation_id=operation.id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            source_subscription_id=source.id,
+            amount_credits=30_000,
+            status="pending",
+        )
+        db.add(grant)
+        db.commit()
+        grant_id = grant.id
+
+    barrier = threading.Barrier(2)
+    activated_ids: list[str] = []
+    errors: list[BaseException] = []
+
+    def activate() -> None:
+        try:
+            barrier.wait(timeout=5)
+            activated = activate_subscription_with_retry(
+                factory,
+                tenant_id=tenant_id,
+                plan_id=plan_id,
+                period_start=now,
+            )
+            activated_ids.append(activated.id)
+        except BaseException as exc:  # noqa: BLE001 - thread evidence.
+            errors.append(exc)
+
+    threads = [threading.Thread(target=activate, daemon=True) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert len(set(activated_ids)) == 1
+    with factory() as db:
+        active = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == tenant_id,
+                Subscription.status == "active",
+            )
+        )
+        stored_grant = db.get(CreditRefundGrant, grant_id)
+        assert active.id == activated_ids[0]
+        assert active.quota_credits_total == plan_quota + 30_000
+        assert stored_grant.status == "applied"
+        assert stored_grant.target_subscription_id == active.id
+
+
+def test_postgres_competing_settle_and_release_use_one_terminal_transition(
+    postgres_session_factory,
+) -> None:
+    factory = postgres_session_factory
+    tenant_id, user_id = _seed_postgres_billing_owner(factory)
+    register_billing_result_schema("concurrent_billing_result", _ConcurrentBillingResult)
+    operation = run_db_transaction_with_retry(
+        factory,
+        lambda db: create_reserved_operation(
+            db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            operation="ecom_cutout",
+            idempotency_key=uuid4(),
+            request_hash="a" * 64,
+            verified_quote=_concurrent_billing_quote(),
+            usage_allocations=_concurrent_billing_allocations(),
+        ),
+    )
+
+    first = factory()
+    release_thread = None
+    try:
+        complete_succeeded(
+            first,
+            operation_id=operation.id,
+            actual_quantities={0: Decimal("1")},
+            result_type="concurrent_billing_result",
+            result_id=None,
+            result_payload=_ConcurrentBillingResult(item_ids=["a"]),
+        )
+        release_thread, done, errors = _start_transition(
+            factory,
+            lambda db: complete_failed(
+                db,
+                operation_id=operation.id,
+                code="PROVIDER_FAILED",
+                http_status=502,
+                sanitized_detail=None,
+            ),
+        )
+        release_was_blocked = not done.wait(timeout=0.4)
+        first.commit()
+        release_thread.join(timeout=5)
+    finally:
+        first.rollback()
+        first.close()
+        if release_thread is not None:
+            release_thread.join(timeout=5)
+
+    assert release_was_blocked
+    assert not release_thread.is_alive()
+    assert errors == []
+    with factory() as db:
+        stored = db.get(BillingOperation, operation.id)
+        subscription = db.scalar(select(Subscription).where(Subscription.tenant_id == tenant_id))
+        assert stored.completion_kind == "succeeded"
+        assert stored.settled_credits == 1
+        assert stored.released_credits == 2
+    assert subscription.quota_credits_reserved == 0
+    assert subscription.quota_credits_used == 1
+
+
+def test_postgres_concurrent_last_ecom_items_finalize_the_parent_once(
+    postgres_session_factory,
+) -> None:
+    from app.services.ecom_billing import try_finalize_ecom_operation
+
+    factory = postgres_session_factory
+    tenant_id, user_id = _seed_postgres_billing_owner(factory)
+    quote = _concurrent_billing_quote()
+    with factory() as db:
+        tasks = [
+            VideoTask(
+                id=str(uuid4()),
+                tenant_id=tenant_id,
+                created_by_user_id=user_id,
+                status="queued",
+                mode="photo",
+                video_mode="photo",
+                topic="ecom",
+                params={"source_asset_id": f"source-{index}"},
+            )
+            for index in range(4)
+        ]
+        db.add_all(tasks)
+        db.flush()
+        operation = create_reserved_operation(
+            db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            operation="ecom_cutout",
+            idempotency_key=uuid4(),
+            request_hash="d" * 64,
+            verified_quote=quote,
+            usage_allocations=tuple(
+                UsageAllocation(index, 0, Decimal("1"), Decimal("0.6"), "apimart", None, task.id)
+                for index, task in enumerate(tasks)
+            ),
+            result_type="ecom_image_batch",
+            result_id="concurrent-ecom",
+        )
+        for index, task in enumerate(tasks):
+            task.params = {
+                **task.params,
+                "billing_operation_id": operation.id,
+                "billing_item_index": index,
+            }
+            task.status = "failed" if index < 2 else "queued"
+        db.commit()
+        operation_id = operation.id
+        final_task_ids = [task.id for task in tasks[2:]]
+
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def finish(task_id: str) -> None:
+        try:
+            with factory() as db:
+                task = db.get(VideoTask, task_id)
+                assert task is not None
+                task.status = "failed"
+                db.commit()
+            barrier.wait(timeout=5)
+            with factory() as db:
+                try_finalize_ecom_operation(db, billing_operation_id=operation_id)
+                db.commit()
+        except BaseException as exc:  # noqa: BLE001 - concurrency evidence
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=finish, args=(task_id,), daemon=True)
+        for task_id in final_task_ids
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    with factory() as db:
+        stored = db.get(BillingOperation, operation_id)
+        subscription = db.scalar(select(Subscription).where(Subscription.tenant_id == tenant_id))
+    assert stored is not None
+    assert stored.status == "completed"
+    assert stored.completion_kind == "failed"
+    assert stored.released_credits == 3
+    assert subscription.quota_credits_reserved == 0

@@ -17,7 +17,9 @@ from app.db import models
 from app.db.models import (
     AdminAuditLog,
     Asset,
+    BillingOperation,
     BrandVoice,
+    BrandVoiceOrder,
     EcomReplicateJob,
     EcomReplicateOutput,
     Plan,
@@ -30,6 +32,22 @@ from app.db.models import (
     VideoTask,
 )
 from app.main import app
+
+
+class _ManualOrderAudioStorage:
+    def __init__(self) -> None:
+        self.presign_calls: list[tuple[str, int]] = []
+
+    def presign_get_url(
+        self,
+        key: str,
+        *,
+        expires_in: int,
+        download_filename: str | None = None,
+    ) -> str:
+        del download_filename
+        self.presign_calls.append((key, expires_in))
+        return f"https://storage.test/{key}?ttl={expires_in}"
 
 
 @pytest.fixture
@@ -89,6 +107,13 @@ _CONSOLE_REQUESTS = (
     ("GET", "/api/v1/admin/console/tasks", None),
     ("POST", "/api/v1/admin/console/tasks/missing/retry", None),
     ("GET", "/api/v1/admin/console/audit-logs", None),
+    ("GET", "/api/v1/admin/console/brand-voice-orders", None),
+    ("GET", "/api/v1/admin/console/brand-voice-orders/missing", None),
+    (
+        "POST",
+        "/api/v1/admin/console/brand-voice-orders/missing/resolve",
+        {"action": "reject", "rejection_reason": "gate probe"},
+    ),
 )
 
 
@@ -126,6 +151,168 @@ def test_admin_console_entitlement_is_derived_only_for_platform_tenant(
 
     assert response.status_code == 200
     assert "admin_console" in response.json()["data"]["permissions"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "action": "fulfill",
+            "provider_voice_id": "customer-voice",
+            "rejection_reason": "must not mix",
+        },
+        {
+            "action": "reject",
+            "rejection_reason": "not deliverable",
+            "provider_voice_id": "must-not-mix",
+        },
+    ],
+)
+def test_manual_order_resolve_rejects_mixed_action_fields(
+    auth_context,
+    platform_acme,
+    payload,
+) -> None:
+    response = TestClient(app).post(
+        "/api/v1/admin/console/brand-voice-orders/missing/resolve",
+        headers=auth_context["headers"],
+        json=payload,
+    )
+
+    assert response.status_code == 422
+
+
+def test_manual_order_audio_url_is_detail_only_and_access_is_audited(
+    auth_context,
+    auth_db,
+    platform_acme,
+) -> None:
+    from app.api.deps import get_object_storage
+
+    now = datetime.now(UTC)
+    storage_key = f"tenants/{auth_context['tenant_id']}/manual-orders/source.wav"
+    with auth_db() as db:
+        db.add(
+            Asset(
+                id="manual-audio-audit-asset",
+                tenant_id=auth_context["tenant_id"],
+                type="audio",
+                source="upload",
+                storage_key=storage_key,
+                mime_type="audio/wav",
+                duration_ms=10_000,
+                status="ready",
+            )
+        )
+        db.add(
+            BillingOperation(
+                id="manual-audio-audit-billing",
+                tenant_id=auth_context["tenant_id"],
+                user_id=auth_context["user_id"],
+                operation="doubao_brand_voice_order_create",
+                idempotency_key="00000000-0000-0000-0000-000000000001",
+                request_hash="a" * 64,
+                quote_hash="b" * 64,
+                pricing_snapshot={},
+                requested_credits=30_000,
+                settled_credits=0,
+                released_credits=0,
+                status="in_progress",
+            )
+        )
+        db.flush()
+        db.add(
+            BrandVoiceOrder(
+                id="manual-audio-audit-order",
+                tenant_id=auth_context["tenant_id"],
+                user_id=auth_context["user_id"],
+                order_type="create",
+                requested_name="Audit voice",
+                source_audio_asset_id="manual-audio-audit-asset",
+                source_metadata_snapshot={},
+                consent_confirmed_at=now,
+                billing_operation_id="manual-audio-audit-billing",
+                status="awaiting_fulfillment",
+            )
+        )
+        db.commit()
+
+    storage = _ManualOrderAudioStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    client = TestClient(app)
+    try:
+        listing = client.get(
+            "/api/v1/admin/console/brand-voice-orders",
+            headers=auth_context["headers"],
+        )
+        assert listing.status_code == 200
+        assert "source_audio_url" not in listing.json()["data"]["items"][0]
+        assert storage.presign_calls == []
+        with auth_db() as db:
+            assert db.scalar(select(func.count()).select_from(AdminAuditLog)) == 0
+
+        detail = client.get(
+            "/api/v1/admin/console/brand-voice-orders/manual-audio-audit-order",
+            headers=auth_context["headers"],
+        )
+    finally:
+        app.dependency_overrides.pop(get_object_storage, None)
+
+    assert detail.status_code == 200
+    assert detail.json()["data"]["source_audio_url"].startswith(
+        f"https://storage.test/{storage_key}"
+    )
+    assert len(storage.presign_calls) == 1
+    assert storage.presign_calls[0][0] == storage_key
+    assert 0 < storage.presign_calls[0][1] <= 900
+    with auth_db() as db:
+        audit = db.scalar(select(AdminAuditLog))
+        assert audit.actor_user_id == auth_context["user_id"]
+        assert audit.actor_tenant_id == auth_context["tenant_id"]
+        assert audit.action == "brand_voice_order_audio_access"
+        assert audit.target_tenant_id == auth_context["tenant_id"]
+        assert audit.target_id == "manual-audio-audit-order"
+
+
+@pytest.mark.parametrize("role", ["creator", "ops"])
+def test_platform_non_admin_cannot_read_admin_console_or_receive_entitlement(
+    auth_context,
+    auth_db,
+    platform_acme,
+    role,
+) -> None:
+    with auth_db() as db:
+        user = db.get(User, auth_context["user_id"])
+        user.role = role
+        db.commit()
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/v1/admin/console/tenants",
+        headers=auth_context["headers"],
+    )
+    session = client.get("/api/v1/auth/me", headers=auth_context["headers"])
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "PLATFORM_ADMIN_REQUIRED"
+    assert "admin_console" not in session.json()["data"]["permissions"]
+
+
+def test_legacy_voice_slot_write_is_gone(
+    auth_context,
+    auth_db,
+    platform_acme,
+) -> None:
+    fixture = _seed_console_read_fixture(auth_db, auth_context)
+
+    response = TestClient(app).post(
+        f"/api/v1/admin/console/tenants/{fixture['tenant_id']}/voice-slots",
+        headers=auth_context["headers"],
+        json={"speaker_id": "voice-new"},
+    )
+
+    assert response.status_code == 410
+    assert response.json()["error"]["code"] == "VOICE_SLOT_ASSIGNMENT_RETIRED"
 
 
 def test_admin_audit_log_model_and_migration_are_declared() -> None:
@@ -541,14 +728,17 @@ def test_admin_task_monitor_normalizes_all_task_families_and_filters_them(
     assert items[fixture["task_id"]]["video_mode"] == "photo"
     assert items[completed_video_id]["status"] == "succeeded"
     reverse_item = items[jobs["reverse_job_id"]]
-    assert {key: reverse_item[key] for key in (
-        "task_family",
-        "mode",
-        "label",
-        "status",
-        "progress",
-        "retryable",
-    )} == {
+    assert {
+        key: reverse_item[key]
+        for key in (
+            "task_family",
+            "mode",
+            "label",
+            "status",
+            "progress",
+            "retryable",
+        )
+    } == {
         "task_family": "reverse_prompt",
         "mode": "video",
         "label": "seedance_2_0",
@@ -571,9 +761,7 @@ def test_admin_task_monitor_normalizes_all_task_families_and_filters_them(
 
     assert filtered.status_code == 200
     assert filtered.json()["data"]["total"] == 2
-    assert {
-        item["task_family"] for item in filtered.json()["data"]["items"]
-    } == {"reverse_prompt"}
+    assert {item["task_family"] for item in filtered.json()["data"]["items"]} == {"reverse_prompt"}
 
     legacy_done_filter = client.get(
         "/api/v1/admin/console/tasks",
@@ -581,9 +769,9 @@ def test_admin_task_monitor_normalizes_all_task_families_and_filters_them(
         headers=auth_context["headers"],
     )
     assert legacy_done_filter.status_code == 200
-    assert [
-        item["id"] for item in legacy_done_filter.json()["data"]["items"]
-    ] == [completed_video_id]
+    assert [item["id"] for item in legacy_done_filter.json()["data"]["items"]] == [
+        completed_video_id
+    ]
 
 
 def test_admin_task_monitor_excludes_soft_deleted_reverse_prompt_jobs(
@@ -788,15 +976,15 @@ def test_admin_console_tenant_mutations_are_transactional_and_audited(
         json={"speaker_id": "S_admin_api_slot", "reason": "purchased slot"},
         headers=headers,
     )
-    assert slot.status_code == 200
-    assert slot.json()["data"]["changed"] is True
+    assert slot.status_code == 410
+    assert slot.json()["error"]["code"] == "VOICE_SLOT_ASSIGNMENT_RETIRED"
     repeated_slot = client.post(
         f"/api/v1/admin/console/tenants/{fixture['tenant_id']}/voice-slots",
         json={"speaker_id": "S_admin_api_slot", "reason": "idempotency probe"},
         headers=headers,
     )
-    assert repeated_slot.status_code == 200
-    assert repeated_slot.json()["data"]["changed"] is False
+    assert repeated_slot.status_code == 410
+    assert repeated_slot.json()["error"]["code"] == "VOICE_SLOT_ASSIGNMENT_RETIRED"
 
     status_response = client.patch(
         f"/api/v1/admin/console/tenants/{fixture['tenant_id']}/status",
@@ -829,9 +1017,9 @@ def test_admin_console_tenant_mutations_are_transactional_and_audited(
         assert target.status == "suspended"
         assert actions.count("credits_adjust") == 1
         assert actions.count("plan_change") == 2  # fixture + API change
-        assert actions.count("voice_slot_assign") == 2
+        assert actions.count("voice_slot_assign") == 0
         assert actions.count("status_change") == 1
-        assert len(actions) == 6
+        assert len(actions) == 4
 
 
 def test_credit_adjustment_uses_for_update_and_independent_commits_do_not_lose_updates(
@@ -843,6 +1031,7 @@ def test_credit_adjustment_uses_for_update_and_independent_commits_do_not_lose_u
     fixture = _seed_console_read_fixture(auth_db, auth_context)
     statements: list[str] = []
     with auth_db() as db:
+
         @event.listens_for(db, "do_orm_execute")
         def capture_statement(orm_execute_state) -> None:
             if orm_execute_state.is_select:
@@ -1085,9 +1274,7 @@ def test_photo_retry_rejects_when_bound_image_provider_is_no_longer_available(
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "IMAGE_PROVIDER_NOT_CONFIGURED"
-    assert response.json()["error"]["message"] == (
-        "原任务绑定的图片服务已不可用，请重新创建任务。"
-    )
+    assert response.json()["error"]["message"] == ("原任务绑定的图片服务已不可用，请重新创建任务。")
     assert enqueued is False
     assert reservation_attempted is False
     with auth_db() as db:
@@ -1248,10 +1435,10 @@ def test_avatar_retry_discloses_estimate_and_settles_once_at_actual_duration(
                 )
             )
         )
-        assert subscription.quota_credits_used == used_before + 1801
+        assert subscription.quota_credits_used == used_before + 1802
         assert subscription.quota_credits_reserved == reserved_before
         assert len(settled) == 1
-        assert settled[0].credits == Decimal("1801")
+        assert settled[0].credits == Decimal("1801.2")
         settle_reserved_quota(
             db,
             tenant_id=fixture["tenant_id"],
@@ -1270,7 +1457,7 @@ def test_avatar_retry_discloses_estimate_and_settles_once_at_actual_duration(
                 UsageRecord.credits > 0,
             )
         )
-        assert subscription.quota_credits_used == used_before + 1801
+        assert subscription.quota_credits_used == used_before + 1802
         assert settled_count == 1
 
 
@@ -1571,9 +1758,7 @@ def test_admin_task_retry_reuses_reverse_video_and_replicate_output_paths(
             db.scalars(
                 select(AdminAuditLog).where(
                     AdminAuditLog.action == "task_retry",
-                    AdminAuditLog.target_id.in_(
-                        (jobs["reverse_job_id"], jobs["replicate_job_id"])
-                    ),
+                    AdminAuditLog.target_id.in_((jobs["reverse_job_id"], jobs["replicate_job_id"])),
                 )
             )
         )
@@ -1929,9 +2114,7 @@ def test_non_video_stale_retries_redispatch_without_duplicate_charge_or_audit(
             db.scalars(
                 select(AdminAuditLog).where(
                     AdminAuditLog.action == "task_retry",
-                    AdminAuditLog.target_id.in_(
-                        (jobs["reverse_job_id"], jobs["replicate_job_id"])
-                    ),
+                    AdminAuditLog.target_id.in_((jobs["reverse_job_id"], jobs["replicate_job_id"])),
                 )
             )
         )
@@ -2039,9 +2222,7 @@ def test_non_video_retry_enqueue_compensations_are_idempotent(
             db.scalars(
                 select(AdminAuditLog).where(
                     AdminAuditLog.action == "task_retry",
-                    AdminAuditLog.target_id.in_(
-                        (jobs["reverse_job_id"], jobs["replicate_job_id"])
-                    ),
+                    AdminAuditLog.target_id.in_((jobs["reverse_job_id"], jobs["replicate_job_id"])),
                 )
             )
         )
@@ -2091,21 +2272,17 @@ def test_reverse_retry_enqueue_compensation_releases_reservation_after_soft_dele
 
     with auth_db() as db:
         actor = db.get(User, auth_context["user_id"])
-        compensated = (
-            admin_console_service.compensate_reverse_prompt_retry_enqueue_failure(
-                db,
-                actor=actor,
-                job_id=job_id,
-            )
+        compensated = admin_console_service.compensate_reverse_prompt_retry_enqueue_failure(
+            db,
+            actor=actor,
+            job_id=job_id,
         )
         assert compensated is not None
         assert compensated.deleted_at is not None
         db.commit()
 
     with auth_db() as db:
-        usage = db.scalar(
-            select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id)
-        )
+        usage = db.scalar(select(UsageRecord).where(UsageRecord.reverse_prompt_job_id == job_id))
         subscription = db.get(Subscription, fixture["subscription_id"])
         job = db.get(ReversePromptJob, job_id)
         assert usage.status == "released"
@@ -2304,8 +2481,9 @@ def test_ecom_replicate_worker_entry_claims_job_once_before_rendering(
     monkeypatch.setattr(
         image_gen,
         "run_ecom_replicate_generation",
-        lambda job_id, output_index=None: calls.append((job_id, output_index))
-        or {"status": "executed"},
+        lambda job_id, output_index=None: (
+            calls.append((job_id, output_index)) or {"status": "executed"}
+        ),
     )
 
     first = image_gen.generate_ecom_replicate_task.run(jobs["replicate_job_id"])
@@ -2337,8 +2515,7 @@ def test_ecom_replicate_worker_does_not_claim_soft_deleted_job(
     monkeypatch.setattr(
         image_gen,
         "run_ecom_replicate_generation",
-        lambda job_id, output_index=None: calls.append(job_id)
-        or {"status": "executed"},
+        lambda job_id, output_index=None: calls.append(job_id) or {"status": "executed"},
     )
 
     result = image_gen.generate_ecom_replicate_task.run(jobs["replicate_job_id"])
@@ -2370,9 +2547,7 @@ def test_plan_change_updates_target_auth_entitlements_immediately(
 
     before = client.get("/api/v1/auth/me", headers=target_headers)
     assert before.status_code == 200
-    assert {"voice_clone_vip", "analytics_view"}.issubset(
-        set(before.json()["data"]["permissions"])
-    )
+    assert {"voice_clone_vip", "analytics_view"}.issubset(set(before.json()["data"]["permissions"]))
 
     changed = client.patch(
         f"/api/v1/admin/console/tenants/{fixture['tenant_id']}/plan",
@@ -2515,10 +2690,7 @@ def test_admin_audit_migration_upgrades_and_downgrades_on_sqlite() -> None:
         migration.upgrade()
         names = set(
             connection.scalars(
-                text(
-                    "SELECT name FROM sqlite_master "
-                    "WHERE name LIKE '%admin_audit_logs%'"
-                )
+                text("SELECT name FROM sqlite_master WHERE name LIKE '%admin_audit_logs%'")
             )
         )
         assert {
@@ -2527,9 +2699,12 @@ def test_admin_audit_migration_upgrades_and_downgrades_on_sqlite() -> None:
             "ix_admin_audit_logs_target_tenant_created_at",
         }.issubset(names)
         migration.downgrade()
-        assert connection.scalar(
-            text(
-                "SELECT count(*) FROM sqlite_master "
-                "WHERE type='table' AND name='admin_audit_logs'"
+        assert (
+            connection.scalar(
+                text(
+                    "SELECT count(*) FROM sqlite_master "
+                    "WHERE type='table' AND name='admin_audit_logs'"
+                )
             )
-        ) == 0
+            == 0
+        )

@@ -1,11 +1,15 @@
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUserDependency, DbSessionDependency
+from app.core.exceptions import AppError
 from app.db.models import BrandVoice, User, Voice
 from app.schemas.catalog import VoiceListResponse, VoiceRead
 from app.schemas.response import ApiResponse, ok
+from app.services.voices import assert_brand_voice_usable
 
 router = APIRouter()
 
@@ -48,6 +52,22 @@ def list_voices(
             .order_by(BrandVoice.created_at.desc())
         )
     )
+    requested_at = datetime.now(UTC)
+    usable_brand_voices = []
+    for brand_voice in brand_voices:
+        try:
+            assert_brand_voice_usable(
+                db,
+                brand_voice,
+                user=user,
+                requested_at=requested_at,
+            )
+        except AppError as exc:
+            if exc.status_code != 404:
+                raise
+        else:
+            usable_brand_voices.append(brand_voice)
+    brand_voices = usable_brand_voices
     items.extend(
         VoiceRead(
             id=brand_voice.id,

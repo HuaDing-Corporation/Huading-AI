@@ -12,6 +12,9 @@ import {
   fetchAdminTenants,
   fetchAdminUsage,
   fetchAdminVoiceSlots,
+  getAdminBrandVoiceOrder,
+  listAdminBrandVoiceOrders,
+  resolveAdminBrandVoiceOrder,
   retryAdminTask,
   type AdminTaskFamily,
   type AdminTaskStatus,
@@ -21,7 +24,7 @@ import {
   type PlanCode
 } from "@/lib/api/admin-console";
 import { listAvatarPresets } from "@/lib/api/avatars";
-import { analyticsKeys, avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, historyImageKeys, labelSettingsKey, meKey, publishKeys, quotaKey, reversePromptKeys, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
+import { adminBrandVoiceOrderKeys, analyticsKeys, avatarPresetsKey, batchKeys, bgmLibraryKey, brandVoiceKeys, brandVoiceOrderKeys, copyKeys, coverKeys, ecomModelStylesKey, ecomPosterTemplatesKey, historyImageKeys, labelSettingsKey, meKey, publishKeys, quotaKey, reversePromptKeys, subtitleTemplatesKey, videoKeys, voicesKey } from "@/lib/api/keys";
 import {
   clearHistoryImages,
   deleteHistoryImageSet,
@@ -53,27 +56,45 @@ import { uploadAudio } from "@/lib/api/brand-voices";
 import { listVoices } from "@/lib/api/voices";
 import { listSubtitleTemplates } from "@/lib/api/oral";
 import { createCoverFromFrame, getFrameCandidates } from "@/lib/api/covers";
-import { cutoutImage, cutoutImageBatch, listModelStyles, listPosterTemplates, modelImage, modelImageBatch, posterImage, posterImageBatch } from "@/lib/api/ecom-images";
-import { createBrandVoiceFromAudio, deleteBrandVoice, listBrandVoices } from "@/lib/api/brand-voices";
+import {
+  createEcomCutout,
+  createEcomModel,
+  cutoutImage,
+  cutoutImageBatch,
+  estimateEcomCutout,
+  estimateEcomModel,
+  listModelStyles,
+  listPosterTemplates,
+  modelImage,
+  modelImageBatch,
+  posterImage,
+  posterImageBatch
+} from "@/lib/api/ecom-images";
+import { deleteBrandVoice, listBrandVoices } from "@/lib/api/brand-voices";
+import { listBrandVoiceOrders } from "@/lib/api/brand-voice-orders";
 import { getLabelSettings, updateLabelSettings } from "@/lib/api/label-settings";
 import { createPublishDrafts, deletePublishRecord, listPublishPlatforms, listPublishRecords, markPublished } from "@/lib/api/publish";
 import { clearVideos, createVideo, deleteVideo, estimateVideo, generateScenePrompt, getVideo, listVideos, listVideosPage } from "@/lib/api/videos";
 import type {
   BatchRequest,
+  BillingConfirmation,
   CopyDraftCreateRequest,
   CopyRewriteRequest,
   CopyTitlesRequest,
   CopyTopicsRequest,
   CoverFromFrameRequest,
   CreateVideoRequest,
-  CreateBrandVoiceInput,
   CreateDraftsRequest,
   PublishPlatformId,
   CutoutBatchRequest,
+  CutoutBatchResponse,
   CutoutRequest,
+  CutoutResponse,
   LabelSettingsUpdate,
   ModelBatchRequest,
+  ModelBatchResponse,
   ModelRequest,
+  ModelResponse,
   PosterBatchRequest,
   PosterRequest,
   ScenePromptRequest,
@@ -197,10 +218,26 @@ export function useUploadAudio() {
   return useMutation({ mutationFn: (audio: Blob) => uploadAudio(audio) });
 }
 export function useScriptGenerate() {
-  return useMutation({ mutationFn: (params: ScriptGenerateRequest) => generateScript(params) });
+  return useMutation({
+    mutationFn: ({
+      params,
+      confirmation
+    }: {
+      params: ScriptGenerateRequest;
+      confirmation: BillingConfirmation;
+    }) => generateScript(params, confirmation)
+  });
 }
 export function useScenePromptGenerate() {
-  return useMutation({ mutationFn: (params: ScenePromptRequest) => generateScenePrompt(params) });
+  return useMutation({
+    mutationFn: ({
+      params,
+      confirmation
+    }: {
+      params: ScenePromptRequest;
+      confirmation: BillingConfirmation;
+    }) => generateScenePrompt(params, confirmation)
+  });
 }
 // ── 提示词反推 (REVERSE-PROMPT-UI-0001) — 预估 / 反推 / 重推 / 保存 ──
 /**
@@ -285,6 +322,25 @@ export function useCoverFromFrame() {
   return useMutation({ mutationFn: (body: CoverFromFrameRequest) => createCoverFromFrame(body) });
 }
 // ── 电商图扩展 Phase1 (ECOM-IMG-UI-0001) — 白底图/抠图(单张 + 批量 fan-out)──
+export function useEstimateEcomCutout() {
+  return useMutation({
+    mutationFn: (body: CutoutRequest | CutoutBatchRequest) => estimateEcomCutout(body)
+  });
+}
+export function useCreateEcomCutout() {
+  return useMutation({
+    mutationFn: ({
+      body,
+      confirmation
+    }: {
+      body: CutoutRequest | CutoutBatchRequest;
+      confirmation: BillingConfirmation;
+    }): Promise<CutoutResponse | CutoutBatchResponse> =>
+      "items" in body
+        ? createEcomCutout(body, confirmation)
+        : createEcomCutout(body, confirmation)
+  });
+}
 export function useCutoutImage() {
   return useMutation({ mutationFn: (body: CutoutRequest) => cutoutImage(body) });
 }
@@ -292,6 +348,25 @@ export function useCutoutBatch() {
   return useMutation({ mutationFn: (body: CutoutBatchRequest) => cutoutImageBatch(body) });
 }
 // ── 电商图扩展 Phase2 (ECOM-MODEL-UI-0001) — AI 模特风格预设 + 单张/批量生成 ──
+export function useEstimateEcomModel() {
+  return useMutation({
+    mutationFn: (body: ModelRequest | ModelBatchRequest) => estimateEcomModel(body)
+  });
+}
+export function useCreateEcomModel() {
+  return useMutation({
+    mutationFn: ({
+      body,
+      confirmation
+    }: {
+      body: ModelRequest | ModelBatchRequest;
+      confirmation: BillingConfirmation;
+    }): Promise<ModelResponse | ModelBatchResponse> =>
+      "items" in body
+        ? createEcomModel(body, confirmation)
+        : createEcomModel(body, confirmation)
+  });
+}
 export function useModelStyles() {
   const { session } = useAuth();
   return useQuery({ queryKey: ecomModelStylesKey, queryFn: listModelStyles, enabled: !!session });
@@ -314,27 +389,24 @@ export function usePosterBatch() {
   return useMutation({ mutationFn: (body: PosterBatchRequest) => posterImageBatch(body) });
 }
 // ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001) ──
-// 列表：有 processing 项时每 3s 轮询，全部终态(ready/failed)则停轮询。
+// 只有 CosyVoice 自动创建的 processing 项每 3s 轮询；Doubao 人工订单绝不伪装成供应商轮询。
 export function useBrandVoices() {
   const { session } = useAuth();
   return useQuery({
     queryKey: brandVoiceKeys.list(),
     queryFn: listBrandVoices,
     enabled: !!session,
-    refetchInterval: (query) => (query.state.data?.some((v) => v.status === "processing") ? 3000 : false)
+    refetchInterval: (query) =>
+      query.state.data?.some(
+        (voice) => voice.provider === "cosyvoice-voice-clone" && voice.status === "processing"
+      )
+        ? 3000
+        : false
   });
 }
-export function useCreateBrandVoice() {
-  const qc = useQueryClient();
-  return useMutation({
-    // 三段式编排：上传音频 → JSON 创建(带 consent_confirmed)。
-    mutationFn: (input: CreateBrandVoiceInput) => createBrandVoiceFromAudio(input),
-    // 新建后失效品牌音色列表 + voices(ready 克隆音色会进口播 picker)。
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: brandVoiceKeys.all });
-      void qc.invalidateQueries({ queryKey: voicesKey });
-    }
-  });
+export function useBrandVoiceOrders() {
+  const { session } = useAuth();
+  return useQuery({ queryKey: brandVoiceOrderKeys.list(), queryFn: listBrandVoiceOrders, enabled: !!session });
 }
 export function useDeleteBrandVoice() {
   const qc = useQueryClient();
@@ -457,6 +529,33 @@ export function useMe() {
 export function useQuota() {
   const { session } = useAuth();
   return useQuery({ queryKey: quotaKey, queryFn: getQuota, enabled: !!session });
+}
+
+export function useAdminBrandVoiceOrders(status: import("@/lib/api/admin-console").AdminBrandVoiceOrderStatus | "", page = 1) {
+  return useQuery({
+    queryKey: adminBrandVoiceOrderKeys.list(status, page, 20),
+    queryFn: () => listAdminBrandVoiceOrders({ status, page, page_size: 20 })
+  });
+}
+
+export function useAdminBrandVoiceOrder(orderId: string | null) {
+  return useQuery({
+    queryKey: adminBrandVoiceOrderKeys.detail(orderId ?? ""),
+    queryFn: () => getAdminBrandVoiceOrder(orderId as string),
+    enabled: !!orderId
+  });
+}
+
+export function useResolveAdminBrandVoiceOrder() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ orderId, action }: { orderId: string; action: import("@/lib/api/admin-console").AdminBrandVoiceOrderAction }) =>
+      resolveAdminBrandVoiceOrder(orderId, action),
+    onSuccess: (result) => {
+      qc.setQueryData(adminBrandVoiceOrderKeys.detail(result.id), result);
+      void qc.invalidateQueries({ queryKey: adminBrandVoiceOrderKeys.all });
+    }
+  });
 }
 
 // ── 批量生产中心 (BATCH-PROD-UI-0001) ──

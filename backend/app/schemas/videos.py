@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
@@ -11,6 +11,8 @@ from app.core.image_aspect_ratio import (
     RequestedImageAspectRatio,
     image_aspect_ratio_from_legacy_size,
 )
+from app.schemas.billing import BillingQuote
+from app.services.billing_operations import BillingSummary
 from app.services.subtitle_styles import SUBTITLE_TEMPLATE_IDS, clamp_subtitle_font_size
 
 _ALLOWED_PIPELINES = {"standard", "custom"}
@@ -417,17 +419,51 @@ class VideoGenerateRequest(BaseModel):
         return self
 
 
-class VideoAccepted(BaseModel):
+class _VideoAcceptedBase(BaseModel):
     id: str
     # Kept for the existing M2 frontend while the new contract standardizes on id.
     task_id: str
     status: str
 
 
-class VideoEstimateResponse(BaseModel):
+class BillingQuoteVideoAccepted(_VideoAcceptedBase):
+    pricing_contract: Literal["billing_quote"] = "billing_quote"
+    billing: BillingSummary
+
+
+class LegacyVideoAccepted(_VideoAcceptedBase):
+    pricing_contract: Literal["legacy_estimate"] = "legacy_estimate"
+
+
+class DeferredVideoAccepted(_VideoAcceptedBase):
+    pricing_contract: Literal["deferred_unpriced"] = "deferred_unpriced"
+
+
+VideoAccepted = Annotated[
+    BillingQuoteVideoAccepted | LegacyVideoAccepted | DeferredVideoAccepted,
+    Field(discriminator="pricing_contract"),
+]
+
+
+class LegacyVideoEstimate(BaseModel):
+    pricing_contract: Literal["legacy_estimate"] = "legacy_estimate"
     estimated_credits: int
     unit: Literal["credits"] = "credits"
     note: str | None = None
+
+
+class DeferredUnpricedEstimate(BaseModel):
+    pricing_contract: Literal["deferred_unpriced"] = "deferred_unpriced"
+    estimated_credits: Literal[0] = 0
+    unit: Literal["credits"] = "credits"
+    unpriced: Literal[True] = True
+    note: str | None = None
+
+
+VideoEstimateResponse = Annotated[
+    BillingQuote | LegacyVideoEstimate | DeferredUnpricedEstimate,
+    Field(discriminator="pricing_contract"),
+]
 
 
 class ScenePromptRequest(BaseModel):
@@ -458,6 +494,7 @@ class ScenePromptRequest(BaseModel):
 class ScenePromptResponse(BaseModel):
     scene_prompt: str
     negative_prompt: str
+    billing: BillingSummary
 
 
 class VideoTaskStatus(BaseModel):

@@ -24,7 +24,7 @@ class EcomCutoutRequest(BaseModel):
 class EcomCutoutBatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    items: list[EcomCutoutRequest] = Field(min_length=1)
+    items: list[EcomCutoutRequest] = Field(min_length=1, max_length=20)
 
 
 class EcomCutoutAccepted(BaseModel):
@@ -106,7 +106,7 @@ class EcomModelAccepted(BaseModel):
 class EcomModelBatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    items: list[EcomModelRequest] = Field(min_length=1)
+    items: list[EcomModelRequest] = Field(min_length=1, max_length=20)
 
 
 class EcomModelBatchItem(BaseModel):

@@ -1,5 +1,8 @@
 import { apiFetch } from "@/lib/api/client";
+import { billingHeaders } from "@/lib/api/billing";
 import type {
+  BillingConfirmation,
+  BillingQuote,
   CutoutBatchRequest,
   CutoutBatchResponse,
   CutoutRequest,
@@ -17,6 +20,72 @@ import type {
   PosterTemplate,
   PosterTemplatesResponse
 } from "@/lib/api/types";
+
+/** 获取与单张或批量抠图请求逐字段绑定的服务端报价。 */
+export function estimateEcomCutout(
+  body: CutoutRequest | CutoutBatchRequest
+): Promise<BillingQuote> {
+  return apiFetch<BillingQuote>("/api/v1/ecom-images/cutout/estimate", {
+    method: "POST",
+    body
+  });
+}
+
+/** 按已确认的服务端报价提交抠图；批量体只路由到严格的 batch 端点。 */
+export function createEcomCutout(
+  body: CutoutRequest,
+  confirmation: BillingConfirmation
+): Promise<CutoutResponse>;
+export function createEcomCutout(
+  body: CutoutBatchRequest,
+  confirmation: BillingConfirmation
+): Promise<CutoutBatchResponse>;
+export function createEcomCutout(
+  body: CutoutRequest | CutoutBatchRequest,
+  confirmation: BillingConfirmation
+): Promise<CutoutResponse | CutoutBatchResponse> {
+  const path = "items" in body
+    ? "/api/v1/ecom-images/cutout/batch"
+    : "/api/v1/ecom-images/cutout";
+  return apiFetch<CutoutResponse | CutoutBatchResponse>(path, {
+    method: "POST",
+    body,
+    headers: billingHeaders(confirmation)
+  });
+}
+
+/** 获取与单张或批量 AI 模特请求逐字段绑定的服务端报价。 */
+export function estimateEcomModel(
+  body: ModelRequest | ModelBatchRequest
+): Promise<BillingQuote> {
+  return apiFetch<BillingQuote>("/api/v1/ecom-images/model/estimate", {
+    method: "POST",
+    body
+  });
+}
+
+/** 按已确认的服务端报价提交 AI 模特任务。 */
+export function createEcomModel(
+  body: ModelRequest,
+  confirmation: BillingConfirmation
+): Promise<ModelResponse>;
+export function createEcomModel(
+  body: ModelBatchRequest,
+  confirmation: BillingConfirmation
+): Promise<ModelBatchResponse>;
+export function createEcomModel(
+  body: ModelRequest | ModelBatchRequest,
+  confirmation: BillingConfirmation
+): Promise<ModelResponse | ModelBatchResponse> {
+  const path = "items" in body
+    ? "/api/v1/ecom-images/model/batch"
+    : "/api/v1/ecom-images/model";
+  return apiFetch<ModelResponse | ModelBatchResponse>(path, {
+    method: "POST",
+    body,
+    headers: billingHeaders(confirmation)
+  });
+}
 
 /**
  * 电商图扩展 Phase1 (ECOM-IMG-UI-0001) — 白底图/抠图。同步 REST 提交,返回已创建的

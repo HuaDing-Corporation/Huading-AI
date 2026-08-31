@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -6,6 +8,7 @@ from app.api.deps import get_object_storage
 from app.db.models import (
     Asset,
     BatchJob,
+    BillingOperation,
     ProviderConfig,
     Subscription,
     Tenant,
@@ -101,6 +104,54 @@ def _stub_image_task(monkeypatch):
     return enqueued
 
 
+@pytest.fixture(autouse=True)
+def _sign_ecom_image_submissions(monkeypatch) -> None:
+    """Exercise image creation through the same signed quote contract as clients."""
+    original_post = TestClient.post
+
+    def signed_post(self, url, *, json=None, headers=None, **kwargs):
+        path = str(url)
+        if (
+            path in {"/api/v1/ecom-images/cutout", "/api/v1/ecom-images/cutout/batch"}
+            and headers is not None
+            and "X-Huading-Quote" not in headers
+        ):
+            estimate = original_post(
+                self,
+                "/api/v1/ecom-images/cutout/estimate",
+                json=json,
+                headers=headers,
+            )
+            if estimate.status_code != 200:
+                return estimate
+            headers = {
+                **headers,
+                "Idempotency-Key": str(uuid4()),
+                "X-Huading-Quote": estimate.json()["data"]["quote_token"],
+            }
+        elif (
+            path in {"/api/v1/ecom-images/model", "/api/v1/ecom-images/model/batch"}
+            and headers is not None
+            and "X-Huading-Quote" not in headers
+        ):
+            estimate = original_post(
+                self,
+                "/api/v1/ecom-images/model/estimate",
+                json=json,
+                headers=headers,
+            )
+            if estimate.status_code != 200:
+                return estimate
+            headers = {
+                **headers,
+                "Idempotency-Key": str(uuid4()),
+                "X-Huading-Quote": estimate.json()["data"]["quote_token"],
+            }
+        return original_post(self, url, json=json, headers=headers, **kwargs)
+
+    monkeypatch.setattr(TestClient, "post", signed_post)
+
+
 def test_ecom_poster_templates_returns_static_presets(auth_context) -> None:
     resp = TestClient(app).get(
         "/api/v1/ecom-images/poster-templates",
@@ -109,6 +160,191 @@ def test_ecom_poster_templates_returns_static_presets(auth_context) -> None:
 
     assert resp.status_code == 410
     assert resp.json()["error"]["code"] == "ECOM_POSTER_DISABLED"
+
+
+def test_ecom_cutout_insufficient_balance_rolls_back_everything(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    with auth_db() as db:
+        source = _seed_source_asset(
+            db, tenant_id=auth_context["tenant_id"], asset_id="insufficient-cutout-source"
+        )
+        subscription = db.scalars(select(Subscription)).one()
+        subscription.quota_credits_total = 0
+        subscription.quota_credits_used = 0
+        subscription.quota_credits_reserved = 0
+        db.commit()
+    enqueued = _stub_image_task(monkeypatch)
+
+    response = TestClient(app).post(
+        "/api/v1/ecom-images/cutout",
+        json={"source_asset_id": source["id"]},
+        headers=auth_context["headers"],
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "TENANT_QUOTA_EXCEEDED"
+    assert enqueued == []
+    with auth_db() as db:
+        assert db.scalar(select(func.count()).select_from(VideoTask)) == 0
+        assert db.scalar(select(func.count()).select_from(BillingOperation)) == 0
+        assert db.scalar(select(func.count()).select_from(UsageRecord)) == 0
+
+
+def test_terminal_cutout_replay_returns_the_stored_success_without_new_side_effects(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.db.models import TaskAsset
+    from app.services.ecom_billing import try_finalize_ecom_operation
+
+    with auth_db() as db:
+        source = _seed_source_asset(
+            db, tenant_id=auth_context["tenant_id"], asset_id="terminal-replay-success-source"
+        )
+    payload = {"source_asset_id": source["id"]}
+    client = TestClient(app)
+    estimate = client.post(
+        "/api/v1/ecom-images/cutout/estimate", json=payload, headers=auth_context["headers"]
+    )
+    assert estimate.status_code == 200
+    headers = {
+        **auth_context["headers"],
+        "Idempotency-Key": str(uuid4()),
+        "X-Huading-Quote": estimate.json()["data"]["quote_token"],
+    }
+    enqueued = _stub_image_task(monkeypatch)
+
+    submitted = client.post("/api/v1/ecom-images/cutout", json=payload, headers=headers)
+
+    assert submitted.status_code == 202
+    task_id = submitted.json()["data"]["task_id"]
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        assert task is not None
+        operation_id = str(task.params["billing_operation_id"])
+        asset = Asset(
+            tenant_id=auth_context["tenant_id"],
+            type="generated_image",
+            source="generated",
+            storage_key=f"tenants/{auth_context['tenant_id']}/photos/{task.id}/output.png",
+            mime_type="image/png",
+            status="ready",
+        )
+        db.add(asset)
+        db.flush()
+        asset_id = asset.id
+        db.add(TaskAsset(video_task_id=task.id, asset_id=asset.id, role="output_image"))
+        task.status = "done"
+        task.progress = 100
+        db.commit()
+    with auth_db() as db:
+        assert try_finalize_ecom_operation(db, billing_operation_id=operation_id) is not None
+        db.commit()
+    with auth_db() as db:
+        counts_before = (
+            db.scalar(select(func.count()).select_from(VideoTask)),
+            db.scalar(select(func.count()).select_from(BillingOperation)),
+            db.scalar(select(func.count()).select_from(UsageRecord)),
+        )
+
+    replay = client.post("/api/v1/ecom-images/cutout", json=payload, headers=headers)
+
+    assert replay.status_code == 202
+    data = replay.json()["data"]
+    assert data["state"] == "completed"
+    assert data["completion_kind"] == "succeeded"
+    assert data["billing"]["held_credits"] == 0
+    assert data["result_type"] == "ecom_image_batch"
+    assert data["result"]["items"] == [
+        {
+            "item_index": 0,
+            "task_id": task_id,
+            "source_asset_id": source["id"],
+            "status": "done",
+            "asset_id": asset_id,
+        }
+    ]
+    assert len(enqueued) == 1
+    assert enqueued[0]["task_id"] == task_id
+    with auth_db() as db:
+        counts_after = (
+            db.scalar(select(func.count()).select_from(VideoTask)),
+            db.scalar(select(func.count()).select_from(BillingOperation)),
+            db.scalar(select(func.count()).select_from(UsageRecord)),
+        )
+    assert counts_after == counts_before
+
+
+def test_terminal_cutout_replay_returns_the_stored_failure_without_new_side_effects(
+    monkeypatch,
+    auth_context,
+    auth_db,
+) -> None:
+    from app.services.ecom_billing import try_finalize_ecom_operation
+
+    with auth_db() as db:
+        source = _seed_source_asset(
+            db, tenant_id=auth_context["tenant_id"], asset_id="terminal-replay-failure-source"
+        )
+    payload = {"source_asset_id": source["id"]}
+    client = TestClient(app)
+    estimate = client.post(
+        "/api/v1/ecom-images/cutout/estimate", json=payload, headers=auth_context["headers"]
+    )
+    assert estimate.status_code == 200
+    headers = {
+        **auth_context["headers"],
+        "Idempotency-Key": str(uuid4()),
+        "X-Huading-Quote": estimate.json()["data"]["quote_token"],
+    }
+    enqueued = _stub_image_task(monkeypatch)
+
+    submitted = client.post("/api/v1/ecom-images/cutout", json=payload, headers=headers)
+
+    assert submitted.status_code == 202
+    task_id = submitted.json()["data"]["task_id"]
+    with auth_db() as db:
+        task = db.get(VideoTask, task_id)
+        assert task is not None
+        operation_id = str(task.params["billing_operation_id"])
+        task.status = "failed"
+        task.progress = 1
+        db.commit()
+    with auth_db() as db:
+        assert try_finalize_ecom_operation(db, billing_operation_id=operation_id) is not None
+        db.commit()
+    with auth_db() as db:
+        counts_before = (
+            db.scalar(select(func.count()).select_from(VideoTask)),
+            db.scalar(select(func.count()).select_from(BillingOperation)),
+            db.scalar(select(func.count()).select_from(UsageRecord)),
+        )
+
+    replay = client.post("/api/v1/ecom-images/cutout", json=payload, headers=headers)
+
+    assert replay.status_code == 202
+    data = replay.json()["data"]
+    assert data["state"] == "completed"
+    assert data["completion_kind"] == "failed"
+    assert data["billing"]["held_credits"] == 0
+    assert data["failure"] == {
+        "code": "ECOM_IMAGE_BATCH_FAILED",
+        "original_http_status": 502,
+        "detail": None,
+    }
+    assert len(enqueued) == 1
+    assert enqueued[0]["task_id"] == task_id
+    with auth_db() as db:
+        counts_after = (
+            db.scalar(select(func.count()).select_from(VideoTask)),
+            db.scalar(select(func.count()).select_from(BillingOperation)),
+            db.scalar(select(func.count()).select_from(UsageRecord)),
+        )
+    assert counts_after == counts_before
 
 
 def test_ecom_poster_single_creates_photo_task_clamps_text_without_quota(
@@ -376,8 +612,8 @@ def test_ecom_model_single_preserves_long_prompt_and_reserves_quota(
     assert task.params["image_resolution"] == "1k"
     assert task.params["apply_visible_label"] is True
     assert usage.status == "reserved"
-    assert usage.credits == 10
-    assert subscription.quota_credits_reserved == 10
+    assert usage.credits == 80
+    assert subscription.quota_credits_reserved == 80
 
 
 @pytest.mark.parametrize("field_name", ["extra_prompt", "custom_style"])
@@ -451,9 +687,7 @@ def test_ecom_model_product_asset_list_takes_precedence_over_legacy_scalar(
     assert worker_payload["product_asset_ids"] == [product["id"] for product in products]
     assert worker_payload["source_asset_id"] == products[0]["id"]
     assert worker_payload["source_storage_key"] == products[0]["storage_key"]
-    assert worker_payload["source_storage_keys"] == [
-        product["storage_key"] for product in products
-    ]
+    assert worker_payload["source_storage_keys"] == [product["storage_key"] for product in products]
 
 
 def test_ecom_model_schema_accepts_product_list_or_legacy_scalar() -> None:
@@ -536,8 +770,7 @@ def test_ecom_model_accepts_six_product_and_model_images_in_product_first_order(
         in worker_payload["topic"]
     )
     assert (
-        "model references only for the model's identity and appearance"
-        in worker_payload["topic"]
+        "model references only for the model's identity and appearance" in worker_payload["topic"]
     )
 
 
@@ -569,9 +802,7 @@ def test_ecom_model_rejects_two_references_for_openai_before_side_effects(
     )
 
     assert response.status_code == 422
-    assert response.json()["error"]["code"] == (
-        "IMAGE_PROVIDER_REFERENCE_IMAGES_UNSUPPORTED"
-    )
+    assert response.json()["error"]["code"] == ("IMAGE_PROVIDER_REFERENCE_IMAGES_UNSUPPORTED")
     assert response.json()["error"]["message"] == "当前图片服务最多支持 1 张参考图。"
     assert enqueued == []
     with auth_db() as db:
@@ -617,9 +848,7 @@ def test_ecom_model_batch_preflights_every_reference_group_before_side_effects(
     )
 
     assert response.status_code == 422
-    assert response.json()["error"]["code"] == (
-        "IMAGE_PROVIDER_REFERENCE_IMAGES_UNSUPPORTED"
-    )
+    assert response.json()["error"]["code"] == ("IMAGE_PROVIDER_REFERENCE_IMAGES_UNSUPPORTED")
     assert enqueued == []
     with auth_db() as db:
         assert db.scalar(select(func.count()).select_from(VideoTask)) == 0
@@ -748,7 +977,7 @@ def test_ecom_model_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
                 tenant_id=auth_context["tenant_id"],
                 asset_id=f"model-batch-product-{index:02d}",
             )
-            for index in range(25)
+            for index in range(20)
         ]
 
     enqueued = _stub_image_task(monkeypatch)
@@ -798,16 +1027,14 @@ def test_ecom_model_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
         )
         batch_rows = db.scalar(select(func.count()).select_from(BatchJob))
         reserved_count = db.scalar(
-            select(func.count())
-            .select_from(UsageRecord)
-            .where(UsageRecord.status == "reserved")
+            select(func.count()).select_from(UsageRecord).where(UsageRecord.status == "reserved")
         )
         subscription = db.scalars(select(Subscription)).one()
 
     assert task_count == 20
     assert batch_rows == 0
     assert reserved_count == 20
-    assert subscription.quota_credits_reserved == 200
+    assert subscription.quota_credits_reserved == 1600
 
 
 def test_ecom_model_rejects_unknown_style_id(
@@ -1006,9 +1233,7 @@ def test_ecom_cutout_rejects_undeclared_image_provider_before_side_effects(
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "IMAGE_PROVIDER_CAPABILITIES_UNDECLARED"
-    assert response.json()["error"]["message"] == (
-        "当前图片服务能力配置不完整，暂时无法生成图片。"
-    )
+    assert response.json()["error"]["message"] == ("当前图片服务能力配置不完整，暂时无法生成图片。")
     assert enqueued == []
     with auth_db() as db:
         subscription = db.get(Subscription, subscription_id)
@@ -1133,8 +1358,8 @@ def test_ecom_cutout_single_creates_photo_task_and_reserves_quota(
     assert task.params["requested_aspect_ratio"] == "auto"
     assert task.params["apply_visible_label"] is True
     assert usage.status == "reserved"
-    assert usage.credits == 10
-    assert subscription.quota_credits_reserved == 10
+    assert usage.credits == 80
+    assert subscription.quota_credits_reserved == 80
 
 
 def test_ecom_cutout_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
@@ -1149,7 +1374,7 @@ def test_ecom_cutout_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
                 tenant_id=auth_context["tenant_id"],
                 asset_id=f"batch-product-{index:02d}",
             )
-            for index in range(25)
+            for index in range(20)
         ]
 
     enqueued = _stub_image_task(monkeypatch)
@@ -1194,16 +1419,14 @@ def test_ecom_cutout_batch_clamps_to_20_and_fans_out_independent_photo_tasks(
         )
         batch_rows = db.scalar(select(func.count()).select_from(BatchJob))
         reserved_count = db.scalar(
-            select(func.count())
-            .select_from(UsageRecord)
-            .where(UsageRecord.status == "reserved")
+            select(func.count()).select_from(UsageRecord).where(UsageRecord.status == "reserved")
         )
         subscription = db.scalars(select(Subscription)).one()
 
     assert task_count == 20
     assert batch_rows == 0
     assert reserved_count == 20
-    assert subscription.quota_credits_reserved == 200
+    assert subscription.quota_credits_reserved == 1600
 
 
 def test_ecom_image_ratio_defaults_square_and_rejects_unknown(auth_context) -> None:

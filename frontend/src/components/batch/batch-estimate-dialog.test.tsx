@@ -53,6 +53,17 @@ describe("BatchEstimateDialog (批量确认)", () => {
     expect(screen.getByRole("button", { name: copy.batch.estimateConfirm })).toBeDisabled();
   });
 
+  it("预估不可用时失败关闭：提示稍后重试、禁用确认且点击不提交", () => {
+    const onConfirm = vi.fn();
+    render(<BatchEstimateDialog open request={req()} submitting={false} onConfirm={onConfirm} onCancel={vi.fn()} />);
+
+    expect(screen.getByText("暂时无法获取价格，请稍后重试")).toBeInTheDocument();
+    const confirm = screen.getByRole("button", { name: copy.batch.estimateConfirm });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
   it("充足 → 确认调 onConfirm", () => {
     estimateMock.data = est(false);
     const onConfirm = vi.fn();

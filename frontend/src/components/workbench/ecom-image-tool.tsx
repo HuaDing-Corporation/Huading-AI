@@ -6,7 +6,16 @@ import { Download, ImagePlus, RefreshCw, X } from "lucide-react";
 import { errorText } from "@/lib/api/error-text";
 import { friendlyImageError } from "@/lib/api/image-error";
 import { useUploadImage } from "@/lib/api/hooks";
+import type {
+  BillingConfirmation,
+  BillingOperationLookupFor,
+  BillingQuote,
+  BillingSummary,
+  CutoutBatchRequest,
+  CutoutRequest
+} from "@/lib/api/types";
 import { useTrackedUpload } from "@/lib/api/use-tracked-upload";
+import { useBillingAction } from "@/lib/billing/use-billing-action";
 import { ALLOWED_UPLOAD_TYPES, MAX_UPLOAD_BYTES } from "@/lib/api/uploads";
 import { useVideoTasks, type TrackedTask } from "@/lib/videos/tasks-context";
 import { Button } from "@/components/ui/button";
@@ -15,13 +24,15 @@ import { Progress } from "@/components/ui/progress";
 import { SelectableOption } from "@/components/ui/selectable-option";
 import { ImagePicker } from "@/components/workbench/image-picker";
 import { AiLabelToggle } from "@/components/label/ai-label-toggle";
+import { BillingStatus } from "@/components/billing/billing-status";
+import { PricingConfirmDialog } from "@/components/billing/pricing-confirm-dialog";
 import { useLabelTogglePreference } from "@/lib/preferences/label-toggle";
 import { copy } from "@/lib/copy";
 
 const labelClass = "mb-2 block text-[12.5px] tracking-[.5px] text-ink-soft";
 const MAX_BATCH = 20;
 
-type EcomMode = "single" | "batch";
+export type EcomMode = "single" | "batch";
 
 const MODE_OPTIONS: { id: EcomMode; label: string }[] = [
   { id: "single", label: copy.workbench.ecomModeSingle },
@@ -96,16 +107,28 @@ export interface EcomImageToolProps {
   idPrefix: string;
   /** 生成按钮非 loading 时的图标。 */
   icon: ReactNode;
-  /** 工具提交进行中（其 mutation isPending）。 */
-  submitting: boolean;
   /** 工具侧附加校验门（如风格必填）；缺省 true。 */
   extraValid?: boolean;
-  /** 单张提交：工具调用自身 mutation，返回已创建 task_id 列表。applyVisibleLabel = AI 标识开关值。 */
-  onSubmitSingle: (assetId: string, applyVisibleLabel: boolean) => Promise<string[]>;
-  /** 批量提交：返回已创建 task_id 列表。applyVisibleLabel 贯穿每项。 */
-  onSubmitBatch: (assetIds: string[], applyVisibleLabel: boolean) => Promise<string[]>;
+  /** 从当前已校验素材与偏好生成唯一请求快照；该对象同时用于 estimate 与 submit。 */
+  buildRequest: (
+    assetIds: string[],
+    applyVisibleLabel: boolean,
+    mode: EcomMode
+  ) => CutoutRequest | CutoutBatchRequest;
+  estimate: (request: CutoutRequest | CutoutBatchRequest) => Promise<BillingQuote>;
+  submit: (
+    request: CutoutRequest | CutoutBatchRequest,
+    confirmation: BillingConfirmation
+  ) => Promise<EcomImageSubmitResult>;
+  /** 打开报价时保存装饰等非计费 UI 快照。 */
+  onQuoteRequested?: (request: CutoutRequest | CutoutBatchRequest) => void;
   /** 完成结果瓦片可选装饰（白底图透明→棋盘格）。 */
   resultDecoration?: CSSProperties;
+}
+
+export interface EcomImageSubmitResult {
+  taskIds: string[];
+  billing?: BillingSummary;
 }
 
 /**
@@ -121,10 +144,11 @@ export function EcomImageTool({
   complianceHint,
   idPrefix,
   icon,
-  submitting,
   extraValid = true,
-  onSubmitSingle,
-  onSubmitBatch,
+  buildRequest,
+  estimate,
+  submit,
+  onQuoteRequested,
   resultDecoration
 }: EcomImageToolProps) {
   const { tasks, trackExisting } = useVideoTasks();
@@ -135,12 +159,14 @@ export function EcomImageTool({
   const [mode, setMode] = useState<EcomMode>("single");
   const [batchItems, setBatchItems] = useState<{ assetId: string; preview: string }[]>([]);
   const [submittedIds, setSubmittedIds] = useState<string[]>([]);
+  const [pricingOpen, setPricingOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [downloadingAll, setDownloadingAll] = useState(false);
   const batchInputRef = useRef<HTMLInputElement>(null);
   // 同步锁：fireEvent / 快速连点会绕过 disabled，靠 ref 保证一次只触发一批下载（防连点）。
   const downloadingAllRef = useRef(false);
   const downloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handledBillingResultRef = useRef<EcomImageSubmitResult | null>(null);
 
   // 卸载时释放残留批量预览的 object URL，对齐 ImagePicker 防泄漏；并清掉批量下载复位定时器，避免卸载后 setState。
   // ECOM-SUBTOOL-KEEPALIVE-UI-0001：原注释写的「切走工具/模式即卸载」前提**已不成立** —— 子工具与顶层 mode
@@ -167,8 +193,12 @@ export function EcomImageTool({
     if (all.some((f) => !ALLOWED_UPLOAD_TYPES.includes(f.type))) setError(copy.errors.uploadType);
     else if (all.some((f) => f.size > MAX_UPLOAD_BYTES)) setError(copy.errors.uploadTooLarge);
     const room = MAX_BATCH - batchItems.length;
-    if (valid.length > room) setError(copy.workbench.ecomBatchOverLimit);
-    for (const file of valid.slice(0, room)) {
+    if (valid.length > room) {
+      setError(copy.workbench.ecomBatchOverLimit);
+      if (batchInputRef.current) batchInputRef.current.value = "";
+      return;
+    }
+    for (const file of valid) {
       const preview = URL.createObjectURL(file);
       try {
         const r = await uploadImg.mutateAsync(file);
@@ -189,27 +219,73 @@ export function EcomImageTool({
     });
   };
 
-  const onGenerate = async () => {
+  const currentAssetIds = mode === "single"
+    ? (source.value ? [source.value] : [])
+    : batchItems.map((item) => item.assetId);
+  const billingInput = currentAssetIds.length > 0 && extraValid
+    ? buildRequest(currentAssetIds, applyLabel, mode)
+    : null;
+  const billing = useBillingAction<
+    CutoutRequest | CutoutBatchRequest,
+    BillingQuote,
+    EcomImageSubmitResult,
+    "ecom_cutout"
+  >({
+    operation: "ecom_cutout",
+    input: billingInput,
+    estimate,
+    submit,
+    resultFromLookup: (lookup: BillingOperationLookupFor<"ecom_cutout">) => {
+      if (
+        lookup.state !== "completed" ||
+        lookup.completion_kind !== "succeeded" ||
+        lookup.result_type !== "ecom_image_batch" ||
+        !lookup.result
+      ) {
+        return null;
+      }
+      return {
+        taskIds: lookup.result.items.map((item) => item.task_id),
+        billing: lookup.billing
+      };
+    }
+  });
+
+  useEffect(() => {
+    const result = billing.result;
+    if (billing.phase !== "succeeded" || !result || handledBillingResultRef.current === result) return;
+    handledBillingResultRef.current = result;
+    result.taskIds.forEach((id) => trackExisting(id, title, "photo", applyLabel));
+    setSubmittedIds(result.taskIds);
+    setPricingOpen(false);
+  }, [applyLabel, billing.phase, billing.result, title, trackExisting]);
+
+  useEffect(() => {
+    if (billing.phase === "failed" && billing.quote !== null && billing.errorMessage) {
+      setError(billing.errorMessage);
+    }
+  }, [billing.errorMessage, billing.phase, billing.quote]);
+
+  const onGenerate = () => {
     setError(null);
-    const assetIds = mode === "single" ? (source.value ? [source.value] : []) : batchItems.map((it) => it.assetId);
-    if (assetIds.length === 0) {
+    if (currentAssetIds.length === 0 || billingInput === null) {
       setError(copy.workbench.ecomUploadRequired);
       return;
     }
     // 附加门（如风格必填）复核：正常 UI 已 disabled，这里防 fireEvent/快速绕过 disabled
     // 提交不完整请求（对齐 new-video-form/ecom-video-form 在 onGenerate 顶部复核完整门）。
     if (!extraValid) return;
-    try {
-      const ids = mode === "single" ? await onSubmitSingle(assetIds[0], applyLabel) : await onSubmitBatch(assetIds, applyLabel);
-      ids.forEach((id) => trackExisting(id, title, "photo", applyLabel));
-      setSubmittedIds(ids);
-    } catch (err) {
-      setError(errorText(err));
-    }
+    handledBillingResultRef.current = null;
+    onQuoteRequested?.(billingInput);
+    billing.reset();
+    setPricingOpen(true);
   };
+
+  const submitting = billing.phase === "estimating" || billing.phase === "submitting" || billing.phase === "querying";
 
   const generateDisabled =
     submitting ||
+    pricingOpen ||
     uploadImg.isPending ||
     !extraValid ||
     (mode === "single" ? !source.value : batchItems.length === 0);
@@ -326,10 +402,39 @@ export function EcomImageTool({
         </p>
       )}
 
-      <Button variant="primary" size="lg" className="mt-1 w-full" onClick={() => void onGenerate()} disabled={generateDisabled}>
+      <Button variant="primary" size="lg" className="mt-1 w-full" onClick={onGenerate} disabled={generateDisabled}>
         {submitting ? <RefreshCw size={18} strokeWidth={1.8} className="animate-spin" /> : icon}
         {submitting ? copy.workbench.ecomGenerating : copy.workbench.ecomGenerate}
       </Button>
+
+      <PricingConfirmDialog
+        open={pricingOpen}
+        phase={billing.phase}
+        quote={billing.quote}
+        expiresInSeconds={billing.expiresInSeconds}
+        errorMessage={billing.errorMessage}
+        onEstimate={() => void billing.estimate()}
+        onConfirm={() => void billing.confirm()}
+        onCancel={() => {
+          setPricingOpen(false);
+          billing.reset();
+        }}
+      />
+
+      {billing.billing && (
+        <div className="mt-4 space-y-2">
+          <BillingStatus
+            summary={billing.billing}
+            querying={billing.phase === "querying"}
+            onContinueLookup={() => void billing.continueLookup()}
+          />
+          {billing.billing.status === "partially_settled" && (
+            <p className="text-[12px] leading-5 text-ink-soft">
+              仅结算成功生成的图片，失败图片对应的冻结积分已释放。
+            </p>
+          )}
+        </div>
+      )}
 
       {resultTasks.length > 0 && (
         <div className="mt-5 border-t border-line-gold pt-5">

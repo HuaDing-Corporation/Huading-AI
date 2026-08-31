@@ -53,6 +53,32 @@ def ready(
         status = "degraded"
         components.append(ComponentHealth(name="redis", status="error", detail=str(exc)))
 
+    if str(settings.environment).strip().lower() in {"prod", "production"}:
+        try:
+            from scripts.ops.pricing_closure_readiness import pricing_closure_readiness
+
+            report = pricing_closure_readiness(db, production_mode=True)
+            if report.ready:
+                components.append(ComponentHealth(name="pricing_closure", status="ok"))
+            else:
+                status = "degraded"
+                components.append(
+                    ComponentHealth(
+                        name="pricing_closure",
+                        status="error",
+                        detail="pricing closure readiness gate is not ready",
+                    )
+                )
+        except Exception:
+            status = "degraded"
+            components.append(
+                ComponentHealth(
+                    name="pricing_closure",
+                    status="error",
+                    detail="pricing closure readiness check failed",
+                )
+            )
+
     return ok(request, HealthResponse(status=status, components=components))
 
 

@@ -1,0 +1,494 @@
+"""Centralize authoritative pricing rates and numeric guards."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from decimal import Decimal
+
+import sqlalchemy as sa
+
+from alembic import op
+
+revision = "20260829_0037"
+down_revision = "20260829_0036"
+branch_labels = None
+depends_on = None
+
+
+_CREDIT_RATE_CAPABILITIES = (
+    "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
+    "'publish', 'voice_clone', 'video_gen', 'reverse_prompt', "
+    "'reverse_prompt_video', 'script_generate', 'scene_prompt')"
+)
+_CREDIT_RATE_CAPABILITIES_LEGACY = (
+    "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
+    "'publish', 'voice_clone', 'video_gen', 'reverse_prompt', "
+    "'reverse_prompt_video')"
+)
+_USAGE_CAPABILITIES = (
+    "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
+    "'publish', 'voice_clone', 'video_gen', 'reverse_prompt', "
+    "'reverse_prompt_video', 'scene_prompt', 'chat', 'script_generate')"
+)
+_USAGE_CAPABILITIES_LEGACY = (
+    "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
+    "'publish', 'voice_clone', 'video_gen', 'reverse_prompt', "
+    "'reverse_prompt_video', 'scene_prompt', 'chat')"
+)
+_USAGE_UNITS = "unit IN ('second', 'call', 'token', 'image', 'char', 'character')"
+_USAGE_UNITS_LEGACY = "unit IN ('second', 'call', 'token', 'image', 'char')"
+_RATE_AMOUNT_GUARD = (
+    "credits_per_unit >= 0 AND credits_per_unit <= 99999999.9999 AND "
+    "credits_per_unit = ROUND(credits_per_unit, 4) AND "
+    "LOWER(CAST(credits_per_unit AS TEXT)) NOT IN "
+    "('nan', 'infinity', '-infinity', 'inf', '-inf')"
+)
+_USAGE_AMOUNT_GUARD = (
+    "quantity >= 0 AND quantity <= 999999999.999 AND "
+    "quantity = ROUND(quantity, 3) AND "
+    "credits >= 0 AND credits < 1000000000000 AND "
+    "credits = ROUND(credits, 6) AND "
+    "LOWER(CAST(quantity AS TEXT)) NOT IN "
+    "('nan', 'infinity', '-infinity', 'inf', '-inf') AND "
+    "LOWER(CAST(credits AS TEXT)) NOT IN "
+    "('nan', 'infinity', '-infinity', 'inf', '-inf')"
+)
+_BILLING_FINITE_GUARD = (
+    "LOWER(CAST(requested_credits AS TEXT)) NOT IN "
+    "('nan', 'infinity', '-infinity', 'inf', '-inf') AND "
+    "LOWER(CAST(settled_credits AS TEXT)) NOT IN "
+    "('nan', 'infinity', '-infinity', 'inf', '-inf') AND "
+    "LOWER(CAST(released_credits AS TEXT)) NOT IN "
+    "('nan', 'infinity', '-infinity', 'inf', '-inf')"
+)
+_BILLING_AMOUNT_DOMAIN_GUARD = (
+    "requested_credits >= 0 AND settled_credits >= 0 AND released_credits >= 0 AND "
+    "requested_credits < 1000000000000 AND "
+    "settled_credits < 1000000000000 AND "
+    "released_credits < 1000000000000 AND "
+    "requested_credits = ROUND(requested_credits, 6) AND "
+    "settled_credits = ROUND(settled_credits, 6) AND "
+    "released_credits = ROUND(released_credits, 6)"
+)
+_PLATFORM_ACTIVE_INDEX = "uq_credit_rates_platform_active_capability_unit"
+_TENANT_ACTIVE_INDEX = "uq_credit_rates_tenant_active_capability_unit"
+
+_TARGETS = (
+    (
+        "00000000-0000-0000-0000-000000000371",
+        "script_generate",
+        "call",
+        Decimal("1.0000"),
+        frozenset({Decimal("1.0000")}),
+    ),
+    (
+        "00000000-0000-0000-0000-000000000372",
+        "scene_prompt",
+        "call",
+        Decimal("30.0000"),
+        frozenset({Decimal("30.0000")}),
+    ),
+    (
+        "00000000-0000-0000-0000-000000000373",
+        "image",
+        "image",
+        Decimal("80.0000"),
+        frozenset({Decimal("10.0000"), Decimal("80.0000")}),
+    ),
+    (
+        "00000000-0000-0000-0000-000000000374",
+        "voice_clone",
+        "call",
+        Decimal("30000.0000"),
+        frozenset({Decimal("30.0000"), Decimal("30000.0000")}),
+    ),
+    (
+        "00000000-0000-0000-0000-000000000375",
+        "tts",
+        "character",
+        Decimal("0.1000"),
+        frozenset({Decimal("0.1000")}),
+    ),
+)
+
+_POSITIVE_RATE_PAIRS = {
+    ("script_generate", "call"),
+    ("scene_prompt", "call"),
+    ("image", "image"),
+    ("tts", "character"),
+    ("avatar", "second"),
+    ("video", "second"),
+    ("video_gen", "second"),
+    ("reverse_prompt", "call"),
+}
+_PLATFORM_POSITIVE_RATE_PAIRS = {("voice_clone", "call")}
+
+
+def _ids(rows) -> str:
+    return ", ".join(sorted(str(row[0]) for row in rows))
+
+
+def _audit_existing_data() -> None:
+    connection = op.get_bind()
+    duplicate_groups = connection.execute(
+        sa.text(
+            """
+            SELECT tenant_id, capability, unit
+            FROM credit_rates
+            WHERE is_active IS TRUE
+            GROUP BY tenant_id, capability, unit
+            HAVING COUNT(*) > 1
+            """
+        )
+    ).all()
+    duplicate_ids: list[tuple[str]] = []
+    for tenant_id, capability, unit in duplicate_groups:
+        tenant_predicate = "tenant_id IS NULL" if tenant_id is None else "tenant_id = :tenant_id"
+        duplicate_ids.extend(
+            connection.execute(
+                sa.text(
+                    "SELECT id FROM credit_rates "
+                    f"WHERE {tenant_predicate} AND capability = :capability AND unit = :unit "
+                    "AND is_active IS TRUE ORDER BY id"
+                ),
+                {"tenant_id": tenant_id, "capability": capability, "unit": unit},
+            ).all()
+        )
+    if duplicate_ids:
+        raise RuntimeError(f"Duplicate active credit rate IDs: {_ids(duplicate_ids)}")
+
+    invalid_rate_rows = connection.execute(
+        sa.text(
+            """
+            SELECT id FROM credit_rates
+            WHERE credits_per_unit < 0
+               OR credits_per_unit > 99999999.9999
+               OR credits_per_unit <> ROUND(credits_per_unit, 4)
+               OR LOWER(CAST(credits_per_unit AS TEXT)) IN
+                  ('nan', 'infinity', '-infinity', 'inf', '-inf')
+            ORDER BY id
+            """
+        )
+    ).all()
+    if invalid_rate_rows:
+        raise RuntimeError(f"Invalid credit rate amount IDs: {_ids(invalid_rate_rows)}")
+
+    invalid_usage_rows = connection.execute(
+        sa.text(
+            """
+            SELECT id FROM usage_records
+            WHERE quantity < 0 OR quantity > 999999999.999
+               OR quantity <> ROUND(quantity, 3)
+               OR credits < 0 OR credits >= 1000000000000
+               OR credits <> ROUND(credits, 6)
+               OR LOWER(CAST(quantity AS TEXT)) IN
+                  ('nan', 'infinity', '-infinity', 'inf', '-inf')
+               OR LOWER(CAST(credits AS TEXT)) IN
+                  ('nan', 'infinity', '-infinity', 'inf', '-inf')
+            ORDER BY id
+            """
+        )
+    ).all()
+    if invalid_usage_rows:
+        raise RuntimeError(f"Invalid usage amount IDs: {_ids(invalid_usage_rows)}")
+
+    invalid_billing_rows = connection.execute(
+        sa.text(
+            """
+            SELECT id FROM billing_operations
+            WHERE requested_credits < 0 OR requested_credits >= 1000000000000
+               OR requested_credits <> ROUND(requested_credits, 6)
+               OR settled_credits < 0 OR settled_credits >= 1000000000000
+               OR settled_credits <> ROUND(settled_credits, 6)
+               OR released_credits < 0 OR released_credits >= 1000000000000
+               OR released_credits <> ROUND(released_credits, 6)
+               OR LOWER(CAST(requested_credits AS TEXT)) IN
+                  ('nan', 'infinity', '-infinity', 'inf', '-inf')
+               OR LOWER(CAST(settled_credits AS TEXT)) IN
+                  ('nan', 'infinity', '-infinity', 'inf', '-inf')
+               OR LOWER(CAST(released_credits AS TEXT)) IN
+                  ('nan', 'infinity', '-infinity', 'inf', '-inf')
+            ORDER BY id
+            """
+        )
+    ).all()
+    if invalid_billing_rows:
+        raise RuntimeError(f"Invalid billing amount IDs: {_ids(invalid_billing_rows)}")
+
+    zero_ids: list[tuple[str]] = []
+    for capability, unit in sorted(_POSITIVE_RATE_PAIRS):
+        zero_ids.extend(
+            connection.execute(
+                sa.text(
+                    "SELECT id FROM credit_rates "
+                    "WHERE capability = :capability AND unit = :unit "
+                    "AND is_active IS TRUE AND credits_per_unit = 0 ORDER BY id"
+                ),
+                {"capability": capability, "unit": unit},
+            ).all()
+        )
+    for capability, unit in sorted(_PLATFORM_POSITIVE_RATE_PAIRS):
+        zero_ids.extend(
+            connection.execute(
+                sa.text(
+                    "SELECT id FROM credit_rates "
+                    "WHERE tenant_id IS NULL AND capability = :capability AND unit = :unit "
+                    "AND is_active IS TRUE AND credits_per_unit = 0 ORDER BY id"
+                ),
+                {"capability": capability, "unit": unit},
+            ).all()
+        )
+    if zero_ids:
+        raise RuntimeError(f"Active zero credit rate IDs: {_ids(zero_ids)}")
+
+    drift_ids: list[tuple[str]] = []
+    for _, capability, unit, _, allowed_values in _TARGETS:
+        row = connection.execute(
+            sa.text(
+                "SELECT id, credits_per_unit FROM credit_rates "
+                "WHERE tenant_id IS NULL AND capability = :capability AND unit = :unit "
+                "AND is_active IS TRUE"
+            ),
+            {"capability": capability, "unit": unit},
+        ).first()
+        if row is not None and Decimal(str(row.credits_per_unit)) not in allowed_values:
+            drift_ids.append((row.id,))
+    if drift_ids:
+        raise RuntimeError(f"Unexpected platform credit rate IDs: {_ids(drift_ids)}")
+
+
+def _apply_schema_changes() -> None:
+    # 0036 may already be applied with fixed-scale NUMERIC columns. Widen the
+    # physical type before installing scale checks so PostgreSQL cannot round
+    # invalid input before the constraint sees it. The stable 0036 constraint
+    # names are retained for both fresh and in-place upgrade paths.
+    with op.batch_alter_table("billing_operations") as batch_op:
+        batch_op.drop_constraint(
+            "ck_billing_operations_amounts_finite", type_="check"
+        )
+        batch_op.drop_constraint(
+            "ck_billing_operations_amounts_nonnegative", type_="check"
+        )
+        for column_name in (
+            "requested_credits",
+            "settled_credits",
+            "released_credits",
+        ):
+            batch_op.alter_column(
+                column_name,
+                existing_type=sa.Numeric(18, 6),
+                type_=sa.Numeric(),
+                existing_nullable=False,
+            )
+        batch_op.create_check_constraint(
+            "ck_billing_operations_amounts_finite",
+            _BILLING_FINITE_GUARD,
+        )
+        batch_op.create_check_constraint(
+            "ck_billing_operations_amounts_nonnegative",
+            _BILLING_AMOUNT_DOMAIN_GUARD,
+        )
+
+    with op.batch_alter_table("credit_rates") as batch_op:
+        batch_op.drop_constraint("ck_credit_rates_capability", type_="check")
+        batch_op.alter_column(
+            "credits_per_unit",
+            existing_type=sa.Numeric(12, 4),
+            type_=sa.Numeric(),
+            existing_nullable=False,
+        )
+        batch_op.create_check_constraint(
+            "ck_credit_rates_capability", _CREDIT_RATE_CAPABILITIES
+        )
+        batch_op.create_check_constraint(
+            "ck_credit_rates_credits_per_unit_valid", _RATE_AMOUNT_GUARD
+        )
+
+    with op.batch_alter_table("usage_records") as batch_op:
+        batch_op.drop_constraint("ck_usage_records_capability", type_="check")
+        batch_op.drop_constraint("ck_usage_records_unit", type_="check")
+        batch_op.alter_column(
+            "quantity",
+            existing_type=sa.Numeric(12, 3),
+            type_=sa.Numeric(),
+            existing_nullable=False,
+        )
+        batch_op.alter_column(
+            "credits",
+            existing_type=sa.Numeric(18, 6),
+            type_=sa.Numeric(),
+            existing_nullable=False,
+        )
+        batch_op.create_check_constraint(
+            "ck_usage_records_capability", _USAGE_CAPABILITIES
+        )
+        batch_op.create_check_constraint("ck_usage_records_unit", _USAGE_UNITS)
+        batch_op.create_check_constraint(
+            "ck_usage_records_amounts_valid", _USAGE_AMOUNT_GUARD
+        )
+
+    active_platform = sa.text("tenant_id IS NULL AND is_active")
+    active_tenant = sa.text("tenant_id IS NOT NULL AND is_active")
+    op.create_index(
+        _PLATFORM_ACTIVE_INDEX,
+        "credit_rates",
+        ["capability", "unit"],
+        unique=True,
+        postgresql_where=active_platform,
+        sqlite_where=active_platform,
+    )
+    op.create_index(
+        _TENANT_ACTIVE_INDEX,
+        "credit_rates",
+        ["tenant_id", "capability", "unit"],
+        unique=True,
+        postgresql_where=active_tenant,
+        sqlite_where=active_tenant,
+    )
+
+
+def _seed_platform_rates() -> None:
+    connection = op.get_bind()
+    effective_at = datetime.now(UTC)
+    insert_rate = sa.text(
+        "INSERT INTO credit_rates "
+        "(id, tenant_id, capability, unit, credits_per_unit, is_active, effective_at) "
+        "VALUES (:id, NULL, :capability, :unit, :target, TRUE, :effective_at)"
+    ).bindparams(
+        sa.bindparam("target", type_=sa.Numeric()),
+        sa.bindparam("effective_at", type_=sa.DateTime(timezone=True)),
+    )
+    for rate_id, capability, unit, target, allowed_values in _TARGETS:
+        row = connection.execute(
+            sa.text(
+                "SELECT id, credits_per_unit FROM credit_rates "
+                "WHERE tenant_id IS NULL AND capability = :capability AND unit = :unit "
+                "AND is_active IS TRUE"
+            ),
+            {"capability": capability, "unit": unit},
+        ).first()
+        if row is None:
+            inserted = connection.execute(
+                insert_rate,
+                {
+                    "id": rate_id,
+                    "capability": capability,
+                    "unit": unit,
+                    "target": target,
+                    "effective_at": effective_at,
+                },
+            )
+            if inserted.rowcount != 1:
+                raise RuntimeError(f"Credit rate insert failed for ID: {rate_id}")
+        else:
+            current = Decimal(str(row.credits_per_unit))
+            if current not in allowed_values:
+                raise RuntimeError(f"Credit rate CAS found unexpected value for ID: {row.id}")
+            verify_or_deactivate = sa.text(
+                "UPDATE credit_rates SET is_active = :next_active "
+                "WHERE id = :id AND tenant_id IS NULL "
+                "AND capability = :capability AND unit = :unit "
+                "AND is_active IS TRUE AND credits_per_unit = :expected"
+            ).bindparams(sa.bindparam("expected", type_=sa.Numeric()))
+            result = connection.execute(
+                verify_or_deactivate,
+                {
+                    "id": row.id,
+                    "capability": capability,
+                    "unit": unit,
+                    "expected": current,
+                    "next_active": current == target,
+                },
+            )
+            if result.rowcount != 1:
+                raise RuntimeError(f"Credit rate CAS failed for ID: {row.id}")
+            if current != target:
+                inserted = connection.execute(
+                    insert_rate,
+                    {
+                        "id": rate_id,
+                        "capability": capability,
+                        "unit": unit,
+                        "target": target,
+                        "effective_at": effective_at,
+                    },
+                )
+                if inserted.rowcount != 1:
+                    raise RuntimeError(f"Credit rate insert failed for ID: {rate_id}")
+
+
+def upgrade() -> None:
+    _audit_existing_data()
+    _apply_schema_changes()
+    _seed_platform_rates()
+
+
+def downgrade() -> None:
+    # Billing amount hardening belongs to the amended 0036 contract and is
+    # intentionally retained when the 0037 pricing-rate changes are reverted.
+    connection = op.get_bind()
+    incompatible_usage = connection.execute(
+        sa.text(
+            "SELECT id FROM usage_records "
+            "WHERE capability = 'script_generate' OR unit = 'character' ORDER BY id"
+        )
+    ).all()
+    incompatible_tenant_rates = connection.execute(
+        sa.text(
+            "SELECT id FROM credit_rates WHERE tenant_id IS NOT NULL "
+            "AND capability IN ('script_generate', 'scene_prompt') ORDER BY id"
+        )
+    ).all()
+    if incompatible_usage or incompatible_tenant_rates:
+        raise RuntimeError(
+            "Cannot downgrade 20260829_0037 with incompatible IDs: "
+            f"{_ids([*incompatible_usage, *incompatible_tenant_rates])}"
+        )
+
+    for rate_id, capability, unit, target, _ in _TARGETS[:2]:
+        row = connection.execute(
+            sa.text(
+                "SELECT credits_per_unit FROM credit_rates WHERE id = :id "
+                "AND tenant_id IS NULL AND capability = :capability AND unit = :unit "
+                "AND is_active IS TRUE"
+            ),
+            {"id": rate_id, "capability": capability, "unit": unit},
+        ).first()
+        if row is not None and Decimal(str(row.credits_per_unit)) != target:
+            raise RuntimeError(f"Cannot remove modified seeded credit rate ID: {rate_id}")
+        connection.execute(sa.text("DELETE FROM credit_rates WHERE id = :id"), {"id": rate_id})
+
+    op.drop_index(_TENANT_ACTIVE_INDEX, table_name="credit_rates")
+    op.drop_index(_PLATFORM_ACTIVE_INDEX, table_name="credit_rates")
+    with op.batch_alter_table("usage_records") as batch_op:
+        batch_op.drop_constraint("ck_usage_records_amounts_valid", type_="check")
+        batch_op.drop_constraint("ck_usage_records_capability", type_="check")
+        batch_op.drop_constraint("ck_usage_records_unit", type_="check")
+        batch_op.alter_column(
+            "quantity",
+            existing_type=sa.Numeric(),
+            type_=sa.Numeric(12, 3),
+            existing_nullable=False,
+        )
+        batch_op.alter_column(
+            "credits",
+            existing_type=sa.Numeric(),
+            type_=sa.Numeric(18, 6),
+            existing_nullable=False,
+        )
+        batch_op.create_check_constraint(
+            "ck_usage_records_capability", _USAGE_CAPABILITIES_LEGACY
+        )
+        batch_op.create_check_constraint("ck_usage_records_unit", _USAGE_UNITS_LEGACY)
+    with op.batch_alter_table("credit_rates") as batch_op:
+        batch_op.drop_constraint("ck_credit_rates_credits_per_unit_valid", type_="check")
+        batch_op.drop_constraint("ck_credit_rates_capability", type_="check")
+        batch_op.alter_column(
+            "credits_per_unit",
+            existing_type=sa.Numeric(),
+            type_=sa.Numeric(12, 4),
+            existing_nullable=False,
+        )
+        batch_op.create_check_constraint(
+            "ck_credit_rates_capability", _CREDIT_RATE_CAPABILITIES_LEGACY
+        )

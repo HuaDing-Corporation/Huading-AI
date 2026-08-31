@@ -1,203 +1,221 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { copy } from "@/lib/copy";
-
-const createMock = vi.hoisted(() => ({ mutateAsync: vi.fn(), isPending: false }));
-
-vi.mock("@/lib/api/hooks", () => ({
-  useCreateBrandVoice: () => ({ mutateAsync: createMock.mutateAsync, isPending: createMock.isPending })
+const api = vi.hoisted(() => ({
+  upload: vi.fn(),
+  estimateOrder: vi.fn(),
+  createOrder: vi.fn(),
+  estimateCosy: vi.fn(),
+  createCosy: vi.fn()
 }));
-
-// VIP 门禁：门禁唯一信号 = permissions 含 voice_clone_vip（不看 role）。默认授权（含该权限，doubao 可用）；
-// VIP 置灰测试改 session 为无该权限。
-const authMock = vi.hoisted(() => ({
-  session: { role: "admin", user: { permissions: ["voice_clone_vip"] } } as { role: string; user?: { permissions: string[] } } | null,
-  ready: true
+vi.mock("@/lib/api/brand-voices", () => ({
+  uploadAudio: api.upload,
+  estimateBrandVoice: api.estimateCosy,
+  createBrandVoice: api.createCosy
 }));
-vi.mock("@/lib/auth/auth-context", () => ({ useAuth: () => authMock }));
+vi.mock("@/lib/api/brand-voice-orders", () => ({
+  estimateBrandVoiceOrder: api.estimateOrder,
+  createBrandVoiceOrder: api.createOrder
+}));
+vi.mock("@/lib/auth/auth-context", () => ({
+  useAuth: () => ({ session: { user: { permissions: ["voice_clone_vip"] } }, ready: true })
+}));
 
 import { BrandVoiceCreate } from "./brand-voice-create";
+import { brandVoiceKeys, brandVoiceOrderKeys, voicesKey } from "@/lib/api/keys";
 
-const mp3 = (name = "a.mp3") => new File(["xxxxxx"], name, { type: "audio/mpeg" });
+function renderCreate(ui: React.ReactElement = <BrandVoiceCreate />, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
+  return {
+    client,
+    ...render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>)
+  };
+}
 
-// 通过上传路径提供音频（jsdom 无 MediaRecorder；useAudioRecorder 走 supported=false + setExternal）。
-function uploadAudio(file = mp3()) {
+const quote = (operation: string, payable: number, disclosures: Array<Record<string, unknown>> = []) => ({
+  pricing_contract: "billing_quote",
+  operation,
+  pricing_shape: "simple",
+  unit: "voice",
+  quantity: "1",
+  unit_credits: String(payable),
+  rate_scope: "platform_fixed",
+  rate_source: "fixed_policy",
+  subtotal_credits: String(payable),
+  payable_credits: payable,
+  breakdown: [],
+  disclosures,
+  quote_token: `quote-${operation}`,
+  expires_at: "2030-08-30T00:00:00Z"
+});
+const summary = (status: "reserved" | "settled", amount: number, idempotencyKey = "00000000-0000-4000-8000-000000000001") => ({
+  operation_id: "op-1",
+  idempotency_key: idempotencyKey,
+  status,
+  requested_credits: amount,
+  held_credits: status === "reserved" ? amount : 0,
+  settled_credits: status === "settled" ? amount : 0,
+  released_credits: 0
+});
+
+function fill(file = new File(["audio"], "voice.mp3", { type: "audio/mpeg" })) {
   fireEvent.change(document.querySelector("#brand-voice-audio")!, { target: { files: [file] } });
+  fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "客户主播音" } });
+  fireEvent.click(screen.getByRole("checkbox"));
+  return file;
 }
 
 beforeEach(() => {
-  URL.createObjectURL = vi.fn(() => "blob:mock");
+  URL.createObjectURL = vi.fn(() => "blob:voice");
   URL.revokeObjectURL = vi.fn();
-  createMock.isPending = false;
-  createMock.mutateAsync.mockResolvedValue({ id: "bv-1", name: "我的音", status: "processing", created_at: "" });
-  authMock.session = { role: "admin", user: { permissions: ["voice_clone_vip"] } }; // 每用例复位为 VIP 可用（含权限）
-  authMock.ready = true;
+  api.upload.mockReset().mockResolvedValue({ asset_id: "asset-1" });
+  api.estimateOrder.mockReset().mockResolvedValue(quote("doubao_brand_voice_order_create", 30000));
+  api.createOrder.mockReset().mockImplementation((_input, confirmation) => Promise.resolve({
+    id: "order-1",
+    status: "awaiting_fulfillment",
+    billing: summary("reserved", 30000, confirmation.idempotency_key)
+  }));
+  const disclosure = {
+    key: "cosyvoice_tts_reference_rate",
+    rendered_text: "创建免费；使用该音色时当前参考费率为 0.2 积分/字，实际使用时重新报价。",
+    copy_version: 1,
+    unit: "character",
+    rate_scope: "tenant_overridable",
+    rate_source: "tenant_rate",
+    rate_id: "rate-tenant",
+    effective_at: "2026-08-30T00:00:00Z",
+    policy_key: null,
+    policy_version: null,
+    reference_unit_credits: "0.2"
+  };
+  api.estimateCosy.mockReset().mockResolvedValue(quote("cosyvoice_brand_voice_create", 0, [disclosure]));
+  api.createCosy.mockReset().mockImplementation((_input, confirmation) => Promise.resolve({
+    id: "voice-1",
+    name: "客户主播音",
+    provider: "cosyvoice-voice-clone",
+    status: "ready",
+    order_status: null,
+    delivery_status: "active",
+    expires_at: null,
+    created_at: "2026-08-30T00:00:00Z",
+    billing: summary("settled", 0, confirmation.idempotency_key)
+  }));
 });
-afterEach(() => vi.clearAllMocks());
 
-describe("BrandVoiceCreate (品牌音色创建)", () => {
-  it("授权未勾：点创建绝不发请求 + 内联授权错误（load-bearing）", async () => {
-    render(<BrandVoiceCreate />);
-    uploadAudio();
-    fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "我的音" } });
-    // 不勾授权
-    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
-
-    expect(createMock.mutateAsync).not.toHaveBeenCalled();
-    expect(screen.getByText(copy.brandVoice.consentRequired)).toBeInTheDocument();
+describe("BrandVoiceCreate", () => {
+  it("shows manual delivery instead of pretending Doubao is cloning", async () => {
+    renderCreate();
+    expect(screen.getByText("升级版 VIP 人工交付音色")).toBeVisible();
+    expect(screen.getByText("提交人工订单，由平台交付；交付后有效 365 天")).toBeVisible();
+    expect(screen.queryByText(/永久/)).not.toBeInTheDocument();
+    fill();
+    fireEvent.click(screen.getByRole("button", { name: "提交开通" }));
+    expect(await screen.findByText("本次冻结 30000 积分")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "确认并提交人工开通" }));
+    expect(await screen.findByText("已冻结 30000 积分，等待平台人工交付；订单不自动超时且无法取消")).toBeVisible();
+    expect(screen.queryByText("供应商生成中")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "取消订单" })).not.toBeInTheDocument();
   });
 
-  it("选 cosyvoice(免费)：直建、无扣费确认窗，提交带 provider:cosyvoice", async () => {
-    const file = mp3();
-    render(<BrandVoiceCreate />);
-    uploadAudio(file);
-    fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "我的音" } });
-    fireEvent.click(screen.getByRole("checkbox"));
-    // 主动选免费档 cosyvoice（缺省是 doubao）。
-    fireEvent.click(screen.getByText(copy.brandVoice.providerCosyTitle));
-    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
+  it("shows free CosyVoice creation as success and renders the tenant quote disclosure verbatim", async () => {
+    renderCreate();
+    fill();
+    fireEvent.click(screen.getByText("免费开通私人专属音色"));
+    fireEvent.click(screen.getByRole("button", { name: "提交开通" }));
+    expect(await screen.findByText("创建免费；使用该音色时当前参考费率为 0.2 积分/字，实际使用时重新报价。")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "确认并创建" }));
+    expect(await screen.findByText("创建成功，本次创建免费（扣除 0 积分）")).toBeVisible();
+    expect(screen.queryByText(/冻结已释放/)).not.toBeInTheDocument();
+  });
 
-    // cosyvoice 免费 → 无扣费确认窗，直接创建；provider 进 body。
-    expect(screen.queryByText(copy.brandVoice.chargeConfirmTitle)).not.toBeInTheDocument();
-    await waitFor(() =>
-      expect(createMock.mutateAsync).toHaveBeenCalledWith({
-        name: "我的音",
-        audio: file,
-        consentConfirmed: true,
-        provider: "cosyvoice"
-      })
+  it("does not submit when no valid quote was obtained", async () => {
+    api.estimateOrder.mockRejectedValue(new Error("quote unavailable"));
+    renderCreate();
+    fill();
+    fireEvent.click(screen.getByRole("button", { name: "提交开通" }));
+    const confirm = await screen.findByRole("button", { name: "确认并提交人工开通" });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    await waitFor(() => expect(api.createOrder).not.toHaveBeenCalled());
+  });
+
+  it("renewal requires a new audio upload and sends the expired voice id", async () => {
+    api.estimateOrder.mockResolvedValue(quote("doubao_brand_voice_order_renew", 30000));
+    renderCreate(<BrandVoiceCreate renewVoice={{
+      id: "expired-1",
+      name: "过期音",
+      provider: "doubao-voice-clone",
+      status: "ready",
+      order_status: "fulfilled",
+      delivery_status: "expired",
+      expires_at: "2026-08-01T00:00:00Z",
+      created_at: "2025-08-01T00:00:00Z"
+    }} />);
+    const file = new File(["fresh"], "fresh.mp3", { type: "audio/mpeg" });
+    fireEvent.change(document.querySelector("#brand-voice-audio")!, { target: { files: [file] } });
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "提交续期" }));
+    await screen.findByText("本次冻结 30000 积分");
+    expect(api.estimateOrder).toHaveBeenCalledWith(expect.objectContaining({ order_type: "renew", existing_brand_voice_id: "expired-1", source_audio_asset_id: "asset-1" }));
+  });
+
+  it("invalidates each adjacent order, brand-voice, and voice-picker cache exactly once after one success", async () => {
+    const orderRefresh = vi.fn().mockResolvedValue([]);
+    const brandRefresh = vi.fn().mockResolvedValue([]);
+    const pickerRefresh = vi.fn().mockResolvedValue([]);
+    function AdjacentConsumers() {
+      useQuery({ queryKey: brandVoiceOrderKeys.list(), queryFn: orderRefresh });
+      useQuery({ queryKey: brandVoiceKeys.list(), queryFn: brandRefresh });
+      useQuery({ queryKey: voicesKey, queryFn: pickerRefresh });
+      return null;
+    }
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const view = renderCreate(
+      <><AdjacentConsumers /><BrandVoiceCreate /></>,
+      client
     );
-  });
-
-  // 承重·缺省 doubao（兼容承现状）：不选卡片时默认 doubao → 点创建即弹扣费确认（现状即豆包付费）。
-  // ADMIN-VIP-GATE-UI-0001 §二之二：非 huading（且非 admin）→ doubao「升级版 VIP」置灰 + 提示（区别于「槽位空」）。
-  it("VIP 门禁：非 huading（creator）→ doubao 卡置灰 + 「开通 huading plan 后可创建」（区别于「暂无可用音色槽位」）", () => {
-    authMock.session = { role: "creator", user: { permissions: [] } };
-    render(<BrandVoiceCreate />);
-    expect(screen.getByText(copy.brandVoice.providerVipLocked)).toBeInTheDocument();
-    // 置灰态：doubao 定价描述被锁定提示替换。
-    expect(screen.queryByText(copy.brandVoice.providerDoubaoDesc)).not.toBeInTheDocument();
-    // 免费档 cosyvoice 不受门禁，仍可见。
-    expect(screen.getByText(copy.brandVoice.providerCosyTitle)).toBeInTheDocument();
-  });
-
-  it("VIP 门禁：非 huading 提交 → 缺省自动切 cosyvoice 免费直建（无扣费窗、provider:cosyvoice），绝不发 doubao", async () => {
-    authMock.session = { role: "creator", user: { permissions: [] } };
-    const file = mp3();
-    render(<BrandVoiceCreate />);
-    uploadAudio(file);
-    fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "免费音" } });
-    fireEvent.click(screen.getByRole("checkbox"));
-    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
-    expect(screen.queryByText(copy.brandVoice.chargeConfirmTitle)).not.toBeInTheDocument();
-    await waitFor(() =>
-      expect(createMock.mutateAsync).toHaveBeenCalledWith(expect.objectContaining({ provider: "cosyvoice" }))
-    );
-  });
-
-  // 承重·真实付费用户（Codex B P1 · FIX1）：creator + huading 套餐 → /me 已含 voice_clone_vip →
-  // 「升级版 VIP」**不置灰、可选**，缺省 doubao 照走扣费确认，绝不被误伤为免费档。这条正是旧 mock 假绿掩盖的场景。
-  it("VIP 门禁：creator + huading（permissions 含 voice_clone_vip）→ doubao 可选、无锁提示、走扣费确认（不误伤付费用户）", async () => {
-    authMock.session = { role: "creator", user: { permissions: ["video:create", "voice_clone_vip"] } };
-    const file = mp3();
-    render(<BrandVoiceCreate />);
-    // 无锁定提示；doubao 定价描述照常在（未被替换）。
-    expect(screen.queryByText(copy.brandVoice.providerVipLocked)).not.toBeInTheDocument();
-    expect(screen.getByText(copy.brandVoice.providerDoubaoDesc)).toBeInTheDocument();
-    uploadAudio(file);
-    fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "付费音" } });
-    fireEvent.click(screen.getByRole("checkbox"));
-    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
-    // 缺省 doubao 未被误切 cosyvoice → 弹扣费确认（付费通路可走）。
-    expect(screen.getByText(copy.brandVoice.chargeConfirmTitle)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.chargeConfirmBtn }));
-    await waitFor(() =>
-      expect(createMock.mutateAsync).toHaveBeenCalledWith(expect.objectContaining({ provider: "doubao" }))
-    );
-  });
-
-  // 管理员（默认）：doubao 可用，缺省仍走扣费确认（零回归）。
-  it("缺省 doubao：不选卡片点创建 → 弹扣费确认，确认后带 provider:doubao", async () => {
-    const file = mp3();
-    render(<BrandVoiceCreate />);
-    uploadAudio(file);
-    fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "默认音" } });
-    fireEvent.click(screen.getByRole("checkbox"));
-    // 不动通路卡（缺省 doubao）
-    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
-
-    // 弹扣费确认窗 + 明确 30000 积分文案；此时**尚未**创建。
-    expect(screen.getByText(copy.brandVoice.chargeConfirmTitle)).toBeInTheDocument();
-    expect(screen.getByText(copy.brandVoice.chargeConfirmMessage(30000))).toBeInTheDocument();
-    expect(createMock.mutateAsync).not.toHaveBeenCalled();
-    // 确认扣费 → 带 provider:doubao 创建。
-    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.chargeConfirmBtn }));
-    await waitFor(() =>
-      expect(createMock.mutateAsync).toHaveBeenCalledWith({
-        name: "默认音",
-        audio: file,
-        consentConfirmed: true,
-        provider: "doubao"
-      })
-    );
-  });
-
-  it("doubao 扣费确认取消 → 不创建", () => {
-    render(<BrandVoiceCreate />);
-    uploadAudio();
-    fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "VIP音" } });
-    fireEvent.click(screen.getByRole("checkbox"));
-    // 缺省即 doubao，无需再点卡；点创建 → 弹扣费确认。
-    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
-    // 取消
-    fireEvent.click(screen.getByRole("button", { name: copy.common.cancel }));
-    expect(createMock.mutateAsync).not.toHaveBeenCalled();
-  });
-
-  it("无音频：提示先录制/上传，不发请求", () => {
-    render(<BrandVoiceCreate />);
-    fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "我的音" } });
-    fireEvent.click(screen.getByRole("checkbox"));
-    // 无音频 → 按钮 disabled；即便点击也不发请求
-    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
-    expect(createMock.mutateAsync).not.toHaveBeenCalled();
-  });
-
-  it("非法音频类型：提示且不载入音频", () => {
-    render(<BrandVoiceCreate />);
-    fireEvent.change(document.querySelector("#brand-voice-audio")!, {
-      target: { files: [new File(["x"], "a.txt", { type: "text/plain" })] }
+    await waitFor(() => {
+      expect(orderRefresh).toHaveBeenCalledTimes(1);
+      expect(brandRefresh).toHaveBeenCalledTimes(1);
+      expect(pickerRefresh).toHaveBeenCalledTimes(1);
     });
-    expect(screen.getByText(copy.errors.audioType)).toBeInTheDocument();
+
+    fill();
+    fireEvent.click(screen.getByRole("button", { name: "提交开通" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认并提交人工开通" }));
+    await screen.findByText("已冻结 30000 积分，等待平台人工交付；订单不自动超时且无法取消");
+    await waitFor(() => {
+      expect(orderRefresh).toHaveBeenCalledTimes(2);
+      expect(brandRefresh).toHaveBeenCalledTimes(2);
+      expect(pickerRefresh).toHaveBeenCalledTimes(2);
+    });
+    expect(invalidate.mock.calls.map(([options]) => options?.queryKey)).toEqual([
+      brandVoiceOrderKeys.all,
+      brandVoiceKeys.all,
+      voicesKey
+    ]);
+
+    view.rerender(
+      <QueryClientProvider client={client}><AdjacentConsumers /><BrandVoiceCreate /></QueryClientProvider>
+    );
+    await Promise.resolve();
+    expect(invalidate).toHaveBeenCalledTimes(3);
   });
 
-  it("音频过大：>20MB 提示且不载入音频", () => {
-    render(<BrandVoiceCreate />);
-    const big = new File(["x"], "big.mp3", { type: "audio/mpeg" });
-    Object.defineProperty(big, "size", { value: 21 * 1024 * 1024 });
-    fireEvent.change(document.querySelector("#brand-voice-audio")!, { target: { files: [big] } });
-    expect(screen.getByText(copy.errors.audioTooLarge)).toBeInTheDocument();
-    // 未载入：无试听音频元素
-    expect(screen.queryByLabelText(copy.brandVoice.previewAria)).not.toBeInTheDocument();
-  });
-
-  it("名称 ≤30：超长输入截断到 30，提交 name 长度封顶 30（对齐后端 max_length=30）", async () => {
-    const file = mp3();
-    render(<BrandVoiceCreate />);
-    uploadAudio(file);
-    fireEvent.change(screen.getByLabelText(/音色名称/), { target: { value: "名".repeat(50) } });
-    fireEvent.click(screen.getByRole("checkbox"));
-    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.create }));
-    // 缺省 doubao → 过扣费确认再创建。
-    fireEvent.click(screen.getByRole("button", { name: copy.brandVoice.chargeConfirmBtn }));
-    await waitFor(() => expect(createMock.mutateAsync).toHaveBeenCalled());
-    expect(createMock.mutateAsync.mock.calls[0][0].name).toHaveLength(30);
-  });
-
-  it("防连点：创建中按钮显「创建中…」并禁用", () => {
-    createMock.isPending = true;
-    render(<BrandVoiceCreate />);
-    expect(screen.getByRole("button", { name: copy.brandVoice.creating })).toBeDisabled();
+  it("invalidates the same three caches exactly once after one CosyVoice success", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    renderCreate(<BrandVoiceCreate />, client);
+    fill();
+    fireEvent.click(screen.getByText("免费开通私人专属音色"));
+    fireEvent.click(screen.getByRole("button", { name: "提交开通" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认并创建" }));
+    await screen.findByText("创建成功，本次创建免费（扣除 0 积分）");
+    expect(invalidate.mock.calls.map(([options]) => options?.queryKey)).toEqual([
+      brandVoiceOrderKeys.all,
+      brandVoiceKeys.all,
+      voicesKey
+    ]);
   });
 });

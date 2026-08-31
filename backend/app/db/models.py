@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Literal
 from uuid import uuid4
 
 from sqlalchemy import (
@@ -37,6 +38,10 @@ def _now() -> datetime:
 
 def _json_type():
     return JSON().with_variant(JSONB(), "postgresql")
+
+
+def _guarded_numeric(*, precision: int, scale: int):
+    return Numeric().with_variant(Numeric(precision, scale), "sqlite")
 
 
 class Role(StrEnum):
@@ -348,14 +353,38 @@ class CreditRate(Base):
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
             "'publish', 'voice_clone', 'video_gen', 'reverse_prompt', "
-            "'reverse_prompt_video')",
+            "'reverse_prompt_video', 'script_generate', 'scene_prompt')",
             name="ck_credit_rates_capability",
         ),
         CheckConstraint(
             "unit IN ('second', 'call', 'token', 'image', 'character')",
             name="ck_credit_rates_unit",
         ),
+        CheckConstraint(
+            "credits_per_unit >= 0 AND credits_per_unit <= 99999999.9999 AND "
+            "credits_per_unit = ROUND(credits_per_unit, 4) AND "
+            "LOWER(CAST(credits_per_unit AS TEXT)) NOT IN "
+            "('nan', 'infinity', '-infinity', 'inf', '-inf')",
+            name="ck_credit_rates_credits_per_unit_valid",
+        ),
         Index("ix_credit_rates_tenant_capability_unit", "tenant_id", "capability", "unit"),
+        Index(
+            "uq_credit_rates_platform_active_capability_unit",
+            "capability",
+            "unit",
+            unique=True,
+            postgresql_where=text("tenant_id IS NULL AND is_active"),
+            sqlite_where=text("tenant_id IS NULL AND is_active"),
+        ),
+        Index(
+            "uq_credit_rates_tenant_active_capability_unit",
+            "tenant_id",
+            "capability",
+            "unit",
+            unique=True,
+            postgresql_where=text("tenant_id IS NOT NULL AND is_active"),
+            sqlite_where=text("tenant_id IS NOT NULL AND is_active"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
@@ -364,9 +393,141 @@ class CreditRate(Base):
     )
     capability: Mapped[str] = mapped_column(String(32))
     unit: Mapped[str] = mapped_column(String(32))
-    credits_per_unit: Mapped[Decimal] = mapped_column(Numeric(12, 4))
+    credits_per_unit: Mapped[Decimal] = mapped_column(
+        _guarded_numeric(precision=12, scale=4)
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+RESULT_PAYLOAD_MAX_BYTES = 64 * 1024
+ERROR_PAYLOAD_MAX_BYTES = 16 * 1024
+BILLING_CREDITS_MAX = 999_999_999_999
+
+
+BILLING_STATE_CHECK = """
+(
+  status = 'in_progress'
+  AND completion_kind IS NULL
+  AND completed_at IS NULL
+  AND settled_credits = 0
+  AND released_credits = 0
+)
+OR
+(
+  status = 'completed'
+  AND completion_kind IN ('succeeded', 'failed', 'rejected')
+  AND completed_at IS NOT NULL
+  AND settled_credits + released_credits = requested_credits
+)
+"""
+
+BILLING_ZERO_CHECK = """
+(operation = 'cosyvoice_brand_voice_create' AND requested_credits = 0)
+OR
+(operation <> 'cosyvoice_brand_voice_create' AND requested_credits > 0)
+"""
+
+BILLING_COMPLETION_CHECK = """
+(completion_kind NOT IN ('failed', 'rejected') OR
+ (settled_credits = 0 AND released_credits = requested_credits))
+AND
+(completion_kind <> 'succeeded' OR requested_credits = 0 OR settled_credits > 0)
+"""
+
+BILLING_FINITE_CHECK = """
+LOWER(CAST(requested_credits AS TEXT))
+  NOT IN ('nan', 'infinity', '-infinity', 'inf', '-inf')
+AND LOWER(CAST(settled_credits AS TEXT))
+  NOT IN ('nan', 'infinity', '-infinity', 'inf', '-inf')
+AND LOWER(CAST(released_credits AS TEXT))
+  NOT IN ('nan', 'infinity', '-infinity', 'inf', '-inf')
+"""
+
+BILLING_UPPER_BOUND_CHECK = """
+requested_credits < 1000000000000
+AND settled_credits < 1000000000000
+AND released_credits < 1000000000000
+"""
+
+BILLING_SCALE_CHECK = """
+requested_credits = ROUND(requested_credits, 6)
+AND settled_credits = ROUND(settled_credits, 6)
+AND released_credits = ROUND(released_credits, 6)
+"""
+
+BILLING_AMOUNT_DOMAIN_CHECK = f"""
+requested_credits >= 0 AND settled_credits >= 0 AND released_credits >= 0
+AND ({BILLING_UPPER_BOUND_CHECK})
+AND ({BILLING_SCALE_CHECK})
+"""
+
+
+class BillingOperation(Base):
+    __tablename__ = "billing_operations"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "user_id",
+            "operation",
+            "idempotency_key",
+            name="uq_billing_operations_tenant_user_operation_idempotency_key",
+        ),
+        CheckConstraint(
+            f"({BILLING_STATE_CHECK}) IS TRUE", name="ck_billing_operations_state"
+        ),
+        CheckConstraint(BILLING_ZERO_CHECK, name="ck_billing_operations_zero_price"),
+        CheckConstraint(BILLING_COMPLETION_CHECK, name="ck_billing_operations_completion"),
+        CheckConstraint(BILLING_FINITE_CHECK, name="ck_billing_operations_amounts_finite"),
+        CheckConstraint(
+            BILLING_AMOUNT_DOMAIN_CHECK,
+            name="ck_billing_operations_amounts_nonnegative",
+        ),
+        Index("ix_billing_operations_tenant_created_at", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenants.id", ondelete="RESTRICT")
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="RESTRICT")
+    )
+    operation: Mapped[str] = mapped_column(String(64))
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    quote_hash: Mapped[str] = mapped_column(String(64))
+    pricing_snapshot: Mapped[dict[str, object]] = mapped_column(_json_type())
+    requested_credits: Mapped[Decimal] = mapped_column(
+        _guarded_numeric(precision=18, scale=6)
+    )
+    settled_credits: Mapped[Decimal] = mapped_column(
+        _guarded_numeric(precision=18, scale=6), default=Decimal("0")
+    )
+    released_credits: Mapped[Decimal] = mapped_column(
+        _guarded_numeric(precision=18, scale=6), default=Decimal("0")
+    )
+    status: Mapped[Literal["in_progress", "completed"]] = mapped_column(
+        String(32), default="in_progress"
+    )
+    completion_kind: Mapped[Literal["succeeded", "failed", "rejected"] | None] = (
+        mapped_column(String(32), default=None)
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    result_type: Mapped[str | None] = mapped_column(String(64), default=None)
+    result_id: Mapped[str | None] = mapped_column(String(128), default=None)
+    result_payload: Mapped[dict[str, object] | None] = mapped_column(
+        _json_type(), default=None
+    )
+    error_code: Mapped[str | None] = mapped_column(String(64), default=None)
+    error_http_status: Mapped[int | None] = mapped_column(Integer, default=None)
+    error_payload: Mapped[dict[str, object] | None] = mapped_column(
+        _json_type(), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class Voice(Base):
@@ -401,6 +562,9 @@ class BrandVoice(TenantScopedMixin, Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
     name: Mapped[str] = mapped_column(String(30))
     source_audio_asset_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("assets.id", ondelete="SET NULL"), nullable=True
@@ -412,11 +576,204 @@ class BrandVoice(TenantScopedMixin, Base):
     consent_confirmed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), default=None
     )
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     error_code: Mapped[str | None] = mapped_column(String(40), default=None)
     error_message: Mapped[str | None] = mapped_column(Text, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+
+BRAND_VOICE_ORDER_STATE_CHECK = """
+(
+  status = 'awaiting_fulfillment'
+  AND fulfilled_brand_voice_id IS NULL AND fulfilled_provider_id IS NULL
+  AND resolver_user_id IS NULL AND fulfilled_at IS NULL
+  AND rejected_at IS NULL AND rejection_reason IS NULL
+)
+OR
+(
+  status = 'fulfilled'
+  AND fulfilled_brand_voice_id IS NOT NULL AND fulfilled_provider_id IS NOT NULL
+  AND resolver_user_id IS NOT NULL AND fulfilled_at IS NOT NULL
+  AND rejected_at IS NULL AND rejection_reason IS NULL
+)
+OR
+(
+  status = 'rejected'
+  AND fulfilled_brand_voice_id IS NULL AND fulfilled_provider_id IS NULL
+  AND resolver_user_id IS NOT NULL AND fulfilled_at IS NULL
+  AND rejected_at IS NOT NULL AND rejection_reason IS NOT NULL
+  AND LENGTH(TRIM(rejection_reason)) > 0
+)
+"""
+BRAND_VOICE_ORDER_EXISTING_VOICE_CHECK = (
+    "(order_type = 'create' AND existing_brand_voice_id IS NULL) OR "
+    "(order_type = 'renew' AND existing_brand_voice_id IS NOT NULL)"
+)
+BRAND_VOICE_ORDER_RENEWAL_FULFILLMENT_CHECK = (
+    "order_type != 'renew' OR status != 'fulfilled' OR "
+    "fulfilled_brand_voice_id = existing_brand_voice_id"
+)
+CREDIT_REFUND_AMOUNT_CHECK = (
+    "amount_credits > 0 AND amount_credits = CAST(amount_credits AS INTEGER)"
+)
+CREDIT_REFUND_STATE_CHECK = (
+    "(status = 'pending' AND target_subscription_id IS NULL AND applied_at IS NULL) OR "
+    "(status = 'applied' AND target_subscription_id IS NOT NULL AND applied_at IS NOT NULL)"
+)
+
+
+class BrandVoiceOrder(Base):
+    __tablename__ = "brand_voice_orders"
+    __table_args__ = (
+        UniqueConstraint("billing_operation_id", name="uq_brand_voice_orders_billing_operation_id"),
+        CheckConstraint(
+            "order_type IN ('create', 'renew')", name="ck_brand_voice_orders_order_type"
+        ),
+        CheckConstraint(
+            "source_audio_asset_id IS NOT NULL AND consent_confirmed_at IS NOT NULL",
+            name="ck_brand_voice_orders_source_and_consent",
+        ),
+        CheckConstraint(
+            BRAND_VOICE_ORDER_EXISTING_VOICE_CHECK,
+            name="ck_brand_voice_orders_existing_voice",
+        ),
+        CheckConstraint(
+            "status IN ('awaiting_fulfillment', 'fulfilled', 'rejected')",
+            name="ck_brand_voice_orders_status",
+        ),
+        CheckConstraint(
+            f"({BRAND_VOICE_ORDER_STATE_CHECK}) IS TRUE",
+            name="ck_brand_voice_orders_resolution_state",
+        ),
+        CheckConstraint(
+            BRAND_VOICE_ORDER_RENEWAL_FULFILLMENT_CHECK,
+            name="ck_brand_voice_orders_renewal_fulfills_existing_voice",
+        ),
+        Index(
+            "uq_brand_voice_orders_awaiting_renewal_per_voice",
+            "existing_brand_voice_id",
+            unique=True,
+            postgresql_where=text("order_type = 'renew' AND status = 'awaiting_fulfillment'"),
+            sqlite_where=text("order_type = 'renew' AND status = 'awaiting_fulfillment'"),
+        ),
+        Index("ix_brand_voice_orders_queue_created_at", "status", "created_at"),
+        Index("ix_brand_voice_orders_tenant_user_created_at", "tenant_id", "user_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenants.id", ondelete="RESTRICT")
+    )
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="RESTRICT"))
+    order_type: Mapped[Literal["create", "renew"]] = mapped_column(String(16))
+    requested_name: Mapped[str] = mapped_column(String(30))
+    source_audio_asset_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("assets.id", ondelete="RESTRICT")
+    )
+    source_metadata_snapshot: Mapped[dict[str, object]] = mapped_column(_json_type())
+    consent_confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    existing_brand_voice_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("brand_voices.id", ondelete="RESTRICT"), nullable=True
+    )
+    billing_operation_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("billing_operations.id", ondelete="RESTRICT")
+    )
+    status: Mapped[Literal["awaiting_fulfillment", "fulfilled", "rejected"]] = mapped_column(
+        String(32), default="awaiting_fulfillment"
+    )
+    fulfilled_brand_voice_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("brand_voices.id", ondelete="RESTRICT"), nullable=True
+    )
+    fulfilled_provider_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("brand_voice_provider_ids.id", ondelete="RESTRICT"), nullable=True
+    )
+    resolver_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+    fulfilled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class BrandVoiceProviderId(Base):
+    __tablename__ = "brand_voice_provider_ids"
+    __table_args__ = (
+        UniqueConstraint(
+            "normalized_provider_id", name="uq_brand_voice_provider_ids_normalized_id"
+        ),
+        CheckConstraint(
+            "kind IN ('official', 'customer')", name="ck_brand_voice_provider_ids_kind"
+        ),
+        CheckConstraint(
+            "status IN ('active', 'retired')", name="ck_brand_voice_provider_ids_status"
+        ),
+        Index("ix_brand_voice_provider_ids_brand_voice_id", "brand_voice_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    provider: Mapped[str] = mapped_column(String(40))
+    normalized_provider_id: Mapped[str] = mapped_column(String(160))
+    kind: Mapped[Literal["official", "customer"]] = mapped_column(String(16))
+    brand_voice_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("brand_voices.id", ondelete="RESTRICT"), nullable=True
+    )
+    first_order_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey(
+            "brand_voice_orders.id",
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="fk_brand_voice_provider_ids_first_order_id",
+        ),
+        nullable=True,
+    )
+    status: Mapped[Literal["active", "retired"]] = mapped_column(String(16), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class CreditRefundGrant(Base):
+    __tablename__ = "credit_refund_grants"
+    __table_args__ = (
+        UniqueConstraint(
+            "billing_operation_id", name="uq_credit_refund_grants_billing_operation_id"
+        ),
+        CheckConstraint(
+            CREDIT_REFUND_AMOUNT_CHECK,
+            name="ck_credit_refund_grants_amount_positive_finite",
+        ),
+        CheckConstraint(
+            CREDIT_REFUND_STATE_CHECK,
+            name="ck_credit_refund_grants_state",
+        ),
+        Index(
+            "ix_credit_refund_grants_tenant_user_created_at", "tenant_id", "user_id", "created_at"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    billing_operation_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("billing_operations.id", ondelete="RESTRICT")
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenants.id", ondelete="RESTRICT")
+    )
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="RESTRICT"))
+    source_subscription_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("subscriptions.id", ondelete="RESTRICT")
+    )
+    target_subscription_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("subscriptions.id", ondelete="RESTRICT"), nullable=True
+    )
+    amount_credits: Mapped[Decimal] = mapped_column(Numeric())
+    status: Mapped[Literal["pending", "applied"]] = mapped_column(String(16), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Asset(Base):
@@ -925,16 +1282,47 @@ class UsageRecord(Base):
         CheckConstraint(
             "capability IN ('llm', 'tts', 'avatar', 'video', 'image', 'asr', "
             "'publish', 'voice_clone', 'video_gen', 'reverse_prompt', "
-            "'reverse_prompt_video', 'scene_prompt', 'chat')",
+            "'reverse_prompt_video', 'scene_prompt', 'chat', 'script_generate')",
             name="ck_usage_records_capability",
         ),
         CheckConstraint(
-            "unit IN ('second', 'call', 'token', 'image', 'char')",
+            "unit IN ('second', 'call', 'token', 'image', 'char', 'character')",
             name="ck_usage_records_unit",
+        ),
+        CheckConstraint(
+            "quantity >= 0 AND quantity <= 999999999.999 AND "
+            "quantity = ROUND(quantity, 3) AND "
+            "credits >= 0 AND credits < 1000000000000 AND "
+            "credits = ROUND(credits, 6) AND "
+            "LOWER(CAST(quantity AS TEXT)) NOT IN "
+            "('nan', 'infinity', '-infinity', 'inf', '-inf') AND "
+            "LOWER(CAST(credits AS TEXT)) NOT IN "
+            "('nan', 'infinity', '-infinity', 'inf', '-inf')",
+            name="ck_usage_records_amounts_valid",
         ),
         CheckConstraint(
             "status IN ('reserved', 'settled', 'released')",
             name="ck_usage_records_status",
+        ),
+        CheckConstraint(
+            "billing_item_index IS NULL OR billing_item_index >= 0",
+            name="ck_usage_records_billing_item_index_nonnegative",
+        ),
+        CheckConstraint(
+            "billing_pricing_line_index IS NULL OR billing_pricing_line_index >= 0",
+            name="ck_usage_records_billing_pricing_line_index_nonnegative",
+        ),
+        CheckConstraint(
+            "(billing_operation_id IS NULL AND billing_item_index IS NULL "
+            "AND billing_pricing_line_index IS NULL) OR "
+            "(billing_operation_id IS NOT NULL AND billing_item_index IS NOT NULL "
+            "AND billing_pricing_line_index IS NOT NULL)",
+            name="ck_usage_records_billing_allocation",
+        ),
+        UniqueConstraint(
+            "billing_operation_id",
+            "billing_item_index",
+            name="uq_usage_records_billing_operation_item_index",
         ),
         Index("ix_usage_records_subscription_status", "subscription_id", "status"),
         Index("ix_usage_records_reverse_prompt_status", "reverse_prompt_job_id", "status"),
@@ -962,15 +1350,25 @@ class UsageRecord(Base):
     chat_message_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True
     )
+    billing_operation_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("billing_operations.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    billing_item_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    billing_pricing_line_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     capability: Mapped[str] = mapped_column(String(32))
     provider: Mapped[str] = mapped_column(String(40))
     model: Mapped[str | None] = mapped_column(String(80), default=None)
     unit: Mapped[str] = mapped_column(String(32))
-    quantity: Mapped[Decimal] = mapped_column(Numeric(12, 3))
-    credits: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    quantity: Mapped[Decimal] = mapped_column(_guarded_numeric(precision=12, scale=3))
+    credits: Mapped[Decimal] = mapped_column(_guarded_numeric(precision=18, scale=6))
     cost_cents: Mapped[int] = mapped_column(Integer)
     provider_cost_usd: Mapped[Decimal | None] = mapped_column(
         Numeric(18, 8), default=None
+    )
+    provider_usage: Mapped[dict[str, object] | None] = mapped_column(
+        _json_type(), default=None
     )
     currency: Mapped[str] = mapped_column(String(3), default="CNY")
     status: Mapped[str] = mapped_column(String(32), default="reserved")
@@ -997,7 +1395,8 @@ class AdminAuditLog(Base):
     __table_args__ = (
         CheckConstraint(
             "action IN ('credits_adjust', 'plan_change', 'status_change', "
-            "'voice_slot_assign', 'task_retry')",
+            "'voice_slot_assign', 'task_retry', 'brand_voice_order_audio_access', "
+            "'brand_voice_order_fulfill', 'brand_voice_order_reject')",
             name="ck_admin_audit_logs_action",
         ),
         Index("ix_admin_audit_logs_created_at", created_at.desc()),

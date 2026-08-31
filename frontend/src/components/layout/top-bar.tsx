@@ -30,9 +30,9 @@ export function TopBar() {
     // 窄屏优先保留管理员/余额/开通额度/退出/头像五个关键操作，移动端隐藏装饰性品牌标；
     // 品牌身份由当前页面标题与导航上下文承接。
     // 真实 mock 余额 844/1000 会占 107px；320px 下五项动作超过单行可用宽度，因此允许紧凑布局换行。
-    // 完整品牌、搜索、文字与单行布局到 lg 才恢复；若在 sm 一次展开，640–768px 会确定性横溢。
+    // 完整品牌、搜索与文字到 lg 恢复；lg 允许动作区换行，xl 空间充足时恢复单行。
     // e2e/landing 会先等异步 QuotaBadge 落屏再量断点精确值，避免余额尚未出现时假绿。
-    <Glass className="col-span-full flex items-center gap-2 rounded-card px-3 py-[15px] sm:gap-[18px] sm:px-6">
+    <Glass className="col-span-full flex flex-wrap items-center gap-2 rounded-card px-3 py-[15px] sm:gap-[18px] sm:px-6">
       <div className="hidden flex-none lg:block">
         <Logo />
       </div>
@@ -50,7 +50,7 @@ export function TopBar() {
         />
       </div>
 
-      <div className="ml-auto flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2 lg:flex-none lg:flex-nowrap lg:gap-3">
+      <div className="ml-auto flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2 lg:basis-full lg:gap-3 xl:basis-auto xl:flex-none xl:flex-nowrap">
         {showAdmin && (
           <Link
             href="/admin"

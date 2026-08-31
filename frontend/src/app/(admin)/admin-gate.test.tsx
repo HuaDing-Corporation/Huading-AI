@@ -63,5 +63,9 @@ describe("/admin 门禁（真实 /me 驱动）", () => {
     expect(await screen.findByTestId("admin-content")).toBeInTheDocument();
     expect(screen.getByText(copy.admin.navTenants)).toBeInTheDocument();
     expect(screen.queryByText(copy.admin.gateTitle)).not.toBeInTheDocument();
+    expect(screen.getByText(copy.admin.consoleTitle)).toHaveClass("flex-none", "whitespace-nowrap");
+    const back = screen.getByRole("link", { name: copy.admin.backToWorkbench });
+    expect(back).toHaveClass("flex-none", "whitespace-nowrap");
+    expect(back.parentElement).toHaveClass("w-full", "sm:w-auto");
   });
 });

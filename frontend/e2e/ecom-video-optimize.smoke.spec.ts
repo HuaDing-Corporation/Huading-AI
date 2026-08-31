@@ -118,6 +118,8 @@ test("电商带货视频优化：新控件 + 主题可空提交 + AI生成画面
   // ③ 上传后「AI 生成画面」可点 → scene_prompt + negative_prompt 各自自动填入（MSW 新契约）。
   await expect(sceneBtn).toBeEnabled();
   await sceneBtn.click();
+  await expect(page.getByText("服务端应付积分")).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("button", { name: "确认并继续" }).click();
   await expect(ecom.locator("#scene-prompt")).toHaveValue(/白色大理石台面/, { timeout: 15_000 });
   await expect(ecom.locator("#ecom-negative-prompt")).toHaveValue(/水印/);
 

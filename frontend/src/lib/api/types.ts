@@ -187,17 +187,63 @@ export interface BgmTrack {
 export interface BgmLibraryResponse {
   items: BgmTrack[];
 }
-export interface VideoAccepted {
+interface VideoAcceptedBase {
   id: string;
+  /** Kept by the backend for older consumers; when present it aliases `id`. */
+  task_id?: string;
   status: string;
 }
 
-// POST /videos/estimate → 预计积分（"确定生成"确认窗用）；请求体同 CreateVideoRequest。
-export interface EstimateResponse {
+export type VideoAcceptedContract =
+  | (VideoAcceptedBase & {
+      pricing_contract: "billing_quote";
+      billing: BillingSummary;
+    })
+  | (VideoAcceptedBase & {
+      pricing_contract: "legacy_estimate";
+      billing?: never;
+    })
+  | (VideoAcceptedBase & {
+      pricing_contract: "deferred_unpriced";
+      billing?: never;
+    });
+
+export interface LegacyVideoEstimate {
+  pricing_contract: "legacy_estimate";
   estimated_credits: number;
-  unit: string;
-  note?: string;
+  unit: "credits";
+  note?: string | null;
+  billing?: never;
 }
+
+export interface DeferredUnpricedVideoEstimate {
+  pricing_contract: "deferred_unpriced";
+  estimated_credits: 0;
+  unit: "credits";
+  unpriced: true;
+  note?: string | null;
+  billing?: never;
+}
+
+/** Strict wire union returned by POST /videos/estimate. */
+export type VideoEstimateContract =
+  | BillingQuote
+  | LegacyVideoEstimate
+  | DeferredUnpricedVideoEstimate;
+
+/** Compatibility aliases for existing imports while consumers migrate to the contract names. */
+export type VideoAccepted = VideoAcceptedContract;
+export type EstimateResponse = VideoEstimateContract;
+
+/**
+ * Client-only context used to validate the shape of a video composite quote.
+ * It is derived from the selected voice record and is never sent as pricing
+ * authority to the backend.
+ */
+export type VideoPricingContext =
+  | { voice_kind: "brand"; voice_provider: "cosyvoice" | "doubao" }
+  | { voice_kind: "standard"; voice_provider: string }
+  | { voice_kind: "none"; voice_provider: null };
 
 // 音色来源 (BRAND-VOICE-UI-0001 §8)：系统预设 / 品牌音色(声音克隆)。
 export type VoiceSource = "preset" | "brand_voice";
@@ -230,6 +276,7 @@ export interface ScriptGenerateRequest {
 
 export interface ScriptGenerateResponse {
   script: string;
+  billing: BillingSummary;
 }
 
 // POST /videos/scene-prompt 请求（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.2）：从只发 topic → 发产品图 keys + 文案 + topic。
@@ -247,6 +294,7 @@ export interface ScenePromptRequest {
 export interface ScenePromptResponse {
   scene_prompt: string;
   negative_prompt: string; // 新增（契约 §4.2/req6）：luna 同产出负面提示词，前端自动填入负面框
+  billing: BillingSummary;
 }
 
 export interface UploadImageResponse {
@@ -273,10 +321,14 @@ export interface UploadResponse {
 }
 
 export interface Quota {
+  has_active_subscription: boolean;
+  active_subscription_id: string | null;
   total: number;
   used: number;
   reserved: number;
   remaining: number;
+  manual_fulfillment_held_credits: number;
+  pending_refund_credits: number;
 }
 
 // SSE 新枚举帧（§8）+ 旧帧兜底字段
@@ -620,7 +672,9 @@ export interface PosterBatchResponse {
 }
 
 // ── 品牌音色 / 声音克隆 (BRAND-VOICE-UI-0001，FIX1 对齐后端 §8 真契约) ──
-export type BrandVoiceStatus = "processing" | "ready" | "failed"; // 处理中 / 可用 / 失败
+export type BrandVoiceStatus = "processing" | "ready" | "failed";
+export type BrandVoiceOrderStatus = "awaiting_fulfillment" | "fulfilled" | "rejected";
+export type BrandVoiceDeliveryStatus = "awaiting_fulfillment" | "active" | "expired" | "rejected";
 
 // 声音复刻通路（BRAND-VOICE-PICKER-UI-0001）：doubao（豆包）/ cosyvoice（免费通路 COSYVOICE-CLONE-0001）。
 // 字符串宽松兼容未来通路；**provider 可选**——接口暂无该字段时前端不显徽标、不报错（UI 可先于后端合并）。
@@ -633,7 +687,10 @@ export interface BrandVoice {
   name: string;
   status: BrandVoiceStatus;
   created_at: string;
-  provider?: BrandVoiceProvider | string | null;
+  provider: BrandVoiceProvider | string;
+  order_status: BrandVoiceOrderStatus | null;
+  delivery_status: BrandVoiceDeliveryStatus;
+  expires_at: string | null;
 }
 export interface BrandVoiceListResponse {
   items: BrandVoice[];
@@ -652,7 +709,7 @@ export interface BrandVoiceCreateBody {
   name: string; // 1–30 非空
   source_audio_asset_id: string;
   consent_confirmed: boolean;
-  provider: BrandVoiceProvider;
+  provider: BrandVoiceProvider | "doubao-voice-clone" | "cosyvoice-voice-clone";
 }
 // UI 侧入参（组件持有 Blob + 名称 + 授权勾选 + 通路）；经 createBrandVoiceFromAudio 编排上传→创建。
 export interface CreateBrandVoiceInput {
@@ -893,3 +950,393 @@ export interface AnalyticsTimeseriesBucket {
 export interface AnalyticsTimeseries {
   buckets: AnalyticsTimeseriesBucket[];
 }
+
+// ── Authoritative billing confirmation + operation recovery ──
+// Decimal strings and payable_credits are server-owned display values. Callers must
+// never derive or round prices from these fields in JavaScript.
+export interface BillingConfirmation {
+  quote_token: string;
+  idempotency_key: string;
+}
+
+export interface BillingSummary {
+  operation_id: string;
+  idempotency_key: string;
+  status: "reserved" | "settled" | "partially_settled" | "released";
+  requested_credits: number;
+  held_credits: number;
+  settled_credits: number;
+  released_credits: number;
+}
+
+export interface BillingPricingLine {
+  operation: string;
+  capability: string;
+  unit: string;
+  quantity: string;
+  unit_credits: string;
+  subtotal_credits: string;
+  rate_scope: "tenant_overridable" | "platform_fixed";
+  rate_source: "tenant_rate" | "platform_rate" | "code_default" | "fixed_policy";
+  rate_id: string | null;
+  effective_at: string | null;
+  policy_key: string | null;
+  policy_version: number | null;
+  label: string;
+}
+
+export interface BillingDisclosure {
+  key: string;
+  rendered_text: string;
+  copy_version: number;
+  unit: string;
+  rate_scope: BillingPricingLine["rate_scope"];
+  rate_source: BillingPricingLine["rate_source"];
+  rate_id: string | null;
+  effective_at: string | null;
+  policy_key: string | null;
+  policy_version: number | null;
+  reference_unit_credits: string;
+}
+
+interface BillingQuoteBase {
+  pricing_contract: "billing_quote";
+  operation: string;
+  subtotal_credits: string;
+  payable_credits: number;
+  disclosures: BillingDisclosure[];
+  quote_token: string;
+  expires_at: string;
+}
+
+export type BillingQuote =
+  | (BillingQuoteBase & {
+      pricing_shape: "simple";
+      unit: string;
+      quantity: string;
+      unit_credits: string;
+      rate_scope: BillingPricingLine["rate_scope"];
+      rate_source: BillingPricingLine["rate_source"];
+      breakdown: [];
+    })
+  | (BillingQuoteBase & {
+      pricing_shape: "composite";
+      unit: null;
+      quantity: null;
+      unit_credits: null;
+      rate_scope: null;
+      rate_source: null;
+      breakdown: [BillingPricingLine, ...BillingPricingLine[]];
+    });
+
+export type BillingLookupPayload = Record<string, unknown>;
+
+export interface BillingScriptResult extends BillingLookupPayload {
+  script: string;
+}
+
+export interface BillingScenePromptResult extends BillingLookupPayload {
+  scene_prompt: string;
+  negative_prompt: string;
+}
+
+interface BillingEcomImageBatchItemBase extends BillingLookupPayload {
+  item_index: number;
+  task_id: string;
+  source_asset_id: string;
+}
+
+export type BillingEcomImageBatchItem = BillingEcomImageBatchItemBase &
+  ({ status: "done"; asset_id: string } | { status: "failed"; asset_id: null });
+
+export interface BillingEcomImageBatchResult extends BillingLookupPayload {
+  items: BillingEcomImageBatchItem[];
+}
+
+interface BillingVideoTaskResourceBase extends BillingLookupPayload {
+  task_id: string;
+}
+
+export type BillingVideoTaskResource = BillingVideoTaskResourceBase &
+  ({ status: "queued" } | { status: "done" });
+
+export interface BillingBrandVoiceResource extends BillingLookupPayload {
+  id: string;
+  name: string;
+  provider: "cosyvoice-voice-clone";
+  status: "ready";
+  order_status: null;
+  delivery_status: "active";
+  expires_at: string | null;
+  created_at: string;
+}
+
+interface BillingBrandVoiceOrderBase extends BillingLookupPayload {
+  id: string;
+  tenant_id: string;
+  ordered_by_user_id: string;
+  order_type: "create" | "renew";
+  requested_name: string;
+  source_audio_asset_id: string;
+  existing_brand_voice_id: string | null;
+  created_at: string;
+  updated_at: string;
+  expires_at: string | null;
+  billing: BillingSummary;
+}
+
+export type BillingAwaitingBrandVoiceOrderResource = BillingBrandVoiceOrderBase & {
+  status: "awaiting_fulfillment";
+  fulfilled_brand_voice_id: null;
+  fulfilled_provider_voice_id: null;
+  rejection_reason: null;
+  fulfilled_at: null;
+  rejected_at: null;
+  refund_disposition: "not_applicable";
+  refund_grant_status: null;
+  refund_applied_at: null;
+};
+
+export type BillingFulfilledBrandVoiceOrderResource = BillingBrandVoiceOrderBase & {
+  status: "fulfilled";
+  fulfilled_brand_voice_id: string;
+  fulfilled_provider_voice_id: string;
+  rejection_reason: null;
+  fulfilled_at: string;
+  rejected_at: null;
+  refund_disposition: "not_applicable";
+  refund_grant_status: null;
+  refund_applied_at: null;
+};
+
+type BillingRejectedRefund =
+  | {
+      refund_disposition: "source_subscription_released";
+      refund_grant_status: null;
+      refund_applied_at: null;
+    }
+  | {
+      refund_disposition: "current_subscription_credited";
+      refund_grant_status: "applied";
+      refund_applied_at: string;
+    }
+  | {
+      refund_disposition: "pending_next_subscription";
+      refund_grant_status: "pending";
+      refund_applied_at: null;
+    };
+
+export type BillingRejectedBrandVoiceOrderResource = BillingBrandVoiceOrderBase & {
+  status: "rejected";
+  fulfilled_brand_voice_id: null;
+  fulfilled_provider_voice_id: null;
+  rejection_reason: string;
+  fulfilled_at: null;
+  rejected_at: string;
+} & BillingRejectedRefund;
+
+export type BillingBrandVoiceOrderResource =
+  | BillingAwaitingBrandVoiceOrderResource
+  | BillingFulfilledBrandVoiceOrderResource
+  | BillingRejectedBrandVoiceOrderResource;
+
+export interface BillingLookupPayloadMap {
+  script_generate_result: BillingScriptResult;
+  scene_prompt_result: BillingScenePromptResult;
+  ecom_image_batch: BillingEcomImageBatchResult;
+  video_task: BillingVideoTaskResource;
+  brand_voice_order: BillingBrandVoiceOrderResource;
+  brand_voice: BillingBrandVoiceResource;
+}
+
+export type BillingKnownResultType = keyof BillingLookupPayloadMap;
+
+export type BillingKnownOperation =
+  | "script_generate"
+  | "scene_prompt"
+  | "ecom_cutout"
+  | "ecom_model"
+  | "video_create"
+  | "doubao_brand_voice_order_create"
+  | "doubao_brand_voice_order_renew"
+  | "cosyvoice_brand_voice_create";
+
+type BillingOperationForResult<K extends BillingKnownResultType> =
+  K extends "script_generate_result"
+    ? "script_generate"
+    : K extends "scene_prompt_result"
+      ? "scene_prompt"
+      : K extends "ecom_image_batch"
+        ? "ecom_cutout" | "ecom_model"
+        : K extends "video_task"
+          ? "video_create"
+          : K extends "brand_voice_order"
+            ? "doubao_brand_voice_order_create" | "doubao_brand_voice_order_renew"
+            : "cosyvoice_brand_voice_create";
+
+interface BillingInProgressPayloadMap {
+  script_generate_result: BillingScriptResult;
+  scene_prompt_result: BillingScenePromptResult;
+  ecom_image_batch: BillingEcomImageBatchResult;
+  video_task: Extract<BillingVideoTaskResource, { status: "queued" }>;
+  brand_voice_order: BillingAwaitingBrandVoiceOrderResource;
+}
+
+interface BillingSucceededPayloadMap {
+  script_generate_result: BillingScriptResult;
+  scene_prompt_result: BillingScenePromptResult;
+  ecom_image_batch: BillingEcomImageBatchResult;
+  video_task: Extract<BillingVideoTaskResource, { status: "done" }>;
+  brand_voice_order: BillingFulfilledBrandVoiceOrderResource;
+  brand_voice: BillingBrandVoiceResource;
+}
+
+type BillingResultId<K extends BillingKnownResultType> =
+  K extends "script_generate_result" | "scene_prompt_result" ? null : string;
+
+type BillingSucceededResource<K extends BillingKnownResultType> =
+  BillingResultId<K> extends null ? null : BillingSucceededPayloadMap[K];
+
+interface BillingOperationLookupBase {
+  idempotency_key: string;
+  billing: BillingSummary;
+  result_id: string | null;
+}
+
+type BillingInProgressLookup =
+  | (BillingOperationLookupBase & {
+      operation: BillingKnownOperation;
+      state: "in_progress";
+      completion_kind: null;
+      result_type: null;
+      result_id: null;
+      resource: null;
+      result: null;
+      failure: null;
+    })
+  | (BillingOperationLookupBase & {
+      operation: "cosyvoice_brand_voice_create";
+      state: "in_progress";
+      completion_kind: null;
+      result_type: null;
+      result_id: string;
+      resource: null;
+      result: null;
+      failure: null;
+    })
+  | {
+      [K in keyof BillingInProgressPayloadMap]: BillingOperationLookupBase & {
+        operation: BillingOperationForResult<K>;
+        state: "in_progress";
+        completion_kind: null;
+        result_type: K;
+        result_id: BillingResultId<K>;
+        resource: BillingInProgressPayloadMap[K] | null;
+        result: null;
+        failure: null;
+      };
+    }[keyof BillingInProgressPayloadMap];
+
+type BillingSucceededLookup = {
+  [K in BillingKnownResultType]: BillingOperationLookupBase & {
+    operation: BillingOperationForResult<K>;
+    state: "completed";
+    completion_kind: "succeeded";
+    result_type: K;
+    result_id: BillingResultId<K>;
+    resource: BillingSucceededResource<K>;
+    result: BillingSucceededPayloadMap[K];
+    failure: null;
+  };
+}[BillingKnownResultType];
+
+export type BillingOperationLookup =
+  | BillingInProgressLookup
+  | BillingSucceededLookup
+  | (BillingOperationLookupBase & {
+      operation: "doubao_brand_voice_order_create" | "doubao_brand_voice_order_renew";
+      state: "completed";
+      completion_kind: "rejected";
+      result_type: "brand_voice_order";
+      result_id: string;
+      resource: BillingRejectedBrandVoiceOrderResource;
+      result: null;
+      failure: null;
+    })
+  | (BillingOperationLookupBase & {
+      operation: BillingKnownOperation;
+      state: "completed";
+      completion_kind: "failed";
+      result_type: null;
+      result_id: null;
+      resource: null;
+      result: null;
+      failure: {
+        code: string;
+        original_http_status: number;
+        detail: { requires_new_quote: boolean | null } | null;
+      };
+    });
+
+type BillingOperationLookupForMember<
+  TLookup,
+  TOperation extends BillingKnownOperation
+> = TLookup extends { operation: infer SupportedOperation extends BillingKnownOperation }
+  ? TOperation extends SupportedOperation
+    ? Omit<TLookup, "operation"> & { operation: TOperation }
+    : never
+  : never;
+
+export type BillingOperationLookupFor<TOperation extends BillingKnownOperation> =
+  TOperation extends BillingKnownOperation
+    ? BillingOperationLookupForMember<BillingOperationLookup, TOperation>
+    : never;
+
+/** Complete canonical operation-to-lookup mapping used by parser-free billing APIs. */
+export type BillingOperationLookupMap = {
+  readonly [TOperation in BillingKnownOperation]: BillingOperationLookupFor<TOperation>;
+};
+
+/** Only returned when a caller explicitly supplies an extension registry/parser. */
+export type ExtendedBillingOperationLookup =
+  | (BillingOperationLookupBase & {
+      operation: string;
+      state: "in_progress";
+      completion_kind: null;
+      result_type: string;
+      resource: BillingLookupPayload | null;
+      result: null;
+      failure: null;
+    })
+  | (BillingOperationLookupBase & {
+      operation: string;
+      state: "completed";
+      completion_kind: "succeeded";
+      result_type: string;
+      resource: BillingLookupPayload | null;
+      result: BillingLookupPayload;
+      failure: null;
+    })
+  | (BillingOperationLookupBase & {
+      operation: string;
+      state: "completed";
+      completion_kind: "rejected";
+      result_type: string;
+      resource: BillingLookupPayload;
+      result: null;
+      failure: null;
+    })
+  | (BillingOperationLookupBase & {
+      operation: string;
+      state: "completed";
+      completion_kind: "failed";
+      result_type: null;
+      result_id: null;
+      resource: null;
+      result: null;
+      failure: {
+        code: string;
+        original_http_status: number;
+        detail: { requires_new_quote: boolean | null } | null;
+      };
+    });

@@ -1,217 +1,92 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { copy } from "@/lib/copy";
 import type { BrandVoice, Voice } from "@/lib/api/types";
 import { VoicePicker } from "./voice-picker";
 
-const voice = (id: string, display_name: string, extra: Partial<Voice> = {}): Voice => ({
-  id, provider: "edge_tts", voice_code: id, display_name, gender: null, language: "zh-CN", sample_url: null, source: "preset", ...extra
+const voice = (id: string, name: string, source: Voice["source"] = "preset"): Voice => ({
+  id,
+  provider: "edge_tts",
+  voice_code: id,
+  display_name: name,
+  gender: null,
+  language: "zh-CN",
+  sample_url: null,
+  source
 });
-const bv = (id: string, name: string, extra: Partial<BrandVoice> = {}): BrandVoice => ({
-  id, name, status: "ready", created_at: "1970-01-01T00:00:00Z", ...extra
+const brand = (id: string, name: string, delivery_status: BrandVoice["delivery_status"] = "active", provider = "cosyvoice-voice-clone"): BrandVoice => ({
+  id,
+  name,
+  provider,
+  status: delivery_status === "rejected" ? "failed" : "ready",
+  order_status: delivery_status === "rejected" ? "rejected" : delivery_status === "awaiting_fulfillment" ? "awaiting_fulfillment" : "fulfilled",
+  delivery_status,
+  expires_at: delivery_status === "expired" ? "2026-08-29T00:00:00Z" : null,
+  created_at: "2026-08-01T00:00:00Z"
 });
 
-describe("VoicePicker (口播音色 · 选我的音色)", () => {
-  it("非回归：不传 brandVoices → 扁平预设列表，不出分组标题，可选", () => {
+describe("VoicePicker payer isolation", () => {
+  it("preserves the legacy source grouping when no rights-aware list is supplied", () => {
     const onChange = vi.fn();
-    render(<VoicePicker voices={[voice("v1", "知性女声"), voice("v2", "磁性男声")]} value="v1" onChange={onChange} />);
-    expect(screen.getByText("知性女声")).toBeInTheDocument();
-    expect(screen.getByText("磁性男声")).toBeInTheDocument();
-    expect(screen.queryByText(copy.brandVoice.pickerBrandGroup)).not.toBeInTheDocument();
-    expect(screen.queryByText(copy.brandVoice.pickerStandardGroup)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByText("磁性男声"));
-    expect(onChange).toHaveBeenCalledWith("v2");
+    render(<VoicePicker voices={[voice("preset", "系统音"), voice("legacy", "旧品牌音", "brand_voice")]} value="preset" onChange={onChange} />);
+    fireEvent.click(screen.getByText("旧品牌音"));
+    expect(onChange).toHaveBeenCalledWith("legacy");
   });
 
-  // 承重·legacy 非回归（Review P1）：批量电商 common-params 不传 brandVoices，但 /voices 会注入 ready 克隆
-  // (source="brand_voice")。legacy 路径必须仍按 source 分组显示这些克隆可选——否则批量选克隆能力静默丢失。
-  it("legacy 非回归：不传 brandVoices 但 voices 含 source=brand_voice 克隆 → 仍分组显示可选(不丢批量选克隆)", () => {
-    const onChange = vi.fn();
+  it("renders only backend-authorized active brand voice records", () => {
     render(
       <VoicePicker
-        voices={[voice("v1", "知性女声", { source: "preset" }), voice("c1", "我的主播音", { source: "brand_voice", provider: "clone" })]}
-        value="v1"
-        onChange={onChange}
-      />
-    );
-    expect(screen.getByText(copy.brandVoice.pickerBrandGroup)).toBeInTheDocument();
-    // WORKBENCH-KEEPALIVE-UI-0001：分组 id 已改为 useId 生成（面板常驻后字面量 id 会重复，令第二份的
-    // aria-labelledby 错指隐藏面板）→ 按无障碍名取组，不依赖具体 id；顺带验证 aria-labelledby 关联正确。
-    const brandGroup = screen.getByRole("group", { name: copy.brandVoice.pickerBrandGroup });
-    expect(brandGroup.textContent).toContain("我的主播音");
-    fireEvent.click(screen.getByText("我的主播音"));
-    expect(onChange).toHaveBeenCalledWith("c1");
-  });
-
-  it("传 brandVoices：出「我的品牌音色 / 系统音色」分组；ready 品牌音色可见可选(用品牌 id)", () => {
-    const onChange = vi.fn();
-    render(
-      <VoicePicker
-        voices={[voice("v1", "知性女声")]}
-        brandVoices={[bv("c1", "我的主播音", { status: "ready" })]}
-        value="v1"
-        onChange={onChange}
-      />
-    );
-    expect(screen.getByText(copy.brandVoice.pickerBrandGroup)).toBeInTheDocument();
-    expect(screen.getByText(copy.brandVoice.pickerStandardGroup)).toBeInTheDocument();
-    const brandGroup = screen.getByRole("group", { name: copy.brandVoice.pickerBrandGroup });
-    expect(brandGroup.textContent).toContain("我的主播音");
-    expect(brandGroup.textContent).not.toContain("知性女声");
-    fireEvent.click(screen.getByText("我的主播音"));
-    expect(onChange).toHaveBeenCalledWith("c1");
-  });
-
-  it("承重·不双渲染：voices 里混入 source=brand_voice 项(来自 /voices 注入)时，系统组不再渲染它", () => {
-    render(
-      <VoicePicker
-        voices={[voice("v1", "知性女声"), voice("c1", "我的主播音", { source: "brand_voice", provider: "clone" })]}
-        brandVoices={[bv("c1", "我的主播音", { status: "ready" })]}
-        value="v1"
-        onChange={() => {}}
-      />
-    );
-    const standardGroup = screen.getByRole("group", { name: copy.brandVoice.pickerStandardGroup });
-    expect(standardGroup.textContent).not.toContain("我的主播音");
-    // 品牌组仅出现一次「我的主播音」
-    expect(screen.getAllByText("我的主播音")).toHaveLength(1);
-  });
-
-  it("provider 徽标：doubao→豆包、cosyvoice→CosyVoice；**缺 provider 不显徽标也不报错**(兼容)", () => {
-    render(
-      <VoicePicker
-        voices={[voice("v1", "知性女声")]}
+        voices={[voice("preset", "系统音"), voice("duplicate", "重复音", "brand_voice")]}
         brandVoices={[
-          bv("c1", "豆包音", { provider: "doubao" }),
-          bv("c2", "免费音", { provider: "cosyvoice" }),
-          bv("c3", "无标音") // 无 provider
+          brand("paid", "我的已交付音", "active", "doubao-voice-clone"),
+          brand("expired", "我的过期音", "expired", "doubao-voice-clone"),
+          brand("waiting", "等待音", "awaiting_fulfillment", "doubao-voice-clone"),
+          brand("rejected", "拒绝音", "rejected")
         ]}
-        value="v1"
-        onChange={() => {}}
+        value="preset"
+        onChange={() => undefined}
       />
     );
-    expect(screen.getByText(copy.brandVoice.providerDoubao)).toBeInTheDocument();
-    expect(screen.getByText(copy.brandVoice.providerCosyvoice)).toBeInTheDocument();
-    // 无 provider 项照常渲染名字、无徽标、无崩溃
-    expect(screen.getByText("无标音")).toBeInTheDocument();
+    expect(screen.getByText("我的已交付音")).toBeVisible();
+    expect(screen.queryByText("我的过期音")).not.toBeInTheDocument();
+    expect(screen.queryByText("等待音")).not.toBeInTheDocument();
+    expect(screen.queryByText("拒绝音")).not.toBeInTheDocument();
+    expect(screen.queryByText("重复音")).not.toBeInTheDocument();
   });
 
-  // 承重·真栈对齐（FE-INTEGRATION-0001）：BE read 侧 _brand_voice_read 返 canonical 长值
-  // doubao-voice-clone / cosyvoice-voice-clone —— 徽标必须认长值，否则真栈下徽标全部消失。
-  it("provider 徽标兼容 canonical 长值：doubao-voice-clone→豆包、cosyvoice-voice-clone→CosyVoice", () => {
+  it("does not expose expired non-canonical or non-payer records through the picker", () => {
     render(
       <VoicePicker
-        voices={[voice("v1", "知性女声")]}
+        voices={[voice("preset", "系统音")]}
         brandVoices={[
-          bv("c1", "豆包音", { provider: "doubao-voice-clone" }),
-          bv("c2", "免费音", { provider: "cosyvoice-voice-clone" })
+          brand("canonical-expired", "规范豆包过期音", "expired", "doubao-voice-clone"),
+          brand("cosy-expired", "Cosy 过期音", "expired", "cosyvoice-voice-clone"),
+          { ...brand("historical", "历史供应商音", "expired", "doubao"), order_status: null }
         ]}
-        value="v1"
-        onChange={() => {}}
+        value="preset"
+        onChange={() => undefined}
       />
     );
-    expect(screen.getByText(copy.brandVoice.providerDoubao)).toBeInTheDocument();
-    expect(screen.getByText(copy.brandVoice.providerCosyvoice)).toBeInTheDocument();
+    expect(screen.queryByText("规范豆包过期音")).not.toBeInTheDocument();
+    expect(screen.queryByText("Cosy 过期音")).not.toBeInTheDocument();
+    expect(screen.queryByText("历史供应商音")).not.toBeInTheDocument();
   });
 
-  // ADMIN-VIP-GATE-UI-0001 §二之二：canUseVip=false → doubao 品牌音色置灰 + 提示（区别于「暂无可用音色槽位」）。
-  it("VIP 门禁：canUseVip=false → doubao 音色置灰 + 「开通 huading plan 后可用」，点击不选中；cosyvoice 不受限可选", () => {
+  it("does not re-lock a payer-authorized Doubao voice from client subscription inference", () => {
     const onChange = vi.fn();
-    render(
-      <VoicePicker
-        voices={[voice("v1", "知性女声")]}
-        value="v1"
-        onChange={onChange}
-        brandVoices={[
-          bv("c1", "豆包音", { provider: "doubao-voice-clone" }),
-          bv("c2", "免费音", { provider: "cosyvoice-voice-clone" })
-        ]}
-        canUseVip={false}
-      />
-    );
-    expect(screen.getByText(copy.brandVoice.pickerVipLocked)).toBeInTheDocument();
-    // doubao 置灰不可选。
-    expect(screen.getByText("豆包音").closest("button")!).toBeDisabled();
-    fireEvent.click(screen.getByText("豆包音"));
-    expect(onChange).not.toHaveBeenCalledWith("c1");
-    // cosyvoice 不受门禁，正常可选。
-    expect(screen.getByText("免费音").closest("button")!).not.toBeDisabled();
-    fireEvent.click(screen.getByText("免费音"));
-    expect(onChange).toHaveBeenCalledWith("c2");
+    render(<VoicePicker voices={[voice("preset", "系统音")]} brandVoices={[brand("paid", "我的豆包音", "active", "doubao-voice-clone")]} canUseVip={false} value="preset" onChange={onChange} />);
+    fireEvent.click(screen.getByText("我的豆包音"));
+    expect(onChange).toHaveBeenCalledWith("paid");
   });
 
-  it("VIP 门禁：canUseVip 缺省/true → doubao 音色正常可选（零回归，无锁提示）", () => {
-    const onChange = vi.fn();
-    render(
-      <VoicePicker
-        voices={[voice("v1", "知性女声")]}
-        value="v1"
-        onChange={onChange}
-        brandVoices={[bv("c1", "豆包音", { provider: "doubao-voice-clone" })]}
-      />
-    );
-    expect(screen.queryByText(copy.brandVoice.pickerVipLocked)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByText("豆包音"));
-    expect(onChange).toHaveBeenCalledWith("c1");
+  it("shows provider labels from canonical values", () => {
+    render(<VoicePicker voices={[voice("preset", "系统音")]} brandVoices={[brand("d", "豆包音", "active", "doubao-voice-clone"), brand("c", "Cosy 音", "active", "cosyvoice-voice-clone")]} value="preset" onChange={() => undefined} />);
+    expect(screen.getByText("豆包")).toBeVisible();
+    expect(screen.getByText("CosyVoice")).toBeVisible();
   });
 
-  it("processing 品牌音色 → 置灰不可选 + 「复刻中」，点击不触发 onChange", () => {
-    const onChange = vi.fn();
-    render(
-      <VoicePicker
-        voices={[voice("v1", "知性女声")]}
-        brandVoices={[bv("c1", "复刻中的音", { status: "processing" })]}
-        value="v1"
-        onChange={onChange}
-      />
-    );
-    expect(screen.getByText("复刻中的音")).toBeInTheDocument();
-    expect(screen.getByText(copy.brandVoice.pickerCloning)).toBeInTheDocument();
-    const btn = screen.getByText("复刻中的音").closest("button")!;
-    expect(btn).toBeDisabled();
-    fireEvent.click(btn);
-    expect(onChange).not.toHaveBeenCalled();
-  });
-
-  it("failed 品牌音色 → 不出现在选择器（既不可选也不显示）", () => {
-    render(
-      <VoicePicker
-        voices={[voice("v1", "知性女声")]}
-        brandVoices={[bv("c1", "就绪音", { status: "ready" }), bv("c2", "失败音", { status: "failed" })]}
-        value="v1"
-        onChange={() => {}}
-      />
-    );
-    expect(screen.getByText("就绪音")).toBeInTheDocument();
-    expect(screen.queryByText("失败音")).not.toBeInTheDocument();
-  });
-
-  it("空态：无可选/处理中品牌音色 → 引导「还没有品牌音色 · 去创建」跳 /brand-voices", () => {
-    render(
-      <VoicePicker
-        voices={[voice("v1", "知性女声")]}
-        brandVoices={[bv("c2", "失败音", { status: "failed" })]} // 仅失败(隐藏) → 视为空
-        value="v1"
-        onChange={() => {}}
-      />
-    );
-    expect(screen.getByText(copy.brandVoice.pickerBrandEmpty)).toBeInTheDocument();
-    const link = screen.getByRole("link", { name: copy.brandVoice.pickerBrandCreate });
-    expect(link).toHaveAttribute("href", "/brand-voices");
-  });
-
-  it("加载中：brandVoicesLoading → 显加载文案，不渲染品牌选项", () => {
-    render(
-      <VoicePicker
-        voices={[voice("v1", "知性女声")]}
-        brandVoices={[]}
-        brandVoicesLoading
-        value="v1"
-        onChange={() => {}}
-      />
-    );
-    expect(screen.getByText(copy.brandVoice.pickerBrandLoading)).toBeInTheDocument();
-    expect(screen.queryByText(copy.brandVoice.pickerBrandEmpty)).not.toBeInTheDocument();
+  it("shows a creation link when the authorized active list is empty", () => {
+    render(<VoicePicker voices={[voice("preset", "系统音")]} brandVoices={[brand("expired", "过期音", "expired")]} value="preset" onChange={() => undefined} />);
+    expect(screen.getByRole("link", { name: "去创建" })).toHaveAttribute("href", "/brand-voices");
   });
 });

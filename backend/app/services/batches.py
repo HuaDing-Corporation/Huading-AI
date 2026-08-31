@@ -12,10 +12,14 @@ from sqlalchemy.orm import Session
 from app.api.deps import tenant_storage_key
 from app.core.config import settings
 from app.core.exceptions import AppError
-from app.db.models import Asset, BatchJob, BgmLibraryTrack, BrandVoice, VideoTask, Voice
+from app.db.models import Asset, BatchJob, BgmLibraryTrack, BrandVoice, User, VideoTask, Voice
 from app.providers.url_guard import ProviderUrlError, ensure_public_https_url
 from app.schemas.batches import BatchRequest
 from app.services.bgm_library import ensure_default_bgm_tracks
+from app.services.plan_access import (
+    require_doubao_voice_clone_access,
+    uses_doubao_voice_clone,
+)
 from app.services.quota import (
     QuotaEstimate,
     active_subscription,
@@ -109,11 +113,21 @@ def _row_error(index: int, message: str) -> AppError:
 def estimate_batch(
     db: Session,
     *,
-    tenant_id: str,
+    user: User,
     payload: BatchRequest,
+    requested_at: datetime | None = None,
 ) -> tuple[QuotaEstimate, int, int]:
+    tenant_id = user.tenant_id
     if payload.kind == "ecom_table":
         rows = ecom_rows_or_raise(payload)
+        _voice, brand_voice = validate_voice_or_raise(
+            db,
+            user=user,
+            voice_id=payload.common.voice_id,
+            requested_at=requested_at,
+        )
+        if brand_voice is not None and uses_doubao_voice_clone(brand_voice.provider):
+            require_doubao_voice_clone_access(db, tenant_id=tenant_id)
         target_seconds = seedance_i2v_target_seconds(payload.common.duration_sec)
         estimates = [
             estimate_seedance_i2v_quota(
@@ -162,10 +176,16 @@ def image_asset_or_raise(db: Session, *, tenant_id: str, asset_id: str) -> Asset
 def validate_voice_or_raise(
     db: Session,
     *,
-    tenant_id: str,
+    user: User,
     voice_id: str | None,
+    requested_at: datetime | None = None,
 ) -> tuple[Voice | None, BrandVoice | None]:
-    return resolve_narration_voice(db, tenant_id=tenant_id, voice_id=voice_id)
+    return resolve_narration_voice(
+        db,
+        user=user,
+        voice_id=voice_id,
+        requested_at=requested_at,
+    )
 
 
 def tenant_relative_upload_key(asset: Asset, *, tenant_id: str) -> str:

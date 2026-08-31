@@ -1,25 +1,19 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { server } from "@/mocks/server";
 
 const taskMocks = vi.hoisted(() => ({ createAndTrack: vi.fn() }));
 const uploadMock = vi.hoisted(() => ({ mutateAsync: vi.fn() }));
-const estimateMock = vi.hoisted(() => ({ mutate: vi.fn() }));
-const scenePromptMock = vi.hoisted(() => ({ mutateAsync: vi.fn() }));
-const scriptMock = vi.hoisted(() => ({ mutateAsync: vi.fn() }));
 
 vi.mock("@/lib/api/hooks", () => ({
-  useScriptGenerate: () => ({ mutateAsync: scriptMock.mutateAsync, isPending: false }),
-  useScenePromptGenerate: () => ({ mutateAsync: scenePromptMock.mutateAsync, isPending: false }),
   useUploadProductImage: () => ({ mutateAsync: uploadMock.mutateAsync, isPending: false }),
   // ECOM-VIDEO-OPTIMIZE-UI-0001：产品图改多图后复用 ReferenceImagesPicker，其默认路径调 useUploadImage（本表单
   // 走自定义 uploadFile=useUploadProductImage，故此 mock 实际不被调用，仅满足组件 hook 调用契约不为 undefined）。
   useUploadImage: () => ({ mutateAsync: vi.fn(), isPending: false }),
-  useEstimateVideo: () => ({
-    mutate: estimateMock.mutate,
-    reset: vi.fn(),
-    isPending: false,
-    data: { estimated_credits: 12, unit: "credits" }
-  }),
+  // ConfirmGenerateDialog 同时保留非权威旧流程的 fallback hook；本表单走 authoritativePricing，不会调用它。
+  useEstimateVideo: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, data: undefined }),
   useBrandVoices: () => ({ data: [], isLoading: false }),
   useVoices: () => ({
     data: [
@@ -33,19 +27,130 @@ vi.mock("@/lib/auth/auth-context", () => ({ useAuth: () => ({ session: { role: "
 
 import { EcomVideoForm } from "./ecom-video-form";
 
+const API = "http://localhost:8000";
+type RecordedSubmit = {
+  body: unknown;
+  quote: string | null;
+  key: string | null;
+};
+
+const scriptEstimates: unknown[] = [];
+const scriptSubmits: RecordedSubmit[] = [];
+const sceneEstimates: unknown[] = [];
+const sceneSubmits: RecordedSubmit[] = [];
+const videoEstimates: unknown[] = [];
+
+function simpleQuote(operation: "script_generate" | "scene_prompt", credits: number, token: string) {
+  return {
+    pricing_contract: "billing_quote",
+    pricing_shape: "simple",
+    operation,
+    unit: "request",
+    quantity: "1",
+    unit_credits: String(credits),
+    subtotal_credits: String(credits),
+    payable_credits: credits,
+    rate_scope: "platform_fixed",
+    rate_source: "fixed_policy",
+    breakdown: [],
+    disclosures: [],
+    quote_token: token,
+    expires_at: new Date(Date.now() + 60_000).toISOString()
+  };
+}
+
 let uploadSeq = 0;
 beforeEach(() => {
   window.localStorage.clear(); // 每用例干净起点：AI 标识开关默认关
   URL.createObjectURL = vi.fn(() => "blob:mock");
   URL.revokeObjectURL = vi.fn();
   uploadSeq = 0;
+  scriptEstimates.length = 0;
+  scriptSubmits.length = 0;
+  sceneEstimates.length = 0;
+  sceneSubmits.length = 0;
+  videoEstimates.length = 0;
   // 多图承重：每次上传返回**不同** image_key（默认单图用例只上传 1 张，取 key-1）。
   uploadMock.mutateAsync.mockImplementation(() => Promise.resolve({ image_key: `uploads/key-${++uploadSeq}.png` }));
-  scenePromptMock.mutateAsync.mockResolvedValue({
-    scene_prompt: "明亮影棚，产品特写旋转",
-    negative_prompt: "水印, 杂乱背景, 变形"
-  });
-  scriptMock.mutateAsync.mockResolvedValue({ script: "s" });
+  server.use(
+    http.post(`${API}/api/v1/scripts/estimate`, async ({ request }) => {
+      scriptEstimates.push(await request.json());
+      return HttpResponse.json({
+        data: simpleQuote("script_generate", 1, "script-quote-token"),
+        error: null,
+        request_id: "script-estimate"
+      });
+    }),
+    http.post(`${API}/api/v1/scripts/generate`, async ({ request }) => {
+      const key = request.headers.get("Idempotency-Key");
+      scriptSubmits.push({
+        body: await request.json(),
+        quote: request.headers.get("X-Huading-Quote"),
+        key
+      });
+      return HttpResponse.json({
+        data: {
+          script: "服务端生成的电商文案",
+          billing: {
+            operation_id: `script-operation-${scriptSubmits.length}`,
+            idempotency_key: key,
+            status: "settled",
+            requested_credits: 1,
+            held_credits: 0,
+            settled_credits: 1,
+            released_credits: 0
+          }
+        },
+        error: null,
+        request_id: "script-submit"
+      });
+    }),
+    http.post(`${API}/api/v1/videos/scene-prompt/estimate`, async ({ request }) => {
+      sceneEstimates.push(await request.json());
+      return HttpResponse.json({
+        data: simpleQuote("scene_prompt", 30, "scene-quote-token"),
+        error: null,
+        request_id: "scene-estimate"
+      });
+    }),
+    http.post(`${API}/api/v1/videos/scene-prompt`, async ({ request }) => {
+      const key = request.headers.get("Idempotency-Key");
+      sceneSubmits.push({
+        body: await request.json(),
+        quote: request.headers.get("X-Huading-Quote"),
+        key
+      });
+      return HttpResponse.json({
+        data: {
+          scene_prompt: "明亮影棚，产品特写旋转",
+          negative_prompt: "水印, 杂乱背景, 变形",
+          billing: {
+            operation_id: `scene-operation-${sceneSubmits.length}`,
+            idempotency_key: key,
+            status: "settled",
+            requested_credits: 30,
+            held_credits: 0,
+            settled_credits: 30,
+            released_credits: 0
+          }
+        },
+        error: null,
+        request_id: "scene-submit"
+      });
+    }),
+    http.post(`${API}/api/v1/videos/estimate`, async ({ request }) => {
+      videoEstimates.push(await request.json());
+      return HttpResponse.json({
+        data: {
+          pricing_contract: "legacy_estimate",
+          estimated_credits: 12,
+          unit: "credits"
+        },
+        error: null,
+        request_id: "video-estimate"
+      });
+    })
+  );
 });
 afterEach(() => vi.clearAllMocks());
 
@@ -54,6 +159,12 @@ function uploadProductImages(n = 1) {
   const input = document.querySelector('input[type="file"]') as HTMLInputElement;
   const files = Array.from({ length: n }, (_, i) => new File(["x"], `p${i}.png`, { type: "image/png" }));
   fireEvent.change(input, { target: { files } });
+}
+
+async function confirmVideoGeneration() {
+  const confirm = await screen.findByRole("button", { name: "确定" });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  fireEvent.click(confirm);
 }
 
 describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () => {
@@ -82,7 +193,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     expect(screen.queryByText("请上传产品图后再生成")).not.toBeInTheDocument();
 
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     const [request] = taskMocks.createAndTrack.mock.calls[0];
     expect(request.topic).toBeUndefined(); // 空则不带：topic:undefined 被 createVideo 的 JSON.stringify 丢弃 → 请求体不含 topic
@@ -100,7 +211,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
 
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     const [request, topic] = taskMocks.createAndTrack.mock.calls[0];
@@ -135,7 +246,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
 
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0].product_image_keys).toEqual([
@@ -169,7 +280,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0].resolution).toBe("1080p");
   });
@@ -181,7 +292,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0].apply_visible_label).toBe(true);
   });
@@ -195,7 +306,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
 
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0]).toMatchObject({
@@ -221,7 +332,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     fireEvent.change(durationInput, { target: { value: "90" } });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
 
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0]).toMatchObject({ duration_sec: 90 });
@@ -236,11 +347,8 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     fireEvent.click(generate);
 
     expect(await screen.findByText("确定生成")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(estimateMock.mutate).toHaveBeenCalledWith(
-        expect.objectContaining({ video_mode: "seedance_i2v", duration_sec: 30 })
-      )
-    );
+    await waitFor(() => expect(videoEstimates).toHaveLength(1));
+    expect(videoEstimates[0]).toMatchObject({ video_mode: "seedance_i2v", duration_sec: 30 });
     expect(screen.getByText("12")).toBeInTheDocument();
     expect(screen.getByText("确定生成即会消耗积分，生成过程中无法取消！")).toBeInTheDocument();
 
@@ -248,6 +356,34 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     // 🔴 NEGATIVE-ASSERT-SWEEP-UI-0001：推进到静止点再断言（资金路径）。裸同步断言只看得见点击当下那一帧 ——
     //    「取消时仍在微任务后把生成提交出去」这种实现会溜过去（实测：变异后本条照样绿）。
     await act(async () => {});
+    expect(taskMocks.createAndTrack).not.toHaveBeenCalled();
+  });
+
+  it("BILLABLE_TEXT_REQUIRED closes pricing, focuses the e-commerce script, and never submits", async () => {
+    server.use(
+      http.post(`${API}/api/v1/videos/estimate`, () =>
+        HttpResponse.json(
+          {
+            data: null,
+            error: { code: "BILLABLE_TEXT_REQUIRED", message: "品牌音色视频需要文案。" },
+            request_id: "ecom-missing-billable-text"
+          },
+          { status: 422 }
+        )
+      )
+    );
+    render(<EcomVideoForm />);
+    uploadProductImages(1);
+    const generate = screen.getByRole("button", { name: /生成视频/ });
+    await waitFor(() => expect(generate).toBeEnabled());
+
+    fireEvent.click(generate);
+
+    const scriptEditor = document.getElementById("ecom-script");
+    expect(scriptEditor).not.toBeNull();
+    await waitFor(() => expect(scriptEditor).toHaveFocus());
+    expect(screen.getByRole("alert")).toHaveTextContent("品牌音色视频需要文案");
+    expect(screen.queryByRole("dialog", { name: "确定生成" })).not.toBeInTheDocument();
     expect(taskMocks.createAndTrack).not.toHaveBeenCalled();
   });
 
@@ -266,24 +402,30 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     await waitFor(() => expect(sceneBtn).toBeEnabled());
     fireEvent.click(sceneBtn);
 
-    // 发产品图 keys + topic（非只 topic 字符串）+ 当前时长（SCENE-DURATION-FIX：默认 30 秒）。
-    await waitFor(() =>
-      expect(scenePromptMock.mutateAsync).toHaveBeenCalledWith({
-        topic: "保温杯",
-        script: undefined,
-        product_image_keys: ["uploads/key-1.png"],
-        duration_sec: 30
-      })
-    );
+    // 报价与提交都绑定产品图 keys + topic（非只 topic 字符串）+ 当前时长。
+    const dialog = await screen.findByRole("dialog", { name: "确认价格并继续" });
+    await waitFor(() => expect(sceneEstimates).toHaveLength(1));
+    expect(sceneEstimates[0]).toEqual({
+      topic: "保温杯",
+      product_image_keys: ["uploads/key-1.png"],
+      duration_sec: 30
+    });
+    expect(sceneSubmits).toHaveLength(0);
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认并继续" }));
     // 画面 + 负面各自填入。
     expect(await screen.findByDisplayValue("明亮影棚，产品特写旋转")).toBeInTheDocument();
     expect(screen.getByDisplayValue("水印, 杂乱背景, 变形")).toBeInTheDocument();
+    expect(sceneSubmits[0]).toMatchObject({
+      body: sceneEstimates[0],
+      quote: "scene-quote-token",
+      key: expect.any(String)
+    });
 
     // 提交体带 scene_prompt + negative_prompt。
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0]).toMatchObject({
       video_mode: "seedance_i2v",
@@ -303,22 +445,22 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     // 预设 10 秒 → duration_sec:10。
     fireEvent.click(screen.getByRole("button", { name: "10 秒" }));
     fireEvent.click(sceneBtn);
-    await waitFor(() =>
-      expect(scenePromptMock.mutateAsync).toHaveBeenLastCalledWith(
-        expect.objectContaining({ duration_sec: 10 })
-      )
-    );
+    let dialog = await screen.findByRole("dialog", { name: "确认价格并继续" });
+    await waitFor(() => expect(sceneEstimates).toHaveLength(1));
+    expect(sceneEstimates[0]).toMatchObject({ duration_sec: 10 });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认并继续" }));
+    await waitFor(() => expect(sceneSubmits).toHaveLength(1));
 
     // 自定义 5 秒（下限）→ duration_sec:5（必须含自定义输入的值）。
     const durationFieldset = screen.getByText("视频时长（与文案、字幕一致）").closest("fieldset") as HTMLElement;
     fireEvent.click(within(durationFieldset).getByRole("button", { name: "自定义" }));
     fireEvent.change(screen.getByLabelText("自定义时长（秒）"), { target: { value: "5" } });
     fireEvent.click(sceneBtn);
-    await waitFor(() =>
-      expect(scenePromptMock.mutateAsync).toHaveBeenLastCalledWith(
-        expect.objectContaining({ duration_sec: 5 })
-      )
-    );
+    dialog = await screen.findByRole("dialog", { name: "确认价格并继续" });
+    await waitFor(() => expect(sceneEstimates).toHaveLength(2));
+    expect(sceneEstimates[1]).toMatchObject({ duration_sec: 5 });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认并继续" }));
+    await waitFor(() => expect(sceneSubmits).toHaveLength(2));
   });
 
   // FIX2（CB P1）承重：小数时长 5.5 在电商**每条发送路径**分别不发请求（真 BE ScriptGenerateRequest /
@@ -340,7 +482,8 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     const btn = screen.getByRole("button", { name: /AI生成文案/ });
     await waitFor(() => expect(btn).toBeDisabled());
     fireEvent.click(btn);
-    expect(scriptMock.mutateAsync).not.toHaveBeenCalled();
+    expect(scriptEstimates).toHaveLength(0);
+    expect(scriptSubmits).toHaveLength(0);
   });
 
   it("小数时长 5.5 · 路径2「AI生成画面」→ 禁点 + 不发（scene-prompt）", async () => {
@@ -348,7 +491,8 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     const btn = screen.getByRole("button", { name: /AI 生成画面/ });
     await waitFor(() => expect(btn).toBeDisabled());
     fireEvent.click(btn);
-    expect(scenePromptMock.mutateAsync).not.toHaveBeenCalled();
+    expect(sceneEstimates).toHaveLength(0);
+    expect(sceneSubmits).toHaveLength(0);
   });
 
   it("小数时长 5.5 · 路径3「生成视频」→ 禁用 + 不提交（videos + estimate）", async () => {
@@ -356,7 +500,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     await waitFor(() => expect(screen.getByRole("button", { name: /生成视频/ })).toBeDisabled());
     fireEvent.click(screen.getByRole("button", { name: /生成视频/ }));
     expect(taskMocks.createAndTrack).not.toHaveBeenCalled();
-    expect(estimateMock.mutate).not.toHaveBeenCalled();
+    expect(videoEstimates).toHaveLength(0);
   });
 
   // req3 承重：「重写文案」→「AI生成文案」重命名；字数档位随 scripts/generate 传 length_tier（默认 medium，切「长」→ long）。
@@ -370,26 +514,40 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
 
     // 默认档位 medium。
     fireEvent.click(genScript);
-    await waitFor(() =>
-      expect(scriptMock.mutateAsync).toHaveBeenLastCalledWith({
-        topic: "保温杯",
-        video_mode: "seedance_i2v",
-        duration_sec: 30,
-        length_tier: "medium"
-      })
-    );
+    let dialog = await screen.findByRole("dialog", { name: "确认价格并继续" });
+    await waitFor(() => expect(scriptEstimates).toHaveLength(1));
+    expect(scriptEstimates[0]).toEqual({
+      topic: "保温杯",
+      video_mode: "seedance_i2v",
+      duration_sec: 30,
+      length_tier: "medium"
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认并继续" }));
+    await waitFor(() => expect(scriptSubmits).toHaveLength(1));
+    expect(scriptSubmits[0]).toMatchObject({
+      body: scriptEstimates[0],
+      quote: "script-quote-token",
+      key: expect.any(String)
+    });
 
     // 切「长」→ length_tier:long。
     fireEvent.click(screen.getByRole("button", { name: "长" }));
     fireEvent.click(genScript);
-    await waitFor(() =>
-      expect(scriptMock.mutateAsync).toHaveBeenLastCalledWith({
-        topic: "保温杯",
-        video_mode: "seedance_i2v",
-        duration_sec: 30,
-        length_tier: "long"
-      })
-    );
+    dialog = await screen.findByRole("dialog", { name: "确认价格并继续" });
+    await waitFor(() => expect(scriptEstimates).toHaveLength(2));
+    expect(scriptEstimates[1]).toEqual({
+      topic: "保温杯",
+      video_mode: "seedance_i2v",
+      duration_sec: 30,
+      length_tier: "long"
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认并继续" }));
+    await waitFor(() => expect(scriptSubmits).toHaveLength(2));
+    expect(scriptSubmits[1]).toMatchObject({
+      body: scriptEstimates[1],
+      quote: "script-quote-token",
+      key: expect.any(String)
+    });
   });
 
   // req6 承重：手填负面提示词（不经 AI）→ 随提交传 negative_prompt。
@@ -402,7 +560,7 @@ describe("EcomVideoForm (电商带货 i2v · ECOM-VIDEO-OPTIMIZE-UI-0001)", () =
     const generate = screen.getByRole("button", { name: /生成视频/ });
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
-    fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+    await confirmVideoGeneration();
     await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
     expect(taskMocks.createAndTrack.mock.calls[0][0].negative_prompt).toBe("禁止文字水印");
   });

@@ -11,6 +11,7 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.exceptions import AppError
 from app.db.models import Plan, Role, Subscription, Tenant, UsageRecord, User
 from app.db.session import SessionLocal
 from app.services.voice_slots import (
@@ -341,9 +342,10 @@ def _run_assign_speaker_slot(argv: list[str]) -> int:
                 db.commit()
             else:
                 db.rollback()
-        except SpeakerSlotAssignmentError as exc:
+        except (AppError, SpeakerSlotAssignmentError) as exc:
             db.rollback()
-            print(f"speaker slot error: {exc}", file=sys.stderr)
+            code = getattr(exc, "code", "VOICE_SLOT_ASSIGNMENT_FAILED")
+            print(f"speaker slot error [{code}]: {exc}", file=sys.stderr)
             return 2
         except Exception:
             db.rollback()

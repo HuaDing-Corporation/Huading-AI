@@ -5,7 +5,7 @@ from app.api.deps import CurrentUserDependency, DbSessionDependency
 from app.db.models import User
 from app.schemas.quota import QuotaResponse
 from app.schemas.response import ApiResponse, ok
-from app.services.quota import active_subscription, quota_payload
+from app.services.quota import tenant_quota_snapshot
 
 router = APIRouter()
 
@@ -16,5 +16,5 @@ def get_quota(
     user: User = CurrentUserDependency,
     db: Session = DbSessionDependency,
 ) -> ApiResponse[QuotaResponse]:
-    subscription = active_subscription(db, user.tenant_id)
-    return ok(request, QuotaResponse(**quota_payload(subscription)))
+    snapshot = tenant_quota_snapshot(db, tenant_id=user.tenant_id)
+    return ok(request, QuotaResponse(**snapshot.__dict__))

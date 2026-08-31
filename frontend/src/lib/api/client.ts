@@ -41,6 +41,11 @@ export class ApiError extends Error {
   }
 }
 
+/** Public runtime guard for feature-level error parsers; keeps transport checks centralized. */
+export function isApiError(error: unknown): error is ApiError {
+  return error instanceof ApiError;
+}
+
 /** Auth + tenant headers for an authenticated request. */
 export function authHeaders(): Record<string, string> {
   const session = authStore.get();

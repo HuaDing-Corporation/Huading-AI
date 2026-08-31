@@ -1,7 +1,9 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "@/lib/api/client";
+import { server } from "@/mocks/server";
 
 const taskMocks = vi.hoisted(() => ({ createAndTrack: vi.fn() }));
 
@@ -31,6 +33,8 @@ vi.mock("@/lib/auth/auth-context", () => ({ useAuth: () => ({ session: { role: "
 
 import { NewVideoForm } from "./new-video-form";
 
+const API = "http://localhost:8000";
+
 afterEach(() => vi.clearAllMocks());
 
 // 生成视频 now opens the 确定生成 dialog; the real submit happens on 确定.
@@ -38,7 +42,9 @@ async function fillAndSubmit() {
   fireEvent.change(screen.getByPlaceholderText(/输入一句话主题/), { target: { value: "咖啡" } });
   fireEvent.click(screen.getByText("默认主播")); // select preset avatar; voice auto-defaults
   fireEvent.click(screen.getByRole("button", { name: /生成视频/ }));
-  fireEvent.click(await screen.findByRole("button", { name: "确定" }));
+  const confirm = await screen.findByRole("button", { name: "确定" });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  fireEvent.click(confirm);
 }
 
 describe("NewVideoForm error display (P2)", () => {
@@ -79,5 +85,32 @@ describe("NewVideoForm error display (P2)", () => {
     await waitFor(() =>
       expect(screen.getByText("额度不足，无法生成，请充值或精简任务")).toBeInTheDocument()
     );
+  });
+
+  it("BILLABLE_TEXT_REQUIRED closes pricing, focuses the script editor, and never submits", async () => {
+    server.use(
+      http.post(`${API}/api/v1/videos/estimate`, () =>
+        HttpResponse.json(
+          {
+            data: null,
+            error: { code: "BILLABLE_TEXT_REQUIRED", message: "品牌音色视频需要文案。" },
+            request_id: "missing-billable-text"
+          },
+          { status: 422 }
+        )
+      )
+    );
+    render(<NewVideoForm />);
+    fireEvent.change(screen.getByPlaceholderText(/输入一句话主题/), { target: { value: "咖啡" } });
+    fireEvent.click(screen.getByText("默认主播"));
+
+    fireEvent.click(screen.getByRole("button", { name: /生成视频/ }));
+
+    const scriptEditor = document.getElementById("video-script");
+    expect(scriptEditor).not.toBeNull();
+    await waitFor(() => expect(scriptEditor).toHaveFocus());
+    expect(screen.getByRole("alert")).toHaveTextContent("品牌音色视频需要文案");
+    expect(screen.queryByRole("dialog", { name: "确定生成" })).not.toBeInTheDocument();
+    expect(taskMocks.createAndTrack).not.toHaveBeenCalled();
   });
 });

@@ -4,22 +4,36 @@ import { useEffect, useState } from "react";
 import { Sparkles } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
+import { isApiError } from "@/lib/api/client";
 import {
   useAvatarPresets,
   useBrandVoices,
-  useScriptGenerate,
   useSubtitleTemplates,
   useUploadAvatarVideo,
   useUploadImage,
   useVoices
 } from "@/lib/api/hooks";
+import { estimateScript, generateScript } from "@/lib/api/scripts";
 import { useGenerateConfirm } from "@/lib/api/use-generate-confirm";
+import { videoPricingContextForVoice } from "@/lib/api/videos";
 import { useTrackedUpload } from "@/lib/api/use-tracked-upload";
-import type { CreateVideoRequest, SubtitleStyle } from "@/lib/api/types";
+import type {
+  BillingOperationLookupFor,
+  BillingConfirmation,
+  CreateVideoRequest,
+  ScriptGenerateRequest,
+  ScriptGenerateResponse,
+  SubtitleStyle,
+  VideoEstimateContract,
+  VideoPricingContext
+} from "@/lib/api/types";
+import { useBillingAction } from "@/lib/billing/use-billing-action";
 import { useVideoTasks } from "@/lib/videos/tasks-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardSubtitle, CardTitle } from "@/components/ui/card";
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
+import { PricingConfirmDialog } from "@/components/billing/pricing-confirm-dialog";
+import { BillingStatus } from "@/components/billing/billing-status";
 import { Input } from "@/components/ui/input";
 import { SelectableOption } from "@/components/ui/selectable-option";
 import { ImagePicker } from "@/components/workbench/image-picker";
@@ -49,7 +63,6 @@ export function NewVideoForm({
   onPrefillConsumed
 }: { initialTopic?: string; initialScript?: string; onPrefillConsumed?: () => void } = {}) {
   const { createAndTrack } = useVideoTasks();
-  const scriptGen = useScriptGenerate();
   const uploadImg = useUploadImage();
   const uploadVideo = useUploadAvatarVideo();
   const { session, ready: authReady } = useAuth(); // VIP 门禁（§二之二）：doubao 品牌音色可用性
@@ -78,6 +91,31 @@ export function NewVideoForm({
   const [subtitleStyle, setSubtitleStyle] = useState<SubtitleStyle | undefined>(undefined);
   const [applyLabel, setApplyLabel] = useLabelTogglePreference(); // AI 标识开关（默认关，localStorage 记忆）
   const [error, setError] = useState<string | null>(null);
+  const [scriptPricingOpen, setScriptPricingOpen] = useState(false);
+  const scriptInput: ScriptGenerateRequest | null = topic.trim()
+    ? { topic: topic.trim() }
+    : null;
+  const scriptBilling = useBillingAction<
+    ScriptGenerateRequest,
+    Awaited<ReturnType<typeof estimateScript>>,
+    ScriptGenerateResponse,
+    "script_generate"
+  >({
+    operation: "script_generate",
+    input: scriptInput,
+    estimate: estimateScript,
+    submit: generateScript,
+    resultFromLookup: (lookup: BillingOperationLookupFor<"script_generate">) => {
+      if (
+        lookup.state !== "completed" ||
+        lookup.completion_kind !== "succeeded" ||
+        lookup.result_type !== "script_generate_result"
+      ) {
+        return null;
+      }
+      return { script: lookup.result.script, billing: lookup.billing };
+    }
+  });
   // WORKBENCH-KEEPALIVE-UI-0001 · prefill 消费时机重设计：工作台面板改为「挂载后常驻」，本表单不再随切 mode 重挂
   // → 上面的 mount-时惰性初始化承接不了**后到**的 prefill（值注不进来，而 effect 照样回调 clearPrefill → 载荷被
   // 当「已消费」丢弃，用户看不到值也无从重试）。故改为同步 props：只写 prefill 真正带来的字段 → 用户已填的其它
@@ -91,16 +129,55 @@ export function NewVideoForm({
     onPrefillConsumed?.();
   }, [initialTopic, initialScript, onPrefillConsumed]);
 
+  const scriptBillingPhase = scriptBilling.phase;
+  const scriptBillingResult = scriptBilling.result;
+
+  useEffect(() => {
+    if (scriptBillingPhase !== "succeeded" || !scriptBillingResult) return;
+    setScript(scriptBillingResult.script);
+    setScriptPricingOpen(false);
+  }, [scriptBillingPhase, scriptBillingResult]);
+
   // Actual submit — runs only after the 确定生成 confirmation; owns its own errors.
-  const submit = async (req: CreateVideoRequest) => {
+  const submit = async (
+    req: CreateVideoRequest,
+    estimate?: VideoEstimateContract,
+    confirmation?: BillingConfirmation,
+    pricingContext?: VideoPricingContext | null
+  ) => {
     setError(null);
     try {
-      await createAndTrack(req, req.topic ?? ""); // topic 现为可选类型（电商带货可空）；口播恒有值，?? "" 仅为类型收敛
+      if (estimate?.pricing_contract === "billing_quote") {
+        if (!confirmation) throw new Error("缺少视频报价确认信息");
+        if (!pricingContext) throw new Error("缺少视频报价校验信息");
+        return await createAndTrack(req, req.topic ?? "", {
+          estimate,
+          confirmation,
+          pricingContext
+        });
+      }
+      if (estimate) return await createAndTrack(req, req.topic ?? "", { estimate });
+      await createAndTrack(req, req.topic ?? "");
     } catch (err) {
       setError(errorText(err));
+      throw err;
     }
   };
-  const confirm = useGenerateConfirm(submit);
+  const confirm = useGenerateConfirm(submit, {
+    authoritativePricing: true,
+    onEstimateError: (caught) => setError(errorText(caught))
+  });
+  const confirmPricingError = confirm.pricing?.error;
+  const cancelConfirm = confirm.cancel;
+
+  useEffect(() => {
+    if (!isApiError(confirmPricingError) || confirmPricingError.code !== "BILLABLE_TEXT_REQUIRED") return;
+    cancelConfirm();
+    // Let Radix finish closing/restoring focus before moving focus to the
+    // actionable field. Do not cancel this callback when close() clears the
+    // pricing error on the next render; the DOM lookup is safe after unmount.
+    window.setTimeout(() => document.getElementById("video-script")?.focus(), 0);
+  }, [cancelConfirm, confirmPricingError]);
 
   // Default the voice to the first loaded option (once), without clobbering a
   // user's pick.
@@ -109,16 +186,12 @@ export function NewVideoForm({
     if (!voiceId && voiceList && voiceList.length > 0) setVoiceId(voiceList[0].id);
   }, [voiceId, voiceList]);
 
-  const onGenerateScript = async () => {
+  const onGenerateScript = () => {
     const trimmed = topic.trim();
-    if (!trimmed || scriptGen.isPending) return;
+    if (!trimmed || scriptBilling.phase === "submitting" || scriptBilling.phase === "querying") return;
     setError(null);
-    try {
-      const res = await scriptGen.mutateAsync({ topic: trimmed });
-      setScript(res.script);
-    } catch (err) {
-      setError(errorText(err));
-    }
+    scriptBilling.reset();
+    setScriptPricingOpen(true);
   };
 
   // 当前形象来源对应的 asset 值（照片=avatar_asset_id / 视频=avatar_video_asset_id）。
@@ -129,7 +202,7 @@ export function NewVideoForm({
     const trimmed = topic.trim();
     if (!trimmed || !voiceId || !activeSourceValue) return;
     setError(null);
-    confirm.requestConfirm({
+    const request: CreateVideoRequest = {
       topic: trimmed,
       script: script.trim() || undefined,
       voice_id: voiceId,
@@ -141,7 +214,11 @@ export function NewVideoForm({
       subtitle_enabled: true,
       subtitle_style: subtitleStyle, // 不选 = undefined → JSON.stringify 丢弃 → 不回归 0001
       apply_visible_label: applyLabel
-    });
+    };
+    confirm.requestConfirm(
+      request,
+      videoPricingContextForVoice(voiceId, voiceList ?? [], brandVoices.data ?? [])
+    );
   };
 
   const generateDisabled =
@@ -174,7 +251,7 @@ export function NewVideoForm({
         script={script}
         onChange={setScript}
         onRegenerate={onGenerateScript}
-        loading={scriptGen.isPending}
+        loading={scriptBilling.phase === "submitting" || scriptBilling.phase === "querying"}
         speed={speed}
         // FIX1：ScriptReview 不传 id 即走 useId（每实例唯一）。口播这份显式传旧 id —— e2e 的 #video-script
         // 落点断言依赖它（反推「带入 · 数字人口播」）。
@@ -239,6 +316,24 @@ export function NewVideoForm({
         </p>
       )}
 
+      {scriptBilling.billing && !scriptPricingOpen && (
+        <BillingStatus
+          summary={scriptBilling.billing}
+          querying={scriptBilling.phase === "querying"}
+          onContinueLookup={() => void scriptBilling.continueLookup()}
+          onDismiss={scriptBilling.reset}
+          className="mb-3"
+        />
+      )}
+
+      {confirm.billing && !confirm.open && (
+        <BillingStatus
+          summary={confirm.billing}
+          onDismiss={confirm.dismissBilling}
+          className="mb-3"
+        />
+      )}
+
       <Button
         variant="primary"
         size="lg"
@@ -253,8 +348,26 @@ export function NewVideoForm({
         open={confirm.open}
         request={confirm.request}
         submitting={confirm.submitting}
+        pricing={confirm.pricing}
         onConfirm={confirm.confirm}
         onCancel={confirm.cancel}
+      />
+
+      <PricingConfirmDialog
+        open={scriptPricingOpen}
+        phase={scriptBilling.phase}
+        quote={scriptBilling.quote}
+        expiresInSeconds={scriptBilling.expiresInSeconds}
+        errorMessage={scriptBilling.errorMessage}
+        billing={scriptBilling.billing}
+        billingQuerying={scriptBilling.phase === "querying"}
+        onContinueLookup={() => void scriptBilling.continueLookup()}
+        onEstimate={() => void scriptBilling.estimate()}
+        onConfirm={() => void scriptBilling.confirm()}
+        onCancel={() => {
+          setScriptPricingOpen(false);
+          scriptBilling.reset();
+        }}
       />
     </Card>
   );

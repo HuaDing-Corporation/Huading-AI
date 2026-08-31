@@ -10,10 +10,16 @@ from fastapi import status as http_status
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
-from app.api.deps import CurrentUserDependency, DbSessionDependency, require_platform_admin
+from app.api.deps import (
+    CurrentUserDependency,
+    DbSessionDependency,
+    get_object_storage,
+    require_platform_admin,
+)
+from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.logging import get_logger
-from app.db.models import User, VideoTask
+from app.db.models import Asset, User, VideoTask
 from app.schemas.admin_console import (
     AdminAuditLogPage,
     AdminCreditsAdjustRequest,
@@ -28,13 +34,19 @@ from app.schemas.admin_console import (
     AdminTenantStatusRequest,
     AdminTenantStatusResponse,
     AdminUsagePage,
-    AdminVoiceSlotAssignRequest,
     AdminVoiceSlotAssignResponse,
     AdminVoiceSlotsResponse,
 )
+from app.schemas.brand_voice_orders import (
+    AdminBrandVoiceOrderRead,
+    BrandVoiceOrderPage,
+    BrandVoiceOrderRead,
+    BrandVoiceOrderResolveRequest,
+)
 from app.schemas.response import ApiResponse, ok
-from app.services import admin_console
-from app.services.voice_slots import SpeakerSlotAssignmentError
+from app.services import admin_console, brand_voice_orders
+from app.services.storage.base import ObjectStorage
+from app.services.storage.keys import presign_tenant_storage_key
 from app.workers.avatar_talk import generate_avatar_talk_task, generate_seedance_i2v_task
 from app.workers.image_gen import generate_ecom_replicate_task, generate_image_task
 from app.workers.reverse_prompt import generate_reverse_prompt_video_task
@@ -46,8 +58,120 @@ logger = get_logger(__name__)
 
 PageQuery = Annotated[int, Query(ge=1)]
 PageSizeQuery = Annotated[int, Query(ge=1, le=100)]
+ObjectStorageDependency = Depends(get_object_storage)
 FromDateQuery = Annotated[date | None, Query(alias="from")]
 ToDateQuery = Annotated[date | None, Query()]
+
+
+@router.get(
+    "/brand-voice-orders",
+    response_model=ApiResponse[BrandVoiceOrderPage],
+)
+def list_manual_brand_voice_orders(
+    request: Request,
+    status: Literal["awaiting_fulfillment", "fulfilled", "rejected"] | None = None,
+    page: PageQuery = 1,
+    page_size: PageSizeQuery = 20,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[BrandVoiceOrderPage]:
+    result = brand_voice_orders.list_admin_brand_voice_orders(
+        db,
+        status=status,
+        page=page,
+        page_size=page_size,
+    )
+    return ok(
+        request,
+        BrandVoiceOrderPage(
+            items=[
+                brand_voice_orders.brand_voice_order_read(db, order=order) for order in result.items
+            ],
+            total=result.total,
+            page=page,
+            page_size=page_size,
+        ),
+    )
+
+
+@router.get(
+    "/brand-voice-orders/{order_id}",
+    response_model=ApiResponse[AdminBrandVoiceOrderRead],
+)
+def get_manual_brand_voice_order(
+    request: Request,
+    order_id: str,
+    user: User = CurrentUserDependency,
+    db: Session = DbSessionDependency,
+    storage: ObjectStorage = ObjectStorageDependency,
+) -> ApiResponse[AdminBrandVoiceOrderRead]:
+    order = brand_voice_orders.get_admin_brand_voice_order(db, order_id=order_id)
+    asset = db.get(Asset, order.source_audio_asset_id)
+    if asset is None or asset.tenant_id != order.tenant_id:
+        raise AppError(
+            "Source audio asset not found.",
+            code="SOURCE_AUDIO_ASSET_NOT_FOUND",
+            status_code=404,
+        )
+    source_audio_url = presign_tenant_storage_key(
+        storage,
+        tenant_id=order.tenant_id,
+        storage_key=asset.storage_key,
+        expires_in=min(settings.engine_s3_presign_ttl, 900),
+    )
+    try:
+        admin_console.record_audit(
+            db,
+            actor=user,
+            action="brand_voice_order_audio_access",
+            target_tenant_id=order.tenant_id,
+            target_id=order.id,
+            before=None,
+            after=None,
+            reason=None,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    resource = brand_voice_orders.brand_voice_order_read(db, order=order)
+    return ok(
+        request,
+        AdminBrandVoiceOrderRead(
+            **resource.model_dump(),
+            source_audio_url=source_audio_url,
+        ),
+    )
+
+
+@router.post(
+    "/brand-voice-orders/{order_id}/resolve",
+    response_model=ApiResponse[BrandVoiceOrderRead],
+)
+def resolve_manual_brand_voice_order(
+    request: Request,
+    order_id: str,
+    payload: BrandVoiceOrderResolveRequest,
+    user: User = CurrentUserDependency,
+    db: Session = DbSessionDependency,
+) -> ApiResponse[BrandVoiceOrderRead]:
+    if payload.action == "fulfill":
+        resolved = brand_voice_orders.resolve_brand_voice_order(
+            db,
+            actor=user,
+            order_id=order_id,
+            action="fulfill",
+            provider_voice_id=payload.provider_voice_id,
+        )
+    else:
+        resolved = brand_voice_orders.resolve_brand_voice_order(
+            db,
+            actor=user,
+            order_id=order_id,
+            action="reject",
+            rejection_reason=payload.rejection_reason,
+        )
+    order = brand_voice_orders.get_admin_brand_voice_order(db, order_id=resolved.id)
+    return ok(request, brand_voice_orders.brand_voice_order_read(db, order=order))
 
 
 @router.get("/tenants", response_model=ApiResponse[AdminTenantPage])
@@ -189,30 +313,13 @@ def get_voice_slots(
 def assign_voice_slot(
     request: Request,
     tenant_id: str,
-    payload: AdminVoiceSlotAssignRequest,
-    user: User = CurrentUserDependency,
-    db: Session = DbSessionDependency,
 ) -> ApiResponse[AdminVoiceSlotAssignResponse]:
-    try:
-        result = admin_console.assign_tenant_voice_slot(
-            db,
-            actor=user,
-            tenant_id=tenant_id,
-            speaker_id=payload.speaker_id,
-            reason=payload.reason,
-        )
-        db.commit()
-    except SpeakerSlotAssignmentError as exc:
-        db.rollback()
-        raise AppError(
-            str(exc),
-            code="VOICE_SLOT_ASSIGNMENT_FAILED",
-            status_code=422,
-        ) from exc
-    except Exception:
-        db.rollback()
-        raise
-    return ok(request, result)
+    del request, tenant_id
+    raise AppError(
+        "Legacy voice-slot assignment has been retired.",
+        code="VOICE_SLOT_ASSIGNMENT_RETIRED",
+        status_code=410,
+    )
 
 
 @router.get("/usage", response_model=ApiResponse[AdminUsagePage])
@@ -312,8 +419,7 @@ def get_tasks(
     request: Request,
     task_family: AdminTaskFamily | None = None,
     tenant_id: str | None = None,
-    status: Literal["queued", "running", "done", "succeeded", "failed", "cancelled"]
-    | None = None,
+    status: Literal["queued", "running", "done", "succeeded", "failed", "cancelled"] | None = None,
     from_: FromDateQuery = None,
     to: ToDateQuery = None,
     page: PageQuery = 1,
@@ -446,9 +552,7 @@ def retry_task(
                 args=[task.id], task_id=task.id, queue="image"
             )
         else:
-            generate_ecom_replicate_task.apply_async(
-                args=[task.id], task_id=task.id, queue="image"
-            )
+            generate_ecom_replicate_task.apply_async(args=[task.id], task_id=task.id, queue="image")
     except Exception as exc:
         _compensate_retry_dispatch_failure(
             db,
@@ -474,6 +578,9 @@ def get_audit_logs(
         "status_change",
         "voice_slot_assign",
         "task_retry",
+        "brand_voice_order_audio_access",
+        "brand_voice_order_fulfill",
+        "brand_voice_order_reject",
     ]
     | None = None,
     target_tenant_id: str | None = None,

@@ -1,0 +1,724 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from decimal import ROUND_CEILING, Decimal
+
+import pytest
+import sqlalchemy as sa
+from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+
+from app.db.models import Base, CreditRate, Tenant, UsageRecord
+from app.schemas.billing import BillingQuote
+from app.services.pricing import (
+    PRICING_POLICIES,
+    PricingDisclosure,
+    PricingInvariantError,
+    PricingLine,
+    RateScope,
+    RateSource,
+    ResolvedRate,
+    activate_credit_rate,
+    build_composite_pricing,
+    build_simple_pricing,
+    code_default_rate,
+    fixed_policy_rate,
+    resolve_rate,
+    validate_credit_rate_candidate,
+    validate_pricing_snapshot,
+)
+
+
+@pytest.fixture
+def db() -> Session:
+    engine = sa.create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(Tenant(id="tenant-a", slug="tenant-a", name="Tenant A"))
+        session.commit()
+        yield session
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("operation", "unit", "price", "scope"),
+    [
+        ("script_generate", "call", Decimal("1.0000"), RateScope.TENANT_OVERRIDABLE),
+        ("scene_prompt", "call", Decimal("30.0000"), RateScope.TENANT_OVERRIDABLE),
+        ("ecom_cutout", "image", Decimal("80.0000"), RateScope.TENANT_OVERRIDABLE),
+        ("ecom_model", "image", Decimal("80.0000"), RateScope.TENANT_OVERRIDABLE),
+        (
+            "doubao_brand_voice_order_create",
+            "call",
+            Decimal("30000.0000"),
+            RateScope.PLATFORM_FIXED,
+        ),
+        (
+            "doubao_brand_voice_order_renew",
+            "call",
+            Decimal("30000.0000"),
+            RateScope.PLATFORM_FIXED,
+        ),
+        ("cosyvoice_brand_tts", "character", Decimal("0.1000"), RateScope.TENANT_OVERRIDABLE),
+    ],
+)
+def test_policy_defaults(operation, unit, price, scope):
+    policy = PRICING_POLICIES[operation]
+    assert (policy.unit, policy.default_unit_credits, policy.scope) == (unit, price, scope)
+
+
+def test_policy_registry_contains_every_authoritative_operation() -> None:
+    assert set(PRICING_POLICIES) == {
+        "script_generate",
+        "scene_prompt",
+        "ecom_cutout",
+        "ecom_model",
+        "doubao_brand_voice_order_create",
+        "doubao_brand_voice_order_renew",
+        "cosyvoice_brand_voice_create",
+        "video_create",
+        "cosyvoice_brand_tts",
+    }
+
+
+def test_simple_quote_has_one_canonical_line_even_when_display_breakdown_is_empty():
+    draft = build_simple_pricing(
+        policy=PRICING_POLICIES["scene_prompt"],
+        rate=code_default_rate(PRICING_POLICIES["scene_prompt"]),
+        quantity=Decimal("1"),
+    )
+    assert draft.breakdown == ()
+    assert len(draft.pricing_lines) == 1
+    assert draft.payable_credits == 30
+
+
+def _make_line(subtotal: str = "0.4") -> PricingLine:
+    rate = ResolvedRate(
+        unit_credits=Decimal(subtotal),
+        source=RateSource.CODE_DEFAULT,
+        rate_id=None,
+        effective_at=None,
+        policy_key="test_line",
+        policy_version=1,
+    )
+    return PricingLine(
+        operation="cosyvoice_brand_tts",
+        capability="tts",
+        unit="character",
+        quantity=Decimal("1"),
+        unit_credits=Decimal(subtotal),
+        subtotal_credits=Decimal(subtotal),
+        rate_scope=RateScope.TENANT_OVERRIDABLE,
+        rate=rate,
+        label="TTS",
+    )
+
+
+def test_composite_rounds_once_after_aggregation():
+    draft = build_composite_pricing(
+        operation="video_create",
+        lines=(_make_line("0.4"), _make_line("0.4"), _make_line("0.4")),
+    )
+    assert draft.subtotal_credits == Decimal("1.2")
+    assert draft.payable_credits == 2
+
+
+def _maximum_payable_overflow_lines() -> tuple[PricingLine, PricingLine]:
+    avatar_rate = ResolvedRate(
+        unit_credits=Decimal("1000"),
+        source=RateSource.TENANT_RATE,
+        rate_id="avatar-overflow-rate",
+        effective_at=datetime(2026, 8, 30, tzinfo=UTC),
+        policy_key=None,
+        policy_version=None,
+    )
+    avatar_line = PricingLine(
+        operation="video_create",
+        capability="avatar",
+        unit="second",
+        quantity=Decimal("999999999.999"),
+        unit_credits=Decimal("1000"),
+        subtotal_credits=Decimal("999999999999.000"),
+        rate_scope=RateScope.TENANT_OVERRIDABLE,
+        rate=avatar_rate,
+        label="Avatar",
+    )
+    return avatar_line, _make_line("0.5")
+
+
+def _snapshot_line(line: PricingLine) -> dict[str, object]:
+    return {
+        "operation": line.operation,
+        "capability": line.capability,
+        "unit": line.unit,
+        "quantity": str(line.quantity),
+        "unit_credits": str(line.unit_credits),
+        "subtotal_credits": str(line.subtotal_credits),
+        "rate_scope": line.rate_scope.value,
+        "rate_source": line.rate.source.value,
+        "rate_id": line.rate.rate_id,
+        "effective_at": line.rate.effective_at,
+        "policy_key": line.rate.policy_key,
+        "policy_version": line.rate.policy_version,
+        "label": line.label,
+    }
+
+
+def test_composite_rejects_payable_above_billing_storage_maximum() -> None:
+    with pytest.raises(PricingInvariantError, match="payable_credits"):
+        build_composite_pricing(
+            operation="video_create",
+            lines=_maximum_payable_overflow_lines(),
+        )
+
+
+def test_snapshot_rejects_payable_above_billing_storage_maximum() -> None:
+    lines = _maximum_payable_overflow_lines()
+    snapshot = {
+        "operation": "video_create",
+        "pricing_shape": "composite",
+        "pricing_lines": [_snapshot_line(line) for line in lines],
+        "disclosures": [],
+        "subtotal_credits": "999999999999.500",
+        "payable_credits": 1_000_000_000_000,
+        "rounding": "ROUND_CEILING",
+    }
+
+    with pytest.raises(PricingInvariantError, match="payable_credits"):
+        validate_pricing_snapshot(snapshot)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [Decimal("-1"), Decimal("0"), Decimal("NaN"), Decimal("Infinity"), Decimal("0.00001")],
+)
+def test_positive_policy_rejects_invalid_rates(value: Decimal) -> None:
+    policy = PRICING_POLICIES["scene_prompt"]
+    rate = replace(code_default_rate(policy), unit_credits=value)
+    with pytest.raises(PricingInvariantError):
+        build_simple_pricing(policy=policy, rate=rate, quantity=Decimal("1"))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [Decimal("-1"), Decimal("0"), Decimal("NaN"), Decimal("Infinity"), Decimal("1.0001")],
+)
+def test_positive_policy_rejects_invalid_quantities(value: Decimal) -> None:
+    policy = PRICING_POLICIES["scene_prompt"]
+    with pytest.raises(PricingInvariantError):
+        build_simple_pricing(policy=policy, rate=code_default_rate(policy), quantity=value)
+
+
+def test_composite_rejects_line_arithmetic_mismatch() -> None:
+    with pytest.raises(PricingInvariantError, match="arithmetic"):
+        build_composite_pricing(
+            operation="video_create",
+            lines=(replace(_make_line("0.4"), subtotal_credits=Decimal("0.5")),),
+        )
+
+
+def test_resolve_rate_excludes_future_rows(db: Session) -> None:
+    now = datetime.now(UTC)
+    db.add(
+        CreditRate(
+            tenant_id="tenant-a",
+            capability="image",
+            unit="image",
+            credits_per_unit=Decimal("41.0000"),
+            effective_at=now + timedelta(minutes=1),
+        )
+    )
+    db.commit()
+
+    rate = resolve_rate(
+        db,
+        tenant_id="tenant-a",
+        policy=PRICING_POLICIES["ecom_cutout"],
+        now=now,
+    )
+
+    assert rate.source is RateSource.CODE_DEFAULT
+    assert rate.unit_credits == Decimal("80.0000")
+
+
+def test_resolve_rate_rejects_duplicate_eligible_active_rows(db: Session) -> None:
+    now = datetime.now(UTC)
+    db.execute(sa.text("DROP INDEX uq_credit_rates_platform_active_capability_unit"))
+    db.add_all(
+        [
+            CreditRate(
+                id="duplicate-a",
+                capability="image",
+                unit="image",
+                credits_per_unit=Decimal("80.0000"),
+                effective_at=now - timedelta(minutes=2),
+            ),
+            CreditRate(
+                id="duplicate-b",
+                capability="image",
+                unit="image",
+                credits_per_unit=Decimal("80.0000"),
+                effective_at=now - timedelta(minutes=1),
+            ),
+        ]
+    )
+    db.commit()
+
+    with pytest.raises(PricingInvariantError, match="duplicate-a.*duplicate-b"):
+        resolve_rate(
+            db,
+            tenant_id="tenant-a",
+            policy=PRICING_POLICIES["ecom_cutout"],
+            now=now,
+        )
+
+
+def test_tenant_rate_precedes_platform_rate(db: Session) -> None:
+    now = datetime.now(UTC)
+    db.add_all(
+        [
+            CreditRate(
+                id="platform-image",
+                capability="image",
+                unit="image",
+                credits_per_unit=Decimal("80.0000"),
+                effective_at=now,
+            ),
+            CreditRate(
+                id="tenant-image",
+                tenant_id="tenant-a",
+                capability="image",
+                unit="image",
+                credits_per_unit=Decimal("42.0000"),
+                effective_at=now,
+            ),
+        ]
+    )
+    db.commit()
+
+    rate = resolve_rate(
+        db,
+        tenant_id="tenant-a",
+        policy=PRICING_POLICIES["ecom_model"],
+        now=now,
+    )
+
+    assert (rate.source, rate.rate_id, rate.unit_credits) == (
+        RateSource.TENANT_RATE,
+        "tenant-image",
+        Decimal("42.0000"),
+    )
+
+
+def test_platform_rate_is_used_when_tenant_rate_is_absent(db: Session) -> None:
+    now = datetime.now(UTC)
+    db.add(
+        CreditRate(
+            id="platform-image",
+            capability="image",
+            unit="image",
+            credits_per_unit=Decimal("79.0000"),
+            effective_at=now,
+        )
+    )
+    db.commit()
+
+    rate = resolve_rate(
+        db,
+        tenant_id="tenant-a",
+        policy=PRICING_POLICIES["ecom_cutout"],
+        now=now,
+    )
+
+    assert rate.source is RateSource.PLATFORM_RATE
+    assert rate.rate_id == "platform-image"
+    assert rate.effective_at is not None
+    assert rate.policy_key is None
+    assert rate.policy_version is None
+
+
+def test_code_default_and_fixed_policy_have_complete_non_database_provenance() -> None:
+    default_policy = PRICING_POLICIES["scene_prompt"]
+    fixed_policy = PRICING_POLICIES["cosyvoice_brand_voice_create"]
+    default = code_default_rate(default_policy)
+    fixed = fixed_policy_rate(fixed_policy)
+
+    assert (default.source, default.rate_id, default.effective_at) == (
+        RateSource.CODE_DEFAULT,
+        None,
+        None,
+    )
+    assert (default.policy_key, default.policy_version) == (
+        default_policy.policy_key,
+        default_policy.policy_version,
+    )
+    assert (fixed.source, fixed.rate_id, fixed.effective_at) == (
+        RateSource.FIXED_POLICY,
+        None,
+        None,
+    )
+    assert (fixed.policy_key, fixed.policy_version) == (
+        fixed_policy.policy_key,
+        fixed_policy.policy_version,
+    )
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["doubao_brand_voice_order_create", "doubao_brand_voice_order_renew"],
+)
+def test_doubao_policy_ignores_tenant_voice_clone_rate(db: Session, operation: str) -> None:
+    now = datetime.now(UTC)
+    db.add_all(
+        [
+            CreditRate(
+                id="platform-doubao",
+                capability="voice_clone",
+                unit="call",
+                credits_per_unit=Decimal("30000.0000"),
+                effective_at=now,
+            ),
+            CreditRate(
+                id="tenant-doubao-ignored",
+                tenant_id="tenant-a",
+                capability="voice_clone",
+                unit="call",
+                credits_per_unit=Decimal("42.0000"),
+                effective_at=now,
+            ),
+        ]
+    )
+    db.commit()
+
+    rate = resolve_rate(
+        db,
+        tenant_id="tenant-a",
+        policy=PRICING_POLICIES[operation],
+        now=now,
+    )
+
+    assert rate.source is RateSource.PLATFORM_RATE
+    assert rate.rate_id == "platform-doubao"
+    assert rate.unit_credits == Decimal("30000.0000")
+
+
+def test_cosyvoice_creation_is_the_exact_fixed_zero_exception() -> None:
+    policy = PRICING_POLICIES["cosyvoice_brand_voice_create"]
+    draft = build_simple_pricing(
+        policy=policy,
+        rate=fixed_policy_rate(policy),
+        quantity=Decimal("1"),
+    )
+    line = draft.pricing_lines[0]
+    assert line.quantity == Decimal("1")
+    assert line.unit_credits == Decimal("0.0000")
+    assert line.subtotal_credits == Decimal("0.0000")
+    assert draft.payable_credits == 0
+    assert line.rate.source is RateSource.FIXED_POLICY
+
+
+@pytest.mark.parametrize("is_active", [True, False])
+def test_candidate_rejects_negative_nonfinite_and_overprecision(is_active: bool) -> None:
+    for value in (
+        Decimal("-0.0001"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        Decimal("-Infinity"),
+        Decimal("1.00001"),
+        Decimal("100000000.0000"),
+        Decimal("1E+100"),
+    ):
+        with pytest.raises(PricingInvariantError):
+            validate_credit_rate_candidate(
+                tenant_id=None,
+                capability="image",
+                unit="image",
+                credits_per_unit=value,
+                is_active=is_active,
+            )
+
+
+def test_candidate_accepts_numeric_12_4_maximum_boundary() -> None:
+    validate_credit_rate_candidate(
+        tenant_id=None,
+        capability="image",
+        unit="image",
+        credits_per_unit=Decimal("99999999.9999"),
+        is_active=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(Decimal("Infinity"), id="positive-infinity"),
+        pytest.param(Decimal("-Infinity"), id="negative-infinity"),
+        pytest.param(Decimal("NaN"), id="nan"),
+        pytest.param(Decimal("1.00001"), id="fractional-scale-overflow"),
+        pytest.param(Decimal("100000000.0000"), id="integer-boundary-overflow"),
+        pytest.param(Decimal("1E+100"), id="precision-overflow"),
+    ],
+)
+def test_sqlite_orm_rejects_credit_rates_outside_numeric_12_4_domain(
+    db: Session,
+    value: Decimal,
+) -> None:
+    with pytest.raises(IntegrityError):
+        with db.begin_nested():
+            db.add(
+                CreditRate(
+                    id=f"invalid-{str(value)}",
+                    capability="image",
+                    unit="image",
+                    credits_per_unit=value,
+                    is_active=False,
+                    effective_at=datetime.now(UTC),
+                )
+            )
+            db.flush()
+
+
+def test_sqlite_orm_accepts_credit_rate_numeric_12_4_maximum(db: Session) -> None:
+    row = CreditRate(
+        id="maximum-numeric-12-4",
+        capability="image",
+        unit="image",
+        credits_per_unit=Decimal("99999999.9999"),
+        is_active=False,
+        effective_at=datetime.now(UTC),
+    )
+    db.add(row)
+    db.commit()
+    db.expire_all()
+
+    assert db.get(CreditRate, row.id).credits_per_unit == Decimal("99999999.9999")
+
+
+@pytest.mark.parametrize(
+    "credits",
+    [
+        pytest.param(Decimal("1.0000001"), id="fractional-scale-overflow"),
+        pytest.param(Decimal("1000000000000.000000"), id="first-integer-overflow"),
+        pytest.param(Decimal("1000000000000.000001"), id="rounded-fractional-overflow"),
+    ],
+)
+def test_sqlite_orm_rejects_usage_credits_outside_numeric_18_6_domain(
+    db: Session,
+    credits: Decimal,
+) -> None:
+    with pytest.raises(IntegrityError):
+        with db.begin_nested():
+            db.add(
+                UsageRecord(
+                    id=f"invalid-usage-{credits}",
+                    tenant_id="tenant-a",
+                    capability="image",
+                    provider="test",
+                    unit="image",
+                    quantity=Decimal("1"),
+                    credits=credits,
+                    cost_cents=0,
+                    status="reserved",
+                )
+            )
+            db.flush()
+
+
+def test_sqlite_orm_rejects_usage_quantity_fractional_scale_overflow(db: Session) -> None:
+    with pytest.raises(IntegrityError):
+        with db.begin_nested():
+            db.add(
+                UsageRecord(
+                    id="invalid-usage-quantity-scale",
+                    tenant_id="tenant-a",
+                    capability="image",
+                    provider="test",
+                    unit="image",
+                    quantity=Decimal("1.0001"),
+                    credits=Decimal("1"),
+                    cost_cents=0,
+                    status="reserved",
+                )
+            )
+            db.flush()
+
+
+def test_candidate_rejects_active_zero_for_positive_policy() -> None:
+    with pytest.raises(PricingInvariantError):
+        validate_credit_rate_candidate(
+            tenant_id=None,
+            capability="image",
+            unit="image",
+            credits_per_unit=Decimal("0"),
+            is_active=True,
+        )
+
+
+@pytest.mark.parametrize("is_active", [False, True])
+def test_candidate_rejects_every_new_tenant_voice_clone_rate(is_active: bool) -> None:
+    with pytest.raises(PricingInvariantError, match="tenant.*voice_clone"):
+        validate_credit_rate_candidate(
+            tenant_id="tenant-a",
+            capability="voice_clone",
+            unit="call",
+            credits_per_unit=Decimal("42"),
+            is_active=is_active,
+        )
+
+
+def test_activate_rate_deactivates_prior_row_in_same_transaction(db: Session) -> None:
+    now = datetime.now(UTC)
+    old = CreditRate(
+        id="old-image",
+        capability="image",
+        unit="image",
+        credits_per_unit=Decimal("80"),
+        effective_at=now - timedelta(days=1),
+    )
+    selected = CreditRate(
+        id="new-image",
+        capability="image",
+        unit="image",
+        credits_per_unit=Decimal("81"),
+        effective_at=now + timedelta(days=1),
+        is_active=False,
+    )
+    db.add_all([old, selected])
+    db.commit()
+
+    activated = activate_credit_rate(db, rate_id=selected.id, activated_at=now)
+
+    assert activated is selected
+    assert selected.is_active is True
+    assert selected.effective_at == now
+    assert old.is_active is False
+
+
+def test_snapshot_validation_rejects_aggregate_or_line_tampering() -> None:
+    line = _make_line("0.4")
+    snapshot = {
+        "operation": "video_create",
+        "pricing_shape": "composite",
+        "pricing_lines": [
+            {
+                "operation": line.operation,
+                "capability": line.capability,
+                "unit": line.unit,
+                "quantity": "1",
+                "unit_credits": "0.4",
+                "subtotal_credits": "0.4",
+                "rate_scope": line.rate_scope.value,
+                "rate_source": line.rate.source.value,
+                "rate_id": None,
+                "effective_at": None,
+                "policy_key": "test_line",
+                "policy_version": 1,
+                "label": "TTS",
+            }
+        ],
+        "disclosures": [],
+        "subtotal_credits": "0.4",
+        "payable_credits": 1,
+        "rounding": "ROUND_CEILING",
+    }
+    assert validate_pricing_snapshot(snapshot).payable_credits == 1
+    with pytest.raises(PricingInvariantError):
+        validate_pricing_snapshot({**snapshot, "subtotal_credits": "0.5"})
+    tampered_line = {**snapshot["pricing_lines"][0], "subtotal_credits": "0.5"}
+    with pytest.raises(PricingInvariantError):
+        validate_pricing_snapshot({**snapshot, "pricing_lines": [tampered_line]})
+
+
+@pytest.mark.parametrize(
+    ("pricing_shape", "envelope_operation", "line_operation"),
+    [
+        ("simple", "scene_prompt", "script_generate"),
+        ("composite", "ecom_cutout", "cosyvoice_brand_tts"),
+    ],
+)
+def test_snapshot_rejects_lines_from_another_operation(
+    pricing_shape: str,
+    envelope_operation: str,
+    line_operation: str,
+) -> None:
+    policy = PRICING_POLICIES[line_operation]
+    snapshot = {
+        "operation": envelope_operation,
+        "pricing_shape": pricing_shape,
+        "pricing_lines": [
+            {
+                "operation": line_operation,
+                "capability": policy.capability,
+                "unit": policy.unit,
+                "quantity": "1",
+                "unit_credits": str(policy.default_unit_credits),
+                "subtotal_credits": str(policy.default_unit_credits),
+                "rate_scope": policy.scope.value,
+                "rate_source": RateSource.CODE_DEFAULT.value,
+                "rate_id": None,
+                "effective_at": None,
+                "policy_key": policy.policy_key,
+                "policy_version": policy.policy_version,
+                "label": line_operation,
+            }
+        ],
+        "disclosures": [],
+        "subtotal_credits": str(policy.default_unit_credits),
+        "payable_credits": int(
+            policy.default_unit_credits.to_integral_value(rounding=ROUND_CEILING)
+        ),
+        "rounding": "ROUND_CEILING",
+    }
+
+    with pytest.raises(PricingInvariantError, match="operation"):
+        validate_pricing_snapshot(snapshot)
+
+
+def test_billing_quote_enforces_simple_and_composite_wire_shapes() -> None:
+    now = datetime.now(UTC)
+    simple = BillingQuote(
+        operation="scene_prompt",
+        pricing_shape="simple",
+        unit="call",
+        quantity="1",
+        unit_credits="30.0000",
+        rate_scope=RateScope.TENANT_OVERRIDABLE,
+        rate_source=RateSource.CODE_DEFAULT,
+        subtotal_credits="30.0000",
+        payable_credits=30,
+        breakdown=[],
+        disclosures=[],
+        quote_token="token",
+        expires_at=now,
+    )
+    assert simple.model_dump(mode="json")["unit_credits"] == "30.0000"
+    with pytest.raises(ValidationError):
+        BillingQuote(**{**simple.model_dump(), "pricing_shape": "composite"})
+
+
+def test_disclosures_do_not_change_pricing_totals() -> None:
+    policy = PRICING_POLICIES["scene_prompt"]
+    disclosure = PricingDisclosure(
+        key="informational",
+        rendered_text="Reference price",
+        copy_version=1,
+        unit=policy.unit,
+        rate_scope=policy.scope,
+        rate=code_default_rate(policy),
+    )
+    draft = build_simple_pricing(
+        policy=policy,
+        rate=code_default_rate(policy),
+        quantity=Decimal("1"),
+        disclosures=(disclosure,),
+    )
+    assert draft.subtotal_credits == Decimal("30.0000")
+    assert draft.payable_credits == 30
