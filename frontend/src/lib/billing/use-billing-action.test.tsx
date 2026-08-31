@@ -335,42 +335,66 @@ describe("useBillingAction", () => {
     });
   });
 
-  it("does not let an older lookup overwrite a newer terminal result", async () => {
+  it("keeps the frozen querying attempt when input changes and starts the new input only after terminal lookup", async () => {
     const inputA = { text: "A" };
     const inputB = { text: "B" };
     let resolveLookupA!: (value: BillingOperationLookup) => void;
-    const lookupA = vi.fn(
+    const lookup = vi.fn(
       () => new Promise<BillingOperationLookup>((resolve) => (resolveLookupA = resolve))
     );
-    const submitA = vi.fn().mockRejectedValue(networkError());
-    const submitB = vi.fn().mockResolvedValue({ id: "voice-b", billing: billing() });
-    const deps = options({ input: inputA, submit: submitA, lookup: lookupA });
+    const createIdempotencyKey = vi.fn().mockReturnValueOnce(keyA).mockReturnValueOnce(keyB);
+    const estimate = vi.fn().mockResolvedValue(quote());
+    const submit = vi
+      .fn()
+      .mockRejectedValueOnce(networkError())
+      .mockResolvedValueOnce({
+        id: "voice-b",
+        billing: { ...billing(), operation_id: "op-2", idempotency_key: keyB }
+      });
+    const deps = options({
+      input: inputA,
+      createIdempotencyKey,
+      estimate,
+      submit,
+      lookup
+    });
     const view = renderHook(
-      ({ input, submit, lookup }) => useBillingAction({ ...deps, input, submit, lookup }),
-      { initialProps: { input: inputA, submit: submitA, lookup: lookupA } }
+      ({ input }) => useBillingAction({ ...deps, input }),
+      { initialProps: { input: inputA } }
     );
     await act(() => view.result.current.estimate());
     let runA!: Promise<void>;
     act(() => {
       runA = view.result.current.confirm();
     });
-    await waitFor(() => expect(lookupA).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(lookup).toHaveBeenCalledTimes(1));
+    expect(view.result.current.phase).toBe("querying");
+    expect(view.result.current.idempotencyKey).toBe(keyA);
 
-    const lookupB = vi.fn().mockResolvedValue(completedLookup());
-    view.rerender({ input: inputB, submit: submitB, lookup: lookupB });
-    await waitFor(() => expect(view.result.current.phase).toBe("idle"));
-    await act(() => view.result.current.estimate());
-    await act(() => view.result.current.confirm());
-    expect(view.result.current.phase).toBe("succeeded");
-    expect(view.result.current.result?.id).toBe("voice-b");
+    view.rerender({ input: inputB });
+    await waitFor(() => expect(view.result.current.phase).toBe("querying"));
+    expect(view.result.current.idempotencyKey).toBe(keyA);
+    expect(view.result.current.quote).not.toBeNull();
+    expect(estimate).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      resolveLookupA(inProgressLookup());
+      resolveLookupA(completedLookup());
       await runA;
     });
     expect(view.result.current.phase).toBe("succeeded");
+    expect(view.result.current.idempotencyKey).toBe(keyA);
+
+    await act(() => view.result.current.estimate());
+    await act(() => view.result.current.confirm());
+    expect(estimate).toHaveBeenNthCalledWith(2, inputB);
+    expect(submit).toHaveBeenNthCalledWith(2, inputB, {
+      idempotency_key: keyB,
+      quote_token: "signed-token"
+    });
+    expect(createIdempotencyKey).toHaveBeenCalledTimes(2);
+    expect(view.result.current.phase).toBe("succeeded");
     expect(view.result.current.result?.id).toBe("voice-b");
-    expect(view.result.current.lookup).toBeNull();
   });
 
   it("queries the original operation after an unknown network result", async () => {
@@ -740,12 +764,13 @@ describe("useBillingAction", () => {
     expect(view.result.current.phase).toBe("succeeded");
   });
 
-  it("cancels recovery without using a replacement operation or callbacks", async () => {
-    let resolveLookup!: (value: BillingOperationLookup) => void;
-    const originalLookup = vi.fn(
-      () => new Promise<BillingOperationLookup>((resolve) => (resolveLookup = resolve))
-    );
-    const originalSubmit = vi.fn().mockRejectedValue(networkError());
+  it("keeps recovery on the frozen operation when the current operation changes", async () => {
+    vi.useFakeTimers();
+    const originalLookup = vi.fn().mockRejectedValue(notFound());
+    const originalSubmit = vi
+      .fn()
+      .mockRejectedValueOnce(networkError())
+      .mockResolvedValueOnce({ id: "unexpected-replay", billing: billing() });
     const replacementLookup = vi.fn();
     const replacementSubmit = vi.fn();
     const deps = options({ submit: originalSubmit, lookup: originalLookup });
@@ -770,26 +795,37 @@ describe("useBillingAction", () => {
     act(() => {
       confirmation = view.result.current.confirm();
     });
-    await waitFor(() => expect(originalLookup).toHaveBeenCalledTimes(1));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(originalLookup).toHaveBeenCalledTimes(1);
 
     view.rerender({
       operation: "doubao_brand_voice_order_create",
       submit: replacementSubmit,
       lookup: replacementLookup
     });
-    await waitFor(() => expect(view.result.current.phase).toBe("idle"));
+    expect(view.result.current.phase).toBe("querying");
+    expect(view.result.current.idempotencyKey).toBe(keyA);
     await act(async () => {
-      resolveLookup(completedLookup());
+      await vi.advanceTimersByTimeAsync(2_000);
       await confirmation;
     });
 
-    expect(originalLookup).toHaveBeenCalledWith("cosyvoice_brand_voice_create", keyA);
+    expect(originalLookup).toHaveBeenCalledTimes(3);
+    for (const call of originalLookup.mock.calls) {
+      expect(call).toEqual(["cosyvoice_brand_voice_create", keyA]);
+    }
+    expect(originalSubmit).toHaveBeenCalledTimes(1);
     expect(replacementLookup).not.toHaveBeenCalled();
     expect(replacementSubmit).not.toHaveBeenCalled();
-    expect(view.result.current.phase).toBe("idle");
+    expect(view.result.current.phase).toBe("querying");
+    expect(view.result.current.idempotencyKey).toBe(keyA);
+
+    originalLookup.mockResolvedValueOnce(completedLookup());
+    await act(() => view.result.current.continueLookup());
+    expect(view.result.current.phase).toBe("succeeded");
   });
 
-  it("does not replay when the bound input object was mutated without a render", async () => {
+  it("does not replay or discard the attempt when its bound input object mutates", async () => {
     vi.useFakeTimers();
     const submit = vi.fn().mockRejectedValue(networkError());
     const lookup = vi.fn().mockRejectedValue(notFound());
@@ -808,8 +844,14 @@ describe("useBillingAction", () => {
     });
     expect(lookup).toHaveBeenCalledTimes(3);
     expect(submit).toHaveBeenCalledTimes(1);
-    expect(view.result.current.quote).toBeNull();
-    expect(view.result.current.idempotencyKey).toBeNull();
+    expect(view.result.current.phase).toBe("querying");
+    expect(view.result.current.quote).not.toBeNull();
+    expect(view.result.current.idempotencyKey).toBe(keyA);
+
+    lookup.mockResolvedValueOnce(completedLookup());
+    await act(() => view.result.current.continueLookup());
+    expect(view.result.current.phase).toBe("succeeded");
+    expect(lookup).toHaveBeenLastCalledWith("cosyvoice_brand_voice_create", keyA);
   });
 
   it("invalidates a pending POST result when the same input object mutates and rerenders", async () => {
@@ -842,7 +884,7 @@ describe("useBillingAction", () => {
     expect(view.result.current.result).toBeNull();
   });
 
-  it("invalidates a pending lookup when the same input object mutates and rerenders", async () => {
+  it("keeps a pending lookup when the same input object mutates and rerenders", async () => {
     const input = { text: "原请求" };
     let resolveLookup!: (value: BillingOperationLookup) => void;
     const lookup = vi.fn(
@@ -862,14 +904,17 @@ describe("useBillingAction", () => {
 
     input.text = "已突变";
     view.rerender({ currentInput: input });
+    await waitFor(() => expect(view.result.current.phase).toBe("querying"));
+    expect(view.result.current.idempotencyKey).toBe(keyA);
     await act(async () => {
       resolveLookup(completedLookup());
       await confirmation;
     });
 
-    expect(view.result.current.phase).toBe("idle");
-    expect(view.result.current.quote).toBeNull();
-    expect(view.result.current.billing).toBeNull();
+    expect(view.result.current.phase).toBe("succeeded");
+    expect(view.result.current.quote).not.toBeNull();
+    expect(view.result.current.billing?.status).toBe("settled");
+    expect(view.result.current.idempotencyKey).toBe(keyA);
   });
 
   it("rejects a quote for a different operation", async () => {
@@ -927,12 +972,14 @@ describe("useBillingAction", () => {
     expect(submit).toHaveBeenCalledTimes(2);
   });
 
-  it("does not replay after the quote expires during persistent 404 lookup", async () => {
+  it("keeps an expired unknown attempt queryable and blocks every new-attempt action", async () => {
     vi.useFakeTimers();
+    const createIdempotencyKey = vi.fn().mockReturnValueOnce(keyA).mockReturnValueOnce(keyB);
+    const estimate = vi.fn().mockResolvedValue(quote(Date.now() + 1_500));
     const submit = vi.fn().mockRejectedValue(networkError());
     const lookup = vi.fn().mockRejectedValue(notFound());
     const view = renderHook(() =>
-      useBillingAction(options({ estimate: vi.fn().mockResolvedValue(quote(Date.now() + 1_500)), submit, lookup }))
+      useBillingAction(options({ createIdempotencyKey, estimate, submit, lookup }))
     );
     await act(() => view.result.current.estimate());
 
@@ -947,8 +994,35 @@ describe("useBillingAction", () => {
 
     expect(lookup).toHaveBeenCalledTimes(3);
     expect(submit).toHaveBeenCalledTimes(1);
-    expect(view.result.current.phase).toBe("expired");
-    expect(view.result.current.quote).toBeNull();
+    expect(view.result.current.phase).toBe("querying");
+    expect(view.result.current.expired).toBe(true);
+    expect(view.result.current.quote).not.toBeNull();
+    expect(view.result.current.idempotencyKey).toBe(keyA);
+
+    act(() => {
+      view.result.current.reset();
+      view.result.current.retry();
+    });
+    await act(() => view.result.current.estimate());
+    await act(() => view.result.current.confirm());
+    expect(createIdempotencyKey).toHaveBeenCalledTimes(1);
+    expect(estimate).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledTimes(1);
+
+    let continued!: Promise<void>;
+    act(() => {
+      continued = view.result.current.continueLookup();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+      await continued;
+    });
+    expect(lookup).toHaveBeenCalledTimes(6);
+    for (const call of lookup.mock.calls) {
+      expect(call).toEqual(["cosyvoice_brand_voice_create", keyA]);
+    }
+    expect(view.result.current.phase).toBe("querying");
+    expect(view.result.current.idempotencyKey).toBe(keyA);
   });
 
   it("treats a visible failed lookup returned with HTTP 200 as failure", async () => {

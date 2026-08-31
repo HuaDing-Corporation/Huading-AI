@@ -363,9 +363,14 @@ function useBillingActionInternal<
       previousBinding.current.fingerprint !== fingerprint
     ) {
       previousBinding.current = { operation: options.operation, fingerprint };
+      if (
+        phase === "querying" &&
+        attemptRef.current !== null &&
+        !attemptClosed.current
+      ) return;
       clearAttempt();
     }
-  }, [clearAttempt, fingerprint, options.operation]);
+  }, [clearAttempt, fingerprint, options.operation, phase]);
 
   useEffect(() => {
     const parsed = parsedQuoteRef.current;
@@ -555,8 +560,13 @@ function useBillingActionInternal<
       const expired =
         !parsedQuote ||
         Date.parse(parsedQuote.expires_at) <= attempt.now();
-      if (expired || currentFingerprint.current !== attempt.fingerprint) {
-        clearAttempt("expired");
+      const bindingChanged =
+        optionsRef.current.operation !== attempt.operation ||
+        currentFingerprint.current !== attempt.fingerprint ||
+        attempt.fingerprintInput(attempt.input) !== attempt.fingerprint;
+      if (expired || bindingChanged) {
+        setError(new Error("计费结果确认中"));
+        setPhase("querying");
         return;
       }
       if (attempt.replayed) {
@@ -578,7 +588,7 @@ function useBillingActionInternal<
     } finally {
       if (queryOwner.current === attempt.run) queryOwner.current = null;
     }
-  }, [applyLookup, clearAttempt, waitForNextLookup]);
+  }, [applyLookup, waitForNextLookup]);
 
   const submitBound = useCallback(async (
     attempt: BoundAttempt<TInput, TResult, TLookup>
