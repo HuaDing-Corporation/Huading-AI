@@ -497,19 +497,19 @@ def test_billing_core_migration_allows_downgrade_when_provider_usage_is_sql_null
 
 
 @pytest.mark.parametrize(
-    "json_expression",
+    "stored_json",
     [
-        pytest.param("CAST('null' AS JSONB)", id="jsonb-null"),
-        pytest.param("CAST('{}' AS JSONB)", id="jsonb-empty-object"),
+        pytest.param("null", id="jsonb-null"),
+        pytest.param("{}", id="jsonb-empty-object"),
         pytest.param(
-            "CAST('{\"input_tokens\":41}' AS JSONB)",
+            '{"input_tokens":41}',
             id="jsonb-provider-telemetry",
         ),
     ],
 )
 def test_real_postgresql_migration_refuses_stored_provider_usage_json(
     postgres_billing_domain_schema,
-    json_expression: str,
+    stored_json: str,
 ) -> None:
     engine, schema = postgres_billing_domain_schema
     with _schema_transaction(engine, schema) as connection:
@@ -518,8 +518,10 @@ def test_real_postgresql_migration_refuses_stored_provider_usage_json(
         connection.execute(
             sa.text(
                 "INSERT INTO usage_records (id, tenant_id, provider_usage) "
-                f"VALUES ('postgres-provider-usage', 'tenant-a', {json_expression})"
-            )
+                "VALUES ('postgres-provider-usage', 'tenant-a', "
+                "CAST(:provider_usage AS JSONB))"
+            ),
+            {"provider_usage": stored_json},
         )
 
         with pytest.raises(RuntimeError, match="provider_usage"):

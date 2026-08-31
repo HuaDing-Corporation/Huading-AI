@@ -186,7 +186,7 @@ def postgres_registry_factory(monkeypatch):
     monkeypatch.setattr(
         provider_voice_registry.settings,
         "engine_platform_tenant_slugs",
-        {"lifecycle"},
+        {"platform"},
     )
     monkeypatch.setattr(
         provider_voice_registry.settings,
@@ -217,6 +217,7 @@ def _seed_postgres_order_lifecycle(factory, *, include_renewal_voice: bool = Tru
     now = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
     with factory.begin() as db:
         db.add(Tenant(id="lifecycle-tenant", slug="lifecycle", name="Lifecycle"))
+        db.add(Tenant(id="platform-tenant", slug="platform", name="Platform"))
         db.add(
             Plan(
                 id="lifecycle-plan",
@@ -233,6 +234,15 @@ def _seed_postgres_order_lifecycle(factory, *, include_renewal_voice: bool = Tru
                 id="lifecycle-user",
                 tenant_id="lifecycle-tenant",
                 email="lifecycle@example.com",
+                password_hash="hash",
+                role="admin",
+            )
+        )
+        db.add(
+            User(
+                id="platform-user",
+                tenant_id="platform-tenant",
+                email="platform@example.com",
                 password_hash="hash",
                 role="admin",
             )
@@ -417,7 +427,7 @@ def test_postgresql_order_create_vs_tenant_deactivation_is_always_legal(
     def deactivate(db) -> None:
         admin_console.change_tenant_status(
             db,
-            actor=db.get(User, "lifecycle-user"),
+            actor=db.get(User, "platform-user"),
             tenant_id="lifecycle-tenant",
             active=False,
             reason="race test",
@@ -635,8 +645,8 @@ def test_postgresql_fulfill_vs_reject_has_one_terminal_financial_change(
         brand_voice_orders._resolve_in_transaction(
             db,
             locator=locator,
-            actor_id="lifecycle-user",
-            actor_tenant_id="lifecycle-tenant",
+            actor_id="platform-user",
+            actor_tenant_id="platform-tenant",
             action=action,
             provider_voice_id="lifecycle-new-provider-id" if action == "fulfill" else None,
             rejection_reason="race rejection" if action == "reject" else None,
@@ -668,7 +678,7 @@ def test_postgresql_fulfill_vs_reject_has_one_terminal_financial_change(
         subscription = db.get(Subscription, usage.subscription_id)
         audit = db.scalar(select(AdminAuditLog))
         assert order.status == ("fulfilled" if first == "fulfill" else "rejected")
-        assert order.resolver_user_id == "lifecycle-user"
+        assert order.resolver_user_id == "platform-user"
         assert order.updated_at == resolved_at
         assert operation.status == "completed"
         assert operation.tenant_id == "lifecycle-tenant"
@@ -704,8 +714,8 @@ def test_postgresql_fulfill_vs_reject_has_one_terminal_financial_change(
         assert subscription.quota_credits_reserved == 0
         assert subscription.quota_credits_used == (30_000 if first == "fulfill" else 0)
         assert db.scalar(select(func.count()).select_from(AdminAuditLog)) == 1
-        assert audit.actor_user_id == "lifecycle-user"
-        assert audit.actor_tenant_id == "lifecycle-tenant"
+        assert audit.actor_user_id == "platform-user"
+        assert audit.actor_tenant_id == "platform-tenant"
         assert audit.action == f"brand_voice_order_{first}"
         assert audit.target_tenant_id == "lifecycle-tenant"
         assert audit.target_id == order_id
