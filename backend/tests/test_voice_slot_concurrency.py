@@ -118,10 +118,10 @@ def test_retired_speaker_slot_assignment_does_not_lock_or_scan(
 )
 def test_postgres_official_registration_serializes_against_customer_claim(
     monkeypatch,
+    cloned_model_metadata_factory,
 ) -> None:
     from app.db.models import (
         Asset,
-        Base,
         BillingOperation,
         BrandVoice,
         BrandVoiceOrder,
@@ -137,17 +137,21 @@ def test_postgres_official_registration_serializes_against_customer_claim(
     with engine.begin() as connection:
         connection.execute(text(f'CREATE SCHEMA "{schema}"'))
     scoped_engine = engine.execution_options(schema_translate_map={None: schema})
-    Base.metadata.create_all(
+    test_metadata = cloned_model_metadata_factory()
+    test_metadata.create_all(
         scoped_engine,
         tables=[
-            Tenant.__table__,
-            User.__table__,
-            Asset.__table__,
-            BillingOperation.__table__,
-            BrandVoice.__table__,
-            BrandVoiceOrder.__table__,
-            BrandVoiceProviderId.__table__,
-            ProviderConfig.__table__,
+            test_metadata.tables[model.__table__.key]
+            for model in (
+                Tenant,
+                User,
+                Asset,
+                BillingOperation,
+                BrandVoice,
+                BrandVoiceOrder,
+                BrandVoiceProviderId,
+                ProviderConfig,
+            )
         ],
     )
     Session = sessionmaker(bind=scoped_engine, autoflush=False, autocommit=False)

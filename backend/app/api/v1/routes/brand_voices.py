@@ -42,7 +42,6 @@ from app.services.billing_operations import (
     complete_succeeded,
     create_reserved_operation,
     find_replay,
-    register_billing_result_schema,
 )
 from app.services.billing_quotes import issue_quote, request_sha256, verify_quote
 from app.services.cosyvoice_recovery import reconcile_cosyvoice_operation
@@ -84,9 +83,6 @@ _VOICE_CLONE_PROVIDER_ALIASES = {
     "cosyvoice": _COSYVOICE_CLONE_PROVIDER,
     _COSYVOICE_CLONE_PROVIDER: _COSYVOICE_CLONE_PROVIDER,
 }
-
-register_billing_result_schema("brand_voice", BrandVoiceRead)
-
 
 def _manual_order_required() -> AppError:
     return AppError(

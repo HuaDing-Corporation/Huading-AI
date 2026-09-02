@@ -21,6 +21,22 @@ type ExpectedFault = {
   status: number;
 };
 
+type RequestFailure = {
+  method: string;
+  resourceType: string;
+  url: string;
+  errorText: string;
+};
+
+function isExpectedHomeVideoNavigationAbort(failure: RequestFailure) {
+  return (
+    failure.method === "GET" &&
+    failure.resourceType === "media" &&
+    failure.url === "http://localhost:3100/mock-v2v-1080p-2s.mp4" &&
+    failure.errorText === "net::ERR_ABORTED"
+  );
+}
+
 async function installBillingProbe(page: Page) {
   const observedPosts: Probe["posts"] = [];
   page.on("response", async (response) => {
@@ -160,6 +176,7 @@ function watchErrors(page: Page) {
     errors.push(text);
   });
   page.on("requestfailed", (request) => {
+    const errorText = request.failure()?.errorText ?? "unknown";
     if (
       expectedFault?.observed &&
       expectedFault.requestFailureBudget > 0 &&
@@ -169,7 +186,13 @@ function watchErrors(page: Page) {
       expectedFault.requestFailureBudget -= 1;
       return;
     }
-    errors.push(`requestfailed ${request.method()} ${new URL(request.url()).pathname}: ${request.failure()?.errorText ?? "unknown"}`);
+    if (isExpectedHomeVideoNavigationAbort({
+      method: request.method(),
+      resourceType: request.resourceType(),
+      url: request.url(),
+      errorText
+    })) return;
+    errors.push(`requestfailed ${request.method()} ${new URL(request.url()).pathname}: ${errorText}`);
   });
   return {
     errors,
@@ -183,6 +206,25 @@ function watchErrors(page: Page) {
     }
   };
 }
+
+test("request failure guard ignores only the known home video navigation abort", () => {
+  const expectedAbort: RequestFailure = {
+    method: "GET",
+    resourceType: "media",
+    url: "http://localhost:3100/mock-v2v-1080p-2s.mp4",
+    errorText: "net::ERR_ABORTED"
+  };
+
+  expect(isExpectedHomeVideoNavigationAbort(expectedAbort)).toBe(true);
+  for (const unexpected of [
+    { ...expectedAbort, method: "POST" },
+    { ...expectedAbort, resourceType: "fetch" },
+    { ...expectedAbort, url: "http://localhost:3100/api/v1/videos" },
+    { ...expectedAbort, errorText: "net::ERR_FAILED" }
+  ]) {
+    expect(isExpectedHomeVideoNavigationAbort(unexpected)).toBe(false);
+  }
+});
 
 test("mock MP4 boundary provides decodable video metadata", async ({ page }) => {
   const mediaResponses: Array<{ status: number; contentType: string | undefined; url: string }> = [];

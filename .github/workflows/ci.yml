@@ -30,6 +30,7 @@ jobs:
           --health-retries 10
     env:
       TEST_POSTGRES_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/huading_pricing_test_ci
+      PRICING_READINESS_POSTGRES_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/huading_pricing_test_ci
     defaults:
       run:
         working-directory: backend

@@ -204,13 +204,20 @@ describe("BrandVoiceCreate", () => {
   });
 
   it("invalidates the same three caches exactly once after one CosyVoice success", async () => {
+    let resolveEstimate!: (value: ReturnType<typeof quote>) => void;
+    api.estimateCosy.mockImplementationOnce(() => new Promise<ReturnType<typeof quote>>((resolve) => {
+      resolveEstimate = resolve;
+    }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const invalidate = vi.spyOn(client, "invalidateQueries");
     renderCreate(<BrandVoiceCreate />, client);
     fill();
     fireEvent.click(screen.getByText("免费开通私人专属音色"));
     fireEvent.click(screen.getByRole("button", { name: "提交开通" }));
-    fireEvent.click(await screen.findByRole("button", { name: "确认并创建" }));
+    const confirm = await screen.findByRole("button", { name: "确认并创建" });
+    resolveEstimate(quote("cosyvoice_brand_voice_create", 0));
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
     await screen.findByText("创建成功，本次创建免费（扣除 0 积分）");
     expect(invalidate.mock.calls.map(([options]) => options?.queryKey)).toEqual([
       brandVoiceOrderKeys.all,

@@ -10,12 +10,12 @@ from sqlalchemy.orm import sessionmaker
 
 
 @pytest.fixture
-def postgres_provider_config_session_factory():
+def postgres_provider_config_session_factory(cloned_model_metadata_factory):
     postgres_url = os.getenv("TEST_POSTGRES_URL")
     if not postgres_url:
         pytest.skip("TEST_POSTGRES_URL is required for the real PostgreSQL test.")
 
-    from app.db.models import Base, ProviderConfig, Tenant
+    from app.db.models import ProviderConfig, Tenant
 
     engine = create_engine(
         postgres_url,
@@ -32,9 +32,13 @@ def postgres_provider_config_session_factory():
             connection.execute(text(f'CREATE SCHEMA "{schema}"'))
         schema_created = True
         scoped_engine = engine.execution_options(schema_translate_map={None: schema})
-        Base.metadata.create_all(
+        test_metadata = cloned_model_metadata_factory()
+        test_metadata.create_all(
             scoped_engine,
-            tables=[Tenant.__table__, ProviderConfig.__table__],
+            tables=[
+                test_metadata.tables[Tenant.__table__.key],
+                test_metadata.tables[ProviderConfig.__table__.key],
+            ],
         )
         Session = sessionmaker(bind=scoped_engine, autoflush=False, autocommit=False)
         yield Session

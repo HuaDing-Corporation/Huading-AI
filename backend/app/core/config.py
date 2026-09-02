@@ -314,7 +314,11 @@ class Settings(BaseSettings):
             if (normalized := normalize_tenant_slug(item))
         }
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        hide_input_in_errors=True,
+    )
 
 
 @lru_cache

@@ -7,7 +7,7 @@ from typing import Literal
 from uuid import uuid4
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, object_session, sessionmaker
 
 from app.api.deps import BillingSubmissionHeaders
 from app.core.exceptions import AppError
@@ -34,6 +34,7 @@ from app.services.billing_operations import (
     billing_summary,
     create_reserved_operation,
     find_replay,
+    manual_order_lifecycle_is_proven_stale,
     register_billing_result_schema,
 )
 from app.services.billing_quotes import VerifiedQuote, request_sha256
@@ -525,7 +526,74 @@ def get_user_brand_voice_order(
     return order
 
 
-def brand_voice_order_read(db: Session, *, order: BrandVoiceOrder) -> BrandVoiceOrderRead:
+def _validate_brand_voice_order_operation(
+    *,
+    order: BrandVoiceOrder,
+    operation: BillingOperation,
+) -> None:
+    expected_terminal = {
+        "awaiting_fulfillment": ("in_progress", None, 0, 0, False),
+        "fulfilled": ("completed", "succeeded", ORDER_CREDITS, 0, True),
+        "rejected": ("completed", "rejected", 0, ORDER_CREDITS, True),
+    }.get(order.status)
+    if expected_terminal is None:
+        raise BillingInvariantError("manual order status is invalid")
+    expected_status, expected_completion, expected_settled, expected_released, is_terminal = (
+        expected_terminal
+    )
+    try:
+        requested = Decimal(operation.requested_credits)
+        settled = Decimal(operation.settled_credits)
+        released = Decimal(operation.released_credits)
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        raise BillingInvariantError("manual order billing amount is invalid") from exc
+    if (
+        order.billing_operation_id != operation.id
+        or order.tenant_id != operation.tenant_id
+        or order.user_id != operation.user_id
+        or operation.operation != f"doubao_brand_voice_order_{order.order_type}"
+        or operation.result_type != "brand_voice_order"
+        or operation.result_id != order.id
+        or operation.status != expected_status
+        or operation.completion_kind != expected_completion
+        or (operation.completed_at is not None) != is_terminal
+        or requested != ORDER_CREDITS
+        or settled != expected_settled
+        or released != expected_released
+        or operation.error_code is not None
+        or operation.error_http_status is not None
+        or operation.error_payload is not None
+    ):
+        raise BillingInvariantError("manual order billing link is invalid")
+
+
+def _manual_order_source_subscription_id(
+    db: Session,
+    *,
+    operation: BillingOperation,
+) -> str:
+    source_subscription_ids = set(
+        db.scalars(
+            select(UsageRecord.subscription_id).where(
+                UsageRecord.billing_operation_id == operation.id
+            )
+        )
+    )
+    if None in source_subscription_ids or len(source_subscription_ids) != 1:
+        raise BillingInvariantError("manual order source subscription is invalid")
+    source_subscription_id = next(iter(source_subscription_ids))
+    source_subscription = db.get(Subscription, source_subscription_id)
+    if source_subscription is None or source_subscription.tenant_id != operation.tenant_id:
+        raise BillingInvariantError("manual order source subscription is invalid")
+    return source_subscription_id
+
+
+def _subscription_period_contains(subscription: Subscription, timestamp: datetime) -> bool:
+    checked_at = _as_utc(timestamp)
+    return _as_utc(subscription.period_start) <= checked_at <= _as_utc(subscription.period_end)
+
+
+def _brand_voice_order_read_once(db: Session, *, order: BrandVoiceOrder) -> BrandVoiceOrderRead:
     operation = db.get(BillingOperation, order.billing_operation_id)
     if operation is None:
         raise AppError(
@@ -533,6 +601,11 @@ def brand_voice_order_read(db: Session, *, order: BrandVoiceOrder) -> BrandVoice
             code="BILLING_INVARIANT_VIOLATION",
             status_code=500,
         )
+    _validate_brand_voice_order_operation(order=order, operation=operation)
+    source_subscription_id = _manual_order_source_subscription_id(
+        db,
+        operation=operation,
+    )
     provider_voice_id = None
     expires_at = None
     if order.fulfilled_provider_id is not None:
@@ -569,22 +642,83 @@ def brand_voice_order_read(db: Session, *, order: BrandVoiceOrder) -> BrandVoice
             if delivered_voice is not None and delivered_voice.expires_at is not None
             else None
         )
+        completed_at = (
+            _as_utc(operation.completed_at) if operation.completed_at is not None else None
+        )
         if (
             delivered_voice is None
             or delivered_voice.tenant_id != order.tenant_id
             or delivered_voice.owner_user_id != order.user_id
+            or completed_at != fulfilled_at
             or activated_at != fulfilled_at
-            or delivered_expires_at != fulfilled_at + timedelta(days=365)
+            or delivered_expires_at != completed_at + timedelta(days=365)
         ):
-            raise AppError(
-                "Fulfilled manual order has an invalid delivered voice expiry.",
-                code="BILLING_INVARIANT_VIOLATION",
-                status_code=500,
-            )
+            raise BillingInvariantError("fulfilled manual order terminal clock is invalid")
         expires_at = delivered_voice.expires_at
     grant = db.scalar(
         select(CreditRefundGrant).where(CreditRefundGrant.billing_operation_id == operation.id)
     )
+    source_subscription = db.get(Subscription, source_subscription_id)
+    if grant is not None:
+        if (
+            order.status != "rejected"
+            or operation.status != "completed"
+            or operation.completion_kind != "rejected"
+            or operation.completed_at is None
+            or order.rejected_at is None
+            or _as_utc(order.rejected_at) != _as_utc(operation.completed_at)
+        ):
+            raise BillingInvariantError("manual order refund grant is invalid")
+        target_subscription = (
+            db.get(Subscription, grant.target_subscription_id)
+            if grant.target_subscription_id is not None
+            else None
+        )
+        grant_state_invalid = (
+            grant.status == "pending"
+            and (grant.target_subscription_id is not None or grant.applied_at is not None)
+        ) or (
+            grant.status == "applied"
+            and (
+                target_subscription is None
+                or grant.applied_at is None
+                or _as_utc(grant.applied_at) < _as_utc(operation.completed_at)
+                or target_subscription.tenant_id != operation.tenant_id
+                or target_subscription.id == source_subscription_id
+                or not _subscription_period_contains(target_subscription, grant.applied_at)
+            )
+        )
+        try:
+            grant_amount = Decimal(grant.amount_credits)
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            raise BillingInvariantError("manual order refund amount is invalid") from exc
+        if (
+            not grant_amount.is_finite()
+            or grant_amount != ORDER_CREDITS
+            or grant_amount != Decimal(operation.requested_credits)
+            or grant.tenant_id != operation.tenant_id
+            or grant.tenant_id != order.tenant_id
+            or grant.user_id != operation.user_id
+            or grant.user_id != order.user_id
+            or grant.source_subscription_id != source_subscription_id
+            or source_subscription is None
+            or source_subscription.tenant_id != operation.tenant_id
+            or Decimal(operation.settled_credits) != 0
+            or Decimal(operation.released_credits) != ORDER_CREDITS
+            or grant.status not in {"pending", "applied"}
+            or grant_state_invalid
+        ):
+            raise BillingInvariantError("manual order refund grant is invalid")
+    elif order.status == "rejected":
+        if (
+            order.rejected_at is None
+            or operation.completed_at is None
+            or _as_utc(order.rejected_at) != _as_utc(operation.completed_at)
+            or source_subscription is None
+            or source_subscription.tenant_id != operation.tenant_id
+            or not _subscription_period_contains(source_subscription, operation.completed_at)
+        ):
+            raise BillingInvariantError("manual order source refund release is invalid")
     if order.status != "rejected":
         refund_disposition = "not_applicable"
     elif grant is None:
@@ -617,8 +751,40 @@ def brand_voice_order_read(db: Session, *, order: BrandVoiceOrder) -> BrandVoice
     )
 
 
+def brand_voice_order_read(
+    db: Session,
+    *,
+    order: BrandVoiceOrder,
+    allow_stale_reread: bool = True,
+) -> BrandVoiceOrderRead:
+    order_id = order.id
+    if (
+        allow_stale_reread
+        and object_session(order) is db
+        and not db.new
+        and not db.dirty
+        and not db.deleted
+        and manual_order_lifecycle_is_proven_stale(db, order_id=order_id)
+    ):
+        db.expire_all()
+        refreshed_order = db.scalar(
+            select(BrandVoiceOrder)
+            .where(BrandVoiceOrder.id == order_id)
+            .execution_options(populate_existing=True)
+        )
+        if refreshed_order is None:
+            raise BillingInvariantError("manual order disappeared during consistent reread")
+        order = refreshed_order
+    return _brand_voice_order_read_once(db, order=order)
+
+
 def user_brand_voice_order_read(
-    db: Session, *, tenant_id: str, user_id: str, order_id: str
+    db: Session,
+    *,
+    tenant_id: str,
+    user_id: str,
+    order_id: str,
+    allow_stale_reread: bool = True,
 ) -> BrandVoiceOrderRead:
     return brand_voice_order_read(
         db,
@@ -628,6 +794,7 @@ def user_brand_voice_order_read(
             user_id=user_id,
             order_id=order_id,
         ),
+        allow_stale_reread=allow_stale_reread,
     )
 
 

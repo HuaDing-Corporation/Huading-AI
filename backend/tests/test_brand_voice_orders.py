@@ -2,7 +2,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import event, func, select, text
@@ -55,7 +55,11 @@ def _verified_order_quote(db, *, user: User, payload: BrandVoiceOrderCreateReque
     )
 
 
-def _seed_manual_order_for_invariant_test(db_session) -> tuple[str, str]:
+def _seed_manual_order_for_invariant_test(
+    db_session,
+    *,
+    suffix: str = "",
+) -> tuple[str, str]:
     from app.services.brand_voice_orders import create_brand_voice_order
 
     user = db_session.get(User, "user-a")
@@ -63,11 +67,11 @@ def _seed_manual_order_for_invariant_test(db_session) -> tuple[str, str]:
     db_session.get(Plan, subscription.plan_id).code = "huading"
     subscription.quota_credits_total = 100_000
     asset = Asset(
-        id="invariant-audio",
+        id=f"invariant-audio{suffix}",
         tenant_id=user.tenant_id,
         type="audio",
         source="upload",
-        storage_key=f"tenants/{user.tenant_id}/uploads/invariant.wav",
+        storage_key=f"tenants/{user.tenant_id}/uploads/invariant{suffix}.wav",
         mime_type="audio/wav",
         duration_ms=10_000,
         status="ready",
@@ -76,7 +80,7 @@ def _seed_manual_order_for_invariant_test(db_session) -> tuple[str, str]:
     db_session.commit()
     payload = BrandVoiceOrderCreateRequest(
         order_type="create",
-        requested_name="Invariant voice",
+        requested_name=f"Invariant voice{suffix}",
         source_audio_asset_id=asset.id,
         consent_confirmed=True,
     )
@@ -93,6 +97,45 @@ def _seed_manual_order_for_invariant_test(db_session) -> tuple[str, str]:
     )
     db_session.commit()
     return order.id, order.billing_operation_id
+
+
+def _seed_cross_period_refund_grant(db_session, *, suffix: str):
+    from app.services.brand_voice_orders import resolve_brand_voice_order
+
+    now = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+    order_id, operation_id = _seed_manual_order_for_invariant_test(
+        db_session,
+        suffix=suffix,
+    )
+    source = db_session.get(Subscription, "subscription-a")
+    source.status = "expired"
+    source.period_end = now - timedelta(seconds=1)
+    current = Subscription(
+        id=f"refund-current{suffix}",
+        tenant_id=source.tenant_id,
+        plan_id=source.plan_id,
+        status="active",
+        period_start=now,
+        period_end=now + timedelta(days=30),
+        quota_credits_total=100_000,
+        quota_credits_used=0,
+        quota_credits_reserved=0,
+    )
+    db_session.add(current)
+    db_session.commit()
+    resolve_brand_voice_order(
+        db_session,
+        actor=db_session.get(User, "user-a"),
+        order_id=order_id,
+        action="reject",
+        rejection_reason=f"refund invariant {suffix}",
+        now=now,
+    )
+    db_session.expire_all()
+    grant = db_session.scalar(
+        select(CreditRefundGrant).where(CreditRefundGrant.billing_operation_id == operation_id)
+    )
+    return order_id, operation_id, source, current, grant
 
 
 def _seed_invariant_dependencies(db_session) -> None:
@@ -719,9 +762,7 @@ def test_resolve_reconciliation_counts_parent_once_and_ceils_legacy_rows(
     assert db_session.get(Subscription, "subscription-a").quota_credits_reserved == 12
     assert (
         db_session.scalar(
-            select(func.count())
-            .select_from(UsageRecord)
-            .where(UsageRecord.status == "reserved")
+            select(func.count()).select_from(UsageRecord).where(UsageRecord.status == "reserved")
         )
         == 3
     )
@@ -904,9 +945,9 @@ def test_resolve_each_business_invariant_failure_preserves_every_surface(
     elif case == "asset-tenant":
         db_session.get(Asset, locator.source_asset_id).tenant_id = "invariant-other-tenant"
     elif case == "source-subscription-tenant":
-        db_session.get(Subscription, locator.source_subscription_id).tenant_id = (
-            "invariant-other-tenant"
-        )
+        db_session.get(
+            Subscription, locator.source_subscription_id
+        ).tenant_id = "invariant-other-tenant"
     else:  # pragma: no cover - parameter boundary
         raise AssertionError(case)
     if db_session.dirty:
@@ -1051,6 +1092,7 @@ def test_resolve_each_terminal_action_writes_exact_consistent_state(
     action,
 ) -> None:
     from app.services.brand_voice_orders import resolve_brand_voice_order
+    from scripts.ops.pricing_closure_readiness import pricing_closure_readiness
 
     source_subscription = db_session.get(Subscription, "subscription-a")
     resolved_at = source_subscription.period_start.replace(tzinfo=UTC) + timedelta(minutes=1)
@@ -1079,9 +1121,7 @@ def test_resolve_each_terminal_action_writes_exact_consistent_state(
     assert order.status == expected_status
     assert order.resolver_user_id == "user-a"
     assert operation.status == "completed"
-    assert operation.completion_kind == (
-        "succeeded" if action == "fulfill" else "rejected"
-    )
+    assert operation.completion_kind == ("succeeded" if action == "fulfill" else "rejected")
     assert operation.completed_at.replace(tzinfo=UTC) == resolved_at
     assert operation.result_type == "brand_voice_order"
     assert operation.result_id == order_id
@@ -1105,6 +1145,26 @@ def test_resolve_each_terminal_action_writes_exact_consistent_state(
     assert audit.reason == (None if action == "fulfill" else "exact terminal rejection")
     assert audit.created_at.replace(tzinfo=UTC) == resolved_at
     assert db_session.scalar(select(func.count()).select_from(CreditRefundGrant)) == 0
+
+    db_session.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32))"))
+    db_session.execute(text("INSERT INTO alembic_version (version_num) VALUES ('20260829_0038')"))
+    db_session.commit()
+    valid_report = pricing_closure_readiness(db_session, production_mode=False)
+    assert not any(
+        blocker.code == "BILLING_OPERATION_INVARIANT_FAILURE"
+        and blocker.record_ids == (operation_id,)
+        for blocker in valid_report.blockers
+    )
+
+    operation.result_id = f"missing-{action}-order"
+    db_session.commit()
+    corrupt_report = pricing_closure_readiness(db_session, production_mode=False)
+    assert any(
+        blocker.code == "BILLING_OPERATION_INVARIANT_FAILURE"
+        and blocker.record_ids == (operation_id,)
+        for blocker in corrupt_report.blockers
+    )
+
     if action == "fulfill":
         registry = db_session.get(BrandVoiceProviderId, order.fulfilled_provider_id)
         voice = db_session.get(BrandVoice, order.fulfilled_brand_voice_id)
@@ -1132,6 +1192,205 @@ def test_resolve_each_terminal_action_writes_exact_consistent_state(
         assert order.rejection_reason == "exact terminal rejection"
         assert db_session.scalar(select(func.count()).select_from(BrandVoiceProviderId)) == 0
         assert db_session.scalar(select(func.count()).select_from(BrandVoice)) == 0
+
+
+@pytest.mark.parametrize("swap_result_id", [True, False])
+def test_lookup_rejects_same_user_brand_voice_orders_with_swapped_results(
+    db_session,
+    swap_result_id,
+) -> None:
+    from app.services.billing_operations import BillingInvariantError, lookup_operation
+    from app.services.brand_voice_orders import resolve_brand_voice_order
+
+    source = db_session.get(Subscription, "subscription-a")
+    resolved_at = source.period_start.replace(tzinfo=UTC) + timedelta(minutes=1)
+    first_order_id, first_operation_id = _seed_manual_order_for_invariant_test(
+        db_session,
+        suffix="-first",
+    )
+    resolve_brand_voice_order(
+        db_session,
+        actor=db_session.get(User, "user-a"),
+        order_id=first_order_id,
+        action="fulfill",
+        provider_voice_id="swapped-result-first-provider",
+        now=resolved_at,
+    )
+    second_order_id, second_operation_id = _seed_manual_order_for_invariant_test(
+        db_session,
+        suffix="-second",
+    )
+    resolve_brand_voice_order(
+        db_session,
+        actor=db_session.get(User, "user-a"),
+        order_id=second_order_id,
+        action="reject",
+        rejection_reason="swapped result rejection",
+        now=resolved_at + timedelta(minutes=1),
+    )
+    db_session.expire_all()
+    first = db_session.get(BillingOperation, first_operation_id)
+    second = db_session.get(BillingOperation, second_operation_id)
+    first_result_id = first.result_id
+    first_payload = deepcopy(first.result_payload)
+    if swap_result_id:
+        first.result_id = second.result_id
+        second.result_id = first_result_id
+    first.result_payload = deepcopy(second.result_payload)
+    second.result_payload = first_payload
+    db_session.commit()
+
+    try:
+        with pytest.raises(BillingInvariantError):
+            lookup_operation(
+                db_session,
+                tenant_id=first.tenant_id,
+                user_id=first.user_id,
+                operation=first.operation,
+                idempotency_key=UUID(first.idempotency_key),
+            )
+    finally:
+        db_session.rollback()
+        db_session.close()
+        with db_session.get_bind().connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+
+
+def test_terminal_lookup_rejects_every_immutable_manual_order_snapshot_drift(
+    db_session,
+) -> None:
+    from app.services.billing_operations import BillingInvariantError, lookup_operation
+    from app.services.brand_voice_orders import resolve_brand_voice_order
+
+    order_id, operation_id = _seed_manual_order_for_invariant_test(
+        db_session,
+        suffix="-stored-fields",
+    )
+    resolved_at = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+    resolve_brand_voice_order(
+        db_session,
+        actor=db_session.get(User, "user-a"),
+        order_id=order_id,
+        action="fulfill",
+        provider_voice_id="stored-field-provider",
+        now=resolved_at,
+    )
+    db_session.expire_all()
+    operation = db_session.get(BillingOperation, operation_id)
+    original = deepcopy(operation.result_payload)
+    immutable_drifts = (
+        (("id",), "different-order"),
+        (("tenant_id",), "different-tenant"),
+        (("ordered_by_user_id",), "different-user"),
+        (("order_type",), "renew"),
+        (("requested_name",), "Different name"),
+        (("source_audio_asset_id",), "different-asset"),
+        (("existing_brand_voice_id",), "different-existing-voice"),
+        (("status",), "rejected"),
+        (("fulfilled_brand_voice_id",), "different-delivered-voice"),
+        (("fulfilled_provider_voice_id",), "different-provider-voice"),
+        (("rejection_reason",), "different rejection"),
+        (("fulfilled_at",), "2026-08-29T13:00:00Z"),
+        (("expires_at",), "2027-08-30T12:00:00Z"),
+        (("rejected_at",), "2026-08-29T13:00:00Z"),
+        (("created_at",), "2026-08-28T12:00:00Z"),
+        (("updated_at",), "2026-08-29T13:00:00Z"),
+        (("billing", "operation_id"), "different-operation"),
+        (("billing", "idempotency_key"), str(uuid4())),
+        (("billing", "status"), "released"),
+        (("billing", "requested_credits"), 29_999),
+        (("billing", "held_credits"), 1),
+        (("billing", "settled_credits"), 29_999),
+        (("billing", "released_credits"), 1),
+    )
+    lookup_args = {
+        "tenant_id": operation.tenant_id,
+        "user_id": operation.user_id,
+        "operation": operation.operation,
+        "idempotency_key": UUID(operation.idempotency_key),
+    }
+
+    try:
+        for path, value in immutable_drifts:
+            payload = deepcopy(original)
+            target = payload
+            for part in path[:-1]:
+                target = target[part]
+            target[path[-1]] = value
+            operation.result_payload = payload
+            db_session.commit()
+
+            with pytest.raises(BillingInvariantError):
+                lookup_operation(db_session, **lookup_args)
+    finally:
+        db_session.rollback()
+        db_session.close()
+        with db_session.get_bind().connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+
+
+def test_direct_order_read_rejects_operation_type_mismatch(db_session) -> None:
+    from app.services.billing_operations import BillingInvariantError
+    from app.services.brand_voice_orders import brand_voice_order_read
+
+    order_id, operation_id = _seed_manual_order_for_invariant_test(
+        db_session,
+        suffix="-type",
+    )
+    operation = db_session.get(BillingOperation, operation_id)
+    operation.operation = "doubao_brand_voice_order_renew"
+    db_session.commit()
+
+    with pytest.raises(BillingInvariantError):
+        brand_voice_order_read(
+            db_session,
+            order=db_session.get(BrandVoiceOrder, order_id),
+        )
+
+
+@pytest.mark.parametrize("corruption", ["result-id", "state", "amount", "user"])
+def test_direct_order_read_rejects_cross_table_billing_drift(
+    db_session,
+    corruption,
+) -> None:
+    from app.services.billing_operations import BillingInvariantError
+    from app.services.brand_voice_orders import brand_voice_order_read
+
+    order_id, operation_id = _seed_manual_order_for_invariant_test(
+        db_session,
+        suffix=f"-{corruption}",
+    )
+    operation = db_session.get(BillingOperation, operation_id)
+    if corruption == "result-id":
+        operation.result_id = "different-order"
+    elif corruption == "state":
+        operation.status = "completed"
+        operation.completion_kind = "rejected"
+        operation.completed_at = datetime(2026, 8, 29, 12, 1, tzinfo=UTC)
+        operation.released_credits = Decimal("30000")
+    elif corruption == "amount":
+        operation.requested_credits = Decimal("29999")
+    elif corruption == "user":
+        db_session.add(
+            User(
+                id="direct-read-other-user",
+                tenant_id="tenant-a",
+                email="direct-read-other@example.com",
+                password_hash="hash",
+                role="creator",
+            )
+        )
+        db_session.flush()
+        operation.user_id = "direct-read-other-user"
+    else:  # pragma: no cover - parameter boundary
+        raise AssertionError(corruption)
+    db_session.commit()
+
+    with pytest.raises(BillingInvariantError):
+        brand_voice_order_read(
+            db_session,
+            order=db_session.get(BrandVoiceOrder, order_id),
+        )
 
 
 def test_doubao_order_only_freezes_and_does_not_create_brand_voice(db_session):
@@ -1363,9 +1622,9 @@ def test_renewal_submit_revalidates_source_audio_reuse_after_estimate(
     )
     assert quote.status_code == 200
     with auth_db() as db:
-        db.get(BrandVoice, "renew-revalidation-voice").source_audio_asset_id = (
-            "renew-candidate-audio"
-        )
+        db.get(
+            BrandVoice, "renew-revalidation-voice"
+        ).source_audio_asset_id = "renew-candidate-audio"
         db.commit()
 
     response = client.post(
@@ -1791,6 +2050,79 @@ def test_fulfilled_order_read_fails_closed_for_inconsistent_terminal_fields(
         connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
 
 
+@pytest.mark.parametrize(
+    "entrypoint",
+    ["brand_voice_order_read", "lookup_operation", "pricing_closure_readiness"],
+)
+def test_fulfilled_order_rejects_delivery_clock_shift_from_billing_completion(
+    db_session,
+    entrypoint: str,
+) -> None:
+    from app.services.billing_operations import BillingInvariantError, lookup_operation
+    from app.services.brand_voice_orders import brand_voice_order_read, resolve_brand_voice_order
+    from scripts.ops.pricing_closure_readiness import pricing_closure_readiness
+
+    suffix = {
+        "brand_voice_order_read": "read",
+        "lookup_operation": "lookup",
+        "pricing_closure_readiness": "ready",
+    }[entrypoint]
+    order_id, operation_id = _seed_manual_order_for_invariant_test(
+        db_session,
+        suffix=f"-clock-{suffix}",
+    )
+    resolved_at = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+    resolve_brand_voice_order(
+        db_session,
+        actor=db_session.get(User, "user-a"),
+        order_id=order_id,
+        action="fulfill",
+        provider_voice_id=f"clock-shift-{suffix}",
+        now=resolved_at,
+    )
+    db_session.expire_all()
+    order = db_session.get(BrandVoiceOrder, order_id)
+    operation = db_session.get(BillingOperation, operation_id)
+    voice = db_session.get(BrandVoice, order.fulfilled_brand_voice_id)
+    shifted_at = resolved_at + timedelta(hours=1)
+    order.fulfilled_at = shifted_at
+    voice.activated_at = shifted_at
+    voice.expires_at = shifted_at + timedelta(days=365)
+    db_session.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32))"))
+    db_session.execute(text("DELETE FROM alembic_version"))
+    db_session.execute(text("INSERT INTO alembic_version (version_num) VALUES ('20260829_0038')"))
+    db_session.commit()
+
+    try:
+        if entrypoint == "brand_voice_order_read":
+            with pytest.raises(BillingInvariantError):
+                brand_voice_order_read(
+                    db_session,
+                    order=db_session.get(BrandVoiceOrder, order_id),
+                )
+        elif entrypoint == "lookup_operation":
+            with pytest.raises(BillingInvariantError):
+                lookup_operation(
+                    db_session,
+                    tenant_id=operation.tenant_id,
+                    user_id=operation.user_id,
+                    operation=operation.operation,
+                    idempotency_key=UUID(operation.idempotency_key),
+                )
+        else:
+            report = pricing_closure_readiness(db_session, production_mode=False)
+            assert report.ready is False
+            assert (
+                "BILLING_OPERATION_INVARIANT_FAILURE",
+                (operation_id,),
+            ) in {(blocker.code, blocker.record_ids) for blocker in report.blockers}
+    finally:
+        db_session.rollback()
+        db_session.close()
+        with db_session.get_bind().connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+
+
 def test_non_fulfilled_order_reads_never_expose_an_expiry(db_session) -> None:
     from app.services.brand_voice_orders import (
         brand_voice_order_read,
@@ -1865,6 +2197,17 @@ def test_reject_releases_hold_and_conflicting_replay_changes_nothing(db_session)
     db_session.refresh(subscription)
     assert subscription.quota_credits_reserved == 0
     assert subscription.quota_credits_used == 0
+    db_session.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32))"))
+    db_session.execute(text("INSERT INTO alembic_version (version_num) VALUES ('20260829_0038')"))
+    db_session.commit()
+
+    from scripts.ops.pricing_closure_readiness import pricing_closure_readiness
+
+    report = pricing_closure_readiness(db_session, production_mode=False)
+    assert (
+        "BILLING_OPERATION_INVARIANT_FAILURE",
+        (order.billing_operation_id,),
+    ) not in {(blocker.code, blocker.record_ids) for blocker in report.blockers}
 
     replay = resolve_brand_voice_order(
         db_session,
@@ -1926,10 +2269,767 @@ def test_cross_period_reject_moves_refund_to_current_subscription(db_session) ->
     assert db_session.get(Subscription, source.id).quota_credits_reserved == 0
     assert db_session.get(Subscription, current.id).quota_credits_total == 130_000
     grant = db_session.scalar(
-        select(CreditRefundGrant).where(
-            CreditRefundGrant.billing_operation_id == operation_id
-        )
+        select(CreditRefundGrant).where(CreditRefundGrant.billing_operation_id == operation_id)
     )
     assert grant.status == "applied"
     assert grant.source_subscription_id == source.id
     assert grant.target_subscription_id == current.id
+
+
+def test_same_period_rejection_without_grant_exposes_source_release(db_session) -> None:
+    from app.services.brand_voice_orders import brand_voice_order_read, resolve_brand_voice_order
+
+    source = db_session.get(Subscription, "subscription-a")
+    rejected_at = source.period_start.replace(tzinfo=UTC) + timedelta(minutes=1)
+    order_id, operation_id = _seed_manual_order_for_invariant_test(
+        db_session,
+        suffix="-same-release",
+    )
+
+    resolve_brand_voice_order(
+        db_session,
+        actor=db_session.get(User, "user-a"),
+        order_id=order_id,
+        action="reject",
+        rejection_reason="same-period release",
+        now=rejected_at,
+    )
+    db_session.expire_all()
+
+    assert (
+        db_session.scalar(
+            select(CreditRefundGrant).where(CreditRefundGrant.billing_operation_id == operation_id)
+        )
+        is None
+    )
+    read = brand_voice_order_read(
+        db_session,
+        order=db_session.get(BrandVoiceOrder, order_id),
+    )
+    assert read.refund_disposition == "source_subscription_released"
+
+
+def test_cross_period_rejection_without_grant_fails_read_and_readiness(db_session) -> None:
+    from app.services.billing_operations import BillingInvariantError, lookup_operation
+    from app.services.brand_voice_orders import brand_voice_order_read
+    from scripts.ops.pricing_closure_readiness import pricing_closure_readiness
+
+    order_id, operation_id, _source, _current, grant = _seed_cross_period_refund_grant(
+        db_session,
+        suffix="-missing-grant",
+    )
+    db_session.delete(grant)
+    db_session.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32))"))
+    db_session.execute(text("DELETE FROM alembic_version"))
+    db_session.execute(text("INSERT INTO alembic_version (version_num) VALUES ('20260829_0038')"))
+    db_session.commit()
+
+    operation = db_session.get(BillingOperation, operation_id)
+    with pytest.raises(BillingInvariantError):
+        lookup_operation(
+            db_session,
+            tenant_id=operation.tenant_id,
+            user_id=operation.user_id,
+            operation=operation.operation,
+            idempotency_key=UUID(operation.idempotency_key),
+        )
+
+    with pytest.raises(BillingInvariantError):
+        brand_voice_order_read(
+            db_session,
+            order=db_session.get(BrandVoiceOrder, order_id),
+        )
+
+    report = pricing_closure_readiness(db_session, production_mode=False)
+    assert report.ready is False
+    assert (
+        "BILLING_OPERATION_INVARIANT_FAILURE",
+        (operation_id,),
+    ) in {(blocker.code, blocker.record_ids) for blocker in report.blockers}
+
+
+@pytest.mark.parametrize("grant_status", ["pending", "applied"])
+@pytest.mark.parametrize(
+    "entrypoint",
+    ["brand_voice_order_read", "lookup_operation", "pricing_closure_readiness"],
+)
+def test_grant_backed_rejection_rejects_rejected_at_drift_at_every_read_boundary(
+    db_session,
+    grant_status,
+    entrypoint,
+) -> None:
+    from app.services.billing_operations import BillingInvariantError, lookup_operation
+    from app.services.brand_voice_orders import brand_voice_order_read
+    from scripts.ops.pricing_closure_readiness import pricing_closure_readiness
+
+    entrypoint_suffix = {
+        "brand_voice_order_read": "r",
+        "lookup_operation": "l",
+        "pricing_closure_readiness": "c",
+    }[entrypoint]
+    order_id, operation_id, _source, _current, grant = _seed_cross_period_refund_grant(
+        db_session,
+        suffix=f"-rt-{grant_status[0]}-{entrypoint_suffix}",
+    )
+    order = db_session.get(BrandVoiceOrder, order_id)
+    operation = db_session.get(BillingOperation, operation_id)
+    order.rejected_at = operation.completed_at.replace(tzinfo=UTC) + timedelta(hours=1)
+    if grant_status == "pending":
+        grant.status = "pending"
+        grant.target_subscription_id = None
+        grant.applied_at = None
+    db_session.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32))"))
+    db_session.execute(text("DELETE FROM alembic_version"))
+    db_session.execute(text("INSERT INTO alembic_version (version_num) VALUES ('20260829_0038')"))
+    db_session.commit()
+
+    if entrypoint == "brand_voice_order_read":
+        with pytest.raises(BillingInvariantError):
+            brand_voice_order_read(
+                db_session,
+                order=db_session.get(BrandVoiceOrder, order_id),
+            )
+    elif entrypoint == "lookup_operation":
+        with pytest.raises(BillingInvariantError):
+            lookup_operation(
+                db_session,
+                tenant_id=operation.tenant_id,
+                user_id=operation.user_id,
+                operation=operation.operation,
+                idempotency_key=UUID(operation.idempotency_key),
+            )
+    else:
+        report = pricing_closure_readiness(db_session, production_mode=False)
+        assert report.ready is False
+        assert (
+            "BILLING_OPERATION_INVARIANT_FAILURE",
+            (operation_id,),
+        ) in {(blocker.code, blocker.record_ids) for blocker in report.blockers}
+
+
+@pytest.mark.parametrize(
+    "entrypoint",
+    ["brand_voice_order_read", "lookup_operation", "pricing_closure_readiness"],
+)
+def test_applied_refund_rejects_applied_at_before_rejection_at_every_read_boundary(
+    db_session,
+    entrypoint,
+) -> None:
+    from app.services.billing_operations import BillingInvariantError, lookup_operation
+    from app.services.brand_voice_orders import brand_voice_order_read
+    from scripts.ops.pricing_closure_readiness import pricing_closure_readiness
+
+    entrypoint_suffix = {
+        "brand_voice_order_read": "r",
+        "lookup_operation": "l",
+        "pricing_closure_readiness": "c",
+    }[entrypoint]
+    order_id, operation_id, _source, target, grant = _seed_cross_period_refund_grant(
+        db_session,
+        suffix=f"-at-{entrypoint_suffix}",
+    )
+    operation = db_session.get(BillingOperation, operation_id)
+    applied_at = operation.completed_at.replace(tzinfo=UTC) - timedelta(hours=1)
+    grant.applied_at = applied_at
+    target.period_start = applied_at - timedelta(hours=1)
+    db_session.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32))"))
+    db_session.execute(text("DELETE FROM alembic_version"))
+    db_session.execute(text("INSERT INTO alembic_version (version_num) VALUES ('20260829_0038')"))
+    db_session.commit()
+
+    if entrypoint == "brand_voice_order_read":
+        with pytest.raises(BillingInvariantError):
+            brand_voice_order_read(
+                db_session,
+                order=db_session.get(BrandVoiceOrder, order_id),
+            )
+    elif entrypoint == "lookup_operation":
+        with pytest.raises(BillingInvariantError):
+            lookup_operation(
+                db_session,
+                tenant_id=operation.tenant_id,
+                user_id=operation.user_id,
+                operation=operation.operation,
+                idempotency_key=UUID(operation.idempotency_key),
+            )
+    else:
+        report = pricing_closure_readiness(db_session, production_mode=False)
+        assert report.ready is False
+        assert (
+            "BILLING_OPERATION_INVARIANT_FAILURE",
+            (operation_id,),
+        ) in {(blocker.code, blocker.record_ids) for blocker in report.blockers}
+
+
+def test_rejected_order_read_rejects_refund_grant_amount_drift(db_session) -> None:
+    from app.services.billing_operations import BillingInvariantError
+    from app.services.brand_voice_orders import brand_voice_order_read
+
+    order_id, _operation_id, _source, _current, grant = _seed_cross_period_refund_grant(
+        db_session,
+        suffix="-refund-amount",
+    )
+    grant.amount_credits = Decimal("29999")
+    db_session.commit()
+
+    with pytest.raises(BillingInvariantError):
+        brand_voice_order_read(
+            db_session,
+            order=db_session.get(BrandVoiceOrder, order_id),
+        )
+
+
+def test_rejected_order_read_rejects_refund_grant_tenant_drift(db_session) -> None:
+    from app.services.billing_operations import BillingInvariantError
+    from app.services.brand_voice_orders import brand_voice_order_read
+
+    order_id, _operation_id, _source, _current, grant = _seed_cross_period_refund_grant(
+        db_session,
+        suffix="-refund-tenant",
+    )
+    db_session.add(
+        Tenant(
+            id="refund-grant-other-tenant",
+            slug="refund-grant-other-tenant",
+            name="Refund Grant Other Tenant",
+        )
+    )
+    db_session.flush()
+    grant.tenant_id = "refund-grant-other-tenant"
+    db_session.commit()
+
+    with pytest.raises(BillingInvariantError):
+        brand_voice_order_read(
+            db_session,
+            order=db_session.get(BrandVoiceOrder, order_id),
+        )
+
+
+def test_rejected_order_read_rejects_refund_grant_user_drift(db_session) -> None:
+    from app.services.billing_operations import BillingInvariantError
+    from app.services.brand_voice_orders import brand_voice_order_read
+
+    order_id, _operation_id, _source, _current, grant = _seed_cross_period_refund_grant(
+        db_session,
+        suffix="-refund-user",
+    )
+    db_session.add(
+        User(
+            id="refund-grant-other-user",
+            tenant_id="tenant-a",
+            email="refund-grant-other@example.com",
+            password_hash="hash",
+            role="creator",
+        )
+    )
+    db_session.flush()
+    grant.user_id = "refund-grant-other-user"
+    db_session.commit()
+
+    with pytest.raises(BillingInvariantError):
+        brand_voice_order_read(
+            db_session,
+            order=db_session.get(BrandVoiceOrder, order_id),
+        )
+
+
+def test_rejected_order_read_rejects_refund_grant_source_drift(db_session) -> None:
+    from app.services.billing_operations import BillingInvariantError
+    from app.services.brand_voice_orders import brand_voice_order_read
+
+    order_id, _operation_id, _source, current, grant = _seed_cross_period_refund_grant(
+        db_session,
+        suffix="-refund-source",
+    )
+    grant.source_subscription_id = current.id
+    db_session.commit()
+
+    with pytest.raises(BillingInvariantError):
+        brand_voice_order_read(
+            db_session,
+            order=db_session.get(BrandVoiceOrder, order_id),
+        )
+
+
+def test_non_rejected_order_read_rejects_refund_grant(db_session) -> None:
+    from app.services.billing_operations import BillingInvariantError
+    from app.services.brand_voice_orders import brand_voice_order_read
+
+    order_id, operation_id = _seed_manual_order_for_invariant_test(
+        db_session,
+        suffix="-grant",
+    )
+    source_subscription_id = db_session.scalar(
+        select(UsageRecord.subscription_id).where(UsageRecord.billing_operation_id == operation_id)
+    )
+    db_session.add(
+        CreditRefundGrant(
+            billing_operation_id=operation_id,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            source_subscription_id=source_subscription_id,
+            amount_credits=Decimal("30000"),
+            status="pending",
+        )
+    )
+    db_session.commit()
+
+    with pytest.raises(BillingInvariantError):
+        brand_voice_order_read(
+            db_session,
+            order=db_session.get(BrandVoiceOrder, order_id),
+        )
+
+
+def test_rejected_order_read_rejects_cross_tenant_refund_target(db_session) -> None:
+    from app.services.billing_operations import BillingInvariantError
+    from app.services.brand_voice_orders import brand_voice_order_read
+
+    order_id, _operation_id, source, _current, grant = _seed_cross_period_refund_grant(
+        db_session,
+        suffix="-refund-target",
+    )
+    other_tenant = Tenant(
+        id="refund-target-other-tenant",
+        slug="refund-target-other-tenant",
+        name="Refund Target Other Tenant",
+    )
+    other_target = Subscription(
+        id="refund-target-other-subscription",
+        tenant_id=other_tenant.id,
+        plan_id=source.plan_id,
+        status="active",
+        period_start=source.period_start,
+        period_end=source.period_end,
+        quota_credits_total=100_000,
+        quota_credits_used=0,
+        quota_credits_reserved=0,
+    )
+    db_session.add(other_tenant)
+    db_session.flush()
+    db_session.add(other_target)
+    db_session.flush()
+    grant.target_subscription_id = other_target.id
+    db_session.commit()
+
+    with pytest.raises(BillingInvariantError):
+        brand_voice_order_read(
+            db_session,
+            order=db_session.get(BrandVoiceOrder, order_id),
+        )
+
+
+def test_applied_refund_target_must_cover_applied_at_in_read_and_readiness(db_session) -> None:
+    from app.services.billing_operations import BillingInvariantError
+    from app.services.brand_voice_orders import brand_voice_order_read
+    from scripts.ops.pricing_closure_readiness import pricing_closure_readiness
+
+    order_id, _operation_id, _source, target, grant = _seed_cross_period_refund_grant(
+        db_session,
+        suffix="-target-period",
+    )
+    applied_at = grant.applied_at.replace(tzinfo=UTC)
+    target.period_start = applied_at + timedelta(days=1)
+    target.period_end = applied_at + timedelta(days=31)
+    db_session.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32))"))
+    db_session.execute(text("DELETE FROM alembic_version"))
+    db_session.execute(text("INSERT INTO alembic_version (version_num) VALUES ('20260829_0038')"))
+    db_session.commit()
+
+    with pytest.raises(BillingInvariantError):
+        brand_voice_order_read(
+            db_session,
+            order=db_session.get(BrandVoiceOrder, order_id),
+        )
+
+    report = pricing_closure_readiness(db_session, production_mode=False)
+    assert report.ready is False
+    assert (
+        "BILLING_REFUND_GRANT_INVARIANT_FAILURE",
+        (grant.id,),
+    ) in {(blocker.code, blocker.record_ids) for blocker in report.blockers}
+
+
+def test_pending_refund_grant_is_static_on_read_and_current_at_readiness(db_session) -> None:
+    from app.services.brand_voice_orders import brand_voice_order_read, resolve_brand_voice_order
+    from scripts.ops.pricing_closure_readiness import pricing_closure_readiness
+
+    now = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+    order_id, operation_id = _seed_manual_order_for_invariant_test(
+        db_session,
+        suffix="-pending",
+    )
+    source = db_session.get(Subscription, "subscription-a")
+    source.status = "expired"
+    source.period_end = now - timedelta(seconds=1)
+    db_session.commit()
+    resolve_brand_voice_order(
+        db_session,
+        actor=db_session.get(User, "user-a"),
+        order_id=order_id,
+        action="reject",
+        rejection_reason="pending refund",
+        now=now,
+    )
+    db_session.expire_all()
+    grant = db_session.scalar(
+        select(CreditRefundGrant).where(CreditRefundGrant.billing_operation_id == operation_id)
+    )
+    assert grant.status == "pending"
+    db_session.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32))"))
+    db_session.execute(text("DELETE FROM alembic_version"))
+    db_session.execute(text("INSERT INTO alembic_version (version_num) VALUES ('20260829_0038')"))
+    db_session.commit()
+
+    pending_read = brand_voice_order_read(
+        db_session,
+        order=db_session.get(BrandVoiceOrder, order_id),
+    )
+    assert pending_read.refund_disposition == "pending_next_subscription"
+    no_target_report = pricing_closure_readiness(db_session, production_mode=False)
+    assert (
+        "BILLING_REFUND_GRANT_INVARIANT_FAILURE",
+        (grant.id,),
+    ) not in {(blocker.code, blocker.record_ids) for blocker in no_target_report.blockers}
+
+    audit_window_start = datetime.now(UTC) - timedelta(minutes=1)
+    db_session.add(
+        Subscription(
+            id="pending-refund-active-subscription",
+            tenant_id=source.tenant_id,
+            plan_id=source.plan_id,
+            status="active",
+            period_start=audit_window_start,
+            period_end=audit_window_start + timedelta(days=30),
+            quota_credits_total=100_000,
+            quota_credits_used=0,
+            quota_credits_reserved=0,
+        )
+    )
+    db_session.commit()
+
+    pending_read_with_later_subscription = brand_voice_order_read(
+        db_session,
+        order=db_session.get(BrandVoiceOrder, order_id),
+    )
+    assert pending_read_with_later_subscription.refund_disposition == "pending_next_subscription"
+    report = pricing_closure_readiness(db_session, production_mode=False)
+    assert report.ready is False
+    assert report.generated_at >= audit_window_start
+    assert (
+        "BILLING_REFUND_GRANT_INVARIANT_FAILURE",
+        (grant.id,),
+    ) in {(blocker.code, blocker.record_ids) for blocker in report.blockers}
+
+
+def test_terminal_lookup_allows_only_pending_refund_fields_to_become_applied(
+    db_session,
+) -> None:
+    from app.services.billing_operations import lookup_operation
+    from app.services.brand_voice_orders import resolve_brand_voice_order
+    from app.services.subscription import activate_subscription
+
+    rejected_at = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+    order_id, operation_id = _seed_manual_order_for_invariant_test(
+        db_session,
+        suffix="-lk-ref",
+    )
+    source = db_session.get(Subscription, "subscription-a")
+    source.status = "expired"
+    source.period_end = rejected_at - timedelta(seconds=1)
+    plan = db_session.get(Plan, source.plan_id)
+    db_session.commit()
+    resolve_brand_voice_order(
+        db_session,
+        actor=db_session.get(User, "user-a"),
+        order_id=order_id,
+        action="reject",
+        rejection_reason="wait for next subscription",
+        now=rejected_at,
+    )
+    db_session.expire_all()
+    operation = db_session.get(BillingOperation, operation_id)
+    lookup_args = {
+        "tenant_id": operation.tenant_id,
+        "user_id": operation.user_id,
+        "operation": operation.operation,
+        "idempotency_key": UUID(operation.idempotency_key),
+    }
+
+    pending = lookup_operation(db_session, **lookup_args)
+    assert pending.resource.refund_disposition == "pending_next_subscription"
+    assert pending.resource.refund_grant_status == "pending"
+    assert pending.resource.refund_applied_at is None
+    assert operation.result_payload["refund_grant_status"] == "pending"
+
+    activate_subscription(
+        db_session,
+        tenant_id=operation.tenant_id,
+        plan=plan,
+        period_start=rejected_at,
+    )
+    db_session.commit()
+    db_session.expire_all()
+
+    applied = lookup_operation(db_session, **lookup_args)
+    assert applied.resource.refund_disposition == "current_subscription_credited"
+    assert applied.resource.refund_grant_status == "applied"
+    assert applied.resource.refund_applied_at.replace(tzinfo=UTC) == rejected_at
+    assert (
+        db_session.get(BillingOperation, operation_id).result_payload["refund_grant_status"]
+        == "pending"
+    )
+
+
+@pytest.mark.parametrize("read_surface", ["get", "list", "lookup"])
+def test_manual_order_reads_recover_from_stale_identity_map_after_resolve_commit(
+    db_session,
+    read_surface: str,
+) -> None:
+    from sqlalchemy.orm import sessionmaker
+
+    from app.services.billing_operations import lookup_operation
+    from app.services.brand_voice_orders import (
+        brand_voice_order_read,
+        get_user_brand_voice_order,
+        list_user_brand_voice_orders,
+        resolve_brand_voice_order,
+    )
+
+    order_id, operation_id = _seed_manual_order_for_invariant_test(
+        db_session,
+        suffix=f"-stale-{read_surface[0]}",
+    )
+    db_session.expire_all()
+    stale_order = db_session.get(BrandVoiceOrder, order_id)
+    stale_operation = None
+    if read_surface == "lookup":
+        stale_operation = db_session.get(BillingOperation, operation_id)
+        assert stale_operation.status == "in_progress"
+    assert stale_order.status == "awaiting_fulfillment"
+
+    writer_factory = sessionmaker(
+        bind=db_session.get_bind(),
+        autoflush=False,
+        autocommit=False,
+    )
+    with writer_factory() as writer:
+        resolve_brand_voice_order(
+            writer,
+            actor=writer.get(User, "user-a"),
+            order_id=order_id,
+            action="fulfill",
+            provider_voice_id=f"stale-{read_surface}-provider",
+            now=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+        )
+
+    assert stale_order.status == "awaiting_fulfillment"
+    try:
+        if read_surface == "get":
+            selected = get_user_brand_voice_order(
+                db_session,
+                tenant_id="tenant-a",
+                user_id="user-a",
+                order_id=order_id,
+            )
+            result = brand_voice_order_read(db_session, order=selected)
+        elif read_surface == "list":
+            selected = next(
+                order
+                for order in list_user_brand_voice_orders(
+                    db_session,
+                    tenant_id="tenant-a",
+                    user_id="user-a",
+                )
+                if order.id == order_id
+            )
+            result = brand_voice_order_read(db_session, order=selected)
+        else:
+            result = lookup_operation(
+                db_session,
+                tenant_id=stale_operation.tenant_id,
+                user_id=stale_operation.user_id,
+                operation=stale_operation.operation,
+                idempotency_key=UUID(stale_operation.idempotency_key),
+            ).resource
+
+        assert result.status == "fulfilled"
+        assert result.fulfilled_provider_voice_id == f"stale-{read_surface}-provider"
+    finally:
+        db_session.rollback()
+        db_session.close()
+        with db_session.get_bind().connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+
+
+def test_lookup_operation_shares_one_reread_budget_with_manual_order_resource(
+    db_session,
+    monkeypatch,
+) -> None:
+    """A stale order and a bad terminal receipt must not cause nested rereads."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.services.billing_operations import BillingInvariantError, lookup_operation
+    from app.services.brand_voice_orders import resolve_brand_voice_order
+
+    order_id, operation_id = _seed_manual_order_for_invariant_test(
+        db_session,
+        suffix="-reread-budget",
+    )
+    db_session.expire_all()
+    stale_order = db_session.get(BrandVoiceOrder, order_id)
+    operation = db_session.get(BillingOperation, operation_id)
+    lookup_args = {
+        "tenant_id": operation.tenant_id,
+        "user_id": operation.user_id,
+        "operation": operation.operation,
+        "idempotency_key": UUID(operation.idempotency_key),
+    }
+    # Keep only the stale order attached.  The outer lookup therefore sees the
+    # fresh terminal operation, while its nested resource read must reread.
+    db_session.expunge(operation)
+    assert stale_order.status == "awaiting_fulfillment"
+
+    writer_factory = sessionmaker(
+        bind=db_session.get_bind(),
+        autoflush=False,
+        autocommit=False,
+    )
+    with writer_factory() as writer:
+        resolve_brand_voice_order(
+            writer,
+            actor=writer.get(User, "user-a"),
+            order_id=order_id,
+            action="fulfill",
+            provider_voice_id="single-reread-provider",
+            now=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+        )
+    with writer_factory() as corruptor:
+        terminal_operation = corruptor.get(BillingOperation, operation_id)
+        terminal_payload = deepcopy(terminal_operation.result_payload)
+        terminal_payload["requested_name"] = "tampered terminal receipt"
+        terminal_operation.result_payload = terminal_payload
+        corruptor.commit()
+
+    reread_count = 0
+    original_expire_all = db_session.expire_all
+
+    def count_reread() -> None:
+        nonlocal reread_count
+        reread_count += 1
+        original_expire_all()
+
+    monkeypatch.setattr(db_session, "expire_all", count_reread)
+
+    try:
+        with pytest.raises(BillingInvariantError):
+            lookup_operation(db_session, **lookup_args)
+
+        assert reread_count == 1
+    finally:
+        db_session.rollback()
+        db_session.close()
+        with db_session.get_bind().connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+
+
+def test_order_read_does_not_reread_current_committed_result_type_invariant(
+    db_session,
+    monkeypatch,
+) -> None:
+    """Only an observable lifecycle mismatch may qualify for a stale reread."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.services.billing_operations import BillingInvariantError
+    from app.services.brand_voice_orders import brand_voice_order_read
+
+    order_id, operation_id = _seed_manual_order_for_invariant_test(
+        db_session,
+        suffix="-result-type",
+    )
+    db_session.expunge_all()
+    factory = sessionmaker(bind=db_session.get_bind(), autoflush=False, autocommit=False)
+    with factory() as corruptor:
+        operation = corruptor.get(BillingOperation, operation_id)
+        original_result_type = operation.result_type
+        operation.result_type = None
+        corruptor.commit()
+
+    order = db_session.get(BrandVoiceOrder, order_id)
+    reread_count = 0
+    original_expire_all = db_session.expire_all
+
+    def repair_during_reread() -> None:
+        nonlocal reread_count
+        reread_count += 1
+        with factory() as repairer:
+            operation = repairer.get(BillingOperation, operation_id)
+            operation.result_type = original_result_type
+            repairer.commit()
+        original_expire_all()
+
+    monkeypatch.setattr(db_session, "expire_all", repair_during_reread)
+
+    with pytest.raises(BillingInvariantError):
+        brand_voice_order_read(db_session, order=order)
+
+    assert reread_count == 0
+
+
+def test_order_read_does_not_reread_current_lifecycle_mismatch(
+    db_session,
+    monkeypatch,
+) -> None:
+    """A current order/operation state mismatch is not evidence of staleness."""
+    from app.services.billing_operations import BillingInvariantError
+    from app.services.brand_voice_orders import brand_voice_order_read
+
+    order_id, operation_id = _seed_manual_order_for_invariant_test(
+        db_session,
+        suffix="-lifecycle",
+    )
+    db_session.expunge_all()
+    original_status = "in_progress"
+    original_completion_kind = None
+    engine = db_session.get_bind()
+    with engine.connect() as corruptor:
+        corruptor.exec_driver_sql("PRAGMA ignore_check_constraints=ON")
+        corruptor.execute(
+            text(
+                "UPDATE billing_operations "
+                "SET status = 'completed', completion_kind = 'succeeded' WHERE id = :operation_id"
+            ),
+            {"operation_id": operation_id},
+        )
+        corruptor.commit()
+        corruptor.exec_driver_sql("PRAGMA ignore_check_constraints=OFF")
+
+    order = db_session.get(BrandVoiceOrder, order_id)
+    reread_count = 0
+    original_expire_all = db_session.expire_all
+
+    def repair_during_reread() -> None:
+        nonlocal reread_count
+        reread_count += 1
+        with engine.connect() as repairer:
+            repairer.execute(
+                text(
+                    "UPDATE billing_operations "
+                    "SET status = :status, completion_kind = :completion_kind "
+                    "WHERE id = :operation_id"
+                ),
+                {
+                    "status": original_status,
+                    "completion_kind": original_completion_kind,
+                    "operation_id": operation_id,
+                },
+            )
+            repairer.commit()
+        original_expire_all()
+
+    monkeypatch.setattr(db_session, "expire_all", repair_during_reread)
+
+    with pytest.raises(BillingInvariantError):
+        brand_voice_order_read(db_session, order=order)
+
+    assert reread_count == 0
