@@ -192,6 +192,13 @@ def test_manual_order_audio_url_is_detail_only_and_access_is_audited(
     now = datetime.now(UTC)
     storage_key = f"tenants/{auth_context['tenant_id']}/manual-orders/source.wav"
     with auth_db() as db:
+        subscription = db.scalar(
+            select(Subscription).where(
+                Subscription.tenant_id == auth_context["tenant_id"],
+                Subscription.status == "active",
+            )
+        )
+        subscription.quota_credits_reserved = 30_000
         db.add(
             Asset(
                 id="manual-audio-audit-asset",
@@ -218,9 +225,28 @@ def test_manual_order_audio_url_is_detail_only_and_access_is_audited(
                 settled_credits=0,
                 released_credits=0,
                 status="in_progress",
+                result_type="brand_voice_order",
+                result_id="manual-audio-audit-order",
             )
         )
         db.flush()
+        db.add(
+            UsageRecord(
+                tenant_id=auth_context["tenant_id"],
+                subscription_id=subscription.id,
+                billing_operation_id="manual-audio-audit-billing",
+                billing_item_index=0,
+                billing_pricing_line_index=0,
+                capability="voice_clone",
+                provider="doubao-voice-clone",
+                model="manual_fulfillment",
+                unit="call",
+                quantity=Decimal("1"),
+                credits=Decimal("30000"),
+                cost_cents=0,
+                status="reserved",
+            )
+        )
         db.add(
             BrandVoiceOrder(
                 id="manual-audio-audit-order",

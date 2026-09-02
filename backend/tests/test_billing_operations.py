@@ -162,8 +162,7 @@ def reserve_batch(db_session, verified_quote, *, key=None, request_hash="a" * 64
 
 def test_wallet_integer_amount_accepts_billing_storage_maximum() -> None:
     assert (
-        _integer_amount(Decimal("999999999999"), field="requested_credits")
-        == BILLING_CREDITS_MAX
+        _integer_amount(Decimal("999999999999"), field="requested_credits") == BILLING_CREDITS_MAX
     )
 
 
@@ -1006,6 +1005,95 @@ def test_terminal_lookup_rejects_corrupt_canonical_usage(db_session, verified_qu
             operation=operation.operation,
             idempotency_key=UUID(operation.idempotency_key),
         )
+
+
+def test_lookup_rejects_operation_spanning_multiple_source_subscriptions(
+    db_session,
+    verified_quote,
+) -> None:
+    operation = reserve_batch(db_session, verified_quote)
+    source = db_session.get(Subscription, "subscription-a")
+    other = Subscription(
+        id="lookup-other-source-subscription",
+        tenant_id=source.tenant_id,
+        plan_id=source.plan_id,
+        status="expired",
+        period_start=source.period_start,
+        period_end=source.period_end,
+        quota_credits_total=100,
+        quota_credits_used=0,
+        quota_credits_reserved=0,
+    )
+    db_session.add(other)
+    usage = db_session.scalar(
+        select(UsageRecord)
+        .where(UsageRecord.billing_operation_id == operation.id)
+        .order_by(UsageRecord.billing_item_index.desc())
+    )
+    usage.subscription_id = other.id
+    db_session.commit()
+
+    with pytest.raises(BillingInvariantError):
+        lookup_operation(
+            db_session,
+            tenant_id=operation.tenant_id,
+            user_id=operation.user_id,
+            operation=operation.operation,
+            idempotency_key=UUID(operation.idempotency_key),
+        )
+
+
+def test_lookup_does_not_reread_current_committed_usage_invariant(
+    db_session,
+    verified_quote,
+    monkeypatch,
+) -> None:
+    """A current committed invariant breach must not be hidden by a reread."""
+    from sqlalchemy.orm import sessionmaker
+
+    operation = reserve_batch(db_session, verified_quote)
+    operation_id = operation.id
+    db_session.commit()
+    lookup_args = {
+        "tenant_id": operation.tenant_id,
+        "user_id": operation.user_id,
+        "operation": operation.operation,
+        "idempotency_key": UUID(operation.idempotency_key),
+    }
+    db_session.expunge_all()
+
+    factory = sessionmaker(bind=db_session.get_bind(), autoflush=False, autocommit=False)
+    with factory() as corruptor:
+        usage = corruptor.scalar(
+            select(UsageRecord)
+            .where(UsageRecord.billing_operation_id == operation_id)
+            .order_by(UsageRecord.billing_item_index)
+        )
+        usage.billing_item_index = 99
+        corruptor.commit()
+
+    reread_count = 0
+    original_expire_all = db_session.expire_all
+
+    def repair_during_reread() -> None:
+        nonlocal reread_count
+        reread_count += 1
+        with factory() as repairer:
+            usage = repairer.scalar(
+                select(UsageRecord)
+                .where(UsageRecord.billing_operation_id == operation_id)
+                .order_by(UsageRecord.billing_item_index.desc())
+            )
+            usage.billing_item_index = 0
+            repairer.commit()
+        original_expire_all()
+
+    monkeypatch.setattr(db_session, "expire_all", repair_during_reread)
+
+    with pytest.raises(BillingInvariantError):
+        lookup_operation(db_session, **lookup_args)
+
+    assert reread_count == 0
 
 
 def test_legacy_unassociated_reservation_coexists_with_operation_reservation(

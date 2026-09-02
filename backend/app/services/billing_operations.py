@@ -12,6 +12,7 @@ from uuid import UUID
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy import inspect as sqlalchemy_inspect
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -21,10 +22,12 @@ from app.db.models import (
     ERROR_PAYLOAD_MAX_BYTES,
     RESULT_PAYLOAD_MAX_BYTES,
     BillingOperation,
+    BrandVoiceOrder,
     Subscription,
     UsageRecord,
 )
 from app.schemas.brand_voice_orders import BrandVoiceOrderRead
+from app.schemas.brand_voices import BrandVoiceRead
 from app.services import quota
 from app.services.billing_quotes import VerifiedQuote, canonical_json
 from app.services.pricing import (
@@ -206,6 +209,7 @@ register_billing_result_schema("scene_prompt_result", ScenePromptStoredResult)
 register_billing_result_schema("ecom_image_batch", EcomImageBatchStoredResult)
 register_billing_result_schema("video_task", VideoTaskBillingResource)
 register_billing_result_schema("brand_voice_order", BrandVoiceOrderRead)
+register_billing_result_schema("brand_voice", BrandVoiceRead)
 
 
 def _integer_amount(value: Decimal, *, field: str) -> int:
@@ -976,7 +980,30 @@ def _validate_stored_result(operation: BillingOperation) -> BaseModel:
     return result
 
 
-def _lookup_resource(db: Session, operation: BillingOperation) -> BaseModel:
+def _immutable_manual_order_result(result: BrandVoiceOrderRead) -> dict[str, object]:
+    snapshot = result.model_dump(
+        mode="python",
+        exclude={
+            "refund_disposition",
+            "refund_grant_status",
+            "refund_applied_at",
+        },
+    )
+    for field in ("fulfilled_at", "expires_at", "rejected_at", "created_at", "updated_at"):
+        value = snapshot[field]
+        if isinstance(value, datetime):
+            snapshot[field] = (
+                value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+            )
+    return snapshot
+
+
+def _lookup_resource(
+    db: Session,
+    operation: BillingOperation,
+    *,
+    allow_stale_reread: bool = True,
+) -> BaseModel:
     if operation.result_type == "brand_voice_order":
         if operation.result_id is None:
             raise BillingInvariantError("manual order result identifier is missing")
@@ -984,13 +1011,47 @@ def _lookup_resource(db: Session, operation: BillingOperation) -> BaseModel:
         # the operation became terminal, so never return the stale stored JSON.
         from app.services.brand_voice_orders import user_brand_voice_order_read
 
-        return user_brand_voice_order_read(
+        resource = user_brand_voice_order_read(
             db,
             tenant_id=operation.tenant_id,
             user_id=operation.user_id,
             order_id=operation.result_id,
+            allow_stale_reread=allow_stale_reread,
         )
+        _validate_brand_voice_order_resource(operation, resource)
+        if operation.status == "in_progress":
+            if operation.result_payload is not None:
+                raise BillingInvariantError("in-progress manual order contains a stored result")
+        else:
+            stored = _validate_stored_result(operation)
+            if not isinstance(stored, BrandVoiceOrderRead) or _immutable_manual_order_result(
+                stored
+            ) != _immutable_manual_order_result(resource):
+                raise BillingInvariantError("stored manual order result identity is invalid")
+        return resource
     return _validate_stored_result(operation)
+
+
+def _validate_brand_voice_order_resource(
+    operation: BillingOperation,
+    resource: BrandVoiceOrderRead,
+) -> None:
+    expected_operation = f"doubao_brand_voice_order_{resource.order_type}"
+    expected_state = {
+        "awaiting_fulfillment": ("in_progress", None),
+        "fulfilled": ("completed", "succeeded"),
+        "rejected": ("completed", "rejected"),
+    }[resource.status]
+    if (
+        operation.operation != expected_operation
+        or (operation.status, operation.completion_kind) != expected_state
+        or operation.result_type != "brand_voice_order"
+        or operation.result_id != resource.id
+        or operation.tenant_id != resource.tenant_id
+        or operation.user_id != resource.ordered_by_user_id
+        or resource.billing.operation_id != operation.id
+    ):
+        raise BillingInvariantError("manual order billing link is invalid")
 
 
 def _validate_stored_error_payload(operation: BillingOperation) -> _StoredErrorPayload:
@@ -1024,6 +1085,9 @@ def _validate_lookup_usages(
     )
     if [usage.billing_item_index for usage in ordered] != list(range(len(ordered))):
         raise BillingInvariantError("billing usage item allocation is not contiguous")
+    source_subscription_ids = {usage.subscription_id for usage in ordered}
+    if None in source_subscription_ids or len(source_subscription_ids) != 1:
+        raise BillingInvariantError("billing operation source subscription is invalid")
     line_indexes: set[int] = set()
     quantities_by_line: dict[int, Decimal] = {}
     for usage in ordered:
@@ -1121,13 +1185,14 @@ def _validate_lookup_usages(
     raise BillingInvariantError("lookup completion kind is invalid")
 
 
-def lookup_operation(
+def _lookup_operation_once(
     db: Session,
     *,
     tenant_id: str,
     user_id: str,
     operation: str,
     idempotency_key: UUID,
+    allow_stale_reread: bool = True,
 ) -> BillingOperationLookup | None:
     row = _operation_for_key(
         db,
@@ -1156,7 +1221,7 @@ def lookup_operation(
     if row.status == "in_progress":
         resource = None
         if row.result_type is not None or row.result_payload is not None:
-            resource = _lookup_resource(db, row)
+            resource = _lookup_resource(db, row, allow_stale_reread=allow_stale_reread)
         if row.error_code or row.error_http_status or row.error_payload:
             raise BillingInvariantError("in-progress operation contains an error")
         return BillingInProgressLookup(
@@ -1168,7 +1233,7 @@ def lookup_operation(
     if row.completion_kind == "succeeded":
         if row.error_code or row.error_http_status or row.error_payload:
             raise BillingInvariantError("successful operation contains an error")
-        result = _lookup_resource(db, row)
+        result = _lookup_resource(db, row, allow_stale_reread=allow_stale_reread)
         return BillingSucceededLookup(
             **common,
             result_type=row.result_type,
@@ -1179,7 +1244,7 @@ def lookup_operation(
     if row.completion_kind == "rejected":
         if row.error_code or row.error_http_status or row.error_payload:
             raise BillingInvariantError("rejected operation contains an error payload")
-        resource = _lookup_resource(db, row)
+        resource = _lookup_resource(db, row, allow_stale_reread=allow_stale_reread)
         return BillingRejectedLookup(
             **common,
             result_type=row.result_type,
@@ -1201,3 +1266,155 @@ def lookup_operation(
             ),
         )
     raise BillingInvariantError("operation lookup state is invalid")
+
+
+@dataclass(frozen=True)
+class _ManualOrderLifecycleView:
+    order_id: str
+    order_tenant_id: str
+    order_user_id: str
+    order_type: str
+    order_status: str
+    billing_operation_id: str
+    operation_id: str
+    operation_tenant_id: str
+    operation_user_id: str
+    operation_name: str
+    result_type: str | None
+    result_id: str | None
+    operation_status: str
+    completion_kind: str | None
+    completed_at: datetime | None
+
+
+def _manual_order_lifecycle_view(
+    db: Session,
+    *,
+    order_id: str | None = None,
+    tenant_id: str | None = None,
+    user_id: str | None = None,
+    operation: str | None = None,
+    idempotency_key: UUID | None = None,
+) -> _ManualOrderLifecycleView | None:
+    criteria = [BrandVoiceOrder.billing_operation_id == BillingOperation.id]
+    if order_id is not None:
+        criteria.append(BrandVoiceOrder.id == order_id)
+    if tenant_id is not None:
+        criteria.append(BillingOperation.tenant_id == tenant_id)
+    if user_id is not None:
+        criteria.append(BillingOperation.user_id == user_id)
+    if operation is not None:
+        criteria.append(BillingOperation.operation == operation)
+    if idempotency_key is not None:
+        criteria.append(BillingOperation.idempotency_key == str(idempotency_key))
+    row = db.execute(
+        select(
+            BrandVoiceOrder.id,
+            BrandVoiceOrder.tenant_id,
+            BrandVoiceOrder.user_id,
+            BrandVoiceOrder.order_type,
+            BrandVoiceOrder.status,
+            BrandVoiceOrder.billing_operation_id,
+            BillingOperation.id,
+            BillingOperation.tenant_id,
+            BillingOperation.user_id,
+            BillingOperation.operation,
+            BillingOperation.result_type,
+            BillingOperation.result_id,
+            BillingOperation.status,
+            BillingOperation.completion_kind,
+            BillingOperation.completed_at,
+        ).where(*criteria)
+    ).one_or_none()
+    if row is None:
+        return None
+    return _ManualOrderLifecycleView(*row)
+
+
+def _manual_order_lifecycle_is_consistent(view: _ManualOrderLifecycleView) -> bool:
+    expected_state = {
+        "awaiting_fulfillment": ("in_progress", None, False),
+        "fulfilled": ("completed", "succeeded", True),
+        "rejected": ("completed", "rejected", True),
+    }.get(view.order_status)
+    if expected_state is None:
+        return False
+    expected_status, expected_completion_kind, terminal = expected_state
+    return (
+        view.order_tenant_id == view.operation_tenant_id
+        and view.order_user_id == view.operation_user_id
+        and view.operation_name == f"doubao_brand_voice_order_{view.order_type}"
+        and view.result_type == "brand_voice_order"
+        and view.result_id == view.order_id
+        and view.operation_status == expected_status
+        and view.completion_kind == expected_completion_kind
+        and (view.completed_at is not None) == terminal
+    )
+
+
+def _identity_map_lifecycle_differs(db: Session, view: _ManualOrderLifecycleView) -> bool:
+    for candidate in db.identity_map.values():
+        state = sqlalchemy_inspect(candidate)
+        values = state.dict
+        if isinstance(candidate, BrandVoiceOrder) and state.identity == (view.order_id,):
+            if "status" in values and values["status"] != view.order_status:
+                return True
+        elif isinstance(candidate, BillingOperation) and state.identity == (view.operation_id,):
+            if {"status", "completion_kind"}.issubset(values) and (
+                values["status"] != view.operation_status
+                or values["completion_kind"] != view.completion_kind
+            ):
+                return True
+    return False
+
+
+def manual_order_lifecycle_is_proven_stale(db: Session, *, order_id: str) -> bool:
+    """Use a column-only query to distinguish a stale lifecycle view from corruption."""
+    view = _manual_order_lifecycle_view(db, order_id=order_id)
+    return view is not None and _manual_order_lifecycle_is_consistent(view) and (
+        _identity_map_lifecycle_differs(db, view)
+    )
+
+
+def lookup_manual_order_lifecycle_is_proven_stale(
+    db: Session,
+    *,
+    tenant_id: str,
+    user_id: str,
+    operation: str,
+    idempotency_key: UUID,
+) -> bool:
+    view = _manual_order_lifecycle_view(
+        db,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        operation=operation,
+        idempotency_key=idempotency_key,
+    )
+    return view is not None and _manual_order_lifecycle_is_consistent(view) and (
+        _identity_map_lifecycle_differs(db, view)
+    )
+
+
+def lookup_operation(
+    db: Session,
+    *,
+    tenant_id: str,
+    user_id: str,
+    operation: str,
+    idempotency_key: UUID,
+) -> BillingOperationLookup | None:
+    lookup_args = {
+        "tenant_id": tenant_id,
+        "user_id": user_id,
+        "operation": operation,
+        "idempotency_key": idempotency_key,
+    }
+    if (
+        not db.new
+        and not db.dirty
+        and not db.deleted
+        and lookup_manual_order_lifecycle_is_proven_stale(db, **lookup_args)
+    ):
+        db.expire_all()
+    return _lookup_operation_once(db, **lookup_args, allow_stale_reread=False)

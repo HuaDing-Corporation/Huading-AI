@@ -101,6 +101,7 @@ def test_rejected_order_read_requeries_pending_grant_after_activation(db_session
         requested_credits=30_000,
         completed=True,
     )
+    operation.completed_at = now
     order_id = str(uuid4())
     operation.result_type = "brand_voice_order"
     operation.result_id = order_id
@@ -139,7 +140,23 @@ def test_rejected_order_read_requeries_pending_grant_after_activation(db_session
         amount_credits=30_000,
         status="pending",
     )
-    db_session.add_all([order, grant])
+    usage = UsageRecord(
+        tenant_id="tenant-a",
+        subscription_id=source.id,
+        billing_operation_id=operation.id,
+        billing_item_index=0,
+        billing_pricing_line_index=0,
+        capability="voice_clone",
+        provider="doubao-voice-clone",
+        model="manual_fulfillment",
+        unit="call",
+        quantity=Decimal("1"),
+        credits=Decimal("30000"),
+        cost_cents=0,
+        status="released",
+        settled_at=now,
+    )
+    db_session.add_all([order, grant, usage])
     db_session.commit()
 
     pending = brand_voice_order_read(db_session, order=order)
