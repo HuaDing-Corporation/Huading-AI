@@ -16,7 +16,6 @@ from app.core.config import settings
 from app.core.exceptions import AppError
 from app.db.models import (
     AIBrainUserCooldown,
-    Base,
     ChatConversation,
     ChatMessage,
     Plan,
@@ -627,7 +626,7 @@ def test_wallet_mutation_query_uses_for_update_and_populate_existing(
 
 
 @pytest.fixture(scope="module")
-def postgres_session_factory():
+def postgres_session_factory(cloned_model_metadata_factory):
     database_url = os.getenv("TEST_POSTGRES_URL")
     if not database_url:
         pytest.skip("TEST_POSTGRES_URL is required for AIBRAIN concurrency tests.")
@@ -637,7 +636,8 @@ def postgres_session_factory():
     with engine.begin() as connection:
         connection.execute(text(f'CREATE SCHEMA "{schema}"'))
     scoped_engine = engine.execution_options(schema_translate_map={None: schema})
-    Base.metadata.create_all(scoped_engine)
+    test_metadata = cloned_model_metadata_factory()
+    test_metadata.create_all(scoped_engine)
     factory = sessionmaker(bind=scoped_engine, autoflush=False, autocommit=False)
     try:
         yield factory

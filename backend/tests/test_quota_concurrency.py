@@ -16,7 +16,6 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.exceptions import AppError
 from app.db.models import (
-    Base,
     BillingOperation,
     CreditRefundGrant,
     Plan,
@@ -440,7 +439,7 @@ def test_refund_decision_composes_with_full_global_lock_order(
         assert "ORDER BY credit_refund_grants.id" in locked[4]
 
 @pytest.fixture(scope="module")
-def postgres_session_factory():
+def postgres_session_factory(cloned_model_metadata_factory):
     database_url = os.getenv("TEST_POSTGRES_URL")
     if not database_url:
         pytest.skip("TEST_POSTGRES_URL is required for quota concurrency tests.")
@@ -450,7 +449,8 @@ def postgres_session_factory():
     with engine.begin() as connection:
         connection.execute(text(f'CREATE SCHEMA "{schema}"'))
     scoped_engine = engine.execution_options(schema_translate_map={None: schema})
-    Base.metadata.create_all(scoped_engine)
+    test_metadata = cloned_model_metadata_factory()
+    test_metadata.create_all(scoped_engine)
     factory = sessionmaker(bind=scoped_engine, autoflush=False, autocommit=False)
     try:
         yield factory

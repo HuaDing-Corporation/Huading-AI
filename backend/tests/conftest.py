@@ -1,12 +1,12 @@
 import os
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import String, cast, create_engine, event, select, text
+from sqlalchemy import MetaData, String, cast, create_engine, event, select, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -37,6 +37,19 @@ from app.main import app
 def jwt_test_secret(monkeypatch):
     monkeypatch.setattr(settings, "jwt_secret_key", "test-secret-test-secret-test-secret-32")
     monkeypatch.setattr(settings, "engine_bgm_seed_on_startup", False)
+
+
+@pytest.fixture(scope="session")
+def cloned_model_metadata_factory() -> Callable[[], MetaData]:
+    """Return disposable DDL metadata without mutating the ORM's shared metadata."""
+
+    def build() -> MetaData:
+        metadata = MetaData()
+        for table in Base.metadata.tables.values():
+            table.to_metadata(metadata)
+        return metadata
+
+    return build
 
 
 @pytest.fixture

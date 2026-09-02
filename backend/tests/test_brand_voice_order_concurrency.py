@@ -19,7 +19,6 @@ from app.core.exceptions import AppError
 from app.db.models import (
     AdminAuditLog,
     Asset,
-    Base,
     BillingOperation,
     BrandVoice,
     BrandVoiceOrder,
@@ -170,7 +169,7 @@ def test_production_code_has_no_unprotected_user_deactivation_writer() -> None:
 
 
 @pytest.fixture
-def postgres_registry_factory(monkeypatch):
+def postgres_registry_factory(monkeypatch, cloned_model_metadata_factory):
     from app.services import provider_voice_registry
 
     raw_url = os.getenv("TEST_POSTGRES_URL")
@@ -198,8 +197,9 @@ def postgres_registry_factory(monkeypatch):
         "engine_doubao_voice_clone_speaker_ids",
         [],
     )
-    Base.metadata.drop_all(engine)
-    Base.metadata.create_all(engine)
+    test_metadata = cloned_model_metadata_factory()
+    test_metadata.drop_all(engine)
+    test_metadata.create_all(engine)
     factory = sessionmaker(
         bind=engine,
         autoflush=False,
@@ -209,7 +209,7 @@ def postgres_registry_factory(monkeypatch):
     try:
         yield factory
     finally:
-        Base.metadata.drop_all(engine)
+        test_metadata.drop_all(engine)
         engine.dispose()
 
 
