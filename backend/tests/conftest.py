@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import String, cast, create_engine, event, select
+from sqlalchemy import String, cast, create_engine, event, select, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -56,6 +56,16 @@ def auth_db():
         cursor.close()
 
     Base.metadata.create_all(engine)
+    # This fixture materializes the current model schema directly instead of
+    # running Alembic, so stamp it at the release revision that schema represents.
+    with engine.begin() as connection:
+        connection.execute(
+            text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32))")
+        )
+        connection.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+            {"revision": "20260829_0038"},
+        )
     SessionTesting = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
     def override_db() -> Generator[Session, None, None]:
@@ -131,10 +141,7 @@ def db_session():
 
 def _pricing_closure_snapshot(db: Session) -> dict[str, tuple[tuple[object, ...], ...]]:
     def rows(*columns) -> tuple[tuple[object, ...], ...]:
-        return tuple(
-            tuple(row)
-            for row in db.execute(select(*columns).order_by(columns[0]))
-        )
+        return tuple(tuple(row) for row in db.execute(select(*columns).order_by(columns[0])))
 
     return deepcopy(
         {
@@ -306,17 +313,26 @@ def pricing_closure_snapshot():
 
 
 @pytest.fixture
-def seed_pricing_closure_state():
+def seed_pricing_closure_state(monkeypatch):
     seeded_sessions: list[Session] = []
 
     def seed(db: Session) -> dict[str, str]:
-        from app.services import provider_voice_registry
+        from uuid import UUID
+
+        from app.api.deps import BillingSubmissionHeaders
+        from app.schemas.brand_voice_orders import BrandVoiceOrderCreateRequest
+        from app.services import brand_voice_orders, pricing
+        from app.services.billing_quotes import VerifiedQuote, _validated_snapshot
 
         now = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
         secret = "provider-config-secret-value"
         source_url = "https://private.example/source-audio.wav?signature=secret"
         subscription = db.get(Subscription, "subscription-a")
-        subscription.quota_credits_reserved = 3
+        plan = db.get(Plan, subscription.plan_id)
+        user = db.get(User, "user-a")
+        subscription.quota_credits_total = 100_000
+        plan.code = "huading"
+        user.role = "admin"
         db.add_all(
             [
                 Asset(
@@ -339,22 +355,6 @@ def seed_pricing_closure_state():
                     credits_per_unit=Decimal("7.0000"),
                     is_active=False,
                 ),
-                BillingOperation(
-                    id="cli-billing-operation",
-                    tenant_id="tenant-a",
-                    user_id="user-a",
-                    operation="cosyvoice_brand_voice_create",
-                    idempotency_key="00000000-0000-0000-0000-000000000013",
-                    request_hash="r" * 64,
-                    quote_hash="q" * 64,
-                    pricing_snapshot={},
-                    requested_credits=Decimal("0"),
-                    settled_credits=Decimal("0"),
-                    released_credits=Decimal("0"),
-                    status="completed",
-                    completion_kind="succeeded",
-                    completed_at=now,
-                ),
                 ProviderConfig(
                     id="cli-preserved-provider-config",
                     capability="chat",
@@ -366,77 +366,74 @@ def seed_pricing_closure_state():
                     },
                     is_active=False,
                 ),
-                BrandVoice(
-                    id="cli-customer-brand-voice",
-                    tenant_id="tenant-a",
-                    owner_user_id="user-a",
-                    name="CLI Customer Voice",
-                    source_audio_asset_id="cli-source-asset",
-                    provider="doubao-voice-clone",
-                    status="ready",
-                    consent_confirmed=True,
-                    consent_confirmed_at=now,
-                    activated_at=now,
-                    expires_at=now + timedelta(days=30),
-                ),
             ]
         )
-        db.flush()
-        db.add_all(
-            [
-                UsageRecord(
-                    id="cli-preserved-usage",
-                    tenant_id="tenant-a",
-                    subscription_id="subscription-a",
-                    capability="image",
-                    provider="private-provider",
-                    model="private-model",
-                    unit="image",
+        db.commit()
+
+        operation_name = "doubao_brand_voice_order_create"
+        policy = pricing.PRICING_POLICIES[operation_name]
+        quote = VerifiedQuote(
+            snapshot=_validated_snapshot(
+                pricing.build_simple_pricing(
+                    policy=policy,
+                    rate=pricing.resolve_rate(
+                        db,
+                        tenant_id=user.tenant_id,
+                        policy=policy,
+                    ),
                     quantity=Decimal("1"),
-                    credits=Decimal("3"),
-                    cost_cents=0,
-                    provider_cost_usd=Decimal("0.01000000"),
-                    provider_usage={"trace": "usage-trace-secret"},
-                    status="reserved",
-                ),
-                CreditRefundGrant(
-                    id="cli-preserved-refund",
-                    billing_operation_id="cli-billing-operation",
-                    tenant_id="tenant-a",
-                    user_id="user-a",
-                    source_subscription_id="subscription-a",
-                    amount_credits=2,
-                    status="pending",
-                ),
-                BrandVoiceOrder(
-                    id="cli-brand-voice-order",
-                    tenant_id="tenant-a",
-                    user_id="user-a",
-                    order_type="create",
-                    requested_name="CLI Customer Voice",
-                    source_audio_asset_id="cli-source-asset",
-                    source_metadata_snapshot={"source_url": source_url},
-                    consent_confirmed_at=now,
-                    billing_operation_id="cli-billing-operation",
-                    status="awaiting_fulfillment",
-                ),
-            ]
+                )
+            )[1],
+            quote_hash="q" * 64,
+            pricing_payload_hash="p" * 64,
         )
-        db.flush()
-        customer = provider_voice_registry.claim_customer_provider_voice_id(
+        order = brand_voice_orders.create_brand_voice_order(
             db,
-            provider_voice_id="cli-customer-provider-id",
-            brand_voice_id="cli-customer-brand-voice",
-            order_id="cli-brand-voice-order",
+            user=db.get(User, "user-a"),
+            payload=BrandVoiceOrderCreateRequest(
+                order_type="create",
+                requested_name="CLI Customer Voice",
+                source_audio_asset_id="cli-source-asset",
+                consent_confirmed=True,
+            ),
+            verified_quote=quote,
+            submission_headers=BillingSubmissionHeaders(
+                idempotency_key=UUID("00000000-0000-0000-0000-000000000013"),
+                quote_token="quoted",
+            ),
+            now=now,
         )
-        voice = db.get(BrandVoice, "cli-customer-brand-voice")
-        order = db.get(BrandVoiceOrder, "cli-brand-voice-order")
-        voice.speaker_id = customer.normalized_provider_id
-        order.status = "fulfilled"
-        order.fulfilled_brand_voice_id = voice.id
-        order.fulfilled_provider_id = customer.id
-        order.resolver_user_id = "user-a"
-        order.fulfilled_at = now
+        monkeypatch.setattr(settings, "engine_platform_tenant_slugs", {"billing-a"})
+        fulfilled = brand_voice_orders.resolve_brand_voice_order(
+            db,
+            actor=db.get(User, "user-a"),
+            order_id=order.id,
+            action="fulfill",
+            provider_voice_id="cli-customer-provider-id",
+            now=now,
+        )
+
+        db.expire_all()
+        customer = db.get(BrandVoiceProviderId, fulfilled.fulfilled_provider_id)
+        subscription = db.get(Subscription, "subscription-a")
+        subscription.quota_credits_reserved = 3
+        db.add(
+            UsageRecord(
+                id="cli-preserved-usage",
+                tenant_id="tenant-a",
+                subscription_id="subscription-a",
+                capability="image",
+                provider="private-provider",
+                model="private-model",
+                unit="image",
+                quantity=Decimal("1"),
+                credits=Decimal("3"),
+                cost_cents=0,
+                provider_cost_usd=Decimal("0.01000000"),
+                provider_usage={"trace": "usage-trace-secret"},
+                status="reserved",
+            )
+        )
         db.commit()
         seeded_sessions.append(db)
         return {
