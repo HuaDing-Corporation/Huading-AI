@@ -1937,6 +1937,18 @@ def test_target_audit_fails_closed_for_missing_manual_delivery_table(db_session)
     ) in {(blocker.code, blocker.record_ids) for blocker in report.blockers}
 
 
+def test_target_schema_contract_matches_current_metadata(db_session) -> None:
+    """Keep the release model and the target-schema reflection gate in lockstep."""
+    from scripts.ops import pricing_closure_readiness as readiness
+
+    blockers = tuple(
+        (blocker.code, blocker.record_ids)
+        for blocker in readiness._target_schema_preflight_blockers(db_session)
+    )
+
+    assert blockers == ()
+
+
 @pytest.mark.skipif(
     not os.getenv("PRICING_READINESS_POSTGRES_URL"),
     reason="set PRICING_READINESS_POSTGRES_URL to run PostgreSQL reflection coverage",
@@ -2266,9 +2278,10 @@ def test_readiness_fails_on_unknown_historic_doubao_id(db_session) -> None:
     db_session.commit()
 
     report = pricing_closure_readiness(db_session, production_mode=True)
+    blockers = tuple((blocker.code, blocker.record_ids) for blocker in report.blockers)
 
     assert report.ready is False
-    assert report.blockers[0].code == "UNKNOWN_HISTORIC_DOUBAO_ID"
+    assert report.blockers[0].code == "UNKNOWN_HISTORIC_DOUBAO_ID", blockers
     assert report.blockers[0].record_ids == ("unknown-id",)
 
 
@@ -2658,12 +2671,19 @@ def test_register_official_cli_exact_list_has_only_expected_delta_and_rejects_re
     before = pricing_closure_snapshot(db_session)
     before_registry = {row[2]: row for row in before["provider_voice_registry"]}
     assert tuple(before_registry) == (sensitive["customer_provider_id"],)
+    initial_blockers = tuple(
+        (blocker.code, blocker.record_ids)
+        for blocker in readiness.pricing_closure_readiness(
+            db_session,
+            production_mode=True,
+        ).blockers
+    )
 
     first_exit_code = readiness.main(["register-official"])
 
     first_output = capsys.readouterr().out
     first_payload = json.loads(first_output)
-    assert first_exit_code == 0
+    assert first_exit_code == 0, initial_blockers
     assert first_payload == {"registered_official_count": len(allowed_ids)}
     for forbidden in (
         *allowed_ids,

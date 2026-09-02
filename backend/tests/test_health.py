@@ -190,13 +190,19 @@ def test_production_ready_uses_shared_validator_and_writes_nothing(
     from scripts.ops import pricing_closure_readiness as readiness
 
     sensitive = _seed_persisted_ready_state(db_session, monkeypatch)
-    observed: list[tuple[bool, bool, tuple[str, ...]]] = []
+    observed: list[
+        tuple[bool, bool, tuple[tuple[str, tuple[str, ...]], ...]]
+    ] = []
     production_validator = readiness.pricing_closure_readiness
 
     def observed_validator(db, *, production_mode: bool):
         report = production_validator(db, production_mode=production_mode)
         observed.append(
-            (production_mode, report.ready, tuple(item.code for item in report.blockers))
+            (
+                production_mode,
+                report.ready,
+                tuple((item.code, item.record_ids) for item in report.blockers),
+            )
         )
         return report
 
@@ -218,7 +224,7 @@ def test_production_ready_uses_shared_validator_and_writes_nothing(
 
     assert response.status_code == 200
     payload = response.json()["data"]
-    assert payload["status"] == "ok"
+    assert payload["status"] == "ok", observed
     pricing_component = next(
         item for item in payload["components"] if item["name"] == "pricing_closure"
     )
