@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import defaultdict
 from contextlib import redirect_stderr, redirect_stdout
@@ -273,6 +274,194 @@ _PARTIAL_UNIQUE_INDEX_PREDICATES = {
         "status = 'awaiting_fulfillment'",
     ),
 }
+_PARTIAL_PREDICATE_TOKEN = re.compile(
+    r"""
+    (?P<whitespace>\s+)
+    |(?P<cast>::)
+    |(?P<left_parenthesis>\()
+    |(?P<right_parenthesis>\))
+    |(?P<equals>=)
+    |(?P<string>'(?:''|[^'])*')
+    |(?P<quoted_identifier>"(?:""|[^"])*")
+    |(?P<word>[A-Za-z_][A-Za-z0-9_$]*)
+    """,
+    re.VERBOSE,
+)
+_PARTIAL_PREDICATE_RESERVED_WORDS = frozenset({"AND", "FALSE", "IS", "NOT", "NULL", "OR", "TRUE"})
+
+
+def _partial_predicate_tokens(value: str) -> tuple[tuple[str, str], ...] | None:
+    """Tokenize only the small predicate grammar emitted by our indexes."""
+    tokens: list[tuple[str, str]] = []
+    position = 0
+    while position < len(value):
+        match = _PARTIAL_PREDICATE_TOKEN.match(value, position)
+        if match is None:
+            return None
+        position = match.end()
+        kind = str(match.lastgroup)
+        token_value = match.group()
+        if kind == "whitespace":
+            continue
+        if kind == "string":
+            token_value = token_value[1:-1].replace("''", "'")
+        elif kind == "quoted_identifier":
+            token_value = token_value[1:-1].replace('""', '"')
+        tokens.append((kind, token_value))
+    return tuple(tokens)
+
+
+def _strip_partial_predicate_parentheses(
+    tokens: tuple[tuple[str, str], ...],
+) -> tuple[tuple[str, str], ...] | None:
+    while tokens and tokens[0][0] == "left_parenthesis":
+        depth = 0
+        closing_position: int | None = None
+        for position, (kind, _value) in enumerate(tokens):
+            if kind == "left_parenthesis":
+                depth += 1
+            elif kind == "right_parenthesis":
+                depth -= 1
+                if depth < 0:
+                    return None
+                if depth == 0:
+                    closing_position = position
+                    break
+        if closing_position is None:
+            return None
+        if closing_position != len(tokens) - 1:
+            break
+        tokens = tokens[1:-1]
+    return tokens
+
+
+def _partial_predicate_conjuncts(
+    tokens: tuple[tuple[str, str], ...],
+) -> list[tuple[tuple[str, str], ...]] | None:
+    tokens = _strip_partial_predicate_parentheses(tokens)
+    if not tokens:
+        return None
+    depth = 0
+    start = 0
+    parts: list[tuple[tuple[str, str], ...]] = []
+    for position, (kind, value) in enumerate(tokens):
+        if kind == "left_parenthesis":
+            depth += 1
+        elif kind == "right_parenthesis":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif depth == 0 and kind == "word" and value.upper() == "AND":
+            nested = _partial_predicate_conjuncts(tokens[start:position])
+            if nested is None:
+                return None
+            parts.extend(nested)
+            start = position + 1
+    if depth != 0:
+        return None
+    if not parts:
+        return [tokens]
+    nested = _partial_predicate_conjuncts(tokens[start:])
+    if nested is None:
+        return None
+    parts.extend(nested)
+    return parts
+
+
+def _partial_predicate_operand(
+    tokens: tuple[tuple[str, str], ...],
+    *,
+    kind: str,
+    allow_text_cast: bool,
+) -> str | None:
+    tokens = _strip_partial_predicate_parentheses(tokens)
+    if not tokens:
+        return None
+    while len(tokens) >= 3 and tokens[-2][0] == "cast" and tokens[-1][0] == "word":
+        if not allow_text_cast or tokens[-1][1].lower() != "text":
+            return None
+        tokens = _strip_partial_predicate_parentheses(tokens[:-2])
+        if not tokens:
+            return None
+    if len(tokens) != 1 or tokens[0][0] != kind:
+        return None
+    value = tokens[0][1]
+    if kind == "word":
+        if value.upper() in _PARTIAL_PREDICATE_RESERVED_WORDS:
+            return None
+        return value.lower()
+    return value
+
+
+def _canonical_partial_predicate_atom(
+    tokens: tuple[tuple[str, str], ...],
+) -> tuple[str, ...] | None:
+    tokens = _strip_partial_predicate_parentheses(tokens)
+    if not tokens:
+        return None
+    depth = 0
+    operators: list[tuple[int, str]] = []
+    for position, (kind, value) in enumerate(tokens):
+        if kind == "left_parenthesis":
+            depth += 1
+        elif kind == "right_parenthesis":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif depth == 0 and kind == "equals":
+            operators.append((position, "equals"))
+        elif depth == 0 and kind == "word" and value.upper() == "IS":
+            operators.append((position, "is"))
+    if depth != 0 or len(operators) > 1:
+        return None
+    if not operators:
+        identifier = _partial_predicate_operand(tokens, kind="word", allow_text_cast=False)
+        return None if identifier is None else ("truthy", identifier)
+
+    position, operator = operators[0]
+    identifier = _partial_predicate_operand(
+        tokens[:position], kind="word", allow_text_cast=True
+    )
+    if identifier is None:
+        return None
+    if operator == "equals":
+        literal = _partial_predicate_operand(
+            tokens[position + 1 :], kind="string", allow_text_cast=True
+        )
+        return None if literal is None else ("equals", identifier, literal)
+
+    suffix = tuple((kind, value.upper()) for kind, value in tokens[position + 1 :])
+    if suffix == (("word", "NULL"),):
+        return ("is_null", identifier)
+    if suffix == (("word", "NOT"), ("word", "NULL")):
+        return ("is_not_null", identifier)
+    return None
+
+
+def _canonical_partial_predicate(value: str) -> tuple[tuple[str, ...], ...] | None:
+    tokens = _partial_predicate_tokens(value)
+    if not tokens:
+        return None
+    conjuncts = _partial_predicate_conjuncts(tokens)
+    if conjuncts is None:
+        return None
+    atoms = [_canonical_partial_predicate_atom(conjunct) for conjunct in conjuncts]
+    if any(atom is None for atom in atoms):
+        return None
+    return tuple(sorted(atom for atom in atoms if atom is not None))
+
+
+def _partial_unique_index_predicate_matches(
+    index_name: str,
+    where_clauses: list[object],
+) -> bool:
+    predicates = _PARTIAL_UNIQUE_INDEX_PREDICATES[index_name]
+    if len(where_clauses) != 1:
+        return False
+    expected = _canonical_partial_predicate(" AND ".join(predicates))
+    actual = _canonical_partial_predicate(str(where_clauses[0]))
+    return expected is not None and actual == expected
+
 _MIGRATION_0036_FOREIGN_KEYS = {
     "billing_operations": (
         (("tenant_id",), "tenants", ("id",), "RESTRICT"),
@@ -679,12 +868,12 @@ def _schema_contract_blockers(
             predicates = _PARTIAL_UNIQUE_INDEX_PREDICATES.get(index_name)
             if not predicates or index_name in missing:
                 continue
-            where_clause = " ".join(
-                str(value).lower()
+            where_clauses = [
+                value
                 for key, value in (index.get("dialect_options") or {}).items()
                 if key.endswith("_where")
-            )
-            if not all(predicate in where_clause for predicate in predicates):
+            ]
+            if not _partial_unique_index_predicate_matches(index_name, where_clauses):
                 missing.append(index_name)
         if missing:
             blockers.append(
