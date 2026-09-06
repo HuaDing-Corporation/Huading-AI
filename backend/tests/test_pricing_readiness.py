@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -1947,6 +1947,382 @@ def test_target_schema_contract_matches_current_metadata(db_session) -> None:
     )
 
     assert blockers == ()
+
+
+_PLATFORM_PARTIAL_INDEX = "uq_credit_rates_platform_active_capability_unit"
+_TENANT_PARTIAL_INDEX = "uq_credit_rates_tenant_active_capability_unit"
+_RENEWAL_PARTIAL_INDEX = "uq_brand_voice_orders_awaiting_renewal_per_voice"
+_PARTIAL_INDEX_CONTRACTS = (
+    (
+        _PLATFORM_PARTIAL_INDEX,
+        ("capability", "unit"),
+        "tenant_id IS NULL AND is_active",
+    ),
+    (
+        _TENANT_PARTIAL_INDEX,
+        ("tenant_id", "capability", "unit"),
+        "tenant_id IS NOT NULL AND is_active",
+    ),
+    (
+        _RENEWAL_PARTIAL_INDEX,
+        ("existing_brand_voice_id",),
+        "order_type = 'renew' AND status = 'awaiting_fulfillment'",
+    ),
+)
+_PARTIAL_INDEX_COLUMNS = {
+    index_name: columns for index_name, columns, _predicate in _PARTIAL_INDEX_CONTRACTS
+}
+
+
+def _reflected_partial_index_blockers(
+    monkeypatch,
+    *,
+    index_name: str,
+    columns: tuple[str, ...],
+    where_clause: object,
+    present: bool = True,
+    reflected_columns: tuple[str, ...] | None = None,
+    reflected_unique: bool = True,
+):
+    """Drive the real schema blocker with only SQLAlchemy reflection replaced."""
+    from scripts.ops import pricing_closure_readiness as readiness
+
+    class ReflectedIndexInspector:
+        @staticmethod
+        def get_table_names():
+            return ["contract_table"]
+
+        @staticmethod
+        def get_columns(_table_name):
+            return [{"name": column} for column in columns]
+
+        @staticmethod
+        def get_indexes(_table_name):
+            if not present:
+                return []
+            return [
+                {
+                    "name": index_name,
+                    "column_names": list(reflected_columns or columns),
+                    "unique": reflected_unique,
+                    "dialect_options": {"postgresql_where": where_clause},
+                }
+            ]
+
+    class ReflectedSession:
+        @staticmethod
+        def connection():
+            return object()
+
+    monkeypatch.setattr(readiness, "inspect", lambda _connection: ReflectedIndexInspector())
+    return readiness._schema_contract_blockers(
+        ReflectedSession(),
+        required_schema={"contract_table": set(columns)},
+        named_checks={},
+        named_uniques={},
+        named_indexes={"contract_table": {index_name: (columns, True)}},
+        foreign_keys={},
+    )
+
+
+@pytest.mark.parametrize(
+    ("index_name", "columns", "_expected_predicate"),
+    _PARTIAL_INDEX_CONTRACTS,
+)
+@pytest.mark.parametrize(
+    "reflected_predicate",
+    [contract[2] for contract in _PARTIAL_INDEX_CONTRACTS],
+)
+def test_partial_unique_predicates_cannot_be_reused_across_indexes(
+    monkeypatch,
+    index_name: str,
+    columns: tuple[str, ...],
+    _expected_predicate: str,
+    reflected_predicate: str,
+) -> None:
+    """Binding any of the three valid predicates to the wrong index must fail closed."""
+    blockers = _reflected_partial_index_blockers(
+        monkeypatch,
+        index_name=index_name,
+        columns=columns,
+        where_clause=reflected_predicate,
+    )
+
+    expected_record = f"contract_table.{index_name}"
+    if reflected_predicate == _expected_predicate:
+        assert blockers == []
+    else:
+        assert [(blocker.code, blocker.record_ids) for blocker in blockers] == [
+            ("PREFLIGHT_SCHEMA_MISSING", (expected_record,))
+        ]
+
+
+@pytest.mark.parametrize(
+    ("present", "reflected_columns", "reflected_unique"),
+    [
+        (False, ("existing_brand_voice_id",), True),
+        (True, ("wrong_column",), True),
+        (True, ("existing_brand_voice_id",), False),
+    ],
+)
+def test_partial_unique_index_requires_presence_columns_and_uniqueness(
+    monkeypatch,
+    present: bool,
+    reflected_columns: tuple[str, ...],
+    reflected_unique: bool,
+) -> None:
+    """Predicate compatibility must not weaken the existing index-shape gate."""
+    index_name = _RENEWAL_PARTIAL_INDEX
+    blockers = _reflected_partial_index_blockers(
+        monkeypatch,
+        index_name=index_name,
+        columns=("existing_brand_voice_id",),
+        where_clause="order_type = 'renew' AND status = 'awaiting_fulfillment'",
+        present=present,
+        reflected_columns=reflected_columns,
+        reflected_unique=reflected_unique,
+    )
+
+    assert [(blocker.code, blocker.record_ids) for blocker in blockers] == [
+        ("PREFLIGHT_SCHEMA_MISSING", (f"contract_table.{index_name}",))
+    ]
+
+
+@pytest.mark.parametrize(
+    ("index_name", "where_clause"),
+    [
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            "order_type = 'RENEW' AND status = 'awaiting_fulfillment'",
+            id="literal-value-case",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            "order_type = 'renew' AND status = 'Awaiting_fulfillment'",
+            id="second-literal-value-case",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            "order_type = 'renew::text' AND status = 'awaiting_fulfillment'",
+            id="cast-text-inside-literal",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            "order_type = 'renew' OR status = 'awaiting_fulfillment'",
+            id="or",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            "NOT (order_type = 'renew' AND status = 'awaiting_fulfillment')",
+            id="not",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            "order_type = 'renew' AND "
+            "(status = 'awaiting_fulfillment' OR status = 'fulfilled')",
+            id="nested-or",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            "order_type = 'renew'",
+            id="missing-condition",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            "order_type = 'renew' AND status = 'awaiting_fulfillment' "
+            "AND tenant_id IS NOT NULL",
+            id="extra-filter",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            "order_type = 'renew' AND status = 'awaiting_fulfillment' AND TRUE",
+            id="and-true",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            "(order_type)::citext = 'renew'::citext AND "
+            "(status)::text = 'awaiting_fulfillment'::text",
+            id="citext-cast",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            "(order_type)::char(5) = 'renew'::char(5) AND "
+            "(status)::text = 'awaiting_fulfillment'::text",
+            id="char-cast",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            "(order_type)::varchar(5) = 'renew'::varchar(5) AND "
+            "(status)::text = 'awaiting_fulfillment'::text",
+            id="varchar-cast",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            "(order_type)::integer = 'renew'::text AND "
+            "(status)::text = 'awaiting_fulfillment'::text",
+            id="integer-cast",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            "lower(order_type) = 'renew' AND status = 'awaiting_fulfillment'",
+            id="function-call",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            '"ORDER_TYPE" = \'renew\' AND status = \'awaiting_fulfillment\'',
+            id="quoted-uppercase-column",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            "order_type = 'renew' AND status = 'awaiting_fulfillment' trailing_garbage",
+            id="trailing-garbage",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            "(",
+            id="unbalanced-parenthesis",
+        ),
+        pytest.param(
+            _RENEWAL_PARTIAL_INDEX,
+            None,
+            id="missing-dialect-value",
+        ),
+        pytest.param(
+            _PLATFORM_PARTIAL_INDEX,
+            "tenant_id IS NULL AND NOT is_active",
+            id="not-active",
+        ),
+        pytest.param(
+            _PLATFORM_PARTIAL_INDEX,
+            "tenant_id IS NULL AND is_active IS FALSE",
+            id="is-false",
+        ),
+        pytest.param(
+            _PLATFORM_PARTIAL_INDEX,
+            "tenant_id IS NULL AND is_active IS NOT FALSE",
+            id="is-not-false",
+        ),
+        pytest.param(
+            _PLATFORM_PARTIAL_INDEX,
+            "tenant_id IS NULL AND COALESCE(is_active, TRUE)",
+            id="coalesce",
+        ),
+    ],
+)
+def test_partial_unique_predicates_reject_unsafe_or_drifted_sql(
+    monkeypatch,
+    index_name: str,
+    where_clause: object,
+) -> None:
+    """Substring matching, global lowercasing, or blind cast removal makes this matrix fail."""
+    blockers = _reflected_partial_index_blockers(
+        monkeypatch,
+        index_name=index_name,
+        columns=_PARTIAL_INDEX_COLUMNS[index_name],
+        where_clause=where_clause,
+    )
+
+    assert [(blocker.code, blocker.record_ids) for blocker in blockers] == [
+        ("PREFLIGHT_SCHEMA_MISSING", (f"contract_table.{index_name}",))
+    ]
+
+
+@pytest.mark.parametrize(
+    "where_clause",
+    [
+        "((order_type)::text = 'renew'::text) "
+        "AND ((status)::text = 'awaiting_fulfillment'::text)",
+        "(((status)::TEXT = ('awaiting_fulfillment'::text))) AnD "
+        "(((order_type)::text = ('renew'::TEXT)))",
+    ],
+)
+def test_manual_renewal_predicate_accepts_only_supported_postgresql_text_casts(
+    monkeypatch,
+    where_clause: str,
+) -> None:
+    """PostgreSQL's harmless text casts and grouping must not create a false blocker."""
+    blockers = _reflected_partial_index_blockers(
+        monkeypatch,
+        index_name="uq_brand_voice_orders_awaiting_renewal_per_voice",
+        columns=("existing_brand_voice_id",),
+        where_clause=where_clause,
+    )
+
+    assert blockers == []
+
+
+@pytest.mark.skipif(
+    not os.getenv("PRICING_READINESS_POSTGRES_URL"),
+    reason="set PRICING_READINESS_POSTGRES_URL to run PostgreSQL reflection coverage",
+)
+def test_postgresql_preflight_accepts_reflected_manual_renewal_partial_index() -> None:
+    """Exercise the production PostgreSQL 16 ::text reflection through the real blocker path."""
+    from scripts.ops import pricing_closure_readiness as readiness
+
+    engine = create_engine(os.environ["PRICING_READINESS_POSTGRES_URL"], future=True)
+    schema = f"pricing_readiness_partial_index_{uuid4().hex}"
+    try:
+        with engine.begin() as connection:
+            connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+        with Session(engine) as session:
+            session.execute(text(f'SET search_path TO "{schema}"'))
+            session.execute(
+                text(
+                    """
+                    CREATE TABLE brand_voice_orders (
+                        existing_brand_voice_id VARCHAR(36),
+                        order_type VARCHAR(32) NOT NULL,
+                        status VARCHAR(32) NOT NULL
+                    )
+                    """
+                )
+            )
+            session.execute(
+                text(
+                    """
+                    CREATE UNIQUE INDEX uq_brand_voice_orders_awaiting_renewal_per_voice
+                    ON brand_voice_orders (existing_brand_voice_id)
+                    WHERE order_type = 'renew' AND status = 'awaiting_fulfillment'
+                    """
+                )
+            )
+            session.commit()
+
+            reflected_index = next(
+                index
+                for index in inspect(session.connection()).get_indexes("brand_voice_orders")
+                if index["name"] == "uq_brand_voice_orders_awaiting_renewal_per_voice"
+            )
+            reflected_where = str(reflected_index["dialect_options"]["postgresql_where"])
+            assert "::text" in reflected_where
+
+            blockers = readiness._schema_contract_blockers(
+                session,
+                required_schema={
+                    "brand_voice_orders": {
+                        "existing_brand_voice_id",
+                        "order_type",
+                        "status",
+                    }
+                },
+                named_checks={},
+                named_uniques={},
+                named_indexes={
+                    "brand_voice_orders": {
+                        "uq_brand_voice_orders_awaiting_renewal_per_voice": (
+                            ("existing_brand_voice_id",),
+                            True,
+                        )
+                    }
+                },
+                foreign_keys={},
+            )
+
+            assert blockers == []
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        engine.dispose()
 
 
 @pytest.mark.skipif(

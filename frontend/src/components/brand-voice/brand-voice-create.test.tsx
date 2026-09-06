@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -159,7 +159,13 @@ describe("BrandVoiceCreate", () => {
     expect(api.estimateOrder).toHaveBeenCalledWith(expect.objectContaining({ order_type: "renew", existing_brand_voice_id: "expired-1", source_audio_asset_id: "asset-1" }));
   });
 
-  it("invalidates each adjacent order, brand-voice, and voice-picker cache exactly once after one success", async () => {
+  it.each(["immediate", "deferred"])("invalidates each adjacent order, brand-voice, and voice-picker cache exactly once after one success (%s quote)", async (quoteTiming) => {
+    let resolveEstimate!: (value: ReturnType<typeof quote>) => void;
+    if (quoteTiming === "deferred") {
+      api.estimateOrder.mockImplementationOnce(() => new Promise<ReturnType<typeof quote>>((resolve) => {
+        resolveEstimate = resolve;
+      }));
+    }
     const orderRefresh = vi.fn().mockResolvedValue([]);
     const brandRefresh = vi.fn().mockResolvedValue([]);
     const pickerRefresh = vi.fn().mockResolvedValue([]);
@@ -183,8 +189,17 @@ describe("BrandVoiceCreate", () => {
 
     fill();
     fireEvent.click(screen.getByRole("button", { name: "提交开通" }));
-    fireEvent.click(await screen.findByRole("button", { name: "确认并提交人工开通" }));
+    const confirm = await screen.findByRole("button", { name: "确认并提交人工开通" });
+    if (quoteTiming === "deferred") expect(confirm).toBeDisabled();
+    if (quoteTiming === "deferred") {
+      await act(async () => resolveEstimate(quote("doubao_brand_voice_order_create", 30000)));
+    }
+    // 按钮先于有效报价出现；找到按钮不代表可以点击。等待真实 ready 态，不放宽提交/缓存断言。
+    await waitFor(() => expect(confirm).toBeEnabled());
+    expect(screen.getByText("本次冻结 30000 积分")).toBeVisible();
+    fireEvent.click(confirm);
     await screen.findByText("已冻结 30000 积分，等待平台人工交付；订单不自动超时且无法取消");
+    expect(api.createOrder).toHaveBeenCalledTimes(1);
     await waitFor(() => {
       expect(orderRefresh).toHaveBeenCalledTimes(2);
       expect(brandRefresh).toHaveBeenCalledTimes(2);
@@ -199,7 +214,7 @@ describe("BrandVoiceCreate", () => {
     view.rerender(
       <QueryClientProvider client={client}><AdjacentConsumers /><BrandVoiceCreate /></QueryClientProvider>
     );
-    await Promise.resolve();
+    await act(async () => {});
     expect(invalidate).toHaveBeenCalledTimes(3);
   });
 
