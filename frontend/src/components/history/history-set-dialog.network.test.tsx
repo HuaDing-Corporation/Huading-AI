@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { defaultScheduler, notifyManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -78,7 +78,10 @@ function wrap(ui: ReactNode) {
 const badImg = () => screen.getAllByRole("img").find((img) => img.getAttribute("src")?.includes("gone.png"))!;
 const healthyImgs = () => screen.getAllByRole("img").filter((img) => !img.getAttribute("src")?.includes("gone.png"));
 
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  notifyManager.setScheduler(defaultScheduler);
+  vi.clearAllMocks();
+});
 
 describe("HistorySetDialog · 真实 network 次数（FIX3：mediaKey 必须跨重取稳定）", () => {
   it("🔴 批量陆续完成 → 同一坏图 index 漂 0→1→2 → 封顶仍是 2 次（预算不许跟着 index 换新）", async () => {
@@ -182,7 +185,9 @@ describe("HistorySetDialog · 真实 network 次数（FIX3：mediaKey 必须跨�
     expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(4);
   });
 
-  it("整套里两张各自坏 → 各自独立爬到封顶，互不吃对方的机会（单射：不同媒体 ≠ 同一个 key）", async () => {
+  it.each([0, 30])("整套里两张各自坏 → 各自独立爬到封顶，互不吃对方的机会（通知延迟 %i ms）", async (notificationDelay) => {
+    // 保留真实 QueryClient / observer；受控延迟能复现 CI 中响应已到、DOM URL 尚未更新的窗口。
+    notifyManager.setScheduler(notificationDelay === 0 ? defaultScheduler : (callback) => setTimeout(callback, notificationDelay));
     // 判据的另一半：稳定之外还要**单射**。两张坏图若共享一个 key，合计只会重取 2 次而不是各自 2 次。
     const twoBad = (sig: string) => ({
       id: "batch-1",
@@ -202,11 +207,20 @@ describe("HistorySetDialog · 真实 network 次数（FIX3：mediaKey 必须跨�
 
     // 两轮「两张一起碎 → 重取 → 新 URL 仍全碎」。同一 tick 的两个 error 由**在飞门控**合流成 1 次重取，
     // 但两张的 consecutive **各自**涨 → 两轮后双双到顶 → 第三轮整域静默。
-    for (const sig of ["2", "3", "4"]) {
+    for (const sig of ["2", "3"]) {
       adapter.getHistoryImageSet.mockResolvedValue(twoBad(sig));
       act(() => screen.getAllByRole("img").forEach((img) => fireEvent.error(img)));
-      await act(async () => {});
+      // 请求完成不等于 observer 已把新 URL 渲染出来；下一轮必须报新 URL 的错误。
+      await waitFor(() => expect(screen.getAllByRole("img").map((img) => img.getAttribute("src"))).toEqual([
+        `https://cdn/gone-a.png?sig=${sig}`,
+        `https://cdn/gone-b.png?sig=${sig}`
+      ]));
     }
+
+    // 第三次失败才单独检验封顶，不能等待永远不应发生的 sig=4 响应。
+    adapter.getHistoryImageSet.mockResolvedValue(twoBad("4"));
+    act(() => screen.getAllByRole("img").forEach((img) => fireEvent.error(img)));
+    await act(async () => {});
 
     // 1 初次 + 2 重取（合流后每轮 1 次，封顶 2 轮）= 3。
     expect(adapter.getHistoryImageSet).toHaveBeenCalledTimes(3);
