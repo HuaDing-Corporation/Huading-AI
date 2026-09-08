@@ -103,7 +103,7 @@ beforeEach(() => {
 });
 
 describe("BrandVoiceCreate", () => {
-  it("shows manual delivery instead of pretending Doubao is cloning", async () => {
+  it("records manual submission as history and points to current order status, not a persistent live hold", async () => {
     renderCreate();
     expect(screen.getByText("升级版 VIP 人工交付音色")).toBeVisible();
     expect(screen.getByText("提交人工订单，由平台交付；交付后有效 365 天")).toBeVisible();
@@ -112,7 +112,10 @@ describe("BrandVoiceCreate", () => {
     fireEvent.click(screen.getByRole("button", { name: "提交开通" }));
     expect(await screen.findByText("本次冻结 30000 积分")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "确认并提交人工开通" }));
-    expect(await screen.findByText("已冻结 30000 积分，等待平台人工交付；订单不自动超时且无法取消")).toBeVisible();
+    const submission = await screen.findByText("订单已提交，请在「人工开通订单」查询最新交付及退款状态。");
+    expect(submission).toBeVisible();
+    expect(submission).toHaveAttribute("role", "status");
+    expect(submission).not.toHaveTextContent(/已冻结|等待平台人工交付/);
     expect(screen.queryByText("供应商生成中")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "取消订单" })).not.toBeInTheDocument();
   });
@@ -198,7 +201,7 @@ describe("BrandVoiceCreate", () => {
     await waitFor(() => expect(confirm).toBeEnabled());
     expect(screen.getByText("本次冻结 30000 积分")).toBeVisible();
     fireEvent.click(confirm);
-    await screen.findByText("已冻结 30000 积分，等待平台人工交付；订单不自动超时且无法取消");
+    await screen.findByText("订单已提交，请在「人工开通订单」查询最新交付及退款状态。");
     expect(api.createOrder).toHaveBeenCalledTimes(1);
     await waitFor(() => {
       expect(orderRefresh).toHaveBeenCalledTimes(2);
