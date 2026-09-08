@@ -220,7 +220,7 @@ describe("useBillingAction", () => {
     await act(() => view.result.current.estimate());
     await act(() => view.result.current.confirm());
     expect(view.result.current.phase).toBe("succeeded");
-    expect(deps.lookup).toHaveBeenCalledWith("cosyvoice_brand_voice_create", keyA);
+    expect(deps.lookup).toHaveBeenCalledWith("cosyvoice_brand_voice_create", keyA, expect.any(AbortSignal));
     expect(deps.submit).toHaveBeenCalledTimes(1);
   });
   it.each(["settled", "released", "partially_settled"] as const)("refreshes server quota after %s, without computing a wallet from billing", async (status) => {
@@ -259,7 +259,7 @@ describe("useBillingAction", () => {
     expect(view.result.current.phase).toBe("succeeded");
     expect(view.result.current.isLookingUp).toBe(false);
     expect(view.result.current.result?.id).toBe("voice-1");
-    expect(lookup.mock.calls).toEqual([["cosyvoice_brand_voice_create", keyA], ["cosyvoice_brand_voice_create", keyA]]);
+    expect(lookup.mock.calls).toEqual([["cosyvoice_brand_voice_create", keyA, expect.any(AbortSignal)], ["cosyvoice_brand_voice_create", keyA, expect.any(AbortSignal)]]);
     expect(deps.submit).toHaveBeenCalledTimes(1);
     expect(deps.createIdempotencyKey).toHaveBeenCalledTimes(1);
   });
@@ -284,7 +284,7 @@ describe("useBillingAction", () => {
     vi.mocked(deps.lookup!).mockResolvedValueOnce(completedLookup());
     await act(() => view.result.current.continueLookup());
     expect(view.result.current.phase).toBe("succeeded");
-    expect(deps.lookup).toHaveBeenLastCalledWith("cosyvoice_brand_voice_create", keyA);
+    expect(deps.lookup).toHaveBeenLastCalledWith("cosyvoice_brand_voice_create", keyA, expect.any(AbortSignal));
     expect(deps.createIdempotencyKey).toHaveBeenCalledTimes(1);
   });
 
@@ -543,7 +543,7 @@ describe("useBillingAction", () => {
     await act(() => view.result.current.estimate());
     await act(() => view.result.current.confirm());
 
-    expect(lookup).toHaveBeenCalledWith("cosyvoice_brand_voice_create", keyA);
+    expect(lookup).toHaveBeenCalledWith("cosyvoice_brand_voice_create", keyA, expect.any(AbortSignal));
     expect(view.result.current.billing?.status).toBe("settled");
     expect(view.result.current.phase).toBe("succeeded");
   });
@@ -577,8 +577,8 @@ describe("useBillingAction", () => {
     lookup.mockResolvedValueOnce(completedLookup());
     await act(() => view.result.current.continueLookup());
     expect(view.result.current.phase).toBe("succeeded");
-    expect(lookup).toHaveBeenNthCalledWith(1, "cosyvoice_brand_voice_create", keyA);
-    expect(lookup).toHaveBeenNthCalledWith(4, "cosyvoice_brand_voice_create", keyA);
+    expect(lookup).toHaveBeenNthCalledWith(1, "cosyvoice_brand_voice_create", keyA, expect.any(AbortSignal));
+    expect(lookup).toHaveBeenNthCalledWith(4, "cosyvoice_brand_voice_create", keyA, expect.any(AbortSignal));
     expect(createIdempotencyKey).toHaveBeenCalledTimes(1);
     expect(estimate).toHaveBeenCalledTimes(1);
     expect(submit).toHaveBeenCalledTimes(1);
@@ -832,7 +832,7 @@ describe("useBillingAction", () => {
     const view = renderHook(() => useBillingAction(deps));
     await act(() => view.result.current.estimate());
     await act(() => view.result.current.confirm());
-    expect(lookup).toHaveBeenCalledWith("cosyvoice_brand_voice_create", keyA);
+    expect(lookup).toHaveBeenCalledWith("cosyvoice_brand_voice_create", keyA, expect.any(AbortSignal));
     expect(view.result.current.phase).toBe("succeeded");
   });
 
@@ -950,7 +950,7 @@ describe("useBillingAction", () => {
 
     expect(originalLookup).toHaveBeenCalledTimes(3);
     for (const call of originalLookup.mock.calls) {
-      expect(call).toEqual(["cosyvoice_brand_voice_create", keyA]);
+      expect(call).toEqual(["cosyvoice_brand_voice_create", keyA, expect.any(AbortSignal)]);
     }
     expect(originalSubmit).toHaveBeenCalledTimes(1);
     expect(replacementLookup).not.toHaveBeenCalled();
@@ -989,7 +989,7 @@ describe("useBillingAction", () => {
     lookup.mockResolvedValueOnce(completedLookup());
     await act(() => view.result.current.continueLookup());
     expect(view.result.current.phase).toBe("succeeded");
-    expect(lookup).toHaveBeenLastCalledWith("cosyvoice_brand_voice_create", keyA);
+    expect(lookup).toHaveBeenLastCalledWith("cosyvoice_brand_voice_create", keyA, expect.any(AbortSignal));
   });
 
   it("retains the sent operation after an in-place input edit instead of allowing duplicate payment", async () => {
@@ -1157,7 +1157,7 @@ describe("useBillingAction", () => {
     });
     expect(lookup).toHaveBeenCalledTimes(6);
     for (const call of lookup.mock.calls) {
-      expect(call).toEqual(["cosyvoice_brand_voice_create", keyA]);
+      expect(call).toEqual(["cosyvoice_brand_voice_create", keyA, expect.any(AbortSignal)]);
     }
     expect(view.result.current.phase).toBe("querying");
     expect(view.result.current.idempotencyKey).toBe(keyA);

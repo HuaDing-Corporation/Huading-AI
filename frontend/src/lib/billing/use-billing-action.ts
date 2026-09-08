@@ -47,7 +47,8 @@ interface UseBillingActionOptionsBase<
   input: TInput | null;
   estimate: (input: TInput) => Promise<TQuote>;
   submit: (input: TInput, confirmation: BillingConfirmation) => Promise<TResult>;
-  lookup?: (operation: string, idempotencyKey: string) => Promise<unknown>;
+  /** Custom transports must forward signal so timeout/pause/unmount aborts the real GET. */
+  lookup?: (operation: string, idempotencyKey: string, signal?: AbortSignal) => Promise<unknown>;
   fingerprint?: (input: TInput) => string;
   parseQuote?: (quote: TQuote) => BillingQuote | null;
   billingFromResult?: (result: TResult) => BillingSummary | null;
@@ -223,7 +224,7 @@ interface BoundAttempt<TInput, TResult, TLookup extends BillingOperationLookupLi
   fingerprint: string;
   fingerprintInput: (input: TInput) => string;
   submit: (input: TInput, confirmation: BillingConfirmation) => Promise<TResult>;
-  lookup: (operation: string, idempotencyKey: string) => Promise<unknown>;
+  lookup: (operation: string, idempotencyKey: string, signal?: AbortSignal) => Promise<unknown>;
   parseLookup: (value: unknown) => TLookup | null;
   billingFromResult: (result: TResult) => BillingSummary | null;
   resultFromLookup: (lookup: TLookup) => TResult | null;
@@ -508,20 +509,22 @@ function useBillingActionInternal<
   }, []);
 
   const pauseLookup = useCallback(() => {
-    queryOwner.current = null;
+    // Abort the actual request before allowing another cycle to acquire ownership.
     clearPollTimers();
+    queryOwner.current = null;
     setIsLookingUp(false);
   }, [clearPollTimers]);
 
-  // Bound both intervals and a hung transport. Late responses have no state owner.
-  // Cancellation stops local recovery, never the server operation and never sends POST.
-  const boundedWait = useCallback(<T,>(pending: Promise<T>, ms: number) =>
+  // Both the wait and the underlying GET are cancelled. Rejecting only this outer
+  // promise would leave hung fetches alive and stack requests on every continuation.
+  // Aborting a read never cancels the server operation or sends another POST.
+  const boundedWait = useCallback(<T,>(pending: Promise<T>, ms: number, abort?: () => void) =>
     new Promise<T>((resolve, reject) => {
       const finish = () => {
         window.clearTimeout(timer);
         pollTimers.current.delete(timer);
       };
-      const cancel = () => { finish(); reject(new Error("计费结果确认中")); };
+      const cancel = () => { finish(); abort?.(); reject(new Error("计费结果确认中")); };
       const timer = window.setTimeout(cancel, ms);
       pollTimers.current.set(timer, cancel);
       pending.then((value) => { finish(); resolve(value); }, (caught) => { finish(); reject(caught); });
@@ -547,10 +550,12 @@ function useBillingActionInternal<
         }
         if (!current()) return;
         try {
+          const controller = new AbortController();
           const raw = await boundedWait(attempt.lookup(
             attempt.operation,
-            attempt.confirmation.idempotency_key
-          ), 10_000);
+            attempt.confirmation.idempotency_key,
+            controller.signal
+          ), 10_000, () => controller.abort());
           if (!current()) return;
           if (applyLookup(raw, attempt)) return;
         } catch (caught) {
@@ -691,15 +696,16 @@ function useBillingActionInternal<
       explicitParseLookup ??
       ((value) => parseBillingOperationLookup(value) as TLookup | null);
     const defaultLookup = explicitParseLookup
-      ? (operation: string, idempotencyKey: string) =>
+      ? (operation: string, idempotencyKey: string, signal?: AbortSignal) =>
           getBillingOperation<TLookup>(
             operation as InternalLookupOperation<TLookup> & InternalStrictCustomGuard<TLookup>,
             idempotencyKey,
             explicitParseLookup as BillingOperationLookupParser<TLookup> &
-              InternalStrictCustomGuard<TLookup>
+              InternalStrictCustomGuard<TLookup>,
+            { signal }
           )
-      : (operation: string, idempotencyKey: string) =>
-          getBillingOperation(operation as BillingKnownOperation, idempotencyKey);
+      : (operation: string, idempotencyKey: string, signal?: AbortSignal) =>
+          getBillingOperation(operation as BillingKnownOperation, idempotencyKey, { signal });
     const attempt: BoundAttempt<TInput, TResult, TLookup> = {
       operation: optionsRef.current.operation,
       input,
