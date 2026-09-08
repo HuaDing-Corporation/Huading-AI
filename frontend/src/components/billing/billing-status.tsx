@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 export interface BillingStatusProps {
   summary: unknown;
   querying?: boolean;
+  lookupBusy?: boolean;
   onContinueLookup?: () => void;
   onDismiss?: () => void;
   className?: string;
@@ -17,6 +18,7 @@ export interface BillingStatusProps {
 export function BillingStatus({
   summary,
   querying = false,
+  lookupBusy = false,
   onContinueLookup,
   onDismiss,
   className
@@ -28,7 +30,7 @@ export function BillingStatus({
   if (!parsed) {
     content = (
       <>
-        <CircleDashed aria-hidden size={16} className={querying ? "animate-spin" : undefined} />
+        <CircleDashed aria-hidden size={16} className={lookupBusy ? "animate-spin" : undefined} />
         <span>计费结果确认中</span>
       </>
     );
@@ -90,8 +92,8 @@ export function BillingStatus({
       {((querying && onContinueLookup) || onDismiss) && (
         <div className="ml-auto flex flex-none items-center gap-2">
           {querying && onContinueLookup && (
-            <Button type="button" variant="soft" size="sm" onClick={onContinueLookup}>
-              继续查询
+            <Button type="button" variant="soft" size="sm" onClick={onContinueLookup} disabled={lookupBusy}>
+              {lookupBusy ? "查询中…" : "继续查询"}
             </Button>
           )}
           {onDismiss && (

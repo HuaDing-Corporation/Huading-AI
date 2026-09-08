@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { render } from "@/lib/billing/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Deferred upload promise so we can resolve it AFTER a remove.

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import {
   billingFromApiError,
@@ -15,6 +16,7 @@ import {
   type StrictCustomBillingOperationLookup
 } from "@/lib/api/billing";
 import { ApiError, isApiError } from "@/lib/api/client";
+import { quotaKey } from "@/lib/api/keys";
 import type {
   BillingConfirmation,
   BillingKnownOperation,
@@ -149,6 +151,8 @@ export interface UseBillingActionResult<
   quote: TQuote | null;
   billing: BillingSummary | null;
   result: TResult | null;
+  /** POST receipt only (e.g. task IDs); does NOT establish completion or billing. */
+  acceptedResult: TResult | null;
   lookup: TLookup | null;
   error: unknown;
   errorMessage: string | null;
@@ -156,9 +160,12 @@ export interface UseBillingActionResult<
   expiresInSeconds: number | null;
   expired: boolean;
   canConfirm: boolean;
+  /** Active bounded GET cycle; phase=querying also includes paused/unknown outcomes. */
+  isLookingUp: boolean;
   estimate: () => Promise<void>;
   confirm: () => Promise<void>;
   continueLookup: () => Promise<void>;
+  pauseLookup: () => void;
   retry: () => void;
   reset: () => void;
 }
@@ -205,9 +212,7 @@ function isUnknownPostResult(error: unknown): boolean {
   return (
     !isApiError(error) ||
     error.status === 0 ||
-    error.status === 502 ||
-    error.status === 503 ||
-    error.status === 504 ||
+    error.status >= 500 ||
     error.code === "INVALID_BILLING_RESPONSE"
   );
 }
@@ -222,9 +227,7 @@ interface BoundAttempt<TInput, TResult, TLookup extends BillingOperationLookupLi
   parseLookup: (value: unknown) => TLookup | null;
   billingFromResult: (result: TResult) => BillingSummary | null;
   resultFromLookup: (lookup: TLookup) => TResult | null;
-  now: () => number;
   confirmation: BillingConfirmation;
-  replayed: boolean;
   run: number;
 }
 
@@ -282,6 +285,7 @@ function useBillingActionInternal<
 >(
   options: InternalBillingActionOptions<TInput, TQuote, TResult, TLookup>
 ): UseBillingActionResult<TInput, TQuote, TResult, TLookup> {
+  const queryClient = useQueryClient();
   const optionsRef = useRef(options);
   // Deliberately recompute on every render: React state should be immutable, but a
   // billing boundary must also detect an in-place mutation of the same object.
@@ -293,7 +297,7 @@ function useBillingActionInternal<
   const currentFingerprint = useRef(fingerprint);
   const mounted = useRef(true);
   const submitOwner = useRef<number | null>(null);
-  const queryOwner = useRef<number | null>(null);
+  const queryOwner = useRef<symbol | null>(null);
   const attemptClosed = useRef(false);
   const runId = useRef(0);
   const boundFingerprint = useRef<string | null>(null);
@@ -301,21 +305,30 @@ function useBillingActionInternal<
   const parsedQuoteRef = useRef<BillingQuote | null>(null);
   const keyRef = useRef<string | null>(null);
   const attemptRef = useRef<BoundAttempt<TInput, TResult, TLookup> | null>(null);
-  const pollTimers = useRef(new Set<number>());
-  const submitBoundRef = useRef<
-    (attempt: BoundAttempt<TInput, TResult, TLookup>) => Promise<void>
-  >(
-    async () => undefined
-  );
+  const pollTimers = useRef(new Map<number, () => void>());
 
   const [phase, setPhase] = useState<BillingActionPhase>("idle");
+  const [isLookingUp, setIsLookingUp] = useState(false);
   const [quoteValue, setQuoteValue] = useState<TQuote | null>(null);
   const [billing, setBilling] = useState<BillingSummary | null>(null);
   const [result, setResult] = useState<TResult | null>(null);
+  const [acceptedResult, setAcceptedResult] = useState<TResult | null>(null);
   const [lookupValue, setLookupValue] = useState<TLookup | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [idempotencyKey, setIdempotencyKey] = useState<string | null>(null);
   const [expiresInSeconds, setExpiresInSeconds] = useState<number | null>(null);
+
+  // Refetch the shared server quota on verified ledger changes; never derive
+  // a wallet by adding/subtracting this operation's credits. Depend on scalar
+  // fields so repeated identical in_progress responses do not refetch forever.
+  const operationId = billing?.operation_id;
+  const billingStatus = billing?.status;
+  const held = billing?.held_credits;
+  const settled = billing?.settled_credits;
+  const released = billing?.released_credits;
+  useEffect(() => {
+    if (operationId) void queryClient.invalidateQueries({ queryKey: quotaKey });
+  }, [queryClient, operationId, billingStatus, held, settled, released]);
 
   useEffect(() => {
     optionsRef.current = options;
@@ -323,7 +336,8 @@ function useBillingActionInternal<
   }, [fingerprint, options]);
 
   const clearPollTimers = useCallback(() => {
-    for (const timer of pollTimers.current) window.clearTimeout(timer);
+    // Wake cancelled waits too: clearing a timeout alone leaves confirm() pending forever.
+    for (const cancel of [...pollTimers.current.values()]) cancel();
     pollTimers.current.clear();
   }, []);
 
@@ -332,6 +346,7 @@ function useBillingActionInternal<
     clearPollTimers();
     submitOwner.current = null;
     queryOwner.current = null;
+    setIsLookingUp(false);
     attemptClosed.current = false;
     boundFingerprint.current = null;
     quoteRef.current = null;
@@ -341,6 +356,7 @@ function useBillingActionInternal<
     setQuoteValue(null);
     setBilling(null);
     setResult(null);
+    setAcceptedResult(null);
     setLookupValue(null);
     setError(null);
     setIdempotencyKey(null);
@@ -363,11 +379,8 @@ function useBillingActionInternal<
       previousBinding.current.fingerprint !== fingerprint
     ) {
       previousBinding.current = { operation: options.operation, fingerprint };
-      if (
-        phase === "querying" &&
-        attemptRef.current !== null &&
-        !attemptClosed.current
-      ) return;
+      // Editing inputs cannot discard an already sent, unresolved operation.
+      if (attemptRef.current !== null && !attemptClosed.current) return;
       clearAttempt();
     }
   }, [clearAttempt, fingerprint, options.operation, phase]);
@@ -382,7 +395,7 @@ function useBillingActionInternal<
       );
       if (!mounted.current) return;
       setExpiresInSeconds(remaining);
-      if (remaining === 0 && (phase === "ready" || phase === "submitting")) setPhase("expired");
+      if (remaining === 0 && phase === "ready") setPhase("expired");
     };
     update();
     const timer = window.setInterval(update, 1000);
@@ -408,6 +421,7 @@ function useBillingActionInternal<
     setLookupValue(null);
     setError(null);
     setPhase("estimating");
+    setAcceptedResult(null);
     try {
       const raw = await estimateOptions.estimate(input);
       if (!mounted.current || id !== runId.current || currentFingerprint.current !== startFingerprint) return;
@@ -493,17 +507,25 @@ function useBillingActionInternal<
     return true;
   }, []);
 
-  const waitForNextLookup = useCallback(
-    () =>
-      new Promise<void>((resolve) => {
-        const timer = window.setTimeout(() => {
-          pollTimers.current.delete(timer);
-          resolve();
-        }, 1_000);
-        pollTimers.current.add(timer);
-      }),
-    []
-  );
+  const pauseLookup = useCallback(() => {
+    queryOwner.current = null;
+    clearPollTimers();
+    setIsLookingUp(false);
+  }, [clearPollTimers]);
+
+  // Bound both intervals and a hung transport. Late responses have no state owner.
+  // Cancellation stops local recovery, never the server operation and never sends POST.
+  const boundedWait = useCallback(<T,>(pending: Promise<T>, ms: number) =>
+    new Promise<T>((resolve, reject) => {
+      const finish = () => {
+        window.clearTimeout(timer);
+        pollTimers.current.delete(timer);
+      };
+      const cancel = () => { finish(); reject(new Error("计费结果确认中")); };
+      const timer = window.setTimeout(cancel, ms);
+      pollTimers.current.set(timer, cancel);
+      pending.then((value) => { finish(); resolve(value); }, (caught) => { finish(); reject(caught); });
+    }), []);
 
   const recoverUnknown = useCallback(async (
     attempt: BoundAttempt<TInput, TResult, TLookup>
@@ -513,23 +535,26 @@ function useBillingActionInternal<
       attempt.run !== runId.current ||
       queryOwner.current !== null
     ) return;
-    queryOwner.current = attempt.run;
+    const owner = Symbol("lookup-cycle");
+    queryOwner.current = owner;
+    const current = () => mounted.current && attempt.run === runId.current && queryOwner.current === owner;
+    setIsLookingUp(true);
     setPhase("querying");
-    let onlyNotFound = true;
     try {
       for (let index = 0; index < 3; index += 1) {
-        if (index > 0) await waitForNextLookup();
-        if (!mounted.current || attempt.run !== runId.current) return;
+        if (index > 0) {
+          await boundedWait(new Promise<never>(() => {}), 1_000).catch(() => undefined);
+        }
+        if (!current()) return;
         try {
-          const raw = await attempt.lookup(
+          const raw = await boundedWait(attempt.lookup(
             attempt.operation,
             attempt.confirmation.idempotency_key
-          );
-          if (!mounted.current || attempt.run !== runId.current) return;
-          onlyNotFound = false;
+          ), 10_000);
+          if (!current()) return;
           if (applyLookup(raw, attempt)) return;
         } catch (caught) {
-          if (!mounted.current || attempt.run !== runId.current) return;
+          if (!current()) return;
           if (!isApiError(caught) || caught.status !== 404) {
             const protocolBilling =
               isApiError(caught) && caught.code === "INVALID_BILLING_RESPONSE"
@@ -545,50 +570,24 @@ function useBillingActionInternal<
               setError(new Error("计费结果确认中"));
             }
             setPhase("querying");
-            return;
+            // Protocol errors stop here without weakening the strict parser.
+            if (isApiError(caught) && caught.code === "INVALID_BILLING_RESPONSE") return;
           }
         }
       }
 
-      if (!mounted.current || attempt.run !== runId.current) return;
-      if (!onlyNotFound) {
-        setError(new Error("计费结果确认中"));
-        setPhase("querying");
-        return;
-      }
-      const parsedQuote = parsedQuoteRef.current;
-      const expired =
-        !parsedQuote ||
-        Date.parse(parsedQuote.expires_at) <= attempt.now();
-      const bindingChanged =
-        optionsRef.current.operation !== attempt.operation ||
-        currentFingerprint.current !== attempt.fingerprint ||
-        attempt.fingerprintInput(attempt.input) !== attempt.fingerprint;
-      if (expired || bindingChanged) {
-        setError(new Error("计费结果确认中"));
-        setPhase("querying");
-        return;
-      }
-      if (attempt.replayed) {
-        setError(new Error("计费结果确认中"));
-        setPhase("querying");
-        return;
-      }
-
-      attempt.replayed = true;
-      if (queryOwner.current === attempt.run) queryOwner.current = null;
-      const acquiredSubmit = submitOwner.current === null;
-      if (submitOwner.current !== null && submitOwner.current !== attempt.run) return;
-      if (acquiredSubmit) submitOwner.current = attempt.run;
-      try {
-        await submitBoundRef.current(attempt);
-      } finally {
-        if (acquiredSubmit && submitOwner.current === attempt.run) submitOwner.current = null;
-      }
+      if (!current()) return;
+      // Even repeated 404s are not proof of non-execution. Only a user-initiated
+      // GET continuation is allowed; never replay POST or generate another key.
+      setError(new Error("计费结果确认中"));
+      setPhase("querying");
     } finally {
-      if (queryOwner.current === attempt.run) queryOwner.current = null;
+      if (current()) {
+        queryOwner.current = null;
+        setIsLookingUp(false);
+      }
     }
-  }, [applyLookup, waitForNextLookup]);
+  }, [applyLookup, boundedWait]);
 
   const submitBound = useCallback(async (
     attempt: BoundAttempt<TInput, TResult, TLookup>
@@ -606,6 +605,7 @@ function useBillingActionInternal<
       }
       const completed = await attempt.submit(attempt.input, attempt.confirmation);
       if (!mounted.current || attempt.run !== runId.current) return;
+      setAcceptedResult(completed);
       const parsedBilling = attempt.billingFromResult(completed);
       if (!parsedBilling || parsedBilling.idempotency_key !== attempt.confirmation.idempotency_key) {
         throw new ApiError("提交结果无法确认。", "INVALID_BILLING_RESPONSE", 502);
@@ -652,9 +652,6 @@ function useBillingActionInternal<
       }
     }
   }, [clearAttempt, recoverUnknown]);
-  useEffect(() => {
-    submitBoundRef.current = submitBound;
-  }, [submitBound]);
 
   const queryOriginal = useCallback(async () => {
     const attempt = attemptRef.current;
@@ -713,9 +710,7 @@ function useBillingActionInternal<
       parseLookup,
       billingFromResult: optionsRef.current.billingFromResult ?? defaultBillingFromResult,
       resultFromLookup: optionsRef.current.resultFromLookup,
-      now: optionsRef.current.now ?? Date.now,
       confirmation,
-      replayed: false,
       run: id
     };
     attemptRef.current = attempt;
@@ -738,6 +733,7 @@ function useBillingActionInternal<
     quote: quoteValue,
     billing,
     result,
+    acceptedResult,
     lookup: lookupValue,
     error,
     errorMessage: error ? messageFor(error) : null,
@@ -745,9 +741,11 @@ function useBillingActionInternal<
     expiresInSeconds,
     expired,
     canConfirm: phase === "ready" && !expired && quoteValue !== null,
+    isLookingUp,
     estimate,
     confirm,
     continueLookup: queryOriginal,
+    pauseLookup,
     retry: clearUserAttempt,
     reset: clearUserAttempt
   };

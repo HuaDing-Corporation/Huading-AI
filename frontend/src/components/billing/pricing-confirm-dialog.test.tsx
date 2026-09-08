@@ -45,6 +45,7 @@ function renderDialog(overrides: Partial<Parameters<typeof PricingConfirmDialog>
     quote: quote(),
     expiresInSeconds: 42,
     errorMessage: null,
+    allowCloseWhileQuerying: true,
     onEstimate: vi.fn(),
     onConfirm: vi.fn(),
     onCancel: vi.fn(),
@@ -75,13 +76,17 @@ describe("PricingConfirmDialog", () => {
     expect(props.onConfirm).not.toHaveBeenCalled();
   });
 
-  it("prevents closing or starting a new estimate while the result is querying", () => {
-    const view = renderDialog({ phase: "querying" });
-    const cancel = screen.getByRole("button", { name: "取消" });
-    expect(cancel).toBeDisabled();
+  it("lets an unknown result close or continue querying but never confirm or re-estimate", () => {
+    const onContinueLookup = vi.fn();
+    const view = renderDialog({ phase: "querying", onContinueLookup });
+    expect(screen.getByText(/结果尚未确认/)).toBeVisible();
+    const cancel = screen.getByRole("button", { name: "关闭" });
+    expect(cancel).toBeEnabled();
     fireEvent.click(cancel);
-    fireEvent.keyDown(document, { key: "Escape" });
-    expect(view.props.onCancel).not.toHaveBeenCalled();
+    expect(view.props.onCancel).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "继续查询" }));
+    expect(onContinueLookup).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "确认并继续" })).toBeDisabled();
 
     view.rerender(
       <PricingConfirmDialog
@@ -90,10 +95,15 @@ describe("PricingConfirmDialog", () => {
         expiresInSeconds={0}
       />
     );
-    const reestimate = screen.getByRole("button", { name: "重新获取价格" });
-    expect(reestimate).toBeDisabled();
-    fireEvent.click(reestimate);
+    expect(screen.queryByRole("button", { name: "重新获取价格" })).not.toBeInTheDocument();
     expect(view.props.onEstimate).not.toHaveBeenCalled();
+  });
+
+  it("does not offer parallel lookup during a running recovery cycle", () => {
+    const onContinueLookup = vi.fn();
+    renderDialog({ phase: "querying", lookupBusy: true, onContinueLookup });
+    expect(screen.getByRole("button", { name: "查询中…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "关闭" })).toBeEnabled();
   });
 
   it("recognizes loading, submitting, and expiry without changing the accessible action name", () => {

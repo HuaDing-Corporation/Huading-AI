@@ -166,7 +166,8 @@ export function EcomImageTool({
   // 同步锁：fireEvent / 快速连点会绕过 disabled，靠 ref 保证一次只触发一批下载（防连点）。
   const downloadingAllRef = useRef(false);
   const downloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const handledBillingResultRef = useRef<EcomImageSubmitResult | null>(null);
+  const trackedIdsRef = useRef(new Set<string>());
+  const submittedLabelRef = useRef(false);
 
   // 卸载时释放残留批量预览的 object URL，对齐 ImagePicker 防泄漏；并清掉批量下载复位定时器，避免卸载后 setState。
   // ECOM-SUBTOOL-KEEPALIVE-UI-0001：原注释写的「切走工具/模式即卸载」前提**已不成立** —— 子工具与顶层 mode
@@ -252,13 +253,16 @@ export function EcomImageTool({
   });
 
   useEffect(() => {
-    const result = billing.result;
-    if (billing.phase !== "succeeded" || !result || handledBillingResultRef.current === result) return;
-    handledBillingResultRef.current = result;
-    result.taskIds.forEach((id) => trackExisting(id, title, "photo", applyLabel));
+    const result = billing.result ?? billing.acceptedResult;
+    if (!result) return;
+    result.taskIds.forEach((id) => {
+      if (trackedIdsRef.current.has(id)) return;
+      trackedIdsRef.current.add(id);
+      trackExisting(id, title, "photo", submittedLabelRef.current);
+    });
     setSubmittedIds(result.taskIds);
-    setPricingOpen(false);
-  }, [applyLabel, billing.phase, billing.result, title, trackExisting]);
+    if (billing.phase === "succeeded") setPricingOpen(false);
+  }, [billing.acceptedResult, billing.phase, billing.result, title, trackExisting]);
 
   useEffect(() => {
     if (billing.phase === "failed" && billing.quote !== null && billing.errorMessage) {
@@ -267,6 +271,7 @@ export function EcomImageTool({
   }, [billing.errorMessage, billing.phase, billing.quote]);
 
   const onGenerate = () => {
+    if (billing.phase === "querying" || billing.phase === "submitting") return;
     setError(null);
     if (currentAssetIds.length === 0 || billingInput === null) {
       setError(copy.workbench.ecomUploadRequired);
@@ -275,7 +280,8 @@ export function EcomImageTool({
     // 附加门（如风格必填）复核：正常 UI 已 disabled，这里防 fireEvent/快速绕过 disabled
     // 提交不完整请求（对齐 new-video-form/ecom-video-form 在 onGenerate 顶部复核完整门）。
     if (!extraValid) return;
-    handledBillingResultRef.current = null;
+    trackedIdsRef.current.clear();
+    submittedLabelRef.current = applyLabel;
     onQuoteRequested?.(billingInput);
     billing.reset();
     setPricingOpen(true);
@@ -403,8 +409,8 @@ export function EcomImageTool({
       )}
 
       <Button variant="primary" size="lg" className="mt-1 w-full" onClick={onGenerate} disabled={generateDisabled}>
-        {submitting ? <RefreshCw size={18} strokeWidth={1.8} className="animate-spin" /> : icon}
-        {submitting ? copy.workbench.ecomGenerating : copy.workbench.ecomGenerate}
+        {submitting && (billing.phase !== "querying" || billing.isLookingUp) ? <RefreshCw size={18} strokeWidth={1.8} className="animate-spin" /> : icon}
+        {billing.phase === "querying" ? (billing.isLookingUp ? "查询中…" : "结果待确认") : submitting ? copy.workbench.ecomGenerating : copy.workbench.ecomGenerate}
       </Button>
 
       <PricingConfirmDialog
@@ -413,22 +419,34 @@ export function EcomImageTool({
         quote={billing.quote}
         expiresInSeconds={billing.expiresInSeconds}
         errorMessage={billing.errorMessage}
+        billing={billing.billing}
+        billingQuerying={billing.phase === "querying"}
+        lookupBusy={billing.isLookingUp}
+        allowCloseWhileQuerying
+        onContinueLookup={() => void billing.continueLookup()}
+        onViewTask={submittedIds.length ? () => {
+          billing.pauseLookup();
+          setPricingOpen(false);
+        } : undefined}
         onEstimate={() => void billing.estimate()}
         onConfirm={() => void billing.confirm()}
         onCancel={() => {
+          billing.pauseLookup();
           setPricingOpen(false);
           billing.reset();
         }}
       />
 
-      {billing.billing && (
+      {!pricingOpen && (billing.billing || billing.phase === "querying") && (
         <div className="mt-4 space-y-2">
           <BillingStatus
             summary={billing.billing}
             querying={billing.phase === "querying"}
+            lookupBusy={billing.isLookingUp}
             onContinueLookup={() => void billing.continueLookup()}
           />
-          {billing.billing.status === "partially_settled" && (
+          {billing.phase === "querying" && <p className="text-[12px] leading-5 text-ink-soft">结果尚未确认，请勿重复生成；继续查询原请求或查看下方任务，计费以查询结果和用量记录为准。</p>}
+          {billing.billing?.status === "partially_settled" && (
             <p className="text-[12px] leading-5 text-ink-soft">
               仅结算成功生成的图片，失败图片对应的冻结积分已释放。
             </p>

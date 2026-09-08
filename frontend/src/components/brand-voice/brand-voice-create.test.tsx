@@ -206,6 +206,7 @@ describe("BrandVoiceCreate", () => {
       expect(pickerRefresh).toHaveBeenCalledTimes(2);
     });
     expect(invalidate.mock.calls.map(([options]) => options?.queryKey)).toEqual([
+      ["quota"],
       brandVoiceOrderKeys.all,
       brandVoiceKeys.all,
       voicesKey
@@ -215,10 +216,10 @@ describe("BrandVoiceCreate", () => {
       <QueryClientProvider client={client}><AdjacentConsumers /><BrandVoiceCreate /></QueryClientProvider>
     );
     await act(async () => {});
-    expect(invalidate).toHaveBeenCalledTimes(3);
+    expect(invalidate).toHaveBeenCalledTimes(4);
   });
 
-  it("invalidates the same three caches exactly once after one CosyVoice success", async () => {
+  it("invalidates quota and the three adjacent caches exactly once after one CosyVoice success", async () => {
     let resolveEstimate!: (value: ReturnType<typeof quote>) => void;
     api.estimateCosy.mockImplementationOnce(() => new Promise<ReturnType<typeof quote>>((resolve) => {
       resolveEstimate = resolve;
@@ -235,6 +236,7 @@ describe("BrandVoiceCreate", () => {
     fireEvent.click(confirm);
     await screen.findByText("创建成功，本次创建免费（扣除 0 积分）");
     expect(invalidate.mock.calls.map(([options]) => options?.queryKey)).toEqual([
+      ["quota"],
       brandVoiceOrderKeys.all,
       brandVoiceKeys.all,
       voicesKey
