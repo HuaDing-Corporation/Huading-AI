@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal
@@ -21,7 +21,12 @@ from app.db.models import (
     VideoTask,
 )
 from app.services import provider_costs
-from app.services.pricing import DEFAULT_RATE_CREDITS, PRICING_POLICIES, resolve_rate
+from app.services.pricing import (
+    DEFAULT_RATE_CREDITS,
+    PRICING_POLICIES,
+    VIDEO_RESOLUTION_MULTIPLIERS_V1,
+    resolve_rate,
+)
 
 _SCRIPT_CPS = Decimal("5")
 _MIN_SECONDS = Decimal("3")
@@ -32,11 +37,7 @@ _SEEDANCE_I2V_MIN_SECONDS = 5
 _SEEDANCE_I2V_MAX_SECONDS = 120
 _VIDEO_GEN_MIN_DURATION_SEC = 4
 _VIDEO_GEN_MAX_DURATION_SEC = 15
-_VIDEO_GEN_RESOLUTION_MULTIPLIERS = {
-    "480p": Decimal("1.0000"),
-    "720p": Decimal("2.0000"),
-    "1080p": Decimal("5.0000"),
-}
+_VIDEO_GEN_RESOLUTION_MULTIPLIERS = VIDEO_RESOLUTION_MULTIPLIERS_V1
 _IMAGE_RESOLUTION_MULTIPLIERS = {
     "1k": Decimal("1.0000"),
     "2k": Decimal("1.6250"),
@@ -421,7 +422,7 @@ def _credit_units(value: Decimal) -> int:
 def _resolution_multiplier(
     resolution: str,
     *,
-    multipliers: dict[str, Decimal],
+    multipliers: Mapping[str, Decimal],
     media_type: str,
 ) -> Decimal:
     multiplier = multipliers.get(resolution)
@@ -437,7 +438,7 @@ def _resolution_multiplier(
 def _video_resolution_multiplier(resolution: str) -> Decimal:
     return _resolution_multiplier(
         resolution,
-        multipliers=_VIDEO_GEN_RESOLUTION_MULTIPLIERS,
+        multipliers=VIDEO_RESOLUTION_MULTIPLIERS_V1,
         media_type="video",
     )
 

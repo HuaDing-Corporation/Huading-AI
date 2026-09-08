@@ -36,6 +36,7 @@ from app.services.pricing import (
     PricingLine,
     PricingSnapshot,
     RateSource,
+    resolution_snapshot_fields,
     validate_pricing_snapshot,
 )
 
@@ -338,6 +339,7 @@ def _stored_snapshot(snapshot: PricingSnapshot) -> dict[str, object]:
                 "policy_key": line.rate.policy_key,
                 "policy_version": line.rate.policy_version,
                 "label": line.label,
+                **resolution_snapshot_fields(line),
             }
         )
     disclosures = []
