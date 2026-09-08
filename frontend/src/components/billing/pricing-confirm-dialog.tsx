@@ -17,7 +17,11 @@ export interface PricingConfirmDialogProps {
   errorMessage?: string | null;
   billing?: BillingSummary | null;
   billingQuerying?: boolean;
+  lookupBusy?: boolean;
+  /** Caller retains the original operation and a recovery entry after closing. */
+  allowCloseWhileQuerying?: boolean;
   onContinueLookup?: () => void;
+  onViewTask?: () => void;
   onEstimate: () => void;
   onConfirm: () => void;
   onCancel: () => void;
@@ -32,7 +36,10 @@ export function PricingConfirmDialog({
   errorMessage,
   billing = null,
   billingQuerying = false,
+  lookupBusy = false,
+  allowCloseWhileQuerying = false,
   onContinueLookup,
+  onViewTask,
   onEstimate,
   onConfirm,
   onCancel,
@@ -46,6 +53,7 @@ export function PricingConfirmDialog({
   const submitting = phase === "submitting";
   const querying = phase === "querying";
   const interactionLocked = submitting || querying;
+  const closeLocked = submitting || (querying && !allowCloseWhileQuerying);
   const expired = phase === "expired" || expiresInSeconds === 0;
   const estimateFailed = phase === "failed" && quote === null;
   const confirmable = phase === "ready" && quote !== null && !expired;
@@ -54,7 +62,7 @@ export function PricingConfirmDialog({
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        if (!next && !interactionLocked) onCancel();
+        if (!next && !closeLocked) onCancel();
       }}
     >
       <DialogContent className="flex max-h-[90vh] min-w-0 flex-col gap-5 overflow-y-auto p-5 sm:p-6">
@@ -67,12 +75,18 @@ export function PricingConfirmDialog({
           </DialogDescription>
         </div>
 
-        {(billing || billingQuerying) && (
+        {(billing || billingQuerying || querying) && (
           <BillingStatus
             summary={billing}
-            querying={billingQuerying}
+            querying={billingQuerying || querying}
+            lookupBusy={lookupBusy}
             onContinueLookup={onContinueLookup}
           />
+        )}
+        {querying && (
+          <p role="status" className="text-[13px] leading-5 text-ink-soft">
+            结果尚未确认，请勿重复生成。可继续查询原请求；关闭仅收起提示，不会取消服务端任务。计费以查询结果和用量记录为准。
+          </p>
         )}
 
         <div
@@ -151,7 +165,9 @@ export function PricingConfirmDialog({
               className={`flex items-center gap-2 text-[13px] ${expired ? "text-error-fg" : "text-ink-soft"}`}
             >
               <Clock3 aria-hidden size={15} className="flex-none" />
-              {expired
+              {querying
+                ? "已提交的请求不受报价到期影响，请继续查询原请求"
+                : expired
                 ? "报价已过期，请重新获取价格"
                 : `报价有效期：${expiresInSeconds ?? "--"} 秒`}
             </p>
@@ -175,10 +191,11 @@ export function PricingConfirmDialog({
         )}
 
         <div className="flex flex-col-reverse gap-2.5 sm:flex-row sm:justify-end">
-          <Button variant="soft" onClick={onCancel} disabled={interactionLocked}>
-            取消
+          {querying && onViewTask && <Button variant="soft" onClick={onViewTask}>查看任务</Button>}
+          <Button variant="soft" onClick={onCancel} disabled={closeLocked}>
+            {querying ? "关闭" : "取消"}
           </Button>
-          {expired ? (
+          {expired && !querying ? (
             <Button onClick={onEstimate} disabled={interactionLocked}>重新获取价格</Button>
           ) : (
             <>

@@ -1060,27 +1060,36 @@ function parseBillingOperationLookupUnchecked(
   return value as unknown as BillingOperationLookup | ExtendedBillingOperationLookup;
 }
 
+export interface BillingLookupRequestOptions {
+  signal?: AbortSignal;
+}
+
 export async function getBillingOperation<TOperation>(
   operation: IsAny<TOperation> extends true
     ? never
     : [TOperation] extends [BillingKnownOperation]
       ? TOperation
       : never,
-  idempotencyKey: string
+  idempotencyKey: string,
+  options?: BillingLookupRequestOptions
 ): Promise<BillingOperationLookupFor<Extract<TOperation, BillingKnownOperation>>>;
 export async function getBillingOperation<TLookup>(
   operation: LookupOperation<TLookup> & StrictCustomLookupGuard<TLookup>,
   idempotencyKey: string,
-  parseLookup: ((value: unknown) => TLookup | null) & StrictCustomLookupGuard<TLookup>
+  parseLookup: ((value: unknown) => TLookup | null) & StrictCustomLookupGuard<TLookup>,
+  options?: BillingLookupRequestOptions
 ): Promise<StrictCustomBillingOperationLookup<TLookup>>;
 export async function getBillingOperation(
   operation: string,
   idempotencyKey: string,
-  parseLookup: BillingOperationLookupParser<BillingOperationLookupLike> = (value) =>
-    parseBillingOperationLookup(value)
+  parserOrOptions?: BillingOperationLookupParser<BillingOperationLookupLike> | BillingLookupRequestOptions,
+  options?: BillingLookupRequestOptions
 ): Promise<BillingOperationLookupLike> {
+  const parseLookup = typeof parserOrOptions === "function" ? parserOrOptions : parseBillingOperationLookup;
+  const requestOptions = typeof parserOrOptions === "function" ? options : parserOrOptions;
   const value = await apiFetch<unknown>(
-    `/api/v1/billing/operations/by-idempotency/${encodeURIComponent(operation)}/${encodeURIComponent(idempotencyKey)}`
+    `/api/v1/billing/operations/by-idempotency/${encodeURIComponent(operation)}/${encodeURIComponent(idempotencyKey)}`,
+    { signal: requestOptions?.signal }
   );
   let parsed: BillingOperationLookupLike | null = null;
   let envelope: BillingOperationLookupEnvelope | null = null;

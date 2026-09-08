@@ -78,7 +78,7 @@ export function EcomImageModelForm({
   const [submittedId, setSubmittedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pricingOpen, setPricingOpen] = useState(false);
-  const handledBillingResultRef = useRef<EcomImageSubmitResult | null>(null);
+  const trackedIdsRef = useRef(new Set<string>());
   const submittedLabelRef = useRef(false);
 
   // 提示词反推「带入 · 电商图(AI 模特)」：注入自定义补充（= extra_prompt）+ 画面比例（REVERSE-DEEP-UI-0001 范围2）。
@@ -144,15 +144,16 @@ export function EcomImageModelForm({
   });
 
   useEffect(() => {
-    const result = modelBilling.result;
-    if (modelBilling.phase !== "succeeded" || !result || handledBillingResultRef.current === result) return;
-    handledBillingResultRef.current = result;
-    result.taskIds.forEach((id) =>
-      trackExisting(id, copy.workbench.ecomModelTitle, "photo", submittedLabelRef.current)
-    );
+    const result = modelBilling.result ?? modelBilling.acceptedResult;
+    if (!result) return;
+    result.taskIds.forEach((id) => {
+      if (trackedIdsRef.current.has(id)) return;
+      trackedIdsRef.current.add(id);
+      trackExisting(id, copy.workbench.ecomModelTitle, "photo", submittedLabelRef.current);
+    });
     setSubmittedId(result.taskIds[0] ?? null);
-    setPricingOpen(false);
-  }, [modelBilling.phase, modelBilling.result, trackExisting]);
+    if (modelBilling.phase === "succeeded") setPricingOpen(false);
+  }, [modelBilling.acceptedResult, modelBilling.phase, modelBilling.result, trackExisting]);
 
   useEffect(() => {
     if (modelBilling.phase === "failed" && modelBilling.quote !== null && modelBilling.errorMessage) {
@@ -161,6 +162,7 @@ export function EcomImageModelForm({
   }, [modelBilling.errorMessage, modelBilling.phase, modelBilling.quote]);
 
   const onGenerate = () => {
+    if (modelBilling.phase === "querying" || modelBilling.phase === "submitting") return;
     setError(null);
     // 商品图至少 1 张（D1）；模特图/风格均可选。正常 UI 已 disabled，这里防 fireEvent/快速绕过。
     if (productCount < 1) {
@@ -172,7 +174,7 @@ export function EcomImageModelForm({
       return;
     }
     if (!modelInput) return;
-    handledBillingResultRef.current = null;
+    trackedIdsRef.current.clear();
     submittedLabelRef.current = applyLabel;
     modelBilling.reset();
     setPricingOpen(true);
@@ -320,8 +322,8 @@ export function EcomImageModelForm({
       )}
 
       <Button variant="primary" size="lg" className="mt-1 w-full" onClick={onGenerate} disabled={generateDisabled}>
-        {modelPending ? <RefreshCw size={18} strokeWidth={1.8} className="animate-spin" /> : <Sparkles size={18} strokeWidth={1.8} />}
-        {modelPending ? copy.workbench.ecomGenerating : copy.workbench.ecomGenerate}
+        {modelPending && (modelBilling.phase !== "querying" || modelBilling.isLookingUp) ? <RefreshCw size={18} strokeWidth={1.8} className="animate-spin" /> : <Sparkles size={18} strokeWidth={1.8} />}
+        {modelBilling.phase === "querying" ? (modelBilling.isLookingUp ? "查询中…" : "结果待确认") : modelPending ? copy.workbench.ecomGenerating : copy.workbench.ecomGenerate}
       </Button>
 
       <PricingConfirmDialog
@@ -330,22 +332,34 @@ export function EcomImageModelForm({
         quote={modelBilling.quote}
         expiresInSeconds={modelBilling.expiresInSeconds}
         errorMessage={modelBilling.errorMessage}
+        billing={modelBilling.billing}
+        billingQuerying={modelBilling.phase === "querying"}
+        lookupBusy={modelBilling.isLookingUp}
+        allowCloseWhileQuerying
+        onContinueLookup={() => void modelBilling.continueLookup()}
+        onViewTask={submittedId ? () => {
+          modelBilling.pauseLookup();
+          setPricingOpen(false);
+        } : undefined}
         onEstimate={() => void modelBilling.estimate()}
         onConfirm={() => void modelBilling.confirm()}
         onCancel={() => {
+          modelBilling.pauseLookup();
           setPricingOpen(false);
           modelBilling.reset();
         }}
       />
 
-      {modelBilling.billing && (
+      {!pricingOpen && (modelBilling.billing || modelBilling.phase === "querying") && (
         <div className="mt-4 space-y-2">
           <BillingStatus
             summary={modelBilling.billing}
             querying={modelBilling.phase === "querying"}
+            lookupBusy={modelBilling.isLookingUp}
             onContinueLookup={() => void modelBilling.continueLookup()}
           />
-          {modelBilling.billing.status === "partially_settled" && (
+          {modelBilling.phase === "querying" && <p className="text-[12px] leading-5 text-ink-soft">结果尚未确认，请勿重复生成；继续查询原请求或查看下方任务，计费以查询结果和用量记录为准。</p>}
+          {modelBilling.billing?.status === "partially_settled" && (
             <p className="text-[12px] leading-5 text-ink-soft">
               仅结算成功生成的图片，失败图片对应的冻结积分已释放。
             </p>

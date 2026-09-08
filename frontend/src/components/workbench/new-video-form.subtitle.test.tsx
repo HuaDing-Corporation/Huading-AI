@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { render } from "@/lib/billing/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // 关键回归：字幕样式「不选不传」（向后兼容铁律，不回归 0001）+ 选了并入 subtitle_style。

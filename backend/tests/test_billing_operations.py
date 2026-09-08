@@ -843,11 +843,25 @@ def test_lookup_rejects_tampered_error_payload(db_session, verified_quote, unsaf
         )
 
 
-def test_lookup_returns_all_four_closed_union_states(db_session, verified_quote):
+def test_lookup_returns_all_four_closed_union_states(db_session, verified_quote, zero_price_quote):
     register_billing_result_schema("test_lookup_result", EcomBatchResult)
     register_billing_result_schema("test_lookup_resource", StoredResource)
 
-    reserved = reserve_batch(db_session, verified_quote)
+    # A no-resource pending state belongs to the free voice operation; e-commerce
+    # reservations require the real task/batch links covered by the API tests.
+    reserved = create_reserved_operation(
+        db_session,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        operation="cosyvoice_brand_voice_create",
+        idempotency_key=uuid4(),
+        request_hash="a" * 64,
+        verified_quote=zero_price_quote,
+        usage_allocations=[
+            UsageAllocation(0, 0, Decimal("1"), Decimal("0"), "cosyvoice", None, None)
+        ],
+    )
+    db_session.commit()
     reserved_lookup = lookup_operation(
         db_session,
         tenant_id="tenant-a",

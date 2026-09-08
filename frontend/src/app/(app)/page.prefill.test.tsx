@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, screen, within } from "@testing-library/react";
+import { render } from "@/lib/billing/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // page 级「用此文案」串联 prefill 回归：以真实 page + 真实三表单

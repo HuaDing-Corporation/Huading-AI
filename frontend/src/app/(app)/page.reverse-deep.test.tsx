@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { render } from "@/lib/billing/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
