@@ -102,7 +102,7 @@ export function BrandVoiceCreate({ renewVoice = null, onFinished }: BrandVoiceCr
       if (handledOrderResultRef.current === resultKey) return;
       handledOrderResultRef.current = resultKey;
       setPricingOpen(false);
-      setSuccess(`已冻结 ${orderBilling.result.billing.held_credits} 积分，等待平台人工交付；订单不自动超时且无法取消`);
+      setSuccess("订单已提交，请在「人工开通订单」查询最新交付及退款状态。");
       recorderResetRef.current();
       setConsent(false);
       setOrderInput(null);

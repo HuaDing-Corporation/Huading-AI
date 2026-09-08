@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Literal
 
 from sqlalchemy import select
@@ -56,6 +57,23 @@ class ResolvedRate:
     policy_version: int | None
 
 
+# Versioned rules are immutable: accepted snapshots must never be repriced.
+VIDEO_RESOLUTION_MULTIPLIERS_V1 = MappingProxyType(
+    {
+        "480p": Decimal("1.0000"),
+        "720p": Decimal("2.0000"),
+        "1080p": Decimal("5.0000"),
+    }
+)
+
+
+@dataclass(frozen=True)
+class VideoResolutionAdjustment:
+    resolution: str
+    multiplier: Decimal
+    policy_version: int = 1
+
+
 @dataclass(frozen=True)
 class PricingLine:
     operation: str
@@ -67,6 +85,7 @@ class PricingLine:
     rate_scope: RateScope
     rate: ResolvedRate
     label: str
+    video_resolution: VideoResolutionAdjustment | None = None
 
 
 @dataclass(frozen=True)
@@ -415,8 +434,26 @@ def _validate_line(line: PricingLine) -> None:
         None,
     )
     zero_rule = policy.zero_rule if policy is not None else ZeroRule.REQUIRE_POSITIVE
-    unit_credits = _validate_rate(line.rate, zero_rule=zero_rule)
-    if line.rate.unit_credits != line.unit_credits or unit_credits != line.unit_credits:
+    base_unit_credits = _validate_rate(line.rate, zero_rule=zero_rule)
+    multiplier = Decimal("1")
+    if line.video_resolution is not None:
+        adjustment = line.video_resolution
+        if (
+            (line.operation, line.capability, line.unit) != ("video_create", "video", "second")
+            or type(adjustment.policy_version) is not int
+            or adjustment.policy_version != 1
+            or VIDEO_RESOLUTION_MULTIPLIERS_V1.get(adjustment.resolution) != adjustment.multiplier
+        ):
+            raise PricingInvariantError("invalid video resolution adjustment")
+        multiplier = adjustment.multiplier
+    unit_credits = _decimal(
+        line.unit_credits,
+        field="unit_credits",
+        precision=_RATE_PRECISION,
+        scale=_RATE_SCALE,
+        allow_zero=zero_rule is ZeroRule.ALLOW_ZERO,
+    )
+    if base_unit_credits * multiplier != unit_credits:
         raise PricingInvariantError("line unit_credits must equal provenance rate")
     quantity = _decimal(
         line.quantity,
@@ -471,8 +508,16 @@ def build_simple_pricing(
     rate: ResolvedRate,
     quantity: Decimal,
     disclosures: tuple[PricingDisclosure, ...] = (),
+    video_resolution: str | None = None,
 ) -> PricingDraft:
     unit_credits = _validate_rate(rate, zero_rule=policy.zero_rule)
+    adjustment = None
+    if video_resolution is not None:
+        multiplier = VIDEO_RESOLUTION_MULTIPLIERS_V1.get(video_resolution)
+        if multiplier is None:
+            raise PricingInvariantError("invalid video resolution")
+        adjustment = VideoResolutionAdjustment(video_resolution, multiplier)
+        unit_credits *= multiplier.normalize()
     validated_quantity = _decimal(
         quantity,
         field="quantity",
@@ -491,6 +536,7 @@ def build_simple_pricing(
         rate_scope=policy.scope,
         rate=rate,
         label=policy.operation,
+        video_resolution=adjustment,
     )
     _validate_line(line)
     for disclosure in disclosures:
@@ -603,7 +649,23 @@ def _parse_rate(mapping: Mapping[str, object]) -> ResolvedRate:
 
 def _parse_line(value: object) -> PricingLine:
     mapping = _mapping(value, field="pricing line")
-    rate = _parse_rate(mapping)
+    rate_mapping = dict(mapping)
+    adjustment = None
+    if "video_resolution" in mapping:
+        metadata = _mapping(mapping["video_resolution"], field="video resolution")
+        rate_mapping["unit_credits"] = _required(metadata, "base_unit_credits")
+        adjustment = VideoResolutionAdjustment(
+            resolution=str(_required(metadata, "resolution")),
+            multiplier=_decimal(
+                _required(metadata, "multiplier"),
+                field="resolution multiplier",
+                precision=_RATE_PRECISION,
+                scale=_RATE_SCALE,
+                allow_zero=False,
+            ),
+            policy_version=_required(metadata, "policy_version"),
+        )
+    rate = _parse_rate(rate_mapping)
     try:
         scope = RateScope(str(_required(mapping, "rate_scope")))
     except ValueError as exc:
@@ -619,7 +681,13 @@ def _parse_line(value: object) -> PricingLine:
             scale=_QUANTITY_SCALE,
             allow_zero=False,
         ),
-        unit_credits=rate.unit_credits,
+        unit_credits=_decimal(
+            _required(mapping, "unit_credits"),
+            field="unit_credits",
+            precision=_RATE_PRECISION,
+            scale=_RATE_SCALE,
+            allow_zero=True,
+        ),
         subtotal_credits=_decimal(
             _required(mapping, "subtotal_credits"),
             field="subtotal_credits",
@@ -630,9 +698,23 @@ def _parse_line(value: object) -> PricingLine:
         rate_scope=scope,
         rate=rate,
         label=str(_required(mapping, "label")),
+        video_resolution=adjustment,
     )
     _validate_line(line)
     return line
+
+
+def resolution_snapshot_fields(line: PricingLine) -> dict[str, object]:
+    if line.video_resolution is None:
+        return {}
+    return {
+        "video_resolution": {
+            "resolution": line.video_resolution.resolution,
+            "multiplier": line.video_resolution.multiplier,
+            "policy_version": line.video_resolution.policy_version,
+            "base_unit_credits": line.rate.unit_credits,
+        }
+    }
 
 
 def _parse_disclosure(value: object) -> PricingDisclosure:

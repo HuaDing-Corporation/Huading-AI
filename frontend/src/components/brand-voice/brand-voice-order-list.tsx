@@ -3,7 +3,7 @@
 import { RefreshCw } from "lucide-react";
 
 import { Card, CardTitle } from "@/components/ui/card";
-import { useBrandVoiceOrders } from "@/lib/api/hooks";
+import { useBrandVoiceOrders, useQuota } from "@/lib/api/hooks";
 import type { BrandVoiceOrderRead } from "@/lib/api/brand-voice-orders";
 
 function rejectedCopy(order: BrandVoiceOrderRead): string {
@@ -46,6 +46,7 @@ function OrderStatus({ order }: { order: BrandVoiceOrderRead }) {
 
 export function BrandVoiceOrderList() {
   const orders = useBrandVoiceOrders();
+  const quota = useQuota();
   const items = orders.data ?? [];
 
   return (
@@ -55,12 +56,17 @@ export function BrandVoiceOrderList() {
         <button
           type="button"
           aria-label="查询退款状态"
-          onClick={() => void orders.refetch()}
+          onClick={() => void Promise.all([orders.refetch(), quota.refetch()])}
           className="inline-flex flex-none items-center gap-1 rounded-field px-2 py-1 text-[12px] text-gold-deep hover:bg-glass-hover"
         >
           <RefreshCw size={13} aria-hidden /> 刷新
         </button>
       </div>
+      {quota.isError && (
+        <p role="alert" className="mb-3 text-[13px] text-error-fg">
+          {quota.data ? "余额暂未同步，仍显示上次查询结果；请重试查询退款状态。" : "余额暂未同步，请重试查询退款状态。"}
+        </p>
+      )}
       {orders.isLoading ? (
         <p className="text-[13px] text-ink-soft">正在加载订单…</p>
       ) : orders.isError ? (

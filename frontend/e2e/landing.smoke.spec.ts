@@ -82,8 +82,9 @@ test("未登录进站=落地页；登录→控制台；已登录访 /landing=头
     // QuotaBadge 异步请求：必须等 mock 的真实长数字余额落屏后再量宽。少这一步会在余额尚未渲染时
     // 假绿，只有并行 E2E 稍慢时才偶发抓到 844/1000 把头像推到视口之外。
     await expect(page.getByText("当前余额 844/1000", { exact: true })).toBeVisible();
-    await expect(page.getByText("运行任务冻结 36", { exact: true })).toBeVisible();
-    await expect(page.getByText("人工交付冻结 30000", { exact: true })).toBeVisible();
+    await expect(page.getByText("当前订阅冻结总额 36", { exact: true })).toBeVisible();
+    await expect(page.getByText("人工交付冻结（跨订阅） 30000", { exact: true })).toBeVisible();
+    await expect(page.getByText("人工交付冻结与当前订阅冻结可能重叠，不相加。", { exact: true })).toBeVisible();
     await expect(page.getByText("待下期到账 0", { exact: true })).toBeVisible();
     // 无横向溢出：文档滚动宽度 = 视口宽度（多 1px 都算溢出）。
     const scrollW = await page.evaluate(() => document.documentElement.scrollWidth);
@@ -121,8 +122,9 @@ test("未登录进站=落地页；登录→控制台；已登录访 /landing=头
   await page.setViewportSize({ width: 1280, height: 800 }); // 切回桌面继续 ③
   await page.goto("/");
   await expect(page.getByText("当前余额 844/1000", { exact: true })).toBeVisible();
-  await expect(page.getByText("运行任务冻结 36", { exact: true })).toBeVisible();
-  await expect(page.getByText("人工交付冻结 30000", { exact: true })).toBeVisible();
+  await expect(page.getByText("当前订阅冻结总额 36", { exact: true })).toBeVisible();
+  await expect(page.getByText("人工交付冻结（跨订阅） 30000", { exact: true })).toBeVisible();
+  await expect(page.getByText("人工交付冻结与当前订阅冻结可能重叠，不相加。", { exact: true })).toBeVisible();
   await expect(page.getByText("待下期到账 0", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1280);
   await expect(page.getByText("华鼎 AI", { exact: true })).toBeVisible();

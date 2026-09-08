@@ -21,6 +21,7 @@ from app.services.pricing import (
     PricingInvariantError,
     PricingLine,
     PricingSnapshot,
+    resolution_snapshot_fields,
     validate_pricing_snapshot,
 )
 
@@ -112,6 +113,7 @@ def _line_payload(line: PricingLine) -> dict[str, object]:
         "rate_scope": line.rate_scope.value,
         **_rate_payload(line),
         "label": line.label,
+        **resolution_snapshot_fields(line),
     }
 
 

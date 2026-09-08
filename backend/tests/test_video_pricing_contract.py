@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -26,7 +27,296 @@ from app.services.video_pricing import (
     build_video_estimate,
     normalize_billable_tts_text,
     resolve_effective_video_mode,
+    resolve_video_pricing_context,
 )
+
+
+@pytest.mark.parametrize("scope", ["platform", "tenant"])
+def test_resolution_snapshot_preserves_rate_provenance(db_session, scope):
+    from app.services.billing_quotes import _snapshot_payload
+    from app.services.pricing import validate_pricing_snapshot
+
+    user = db_session.get(User, "user-a")
+    payload = _brand_i2v_payload(db_session, user, "cosyvoice-voice-clone", "1080p")
+    rate = CreditRate(
+        tenant_id=user.tenant_id if scope == "tenant" else None,
+        capability="video",
+        unit="second",
+        credits_per_unit=Decimal("123.4567"),
+        effective_at=datetime.now(UTC),
+    )
+    db_session.add(rate)
+    db_session.commit()
+    draft = resolve_video_pricing_context(db_session, user=user, payload=payload).pricing_draft
+    snapshot = validate_pricing_snapshot(_snapshot_payload(draft))
+    line = snapshot.pricing_lines[0]
+    assert line.rate.rate_id == rate.id
+    assert line.rate.source.value == f"{scope}_rate"
+    assert line.rate.unit_credits == Decimal("123.4567")
+    assert line.unit_credits == Decimal("617.2835")
+    assert line.quantity == 5
+    assert line.subtotal_credits == Decimal("3086.4175")
+    assert snapshot.payable_credits == 3088
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("multiplier", "2"),
+        ("multiplier", "NaN"),
+        ("resolution", "4k"),
+        ("policy_version", True),
+        ("policy_version", 2),
+        ("base_unit_credits", "999"),
+    ],
+)
+def test_resolution_snapshot_rejects_invalid_adjustments(db_session, field, value):
+    from app.services.billing_quotes import _snapshot_payload
+    from app.services.pricing import PricingInvariantError, validate_pricing_snapshot
+
+    user = db_session.get(User, "user-a")
+    payload = _brand_i2v_payload(db_session, user, "cosyvoice-voice-clone", "1080p")
+    draft = resolve_video_pricing_context(db_session, user=user, payload=payload).pricing_draft
+    snapshot = _snapshot_payload(draft)
+    snapshot["pricing_lines"][0]["video_resolution"][field] = value
+    with pytest.raises(PricingInvariantError):
+        validate_pricing_snapshot(snapshot)
+
+
+@pytest.mark.parametrize("resolution", ["480p", "720p", "1080p"])
+def test_resolution_keeps_avatar_and_preset_legacy_pricing(db_session, resolution):
+    user = db_session.get(User, "user-a")
+    payload = _brand_i2v_payload(db_session, user, "cosyvoice-voice-clone", resolution)
+    avatar = payload.model_copy(update={"video_mode": "avatar_talk", "avatar_asset_id": "a"})
+    avatar_quote = build_video_estimate(db_session, user=user, payload=avatar)
+    assert Decimal(avatar_quote.breakdown[0].unit_credits) == 180
+    assert avatar_quote.payable_credits == 541
+    assert avatar_quote.disclosures == []
+    preset = Voice(provider="doubao-seed-tts", voice_code="preset", display_name="Preset")
+    db_session.add(preset)
+    db_session.commit()
+    legacy = payload.model_copy(update={"voice_id": preset.id})
+    estimate = build_video_estimate(db_session, user=user, payload=legacy)
+    assert estimate.pricing_contract == "legacy_estimate"
+    assert estimate.estimated_credits == {"480p": 501, "720p": 1001, "1080p": 2501}[resolution]
+    with pytest.raises(AppError, match="voice_id is required"):
+        build_video_estimate(
+            db_session, user=user, payload=payload.model_copy(update={"voice_id": None})
+        )
+
+
+def test_resolution_invalid_request_rejected_before_quote(db_session):
+    from pydantic import ValidationError
+
+    user = db_session.get(User, "user-a")
+    payload = _brand_i2v_payload(db_session, user, "cosyvoice-voice-clone", "480p")
+    with pytest.raises(ValidationError):
+        VideoGenerateRequest.model_validate(
+            {**payload.model_dump(exclude_unset=True), "resolution": "4k"}
+        )
+
+
+def test_resolution_metadata_is_authenticated_even_when_payable_is_unchanged(db_session):
+    from dataclasses import replace
+
+    from app.services.billing_quotes import verify_quote
+    from app.services.pricing import build_composite_pricing
+    from app.services.video_pricing import video_pricing_request_hash
+
+    user = db_session.get(User, "user-a")
+    payload = _brand_i2v_payload(db_session, user, "cosyvoice-voice-clone", "1080p")
+    quote = build_video_estimate(db_session, user=user, payload=payload)
+    draft = resolve_video_pricing_context(db_session, user=user, payload=payload).pricing_draft
+    line = draft.pricing_lines[0]
+    # Same effective 500/second, but a forged claim that all 500 came from the
+    # base rate. Arithmetic alone cannot authenticate the accepted provenance.
+    changed = replace(
+        line, rate=replace(line.rate, unit_credits=line.unit_credits), video_resolution=None
+    )
+    modified = build_composite_pricing(
+        operation=draft.operation,
+        lines=(changed, *draft.pricing_lines[1:]),
+        disclosures=draft.disclosures,
+    )
+    assert modified.payable_credits == draft.payable_credits
+    args = dict(
+        token=quote.quote_token,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        operation="video_create",
+        request_hash=video_pricing_request_hash(payload),
+    )
+    assert verify_quote(**args, current_draft=draft).snapshot.payable_credits == 2501
+    with pytest.raises(AppError) as error:
+        verify_quote(**args, current_draft=modified)
+    assert error.value.code == "PRICE_CHANGED"
+
+
+@pytest.mark.parametrize("provider", ["cosyvoice-voice-clone", "doubao-voice-clone"])
+@pytest.mark.parametrize("resolution,multiplier", [("480p", 1), ("720p", 2), ("1080p", 5)])
+@pytest.mark.parametrize("duration,actual", [(5, 5), (6, 6)])
+@pytest.mark.parametrize("outcome", ["success", "failure", "legacy"])
+def test_resolution_create_reserve_settle_replay(
+    monkeypatch, auth_context, auth_db, provider, resolution, multiplier, duration, actual, outcome
+):
+    from app.api.v1.routes import videos as videos_route
+    from app.services import video_pricing
+    from app.services.billing_operations import complete_failed
+    from app.workers import avatar_talk
+
+    with auth_db() as db:
+        payload = _brand_i2v_payload(
+            db, db.get(User, auth_context["user_id"]), provider, resolution, duration
+        ).model_dump(mode="json", exclude_unset=True)
+    queued = []
+
+    class Queue:
+        def apply_async(self, *, args, task_id, queue=None):
+            queued.append(task_id)
+            return type("Result", (), {"status": "PENDING"})()
+
+    class Store:
+        def update(self, *args, **kwargs):
+            pass
+
+    class Storage:
+        def presign_get_url(self, key, **kwargs):
+            return f"https://storage.test/{key}"
+
+    monkeypatch.setattr(videos_route, "generate_seedance_i2v_task", Queue())
+    monkeypatch.setattr(videos_route, "_validate_product_image_storage_keys", lambda *a, **k: None)
+    monkeypatch.setattr(avatar_talk, "SessionLocal", auth_db)
+    monkeypatch.setattr(avatar_talk, "build_progress_store", lambda _: Store())
+    monkeypatch.setattr(avatar_talk, "create_object_storage", lambda _: Storage())
+    client = TestClient(app)
+    with monkeypatch.context() as old_version:
+        if outcome == "legacy":
+            original = video_pricing.build_simple_pricing
+
+            def old_pricing(**kwargs):
+                kwargs.pop("video_resolution", None)
+                return original(**kwargs)
+
+            old_version.setattr(video_pricing, "build_simple_pricing", old_pricing)
+        quote = client.post(
+            "/api/v1/videos/estimate", headers=auth_context["headers"], json=payload
+        )
+        assert quote.status_code == 200, quote.text
+        headers = {
+            **auth_context["headers"],
+            "Idempotency-Key": str(uuid4()),
+            "X-Huading-Quote": quote.json()["data"]["quote_token"],
+        }
+        created = client.post("/api/v1/videos", headers=headers, json=payload)
+    assert created.status_code == 202, created.text
+    task_id = created.json()["data"]["task_id"]
+    billed_multiplier = 1 if outcome == "legacy" else multiplier
+    tts_exact = Decimal("0.8") if provider == "cosyvoice-voice-clone" else Decimal(0)
+    tts_rounded = 1 if tts_exact else 0
+    reserved = ((duration + 4) // 5) * 5 * 100 * billed_multiplier + tts_rounded
+    assert quote.json()["data"]["payable_credits"] == reserved
+    with auth_db() as db:
+        operation = db.query(BillingOperation).filter_by(result_id=task_id).one()
+        operation_id = operation.id
+        snapshot = deepcopy(operation.pricing_snapshot)
+        line = snapshot["pricing_lines"][0]
+        assert Decimal(line["quantity"]) == ((duration + 4) // 5) * 5
+        if outcome == "legacy":
+            assert "video_resolution" not in line
+        else:
+            assert line["video_resolution"] == {
+                "resolution": resolution,
+                "multiplier": str(multiplier),
+                "base_unit_credits": "100",
+                "policy_version": 1,
+            }
+        subscription = db.query(Subscription).filter_by(tenant_id=auth_context["tenant_id"]).one()
+        assert subscription.quota_credits_reserved == reserved
+        assert subscription.quota_credits_used == 0
+        task = db.get(VideoTask, task_id)
+        task.params = {**task.params, "resolution": "1080p" if resolution != "1080p" else "480p"}
+        # Accepted pricing must not consult today's mutable request or rate row.
+        db.add(
+            CreditRate(
+                tenant_id=None,
+                capability="video",
+                unit="second",
+                credits_per_unit=Decimal("777"),
+                effective_at=datetime.now(UTC),
+            )
+        )
+        db.commit()
+
+    def synthetic_step(ctx):
+        if outcome == "failure":
+            raise RuntimeError("synthetic generation failure")
+        ctx.duration_sec = 2
+        ctx.seedance_billable_seconds = actual
+        ctx.provider_cost_cents = 321
+        ctx.storage_key = f"tenants/{auth_context['tenant_id']}/videos/{task_id}/final.mp4"
+        if tts_exact:
+            usage = (
+                ctx.db.query(UsageRecord)
+                .filter_by(billing_operation_id=operation_id, capability="tts")
+                .one()
+            )
+            usage.cost_cents = 1
+            usage.provider_usage = {"characters": 8, "cost_cents": 1}
+        return ctx
+
+    monkeypatch.setattr(avatar_talk, "ECOM_I2V_STEPS", [("upload", 100, synthetic_step)])
+
+    def run():
+        return avatar_talk.run_seedance_i2v_pipeline(
+            tenant_id=auth_context["tenant_id"], task_id=task_id
+        )
+
+    if outcome == "failure":
+        with pytest.raises(RuntimeError, match="synthetic generation failure"):
+            run()
+        with auth_db() as db:
+            complete_failed(
+                db, operation_id=operation_id, code="REPLAY", http_status=502, sanitized_detail=None
+            )
+            db.commit()
+    else:
+        assert run() == {"task_id": task_id, "status": "done"}
+        assert run() == {"task_id": task_id, "status": "done"}
+    replay = client.post("/api/v1/videos", headers=headers, json=payload)
+    assert replay.status_code == (502 if outcome == "failure" else 202), replay.text
+    assert queued == [task_id]
+    lookup = client.get(
+        f"/api/v1/billing/operations/by-idempotency/video_create/{headers['Idempotency-Key']}",
+        headers=auth_context["headers"],
+    )
+    assert lookup.status_code == 200, lookup.text
+    recovered = lookup.json()["data"]["billing"]
+    assert Decimal(recovered["requested_credits"]) == reserved
+    with auth_db() as db:
+        assert db.query(BillingOperation).count() == 1
+        operation = db.get(BillingOperation, operation_id)
+        assert operation.pricing_snapshot == snapshot
+        assert operation.requested_credits == reserved
+        settled = 0 if outcome == "failure" else actual * 100 * billed_multiplier + tts_rounded
+        assert operation.settled_credits == settled
+        assert operation.released_credits == reserved - settled
+        assert Decimal(recovered["settled_credits"]) == settled
+        assert Decimal(recovered["released_credits"]) == reserved - settled
+        subscription = db.query(Subscription).filter_by(tenant_id=auth_context["tenant_id"]).one()
+        assert subscription.quota_credits_reserved == 0
+        assert subscription.quota_credits_used == settled
+        usages = db.query(UsageRecord).filter_by(billing_operation_id=operation_id).all()
+        if outcome == "failure":
+            assert all(usage.status == "released" for usage in usages)
+        else:
+            video_usage = next(usage for usage in usages if usage.capability == "video")
+            assert video_usage.quantity == actual
+            assert video_usage.credits == actual * 100 * billed_multiplier
+            assert video_usage.cost_cents == 321
+            assert db.get(VideoTask, task_id).params["billing_actual_seconds"] == f"{actual}.000"
+            assert sum(usage.credits for usage in usages) == (
+                actual * 100 * billed_multiplier + tts_exact
+            )
 
 
 @pytest.mark.parametrize(
@@ -91,6 +381,59 @@ def test_billable_tts_text_rejects_missing_or_blank_script() -> None:
 
     assert caught.value.code == "BILLABLE_TEXT_REQUIRED"
     assert caught.value.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("provider", "resolution", "payable"),
+    [
+        ("cosyvoice-voice-clone", "480p", 501),
+        ("cosyvoice-voice-clone", "720p", 1001),
+        ("cosyvoice-voice-clone", "1080p", 2501),
+        ("doubao-voice-clone", "480p", 500),
+        ("doubao-voice-clone", "720p", 1000),
+        ("doubao-voice-clone", "1080p", 2500),
+    ],
+)
+def test_brand_i2v_resolution_payable(db_session, provider, resolution, payable) -> None:
+    user = db_session.get(User, "user-a")
+    payload = _brand_i2v_payload(db_session, user, provider, resolution)
+    estimate = build_video_estimate(db_session, user=user, payload=payload)
+    assert isinstance(estimate, BillingQuote)
+    assert estimate.payable_credits == payable
+    assert Decimal(estimate.breakdown[0].quantity) == 5
+    assert Decimal(estimate.breakdown[0].unit_credits) == (payable // 5)
+    assert Decimal(estimate.disclosures[0].reference_unit_credits) == 100
+    assert resolution in estimate.disclosures[0].rendered_text
+    assert "video_resolution" not in estimate.breakdown[0].model_dump()
+
+
+def _brand_i2v_payload(db, user, provider, resolution, duration=5):
+    db.query(Plan).one().code = "huading"
+    voice = BrandVoice(
+        tenant_id=user.tenant_id,
+        owner_user_id=user.id,
+        name="Brand voice",
+        provider=provider,
+        speaker_id="synthetic-speaker",
+        status="ready",
+        consent_confirmed=True,
+        activated_at=datetime.now(UTC) - timedelta(days=1),
+        expires_at=datetime.now(UTC) + timedelta(days=364),
+    )
+    db.add(voice)
+    db.commit()
+    return VideoGenerateRequest.model_validate(
+        {
+            "video_mode": "seedance_i2v",
+            "topic": "Product",
+            "voice_id": voice.id,
+            "script": "12345678",
+            "duration_sec": duration,
+            "resolution": resolution,
+            "product_image_keys": ["uploads/product.png"],
+            "scene_prompt": "Product showcase",
+        }
+    )
 
 
 def test_cosyvoice_video_quote_has_exactly_one_character_line(db_session) -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
@@ -22,6 +22,7 @@ from app.services.plan_access import (
 )
 from app.services.pricing import (
     PRICING_POLICIES,
+    PricingDisclosure,
     PricingDraft,
     build_composite_pricing,
     build_simple_pricing,
@@ -120,8 +121,29 @@ def _brand_pricing_draft(
             now=requested_at,
         ),
         quantity=quantity,
+        video_resolution=payload.resolution if mode == "seedance_i2v" else None,
     )
     lines = [base.pricing_lines[0]]
+    disclosures = ()
+    adjustment = lines[0].video_resolution
+    if adjustment is not None:
+        line = lines[0]
+        explanation = (
+            f"{adjustment.resolution}: 基础 {line.rate.unit_credits.normalize():f} 积分/秒"
+            f" × {adjustment.multiplier.normalize():f}，"
+            f"按生成秒数计费；配音字符费不乘分辨率倍率。"
+        )
+        lines[0] = replace(line, label=f"视频生成（{adjustment.resolution}）")
+        disclosures = (
+            PricingDisclosure(
+                key="video_resolution_v1",
+                rendered_text=explanation,
+                copy_version=1,
+                unit=line.unit,
+                rate_scope=line.rate_scope,
+                rate=line.rate,
+            ),
+        )
     if brand_voice.provider == "cosyvoice-voice-clone":
         tts_policy = PRICING_POLICIES["cosyvoice_brand_tts"]
         tts = build_simple_pricing(
@@ -139,6 +161,7 @@ def _brand_pricing_draft(
         build_composite_pricing(
             operation="video_create",
             lines=lines,
+            disclosures=disclosures,
         ),
         quantity,
     )

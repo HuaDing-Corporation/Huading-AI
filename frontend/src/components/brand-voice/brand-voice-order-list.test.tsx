@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const orders = vi.hoisted(() => ({ data: [] as Array<Record<string, unknown>>, refetch: vi.fn() }));
 
 vi.mock("@/lib/api/hooks", () => ({
+  useQuota: () => ({ refetch: vi.fn().mockResolvedValue({ isError: false }) }),
   useBrandVoiceOrders: () => ({
     data: orders.data,
     isLoading: false,
