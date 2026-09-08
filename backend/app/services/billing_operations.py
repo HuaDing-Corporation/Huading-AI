@@ -11,7 +11,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 import structlog
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlalchemy import inspect as sqlalchemy_inspect
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -25,6 +25,7 @@ from app.db.models import (
     BrandVoiceOrder,
     Subscription,
     UsageRecord,
+    VideoTask,
 )
 from app.schemas.brand_voice_orders import BrandVoiceOrderRead
 from app.schemas.brand_voices import BrandVoiceRead
@@ -47,6 +48,7 @@ _QUANTITY_SCALE = 3
 _QUANTITY_UPPER_BOUND = Decimal("1000000000")
 _CREDITS_SCALE = 6
 _CREDITS_UPPER_BOUND = Decimal("1000000000000")
+_ECOM_IMAGE_OPERATIONS = frozenset({"ecom_cutout", "ecom_model"})
 
 
 class BillingInvariantError(AppError):
@@ -113,6 +115,19 @@ class BillingInProgressLookup(_BillingModel):
     resource: Any | None = None
     result: None = None
     failure: None = None
+
+    @model_validator(mode="after")
+    def _validate_pending_ecom_response(self):
+        if self.operation in _ECOM_IMAGE_OPERATIONS:
+            if (
+                self.result_type != "ecom_image_batch"
+                or self.result_id is None
+                or self.resource is not None
+            ):
+                raise ValueError("pending e-commerce lookup requires a batch id and no resource")
+            if str(UUID(self.result_id)) != self.result_id:
+                raise ValueError("pending e-commerce batch identifier is not canonical")
+        return self
 
 
 class BillingSucceededLookup(_BillingModel):
@@ -1194,24 +1209,49 @@ def _lookup_operation_once(
     idempotency_key: UUID,
     allow_stale_reread: bool = True,
 ) -> BillingOperationLookup | None:
-    row = _operation_for_key(
-        db,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        operation=operation,
-        idempotency_key=idempotency_key,
-    )
+    ecom_tasks: list[VideoTask | None] = []
+    if operation in _ECOM_IMAGE_OPERATIONS:
+        # One statement observes parent, allocations and immutable task links at
+        # the same PostgreSQL READ COMMITTED snapshot while a worker settles.
+        records = db.execute(
+            select(BillingOperation, UsageRecord, VideoTask)
+            .outerjoin(UsageRecord, UsageRecord.billing_operation_id == BillingOperation.id)
+            .outerjoin(VideoTask, VideoTask.id == UsageRecord.video_task_id)
+            .where(
+                BillingOperation.tenant_id == tenant_id,
+                BillingOperation.user_id == user_id,
+                BillingOperation.operation == operation,
+                BillingOperation.idempotency_key == str(idempotency_key),
+            )
+            .order_by(UsageRecord.billing_item_index)
+            .execution_options(populate_existing=not (db.new or db.dirty or db.deleted))
+        ).all()
+        row = records[0][0] if records else None
+        usages = [usage for _, usage, _ in records if usage is not None]
+        ecom_tasks = [task for _, usage, task in records if usage is not None]
+    else:
+        row = _operation_for_key(
+            db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            operation=operation,
+            idempotency_key=idempotency_key,
+        )
+        usages = (
+            []
+            if row is None
+            else list(
+                db.scalars(
+                    select(UsageRecord)
+                    .where(UsageRecord.billing_operation_id == row.id)
+                    .order_by(UsageRecord.billing_item_index)
+                )
+            )
+        )
     if row is None:
         return None
     summary = billing_summary(row)
     snapshot = _snapshot_from_operation(row)
-    usages = list(
-        db.scalars(
-            select(UsageRecord)
-            .where(UsageRecord.billing_operation_id == row.id)
-            .order_by(UsageRecord.billing_item_index)
-        )
-    )
     _validate_lookup_usages(row, snapshot, usages)
     common = {
         "operation": row.operation,
@@ -1220,7 +1260,9 @@ def _lookup_operation_once(
     }
     if row.status == "in_progress":
         resource = None
-        if row.result_type is not None or row.result_payload is not None:
+        if row.operation in _ECOM_IMAGE_OPERATIONS:
+            _validate_pending_ecom_batch(row, usages, ecom_tasks)
+        elif row.result_type is not None or row.result_payload is not None:
             resource = _lookup_resource(db, row, allow_stale_reread=allow_stale_reread)
         if row.error_code or row.error_http_status or row.error_payload:
             raise BillingInvariantError("in-progress operation contains an error")
@@ -1266,6 +1308,43 @@ def _lookup_operation_once(
             ),
         )
     raise BillingInvariantError("operation lookup state is invalid")
+
+
+def _validate_pending_ecom_batch(
+    operation: BillingOperation,
+    usages: Sequence[UsageRecord],
+    tasks: Sequence[VideoTask | None],
+) -> None:
+    if operation.result_type != "ecom_image_batch" or operation.result_payload is not None:
+        raise BillingInvariantError("pending e-commerce batch result is invalid")
+    try:
+        if str(UUID(operation.result_id or "")) != operation.result_id:
+            raise ValueError("noncanonical batch identifier")
+    except ValueError as exc:
+        raise BillingInvariantError("pending e-commerce batch identifier is invalid") from exc
+    seen_task_ids: set[str] = set()
+    # Tasks can finish before the separate batch settlement commits, so validate
+    # immutable allocation links without inferring a result from task status.
+    for usage, task in zip(usages, tasks, strict=True):
+        if task is None or task.id in seen_task_ids:
+            raise BillingInvariantError("pending e-commerce batch task is missing or duplicated")
+        params = task.params
+        if (
+            task.tenant_id != operation.tenant_id
+            or task.created_by_user_id != operation.user_id
+            or task.mode != "photo"
+            or task.video_mode != "photo"
+            or not isinstance(params, dict)
+            or params.get("kind") != operation.operation
+            or params.get("billing_operation_id") != operation.id
+            or params.get("batch_id") != operation.result_id
+            or type(params.get("billing_item_index")) is not int
+            or params["billing_item_index"] != usage.billing_item_index
+            or not isinstance(params.get("source_asset_id"), str)
+            or not 1 <= len(params["source_asset_id"]) <= 36
+        ):
+            raise BillingInvariantError("pending e-commerce batch task link is invalid")
+        seen_task_ids.add(task.id)
 
 
 @dataclass(frozen=True)
