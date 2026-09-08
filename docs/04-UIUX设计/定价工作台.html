@@ -42,7 +42,7 @@
       font-family: -apple-system, "SF Pro Display", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
       -webkit-font-smoothing: antialiased;
     }
-    .freeze-banner {
+    .status-banner {
       position: sticky;
       z-index: 10;
       top: 0;
@@ -60,13 +60,14 @@
       backdrop-filter: blur(16px);
       -webkit-backdrop-filter: blur(16px);
     }
-    .freeze-banner::before { content: "◆"; font-size: 10px; transform: translateY(2px); }
+    .status-banner::before { content: "◆"; font-size: 10px; transform: translateY(2px); }
     main { width: min(1240px, calc(100% - 40px)); margin: 0 auto; padding: 34px 0 52px; }
     .eyebrow { margin: 0 0 10px; color: var(--gold-deep); font-size: 11px; font-weight: 700; letter-spacing: .22em; }
     .masthead { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 32px; margin-bottom: 24px; }
     h1 { margin: 0; font-size: clamp(27px, 3vw, 40px); font-weight: 650; letter-spacing: .03em; line-height: 1.15; }
     .lead { max-width: 720px; margin: 10px 0 0; color: var(--ink-soft); font-size: 13.5px; line-height: 1.75; }
     .as-of { margin: 0; color: var(--ink-faint); font-size: 11px; line-height: 1.7; text-align: right; }
+    .as-of code { color: var(--gold-deep); }
     .glass {
       border: 1px solid var(--glass-line);
       background: var(--glass);
@@ -102,6 +103,11 @@
     .price { color: var(--ink); font-size: 12.5px; font-weight: 620; font-variant-numeric: tabular-nums; }
     .price.empty { color: var(--ink-faint); font-weight: 500; }
     .settlement { color: var(--ink-soft); font-size: 11.5px; line-height: 1.55; }
+    .acceptance, .next-step { margin: 7px 0 0; color: var(--ink-soft); font-size: 11.5px; line-height: 1.65; overflow-wrap: anywhere; }
+    .next-step { color: var(--gold-deep); }
+    .evidence { margin: 0 0 18px; padding: 16px 20px; border-radius: 20px; font-size: 12px; line-height: 1.75; }
+    .evidence p { margin: 0; }
+    .evidence p + p { margin-top: 6px; color: var(--ink-soft); }
     .badges { display: flex; flex-wrap: wrap; gap: 6px; }
     .badge { display: inline-flex; align-items: center; width: fit-content; min-height: 25px; padding: 4px 9px; border-radius: 10px; font-size: 10.5px; font-weight: 650; line-height: 1.35; }
     .badge.waiting { background: var(--waiting-bg); color: var(--waiting-fg); }
@@ -117,7 +123,7 @@
     .noscript { margin: 20px; color: var(--offline-fg); }
     @media (max-width: 760px) {
       main { width: min(100% - 24px, 560px); padding: 24px 0 36px; }
-      .freeze-banner { align-items: flex-start; justify-content: flex-start; padding: 9px 12px; font-size: 12px; }
+      .status-banner { align-items: flex-start; justify-content: flex-start; padding: 9px 12px; font-size: 12px; }
       .masthead { grid-template-columns: 1fr; gap: 8px; margin-bottom: 18px; }
       .as-of { text-align: left; }
       .summary { grid-template-columns: 1fr 1fr 1fr; }
@@ -134,8 +140,7 @@
       td:nth-child(1) { grid-column: 1 / -1; }
       td:nth-child(2) { grid-column: 1 / -1; padding: 9px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
       td:nth-child(3) { grid-column: 1 / -1; }
-      td:nth-child(4) { grid-column: 1; }
-      td:nth-child(5) { grid-column: 2; }
+      td:nth-child(4), td:nth-child(5) { grid-column: 1 / -1; }
       .settlement::before { content: "结算 · "; color: var(--ink-faint); }
       .notes { grid-template-columns: 1fr; }
       .note + .note { border-top: 1px solid var(--line); border-left: 0; }
@@ -144,22 +149,22 @@
   </style>
 </head>
 <body>
-  <div class="freeze-banner" role="status">生产环境冻结；以下状态不代表已生效</div>
+  <div class="status-banner" role="status">价格已部署；验收待闭环，修复补丁尚未发布</div>
   <main>
     <header class="masthead">
       <div>
         <p class="eyebrow">HUADING · PRICING CLOSURE</p>
         <h1>定价闭环工作台</h1>
-        <p class="lead">用于研发、财务与运营共同核对能力价格、结算条件和入口可见性。价格、状态、可见性及统计均由下方同一数据源生成。</p>
+        <p class="lead">用于研发、财务与运营共同核对生产价格、结算条件与验收待办。已部署不等于验收完成；价格、逐项状态、入口可见性及统计由同一数据源生成。</p>
       </div>
-      <p class="as-of">SOURCE CONTROLLED<br>等待发布核对</p>
+      <p class="as-of">更新时间 · <time datetime="2026-09-08">2026-09-08（Asia/Shanghai）</time><br>当前生产版本 · <code data-testid="production-version">ad54dc80</code><br>人工核对快照，非实时监控</p>
     </header>
 
     <section class="summary glass" aria-label="闭环状态统计">
       <article class="metric">
-        <span class="metric-label">价格完成，待上线</span>
-        <strong class="metric-value" data-testid="count-priced-waiting-release">—</strong>
-        <span class="metric-note">仅表示实现闭环</span>
+        <span class="metric-label">价格已部署，验收待闭环</span>
+        <strong class="metric-value" data-testid="count-deployed-pending-acceptance">—</strong>
+        <span class="metric-note">价格生效，验收仍有待办</span>
       </article>
       <article class="metric">
         <span class="metric-label">延期处理／尚未闭环</span>
@@ -173,45 +178,51 @@
       </article>
     </section>
 
+    <section class="evidence glass" aria-label="已核验记录与待发布修复">
+      <p>本轮 <strong data-testid="count-real-settled">—</strong> 项已各完成一次真实结算，共 <strong data-testid="real-settled-credits">—</strong> 积分；本轮账户当前冻结 <strong data-testid="current-held-credits">0</strong> 积分。</p>
+      <p data-testid="acceptance-scope">以上只覆盖文案、画面提示词、抠图、模特图四次真实请求，不代表全平台 E2E 完成；未新增付费测试授权。</p>
+      <p data-testid="repair-status">图片处理中查询 500、确认框与余额恢复补丁仍为本地待发布：后端已审过，前端仍审中。当前生产未包含这些修复，须完成独立审查与发布门禁后再验收。</p>
+    </section>
+
     <p class="legend" aria-label="状态图例">
-      <span><i></i>价格完成，待上线</span>
+      <span><i></i>价格已部署，验收待闭环</span>
       <span><i class="deferred"></i>延期处理／尚未闭环</span>
       <span><i class="offline"></i>已下线</span>
     </p>
 
     <section class="ledger glass" aria-labelledby="ledger-title">
       <table>
-        <caption><strong id="ledger-title">能力闭环明细</strong><span>每一行独立记录闭环状态与入口可见性；未定价不等于免费。</span></caption>
-        <colgroup><col style="width:24%"><col style="width:18%"><col style="width:25%"><col style="width:19%"><col style="width:14%"></colgroup>
-        <thead><tr><th scope="col">能力</th><th scope="col">价格</th><th scope="col">结算条件</th><th scope="col">闭环状态</th><th scope="col">入口</th></tr></thead>
+        <caption><strong id="ledger-title">能力闭环明细</strong><span>逐项区分部署、验收与后续待办；未定价不等于免费。</span></caption>
+        <colgroup><col style="width:21%"><col style="width:16%"><col style="width:20%"><col style="width:32%"><col style="width:11%"></colgroup>
+        <thead><tr><th scope="col">能力</th><th scope="col">价格</th><th scope="col">结算条件</th><th scope="col">状态 / 验收 / 待办</th><th scope="col">入口</th></tr></thead>
         <tbody id="pricing-rows"></tbody>
       </table>
       <noscript><p class="noscript">请启用 JavaScript 以从规范数据源生成明细。</p></noscript>
     </section>
 
     <footer class="notes glass" aria-label="工作台口径">
-      <article class="note"><b>价格口径</b><p>仅展示规范数据中的价格字符串；所有合计均在运行时从同一数组计算。</p></article>
+      <article class="note"><b>价格口径</b><p>价格保持既定口径；分类计数与本轮已结算合计从同一逐项数组生成，不把未定价显示为零。</p></article>
       <article class="note"><b>结算口径</b><p>服务端报价、冻结、结算与释放是唯一权威；本页不参与客户扣费计算。</p></article>
-      <article class="note"><b>发布口径</b><p>“待上线”不等于“已上线”。生产解冻必须另走发布门禁与明确审批。</p></article>
+      <article class="note"><b>验收口径</b><p>价格已部署与修复待发布分开记录。本地测试不代替真实人工注册、父视频授权或生产验收。</p></article>
     </footer>
   </main>
   <script>
     const pricingRows = [
-      { key: "script_generate", name: "AI 口播文案", closure: "priced_waiting_release", visibility: "visible", price: "1 积分/次", settlement: "成功返回合法文案后结算" },
-      { key: "scene_prompt", name: "画面提示词", closure: "priced_waiting_release", visibility: "visible", price: "30 积分/次", settlement: "成功返回正向与负向提示词后结算" },
-      { key: "ecom_cutout", name: "电商抠图", closure: "priced_waiting_release", visibility: "visible", price: "80 积分/张", settlement: "按成功图片聚合结算" },
-      { key: "ecom_model", name: "AI 模特图", closure: "priced_waiting_release", visibility: "visible", price: "80 积分/张", settlement: "按成功图片聚合结算" },
-      { key: "doubao_brand_voice", name: "豆包品牌音色", closure: "priced_waiting_release", visibility: "visible", price: "30000 积分/个/365 天", settlement: "先冻结，人工交付后结算" },
-      { key: "cosyvoice", name: "CosyVoice", closure: "priced_waiting_release", visibility: "visible", price: "创建免费；使用时 0.1 积分/字", settlement: "字符费随父视频成功结算" },
-      { key: "seedance_t2v", name: "seedance_t2v", closure: "deferred_unpriced", visibility: "visible", price: null, settlement: "延期处理／尚未闭环" },
-      { key: "static_template", name: "static_template", closure: "deferred_unpriced", visibility: "visible", price: null, settlement: "延期处理／尚未闭环" },
-      { key: "publish_draft", name: "发布草稿", closure: "deferred_unpriced", visibility: "hidden", price: null, settlement: "保持隐藏" },
-      { key: "marketing_poster", name: "电商营销海报", closure: "offline", visibility: "hidden", price: null, settlement: "已下线" },
+      { key: "script_generate", name: "AI 口播文案", closure: "deployed_pending_acceptance", visibility: "visible", price: "1 积分/次", settlement: "成功返回合法文案后结算", realSettledCredits: 1, acceptance: "真实请求 1 次，已结清 1 积分。", next: "其余失败、释放与幂等验收待汇总，不能据单次成功关闭全平台验收。" },
+      { key: "scene_prompt", name: "画面提示词", closure: "deployed_pending_acceptance", visibility: "visible", price: "30 积分/次", settlement: "成功返回正向与负向提示词后结算", realSettledCredits: 30, acceptance: "真实请求 1 次，已结清 30 积分。", next: "其余失败、释放与幂等验收待汇总，不能据单次成功关闭全平台验收。" },
+      { key: "ecom_cutout", name: "电商抠图", closure: "deployed_pending_acceptance", visibility: "visible", price: "80 积分/张", settlement: "按成功图片聚合结算", realSettledCredits: 80, acceptance: "真实请求 1 次，已结清 80 积分。", next: "处理中查询 500、确认框与余额修复尚未发布；待前端审查、发布门禁与恢复验收。" },
+      { key: "ecom_model", name: "AI 模特图", closure: "deployed_pending_acceptance", visibility: "visible", price: "80 积分/张", settlement: "按成功图片聚合结算", realSettledCredits: 80, acceptance: "真实请求 1 次，已结清 80 积分。", next: "处理中查询 500、确认框与余额修复尚未发布；待前端审查、发布门禁与恢复验收。" },
+      { key: "doubao_brand_voice", name: "豆包品牌音色", closure: "deployed_pending_acceptance", visibility: "visible", price: "30000 积分/个/365 天", settlement: "先冻结，人工官方注册交付后结算；拒绝则释放", acceptance: "隔离验收待结果；真实人工注册未做。", next: "汇总隔离证据；官方注册由用户人工完成，本地测试不可替代真实交付。" },
+      { key: "cosyvoice", name: "CosyVoice", closure: "deployed_pending_acceptance", visibility: "visible", price: "创建免费；使用时 0.1 积分/字", settlement: "字符费随父视频成功结算", acceptance: "隔离验收待结果；真实父视频未授权。", next: "汇总隔离证据；真实父视频测试须另获授权，不自动新增付费请求。" },
+      { key: "seedance_t2v", name: "seedance_t2v", closure: "deferred_unpriced", visibility: "visible", price: null, settlement: "延期处理／尚未闭环", acceptance: "暂缓定价，不下线；尚无计费闭环结论。", next: "维持当前入口与未定价状态，等待产品定价决定。" },
+      { key: "static_template", name: "static_template", closure: "deferred_unpriced", visibility: "visible", price: null, settlement: "延期处理／尚未闭环", acceptance: "暂缓定价，不下线；尚无计费闭环结论。", next: "维持当前入口与未定价状态，等待产品定价决定。" },
+      { key: "publish_draft", name: "发布草稿", closure: "deferred_unpriced", visibility: "hidden", price: null, settlement: "保持隐藏", acceptance: "未定价，入口保持隐藏；无收费验收结论。", next: "不恢复入口、不生成伪零价格，等待产品决定。" },
+      { key: "marketing_poster", name: "电商营销海报", closure: "offline", visibility: "hidden", price: null, settlement: "已下线", acceptance: "维持下线与未定价决定；不计入已部署价格。", next: "保持隐藏，不执行付费生成或自动恢复入口。" },
     ];
 
     const countByClosure = (closure) => pricingRows.filter((row) => row.closure === closure).length;
     const closureMeta = {
-      priced_waiting_release: { label: "价格完成，待上线", className: "waiting" },
+      deployed_pending_acceptance: { label: "价格已部署，验收待闭环", className: "waiting" },
       deferred_unpriced: { label: "延期处理／尚未闭环", className: "deferred" },
       offline: { label: "已下线", className: "offline" }
     };
@@ -227,9 +238,12 @@
       return element;
     };
 
-    document.querySelector('[data-testid="count-priced-waiting-release"]').textContent = countByClosure("priced_waiting_release");
+    document.querySelector('[data-testid="count-deployed-pending-acceptance"]').textContent = countByClosure("deployed_pending_acceptance");
     document.querySelector('[data-testid="count-deferred-unpriced"]').textContent = countByClosure("deferred_unpriced");
     document.querySelector('[data-testid="count-offline"]').textContent = countByClosure("offline");
+    const realSettledRows = pricingRows.filter((row) => row.realSettledCredits !== undefined);
+    document.querySelector('[data-testid="count-real-settled"]').textContent = realSettledRows.length;
+    document.querySelector('[data-testid="real-settled-credits"]').textContent = realSettledRows.reduce((sum, row) => sum + row.realSettledCredits, 0);
 
     const body = document.getElementById("pricing-rows");
     pricingRows.forEach((row, index) => {
@@ -251,6 +265,8 @@
       const closure = document.createElement("td");
       const closureBadge = closureMeta[row.closure];
       closure.append(node("span", `badge ${closureBadge.className}`, closureBadge.label));
+      closure.append(node("p", "acceptance", `验收 · ${row.acceptance}`));
+      closure.append(node("p", "next-step", `待办 · ${row.next}`));
       const visibility = document.createElement("td");
       const visibilityBadge = visibilityMeta[row.visibility];
       visibility.append(node("span", `badge ${visibilityBadge.className}`, visibilityBadge.label));
