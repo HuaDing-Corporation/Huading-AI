@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { API_BASE_URL } from "@/lib/api/client";
-import { MAX_UPLOAD_BYTES, uploadImage, uploadProductImage, validateImageFile } from "@/lib/api/uploads";
+import { uploadAvatarVideo, uploadImage, uploadProductImage, uploadReverseVideo, uploadVideoGenReference, validateImageFile } from "@/lib/api/uploads";
+import { validateAvatarVideoFile } from "@/lib/media/avatar-video";
+import { validateReverseVideoFile } from "@/lib/media/reverse-video";
+import { validateReferenceVideoFile } from "@/lib/media/reference-video";
 import { copy } from "@/lib/copy";
 
 function mockFetchOnce(data: unknown) {
@@ -44,6 +47,27 @@ describe("uploads — i2v product image vs avatar image (correct endpoints)", ()
   });
 });
 
+describe("video transports do not inherit the image cap", () => {
+  it.each([
+    { upload: uploadAvatarVideo, validate: validateAvatarVideoFile, bytes: 209715200, path: "/api/v1/uploads/videos" },
+    { upload: uploadReverseVideo, validate: validateReverseVideoFile, bytes: 209715200, path: "/api/v1/uploads/videos?purpose=reverse_prompt" },
+    { upload: uploadVideoGenReference, validate: validateReferenceVideoFile, bytes: 104857600, path: "/api/v1/uploads/videos?purpose=video_gen_reference" }
+  ])("preserves $bytes bytes for $path", async ({ upload, validate, bytes, path }) => {
+    // Metadata-sized File: verifies routing/guard separation without allocating
+    // repeated 200MiB buffers. Not evidence of actual 200MiB server acceptance.
+    const file = new File(["video"], "source.mp4", { type: "video/mp4" });
+    Object.defineProperty(file, "size", { value: bytes });
+    expect(validate(file)).toBeNull();
+    const oversize = new File(["video"], "oversize.mp4", { type: "video/mp4" });
+    Object.defineProperty(oversize, "size", { value: bytes + 1 });
+    expect(validate(oversize)).not.toBeNull();
+    const fetchMock = mockFetchOnce({ asset_id: "video-1", type: "video", status: "ready" });
+    await expect(upload(file)).resolves.toMatchObject({ asset_id: "video-1" });
+    expect(fetchMock.mock.calls[0][0]).toBe(`${API_BASE_URL}${path}`);
+    expect(fetchMock.mock.calls[0][1].body.get("file")).toBe(file);
+  });
+});
+
 // REVERSE-PROMPT-UI-0001 客户端校验红线：按真实 MIME（file.type）判定，**不信文件名后缀**；类型/体积超限
 // 返回友好中文，合规返回 null。提示词反推上传入口据此拦截，改判据此断言应红。
 describe("validateImageFile — 反推上传客户端校验（不信文件名，按 MIME）", () => {
@@ -63,8 +87,14 @@ describe("validateImageFile — 反推上传客户端校验（不信文件名，
     expect(validateImageFile(disguised)).toBe(copy.errors.uploadType);
   });
 
-  it("超过体积上限 → 友好中文过大错误", () => {
-    const big = new File([new Uint8Array(MAX_UPLOAD_BYTES + 1)], "big.png", { type: "image/png" });
+  it.each([10485761, 20971520, 31457280])("接受 %i bytes 图片（含旧 10MiB 以上及新上界）", (bytes) => {
+    const image = new File([new Uint8Array(bytes)], "image.png", { type: "image/png" });
+    expect(validateImageFile(image)).toBeNull();
+  });
+
+  it("31457281 bytes → 友好中文过大错误", () => {
+    const big = new File([new Uint8Array(31457281)], "big.png", { type: "image/png" });
     expect(validateImageFile(big)).toBe(copy.errors.uploadTooLarge);
+    expect(validateImageFile(big)).toContain("30MB");
   });
 });

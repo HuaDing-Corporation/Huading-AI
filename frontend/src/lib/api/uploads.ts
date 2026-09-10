@@ -1,10 +1,10 @@
-import { multipartFetch } from "@/lib/api/client";
+import { isApiError, multipartFetch } from "@/lib/api/client";
 import { copy } from "@/lib/copy";
 import type { AvatarVideoUploadResponse, UploadImageResponse, UploadResponse } from "@/lib/api/types";
 
 // Client-side guards (the backend enforces the same; this is a fast first pass).
 export const ALLOWED_UPLOAD_TYPES = ["image/jpeg", "image/png", "image/webp"];
-export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
+export const MAX_UPLOAD_BYTES = 30 * 1024 * 1024; // 30 MiB = 31457280 bytes per image
 
 /**
  * 图片上传客户端校验（快速第一道；后端仍会二次把关）。**按真实 MIME（file.type）判定，不信文件名后缀**——
@@ -17,10 +17,18 @@ export function validateImageFile(file: File): string | null {
 }
 
 /** 单文件 multipart 上传 → 解包封套。复用 client.multipartFetch（鉴权/401/封套单一实现）。 */
-function postImageUpload<T>(path: string, file: File): Promise<T> {
+async function postMediaUpload<T>(path: string, file: File): Promise<T> {
   const form = new FormData();
   form.append("file", file);
-  return multipartFetch<T>(path, form, { defaultErrorMessage: "上传失败", defaultErrorCode: "UPLOAD_ERROR" });
+  try {
+    return await multipartFetch<T>(path, form, { defaultErrorMessage: "上传失败", defaultErrorCode: "UPLOAD_ERROR" });
+  } catch (error) {
+    // 413 can come from a gateway/body limit, even for a file within the UI cap.
+    // Keep the original ApiError and its code/status/detail/outcome for diagnostics.
+    // Audio uses multipartFetch directly and retains its existing feedback.
+    if (isApiError(error) && error.status === 413) error.message = copy.errors.mediaUploadTooLarge;
+    throw error;
+  }
 }
 
 /**
@@ -28,7 +36,7 @@ function postImageUpload<T>(path: string, file: File): Promise<T> {
  * which persists an Asset row and returns its id.
  */
 export function uploadImage(file: File): Promise<UploadImageResponse> {
-  return postImageUpload<UploadImageResponse>("/api/v1/uploads/images", file);
+  return postMediaUpload<UploadImageResponse>("/api/v1/uploads/images", file);
 }
 
 /**
@@ -37,7 +45,7 @@ export function uploadImage(file: File): Promise<UploadImageResponse> {
  * `key`; the create-video request passes that as `image_key`.
  */
 export async function uploadProductImage(file: File): Promise<{ image_key: string }> {
-  const res = await postImageUpload<UploadResponse>("/api/v1/uploads", file);
+  const res = await postMediaUpload<UploadResponse>("/api/v1/uploads", file);
   return { image_key: res.key };
 }
 
@@ -47,7 +55,7 @@ export async function uploadProductImage(file: File): Promise<{ image_key: strin
  * AVATAR-VIDEO-SOURCE-UI-0001；端点/形状以 BE 包为准，mock 先行。
  */
 export function uploadAvatarVideo(file: File): Promise<AvatarVideoUploadResponse> {
-  return postImageUpload<AvatarVideoUploadResponse>("/api/v1/uploads/videos", file);
+  return postMediaUpload<AvatarVideoUploadResponse>("/api/v1/uploads/videos", file);
 }
 
 /**
@@ -55,7 +63,7 @@ export function uploadAvatarVideo(file: File): Promise<AvatarVideoUploadResponse
  * 让后端按用途归类（VIDEO-REVERSE-PROMPT-UI-0001；端点/形状以 BE-0001 为准，mock 先行）。
  */
 export function uploadReverseVideo(file: File): Promise<AvatarVideoUploadResponse> {
-  return postImageUpload<AvatarVideoUploadResponse>("/api/v1/uploads/videos?purpose=reverse_prompt", file);
+  return postMediaUpload<AvatarVideoUploadResponse>("/api/v1/uploads/videos?purpose=reverse_prompt", file);
 }
 
 /**
@@ -64,5 +72,5 @@ export function uploadReverseVideo(file: File): Promise<AvatarVideoUploadRespons
  * VIDEO-GEN-V2V-UI-0001；端点/purpose 命名以 BE 包为准，mock 先行，BE 合并后真联调对齐。
  */
 export function uploadVideoGenReference(file: File): Promise<AvatarVideoUploadResponse> {
-  return postImageUpload<AvatarVideoUploadResponse>("/api/v1/uploads/videos?purpose=video_gen_reference", file);
+  return postMediaUpload<AvatarVideoUploadResponse>("/api/v1/uploads/videos?purpose=video_gen_reference", file);
 }

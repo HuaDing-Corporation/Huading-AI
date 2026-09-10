@@ -48,13 +48,14 @@ describe("reverse-video 预检（VIDEO-REVERSE-PROMPT-UI-0001 · D2 放宽到 18
     expect(validateReverseVideoMetadata(meta(Number.NaN))).toBe(copy.errors.videoUnreadable);
   });
 
-  it("🔴 承重门13 · 60→180 的**文案全类**：上传提示与越界错误里都写 180、且不再出现 60", () => {
+  it("🔴 承重门13 · 时长文案仍写 180 秒、且不再出现旧 1–60 秒范围", () => {
     // 界面上用户能读到的两处（上传区提示 + 预检错误），必须与常量同口径。
     expect(copy.reverse.videoUploadHint).toContain("180");
     expect(copy.errors.reverseVideoDuration).toContain("180");
     // 🔴 「不再出现 60」是这条承重门的原话：只断「含 180」的话，把文案写成「1–60 秒（最长 180）」也能绿。
-    expect(copy.reverse.videoUploadHint).not.toContain("60");
-    expect(copy.errors.reverseVideoDuration).not.toContain("60");
+    // Match the obsolete duration, not the unrelated 2160-pixel upper bound.
+    expect(copy.reverse.videoUploadHint).not.toMatch(/1[–-]60\s*秒/);
+    expect(copy.errors.reverseVideoDuration).not.toMatch(/1[–-]60\s*秒/);
     // 常量与文案同源：改了常量却忘了改文案（或反之）→ 本条红。
     expect(copy.reverse.videoUploadHint).toContain(String(MAX_REVERSE_VIDEO_SEC));
     expect(copy.errors.reverseVideoDuration).toContain(String(MAX_REVERSE_VIDEO_SEC));
@@ -65,5 +66,37 @@ describe("reverse-video 预检（VIDEO-REVERSE-PROMPT-UI-0001 · D2 放宽到 18
     //    与反推视频时长毫无关系。此处显式钉住，防止下一轮有人「顺手一起改成 180」。
     const { MAX_SCRIPT_SECONDS } = await import("@/lib/sse/constants");
     expect(MAX_SCRIPT_SECONDS).toBe(60);
+  });
+
+  it.each([[240, 240], [240, 2160], [2160, 240], [2160, 2160], [1920, 1080], [1080, 1920]])(
+    "accepts BE-valid %i × %i pixels", (width, height) => {
+      expect(validateReverseVideoMetadata({ duration: 5, width, height })).toBeNull();
+    }
+  );
+
+  it.each([[239, 2160], [2160, 239], [240, 2161], [2161, 240], [3840, 2160], [0, 720]])(
+    "rejects BE-invalid %i × %i pixels with the specific resolution guidance", (width, height) => {
+      expect(validateReverseVideoMetadata({ duration: 5, width, height })).toEqual(expect.stringMatching(/短边.*240.*长边.*2160/));
+    }
+  );
+
+  it.each([[Number.NaN, 720], [720, Number.NaN], [Infinity, 720], [720, Infinity]])(
+    "rejects unreadable dimensions %s × %s", (width, height) => {
+      expect(validateReverseVideoMetadata({ duration: 5, width, height })).toBe(copy.errors.videoUnreadable);
+    }
+  );
+
+  it("retains the existing duration tolerance at both edges", () => {
+    expect(validateReverseVideoMetadata(meta(0.5))).toBeNull();
+    expect(validateReverseVideoMetadata(meta(180.5))).toBeNull();
+    expect(validateReverseVideoMetadata(meta(0.49))).toBe(copy.errors.reverseVideoDuration);
+    expect(validateReverseVideoMetadata(meta(180.51))).toBe(copy.errors.reverseVideoDuration);
+  });
+
+  it("keeps the exact 209715200-byte reverse cap", () => {
+    expect(validateReverseVideoFile(file("video/mp4", 200))).toBeNull();
+    const oversize = new File(["x"], "large.mp4", { type: "video/mp4" });
+    Object.defineProperty(oversize, "size", { value: 209715201 });
+    expect(validateReverseVideoFile(oversize)).toBe(copy.errors.videoTooLarge);
   });
 });

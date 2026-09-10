@@ -7,7 +7,8 @@ import { copy } from "@/lib/copy";
 // **单条 >15.2s 拒绝**（内容决策不代剪）、<480p 拒绝、>100MB 拒绝。BE 权威二次把关；此为快速第一道 + 联动提示数据源。
 // 复用 avatar-video 的 readVideoMetadata（隐藏 <video> loadedmetadata）；纯函数可测，DOM 读取单列。
 
-export const ALLOWED_REFERENCE_VIDEO_TYPES = ["video/mp4", "video/quicktime", "video/webm"]; // MOV=video/quicktime
+// MOV aliases match backend uploads.py; file input accept and preflight share this list.
+export const ALLOWED_REFERENCE_VIDEO_TYPES = ["video/mp4", "video/quicktime", "video/mov", "video/x-quicktime", "video/webm"];
 export const MAX_REFERENCE_VIDEO_BYTES = 100 * 1024 * 1024; // 100MB（本需求 UI 定值，非 avatar 的 200MB）
 export const MAX_REFERENCE_VIDEOS = 3; // provider 上限（D10；BE schemas/videos.py:365 >3 → 422）
 // FIX1 真联调（#216 合并源）：BE 两套边界**方向必须一致**（别「前端放过、BE 拦」）：

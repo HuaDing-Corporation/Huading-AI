@@ -127,7 +127,7 @@ export const copy = {
     scriptLabel: "AI 文案（可编辑）",
     regenerate: "重写文案",
     avatarLabel: "数字人形象",
-    upload: "上传形象图（JPG / PNG / WebP，≤10MB）",
+    upload: "上传形象图（JPG / PNG / WebP，≤30MB）",
     voiceLabel: "音色",
     more: "更多设置",
     speed: "语速",
@@ -214,7 +214,7 @@ export const copy = {
     photoPromptPlaceholder: "描述想要的图片，如：白色大理石台面上的香水瓶，柔光氛围，高级质感",
     photoPromptRequired: "请先输入提示词",
     photoRefLabel: "参考图（可选）",
-    photoRefUpload: "上传参考图（JPG / PNG / WebP，≤10MB）",
+    photoRefUpload: "上传参考图（JPG / PNG / WebP，≤30MB）",
     photoRefPreviewAlt: "参考图预览",
     photoRefHint: "上传参考图做换背景 / 修图；留空则纯文生图",
     photoResultAlt: "生成的图片",
@@ -395,9 +395,9 @@ export const copy = {
     ecomDetailModeDetail: "详情页（12 张）",
     // ECOM-REF-LIMIT-UI-0001：参考图上限随模式（主图 1–5 / 详情 1–12）；商品图仍 1–4。
     ecomDetailRefLabel: (max: number) => `参考图（复刻模板，1–${max} 张）`,
-    ecomDetailRefUpload: "上传参考图（JPG / PNG / WebP，≤10MB）",
+    ecomDetailRefUpload: "上传参考图（JPG / PNG / WebP，≤30MB）",
     ecomDetailProductLabel: (max: number) => `商品图（唯一商品依据，1–${max} 张）`,
-    ecomDetailProductUpload: "上传商品图（JPG / PNG / WebP，≤10MB）",
+    ecomDetailProductUpload: "上传商品图（JPG / PNG / WebP，≤30MB）",
     ecomDetailInfoLabel: "商品信息",
     ecomDetailInfoPlaceholder: "品类 / 材质 / 规格等（只用你提供的信息，AI 不补全材质、认证、功效、销量）",
     ecomDetailPointsLabel: "核心卖点",
@@ -562,7 +562,8 @@ export const copy = {
   },
   errors: {
     quota: "额度不足，无法生成，请充值或精简任务",
-    uploadTooLarge: "图片过大，请控制在 10MB 以内",
+    uploadTooLarge: "图片过大，请控制在 30MB 以内",
+    mediaUploadTooLarge: "上传请求超过服务或网关的大小限制（413）。即使文件符合页面上限，仍可能被当前服务拒绝；可尝试缩小文件，若仍失败请联系管理员确认上传限制。",
     uploadType: "仅支持 JPG / PNG / WebP 图片",
     network: "网络连接失败，请检查后端服务是否在线",
     generic: "操作失败，请重试",
@@ -573,6 +574,7 @@ export const copy = {
     // D2 放宽 60→180 秒（依据 §八 8.1 SPIKE 实测：180s 走方案 A = 6 段 × 30 秒，端到端 198.312s 可跑）。
     // 数值单一真源是 lib/media/reverse-video.ts 的 MIN/MAX_REVERSE_VIDEO_SEC，此处文案与之同步改。
     reverseVideoDuration: "请上传 1–180 秒的视频",
+    reverseVideoResolution: "视频分辨率需短边≥240 像素、长边≤2160 像素",
     reverseVideoFailed: "视频反推失败，请稍后重试",
     // 计费预估失败（§八 M4）：🔴 **不给任何金额**、也不提「按实际结算」——分档是一口价预扣，
     // 估不到就不许提交（宁可挡住也不能报错价）。
@@ -627,7 +629,7 @@ export const copy = {
     title: "提示词反推 · 图片",
     subtitle: "上传一张图片，AI 反推可复用的提示词，并可一键带入各生成模块",
     upload: "上传图片",
-    uploadHint: "支持 JPG / PNG / WebP，≤10MB；仅用于本次反推参考",
+    uploadHint: "支持 JPG / PNG / WebP，单张≤30MB（按 MiB 计算，1 MiB = 1024 × 1024 字节）；仅用于本次反推参考",
     reupload: "换一张",
     // 输出语言/细节度不进请求（BE extra="forbid"，且输出本就同时给 zh+en）——面板已移除，仅保留目标格式只读展示。
     targetLabel: "目标格式",
@@ -706,7 +708,7 @@ export const copy = {
     videoSubtitle: "上传一段视频，AI 分析分镜与节奏并反推可复用的提示词",
     videoUpload: "上传视频",
     // 上限同 errors.reverseVideoDuration，真源 MAX_REVERSE_VIDEO_SEC（D2 放宽到 180 秒，依据 §八 8.1 SPIKE）
-    videoUploadHint: "MP4（H.264），≤200MB，1–180 秒；音轨可选（不强制）",
+    videoUploadHint: "MP4（H.264），≤200MB，1–180 秒；短边≥240 像素、长边≤2160 像素；音轨可选（不强制）",
     videoReupload: "换一个视频",
     videoValidating: "校验视频中…",
     videoReady: "已上传，可反推",
