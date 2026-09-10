@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
+from starlette.formparsers import MultiPartException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 
-class BodyTooLargeError(Exception):
+class BodyTooLargeError(MultiPartException):
     pass
 
 
@@ -32,12 +33,8 @@ class BodySizeLimitMiddleware:
         if scope.get("method") not in {"POST", "PUT", "PATCH"}:
             return None
         path = str(scope.get("path") or "")
-        for item, limit in sorted(
-            self.path_limits.items(),
-            key=lambda pair: len(pair[0]),
-            reverse=True,
-        ):
-            if path == item or path.startswith(f"{item}/"):
+        for item, limit in self.path_limits.items():
+            if path == item or path == f"{item}/":
                 return limit
         if any(path == item or path.startswith(f"{item}/") for item in self.paths):
             return self.max_body_size
@@ -65,18 +62,27 @@ class BodySizeLimitMiddleware:
 
         received = 0
         response_started = False
+        body_too_large = False
 
         async def limited_receive() -> Message:
-            nonlocal received
+            nonlocal received, body_too_large
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > body_limit:
-                    raise BodyTooLargeError
+                    body_too_large = True
+                    # MultiPartException closes the parser's partially spooled files.
+                    raise BodyTooLargeError("Request body too large.")
             return message
 
         async def tracking_send(message: Message) -> None:
             nonlocal response_started
+            # FastAPI may translate parser exceptions to 400; preserve the size error.
+            if body_too_large:
+                if not response_started:
+                    response_started = True
+                    await self._send_413(send, max_body_size=body_limit)
+                return
             if message["type"] == "http.response.start":
                 response_started = True
             await send(message)

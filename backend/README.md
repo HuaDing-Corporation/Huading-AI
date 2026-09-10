@@ -145,14 +145,51 @@ Each prints the task id, remote video URL, and the saved mp4 path.
   edge-tts voiceover → ffmpeg compose (+BGM).
 - `seedance_i2v` — same flow, but every clip is conditioned on an uploaded
   product image: first `POST /api/v1/uploads` (multipart `file`; jpeg/png/webp,
-  ≤10MB; stored under `tenants/{tenant_id}/uploads/...`), then pass the returned
+  up to 30 MiB; stored under `tenants/{tenant_id}/uploads/...`), then pass the returned
   `key` as `image_key`.
 
-Upload bodies are capped by the API before multipart parsing using
-`UPLOAD_MAX_BYTES` (default `10485760`, 10 MiB). In production, also set the same
-limit at the reverse proxy layer (for example nginx `client_max_body_size 10m`,
-or the equivalent Traefik/body-size middleware) so oversized uploads are rejected
-before they reach the application process.
+Upload file limits are separate from the complete multipart request limits:
+
+| Endpoint / purpose | File limit | API body limit |
+| --- | --- | --- |
+| `/uploads`, `/uploads/images` | `UPLOAD_IMAGE_MAX_BYTES`: 30 MiB | 31 MiB |
+| `/uploads/audio` | `UPLOAD_MAX_BYTES`: 10 MiB | 11 MiB |
+| `/uploads/videos`: avatar / reverse prompt | `UPLOAD_VIDEO_MAX_BYTES`: 200 MiB | 201 MiB |
+| `/uploads/videos`: reference video | 100 MiB (unchanged) | 201 MiB |
+
+API body limits add 1 MiB for multipart overhead. Declared oversized bodies are
+rejected before parsing; unknown-length or falsely small declared lengths are
+counted while receiving, with partial multipart files closed on overflow.
+Only exact upload endpoints (and one trailing slash) receive these limits;
+unknown upload subpaths retain the legacy generic limit. File guards still apply
+inside the handlers, so body overhead cannot increase the allowed file size.
+Batch remote product-image downloads also use `UPLOAD_IMAGE_MAX_BYTES`, with
+both declared-length and streamed-byte checks. CSV/Excel limits are unchanged.
+
+For release, explicitly inject these values through the deployment env file:
+
+```dotenv
+UPLOAD_IMAGE_MAX_BYTES=31457280
+UPLOAD_MAX_BYTES=10485760
+UPLOAD_VIDEO_MAX_BYTES=209715200
+```
+
+The existing production Compose `env_file` passes these settings to backend and
+worker services. Settings are loaded at startup: the release operator must
+recreate affected processes and verify the effective values in the API and
+image-consuming workers. Updating an example file alone does not update a
+running deployment. A legacy `UPLOAD_MAX_BYTES=10485760` does not override the
+new image default.
+
+The production Nginx config keeps its global `100m` limit and permits `201m`
+only at `/api/v1/uploads/videos` (optional single trailing slash, query preserved).
+Validate the config with `nginx -t` before the operator reloads it. Keep any
+additional ingress/CDN body limit consistent; do not raise all API paths.
+
+Uploads still aggregate bytes in memory, and media probing/transcoding remains
+synchronous. File limits are not process-memory budgets: copies, image decoding,
+temporary files and concurrency add overhead. This change makes no capacity or
+provider-generation guarantee and does not change duration, format or pricing.
 
 Requires `ENGINE_SEEDANCE_API_KEY` (plus the `ENGINE_LLM_*` credentials) on the
 worker. Progress/SSE and the tenant-isolated output key work exactly as for
@@ -175,4 +212,13 @@ curl -X POST http://127.0.0.1:8000/api/v1/videos \
 ```powershell
 uv run ruff check .
 uv run pytest
+```
+
+An isolated, opt-in Nginx boundary gate streams synthetic multipart data against
+the production config (Docker images `nginx:1.27` and `python:3.11-slim` required).
+It uses an internal network, no host ports, and removes its containers afterward:
+
+```powershell
+$env:RUN_UPLOAD_NGINX_TESTS="1"
+uv run pytest tests/test_upload_nginx_runtime.py
 ```

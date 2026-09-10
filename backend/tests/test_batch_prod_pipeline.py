@@ -276,7 +276,7 @@ def test_download_image_url_rejects_content_length_over_limit_before_stream(
     from app.services.batches import download_image_url_to_asset
 
     _mock_dns(monkeypatch, "93.184.216.34")
-    monkeypatch.setattr(settings, "upload_max_bytes", 8)
+    monkeypatch.setattr(settings, "upload_image_max_bytes", 8)
 
     def fake_get(_url: str, **kwargs):
         assert kwargs["stream"] is True
@@ -305,7 +305,7 @@ def test_download_image_url_stops_when_stream_exceeds_limit(
     from app.services.batches import download_image_url_to_asset
 
     _mock_dns(monkeypatch, "93.184.216.34")
-    monkeypatch.setattr(settings, "upload_max_bytes", 8)
+    monkeypatch.setattr(settings, "upload_image_max_bytes", 8)
     storage = _FakeStorage()
 
     def fake_get(_url: str, **kwargs):
@@ -336,7 +336,7 @@ def test_download_image_url_accepts_public_https_and_stores_asset(
     from app.services.batches import download_image_url_to_asset
 
     _mock_dns(monkeypatch, "93.184.216.34")
-    monkeypatch.setattr(settings, "upload_max_bytes", 16)
+    monkeypatch.setattr(settings, "upload_image_max_bytes", 16)
     storage = _FakeStorage()
     calls: list[dict[str, object]] = []
 

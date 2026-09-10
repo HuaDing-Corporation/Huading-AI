@@ -15,7 +15,7 @@ def test_upload_content_length_rejected_before_auth_and_handler() -> None:
         files={
             "file": (
                 "huge.png",
-                b"0" * (uploads_route._MAX_BYTES + 1),
+                b"0" * (31 * 1024 * 1024 + 1),
                 "image/png",
             )
         },
@@ -32,7 +32,7 @@ def test_app_video_upload_uses_video_limit_instead_of_image_limit() -> None:
     above_image_limit = client.post(
         "/api/v1/uploads/videos",
         content=b"",
-        headers={"content-length": str(settings.upload_max_bytes + 1)},
+        headers={"content-length": str(settings.upload_image_max_bytes + 1)},
     )
     above_video_body_limit = client.post(
         "/api/v1/uploads/videos",
