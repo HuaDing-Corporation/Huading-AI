@@ -126,19 +126,24 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
         lifespan=lifespan,
     )
-    app.add_middleware(RequestIdMiddleware)
-    app.add_middleware(TenantContextMiddleware)
+    # Keep the receive guard next to the parser so multipart errors close spooled files.
     app.add_middleware(
         BodySizeLimitMiddleware,
         max_body_size=settings.upload_max_bytes,
         paths=(f"{settings.api_v1_prefix}/uploads",),
         path_limits={
             # Leave room for multipart headers; the handler still caps file bytes exactly.
-            f"{settings.api_v1_prefix}/uploads/videos": (
-                settings.upload_video_max_bytes + 1024 * 1024
-            ),
+            f"{settings.api_v1_prefix}/uploads{suffix}": file_limit + 1024 * 1024
+            for suffix, file_limit in {
+                "": settings.upload_image_max_bytes,
+                "/images": settings.upload_image_max_bytes,
+                "/audio": settings.upload_max_bytes,
+                "/videos": settings.upload_video_max_bytes,
+            }.items()
         },
     )
+    app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(TenantContextMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.effective_cors_origins,

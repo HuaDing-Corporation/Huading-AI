@@ -105,7 +105,7 @@ async def upload_image(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
         )
 
-    content = await _read_limited_upload(file)
+    content = await _read_limited_upload(file, max_bytes=settings.upload_image_max_bytes)
     if not content:
         raise AppError("Uploaded file is empty.", code="EMPTY_UPLOAD", status_code=400)
 
@@ -146,7 +146,7 @@ async def upload_audio(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
         )
 
-    content = await _read_limited_upload(file)
+    content = await _read_limited_upload(file, max_bytes=settings.upload_max_bytes)
     if not content:
         raise AppError("Uploaded file is empty.", code="EMPTY_UPLOAD", status_code=400)
 
@@ -196,7 +196,7 @@ async def upload_avatar_image(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
         )
 
-    content = await _read_limited_upload(file)
+    content = await _read_limited_upload(file, max_bytes=settings.upload_image_max_bytes)
     if not content:
         raise AppError("Uploaded file is empty.", code="EMPTY_UPLOAD", status_code=400)
 

@@ -451,12 +451,12 @@ async def test_upload_reads_stream_in_bounded_chunks() -> None:
     storage = _FakeStorage()
     request = SimpleNamespace(state=SimpleNamespace(request_id="req-test"))
     user = SimpleNamespace(tenant_id="tn1")
-    upload = _ChunkedUpload(size=uploads_route._MAX_BYTES)
+    upload = _ChunkedUpload(size=30 * 1024 * 1024)
 
     response = await uploads_route.upload_image(request, upload, user=user, storage=storage)
 
     assert response.data is not None
-    assert response.data.size == uploads_route._MAX_BYTES
+    assert response.data.size == 30 * 1024 * 1024
     assert storage.put_calls == 1
     assert upload.read_sizes
     assert all(0 < size <= uploads_route._UPLOAD_READ_CHUNK_BYTES for size in upload.read_sizes)
@@ -467,7 +467,7 @@ async def test_upload_over_limit_413_without_storage_write() -> None:
     storage = _FakeStorage()
     request = SimpleNamespace(state=SimpleNamespace(request_id="req-test"))
     user = SimpleNamespace(tenant_id="tn1")
-    upload = _ChunkedUpload(size=uploads_route._MAX_BYTES + 1)
+    upload = _ChunkedUpload(size=30 * 1024 * 1024 + 1)
 
     with pytest.raises(AppError) as exc:
         await uploads_route.upload_image(request, upload, user=user, storage=storage)
@@ -489,7 +489,7 @@ def test_upload_rejects_bad_type_and_size(auth_context):
 
     too_big = client.post(
         "/api/v1/uploads",
-        files={"file": ("big.png", b"0" * (10 * 1024 * 1024 + 1), "image/png")},
+        files={"file": ("big.png", b"0" * (30 * 1024 * 1024 + 1), "image/png")},
         headers=auth_context["headers"],
     )
     assert too_big.status_code == 413

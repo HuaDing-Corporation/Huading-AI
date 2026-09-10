@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     # SSE progress stream cap (seconds) before emitting an sse_timeout event.
     sse_timeout_seconds: int = 1500
     upload_max_bytes: int = 10 * 1024 * 1024
+    upload_image_max_bytes: int = Field(default=30 * 1024 * 1024, gt=0)
     upload_video_max_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
 
     storage_backend: str = "local"

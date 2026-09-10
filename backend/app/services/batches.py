@@ -290,7 +290,7 @@ def download_image_url_to_asset(
         extension = _IMAGE_MIME_EXTENSIONS.get(content_type)
         if extension is None:
             raise BatchImageDownloadError("类型不符")
-        content = _read_limited_response(response, max_bytes=settings.upload_max_bytes)
+        content = _read_limited_response(response, max_bytes=settings.upload_image_max_bytes)
         if not content:
             raise BatchImageDownloadError("空文件")
     finally:

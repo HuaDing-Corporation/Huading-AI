@@ -24,9 +24,25 @@ describe("reference-video 预检（V2V D9/D10）", () => {
     expect(validateReferenceVideoFile(file("video/x-msvideo"))).toBe(copy.workbench.vgRefVideoType);
   });
 
+  it.each(["video/mov", "video/x-quicktime"])("BE MOV alias %s passes and retains the transcode notice", (type) => {
+    const mov = file(type);
+    expect(validateReferenceVideoFile(mov)).toBeNull();
+    expect(inspectReferenceVideoMetadata(mov, { duration: 5, width: 640, height: 480 })).toMatchObject({
+      error: null, willTranscode: true, willDownscale: false
+    });
+  });
+
   it("大小：100MB 通过；101MB 拒（D9 表）", () => {
     expect(validateReferenceVideoFile(file("video/mp4", 100))).toBeNull();
     expect(validateReferenceVideoFile(file("video/mp4", 101))).toBe(copy.workbench.vgRefVideoTooLarge);
+  });
+
+  it.each(["video/mp4", "video/quicktime", "video/mov", "video/x-quicktime", "video/webm"])("%s keeps the exact 104857600-byte cap", (type) => {
+    const video = file(type, 100);
+    expect(validateReferenceVideoFile(video)).toBeNull();
+    const oversize = new File(["x"], "large.mov", { type });
+    Object.defineProperty(oversize, "size", { value: 104857601 });
+    expect(validateReferenceVideoFile(oversize)).toBe(copy.workbench.vgRefVideoTooLarge);
   });
 
   // FIX1（#216 真联调）：单条=闭区间 [1.8,15.2]（video_reference.py:128-137 `< MIN or > MAX`）——过短也拦
