@@ -17,6 +17,7 @@ _MODES = (
 )
 _ARGUMENT_ERROR = {"error": "PRICING_READINESS_ARGUMENT_ERROR"}
 _TARGET_MIGRATION_REVISION = "20260829_0038"
+_SUPPORTED_READY_REVISIONS = {_TARGET_MIGRATION_REVISION, "20260915_0039"}
 _SUPPORTED_PREFLIGHT_REVISIONS = {
     "20260724_0031",
     "20260804_0032",
@@ -26,6 +27,7 @@ _SUPPORTED_PREFLIGHT_REVISIONS = {
     "20260829_0036",
     "20260829_0037",
     _TARGET_MIGRATION_REVISION,
+    "20260915_0039",
 }
 _REPORT_ERROR = "PRICING_READINESS_FAILED"
 _REGISTER_ERRORS = {
@@ -322,7 +324,7 @@ def _validated_audit_report(
     _require_exact_keys(payload, expected)
     ready, blockers = _validate_report_state(payload, exit_code=exit_code)
     revision = _strict_optional_revision(payload["migration_revision"])
-    if exit_code == 0 and revision != _TARGET_MIGRATION_REVISION:
+    if exit_code == 0 and revision not in _SUPPORTED_READY_REVISIONS:
         raise ValueError("successful audit revision is invalid")
     platform_rates = _validated_rates(payload["platform_rates"], scope="platform")
     tenant_rates = _validated_rates(payload["tenant_rates"], scope="tenant")
@@ -405,7 +407,7 @@ def _validated_register_payload(
         revision = _strict_optional_revision(payload["migration_revision"])
         if (
             payload["target_migration_revision"] != _TARGET_MIGRATION_REVISION
-            or revision == _TARGET_MIGRATION_REVISION
+            or revision in _SUPPORTED_READY_REVISIONS
         ):
             raise ValueError("schema readiness revisions are invalid")
         return {
