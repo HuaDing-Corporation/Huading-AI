@@ -13,7 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from test_heygen_worker import MemoryStorage, _entry, real_heygen_step
 from test_heygen_worker import setup_worker as _setup_worker
 
-from app.db.models import Asset, AvatarProviderRun, Base, Plan, Subscription, TaskAsset, VideoTask
+from app.db.models import Asset, AvatarProviderRun, Plan, Subscription, TaskAsset, VideoTask
 from app.providers.avatar.heygen import HeyGenAvatarProvider
 from app.services.avatar_runs import claim_avatar_run, create_avatar_run
 from app.services.history import clear_video_history, delete_video_task, prune_video_history
@@ -26,7 +26,7 @@ setup_worker = _setup_worker
 
 
 @pytest.fixture
-def worker_db():
+def worker_db(cloned_model_metadata_factory):
     url = os.environ["TEST_POSTGRES_URL"]
     schema = f"heygen_test_{uuid4().hex}"
     root = create_engine(url)
@@ -39,7 +39,7 @@ def worker_db():
         },
     )
     try:
-        Base.metadata.create_all(engine)
+        cloned_model_metadata_factory().create_all(engine)
         factory = sessionmaker(bind=engine, autoflush=False)
         with factory() as db:
             db.add(
