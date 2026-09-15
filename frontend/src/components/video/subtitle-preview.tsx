@@ -1,5 +1,6 @@
 export interface SubtitlePreviewProps {
   script: string;
+  label?: string;
 }
 
 /**
@@ -7,10 +8,10 @@ export interface SubtitlePreviewProps {
  * Subtitles are burned into the video; this is text-only display.
  * No hooks, no fetch.
  */
-export function SubtitlePreview({ script }: SubtitlePreviewProps) {
+export function SubtitlePreview({ script, label = "字幕已烧入，仅文本预览" }: SubtitlePreviewProps) {
   return (
     <div className="flex flex-col gap-2">
-      <p className="text-[12px] text-ink-faint">字幕已烧入，仅文本预览</p>
+      <p className="text-[12px] text-ink-faint">{label}</p>
       <div className="rounded-field border border-line-gold bg-glass-fill px-4 py-3 text-[13.5px] leading-relaxed text-ink">
         {script || <span className="text-ink-faint">（无文案）</span>}
       </div>

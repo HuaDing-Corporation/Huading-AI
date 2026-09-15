@@ -20,6 +20,7 @@ import { friendlyImageError } from "@/lib/api/image-error";
 import { friendlyVideoError } from "@/lib/api/video-error";
 import type { MediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 import { copy } from "@/lib/copy";
+import { avatarRecovery } from "@/lib/videos/avatar-presentation";
 import { cn } from "@/lib/utils";
 import type { TrackedTask, UiStatus } from "@/lib/sse/progress-mapping";
 
@@ -91,6 +92,7 @@ export function TaskCard({ task, onOpen, onOpenMedia, onRetry, refresh, onDelete
   const Icon = thumbIcon[task.status] ?? Clock;
   const showPlayer = task.status === "done" && !!task.playbackUrl;
   const isImage = task.mode === "photo";
+  const recovery = task.status === "running" ? avatarRecovery(task.errorCode) : null;
   // 失败均映射友好中文（不露裸 error_message/技术串）：photo→friendlyImageError，视频→friendlyVideoError（VIDEO-ERR-MAP-UI）。
   const failureText = isImage ? friendlyImageError(task.errorCode) : friendlyVideoError(task.errorCode);
 
@@ -109,6 +111,7 @@ export function TaskCard({ task, onOpen, onOpenMedia, onRetry, refresh, onDelete
 
         <div className="min-w-0 flex-1">
           <b className="block truncate text-sm font-medium text-ink">{task.topic}</b>
+          {task.avatarModelLabel && <span className="block text-[12px] text-ink-soft">{task.avatarModelLabel}</span>}
           {task.status === "done" && task.durationSec ? (
             <span className="text-[12px] text-ink-faint">
               时长 {Math.round(task.durationSec)} 秒
@@ -118,7 +121,7 @@ export function TaskCard({ task, onOpen, onOpenMedia, onRetry, refresh, onDelete
             <span className="mt-0.5 block text-[12px] text-ink-soft">{task.statusLabel}</span>
           ) : null}
           {/* GEN-HEARTBEAT-UI-0001：收到心跳时补一行**真实计时**（组件自行门控，非生成态返回 null）。 */}
-          <GeneratingElapsed task={task} />
+          {!recovery && !task.connectionUncertain && <GeneratingElapsed task={task} />}
           {/* LABEL-TOGGLE-UI-0001：按任务实际状态显示徽标；带=显示，不带=不显示。 */}
           {task.status === "done" && task.applyVisibleLabel ? (
             <div className="mt-1">
@@ -143,6 +146,18 @@ export function TaskCard({ task, onOpen, onOpenMedia, onRetry, refresh, onDelete
       </div>
 
       {/* Body: state-specific content */}
+      {(recovery || task.connectionUncertain) && (
+        <div className="mt-2 px-2 text-[12px] text-ink-soft">
+          <p role="status" className="break-words">
+            {recovery?.note ?? copy.tasks.avatarConnectionNote}
+            <span className="mt-1 block">{copy.tasks.taskIdLabel}：{task.taskId}</span>
+          </p>
+          <button type="button" onClick={() => onOpen(task.taskId)}
+            className="mt-2 rounded-field border border-line-gold px-3 py-1.5 text-gold-deep focus-visible:shadow-focus-gold">
+            {copy.tasks.open}
+          </button>
+        </div>
+      )}
       {task.status === "failed" ? (
         <div className="mt-2 px-2">
           {failureText ? (

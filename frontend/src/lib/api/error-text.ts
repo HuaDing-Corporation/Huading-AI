@@ -4,6 +4,8 @@ import { copy } from "@/lib/copy";
 // 数字人出镜视频源·后端二次校验码 → 友好中文（AVATAR-VIDEO-SOURCE-UI / FE-INTEGRATION-0001）。
 // 前端预检拦大部分；BE 权威码(如编码 codec 前端读不到)在生成时回显时走此映射。逐字对齐 routes/videos.py。
 const AVATAR_VIDEO_ERROR_COPY: Record<string, string> = {
+  HEYGEN_NOT_CONFIGURED: copy.errors.avatarNotConfigured,
+  HEYGEN_COST_NOT_CONFIGURED: copy.errors.avatarNotConfigured,
   AVATAR_VIDEO_UNSUPPORTED_FORMAT: copy.errors.videoType,
   AVATAR_VIDEO_TOO_LARGE: copy.errors.videoTooLarge,
   AVATAR_VIDEO_DURATION_INVALID: copy.errors.videoTooLong,

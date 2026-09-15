@@ -37,7 +37,8 @@ function Harness() {
   const t = tasks[0];
   return (
     <div>
-      <button onClick={() => void createAndTrack({ topic: "x", voice_id: "v", avatar_asset_id: "a" }, "x")}>go</button>
+      {/* Non-HeyGen keeps the original stall policy; avatar recovery has its own gates. */}
+      <button onClick={() => void createAndTrack({ topic: "x", video_mode: "photo", voice_id: "v", avatar_asset_id: "a" }, "x")}>go</button>
       <span data-testid="status">{t?.status ?? "-"}</span>
       <span data-testid="progress">{t?.progress ?? "-"}</span>
       <span data-testid="label">{t?.statusLabel ?? "-"}</span>

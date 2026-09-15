@@ -144,6 +144,9 @@ export const copy = {
     avatarPreviewAlt: "形象预览",
     // 数字人形象来源：照片 / 本人出镜视频二选一（AVATAR-VIDEO-SOURCE-UI-0001）
     avatarSourceLabel: "数字人形象来源",
+    avatarPhotoModel: "HeyGen Avatar IV",
+    avatarVideoModel: "HeyGen Precision",
+    avatarAvailabilityNote: "目标模型 · 服务可用性以提交校验为准",
     sourcePhoto: "照片",
     sourceVideo: "本人出镜视频",
     videoUpload: "上传 MP4 本人出镜视频（3–10 秒）",
@@ -561,6 +564,7 @@ export const copy = {
     cancel: "取消"
   },
   errors: {
+    avatarNotConfigured: "数字人服务暂未配置完成，请联系管理员。",
     quota: "额度不足，无法生成，请充值或精简任务",
     uploadTooLarge: "图片过大，请控制在 30MB 以内",
     mediaUploadTooLarge: "上传请求超过服务或网关的大小限制（413）。即使文件符合页面上限，仍可能被当前服务拒绝；可尝试缩小文件，若仍失败请联系管理员确认上传限制。",
@@ -765,6 +769,13 @@ export const copy = {
     vaNotEnabled: "未知"
   },
   tasks: {
+    taskIdLabel: "任务编号",
+    avatarPending: "仍在处理中",
+    avatarPendingNote: "供应商结果尚未确认，请勿重复提交。请稍后查看此任务。",
+    avatarReview: "需要核对",
+    avatarReviewNote: "此任务需要管理员核对供应商结果，请勿重复提交。请提供任务编号联系管理员。",
+    avatarConnectionUnknown: "连接异常，结果待确认",
+    avatarConnectionNote: "尚未取得任务的最终状态，请勿重复提交。请稍后打开详情核对，或联系管理员。",
     title: "生成任务",
     empty: "暂无任务，输入主题开始生成。",
     retry: "重试",

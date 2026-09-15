@@ -31,6 +31,24 @@ function wrapper({ children }: { children: ReactNode }) {
 }
 
 describe("VideoDetail", () => {
+  it.each([
+    ["HEYGEN_PENDING", "仍在处理中"],
+    ["HEYGEN_REVIEW_REQUIRED", "需要核对"]
+  ])("HeyGen详情 %s 不伪装普通进度或可播放成片", (code, label) => {
+    (useVideo as Mock).mockReturnValue({ data: {
+      id: "held", mode: "avatar_talk", avatar_provider: "heygen", avatar_model: "lipsync_precision",
+      status: "running", progress: 38, topic: "结果待确认", created_at: "2026-09-15T00:00:00Z",
+      error_code: code, playback_url: null, script: "尚未完成的文案"
+    }, error: null, isLoading: false });
+    const { container } = render(<VideoDetail id="held" />, { wrapper });
+    expect(screen.getByText("HeyGen Precision", { exact: false })).toBeInTheDocument();
+    expect(screen.getAllByText(label).length).toBeGreaterThan(0);
+    expect(screen.getByRole("status")).toHaveTextContent(/请勿重复提交/);
+    expect.soft(screen.getByRole("status")).toHaveTextContent("held");
+    expect.soft(screen.queryByText(/字幕已烧入/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/生成中 38%/)).not.toBeInTheDocument();
+    expect(container.querySelector("video")).toBeNull();
+  });
   it("renders loading state while isLoading", () => {
     (useVideo as Mock).mockReturnValue({ data: undefined, error: null, isLoading: true });
     render(<VideoDetail id="v1" />, { wrapper });
