@@ -1052,7 +1052,9 @@ function parseBillingOperationLookupUnchecked(
       return null;
     }
   } else if (value.state === "completed" && value.completion_kind === "failed_charged") {
-    if (value.operation !== "video_create" || billing.status !== "settled" ||
+    // Quote-backed video operations retain the DB positive-price constraint;
+    // generic task/policy readers still allow legitimately zero-priced legacy tasks.
+    if (value.operation !== "video_create" || billing.status !== "settled" || billing.requested_credits <= 0 ||
       value.result_type !== null || value.result_id !== null || value.result !== null ||
       !record(value.resource) || !exactKeys(value.resource, ["task_id", "status"]) ||
       !nonEmptyString(value.resource.task_id) || value.resource.status !== "failed" ||
