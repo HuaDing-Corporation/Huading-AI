@@ -63,7 +63,7 @@ def _seed_persisted_ready_state(db, monkeypatch) -> dict[str, str]:
     )
     db.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32))"))
     db.execute(text("DELETE FROM alembic_version"))
-    db.execute(text("INSERT INTO alembic_version (version_num) VALUES ('20260829_0038')"))
+    db.execute(text("INSERT INTO alembic_version (version_num) VALUES ('20260915_0039')"))
     db.add_all(
         [
             Asset(
@@ -248,6 +248,7 @@ def test_production_readiness_cache_singleflights_concurrent_validations(monkeyp
 
     class _Report:
         ready = True
+        migration_revision = "20260915_0039"
 
     def slow_validator(db, *, production_mode: bool):
         assert production_mode is True

@@ -101,6 +101,14 @@ def test_0039_production_health_uses_compatible_gate(heygen_ready_db):
     assert component["status"] == "ok"
 
 
+def test_0038_pricing_audit_does_not_authorize_new_application(heygen_ready_db):
+    heygen_ready_db.execute(text("UPDATE alembic_version SET version_num = '20260829_0038'"))
+    heygen_ready_db.execute(text("DROP TABLE avatar_provider_runs"))
+    heygen_ready_db.commit()
+    assert readiness.pricing_closure_readiness(heygen_ready_db, production_mode=True).ready
+    assert health._cached_pricing_closure_ready(heygen_ready_db) is False
+
+
 @pytest.mark.parametrize(
     "statement, missing",
     [

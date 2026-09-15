@@ -116,7 +116,8 @@ def test_aibrain_user_cooldown_revision_precedes_current_migration_head() -> Non
     script = ScriptDirectory.from_config(config)
     assert script.get_revision("20260805_0034").nextrev == {"20260806_0035"}
     assert script.get_revision("20260806_0035").nextrev == {"20260829_0036"}
-    assert script.get_heads() == ["20260829_0038"]
+    assert script.get_revision("20260829_0038").nextrev == {"20260915_0039"}
+    assert script.get_heads() == ["20260915_0039"]
 
 
 def test_upgrade_creates_cooldown_contract_and_enforces_one_row_per_user() -> None:
