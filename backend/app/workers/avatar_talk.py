@@ -178,6 +178,8 @@ class AvatarTalkContext:
     storage_key: str | None = None
     thumbnail_key: str | None = None
     size_bytes: int | None = None
+    work_dir: Path | None = None
+    artifact_prefix: str | None = None
 
 
 def _scoped_id(tenant_id: str, task_id: str) -> str:
@@ -193,6 +195,11 @@ def _task_or_raise(db: Session, *, tenant_id: str, task_id: str) -> VideoTask:
 
 def _work_dir(task_id: str) -> Path:
     return Path(tempfile.gettempdir()) / "huading-avatar-talk" / task_id
+
+
+def _artifact_key(ctx: AvatarTalkContext, filename: str) -> str:
+    prefix = ctx.artifact_prefix or f"tenants/{ctx.tenant_id}/videos/{ctx.task_id}"
+    return f"{prefix}/{filename}"
 
 
 def _seedance_i2v_image_urls(
@@ -867,7 +874,7 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
                     "brand_voice_provider": brand_voice_provider,
                     "speed": float(task.speed or 1.0),
                     "task_id": ctx.task_id,
-                    "output_dir": str(_work_dir(ctx.task_id)),
+                    "output_dir": str(ctx.work_dir or _work_dir(ctx.task_id)),
                 }
             ),
             timeout_seconds=settings.engine_omnihuman_request_timeout_seconds,
@@ -909,7 +916,7 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         kind="audio",
         suffix=".mp3",
     )
-    audio_key = f"tenants/{ctx.tenant_id}/videos/{ctx.task_id}/audio.mp3"
+    audio_key = _artifact_key(ctx, "audio.mp3")
     put_tenant_storage_bytes(
         ctx.storage,
         tenant_id=ctx.tenant_id,
@@ -1063,7 +1070,9 @@ def avatar_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     audio_key = getattr(ctx, "audio_key", None)
     if not audio_key:
         raise RuntimeError("TTS audio is missing for avatar generation.")
-    provider = resolve(ctx.db, tenant_id=ctx.tenant_id, capability="avatar")
+    provider = resolve_named_provider(
+        ctx.db, tenant_id=ctx.tenant_id, capability="avatar", provider="omnihuman"
+    )
     if avatar.type == "video":
         tier = _change_lips_tier()
         _validate_change_lips_tts_duration(float(ctx.duration_sec or 0), tier=tier)
@@ -1390,7 +1399,7 @@ def subtitle_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
             f"{index}\n{_srt_time(start_ms)} --> {_srt_time(end_ms)}\n{text}\n"
         )
     content = "\n".join(lines).encode("utf-8")
-    subtitle_key = f"tenants/{ctx.tenant_id}/videos/{ctx.task_id}/subtitle.srt"
+    subtitle_key = _artifact_key(ctx, "subtitle.srt")
     put_tenant_storage_bytes(
         ctx.storage,
         tenant_id=ctx.tenant_id,
@@ -1708,7 +1717,7 @@ def compose_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     if not subtitle_key:
         raise RuntimeError("Subtitle asset is missing for compose.")
 
-    work_dir = _work_dir(ctx.task_id)
+    work_dir = ctx.work_dir or _work_dir(ctx.task_id)
     work_dir.mkdir(parents=True, exist_ok=True)
     base_path = work_dir / "base.mp4"
     subtitle_path = work_dir / "subtitle.srt"
@@ -2173,7 +2182,7 @@ def upload_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         kind="video",
         suffix=".mp4",
     )
-    final_key = f"tenants/{ctx.tenant_id}/videos/{ctx.task_id}/final.mp4"
+    final_key = _artifact_key(ctx, "final.mp4")
     put_tenant_storage_bytes(
         ctx.storage,
         tenant_id=ctx.tenant_id,
@@ -2688,6 +2697,15 @@ def run_seedance_i2v_pipeline(*, tenant_id: str, task_id: str) -> dict[str, Any]
 def generate_avatar_talk_task(self, params: dict[str, Any]) -> dict[str, Any]:
     task_id = self.request.id or params.get("video_task_id") or "unknown"
     tenant_id = str(params["tenant_id"])
+    with SessionLocal() as route_db:
+        task = _task_or_raise(route_db, tenant_id=tenant_id, task_id=str(task_id))
+        supplier = (task.params or {}).get("avatar_provider", "omnihuman")
+    if supplier == "heygen":
+        from app.workers.heygen_avatar import run_heygen_avatar_pipeline
+
+        return run_heygen_avatar_pipeline(tenant_id=tenant_id, task_id=str(task_id))
+    if supplier != "omnihuman":
+        raise RuntimeError("Unknown frozen avatar provider.")
     claim = claim_video_task_for_worker(
         tenant_id=tenant_id,
         task_id=str(task_id),

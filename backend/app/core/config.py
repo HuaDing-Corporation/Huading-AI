@@ -3,7 +3,7 @@ from decimal import Decimal
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.utils import normalize_tenant_slug
@@ -101,6 +101,14 @@ class Settings(BaseSettings):
     engine_label_provider_code: str = ""
 
     # ---- Video engine ----
+    heygen_api_key: SecretStr = Field(default=SecretStr(""), repr=False)
+    engine_heygen_avatar_iv_cny_per_second: Decimal | None = Field(default=None, gt=0)
+    engine_heygen_precision_cny_per_second: Decimal | None = Field(default=None, gt=0)
+    engine_heygen_request_timeout_seconds: float = Field(default=60, gt=0, le=120)
+    engine_heygen_poll_timeout_seconds: float = Field(default=600, gt=0, le=1500)
+    engine_heygen_poll_interval_seconds: float = Field(default=5, gt=0, le=30)
+    engine_heygen_proxy_url: str | None = Field(default=None, repr=False)
+    engine_heygen_download_max_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
     # Keys are injected from the platform/environment, never hardcoded (#002-FIX-1).
     # Multi-tenancy is out of scope (M2); the engine config is a single process-wide
     # singleton, so run the worker single-config / single-process (see backend README).

@@ -211,6 +211,38 @@ class VideoTask(TenantScopedMixin, Base):
     )
 
 
+class AvatarProviderRun(TenantScopedMixin, Base):
+    __tablename__ = "avatar_provider_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "model IN ('avatar_iv', 'lipsync_precision')", name="ck_avatar_provider_runs_model"
+        ),
+        CheckConstraint(
+            "state IN ('ready', 'active', 'pending', 'review', 'completed', 'failed')",
+            name="ck_avatar_provider_runs_state",
+        ),
+        Index("ix_avatar_provider_runs_due", "state", "next_check_at"),
+    )
+
+    task_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("video_tasks.id", ondelete="CASCADE"), primary_key=True
+    )
+    model: Mapped[str] = mapped_column(String(32))
+    state: Mapped[str] = mapped_column(String(16), default="ready")
+    owner: Mapped[str | None] = mapped_column(String(36), default=None)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True)
+    request_fingerprint: Mapped[str | None] = mapped_column(String(64), default=None)
+    request_body: Mapped[dict | None] = mapped_column(_json_type(), default=None)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    input_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    provider_job_id: Mapped[str | None] = mapped_column(String(128), default=None)
+    checkpoint: Mapped[dict] = mapped_column(_json_type(), default=dict)
+    next_check_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class CopyDraft(TenantScopedMixin, Base):
     __tablename__ = "copy_drafts"
     __table_args__ = (
