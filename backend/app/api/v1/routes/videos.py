@@ -555,6 +555,8 @@ def _quota_estimate_for_payload(
 
 
 def _api_status(task: VideoTask, snapshot: dict | None = None) -> str:
+    if (task.params or {}).get("avatar_provider") == "heygen":
+        snapshot = None
     status_value = str(snapshot.get("status") if snapshot else task.status).upper()
     if status_value in {"SUCCESS", "DONE"}:
         return "done"
@@ -620,6 +622,10 @@ def _video_read(
             expires_in=settings.engine_s3_presign_ttl,
         )
     return VideoRead(
+        avatar_provider=(
+            "heygen" if params.get("avatar_provider") == "heygen" else "omnihuman"
+        ) if mode == "avatar_talk" else None,
+        avatar_model=params.get("avatar_model") if mode == "avatar_talk" else None,
         id=task.id,
         title=(task.topic or ("Untitled image" if mode == "photo" else "Untitled video"))[:80],
         prompt=task.topic or "",
@@ -754,6 +760,8 @@ def _create_avatar_talk_video(
     script = payload.script
     params = {
         "avatar_source_type": avatar_source_type,
+        "avatar_provider": "heygen",
+        "avatar_model": "lipsync_precision" if avatar_source_type == "video" else "avatar_iv",
         "estimated": True,
         "apply_visible_label": payload.apply_visible_label,
     }
@@ -802,12 +810,17 @@ def _create_avatar_talk_video(
     db.add(task)
     db.flush()
     db.add(TaskAsset(video_task_id=task.id, asset_id=avatar.id, role="input_avatar"))
+    from app.services.avatar_runs import create_avatar_run
+
+    create_avatar_run(db, task=task)
     reserve_avatar_talk_quota(
         db,
         tenant_id=user.tenant_id,
         video_task_id=task.id,
         script=script or payload.topic,
         speed=payload.speed,
+        provider="heygen",
+        model=str(params["avatar_model"]),
     )
     db.commit()
     _video_task_tenants[task_id] = user.tenant_id
@@ -1032,6 +1045,10 @@ def _create_billing_quote_video(
     }
     if mode == "avatar_talk":
         params["avatar_source_type"] = avatar_source_type
+        params["avatar_provider"] = "heygen"
+        params["avatar_model"] = (
+            "lipsync_precision" if avatar_source_type == "video" else "avatar_iv"
+        )
         if payload.avatar_video_asset_id:
             params["avatar_video_asset_id"] = payload.avatar_video_asset_id
             for key in _CHANGE_LIPS_OPTIONAL_FIELDS:
@@ -1078,6 +1095,9 @@ def _create_billing_quote_video(
     db.flush()
     if avatar is not None:
         db.add(TaskAsset(video_task_id=task.id, asset_id=avatar.id, role="input_avatar"))
+        from app.services.avatar_runs import create_avatar_run
+
+        create_avatar_run(db, task=task)
 
     allocations = []
     for index, line in enumerate(verified_quote.snapshot.pricing_lines):
@@ -1092,7 +1112,7 @@ def _create_billing_quote_video(
                 model=(
                     settings.engine_cosyvoice_voice_clone_target_model
                     if line.capability == "tts"
-                    else None
+                    else params.get("avatar_model")
                 ),
                 video_task_id=task.id,
             )
@@ -2032,6 +2052,7 @@ async def stream_video_events(
     user: User = CurrentUserDependency,
     db: Session = DbSessionDependency,
     store: ProgressStore = ProgressStoreDependency,
+    storage: ObjectStorage = ObjectStorageDependency,
 ) -> StreamingResponse:
     """Server-Sent Events stream of progress snapshots until the task is terminal."""
     tenant_id = user.tenant_id
@@ -2057,6 +2078,15 @@ async def stream_video_events(
         max_ticks = max(1, int(settings.sse_timeout_seconds / _SSE_INTERVAL_S))
         for _ in range(max_ticks):
             snapshot = store.read(scoped_id)
+            if task is not None and (task.params or {}).get("avatar_provider") == "heygen":
+                # Redis is advisory; reconnects must retain the durable hold/terminal state.
+                current = db.get(VideoTask, task_id)
+                if current is None or current.tenant_id != tenant_id or current.deleted_at:
+                    db.close()
+                    return
+                public = _video_read(current, storage=storage, snapshot=snapshot)
+                snapshot = {**(snapshot or {}), **public.model_dump(mode="json")}
+                db.close()
             if snapshot:
                 payload = json.dumps(_sse_payload(task_id, snapshot))
                 if payload != last:
@@ -2111,6 +2141,11 @@ def _sse_payload(task_id: str, snapshot: dict) -> dict:
         payload["step"] = step
     if snapshot.get("heartbeat_at") is not None:
         payload["heartbeat_at"] = snapshot["heartbeat_at"]
+    if snapshot.get("avatar_provider") == "heygen":
+        payload["avatar_provider"] = "heygen"
+        payload["avatar_model"] = snapshot.get("avatar_model")
+        payload["error_code"] = snapshot.get("error_code") or None
+        payload["error_message"] = snapshot.get("error_message") or None
     if payload["status"] == "done":
         for name in ("playback_url", "download_url", "thumbnail_url"):
             if snapshot.get(name):

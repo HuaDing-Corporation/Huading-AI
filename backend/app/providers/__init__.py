@@ -3,6 +3,7 @@
 Import built-in adapters for registry side effects.
 """
 
+from app.providers.avatar import heygen as _heygen  # noqa: F401
 from app.providers.avatar import omnihuman as _omnihuman  # noqa: F401
 from app.providers.chat import apimart_gpt56 as _apimart_gpt56_chat  # noqa: F401
 from app.providers.image import apimart as _apimart_image  # noqa: F401

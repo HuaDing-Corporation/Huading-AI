@@ -269,6 +269,10 @@ export function NewVideoForm({
             {copy.workbench.sourceVideo}
           </SelectableOption>
         </div>
+        <p aria-live="polite" className="mt-2 text-[12px] text-ink-soft">
+          {source === "photo" ? copy.workbench.avatarPhotoModel : copy.workbench.avatarVideoModel}
+          <span className="mt-0.5 block text-ink-faint">{copy.workbench.avatarAvailabilityNote}</span>
+        </p>
       </fieldset>
 
       {source === "photo" ? (

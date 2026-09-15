@@ -11,6 +11,7 @@ import { videoKeys } from "@/lib/api/keys";
 import { friendlyImageError } from "@/lib/api/image-error";
 import { friendlyVideoError } from "@/lib/api/video-error";
 import { copy } from "@/lib/copy";
+import { avatarModelLabel, avatarRecovery } from "@/lib/videos/avatar-presentation";
 import { useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 import { cn } from "@/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
@@ -127,10 +128,12 @@ export function VideoDetail({ id }: VideoDetailProps) {
   }
 
   if (!data) return null;
+  const modelLabel = avatarModelLabel(data);
+  const recovery = data.status === "running" ? avatarRecovery(data.error_code) : null;
 
   const statusLabel: Record<string, string> = {
     queued: copy.status.queued,
-    running: `生成中 ${data.progress}%`,
+    running: recovery?.label ?? `生成中 ${data.progress}%`,
     done: copy.status.done,
     failed: copy.status.failed,
     cancelled: copy.status.cancelled // 批量退分产生的 cancelled 也显中文「已取消」，不露英文（ECOM-HISTORY-CANCELLED-FIX-0001）
@@ -153,7 +156,12 @@ export function VideoDetail({ id }: VideoDetailProps) {
       {/* Topic heading */}
       <header>
         <h1 className="text-[22px] font-semibold tracking-wide text-ink">{data.topic ?? "未命名视频"}</h1>
+        {modelLabel && <p className="mt-1 text-[13px] text-ink-soft">{modelLabel}</p>}
       </header>
+      {recovery && <p role="status" className="break-words text-[13px] text-ink-soft">
+        {recovery.note}
+        <span className="mt-1 block">{copy.tasks.taskIdLabel}：{data.id}</span>
+      </p>}
 
       {/* Player — only when done and URL is available */}
       {data.status === "done" && data.playback_url ? (
@@ -216,7 +224,7 @@ export function VideoDetail({ id }: VideoDetailProps) {
       )}
 
       {/* Script / subtitle preview */}
-      {data.script && <SubtitlePreview script={data.script} />}
+      {data.script && <SubtitlePreview script={data.script} label={recovery ? copy.history.scriptLabel : undefined} />}
 
       {/* Meta info */}
       <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-[13px] sm:grid-cols-3">

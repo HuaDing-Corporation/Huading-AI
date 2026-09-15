@@ -2,9 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import { copy } from "@/lib/copy";
 import { friendlyVideoError } from "./video-error";
+import { errorText } from "./error-text";
+import { ApiError } from "./client";
 
 // VIDEO-ERR-MAP-UI：四码 → 友好中文；未知/缺失 → 通用兜底；**绝不回落裸 error_message/技术串**。
 describe("friendlyVideoError (视频失败友好映射)", () => {
+  it.each(["HEYGEN_NOT_CONFIGURED", "HEYGEN_COST_NOT_CONFIGURED"])("%s 显示需配置，不许保证资金或鼓励直接重试", (code) => {
+    for (const text of [friendlyVideoError(code), errorText(new ApiError("Not configured", code, 503))]) {
+      expect(text).toMatch(/未配置/);
+      expect(text).toMatch(/管理员/);
+      expect(text).not.toMatch(/已启用|未扣费|退款|免费|重试/);
+    }
+  });
   it("四个已知码各映射到对应中文文案（与后端 VIDEO-ERR-MAP-BE 共用码）", () => {
     expect(friendlyVideoError("VIDEO_INSUFFICIENT_BALANCE")).toBe(copy.errors.videoInsufficientBalance);
     expect(friendlyVideoError("VIDEO_TIMEOUT")).toBe(copy.errors.videoTimeout);

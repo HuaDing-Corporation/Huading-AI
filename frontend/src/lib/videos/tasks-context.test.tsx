@@ -36,7 +36,7 @@ vi.mock("@/lib/sse/constants", async (orig) => ({
 }));
 
 import { billingFromApiError, getBillingOperation } from "@/lib/api/billing";
-import { createVideo, estimateVideo, listVideos, streamVideoEvents } from "@/lib/api/videos";
+import { createVideo, estimateVideo, getVideo, listVideos, streamVideoEvents } from "@/lib/api/videos";
 import { ApiError } from "@/lib/api/client";
 import type { BillingOperationLookupFor, BillingSummary, VideoEstimateContract } from "@/lib/api/types";
 import type { VideoPricingAttempt } from "./tasks-context";
@@ -247,7 +247,8 @@ function Harness() {
   const { tasks, createAndTrack } = useVideoTasks();
   return (
     <div>
-      <button onClick={() => void createAndTrack({ topic: "x", voice_id: "v", avatar_asset_id: "a" }, "x")}>go</button>
+      {/* Legacy/non-HeyGen watchdog contract; new avatar holds are tested separately. */}
+      <button onClick={() => void createAndTrack({ topic: "x", video_mode: "photo", voice_id: "v", avatar_asset_id: "a" }, "x")}>go</button>
       <span data-testid="status">{tasks[0]?.status ?? "-"}</span>
     </div>
   );
@@ -614,6 +615,11 @@ function RetryPricedHarness() {
 describe("tasks-context explicit priced retry", () => {
   beforeEach(() => {
     mockSession = { token: "t" };
+    // HeyGen retry now requires GET authority as well as an SSE failure.
+    (getVideo as Mock).mockImplementation(async (id: string) => ({
+      id, mode: "avatar_talk", avatar_provider: "heygen", avatar_model: "avatar_iv",
+      status: "failed", progress: 20, topic: "retry", created_at: ""
+    }));
     (streamVideoEvents as Mock).mockImplementation(async (_id, onMessage) => {
       onMessage({ status: "failed", progress: 20, error_message: "provider failed" });
       await new Promise(() => {});

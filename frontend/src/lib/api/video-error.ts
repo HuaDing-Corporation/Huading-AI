@@ -7,6 +7,8 @@ import { copy } from "@/lib/copy";
  * 另含批量视频失败面复用的可操作码 BATCH_IMAGE_DOWNLOAD_FAILED（batch-detail 批量子任务亦是视频任务）。
  */
 const VIDEO_ERROR_COPY: Record<string, string> = {
+  HEYGEN_NOT_CONFIGURED: copy.errors.avatarNotConfigured,
+  HEYGEN_COST_NOT_CONFIGURED: copy.errors.avatarNotConfigured,
   VIDEO_INSUFFICIENT_BALANCE: copy.errors.videoInsufficientBalance,
   VIDEO_TIMEOUT: copy.errors.videoTimeout,
   VIDEO_CONNECTION_ERROR: copy.errors.videoConnection,

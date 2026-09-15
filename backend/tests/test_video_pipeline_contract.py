@@ -719,6 +719,11 @@ def test_avatar_talk_order_reserves_quota_and_returns_queued_id(
         reserved = db.query(UsageRecord).filter_by(video_task_id=data["id"]).one()
         assert reserved.status == "reserved"
         assert reserved.capability == "avatar"
+        assert reserved.provider == "heygen"
+        assert reserved.model == "avatar_iv"
+        assert task.params["avatar_provider"] == "heygen"
+        from app.db.models import AvatarProviderRun
+        assert db.get(AvatarProviderRun, task.id).model == "avatar_iv"
 
 
 def test_avatar_talk_order_without_script_leaves_worker_to_generate_it(
@@ -818,7 +823,11 @@ def test_avatar_talk_order_accepts_avatar_video_source_and_reserves_same_quota(
         assert subscription.quota_credits_reserved > 5
         reserved = db.query(UsageRecord).filter_by(video_task_id=data["id"]).one()
         assert reserved.capability == "avatar"
-        assert reserved.model == "jimeng_realman_avatar_picture_omni_v15"
+        assert reserved.provider == "heygen"
+        assert reserved.model == "lipsync_precision"
+        assert task.params["avatar_provider"] == "heygen"
+        from app.db.models import AvatarProviderRun
+        assert db.get(AvatarProviderRun, task.id).model == "lipsync_precision"
 
 
 def test_avatar_talk_video_source_accepts_change_lips_optional_params(

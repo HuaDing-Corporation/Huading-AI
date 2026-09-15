@@ -54,6 +54,8 @@ test("照片默认零回归：不切来源 → 生成请求带 avatar_asset_id�
   // 默认落数字人口播；照片档默认选中。
   await expect(page.getByRole("button", { name: "照片", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("button", { name: "本人出镜视频", exact: true })).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByText("HeyGen Avatar IV", { exact: false }).first()).toBeVisible();
+  await expect(page.getByText("目标模型 · 服务可用性以提交校验为准")).toBeVisible();
 
   await page.locator("#video-topic").fill("咖啡评测");
   await page.locator('input[type="file"]#avatar-image').setInputFiles(AVATAR_PNG);
@@ -62,6 +64,8 @@ test("照片默认零回归：不切来源 → 生成请求带 avatar_asset_id�
 
   await expect.poll(() => g.videoBody()?.avatar_asset_id, { timeout: 15_000 }).toBeTruthy();
   expect(g.videoBody()?.avatar_video_asset_id).toBeUndefined();
+  expect(g.videoBody()?.voice_id).toBeTruthy();
+  expect(g.videoBody()?.avatar_provider).toBeUndefined();
   expect(g.errors(), g.errors().join("\n")).toEqual([]);
 });
 
@@ -69,6 +73,7 @@ test("视频源：切「本人出镜视频」→ 传 MP4(过预检) → 生成�
   const g = await login(page);
   await page.getByRole("button", { name: "本人出镜视频", exact: true }).click();
   await expect(page.getByRole("button", { name: "本人出镜视频", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText("HeyGen Precision", { exact: false }).first()).toBeVisible();
 
   await page.locator("#video-topic").fill("咖啡评测");
   await page.locator('input[type="file"]#avatar-video').setInputFiles(VIDEO_FIXTURE);
@@ -78,6 +83,8 @@ test("视频源：切「本人出镜视频」→ 传 MP4(过预检) → 生成�
 
   await expect.poll(() => g.videoBody()?.avatar_video_asset_id, { timeout: 15_000 }).toBeTruthy();
   expect(g.videoBody()?.avatar_asset_id).toBeUndefined();
+  expect(g.videoBody()?.voice_id).toBeTruthy();
+  expect(g.videoBody()?.avatar_provider).toBeUndefined();
 
   // 移动端（375）：两档切换仍可见。
   await page.setViewportSize({ width: 375, height: 812 });

@@ -23,7 +23,7 @@ function Harness() {
   const { tasks, createAndTrack } = useVideoTasks();
   return (
     <div>
-      <button onClick={() => void createAndTrack({ topic: "x", voice_id: "v", avatar_asset_id: "a" }, "x")}>go</button>
+      <button onClick={() => void createAndTrack({ topic: "x", video_mode: "photo", voice_id: "v", avatar_asset_id: "a" }, "x")}>go</button>
       <span data-testid="status">{tasks[0]?.status ?? "-"}</span>
     </div>
   );
@@ -45,6 +45,18 @@ describe("GEN-TIMEOUT-1500-UI-0001 · 看门狗晚于 BE 权威超时（1500s）
       vi.runOnlyPendingTimers();
       vi.useRealTimers();
       vi.clearAllMocks();
+    });
+
+    it.each(["HEYGEN_PENDING", "HEYGEN_REVIEW_REQUIRED"])("%s 不被本地看门狗改为失败可重试", async (code) => {
+      (streamVideoEvents as Mock).mockImplementation(async (_id: string, onMessage: (e: unknown) => void) => {
+        onMessage({ status: "running", progress: 30, error_code: code });
+        await new Promise(() => {});
+      });
+      const view = render(<VideoTasksProvider><Harness /></VideoTasksProvider>);
+      await act(async () => { view.getByText("go").click(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(HARD_CAP_MS + 3_000); });
+      expect(view.getByTestId("status")).toHaveTextContent("running");
+      view.unmount();
     });
 
     it("🔴 120s 无进度但后端仍在跑 → 卡片不得 failed（图片生成必中场景，旧值会误杀）", async () => {

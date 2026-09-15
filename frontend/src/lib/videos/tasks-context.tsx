@@ -28,6 +28,8 @@ import type {
 import { useAuth } from "@/lib/auth/auth-context";
 import { HARD_CAP_MS, POLL_MS, STALL_MS } from "@/lib/sse/constants";
 import { eventToProgress, fromVideoRead, labelFor, mapSseStatus, TERMINAL, type TrackedTask } from "@/lib/sse/progress-mapping";
+import { avatarRecovery } from "@/lib/videos/avatar-presentation";
+import { copy } from "@/lib/copy";
 
 export type { TrackedTask, UiStatus } from "@/lib/sse/progress-mapping";
 
@@ -233,6 +235,11 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
   const meta = useRef<Map<string, TaskMeta>>(new Map());
   /** Original request + pricing attempt keyed by taskId — used for recovery/retry. */
   const requests = useRef<Map<string, StoredRequest>>(new Map());
+  // Only HeyGen snapshots / unresolved new avatar submissions get this guard.
+  // A local timeout is not proof that the provider stopped or released billing.
+  const protectedAvatars = useRef(new Set<string>());
+  const avatarRetryChecks = useRef(new Set<string>());
+  const avatarHolds = useRef(new Map<string, string>());
   const hydratedRef = useRef(false);
   const { session } = useAuth();
 
@@ -252,6 +259,15 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
   // stream/poll, mark the task retry-able, and tear down the watchdog (timeout-1).
   const failTask = useCallback(
     (taskId: string, message: string) => {
+      if (protectedAvatars.current.has(taskId)) {
+        const recovery = avatarRecovery(avatarHolds.current.get(taskId));
+        patch(taskId, {
+          status: "running", statusLabel: recovery?.label ?? copy.tasks.avatarConnectionUnknown,
+          connectionUncertain: true
+        });
+        stopWatchdog(taskId);
+        return;
+      }
       patch(taskId, { status: "failed", statusLabel: "失败", error: message });
       controllers.current.get(taskId)?.abort();
       controllers.current.delete(taskId);
@@ -284,8 +300,21 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
   );
 
   /** Authoritative update from a VideoDetail/VideoListItem (carries URLs). */
+  const syncAvatarProtection = useCallback((read: VideoDetail | VideoListItem) => {
+    if (read.avatar_provider === "heygen" || avatarRecovery(read.error_code)) avatarRetryChecks.current.add(read.id);
+    else avatarRetryChecks.current.delete(read.id);
+    if (!TERMINAL.includes(read.status) && (read.avatar_provider === "heygen" || avatarRecovery(read.error_code))) {
+      protectedAvatars.current.add(read.id);
+    } else {
+      protectedAvatars.current.delete(read.id);
+    }
+    if (read.status === "running" && avatarRecovery(read.error_code)) avatarHolds.current.set(read.id, read.error_code!);
+    else avatarHolds.current.delete(read.id);
+  }, []);
+
   const applyRead = useCallback(
     (read: VideoDetail | VideoListItem) => {
+      syncAvatarProtection(read);
       const mapped = fromVideoRead(read);
       setTasks((prev) =>
         prev.some((t) => t.taskId === mapped.taskId)
@@ -293,14 +322,28 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
           : [mapped, ...prev]
       );
     },
-    []
+    [syncAvatarProtection]
   );
 
   /** Live SSE progress (status/percent only; URLs come from the reconcile). */
   const applyEvent = useCallback(
     (taskId: string, event: VideoEvent) => {
-      const next = eventToProgress(event);
+      // Heartbeats may omit error_code; omission must not erase a known hold.
+      const effectiveEvent = event.error_code === undefined && avatarHolds.current.has(taskId)
+        ? { ...event, error_code: avatarHolds.current.get(taskId) }
+        : event;
+      const next = eventToProgress(effectiveEvent);
       if (!next) return;
+      if (TERMINAL.includes(next.status)) {
+        protectedAvatars.current.delete(taskId);
+        avatarHolds.current.delete(taskId);
+      } else if (avatarRecovery(next.errorCode)) {
+        protectedAvatars.current.add(taskId);
+        avatarRetryChecks.current.add(taskId);
+        avatarHolds.current.set(taskId, next.errorCode!);
+      } else if (event.error_code !== undefined) {
+        avatarHolds.current.delete(taskId);
+      }
       // Refresh the no-progress clock only on real forward motion: a higher
       // percent or a step change. Repeated identical frames keep the clock
       // ticking toward STALL_MS so a wedged task still trips the watchdog.
@@ -322,7 +365,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
         // 看门狗并没被废：心跳一停，时钟照常走向 STALL_MS。
         if (advanced || beat) m.lastProgressAt = now;
       }
-      patch(taskId, beat ? { ...next, heartbeatAt: now } : next);
+      patch(taskId, { ...next, connectionUncertain: false, ...(beat ? { heartbeatAt: now } : {}) });
     },
     [patch]
   );
@@ -343,15 +386,22 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
       while (!signal.aborted) {
         try {
           const read = await getVideo(taskId);
+          if (signal.aborted) return;
           applyRead(read);
           if (TERMINAL.includes(read.status)) {
             stopWatchdog(taskId);
             return;
           }
         } catch (err) {
+          if (signal.aborted) return;
           if (err instanceof ApiError && err.status === 401) {
             stopWatchdog(taskId);
             return;
+          }
+          if (protectedAvatars.current.has(taskId)) {
+            failTask(taskId, "进度获取失败");
+            await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+            continue; // Keep checking the same task, never create a replacement.
           }
           patch(taskId, { status: "failed", statusLabel: "失败", error: "进度获取失败" });
           stopWatchdog(taskId);
@@ -360,7 +410,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
         await new Promise((resolve) => setTimeout(resolve, POLL_MS));
       }
     },
-    [applyRead, patch, stopWatchdog]
+    [applyRead, failTask, patch, stopWatchdog]
   );
 
   const subscribe = useCallback(
@@ -376,6 +426,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
           if (controller.signal.aborted) return;
           await refreshTask(taskId);
           stopWatchdog(taskId);
+          if (protectedAvatars.current.has(taskId)) await pollFallback(taskId, controller.signal);
         })
         .catch((err) => {
           if (controller.signal.aborted) return;
@@ -384,7 +435,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
             return;
           }
           // SSE unavailable (e.g. hydrated task from another process) -> poll.
-          void pollFallback(taskId, controller.signal);
+          return pollFallback(taskId, controller.signal);
         })
         .finally(() => controllers.current.delete(taskId));
     },
@@ -398,6 +449,10 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
     pricing?: VideoPricingAttempt
   ) => {
     const status = mapSseStatus(accepted.status);
+    if ((req.video_mode ?? "avatar_talk") === "avatar_talk" && !TERMINAL.includes(status)) {
+      protectedAvatars.current.add(accepted.id);
+      avatarRetryChecks.current.add(accepted.id);
+    }
     requests.current.set(accepted.id, {
       req,
       topic,
@@ -506,8 +561,17 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
         throw new Error(`No stored request for task ${taskId}`);
       }
       const current = tasks.find((task) => task.taskId === taskId);
-      if (!current || current.status !== "failed") {
+      if (!current || current.status !== "failed" || protectedAvatars.current.has(taskId)) {
         throw new ApiError("只有失败任务可以重新尝试。", "VIDEO_RETRY_NOT_ALLOWED", 409);
+      }
+      if (avatarRetryChecks.current.has(taskId)) {
+        // Only an authoritative GET can authorize a new paid attempt. Network
+        // errors reject here; SSE/local state alone cannot authorize a new key.
+        const read = await getVideo(taskId);
+        applyRead(read);
+        if (read.status !== "failed") {
+          throw new ApiError("任务结果尚未确认，请勿重复提交。", "VIDEO_RETRY_NOT_ALLOWED", 409);
+        }
       }
 
       // Explicit retry always starts a new pricing attempt. The stored token/key
@@ -539,7 +603,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
       const accepted = await createAndTrack(stored.req, stored.topic, pricing);
       return accepted.id;
     },
-    [createAndTrack, tasks]
+    [applyRead, createAndTrack, tasks]
   );
 
   // Hydrate the list once we have a session (B4) and resume in-flight tasks.
@@ -555,6 +619,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
         const items = await listVideos();
         if (cancelled) return;
         const mapped = items.map(fromVideoRead);
+        items.forEach(syncAvatarProtection);
         setTasks((prev) => {
           const known = new Set(mapped.map((t) => t.taskId));
           return [...mapped, ...prev.filter((t) => !known.has(t.taskId))];
@@ -569,7 +634,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [session, subscribe]);
+  }, [session, subscribe, syncAvatarProtection]);
 
   // On logout, abort live streams + watchdogs and clear the list so the next
   // user starts clean and a re-login re-hydrates from scratch.
@@ -583,6 +648,9 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
     timers.current.clear();
     meta.current.clear();
     requests.current.clear();
+    protectedAvatars.current.clear();
+    avatarRetryChecks.current.clear();
+    avatarHolds.current.clear();
     setTasks([]);
   }, [session]);
 
@@ -591,6 +659,9 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
     const activeTimers = timers.current;
     const activeMeta = meta.current;
     const activeRequests = requests.current;
+    const activeProtectedAvatars = protectedAvatars.current;
+    const activeAvatarRetryChecks = avatarRetryChecks.current;
+    const activeAvatarHolds = avatarHolds.current;
     return () => {
       activeControllers.forEach((controller) => controller.abort());
       activeControllers.clear();
@@ -598,6 +669,9 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
       activeTimers.clear();
       activeMeta.clear();
       activeRequests.clear();
+      activeProtectedAvatars.clear();
+      activeAvatarRetryChecks.clear();
+      activeAvatarHolds.clear();
     };
   }, []);
 

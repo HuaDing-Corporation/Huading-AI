@@ -1,4 +1,5 @@
 import type { VideoDetail, VideoEvent, VideoListItem, VideoStatus } from "@/lib/api/types";
+import { avatarModelLabel, avatarRecovery } from "@/lib/videos/avatar-presentation";
 
 export type UiStatus = VideoStatus;
 
@@ -10,6 +11,8 @@ export interface TrackedTask {
   statusLabel: string;
   /** Generation mode — "photo" renders an <img> result; videos render <video>. */
   mode?: string | null;
+  avatarModelLabel?: string | null;
+  connectionUncertain?: boolean;
   playbackUrl?: string | null;
   downloadUrl?: string | null;
   thumbnailUrl?: string | null;
@@ -111,6 +114,9 @@ export function eventToProgress(event: VideoEvent): ProgressSnapshot | null {
   const status = mapSseStatus(event.status);
   return {
     ...progressFields(status, pct, event.step),
+    ...(status === "running" && avatarRecovery(event.error_code)
+      ? { statusLabel: avatarRecovery(event.error_code)!.label }
+      : {}),
     error: event.error_message ?? event.error ?? undefined,
     errorCode: event.error_code ?? null
   };
@@ -130,8 +136,10 @@ export function fromVideoRead(read: VideoDetail | VideoListItem): TrackedTask {
     topic: read.topic || "未命名视频",
     status: read.status,
     progress: pct,
-    statusLabel: labelFor(read.status, pct),
+    statusLabel: (read.status === "running" ? avatarRecovery(read.error_code)?.label : null) ?? labelFor(read.status, pct),
     mode: read.mode ?? null,
+    avatarModelLabel: avatarModelLabel(read),
+    connectionUncertain: false,
     playbackUrl: read.playback_url ?? null,
     downloadUrl: read.download_url ?? null,
     thumbnailUrl: read.thumbnail_url ?? null,

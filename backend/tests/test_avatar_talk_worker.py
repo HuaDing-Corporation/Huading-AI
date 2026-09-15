@@ -87,6 +87,7 @@ def _seed_reserved_task(SessionTesting, *, task_id: str = "avatar-task") -> tupl
     now = datetime.now(UTC)
     with SessionTesting() as db:
         db.add(Tenant(id=tenant_id, slug="avatar", name="Avatar Tenant"))
+        db.flush()
         db.add(
             User(
                 id="user-avatar",
@@ -95,6 +96,7 @@ def _seed_reserved_task(SessionTesting, *, task_id: str = "avatar-task") -> tupl
                 password_hash="hash",
             )
         )
+        db.flush()
         task = VideoTask(
             id=task_id,
             tenant_id=tenant_id,
@@ -130,7 +132,9 @@ def _seed_reserved_task(SessionTesting, *, task_id: str = "avatar-task") -> tupl
             cost_cents=0,
             status="reserved",
         )
-        db.add_all([task, sub, record])
+        db.add_all([task, sub])
+        db.flush()
+        db.add(record)
         db.commit()
     return tenant_id, task_id
 

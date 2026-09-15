@@ -980,6 +980,8 @@ def reserve_avatar_talk_quota(
     video_task_id: str,
     script: str,
     speed: Decimal | float | int,
+    provider: str = "omnihuman",
+    model: str = "jimeng_realman_avatar_picture_omni_v15",
 ) -> Reservation:
     estimate = estimate_avatar_talk_quota(
         db,
@@ -1002,8 +1004,8 @@ def reserve_avatar_talk_quota(
         subscription_id=subscription.id,
         video_task_id=video_task_id,
         capability="avatar",
-        provider="omnihuman",
-        model="jimeng_realman_avatar_picture_omni_v15",
+        provider=provider,
+        model=model,
         unit="second",
         quantity=Decimal(estimate.estimated_seconds),
         credits=estimate.estimated_credits,

@@ -62,6 +62,9 @@ export type VideoStatus = "queued" | "running" | "done" | "failed" | "cancelled"
  * 那次就是这么抓到的。故这四个字段补齐、强转删除（HISTORY-VIDEO-DIALOG-UI-0001 · FIX1）。
  */
 export interface VideoListItem {
+  /** HEYGEN-REPLACE: read-only server snapshot; absent legacy avatar tasks remain OmniHuman. */
+  avatar_provider?: "omnihuman" | "heygen" | null;
+  avatar_model?: string | null;
   id: string;
   status: VideoStatus;
   progress: number; // 0..100
@@ -91,6 +94,8 @@ export interface VideoListResponse {
 }
 
 export interface VideoDetail {
+  avatar_provider?: "omnihuman" | "heygen" | null;
+  avatar_model?: string | null;
   id: string;
   status: VideoStatus;
   progress: number;

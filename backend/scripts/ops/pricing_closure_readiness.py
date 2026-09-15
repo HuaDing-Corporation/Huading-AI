@@ -49,6 +49,10 @@ _REQUIRED_RATE_FALLBACKS = {
     ("reverse_prompt", "call"): Decimal("100.0000"),
 }
 _TARGET_MIGRATION_REVISION = "20260829_0038"
+# Pricing's migration target remains 0038. Later application revisions are
+# accepted only when their additional schema contract is explicitly checked.
+_HEYGEN_MIGRATION_REVISION = "20260915_0039"
+_SUPPORTED_READY_REVISIONS = {_TARGET_MIGRATION_REVISION, _HEYGEN_MIGRATION_REVISION}
 _SUPPORTED_PREFLIGHT_REVISIONS = {
     "20260724_0031",
     "20260804_0032",
@@ -58,6 +62,7 @@ _SUPPORTED_PREFLIGHT_REVISIONS = {
     "20260829_0036",
     "20260829_0037",
     _TARGET_MIGRATION_REVISION,
+    _HEYGEN_MIGRATION_REVISION,
 }
 _MIGRATION_0032_EXPECTED_RATES = {
     ("video", "second"): Decimal("80.0000"),
@@ -1286,6 +1291,8 @@ def _target_schema_preflight_blockers(db: Session) -> list[PricingReadinessBlock
         named_indexes=named_indexes,
         foreign_keys=foreign_keys,
     )
+    if _migration_revision(db) == _HEYGEN_MIGRATION_REVISION:
+        blockers.extend(_heygen_schema_blockers(db))
     database_inspector = inspect(db.connection())
     if "reasoning_wallets" in set(database_inspector.get_table_names()):
         retained_checks = {
@@ -1301,6 +1308,105 @@ def _target_schema_preflight_blockers(db: Session) -> list[PricingReadinessBlock
                     detail="Migration 0033's retired wallet check is still present.",
                 )
             )
+    return blockers
+
+
+def _heygen_schema_blockers(db: Session) -> list[PricingReadinessBlocker]:
+    table = "avatar_provider_runs"
+    blockers = _schema_contract_blockers(
+        db,
+        required_schema={
+            table: {
+                "task_id",
+                "tenant_id",
+                "model",
+                "state",
+                "owner",
+                "lease_until",
+                "idempotency_key",
+                "request_fingerprint",
+                "request_body",
+                "submitted_at",
+                "input_expires_at",
+                "provider_job_id",
+                "checkpoint",
+                "next_check_at",
+                "created_at",
+                "updated_at",
+            }
+        },
+        named_checks={table: {"ck_avatar_provider_runs_model", "ck_avatar_provider_runs_state"}},
+        named_uniques={},
+        named_indexes={
+            table: {
+                "ix_avatar_provider_runs_tenant_id": (("tenant_id",), False),
+                "ix_avatar_provider_runs_due": (("state", "next_check_at"), False),
+            }
+        },
+        foreign_keys={
+            table: (
+                (("task_id",), "video_tasks", ("id",), "CASCADE"),
+                (("tenant_id",), "tenants", ("id",), "CASCADE"),
+            )
+        },
+    )
+    inspector = inspect(db.connection())
+    if table not in inspector.get_table_names():
+        return blockers
+    missing = []
+    if tuple(inspector.get_pk_constraint(table).get("constrained_columns") or ()) != ("task_id",):
+        missing.append(f"{table}.primary_key:task_id")
+    # The migration uses an unnamed unique constraint (Postgres assigns a name,
+    # SQLite does not); validate its key, not a dialect-dependent generated name.
+    unique_keys = {
+        tuple(item.get("column_names") or ()) for item in inspector.get_unique_constraints(table)
+    }
+    if ("idempotency_key",) not in unique_keys:
+        missing.append(f"{table}.unique:idempotency_key")
+    required_nonnull = {
+        "task_id",
+        "tenant_id",
+        "model",
+        "state",
+        "idempotency_key",
+        "checkpoint",
+        "next_check_at",
+        "created_at",
+        "updated_at",
+    }
+    for column in inspector.get_columns(table):
+        if column["name"] in required_nonnull and column.get("nullable"):
+            missing.append(f"{table}.not_null:{column['name']}")
+    expected_checks = {
+        "ck_avatar_provider_runs_model": "modelin'avatar_iv','lipsync_precision'",
+        "ck_avatar_provider_runs_state": (
+            "statein'ready','active','pending','review','completed','failed'"
+        ),
+    }
+    actual_checks = {
+        item.get("name"): str(item.get("sqltext", ""))
+        for item in inspector.get_check_constraints(table)
+    }
+    for name, expected in expected_checks.items():
+        pieces = re.split(r"('(?:''|[^'])*')", actual_checks.get(name, ""))
+        # PostgreSQL reflection rewrites IN to = ANY (ARRAY[...]) with text casts.
+        # Preserve literal case and whitespace: different permitted states must
+        # not become equal merely because their SQL representation is normalized.
+        for index in range(0, len(pieces), 2):
+            piece = pieces[index].lower()
+            piece = re.sub(r"::(?:character varying|varchar|text)(?:\[\])?", "", piece)
+            pieces[index] = re.sub(r'[\s()\[\]"]', "", piece).replace("=anyarray", "in")
+        expression = "".join(pieces)
+        if expression != expected:
+            missing.append(f"{table}.{name}")
+    if missing:
+        blockers.append(
+            PricingReadinessBlocker(
+                code="PREFLIGHT_SCHEMA_MISSING",
+                record_ids=tuple(sorted(set(missing))),
+                detail="HeyGen checkpoint identity or state constraints are missing or invalid.",
+            )
+        )
     return blockers
 
 
@@ -1825,7 +1931,7 @@ def pricing_closure_preflight(
 ) -> PricingPreflightReport:
     """Check whether a known release-line schema may enter the migration gate."""
     migration_revision = _migration_revision(db)
-    if migration_revision == _TARGET_MIGRATION_REVISION:
+    if migration_revision in _SUPPORTED_READY_REVISIONS:
         audit = pricing_closure_readiness(db, production_mode=production_mode)
         return PricingPreflightReport(
             ready=audit.ready,
@@ -1841,7 +1947,7 @@ def pricing_closure_preflight(
             PricingReadinessBlocker(
                 code="UNSUPPORTED_SCHEMA_REVISION",
                 record_ids=((migration_revision or "missing"),),
-                detail="Database revision is not on the approved 0031-to-0038 release line.",
+                detail="Database revision is not on the approved 0031-to-0039 release line.",
             )
         )
     configured_ids = {
@@ -2368,7 +2474,7 @@ def pricing_closure_readiness(
     """Audit pricing closure without acquiring locks, mutating rows, or repairing data."""
     as_of = datetime.now(UTC)
     migration_revision = _migration_revision(db)
-    if migration_revision != _TARGET_MIGRATION_REVISION:
+    if migration_revision not in _SUPPORTED_READY_REVISIONS:
         return _schema_not_ready_report(
             production_mode=production_mode,
             migration_revision=migration_revision,
@@ -2495,7 +2601,7 @@ def _execute_cli_mode(db: Session, *, mode: str) -> tuple[int, dict[str, object]
         return (0 if report.ready else 2), _readiness_cli_payload(report)
 
     migration_revision = _migration_revision(db)
-    if migration_revision != _TARGET_MIGRATION_REVISION:
+    if migration_revision not in _SUPPORTED_READY_REVISIONS:
         db.rollback()
         return 2, {
             "error": "SCHEMA_NOT_READY",

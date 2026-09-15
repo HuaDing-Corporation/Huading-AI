@@ -297,6 +297,15 @@ def _recover_stale_billing_operations_once(
                 released.append(operation.id)
                 continue
 
+        if any(
+            task.status in {"queued", "running"}
+            and (task.params or {}).get("avatar_provider") == "heygen"
+            for task in tasks
+        ):
+            # Durable avatar recovery, not elapsed time, owns remote uncertainty.
+            held.append(operation.id)
+            continue
+
         if not tasks:
             if operation.operation in _SYNCHRONOUS_AUTOMATIC_OPERATIONS and _timestamp_is_stale(
                 operation.updated_at or operation.created_at,
@@ -603,6 +612,10 @@ def recover_orphaned_image_queue_tasks(
                     task_id=task_id,
                     error_type=type(exc).__name__,
                 )
+
+    from app.workers.heygen_avatar import enqueue_due_avatar_runs
+
+    enqueue_due_avatar_runs(session_factory, now=recovered_at)
 
     return ImageQueueRecoveryResult(
         photo_tasks=photo_task_count,
