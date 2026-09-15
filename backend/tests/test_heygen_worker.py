@@ -332,3 +332,33 @@ def test_dirty_cross_tenant_source_fails_before_paid_tts(worker_db, setup_worker
         db.commit()
     assert _entry(tenant, task)["status"] == "failed"
     assert counts["tts"] == 0
+
+
+def test_shared_avatar_seed_respects_enabled_foreign_keys(auth_db):
+    from sqlalchemy import text
+
+    from app.db.models import Plan
+
+    with auth_db() as db:
+        assert db.scalar(text("PRAGMA foreign_keys")) == 1
+        db.add(
+            Plan(
+                id="plan-missing-ok-for-sqlite",
+                code="fk-fixture",
+                name="FK fixture",
+                price_cents=0,
+                period="monthly",
+                quota_credits=100,
+                max_concurrent=1,
+                seat_limit=1,
+            )
+        )
+        db.commit()
+    tenant_id, task_id = _seed_reserved_task(auth_db)
+    with auth_db() as db:
+        assert db.get(VideoTask, task_id).tenant_id == tenant_id
+        subscription = db.get(Subscription, "sub-avatar")
+        assert subscription.tenant_id == tenant_id
+        usage = db.query(UsageRecord).filter_by(video_task_id=task_id).one()
+        assert usage.subscription_id == subscription.id
+        assert usage.status == "reserved"
