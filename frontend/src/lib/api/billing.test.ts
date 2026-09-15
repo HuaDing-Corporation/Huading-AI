@@ -361,6 +361,15 @@ function brandVoiceOrderPayload(
 }
 
 describe("billing operation lookup parsing", () => {
+  it("keeps a free CosyVoice creation lookup readable when video lookups require positive money", () => {
+    const freeCreation = lookupBase({
+      state: "completed", completion_kind: "succeeded",
+      billing: { ...summary("settled"), requested_credits: 0, settled_credits: 0 },
+      result_type: "brand_voice", result_id: "voice-1",
+      result: brandVoicePayload(), resource: brandVoicePayload()
+    });
+    expect(parseBillingOperationLookup(freeCreation)).toEqual(freeCreation);
+  });
   it("types canonical lookup payloads by their real state", () => {
     type VideoSucceeded = Extract<
       BillingOperationLookup,

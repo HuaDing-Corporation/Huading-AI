@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseVideoEstimateContract } from "./videos";
 import { parseBillingOperationLookup } from "./billing";
+import { avatarFailureText, checkedAvatarBillingOutcome } from "./avatar-duration-policy";
 
 const policy = {
   version: "145s-no-refund-v1", max_seconds: 145,
@@ -27,8 +28,28 @@ describe("145s wire: quote binding and a narrow paid failure", () => {
   ])("rejects a mismatched/incomplete policy: %j", (change) => {
     expect(parseVideoEstimateContract({ ...estimate, avatar_duration_policy: { ...policy, ...change } })).toBeNull();
   });
-  it("accepts failed_charged as failure with the exact settled amount and failed resource", () => {
-    expect(parseBillingOperationLookup(lookup)).toEqual(lookup);
+  it.each([1, 123])("accepts a positive failed_charged lookup at %i credits", (credits) => {
+    const positive = { ...lookup, billing: { ...lookup.billing, requested_credits: credits, settled_credits: credits } };
+    expect(parseBillingOperationLookup(positive)).toEqual(positive);
+  });
+  // Only quote-backed video operations obey the DB positive-price domain.
+  // A conserved zero summary alone cannot make this lookup legitimate.
+  it("rejects a zero-credit video_create failed_charged lookup", () => {
+    expect(parseBillingOperationLookup({ ...lookup,
+      billing: { ...lookup.billing, requested_credits: 0, settled_credits: 0 }
+    })).toBeNull();
+  });
+  it("preserves a legitimately quantized zero-credit legacy policy", () => {
+    const zeroEstimate = { ...estimate, estimated_credits: 0,
+      avatar_duration_policy: { ...policy, accepted_credits: 0 } };
+    expect(parseVideoEstimateContract(zeroEstimate)).toEqual(zeroEstimate);
+  });
+  it("reads and displays a legacy zero-credit task failure without inventing a minimum", () => {
+    const outcome = { completion_kind: "failed_charged", status: "settled", policy_version: "145s-no-refund-v1",
+      requested_credits: 0, settled_credits: 0, released_credits: 0 };
+    const read = { status: "failed", error_code: "HEYGEN_AUDIO_DURATION_EXCEEDED", billing_outcome: outcome };
+    expect(checkedAvatarBillingOutcome(read)).toEqual(outcome);
+    expect(avatarFailureText(read)).toBe("生成失败（超145秒，费用不退）。已结算 0 积分。");
   });
   it.each([
     { operation: "script_generate" }, { resource: { task_id: "task-1", status: "done" } },
