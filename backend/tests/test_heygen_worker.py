@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import Mock
 
 import pytest
 from pydantic import SecretStr
@@ -19,6 +20,7 @@ from app.workers import avatar_talk
 from app.workers.heygen_avatar import heygen_step as real_heygen_step
 
 worker_db = _worker_db
+real_tts_step = avatar_talk.tts_step
 
 
 class MemoryStorage:
@@ -70,7 +72,9 @@ def setup_worker(worker_db, monkeypatch):
     monkeypatch.setattr(avatar_talk, "script_step", lambda ctx: ctx)
     counts = {"tts": 0, "avatar": 0}
 
-    def tts(ctx):
+    def tts(ctx, *, before_synthesize=None):
+        if before_synthesize is not None:
+            before_synthesize()
         counts["tts"] += 1
         ctx.audio_key = f"tenants/{tenant}/videos/{task_id}/audio.mp3"
         storage.objects[ctx.audio_key] = b"tts"
@@ -362,3 +366,130 @@ def test_shared_avatar_seed_respects_enabled_foreign_keys(auth_db):
         usage = db.query(UsageRecord).filter_by(video_task_id=task_id).one()
         assert usage.subscription_id == subscription.id
         assert usage.status == "reserved"
+
+
+def test_local_voice_plan_denial_releases_once_before_paid_io(worker_db, setup_worker, monkeypatch):
+    from app.services.plan_access import has_huading_access
+
+    tenant, task, _, _, counts = setup_worker
+    with worker_db() as db:
+        assert not has_huading_access(db, tenant_id=tenant)
+    lookup = Mock(side_effect=AssertionError("Provider must not be reached"))
+    monkeypatch.setattr(avatar_talk, "tts_step", real_tts_step)
+    monkeypatch.setattr(
+        avatar_talk,
+        "_tts_voice_for_task",
+        lambda *_args, **_kwargs: ("voice", "brand_voice", "doubao-voice-clone"),
+    )
+    monkeypatch.setattr(avatar_talk, "_tts_provider_for_voice", lookup)
+    assert _entry(tenant, task)["status"] == "failed"
+    assert _entry(tenant, task)["status"] == "failed"
+    lookup.assert_not_called()
+    assert counts == {"tts": 0, "avatar": 0}
+    with worker_db() as db:
+        run = db.get(AvatarProviderRun, task)
+        assert run.state == "failed"
+        assert not run.checkpoint.get("tts_started")
+        assert db.query(UsageRecord).filter_by(video_task_id=task).one().status == "released"
+        sub = db.get(Subscription, "sub-avatar")
+        assert sub.quota_credits_reserved == sub.quota_credits_used == 0
+
+
+def test_real_tts_provider_error_after_dispatch_keeps_reservation(
+    worker_db, setup_worker, monkeypatch
+):
+    tenant, task, _, _, counts = setup_worker
+    calls = []
+
+    class Provider:
+        async def synthesize_speech(self, payload):
+            with worker_db() as db:
+                assert db.get(AvatarProviderRun, task).checkpoint["tts_started"] is True
+            calls.append(payload)
+            raise avatar_talk.AppError(
+                code="VOICE_CLONE_PLAN_REQUIRED",
+                message="Uncertain supplier outcome",
+                status_code=403,
+            )
+
+    monkeypatch.setattr(avatar_talk, "tts_step", real_tts_step)
+    monkeypatch.setattr(
+        avatar_talk,
+        "_tts_voice_for_task",
+        lambda *_args, **_kwargs: ("voice", "preset", None),
+    )
+    monkeypatch.setattr(
+        avatar_talk, "_tts_provider_for_voice", lambda *_args, **_kwargs: (Provider(), "tts")
+    )
+    assert _entry(tenant, task)["status"] == "running"
+    assert _entry(tenant, task)["status"] == "running"
+    assert len(calls) == 1
+    assert counts["avatar"] == 0
+    with worker_db() as db:
+        assert db.get(AvatarProviderRun, task).state == "review"
+        assert db.get(Subscription, "sub-avatar").quota_credits_reserved == 12
+        assert db.query(UsageRecord).filter_by(video_task_id=task).one().status == "reserved"
+
+
+@pytest.mark.parametrize("evidence", ["post_attempted", "provider_job_id", "audio_key"])
+def test_prior_paid_evidence_never_repeats_tts_or_releases(
+    worker_db, setup_worker, monkeypatch, evidence
+):
+    tenant, task, _, _, counts = setup_worker
+    with worker_db() as db:
+        run = db.get(AvatarProviderRun, task)
+        if evidence == "provider_job_id":
+            run.provider_job_id = "known-job"
+        elif evidence == "audio_key":
+            run.checkpoint = {"audio_key": f"tenants/{tenant}/videos/{task}/missing.mp3"}
+        else:
+            run.checkpoint = {"post_attempted": True}
+        db.commit()
+    assert _entry(tenant, task)["status"] == "running"
+    assert counts == {"tts": 0, "avatar": 0}
+    with worker_db() as db:
+        assert db.get(AvatarProviderRun, task).state == "review"
+        assert db.get(Subscription, "sub-avatar").quota_credits_reserved == 12
+
+
+def test_billed_invalid_voice_releases_once_without_synthesis(worker_db, setup_worker, monkeypatch):
+    from app.db.models import BillingOperation, BrandVoice
+
+    _, _, _, _, counts = setup_worker
+    tenant, task_id = _seed_billed_avatar_task(worker_db, task_id="preflight-billed")
+    with worker_db() as db:
+        task = db.get(VideoTask, task_id)
+        task.params = {**task.params, "avatar_provider": "heygen", "avatar_model": "avatar_iv"}
+        operation_id = task.params["billing_operation_id"]
+        create_avatar_run(db, task=task)
+        db.get(BrandVoice, task.brand_voice_id).status = "failed"
+        asset = Asset(
+            tenant_id=tenant,
+            type="avatar_image",
+            source="upload",
+            status="ready",
+            storage_key=f"tenants/{tenant}/uploads/photo.png",
+        )
+        db.add(asset)
+        db.flush()
+        db.add(TaskAsset(video_task_id=task_id, asset_id=asset.id, role="input_avatar"))
+        db.commit()
+    lookup = Mock(side_effect=AssertionError("Provider must not be reached"))
+    monkeypatch.setattr(avatar_talk, "tts_step", real_tts_step)
+    monkeypatch.setattr(avatar_talk, "_tts_provider_for_voice", lookup)
+    assert _entry(tenant, task_id)["status"] == "failed"
+    assert _entry(tenant, task_id)["status"] == "failed"
+    lookup.assert_not_called()
+    assert counts == {"tts": 0, "avatar": 0}
+    with worker_db() as db:
+        assert db.get(AvatarProviderRun, task_id).state == "failed"
+        assert not db.get(AvatarProviderRun, task_id).checkpoint.get("tts_started")
+        operation = db.get(BillingOperation, operation_id)
+        assert operation.status == "completed" and operation.completion_kind == "failed"
+        assert operation.settled_credits == 0
+        assert operation.released_credits == operation.requested_credits
+        usages = db.query(UsageRecord).filter_by(video_task_id=task_id).all()
+        assert len(usages) == 2
+        assert {usage.status for usage in usages} == {"released"}
+        sub = db.get(Subscription, f"sub-{task_id}")
+        assert sub.quota_credits_reserved == sub.quota_credits_used == 0

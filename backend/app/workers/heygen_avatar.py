@@ -402,7 +402,11 @@ def run_heygen_avatar_pipeline(*, tenant_id, task_id):
         try:
             run = db.get(AvatarProviderRun, task_id)
             snapshot = run.checkpoint
-            if snapshot.get("tts_started") and not snapshot.get("audio_key"):
+            if not snapshot.get("audio_key") and (
+                snapshot.get("tts_started")
+                or snapshot.get("post_attempted")
+                or run.provider_job_id
+            ):
                 raise HeyGenReviewRequired("TTS outcome requires reconciliation; synthesis held.")
             if "cost_snapshot" not in snapshot:
                 snapshot = _checkpoint(
@@ -419,8 +423,9 @@ def run_heygen_avatar_pipeline(*, tenant_id, task_id):
                 _validate_source_before_tts(ctx, run.model)
                 legacy.script_step(ctx)
                 db.commit()
-                _checkpoint(ctx, owner, tts_started=True)
-                legacy.tts_step(ctx)
+                legacy.tts_step(
+                    ctx, before_synthesize=lambda: _checkpoint(ctx, owner, tts_started=True)
+                )
                 snapshot = _checkpoint(
                     ctx,
                     owner,
@@ -484,7 +489,12 @@ def run_heygen_avatar_pipeline(*, tenant_id, task_id):
             # Once paid I/O could have happened, unfamiliar local failures cannot refund.
             if (
                 pending is None
-                and run.checkpoint.get("tts_started")
+                and (
+                    run.checkpoint.get("tts_started")
+                    or run.checkpoint.get("audio_key")
+                    or run.checkpoint.get("post_attempted")
+                    or run.provider_job_id
+                )
                 and not isinstance(error, HeyGenTerminalFailure)
             ):
                 pending = HeyGenReviewRequired("Avatar checkpoint requires manual review.")

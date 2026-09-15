@@ -7,7 +7,7 @@ import os
 import re
 import subprocess
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -843,7 +843,9 @@ def script_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
     return ctx
 
 
-def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
+def tts_step(
+    ctx: AvatarTalkContext, *, before_synthesize: Callable[[], None] | None = None
+) -> AvatarTalkContext:
     task = _task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
     voice_code, voice_source, brand_voice_provider = _tts_voice_for_task(
         ctx.db,
@@ -860,23 +862,29 @@ def tts_step(ctx: AvatarTalkContext) -> AvatarTalkContext:
         tenant_id=ctx.tenant_id,
         brand_voice_provider=brand_voice_provider,
     )
+    payload = {
+        "text": task.script or task.topic or "",
+        "voice": voice_code,
+        "voice_source": voice_source,
+        "brand_voice_provider": brand_voice_provider,
+        "speed": float(task.speed or 1.0),
+        "task_id": ctx.task_id,
+        "output_dir": str(ctx.work_dir or _work_dir(ctx.task_id)),
+    }
+
+    def synthesize():
+        # Local validation has finished; durable runners fence paid I/O here.
+        if before_synthesize is not None:
+            before_synthesize()
+        return provider.synthesize_speech(payload)
+
     result = asyncio.run(
         invoke(
             ctx.db,
             tenant_id=ctx.tenant_id,
             capability=capability,
             provider=provider.__class__.__name__,
-            operation=lambda: provider.synthesize_speech(
-                {
-                    "text": task.script or task.topic or "",
-                    "voice": voice_code,
-                    "voice_source": voice_source,
-                    "brand_voice_provider": brand_voice_provider,
-                    "speed": float(task.speed or 1.0),
-                    "task_id": ctx.task_id,
-                    "output_dir": str(ctx.work_dir or _work_dir(ctx.task_id)),
-                }
-            ),
+            operation=synthesize,
             timeout_seconds=settings.engine_omnihuman_request_timeout_seconds,
         )
     )
