@@ -54,6 +54,7 @@ async function submit() {
   await waitFor(() => expect(generate).toBeEnabled());
   fireEvent.click(generate);
   const confirm = await screen.findByRole("button", { name: "确定" });
+  fireEvent.click(screen.getByRole("checkbox", { name: /我已阅读并同意/ }));
   await waitFor(() => expect(confirm).toBeEnabled());
   fireEvent.click(confirm);
   await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));

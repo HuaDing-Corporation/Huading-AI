@@ -404,6 +404,7 @@ test("video contracts expose legacy, deferred and CosyVoice billing while estima
   await page.getByRole("button", { name: "生成视频" }).click();
   await expect(page.getByText("CosyVoice 品牌音色")).toBeVisible();
   await expect(page.getByText(/0\.1000 积分 \/ character/)).toBeVisible();
+  await page.getByRole("checkbox", { name: /我已阅读并同意/ }).check();
   await page.getByRole("button", { name: "确认并继续" }).click();
   await expect(page.getByText(/已冻结 \d+ 积分/)).toBeVisible();
   await expect(page.getByText("品牌音色视频", { exact: true }).first()).toBeVisible();

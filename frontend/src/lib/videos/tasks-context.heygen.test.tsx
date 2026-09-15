@@ -37,6 +37,17 @@ async function start() {
 }
 
 describe("HeyGen 结果未知不可变成本地失败→新付费任务", () => {
+  it("已确认失败也不能自动复用同意创建新付费任务，须回工作台重新确认", async () => {
+    let emit!: (event: VideoEvent) => void;
+    api.streamVideoEvents.mockImplementation((_id, callback) => { emit = callback; return new Promise(() => {}); });
+    await start();
+    await act(async () => { emit({ status: "failed", progress: 40 }); });
+    api.getVideo.mockResolvedValue({ id: "new-avatar", mode: "avatar_talk", avatar_provider: "heygen", status: "failed", progress: 40, topic: "口播", created_at: "" });
+    api.estimateVideo.mockResolvedValue({ pricing_contract: "legacy_estimate", estimated_credits: 12, unit: "credits" });
+    await act(async () => { await expect(current.retryTask("new-avatar")).rejects.toThrow(/重新确认/); });
+    expect(api.estimateVideo).not.toHaveBeenCalled();
+    expect(api.createVideo).toHaveBeenCalledTimes(1);
+  });
   it("连接恢复收到终态后移除本地未知提示", async () => {
     let emit!: (event: VideoEvent) => void;
     api.streamVideoEvents.mockImplementation((_id, callback) => { emit = callback; return new Promise(() => {}); });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, type ReactNode } from "react";
 import { Clock3, Loader2, ReceiptText, TriangleAlert } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,9 @@ export interface PricingConfirmDialogProps {
   onConfirm: () => void;
   onCancel: () => void;
   confirmLabel?: string;
+  /** Optional operation-specific acknowledgement; other billable actions stay unchanged. */
+  confirmationContent?: ReactNode;
+  confirmationDisabled?: boolean;
 }
 
 export function PricingConfirmDialog({
@@ -43,7 +46,9 @@ export function PricingConfirmDialog({
   onEstimate,
   onConfirm,
   onCancel,
-  confirmLabel = "确认并继续"
+  confirmLabel = "确认并继续",
+  confirmationContent,
+  confirmationDisabled = false
 }: PricingConfirmDialogProps) {
   useEffect(() => {
     if (open && phase === "idle") onEstimate();
@@ -91,7 +96,7 @@ export function PricingConfirmDialog({
 
         <div
           data-testid="billing-price-layout"
-          className="min-w-0 overflow-hidden rounded-field border border-line-gold bg-white/45"
+          className="min-w-0 shrink-0 overflow-hidden rounded-field border border-line-gold bg-white/45"
           aria-live="polite"
         >
           {estimating ? (
@@ -190,6 +195,8 @@ export function PricingConfirmDialog({
           </p>
         )}
 
+        {confirmationContent}
+
         <div className="flex flex-col-reverse gap-2.5 sm:flex-row sm:justify-end">
           {querying && onViewTask && <Button variant="soft" onClick={onViewTask}>查看任务</Button>}
           <Button variant="soft" onClick={onCancel} disabled={closeLocked}>
@@ -207,7 +214,7 @@ export function PricingConfirmDialog({
               <Button
                 aria-label={confirmLabel}
                 onClick={onConfirm}
-                disabled={!confirmable || interactionLocked}
+                disabled={!confirmable || interactionLocked || confirmationDisabled}
               >
                 {submitting ? (
                   <>

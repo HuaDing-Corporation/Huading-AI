@@ -46,6 +46,8 @@ async function generate(page: Page): Promise<void> {
   const btn = page.getByRole("button", { name: /生成视频/ });
   await expect(btn).toBeEnabled({ timeout: 15_000 });
   await btn.click();
+  await expect(page.getByRole("button", { name: "确定", exact: true })).toBeDisabled();
+  await page.getByRole("checkbox", { name: /我已阅读并同意/ }).check();
   await page.getByRole("button", { name: "确定" }).click();
 }
 
@@ -66,6 +68,8 @@ test("照片默认零回归：不切来源 → 生成请求带 avatar_asset_id�
   expect(g.videoBody()?.avatar_video_asset_id).toBeUndefined();
   expect(g.videoBody()?.voice_id).toBeTruthy();
   expect(g.videoBody()?.avatar_provider).toBeUndefined();
+  expect(g.videoBody()?.avatar_duration_policy).toBe("145s-no-refund-v1");
+  expect(g.videoBody()?.avatar_duration_policy_token).toBeTruthy();
   expect(g.errors(), g.errors().join("\n")).toEqual([]);
 });
 
@@ -85,6 +89,8 @@ test("视频源：切「本人出镜视频」→ 传 MP4(过预检) → 生成�
   expect(g.videoBody()?.avatar_asset_id).toBeUndefined();
   expect(g.videoBody()?.voice_id).toBeTruthy();
   expect(g.videoBody()?.avatar_provider).toBeUndefined();
+  expect(g.videoBody()?.avatar_duration_policy).toBe("145s-no-refund-v1");
+  expect(g.videoBody()?.avatar_duration_policy_token).toBeTruthy();
 
   // 移动端（375）：两档切换仍可见。
   await page.setViewportSize({ width: 375, height: 812 });
@@ -93,3 +99,59 @@ test("视频源：切「本人出镜视频」→ 传 MP4(过预检) → 生成�
 
   expect(g.errors(), g.errors().join("\n")).toEqual([]);
 });
+
+for (const source of ["photo", "video"] as const) {
+  for (const billed of [false, true]) {
+    test(`145s failed/settled UI: ${source}, billed=${billed}`, async ({ page }) => {
+      const g = await login(page);
+      await page.setViewportSize({ width: billed ? 1280 : 375, height: 812 });
+      await page.evaluate(() => localStorage.setItem("hd_mock_avatar_145_failure", "1"));
+      await page.locator("#video-topic").fill("145秒失败账务演示");
+      await page.locator("#video-script").fill("四字文案");
+      if (source === "video") {
+        await page.getByRole("button", { name: "本人出镜视频", exact: true }).click();
+        await page.locator("#avatar-video").setInputFiles(VIDEO_FIXTURE);
+      } else {
+        await page.locator("#avatar-image").setInputFiles(AVATAR_PNG);
+      }
+      await expect(page.getByText("已上传，可生成")).toBeVisible();
+      if (billed) {
+        await page.getByRole("button", { name: /免费复刻音/ }).click();
+      }
+      await page.getByRole("button", { name: "生成视频", exact: true }).click();
+      const submit = page.getByRole("button", { name: billed ? "确认并继续" : "确定", exact: true });
+      await expect(submit).toBeDisabled();
+      const checkbox = page.getByRole("checkbox", { name: /我已阅读并同意/ });
+      await expect(checkbox).toBeEnabled();
+      await checkbox.focus();
+      await page.keyboard.press("Space");
+      await expect(checkbox).toBeChecked();
+      await expect(submit).toBeEnabled();
+      const overflow = await page.getByRole("dialog").evaluate((dialog) => ({ client: dialog.clientWidth, scroll: dialog.scrollWidth }));
+      expect(overflow.scroll).toBeLessThanOrEqual(overflow.client + 1);
+      if (billed) {
+        // The consent notice must not flex-shrink the hidden-overflow price box:
+        // at 375px this used to crop the payable amount even with zero horizontal overflow.
+        await page.setViewportSize({ width: 375, height: 812 });
+        const priceLayout = page.getByTestId("billing-price-layout");
+        const priceHeight = await priceLayout.evaluate((element) => ({
+          client: element.clientHeight, scroll: element.scrollHeight
+        }));
+        expect(priceHeight.scroll).toBeLessThanOrEqual(priceHeight.client + 1);
+        await page.getByText("服务端应付积分", { exact: true }).scrollIntoViewIfNeeded();
+        await expect(page.getByText("服务端应付积分", { exact: true })).toBeInViewport();
+      }
+      const response = page.waitForResponse((res) => res.request().method() === "POST" && new URL(res.url()).pathname === "/api/v1/videos");
+      await submit.click();
+      const accepted = await (await response).json() as { data: { id: string } };
+      await expect(page.getByText(/生成失败（超145秒，费用不退）。已结算 \d+ 积分/).first()).toBeVisible();
+      await expect(page.getByRole("button", { name: "重试", exact: true })).toHaveCount(0);
+      // Client navigation preserves the in-page MSW store, as other mock E2E do.
+      // A full reload creates a new fixture store and cannot look up this task.
+      await page.getByRole("button", { name: "查看详情", exact: true }).first().click();
+      await expect(page).toHaveURL(new RegExp(`/videos/${accepted.data.id}$`));
+      await expect(page.getByText(/生成失败（超145秒，费用不退）。已结算 \d+ 积分/)).toBeVisible();
+      expect(g.errors()).toEqual([]);
+    });
+  }
+}
