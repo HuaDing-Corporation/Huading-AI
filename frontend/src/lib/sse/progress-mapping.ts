@@ -1,9 +1,12 @@
 import type { VideoDetail, VideoEvent, VideoListItem, VideoStatus } from "@/lib/api/types";
 import { avatarModelLabel, avatarRecovery } from "@/lib/videos/avatar-presentation";
+import { avatarFailureText, checkedAvatarBillingOutcome } from "@/lib/api/avatar-duration-policy";
+import type { AvatarBillingOutcome } from "@/lib/api/types";
 
 export type UiStatus = VideoStatus;
 
 export interface TrackedTask {
+  billingOutcome?: AvatarBillingOutcome | null;
   taskId: string;
   topic: string;
   status: UiStatus;
@@ -92,6 +95,7 @@ export function mapSseStatus(status: string | undefined): UiStatus {
 }
 
 export interface ProgressSnapshot {
+  billingOutcome?: AvatarBillingOutcome | null;
   status: UiStatus;
   progress: number;
   statusLabel: string;
@@ -117,7 +121,8 @@ export function eventToProgress(event: VideoEvent): ProgressSnapshot | null {
     ...(status === "running" && avatarRecovery(event.error_code)
       ? { statusLabel: avatarRecovery(event.error_code)!.label }
       : {}),
-    error: event.error_message ?? event.error ?? undefined,
+    ...(event.billing_outcome !== undefined ? { billingOutcome: checkedAvatarBillingOutcome(event) } : {}),
+    error: avatarFailureText(event) ?? event.error_message ?? event.error ?? undefined,
     errorCode: event.error_code ?? null
   };
 }
@@ -144,7 +149,8 @@ export function fromVideoRead(read: VideoDetail | VideoListItem): TrackedTask {
     downloadUrl: read.download_url ?? null,
     thumbnailUrl: read.thumbnail_url ?? null,
     durationSec: read.duration_ms != null ? read.duration_ms / 1000 : null,
-    error: read.error_message ?? null,
+    billingOutcome: checkedAvatarBillingOutcome(read),
+    error: avatarFailureText(read) ?? read.error_message ?? null,
     errorCode: read.error_code ?? null,
     applyVisibleLabel: read.apply_visible_label ?? false,
     ...(Number.isFinite(startedAt) ? { startedAt } : {})

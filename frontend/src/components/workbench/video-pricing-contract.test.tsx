@@ -1,12 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { render } from "@/lib/billing/test-utils";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ConfirmGenerateDialog } from "@/components/workbench/confirm-generate-dialog";
 import { BillingStatus } from "@/components/billing/billing-status";
 import { createVideo } from "@/lib/api/videos";
-import type { BillingConfirmation, VideoEstimateContract } from "@/lib/api/types";
+import type { BillingConfirmation, CreateVideoRequest, VideoEstimateContract } from "@/lib/api/types";
+import { avatarPolicy } from "@/lib/api/testing/avatar-policy";
 import { useGenerateConfirm } from "@/lib/api/use-generate-confirm";
 import { server } from "@/mocks/server";
 
@@ -54,6 +56,7 @@ function quote(withTts = true) {
     });
   }
   return {
+    avatar_duration_policy: avatarPolicy(withTts ? 101 : 100),
     pricing_contract: "billing_quote",
     pricing_shape: "composite",
     operation: "video_create",
@@ -71,7 +74,8 @@ function quote(withTts = true) {
   };
 }
 
-function Harness({ onSubmit, voiceProvider = "cosyvoice" }: {
+function Harness({ onSubmit, voiceProvider = "cosyvoice", input = request }: {
+  input?: CreateVideoRequest;
   onSubmit?: (
     estimate: VideoEstimateContract | undefined,
     confirmation: BillingConfirmation | undefined
@@ -85,7 +89,7 @@ function Harness({ onSubmit, voiceProvider = "cosyvoice" }: {
   return (
     <>
       <button
-        onClick={() => control.requestConfirm(request, {
+        onClick={() => control.requestConfirm(input, {
           voice_kind: "brand",
           voice_provider: voiceProvider
         })}
@@ -97,7 +101,7 @@ function Harness({ onSubmit, voiceProvider = "cosyvoice" }: {
         request={control.request}
         submitting={control.submitting}
         pricing={control.pricing}
-        onConfirm={() => void control.confirm()}
+        onConfirm={control.confirm}
         onCancel={control.cancel}
       />
       {control.billing && !control.open && <BillingStatus summary={control.billing} />}
@@ -107,12 +111,13 @@ function Harness({ onSubmit, voiceProvider = "cosyvoice" }: {
 
 function renderHarness(
   onSubmit?: Parameters<typeof Harness>[0]["onSubmit"],
-  voiceProvider?: "cosyvoice" | "doubao"
+  voiceProvider?: "cosyvoice" | "doubao",
+  input?: CreateVideoRequest
 ) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <Harness onSubmit={onSubmit} voiceProvider={voiceProvider} />
+      <Harness onSubmit={onSubmit} voiceProvider={voiceProvider} input={input} />
     </QueryClientProvider>
   );
 }
@@ -122,6 +127,50 @@ beforeEach(() => {
 });
 
 describe("video pricing contract UI", () => {
+  it("expired billed quote refetches the server policy and requires fresh consent", async () => {
+    let calls = 0;
+    server.use(http.post(`${API}/api/v1/videos/estimate`, () => {
+      calls++;
+      return HttpResponse.json({ data: { ...quote(true),
+        ...(calls === 1 ? { expires_at: "2020-01-01T00:00:00Z" } : {}) } });
+    }));
+    renderHarness();
+    fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
+    fireEvent.click(await screen.findByRole("button", { name: "重新获取价格" }));
+    await waitFor(() => expect(calls).toBe(2));
+    await screen.findByText("CosyVoice 品牌音色");
+    expect(screen.getByRole("checkbox")).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "确认并继续" })).toBeDisabled();
+  });
+  it("keeps a recovered failed_charged lookup failed with its real settled amount", async () => {
+    let key = "";
+    const posts = vi.fn();
+    server.use(
+      http.post(`${API}/api/v1/videos/estimate`, () => HttpResponse.json({ data: quote(true) })),
+      http.post(`${API}/api/v1/videos`, ({ request: incoming }) => {
+        posts(); key = incoming.headers.get("Idempotency-Key")!;
+        return HttpResponse.error();
+      }),
+      http.get(`${API}/api/v1/billing/operations/by-idempotency/video_create/:key`, () => HttpResponse.json({ data: {
+        operation: "video_create", idempotency_key: key, state: "completed", completion_kind: "failed_charged",
+        billing: { operation_id: "charged-op", idempotency_key: key, status: "settled", requested_credits: 101,
+          held_credits: 0, settled_credits: 101, released_credits: 0 },
+        result_type: null, result_id: null, result: null, resource: { task_id: "charged-task", status: "failed" },
+        failure: { code: "HEYGEN_AUDIO_DURATION_EXCEEDED", original_http_status: 422, detail: null }
+      } }))
+    );
+    renderHarness();
+    fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
+    await screen.findByText("CosyVoice 品牌音色");
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "确认并继续" }));
+    await waitFor(() => expect(posts).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("生成失败（超145秒，费用不退）。已结算 101 积分。")).toBeVisible();
+    expect(screen.getByRole("dialog")).toBeVisible();
+    expect(screen.getByRole("button", { name: "确认并继续" })).toBeDisabled();
+    expect(screen.queryByText(/已退款|已释放 101|生成成功/)).not.toBeInTheDocument();
+    expect(posts).toHaveBeenCalledTimes(1);
+  });
   it("fetches a CosyVoice composite quote once and reuses it for the exact confirmed submit", async () => {
     const estimateCalls = vi.fn();
     const submitCalls = vi.fn();
@@ -168,12 +217,14 @@ describe("video pricing contract UI", () => {
     expect(estimateCalls).toHaveBeenCalledTimes(1);
 
     const confirm = screen.getByRole("button", { name: "确认并继续" });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: /我已阅读并同意/ }));
     fireEvent.click(confirm);
     fireEvent.click(confirm);
     await waitFor(() => expect(submitCalls).toHaveBeenCalledTimes(1));
     expect(estimateCalls).toHaveBeenCalledTimes(1);
     expect(submitCalls).toHaveBeenCalledWith({
-      body: request,
+      body: { ...request, avatar_duration_policy: "145s-no-refund-v1", avatar_duration_policy_token: "synthetic-avatar-policy" },
       quote: "signed-video-quote",
       key: expect.stringMatching(/^[0-9a-f-]{36}$/i)
     });
@@ -237,6 +288,7 @@ describe("video pricing contract UI", () => {
     renderHarness();
     fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
     await screen.findByText("CosyVoice 品牌音色");
+    fireEvent.click(screen.getByRole("checkbox", { name: /我已阅读并同意/ }));
     fireEvent.click(screen.getByRole("button", { name: "确认并继续" }));
 
     expect(await screen.findByText("部分结算 60 积分，已释放 41 积分")).toBeVisible();
@@ -252,6 +304,7 @@ describe("video pricing contract UI", () => {
             pricing_contract: "legacy_estimate",
             estimated_credits: 12,
             unit: "credits",
+            avatar_duration_policy: avatarPolicy(12),
             note: "旧计费流程"
           },
           error: null,
@@ -279,6 +332,7 @@ describe("video pricing contract UI", () => {
     renderHarness(callback);
     fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
     expect(await screen.findByText("12")).toBeVisible();
+    fireEvent.click(screen.getByRole("checkbox", { name: /我已阅读并同意/ }));
     fireEvent.click(screen.getByRole("button", { name: "确定" }));
     await waitFor(() => expect(submit).toHaveBeenCalledWith({ quote: null, key: null }));
     expect(callback.mock.calls[0][0]).toMatchObject({ pricing_contract: "legacy_estimate" });
@@ -314,7 +368,7 @@ describe("video pricing contract UI", () => {
       )
     );
     const callback = vi.fn();
-    renderHarness(callback);
+    renderHarness(callback, undefined, { topic: "未定价模式", video_mode: "seedance_t2v" });
     fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
     expect(await screen.findByText("延期处理／尚未闭环")).toBeVisible();
     expect(screen.queryByText(/0\s*积分|免费/)).not.toBeInTheDocument();

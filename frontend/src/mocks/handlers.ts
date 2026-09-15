@@ -73,6 +73,45 @@ interface MockOperationRecord {
 
 const mockQuotes = new Map<string, MockQuoteRecord>();
 const mockBillingOperations = new Map<string, MockOperationRecord>();
+// Wire-v1 simulation only: opaque in-memory capabilities, not real signatures.
+// Scope uses the mock session identity; real tenant/user signature enforcement is BE-owned.
+const mockAvatarPolicies = new Map<string, { fingerprint: string; identity: string | null; quote: string | null; expires: number; credits: number }>();
+
+function originalMockVideoRequest(body: Record<string, unknown>) {
+  const original = { ...body };
+  delete original.avatar_duration_policy;
+  delete original.avatar_duration_policy_token;
+  return original;
+}
+function mockIsAvatar(body: Record<string, unknown>) {
+  return body.video_mode === "avatar_talk" ||
+    (!body.video_mode && !!(body.avatar_asset_id || body.avatar_video_asset_id || body.voice_id));
+}
+function issueMockAvatarPolicy(request: Request, body: Record<string, unknown>, credits: number, quote: string | null = null) {
+  if (!mockIsAvatar(body)) return {};
+  const token = `mock-avatar-policy-${globalThis.crypto.randomUUID()}`;
+  const expires = Date.now() + 600_000;
+  mockAvatarPolicies.set(token, { fingerprint: normalizedMockJson(originalMockVideoRequest(body)),
+    identity: request.headers.get("Authorization"), quote, expires, credits });
+  return { avatar_duration_policy: {
+    version: "145s-no-refund-v1", max_seconds: 145,
+    notice: "数字人视频最长支持145秒。若实际配音时长超过145秒导致生成失败，本次配音费和视频生成费均不退还。请在提交前确认文案与语速。",
+    accepted_credits: credits, token, expires_at: new Date(expires).toISOString()
+  } };
+}
+function validateMockAvatarPolicy(request: Request, body: Record<string, unknown>) {
+  if (!mockIsAvatar(body)) return null;
+  if (!body.avatar_duration_policy || !body.avatar_duration_policy_token) {
+    return err(422, "AVATAR_DURATION_POLICY_REQUIRED", "请确认时长限制及费用规则。");
+  }
+  const policy = mockAvatarPolicies.get(String(body.avatar_duration_policy_token));
+  if (body.avatar_duration_policy !== "145s-no-refund-v1" || !policy || policy.expires <= Date.now() ||
+    policy.fingerprint !== normalizedMockJson(originalMockVideoRequest(body)) ||
+    policy.identity !== request.headers.get("Authorization") || policy.quote !== request.headers.get("X-Huading-Quote")) {
+    return err(422, "AVATAR_DURATION_POLICY_INVALID", "时长政策凭证已失效，请重新确认。");
+  }
+  return null;
+}
 let mockQuoteSeq = 0;
 let mockBillingSeq = 0;
 
@@ -1298,6 +1337,12 @@ const VIDEO_GEN_RESOLUTIONS = ["480p", "720p", "1080p"];
 
 function sseStream(id: string, fail = false): Response {
   const enc = new TextEncoder();
+  const paidFailure = videos.get(id);
+  if (paidFailure?.billing_outcome && paidFailure.status === "failed") {
+    return new Response(`data: ${JSON.stringify({ status: "failed", progress: paidFailure.progress,
+      error_code: paidFailure.error_code, billing_outcome: paidFailure.billing_outcome })}\n\n`,
+      { headers: { "Content-Type": "text/event-stream" } });
+  }
   const frames = fail
     ? [
         { status: "running", progress: 10, step: "tts" },
@@ -2780,7 +2825,8 @@ export const handlers = [
       if (typeof body.script !== "string" || !body.script.trim()) {
         return pricingErr(422, "BILLABLE_TEXT_REQUIRED", "使用品牌音色前请先生成或填写口播文案");
       }
-      return ok(issueMockVideoQuote(body, pricing.brandProvider));
+      const quote = issueMockVideoQuote(body, pricing.brandProvider);
+      return ok({ ...quote, ...issueMockAvatarPolicy(request, body, quote.payable_credits, quote.quote_token) });
     }
     if (pricing.pricingContract === "deferred_unpriced") {
       return ok({
@@ -2799,6 +2845,7 @@ export const handlers = [
       pricing_contract: "legacy_estimate",
       estimated_credits: estimatedCredits,
       unit: "credits",
+      ...issueMockAvatarPolicy(request, body, estimatedCredits),
       note: "Estimated reservation; final settlement uses actual generated duration."
     });
   }),
@@ -2955,15 +3002,22 @@ export const handlers = [
       return pricingErr(422, "BILLABLE_TEXT_REQUIRED", "使用品牌音色前请先生成或填写口播文案");
     }
     const confirmation = pricing.pricingContract === "billing_quote"
-      ? confirmMockQuote(request, "video_create", body)
+      ? confirmMockQuote(request, "video_create", originalMockVideoRequest(body))
       : null;
     if (confirmation && !confirmation.ok) return confirmation.response;
     if (confirmation?.ok && confirmation.replay) {
+      if (confirmation.replay.lookup.completion_kind === "failed_charged") {
+        return pricingErr(422, "HEYGEN_AUDIO_DURATION_EXCEEDED", "生成失败（超145秒，费用不退）", {
+          billing: confirmation.replay.lookup.billing
+        });
+      }
       return HttpResponse.json(
         { data: confirmation.replay.accepted, error: null, request_id: "mock-req" },
         { status: 202 }
       );
     }
+    const policyError = validateMockAvatarPolicy(request, body);
+    if (policyError) return policyError;
     const id = `mock-${++videoSeq}`;
     // video_gen 用 prompt 作展示标题；记 mode + kind(AI 封面 purpose=cover → kind=cover)，让 GET /videos 筛忠实回放
     const displayTopic = body.video_mode === "video_gen" ? (body.prompt ?? "") : (body.topic ?? "");
@@ -2972,11 +3026,20 @@ export const handlers = [
     Object.assign(videos.get(id)!, (body.video_mode ?? "avatar_talk") === "avatar_talk"
       ? { avatar_provider: "heygen", avatar_model: body.avatar_video_asset_id ? "lipsync_precision" : "avatar_iv" }
       : { avatar_provider: null, avatar_model: null });
+    // Explicit local QA fixture representing trusted completed audio >145s.
+    // Never infer actual audio length from text, speed or a request duration estimate.
+    const paidFailure = mockIsAvatar(body) && readLS("hd_mock_avatar_145_failure") === "1";
+    if (paidFailure) {
+      const credits = mockAvatarPolicies.get(String(body.avatar_duration_policy_token))!.credits;
+      Object.assign(videos.get(id)!, { status: "failed", error_code: "HEYGEN_AUDIO_DURATION_EXCEEDED",
+        billing_outcome: { completion_kind: "failed_charged", status: "settled", policy_version: "145s-no-refund-v1",
+          requested_credits: credits, settled_credits: credits, released_credits: 0 } });
+    }
     if (pricing.pricingContract === "billing_quote" && confirmation?.ok) {
       const billing = mockBillingSummary(
         confirmation.idempotencyKey,
         confirmation.quote.payableCredits,
-        "reserved"
+        paidFailure ? "settled" : "reserved"
       );
       const accepted = {
         id,
@@ -2986,17 +3049,17 @@ export const handlers = [
         billing
       };
       const resource = { task_id: id, status: "queued" };
-      storeMockOperation("video_create", confirmation.idempotencyKey, body, accepted, {
+      storeMockOperation("video_create", confirmation.idempotencyKey, originalMockVideoRequest(body), accepted, {
         operation: "video_create",
         idempotency_key: confirmation.idempotencyKey,
-        state: "in_progress",
-        completion_kind: null,
+        state: paidFailure ? "completed" : "in_progress",
+        completion_kind: paidFailure ? "failed_charged" : null,
         billing,
-        result_type: "video_task",
-        result_id: id,
-        resource,
+        result_type: paidFailure ? null : "video_task",
+        result_id: paidFailure ? null : id,
+        resource: paidFailure ? { task_id: id, status: "failed" } : resource,
         result: null,
-        failure: null
+        failure: paidFailure ? { code: "HEYGEN_AUDIO_DURATION_EXCEEDED", original_http_status: 422, detail: null } : null
       });
       return HttpResponse.json(
         { data: accepted, error: null, request_id: "mock-req" },

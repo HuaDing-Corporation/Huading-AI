@@ -552,6 +552,9 @@ export const copy = {
     wfLoading: "加载波形…"
   },
   confirm: {
+    avatarDurationPolicy: "数字人视频最长支持145秒。若实际配音时长超过145秒导致生成失败，本次配音费和视频生成费均不退还。请在提交前确认文案与语速。",
+    avatarDurationConsent: "我已阅读并同意上述时长限制及超时长失败费用不退规则",
+    avatarPolicyUnavailable: "尚未取得有效的时长收费政策确认凭证，请重新获取价格后再确认。",
     title: "确定生成",
     estimating: "估算中…",
     estimatePrefix: "预计消耗 ",

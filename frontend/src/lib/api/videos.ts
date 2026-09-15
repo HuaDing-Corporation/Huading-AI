@@ -1,6 +1,7 @@
 import { ApiError, apiFetch, apiUrl, authHeaders } from "@/lib/api/client";
 import { billingHeaders, parseBillingQuote, parseBillingSummary } from "@/lib/api/billing";
 import { authStore } from "@/lib/auth/store";
+import { checkedAvatarBillingOutcome, parseAvatarDurationPolicy } from "./avatar-duration-policy";
 import type { BillingConfirmation, BillingQuote, BrandVoice, ClearResult, CreateVideoRequest, DeleteResult, ScenePromptRequest, ScenePromptResponse, VideoAcceptedContract, VideoDetail, VideoEstimateContract, VideoEvent, VideoListItem, VideoListResponse, VideoPricingContext, Voice } from "@/lib/api/types";
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -59,6 +60,13 @@ export function parseVideoEstimateContract(
   }
   if (!record(value)) return null;
   if (value.pricing_contract === "legacy_estimate") {
+    if (Object.hasOwn(value, "avatar_duration_policy")) {
+      const { avatar_duration_policy: rawPolicy, ...base } = value;
+      const parsed = parseVideoEstimateContract(base, pricingContext);
+      const policy = parsed?.pricing_contract === "legacy_estimate" &&
+        parseAvatarDurationPolicy(rawPolicy, parsed.estimated_credits);
+      return parsed && policy ? { ...parsed, avatar_duration_policy: policy } : null;
+    }
     return hasOnlyKeys(
       value,
       ["pricing_contract", "estimated_credits", "unit"],
@@ -177,19 +185,22 @@ export function generateScenePrompt(
 }
 
 /** Authoritative record for one video (status + playback/download URLs). */
-export function getVideo(id: string): Promise<VideoDetail> {
-  return apiFetch<VideoDetail>(`/api/v1/videos/${encodeURIComponent(id)}`, { method: "GET" });
+export async function getVideo(id: string): Promise<VideoDetail> {
+  const read = await apiFetch<VideoDetail>(`/api/v1/videos/${encodeURIComponent(id)}`, { method: "GET" });
+  checkedAvatarBillingOutcome(read);
+  return read;
 }
 
 /** This tenant's videos, newest first — used to hydrate the task list on mount. */
 export async function listVideos(): Promise<VideoListItem[]> {
   const res = await apiFetch<VideoListResponse>("/api/v1/videos", { method: "GET" });
+  res?.items?.forEach(checkedAvatarBillingOutcome);
   return res?.items ?? [];
 }
 
 /** One page of videos, optionally filtered by mode — backs the 历史生成 tabs
  *  (returns total so the caller can paginate via offset). */
-export function listVideosPage(
+export async function listVideosPage(
   params: { mode?: string; kind?: string; limit?: number; offset?: number } = {}
 ): Promise<VideoListResponse> {
   const query = new URLSearchParams();
@@ -198,7 +209,9 @@ export function listVideosPage(
   if (params.limit != null) query.set("limit", String(params.limit));
   if (params.offset != null) query.set("offset", String(params.offset));
   const qs = query.toString();
-  return apiFetch<VideoListResponse>(`/api/v1/videos${qs ? `?${qs}` : ""}`, { method: "GET" });
+  const res = await apiFetch<VideoListResponse>(`/api/v1/videos${qs ? `?${qs}` : ""}`, { method: "GET" });
+  res.items.forEach(checkedAvatarBillingOutcome);
+  return res;
 }
 
 /** 硬删单条视频/图片(+媒体 best-effort)；跨租户/不存在 → 404(HIST-UI-0001)。 */
@@ -250,11 +263,17 @@ export async function streamVideoEvents(
     for (const frame of frames) {
       const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
       if (!dataLine) continue;
+      let event: VideoEvent;
       try {
-        onMessage(JSON.parse(dataLine.slice(5).trim()) as VideoEvent);
+        event = JSON.parse(dataLine.slice(5).trim()) as VideoEvent;
       } catch {
         // ignore malformed frame
+        continue;
       }
+      // A contradictory terminal must reject the stream and trigger GET recovery,
+      // not be swallowed alongside JSON noise or handed to an optimistic consumer.
+      checkedAvatarBillingOutcome(event);
+      onMessage(event);
     }
   }
 }

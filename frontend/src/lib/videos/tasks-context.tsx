@@ -12,6 +12,7 @@ import {
 
 import { billingFromApiError, getBillingOperation, parseBillingSummary } from "@/lib/api/billing";
 import { ApiError } from "@/lib/api/client";
+import { isHeygenAvatarRequest } from "@/lib/api/avatar-duration-policy";
 import { createVideo, estimateVideo, getVideo, listVideos, streamVideoEvents } from "@/lib/api/videos";
 import type {
   BillingConfirmation,
@@ -156,7 +157,7 @@ function isUnknownVideoPost(error: unknown): boolean {
 function acceptedFromVideoLookup(
   lookup: BillingOperationLookupFor<"video_create">
 ): VideoAcceptedContract | null {
-  if (lookup.state === "completed" && lookup.completion_kind === "failed") {
+  if (lookup.state === "completed" && (lookup.completion_kind === "failed" || lookup.completion_kind === "failed_charged")) {
     const billing = parseBillingSummary(lookup.billing);
     if (!billing) {
       throw new ApiError("计费结果确认中", "INVALID_BILLING_RESPONSE", 502, {
@@ -167,7 +168,9 @@ function acceptedFromVideoLookup(
       ? { ...lookup.failure.detail, billing }
       : { failure_detail: lookup.failure.detail, billing };
     throw new ApiError(
-      videoFailureMessage(billing),
+      lookup.completion_kind === "failed_charged"
+        ? `生成失败（超145秒，费用不退）。已结算 ${billing.settled_credits} 积分。`
+        : videoFailureMessage(billing),
       lookup.failure.code,
       lookup.failure.original_http_status,
       detail
@@ -472,7 +475,7 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
         statusLabel: labelFor(status, status === "done" ? 100 : 0),
         applyVisibleLabel: req.apply_visible_label ?? false,
         startedAt: Date.now(),
-        retryable: true
+        retryable: !isHeygenAvatarRequest(req)
       },
       ...prev.filter((task) => task.taskId !== accepted.id)
     ]);
@@ -572,6 +575,10 @@ export function VideoTasksProvider({ children }: { children: ReactNode }) {
         if (read.status !== "failed") {
           throw new ApiError("任务结果尚未确认，请勿重复提交。", "VIDEO_RETRY_NOT_ALLOWED", 409);
         }
+      }
+
+      if (isHeygenAvatarRequest(stored.req)) {
+        throw new ApiError("请回工作台重新确认时长限制及费用规则。", "AVATAR_DURATION_POLICY_REQUIRED", 422);
       }
 
       // Explicit retry always starts a new pricing attempt. The stored token/key

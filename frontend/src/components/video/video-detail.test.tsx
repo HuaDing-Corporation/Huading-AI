@@ -30,6 +30,17 @@ function wrapper({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
 }
 
+it("145收费失败详情不显示退款或成功，显示权威实扣", () => {
+  (useVideo as Mock).mockReturnValue({ data: { id: "over-145", status: "failed", progress: 30,
+    topic: "短片", script: "长文案", mode: "avatar_talk", error_code: "HEYGEN_AUDIO_DURATION_EXCEEDED",
+    created_at: "2026-09-15T00:00:00Z", billing_outcome: { completion_kind: "failed_charged", status: "settled",
+      policy_version: "145s-no-refund-v1", requested_credits: 123, settled_credits: 123, released_credits: 0 } },
+    error: null, isLoading: false });
+  render(<VideoDetail id="over-145" />, { wrapper });
+  expect(screen.getByText(/生成失败（超145秒，费用不退）。已结算 123 积分/)).toBeVisible();
+  expect(screen.queryByText(/生成成功|已退款/)).not.toBeInTheDocument();
+});
+
 describe("VideoDetail", () => {
   it.each([
     ["HEYGEN_PENDING", "仍在处理中"],

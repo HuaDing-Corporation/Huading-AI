@@ -501,7 +501,9 @@ function useBillingActionInternal<
       setPhase("succeeded");
       attemptClosed.current = true;
     } else {
-      setError(parsed.completion_kind === "failed" ? parsed.failure : parsed.resource);
+      setError(parsed.completion_kind === "failed_charged"
+        ? new Error(`生成失败（超145秒，费用不退）。已结算 ${parsed.billing.settled_credits} 积分。`)
+        : parsed.completion_kind === "failed" ? parsed.failure : parsed.resource);
       setPhase("failed");
       attemptClosed.current = true;
     }

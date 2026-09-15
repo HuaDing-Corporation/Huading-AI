@@ -142,7 +142,8 @@ describe("estimateVideo · POST /videos/estimate（apiFetch 真走 MSW · FIX2 P
     });
     if (quote.pricing_contract !== "billing_quote") throw new Error("expected billed video quote");
     const key = "55555555-5555-4555-8555-555555555555";
-    const accepted = await createVideo(input, {
+    const accepted = await createVideo({ ...input, avatar_duration_policy: "145s-no-refund-v1",
+      avatar_duration_policy_token: quote.avatar_duration_policy!.token }, {
       quote_token: quote.quote_token,
       idempotency_key: key
     });

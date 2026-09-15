@@ -49,6 +49,8 @@ async function submitAndCapture() {
   await waitFor(() => expect(generate).toBeEnabled());
   fireEvent.click(generate);
   const confirm = await screen.findByRole("button", { name: "确定" });
+  expect(confirm).toBeDisabled();
+  fireEvent.click(screen.getByRole("checkbox", { name: /我已阅读并同意/ }));
   await waitFor(() => expect(confirm).toBeEnabled());
   fireEvent.click(confirm);
   await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
@@ -56,6 +58,21 @@ async function submitAndCapture() {
 }
 
 describe("NewVideoForm 形象源二选一（AVATAR-VIDEO-SOURCE-UI-0001）", () => {
+  it("145：确认期间新的prefill使旧报价/同意失效，不能提交旧文案", async () => {
+    const view = render(<NewVideoForm />);
+    setTopic();
+    fireEvent.change(document.querySelector('input[type="file"]')!, {
+      target: { files: [new File(["x"], "a.png", { type: "image/png" })] }
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: /生成视频/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /生成视频/ }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: /我已阅读并同意/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "确定" })).toBeEnabled());
+    view.rerender(<NewVideoForm initialScript="新带入的文案" />);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(taskMocks.createAndTrack).not.toHaveBeenCalled();
+  });
+
   it("HeyGen：来源切换展示不同目标模型，但不声称服务已启用", () => {
     render(<NewVideoForm />);
     expect(screen.getByText(/HeyGen Avatar IV/)).toBeInTheDocument();

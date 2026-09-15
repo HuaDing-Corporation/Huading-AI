@@ -18,6 +18,7 @@ import { AiLabelNotice } from "@/components/label/ai-label-notice";
 import { GeneratingElapsed } from "@/components/tasks/generating-elapsed";
 import { friendlyImageError } from "@/lib/api/image-error";
 import { friendlyVideoError } from "@/lib/api/video-error";
+import { avatarFailureText } from "@/lib/api/avatar-duration-policy";
 import type { MediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 import { copy } from "@/lib/copy";
 import { avatarRecovery } from "@/lib/videos/avatar-presentation";
@@ -94,7 +95,9 @@ export function TaskCard({ task, onOpen, onOpenMedia, onRetry, refresh, onDelete
   const isImage = task.mode === "photo";
   const recovery = task.status === "running" ? avatarRecovery(task.errorCode) : null;
   // 失败均映射友好中文（不露裸 error_message/技术串）：photo→friendlyImageError，视频→friendlyVideoError（VIDEO-ERR-MAP-UI）。
-  const failureText = isImage ? friendlyImageError(task.errorCode) : friendlyVideoError(task.errorCode);
+  const failureText = isImage ? friendlyImageError(task.errorCode) : avatarFailureText({
+    status: task.status, error_code: task.errorCode, billing_outcome: task.billingOutcome
+  }) ?? friendlyVideoError(task.errorCode);
 
   return (
     <div className="border-b border-track py-3.5 last:border-none">
@@ -165,10 +168,16 @@ export function TaskCard({ task, onOpen, onOpenMedia, onRetry, refresh, onDelete
               {failureText}
             </p>
           ) : null}
+          {task.errorCode === "HEYGEN_AUDIO_DURATION_EXCEEDED" && (
+            <button type="button" onClick={() => onOpen(task.taskId)}
+              className="mb-2 rounded-field border border-line-gold px-3 py-1.5 text-[12.5px] text-gold-deep focus-visible:shadow-focus-gold">
+              {copy.tasks.open}
+            </button>
+          )}
           {/* Only offer retry when we hold the original request (this-session
               tasks). Hydrated-from-list failed tasks have no stored request, so
               show a "refill on the workbench" hint instead of silently failing (P2-1). */}
-          {task.retryable ? (
+          {task.retryable && !task.billingOutcome ? (
             <button
               type="button"
               onClick={() => onRetry(task.taskId)}

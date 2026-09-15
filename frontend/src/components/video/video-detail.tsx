@@ -10,6 +10,7 @@ import { useVideo } from "@/lib/api/hooks";
 import { videoKeys } from "@/lib/api/keys";
 import { friendlyImageError } from "@/lib/api/image-error";
 import { friendlyVideoError } from "@/lib/api/video-error";
+import { avatarFailureText } from "@/lib/api/avatar-duration-policy";
 import { copy } from "@/lib/copy";
 import { avatarModelLabel, avatarRecovery } from "@/lib/videos/avatar-presentation";
 import { useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
@@ -249,7 +250,7 @@ export function VideoDetail({ id }: VideoDetailProps) {
             <dt className="text-ink-faint">错误信息</dt>
             {/* 失败均映射友好中文（不露裸 error_message）：photo→friendlyImageError，视频→friendlyVideoError（VIDEO-ERR-MAP-UI）。 */}
             <dd className="text-error-fg">
-              {data.mode === "photo" ? friendlyImageError(data.error_code) : friendlyVideoError(data.error_code)}
+              {data.mode === "photo" ? friendlyImageError(data.error_code) : avatarFailureText(data) ?? friendlyVideoError(data.error_code)}
             </dd>
           </div>
         )}
