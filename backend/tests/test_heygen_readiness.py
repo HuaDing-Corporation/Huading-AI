@@ -16,7 +16,6 @@ from test_health import _health_database_session, _ReadyRedis, _seed_persisted_r
 from app.api.deps import get_db_session, get_redis_client
 from app.api.v1.routes import health
 from app.core.config import settings
-from app.db.models import Base
 from app.main import app
 from scripts.ops import pricing_closure_readiness as readiness
 from scripts.ops import pricing_closure_readiness_cli as cli
@@ -185,7 +184,7 @@ def test_0039_missing_safety_constraint_blocks_readiness(heygen_ready_db):
     )
 
 
-def test_real_0039_migration_matches_postgres_readiness_contract():
+def test_real_0039_migration_matches_postgres_readiness_contract(cloned_model_metadata_factory):
     """CI checks real PostgreSQL constraint reflection, not a SQLite approximation."""
     url = os.environ.get("TEST_POSTGRES_URL") or os.environ.get("PRICING_READINESS_POSTGRES_URL")
     if not url:
@@ -203,7 +202,9 @@ def test_real_0039_migration_matches_postgres_readiness_contract():
         with engine.begin() as connection:
             connection.execute(text(f'CREATE SCHEMA "{schema}"'))
             connection.execute(text(f'SET LOCAL search_path TO "{schema}"'))
-            Base.metadata.create_all(connection)
+            # PostgreSQL's ALTER-based FKs mutate DDL metadata; never let this
+            # erase those FKs from later SQLite fixtures sharing the ORM Base.
+            cloned_model_metadata_factory().create_all(connection)
             connection.execute(text("DROP TABLE IF EXISTS avatar_provider_runs"))
             module.op = Operations(MigrationContext.configure(connection))
             module.upgrade()
