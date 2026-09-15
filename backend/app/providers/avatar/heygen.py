@@ -178,6 +178,17 @@ class HeyGenAvatarProvider:
     async def generate_change_lips(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         return await self._generate(payload, model="lipsync_precision")
 
+    def _check_submission_window(self, payload, *, reserve_seconds: float = 0):
+        now = datetime.now(UTC)
+        submitted_at = _timestamp(payload.get("submitted_at"))
+        deadline = now + timedelta(seconds=reserve_seconds)
+        if submitted_at > now or deadline >= submitted_at + timedelta(hours=24):
+            raise HeyGenReviewRequired("HeyGen idempotency window requires manual review.")
+        if deadline >= _timestamp(payload.get("input_expires_at")):
+            raise HeyGenReviewRequired(
+                "HeyGen input URLs expired or too near expiry; submission is held."
+            )
+
     async def _request(self, client, method: str, path: str, payload, *, body=None):
         callback = payload.get("before_request")
         if not callable(callback):
@@ -185,17 +196,25 @@ class HeyGenAvatarProvider:
         callback()
         headers = {"x-api-key": self._api_key}
         if method == "POST":
+            # DNS validation and the ownership callback can block. Recheck here,
+            # after both, reserving the total request budget plus clock/dispatch
+            # slack. A near-expiry replay must hold, never become a new paid job.
+            self._check_submission_window(
+                payload, reserve_seconds=self.request_timeout_seconds + 30
+            )
             headers["Idempotency-Key"] = payload["idempotency_key"]
         try:
-            response = await client.request(
-                method,
-                f"{_API_URL}/{path}",
-                headers=headers,
-                json=body,
-                follow_redirects=False,
-                timeout=self.request_timeout_seconds,
-            )
-        except httpx.HTTPError as exc:
+            # HTTPX's per-I/O timeouts alone do not bound a slow streaming peer.
+            async with asyncio.timeout(self.request_timeout_seconds):
+                response = await client.request(
+                    method,
+                    f"{_API_URL}/{path}",
+                    headers=headers,
+                    json=body,
+                    follow_redirects=False,
+                    timeout=self.request_timeout_seconds,
+                )
+        except (httpx.HTTPError, TimeoutError) as exc:
             raise HeyGenPending("HeyGen request outcome is not yet known.") from exc
         if response.is_redirect:
             raise HeyGenReviewRequired("HeyGen API redirect was blocked.")
@@ -219,12 +238,7 @@ class HeyGenAvatarProvider:
         async with self._client() as client:
             if not job_id:
                 body = payload.get("request_body")
-                now = datetime.now(UTC)
-                submitted_at = _timestamp(payload.get("submitted_at"))
-                if submitted_at > now or now >= submitted_at + timedelta(hours=24):
-                    raise HeyGenReviewRequired("HeyGen idempotency window requires manual review.")
-                if now >= _timestamp(payload.get("input_expires_at")):
-                    raise HeyGenReviewRequired("HeyGen input URLs expired; submission is held.")
+                self._check_submission_window(payload)
                 if not isinstance(body, dict) or request_fingerprint(body) != payload.get(
                     "request_fingerprint"
                 ):

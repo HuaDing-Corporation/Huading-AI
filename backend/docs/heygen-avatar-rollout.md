@@ -43,6 +43,12 @@ workers overwriting current outputs.
 A known remote ID always uses GET. An uncertain POST uses the same stored request
 and key, only within 24 hours and before input expiry. `HEYGEN_REVIEW_REQUIRED`
 is a running, financially held task excluded from automatic re-submission.
+POST deadlines are checked again after DNS validation and ownership renewal,
+immediately before sending. Submission requires remaining time greater than
+the configured total request timeout plus 30 seconds of dispatch/clock slack,
+for both the 24-hour identity window and signed inputs. HTTP requests have a
+total deadline, not only per-I/O timeouts. Near-expiry unknown submissions hold
+for review; known-job GET recovery remains available beyond either POST deadline.
 Uncertain TTS without a committed audio checkpoint is also held, not synthesized
 again. There is no public retry/refund command for these states.
 

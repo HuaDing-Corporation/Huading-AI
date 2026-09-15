@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
@@ -301,3 +302,75 @@ async def test_default_result_hosts_reject_lookalikes_before_network(monkeypatch
         with pytest.raises(HeyGenError, match="not allowed"):
             await provider.download_video(f"https://{host}/video/test.mp4")
     assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["avatar_iv", "lipsync_precision"])
+@pytest.mark.parametrize("boundary", ["replay_expired", "input_expired", "short_margin"])
+async def test_submission_deadline_is_rechecked_after_lease_wait(
+    provider_factory, monkeypatch, model, boundary
+):
+    from app.providers.avatar import heygen
+
+    start = datetime(2026, 9, 14, tzinfo=UTC)
+    clock = [start + timedelta(hours=24, seconds=-120)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+
+    monkeypatch.setattr(heygen, "datetime", Clock)
+    calls = []
+
+    def delayed_renewal():
+        clock[0] = start + timedelta(hours=24, seconds=-60 if boundary == "short_margin" else 1)
+
+    def transport(request):
+        calls.append(request.method)
+        if request.method == "POST":
+            return httpx.Response(
+                200, json={"data": {"video_id" if model == "avatar_iv" else "lipsync_id": "job1"}}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "id": "job1",
+                    "status": "completed",
+                    "video_url": "https://files.heygen.ai/video/test.mp4",
+                }
+            },
+        )
+
+    payload = _payload(
+        model,
+        submitted_at=(
+            start + timedelta(hours=1) if boundary == "input_expired" else start
+        ).isoformat(),
+        input_expires_at=(
+            start + timedelta(hours=24 if boundary == "input_expired" else 25)
+        ).isoformat(),
+        post_attempted_before=True,
+        before_request=delayed_renewal,
+    )
+    provider = provider_factory(transport)
+    with pytest.raises(heygen.HeyGenReviewRequired):
+        await provider._generate(payload, model=model)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_request_has_total_deadline_and_preserves_uncertain_outcome(provider_factory):
+    from app.providers.avatar.heygen import HeyGenPending
+
+    calls = []
+
+    async def transport(request):
+        calls.append(request.method)
+        await asyncio.Event().wait()
+
+    provider = provider_factory(transport, request_timeout_seconds=0.01)
+    with pytest.raises(HeyGenPending):
+        await asyncio.wait_for(provider.generate_avatar(_payload()), timeout=0.5)
+    assert calls == ["POST"]
