@@ -722,12 +722,14 @@ def _billing_snapshot(auth_db, *, task_id: str, operation_id: str) -> dict[str, 
 
 
 @pytest.mark.parametrize("terminal", ["succeeded", "failed"])
+@pytest.mark.parametrize("avatar_supplier", ["omnihuman", "heygen"])
 def test_cosy_parent_fake_tts_terminal_callback_is_exactly_once(
     monkeypatch,
     auth_context,
     auth_db,
     tmp_path: Path,
     terminal: str,
+    avatar_supplier: str,
 ) -> None:
     """Run a fake Cosy TTS step, then prove settle/release and worker replay."""
 
@@ -736,6 +738,16 @@ def test_cosy_parent_fake_tts_terminal_callback_is_exactly_once(
         auth_context=auth_context,
         auth_db=auth_db,
     )
+    if avatar_supplier == "omnihuman":
+        # Materialize a historical missing-supplier task for the explicit legacy route.
+        with auth_db() as db:
+            task = db.get(VideoTask, task_id)
+            task.params = {
+                key: value
+                for key, value in task.params.items()
+                if key not in {"avatar_provider", "avatar_model"}
+            }
+            db.commit()
     provider_calls: list[dict[str, object]] = []
 
     class _FakeCosyTtsProvider:
@@ -793,6 +805,27 @@ def test_cosy_parent_fake_tts_terminal_callback_is_exactly_once(
             ),
         ],
     )
+    if avatar_supplier == "heygen":
+        from pydantic import SecretStr
+
+        from app.providers.avatar.heygen import HeyGenTerminalFailure
+        from app.workers import heygen_avatar
+
+        monkeypatch.setattr(avatar_talk.settings, "heygen_api_key", SecretStr("fixture-only"))
+        monkeypatch.setattr(
+            avatar_talk.settings, "engine_heygen_avatar_iv_cny_per_second", Decimal("0.35")
+        )
+
+        def heygen_result(ctx, **kwargs):
+            if terminal == "failed":
+                raise HeyGenTerminalFailure("fake downstream avatar supplier failed")
+            ctx.base_video_bytes = b"fake-base"
+            return ctx
+
+        monkeypatch.setattr(heygen_avatar, "heygen_step", heygen_result)
+        monkeypatch.setattr(avatar_talk, "subtitle_step", lambda ctx: ctx)
+        monkeypatch.setattr(avatar_talk, "compose_step", lambda ctx: ctx)
+        monkeypatch.setattr(avatar_talk, "upload_step", deliver)
 
     first_call = avatar_talk.generate_avatar_talk_task.apply(
         args=[{"tenant_id": auth_context["tenant_id"], "video_task_id": task_id}],
@@ -801,9 +834,12 @@ def test_cosy_parent_fake_tts_terminal_callback_is_exactly_once(
     if terminal == "succeeded":
         assert first_call.get()["status"] == "done"
         expected_worker_status = "done"
-    else:
+    elif avatar_supplier == "omnihuman":
         with pytest.raises(RuntimeError, match="fake downstream avatar supplier failed"):
             first_call.get(propagate=True)
+        expected_worker_status = "failed"
+    else:
+        assert first_call.get()["status"] == "failed"
         expected_worker_status = "failed"
 
     after_first = _billing_snapshot(
@@ -853,9 +889,10 @@ def test_cosy_parent_fake_tts_terminal_callback_is_exactly_once(
         assert after_first["wallet"][1] > 0
         assert [item[4] for item in after_first["usages"]] == ["settled", "settled"]
     else:
-        assert after_first["task"] == ("failed", "AVATAR_TALK_FAILED", None)
+        expected_error = "HEYGEN_FAILED" if avatar_supplier == "heygen" else "AVATAR_TALK_FAILED"
+        assert after_first["task"] == ("failed", expected_error, None)
         assert after_first["operation"][1] == "failed"
-        assert after_first["operation"][5] == "AVATAR_TALK_FAILED"
+        assert after_first["operation"][5] == expected_error
         assert after_first["wallet"][1] == 0
         assert [item[4] for item in after_first["usages"]] == ["released", "released"]
         with auth_db() as db:

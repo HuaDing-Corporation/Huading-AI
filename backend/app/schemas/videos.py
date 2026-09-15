@@ -509,6 +509,8 @@ class VideoTaskStatus(BaseModel):
 
 
 class VideoRead(BaseModel):
+    avatar_provider: Literal["omnihuman", "heygen"] | None = None
+    avatar_model: str | None = None
     id: str
     title: str
     prompt: str = Field(

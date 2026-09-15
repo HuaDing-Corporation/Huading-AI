@@ -216,7 +216,7 @@ def resolve_video_pricing_context(
         brand_voice=brand_voice,
         billable_tts_text=text,
         pricing_draft=draft,
-        base_provider="omnihuman" if mode == "avatar_talk" else "apimart",
+        base_provider="heygen" if mode == "avatar_talk" else "apimart",
         tts_provider=("cosyvoice-tts" if brand_voice.provider == "cosyvoice-voice-clone" else None),
         base_quantity=base_quantity,
     )

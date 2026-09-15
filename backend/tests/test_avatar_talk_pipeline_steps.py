@@ -388,6 +388,11 @@ def test_default_avatar_talk_steps_create_assets_and_final_video(monkeypatch, tm
     monkeypatch.setattr(avatar_talk, "build_progress_store", lambda _url: _Store())
     monkeypatch.setattr(avatar_talk, "create_object_storage", lambda _settings: storage)
     monkeypatch.setattr(avatar_talk, "resolve", fake_resolve)
+    def named_avatar(db, *, tenant_id, capability, provider):
+        assert provider == "omnihuman"
+        return fake_resolve(db, tenant_id=tenant_id, capability=capability)
+
+    monkeypatch.setattr(avatar_talk, "resolve_named_provider", named_avatar)
     monkeypatch.setattr(avatar_talk, "_download_bytes", lambda _url: b"BASE-MP4")
     monkeypatch.setattr(
         avatar_talk,
@@ -2638,14 +2643,16 @@ def test_avatar_step_publishes_progress_heartbeat_during_provider_polling():
         )
         ctx.audio_key = f"tenants/{tenant_id}/videos/{unit_id}/audio.mp3"
 
-        original_resolve = avatar_talk.resolve
+        original_resolve = avatar_talk.resolve_named_provider
         original_download = avatar_talk._download_bytes
         try:
-            avatar_talk.resolve = lambda _db, *, tenant_id, capability: _AvatarProvider()
+            avatar_talk.resolve_named_provider = (
+                lambda _db, *, tenant_id, capability, provider: _AvatarProvider()
+            )
             avatar_talk._download_bytes = lambda _url: b"MP4"
             avatar_talk.avatar_step(ctx)
         finally:
-            avatar_talk.resolve = original_resolve
+            avatar_talk.resolve_named_provider = original_resolve
             avatar_talk._download_bytes = original_download
 
         progress_events = [kwargs for _args, kwargs in store.events]
@@ -2695,8 +2702,8 @@ def test_avatar_step_reads_platform_preset_through_catalog_boundary(monkeypatch)
 
         monkeypatch.setattr(
             avatar_talk,
-            "resolve",
-            lambda _db, *, tenant_id, capability: _AvatarProvider(),
+            "resolve_named_provider",
+            lambda _db, *, tenant_id, capability, provider: _AvatarProvider(),
         )
         monkeypatch.setattr(avatar_talk, "_download_bytes", lambda _url: b"MP4")
 
@@ -2844,8 +2851,8 @@ def test_avatar_step_routes_video_source_to_change_lips_and_crops_to_tts(
 
         monkeypatch.setattr(
             avatar_talk,
-            "resolve",
-            lambda _db, *, tenant_id, capability: _AvatarProvider(),
+            "resolve_named_provider",
+            lambda _db, *, tenant_id, capability, provider: _AvatarProvider(),
         )
         monkeypatch.setattr(avatar_talk, "_download_bytes", lambda _url: b"LONG-MP4")
         monkeypatch.setattr(avatar_talk, "_fit_change_lips_video_to_tts", fake_fit)
@@ -2951,8 +2958,8 @@ def test_avatar_step_retries_basic_when_lite_output_is_too_short(monkeypatch):
 
         monkeypatch.setattr(
             avatar_talk,
-            "resolve",
-            lambda _db, *, tenant_id, capability: _AvatarProvider(),
+            "resolve_named_provider",
+            lambda _db, *, tenant_id, capability, provider: _AvatarProvider(),
         )
         monkeypatch.setattr(avatar_talk, "_download_bytes", lambda _url: b"MP4")
         monkeypatch.setattr(avatar_talk, "_fit_change_lips_video_to_tts", fake_fit)
@@ -3050,8 +3057,8 @@ def test_avatar_step_revalidates_basic_limit_before_retry(monkeypatch):
 
         monkeypatch.setattr(
             avatar_talk,
-            "resolve",
-            lambda _db, *, tenant_id, capability: _AvatarProvider(),
+            "resolve_named_provider",
+            lambda _db, *, tenant_id, capability, provider: _AvatarProvider(),
         )
         monkeypatch.setattr(avatar_talk, "_download_bytes", lambda _url: b"MP4")
 
@@ -3145,8 +3152,8 @@ def test_avatar_step_rejects_too_long_tts_before_change_lips_call(monkeypatch):
 
         monkeypatch.setattr(
             avatar_talk,
-            "resolve",
-            lambda _db, *, tenant_id, capability: _AvatarProvider(),
+            "resolve_named_provider",
+            lambda _db, *, tenant_id, capability, provider: _AvatarProvider(),
         )
         monkeypatch.setattr(
             avatar_talk.settings,
