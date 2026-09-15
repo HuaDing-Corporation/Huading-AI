@@ -6,6 +6,7 @@ import { HistoryDetailDialog } from "@/components/history/history-detail-dialog"
 import { AiLabelNotice } from "@/components/label/ai-label-notice";
 import { Button } from "@/components/ui/button";
 import { copy } from "@/lib/copy";
+import { avatarRecovery } from "@/lib/videos/avatar-presentation";
 import type { MediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 import type { TrackedTask } from "@/lib/sse/progress-mapping";
 
@@ -57,6 +58,7 @@ export function VideoDetailDialog({
 }) {
   const task = detail?.task;
   const isImage = task?.mode === "photo";
+  const recovery = task?.status === "running" ? avatarRecovery(task.errorCode) : null;
   return (
     <HistoryDetailDialog
       open={detail !== null}
@@ -78,6 +80,7 @@ export function VideoDetailDialog({
             <span>
               {copy.historyImages.detailCategoryLabel}：{detail.modeLabel}
             </span>
+            {task.avatarModelLabel && <span>{task.avatarModelLabel}</span>}
             {task.durationSec ? (
               <span className="tabular-nums">时长 {Math.round(task.durationSec)} 秒</span>
             ) : null}
@@ -87,6 +90,10 @@ export function VideoDetailDialog({
     >
       {task ? (
         <div className="mt-3 flex flex-col gap-3">
+          {recovery && <p role="status" className="break-words text-[13px] text-ink-soft">
+            {recovery.note}
+            <span className="mt-1 block">{copy.tasks.taskIdLabel}：{task.taskId}</span>
+          </p>}
           {task.playbackUrl ? (
             isImage ? (
               // eslint-disable-next-line @next/next/no-img-element

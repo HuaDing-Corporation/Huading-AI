@@ -56,6 +56,16 @@ async function submitAndCapture() {
 }
 
 describe("NewVideoForm 形象源二选一（AVATAR-VIDEO-SOURCE-UI-0001）", () => {
+  it("HeyGen：来源切换展示不同目标模型，但不声称服务已启用", () => {
+    render(<NewVideoForm />);
+    expect(screen.getByText(/HeyGen Avatar IV/)).toBeInTheDocument();
+    expect(screen.getByText(/服务可用性以提交校验为准/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "本人出镜视频" }));
+    expect(screen.getByText(/HeyGen Precision/)).toBeInTheDocument();
+    expect(screen.queryByText(/HeyGen Avatar IV/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/已启用/)).not.toBeInTheDocument();
+  });
+
   it("承重·照片默认零回归：不切来源 → 提交带 avatar_asset_id、**不带 avatar_video_asset_id**", async () => {
     render(<NewVideoForm />);
     setTopic();
@@ -67,6 +77,9 @@ describe("NewVideoForm 形象源二选一（AVATAR-VIDEO-SOURCE-UI-0001）", () 
     const body = await submitAndCapture();
     expect(body.avatar_asset_id).toBe("av-1");
     expect(body.avatar_video_asset_id).toBeUndefined();
+    expect(body.voice_id).toBe("v1");
+    expect(body).not.toHaveProperty("avatar_provider");
+    expect(body).not.toHaveProperty("avatar_model");
   });
 
   it("视频源：切「本人出镜视频」→ 传视频 → 提交带 avatar_video_asset_id、**不带 avatar_asset_id**（互斥）", async () => {
@@ -81,6 +94,9 @@ describe("NewVideoForm 形象源二选一（AVATAR-VIDEO-SOURCE-UI-0001）", () 
     const body = await submitAndCapture();
     expect(body.avatar_video_asset_id).toBe("vid-1");
     expect(body.avatar_asset_id).toBeUndefined();
+    expect(body.voice_id).toBe("v1");
+    expect(body).not.toHaveProperty("avatar_provider");
+    expect(body).not.toHaveProperty("avatar_model");
   });
 
   it("切视频后未传视频 → 生成禁用（按当前来源校验，不误用照片值）", () => {

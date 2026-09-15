@@ -2968,6 +2968,10 @@ export const handlers = [
     // video_gen 用 prompt 作展示标题；记 mode + kind(AI 封面 purpose=cover → kind=cover)，让 GET /videos 筛忠实回放
     const displayTopic = body.video_mode === "video_gen" ? (body.prompt ?? "") : (body.topic ?? "");
     videos.set(id, { id, status: "queued", progress: 0, topic: displayTopic, mode: body.video_mode ?? "avatar_talk", kind: body.purpose === "cover" ? "cover" : null, created_at: new Date(0).toISOString(), script: body.script ?? displayTopic, voice_id: body.voice_id ?? "v-zhixing", aspect_ratio: "9:16", subtitle_enabled: true, apply_visible_label: body.apply_visible_label ?? false });
+    // Only new avatar tasks receive the new route snapshot; never relabel seeds/history.
+    Object.assign(videos.get(id)!, (body.video_mode ?? "avatar_talk") === "avatar_talk"
+      ? { avatar_provider: "heygen", avatar_model: body.avatar_video_asset_id ? "lipsync_precision" : "avatar_iv" }
+      : { avatar_provider: null, avatar_model: null });
     if (pricing.pricingContract === "billing_quote" && confirmation?.ok) {
       const billing = mockBillingSummary(
         confirmation.idempotencyKey,
