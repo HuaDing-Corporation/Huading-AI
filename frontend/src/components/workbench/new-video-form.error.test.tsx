@@ -44,7 +44,12 @@ async function fillAndSubmit() {
   fireEvent.click(screen.getByText("默认主播")); // select preset avatar; voice auto-defaults
   fireEvent.click(screen.getByRole("button", { name: /生成视频/ }));
   const confirm = await screen.findByRole("button", { name: "确定" });
-  fireEvent.click(screen.getByRole("checkbox", { name: /我已阅读并同意/ }));
+  const consent = screen.getByRole("checkbox", { name: /我已阅读并同意/ });
+  // Dialog mount precedes the real policy/estimate response; do not click a disabled input.
+  await waitFor(() => expect(consent).toBeEnabled());
+  expect(confirm).toBeDisabled();
+  fireEvent.click(consent);
+  expect(consent).toBeChecked();
   await waitFor(() => expect(confirm).toBeEnabled());
   fireEvent.click(confirm);
 }
