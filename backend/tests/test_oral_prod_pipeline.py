@@ -3,6 +3,7 @@ from decimal import Decimal
 from io import BytesIO
 
 import pytest
+from avatar_policy_helpers import post_avatar_with_policy
 from fastapi.testclient import TestClient
 from PIL import Image
 from pydantic import ValidationError
@@ -325,7 +326,8 @@ def test_avatar_order_persists_subtitle_style_only_when_provided(
     monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _FakeTask())
     client = TestClient(app)
 
-    styled = client.post(
+    styled = post_avatar_with_policy(
+        client,
         "/api/v1/videos",
         json={
             "topic": "oral script",
@@ -344,7 +346,8 @@ def test_avatar_order_persists_subtitle_style_only_when_provided(
     assert styled.status_code == 202
     styled_id = styled.json()["data"]["id"]
 
-    plain = client.post(
+    plain = post_avatar_with_policy(
+        client,
         "/api/v1/videos",
         json={
             "topic": "oral script",

@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from avatar_policy_helpers import accept_policy, write_decodable_audio
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -2129,6 +2130,7 @@ def test_avatar_talk_accepts_brand_voice_and_worker_uses_speaker_id(
         headers=auth_context["headers"],
     )
     assert quote_resp.status_code == 200
+    payload = accept_policy(payload, quote_resp.json()["data"])
     create_resp = client.post(
         "/api/v1/videos",
         json=payload,
@@ -2153,7 +2155,7 @@ def test_avatar_talk_accepts_brand_voice_and_worker_uses_speaker_id(
             async def synthesize_speech(self, payload: dict[str, Any]):
                 captured_tts_payloads.append(dict(payload))
                 audio = tmp_path / "brand-voice.mp3"
-                audio.write_bytes(b"MP3")
+                write_decodable_audio(audio)
                 return {
                     "audio_path": str(audio),
                     "timeline": [{"text": "hello", "start_ms": 0, "end_ms": 1000}],
@@ -2237,6 +2239,7 @@ def test_video_submit_persists_its_single_trusted_voice_gate_timestamp(
         "apply_async",
         lambda **_kwargs: None,
     )
+    payload = accept_policy(payload, quote.json()["data"])
     response = client.post(
         "/api/v1/videos",
         json=payload,

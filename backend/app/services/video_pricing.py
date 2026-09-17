@@ -83,6 +83,8 @@ def normalize_billable_tts_text(payload: VideoGenerateRequest) -> str:
 
 def normalized_video_pricing_request(payload: VideoGenerateRequest) -> dict[str, object]:
     normalized = payload.model_dump(mode="json")
+    normalized.pop("avatar_duration_policy", None)
+    normalized.pop("avatar_duration_policy_token", None)
     normalized.pop("video_mode", None)
     normalized["effective_video_mode"] = resolve_effective_video_mode(payload)
     return normalized
@@ -280,12 +282,46 @@ def build_video_estimate(
             note="Pricing is deferred until the generated script and duration are known."
         )
     if context.pricing_contract == "legacy_estimate":
-        return _legacy_estimate(db, user=user, payload=payload, context=context)
+        estimate = _legacy_estimate(db, user=user, payload=payload, context=context)
+        if context.effective_video_mode == "avatar_talk":
+            from app.services.avatar_duration_policy import issue_policy
+
+            estimate.avatar_duration_policy = issue_policy(
+                **avatar_policy_binding(db, user=user, payload=payload, context=context)
+            )
+        return estimate
     if context.pricing_draft is None:
         raise RuntimeError("billing quote context is missing its pricing draft")
-    return issue_quote(
+    quote = issue_quote(
         tenant_id=user.tenant_id,
         user_id=user.id,
         request_hash=video_pricing_request_hash(payload),
         draft=context.pricing_draft,
+    )
+    if context.effective_video_mode == "avatar_talk":
+        from app.services.avatar_duration_policy import issue_policy
+
+        quote.avatar_duration_policy = issue_policy(
+            **avatar_policy_binding(
+                db, user=user, payload=payload, context=context, quote_token=quote.quote_token
+            )
+        )
+    return quote
+
+
+def avatar_policy_binding(db, *, user, payload, context, quote_token=None):
+    if context.pricing_contract == "billing_quote":
+        credits = context.pricing_draft.payable_credits
+    else:
+        credits = _legacy_estimate(
+            db, user=user, payload=payload, context=context
+        ).estimated_credits
+    return dict(
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        request_hash=video_pricing_request_hash(payload),
+        model="lipsync_precision" if payload.avatar_video_asset_id else "avatar_iv",
+        pricing_contract=context.pricing_contract,
+        accepted_credits=credits,
+        quote_token=quote_token if context.pricing_contract == "billing_quote" else None,
     )

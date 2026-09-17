@@ -3,6 +3,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+from avatar_policy_helpers import accept_policy, post_avatar_with_policy
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -97,7 +98,8 @@ def test_avatar_talk_order_with_insufficient_quota_rejects_without_task_or_usage
 
     monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _UnexpectedTask())
     client = TestClient(app)
-    resp = client.post(
+    resp = post_avatar_with_policy(
+        client,
         "/api/v1/videos",
         json={
             "topic": "x" * 100,
@@ -563,6 +565,7 @@ def test_cosyvoice_parent_video_reserves_one_character_usage_without_duplicate_f
         json=payload,
     )
     assert quote.status_code == 200, quote.text
+    payload = accept_policy(payload, quote.json()["data"])
     created = client.post(
         "/api/v1/videos",
         headers={
@@ -692,6 +695,7 @@ def test_doubao_parent_video_has_no_character_usage_and_enforces_payer_time_gate
         json=payload,
     )
     assert quote.status_code == 200, quote.text
+    payload = accept_policy(payload, quote.json()["data"])
     created = client.post(
         "/api/v1/videos",
         headers={

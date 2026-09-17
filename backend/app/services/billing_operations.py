@@ -170,8 +170,25 @@ class BillingFailedLookup(_BillingModel):
     failure: BillingFailure
 
 
+class BillingFailedChargedLookup(_BillingModel):
+    operation: str
+    idempotency_key: UUID
+    state: Literal["completed"] = "completed"
+    completion_kind: Literal["failed_charged"] = "failed_charged"
+    result_type: None = None
+    result_id: None = None
+    result: None = None
+    resource: Any
+    billing: BillingSummary
+    failure: BillingFailure
+
+
 BillingOperationLookup = (
-    BillingInProgressLookup | BillingSucceededLookup | BillingRejectedLookup | BillingFailedLookup
+    BillingInProgressLookup
+    | BillingSucceededLookup
+    | BillingRejectedLookup
+    | BillingFailedLookup
+    | BillingFailedChargedLookup
 )
 
 
@@ -259,6 +276,21 @@ def billing_summary(operation: BillingOperation) -> BillingSummary:
             raise BillingInvariantError("terminal operation does not conserve requested credits")
         if operation.completion_kind == "succeeded":
             status = "partially_settled" if settled and released else "settled"
+        elif operation.completion_kind == "failed_charged":
+            if (
+                operation.operation != "video_create"
+                or operation.duration_policy_version != "145s-no-refund-v1"
+                or operation.error_code != "HEYGEN_AUDIO_DURATION_EXCEEDED"
+                or operation.error_http_status != 422
+                or settled != requested
+                or released
+                or operation.result_type != "video_task"
+                or not operation.result_id
+            ):
+                raise BillingInvariantError(
+                    "charged failure is outside the accepted duration policy"
+                )
+            status = "settled"
         elif operation.completion_kind in {"failed", "rejected"} and not settled:
             status = "released"
         else:
@@ -1172,7 +1204,34 @@ def _validate_lookup_usages(
             raise BillingInvariantError("released operation has non-released usage")
         _validate_stored_allocations(snapshot, usages, require_reserved=False)
         return
-    if operation.completion_kind == "succeeded":
+    if operation.completion_kind in {"succeeded", "failed_charged"}:
+        if operation.completion_kind == "failed_charged":
+            from app.services.avatar_duration_policy import ERROR_CODE, validate_receipt
+
+            avatar_usages = [u for u in usages if u.capability == "avatar"]
+            if (
+                len(avatar_usages) != 1
+                or len(usages) > 2
+                or any(
+                    u.status != "settled" or u.capability not in {"avatar", "tts"} for u in usages
+                )
+            ):
+                raise BillingInvariantError("charged failure has invalid usage composition")
+            evidence = avatar_usages[0].duration_failure_evidence or {}
+            receipt = evidence.get("acceptance")
+            accepted = validate_receipt(
+                receipt, tenant_id=operation.tenant_id, user_id=operation.user_id
+            )
+            if (
+                accepted != operation.requested_credits
+                or receipt["quote_hash"] != operation.quote_hash
+                or receipt["request_hash"] != operation.request_hash
+                or evidence.get("original_task_id") != operation.result_id
+                or evidence.get("error_code") != ERROR_CODE
+            ):
+                raise BillingInvariantError(
+                    "charged failure evidence differs from accepted operation"
+                )
         if any(usage.status not in {"settled", "released"} for usage in usages):
             raise BillingInvariantError("succeeded operation has invalid usage state")
         if not any(usage.status == "settled" for usage in usages):
@@ -1294,6 +1353,18 @@ def _lookup_operation_once(
             result_type=row.result_type,
             result_id=row.result_id,
             resource=resource,
+        )
+    if row.completion_kind == "failed_charged":
+        stored_error = _validate_stored_error_payload(row)
+        resource = _lookup_resource(db, row, allow_stale_reread=allow_stale_reread)
+        if not isinstance(resource, VideoTaskBillingResource) or resource.status != "failed":
+            raise BillingInvariantError("charged failure must reference a failed video task")
+        return BillingFailedChargedLookup(
+            **common,
+            resource=resource,
+            failure=BillingFailure(
+                code=row.error_code, original_http_status=422, detail=stored_error.detail
+            ),
         )
     if row.completion_kind == "failed":
         if row.result_type or row.result_id or row.result_payload:

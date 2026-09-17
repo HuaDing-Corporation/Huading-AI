@@ -62,8 +62,8 @@ def _cached_pricing_closure_ready(db: Session) -> bool:
 
         report = pricing_closure_readiness(db, production_mode=True)
         # The historical pricing audit also accepts 0038 for pre-migration ops.
-        # This application creates durable HeyGen runs and requires 0039 itself.
-        value = bool(report.ready and report.migration_revision == "20260915_0039")
+        # This application writes duration-policy evidence and requires 0040 itself.
+        value = bool(report.ready and report.migration_revision == "20260915_0040")
     except Exception:
         value = False
     with _pricing_readiness_condition:

@@ -3,7 +3,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from uuid import UUID, uuid4
@@ -622,6 +622,7 @@ def _video_read(
             expires_in=settings.engine_s3_presign_ttl,
         )
     return VideoRead(
+        billing_outcome=params.get("billing_outcome"),
         avatar_provider=(
             "heygen" if params.get("avatar_provider") == "heygen" else "omnihuman"
         ) if mode == "avatar_talk" else None,
@@ -720,6 +721,7 @@ def _create_avatar_talk_video(
     db: Session,
     storage: ObjectStorage,
     submitted_at: datetime,
+    duration_acceptance: dict | None = None,
 ) -> str:
     if not payload.voice_id:
         raise AppError("avatar_talk requires voice_id.", code="VALIDATION_ERROR", status_code=422)
@@ -765,6 +767,8 @@ def _create_avatar_talk_video(
         "estimated": True,
         "apply_visible_label": payload.apply_visible_label,
     }
+    if duration_acceptance is not None:
+        params["avatar_duration_acceptance"] = duration_acceptance
     if payload.avatar_video_asset_id:
         params["avatar_video_asset_id"] = payload.avatar_video_asset_id
         for key in _CHANGE_LIPS_OPTIONAL_FIELDS:
@@ -813,7 +817,7 @@ def _create_avatar_talk_video(
     from app.services.avatar_runs import create_avatar_run
 
     create_avatar_run(db, task=task)
-    reserve_avatar_talk_quota(
+    reservation = reserve_avatar_talk_quota(
         db,
         tenant_id=user.tenant_id,
         video_task_id=task.id,
@@ -822,6 +826,18 @@ def _create_avatar_talk_video(
         provider="heygen",
         model=str(params["avatar_model"]),
     )
+    if duration_acceptance is not None:
+        reserved_units = int(
+            reservation.usage_record.credits.to_integral_value(rounding=ROUND_CEILING)
+        )
+        if reserved_units != duration_acceptance["accepted_credits"]:
+            # Rates can change after acceptance validation, before reserve reads them.
+            db.rollback()
+            raise AppError(
+                "报价已变化，请重新确认时长政策及金额。",
+                code="AVATAR_DURATION_POLICY_INVALID",
+                status_code=422,
+            )
     db.commit()
     _video_task_tenants[task_id] = user.tenant_id
     return task_id
@@ -949,6 +965,20 @@ def _billing_quote_video_replay(
             status_code=lookup.failure.original_http_status,
             detail=detail,
         )
+    if operation.status == "completed" and operation.completion_kind == "failed_charged":
+        from app.services.avatar_duration_policy import ERROR_CODE, FAILURE_MESSAGE
+        from app.services.billing_operations import BillingFailedChargedLookup
+
+        lookup = lookup_operation(
+            db, tenant_id=user.tenant_id, user_id=user.id, operation="video_create",
+            idempotency_key=UUID(operation.idempotency_key),
+        )
+        if not isinstance(lookup, BillingFailedChargedLookup):
+            raise AppError("Invalid duration failure replay.", code="BILLING_REPLAY_INVALID",
+                           status_code=500)
+        raise AppError(FAILURE_MESSAGE, code=ERROR_CODE, status_code=422,
+                       detail={"billing": lookup.billing.model_dump(mode="json"),
+                               "resource": lookup.resource.model_dump(mode="json")})
     if operation.status == "completed" and operation.completion_kind != "succeeded":
         raise AppError(
             "Video billing replay is invalid.",
@@ -987,6 +1017,7 @@ def _create_billing_quote_video(
     db: Session,
     storage: ObjectStorage,
     submitted_at: datetime,
+    duration_acceptance: dict | None = None,
 ) -> tuple[VideoTask, object, bool]:
     if context.brand_voice is None or context.pricing_draft is None:
         raise RuntimeError("billing quote video context is incomplete")
@@ -1043,6 +1074,8 @@ def _create_billing_quote_video(
         "billing_tts_text": text,
         "pricing_contract": "billing_quote",
     }
+    if duration_acceptance is not None:
+        params["avatar_duration_acceptance"] = duration_acceptance
     if mode == "avatar_talk":
         params["avatar_source_type"] = avatar_source_type
         params["avatar_provider"] = "heygen"
@@ -1158,6 +1191,8 @@ def _create_billing_quote_video(
         status="queued",
     ).model_dump(mode="json")
     task.params = {**params, "billing_operation_id": operation.id}
+    if duration_acceptance is not None:
+        operation.duration_policy_version = duration_acceptance["policy_version"]
     db.commit()
     _video_task_tenants[task.id] = user.tenant_id
     return task, operation, True
@@ -1831,6 +1866,18 @@ def create_video(
         payload=payload,
         requested_at=submitted_at,
     )
+    duration_acceptance = None
+    if effective_mode == "avatar_talk":
+        from app.services.avatar_duration_policy import verify_acceptance
+        from app.services.video_pricing import avatar_policy_binding
+
+        duration_acceptance = verify_acceptance(
+            version=payload.avatar_duration_policy, token=payload.avatar_duration_policy_token,
+            **avatar_policy_binding(
+                db, user=user, payload=payload, context=pricing_context,
+                quote_token=headers.quote_token if headers else None,
+            ),
+        )
     if pricing_context.pricing_contract == "billing_quote":
         if headers is None:
             raise AppError(
@@ -1846,6 +1893,7 @@ def create_video(
             db=db,
             storage=storage,
             submitted_at=submitted_at,
+            duration_acceptance=duration_acceptance,
         )
         if not created:
             return ok(
@@ -1957,6 +2005,7 @@ def create_video(
             db=db,
             storage=storage,
             submitted_at=submitted_at,
+            duration_acceptance=duration_acceptance,
         )
         _prune_after_create(db, tenant_id=user.tenant_id, mode="avatar_talk", storage=storage)
         params = _worker_params(payload)
@@ -2153,4 +2202,6 @@ def _sse_payload(task_id: str, snapshot: dict) -> dict:
     if payload["status"] == "failed":
         payload["error_code"] = snapshot.get("error_code") or "VIDEO_TASK_FAILED"
         payload["error_message"] = snapshot.get("error_message") or snapshot.get("error")
+        if snapshot.get("billing_outcome") is not None:
+            payload["billing_outcome"] = snapshot["billing_outcome"]
     return payload

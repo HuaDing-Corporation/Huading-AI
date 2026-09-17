@@ -26,6 +26,7 @@ from app.services.avatar_runs import (
     update_avatar_run,
 )
 from app.services.heygen_config import configured_cost_snapshot
+from app.services.heygen_duration_settlement import settle_oversize_audio
 from app.services.storage.keys import validate_catalog_storage_key, validate_tenant_storage_key
 from app.workers import avatar_talk as legacy
 
@@ -88,6 +89,7 @@ def _progress(ctx, *, step, progress, **fields):
         avatar_model=(task.params or {}).get("avatar_model"),
         error_code=task.error_code or "",
         error_message=task.error_message or "",
+        billing_outcome=(task.params or {}).get("billing_outcome"),
         **fields,
     )
 
@@ -158,7 +160,9 @@ def _align_source(ctx, source_bytes):
 
 def heygen_step(ctx, *, owner, provider):
     task = legacy._task_or_raise(ctx.db, tenant_id=ctx.tenant_id, task_id=ctx.task_id)
-    legacy._enforce_billed_avatar_duration_quote(ctx, task=task)
+    run = ctx.db.get(AvatarProviderRun, ctx.task_id)
+    if not run.provider_job_id and not run.checkpoint.get("post_attempted"):
+        legacy._enforce_billed_avatar_duration_quote(ctx, task=task)
     ctx.db.commit()
     run = ctx.db.get(AvatarProviderRun, ctx.task_id)
     if not run.request_body and not run.provider_job_id:
@@ -403,9 +407,7 @@ def run_heygen_avatar_pipeline(*, tenant_id, task_id):
             run = db.get(AvatarProviderRun, task_id)
             snapshot = run.checkpoint
             if not snapshot.get("audio_key") and (
-                snapshot.get("tts_started")
-                or snapshot.get("post_attempted")
-                or run.provider_job_id
+                snapshot.get("tts_started") or snapshot.get("post_attempted") or run.provider_job_id
             ):
                 raise HeyGenReviewRequired("TTS outcome requires reconciliation; synthesis held.")
             if "cost_snapshot" not in snapshot:
@@ -423,6 +425,7 @@ def run_heygen_avatar_pipeline(*, tenant_id, task_id):
                 _validate_source_before_tts(ctx, run.model)
                 legacy.script_step(ctx)
                 db.commit()
+                ctx.tts_cost_checkpoint = lambda: _checkpoint(ctx, owner, tts_cost_recorded=True)
                 legacy.tts_step(
                     ctx, before_synthesize=lambda: _checkpoint(ctx, owner, tts_started=True)
                 )
@@ -432,6 +435,7 @@ def run_heygen_avatar_pipeline(*, tenant_id, task_id):
                     audio_key=ctx.audio_key,
                     duration_sec=ctx.duration_sec,
                     timeline=ctx.timeline,
+                    audio_measurement=ctx.audio_measurement,
                 )
             else:
                 ctx.audio_key = snapshot["audio_key"]
@@ -443,6 +447,31 @@ def run_heygen_avatar_pipeline(*, tenant_id, task_id):
                 )
             ctx.use_tts_audio = True
             _progress(ctx, step="tts", progress=25)
+            if settle_oversize_audio(
+                db, tenant_id=tenant_id, task_id=task_id, owner=owner, storage=storage
+            ):
+                db.commit()
+                event.remove(db, "before_flush", fence)
+                fence = None
+                try:
+                    _progress(ctx, step="failed", progress=task.progress or 25)
+                except Exception:
+                    legacy.logger.warning(
+                        "heygen_duration_failure_progress_unavailable", task_id=task_id
+                    )
+                return {"task_id": task_id, "status": "failed"}
+            if (task.params or {}).get("avatar_duration_acceptance") and not (
+                run.provider_job_id or run.checkpoint.get("post_attempted")
+            ):
+                from app.services.avatar_duration_policy import MAX_SECONDS, measured_duration
+
+                meter = snapshot.get("audio_measurement") or {}
+                if (
+                    meter.get("source") != "ffprobe"
+                    or meter.get("complete") is not True
+                    or measured_duration(meter.get("seconds")) > MAX_SECONDS
+                ):
+                    raise HeyGenReviewRequired("Audio duration evidence requires reconciliation.")
             if snapshot.get("base_key"):
                 ctx.base_video_bytes = legacy.get_tenant_storage_bytes(
                     storage, tenant_id=tenant_id, storage_key=snapshot["base_key"]

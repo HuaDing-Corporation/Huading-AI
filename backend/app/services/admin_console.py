@@ -443,6 +443,16 @@ def prepare_task_retry(
     task = db.scalar(select(VideoTask).where(VideoTask.id == task_id).with_for_update())
     if task is None or task.deleted_at is not None:
         raise AppError("Task not found.", code="TASK_NOT_FOUND", status_code=404)
+    billing_outcome = (task.params or {}).get("billing_outcome")
+    if (
+        isinstance(billing_outcome, dict)
+        and billing_outcome.get("completion_kind") == "failed_charged"
+    ):
+        raise AppError(
+            "已结算的时长超限失败不能原地重试，请重新报价并确认后创建新任务。",
+            code="TASK_NOT_RETRYABLE",
+            status_code=409,
+        )
     stale_queued = (
         task.status == "queued" and task.started_at is None and _is_stale(task.updated_at)
     )

@@ -3,6 +3,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+from avatar_policy_helpers import post_avatar_with_policy
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import func, select
@@ -690,7 +691,8 @@ def test_avatar_talk_order_reserves_quota_and_returns_queued_id(
 
     monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _FakeTask())
     client = TestClient(app)
-    resp = client.post(
+    resp = post_avatar_with_policy(
+        client,
         "/api/v1/videos",
         json={
             "topic": "羊绒大衣怎么选",
@@ -723,6 +725,7 @@ def test_avatar_talk_order_reserves_quota_and_returns_queued_id(
         assert reserved.model == "avatar_iv"
         assert task.params["avatar_provider"] == "heygen"
         from app.db.models import AvatarProviderRun
+
         assert db.get(AvatarProviderRun, task.id).model == "avatar_iv"
 
 
@@ -746,7 +749,8 @@ def test_avatar_talk_order_without_script_leaves_worker_to_generate_it(
 
     monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _FakeTask())
     client = TestClient(app)
-    resp = client.post(
+    resp = post_avatar_with_policy(
+        client,
         "/api/v1/videos",
         json={
             "topic": "cashmere coat",
@@ -789,7 +793,8 @@ def test_avatar_talk_order_accepts_avatar_video_source_and_reserves_same_quota(
 
     monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _FakeTask())
     client = TestClient(app)
-    resp = client.post(
+    resp = post_avatar_with_policy(
+        client,
         "/api/v1/videos",
         json={
             "topic": "cashmere coat",
@@ -827,6 +832,7 @@ def test_avatar_talk_order_accepts_avatar_video_source_and_reserves_same_quota(
         assert reserved.model == "lipsync_precision"
         assert task.params["avatar_provider"] == "heygen"
         from app.db.models import AvatarProviderRun
+
         assert db.get(AvatarProviderRun, task.id).model == "lipsync_precision"
 
 
@@ -850,7 +856,8 @@ def test_avatar_talk_video_source_accepts_change_lips_optional_params(
 
     monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _FakeTask())
     client = TestClient(app)
-    resp = client.post(
+    resp = post_avatar_with_policy(
+        client,
         "/api/v1/videos",
         json={
             "topic": "cashmere coat",
@@ -995,7 +1002,8 @@ def test_avatar_talk_video_source_rejects_invalid_asset_matrix(
     monkeypatch.setattr(videos_route, "generate_avatar_talk_task", _FakeTask())
     client = TestClient(app)
     for asset_id, expected_status in cases:
-        resp = client.post(
+        resp = post_avatar_with_policy(
+            client,
             "/api/v1/videos",
             json={
                 "topic": "cashmere coat",
@@ -1047,7 +1055,8 @@ def test_avatar_talk_video_source_checks_storage_size_when_metadata_size_missing
     app.dependency_overrides[get_object_storage] = lambda: storage
     try:
         client = TestClient(app)
-        resp = client.post(
+        resp = post_avatar_with_policy(
+            client,
             "/api/v1/videos",
             json={
                 "topic": "cashmere coat",
