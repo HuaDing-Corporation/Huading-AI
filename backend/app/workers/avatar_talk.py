@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -180,6 +181,8 @@ class AvatarTalkContext:
     size_bytes: int | None = None
     work_dir: Path | None = None
     artifact_prefix: str | None = None
+    audio_measurement: dict | None = None
+    tts_cost_checkpoint: Callable[[], None] | None = None
 
 
 def _scoped_id(tenant_id: str, task_id: str) -> str:
@@ -889,8 +892,9 @@ def tts_step(
         )
     )
     operation_id = _billing_operation_id(task)
-    if operation_id is None:
-        provider_costs.record_tts_usage(
+    recorded_tts_usage = None
+    if operation_id is None or brand_voice_provider != "cosyvoice-voice-clone":
+        recorded_tts_usage = provider_costs.record_tts_usage(
             ctx.db,
             tenant_id=ctx.tenant_id,
             result=result,
@@ -916,6 +920,9 @@ def tts_step(
             expected_characters=len(frozen_text),
         )
         ctx.db.flush([usage])
+        recorded_tts_usage = usage
+    if recorded_tts_usage is not None and ctx.tts_cost_checkpoint is not None:
+        ctx.tts_cost_checkpoint()
     audio_source_path = _tail_faded_tts_audio(Path(str(result["audio_path"])))
     audio_bytes = audio_source_path.read_bytes()
     audio_bytes, label_metadata = _apply_synthetic_label(
@@ -932,8 +939,26 @@ def tts_step(
         content=audio_bytes,
         content_type="audio/mpeg",
     )
-    detected_duration_sec = _audio_duration_sec(audio_source_path)
-    duration_ms = int(round(detected_duration_sec * 1000))
+    # Measure the exact labeled bytes that will be supplied to HeyGen, not telemetry fallback.
+    measurement_path = audio_source_path.parent / "measured-labeled-audio.mp3"
+    measurement_path.write_bytes(audio_bytes)
+    detected_duration_sec = _audio_duration_sec(measurement_path)
+    if math.isfinite(detected_duration_sec) and detected_duration_sec > 0:
+        complete = False
+        if (task.params or {}).get("avatar_duration_acceptance"):
+            subprocess.run(
+                [_ffmpeg_binary(), "-nostdin", "-v", "error", "-xerror", "-i",
+                 str(measurement_path), "-map", "0:a:0", "-f", "null", "-"],
+                check=True, capture_output=True, timeout=180,
+            )
+            complete = True
+        ctx.audio_measurement = {
+            "source": "ffprobe", "complete": complete, "seconds": str(detected_duration_sec),
+            "audio_key": audio_key, "sha256": hashlib.sha256(audio_bytes).hexdigest(),
+        }
+    duration_ms = (
+        int(round(detected_duration_sec * 1000)) if math.isfinite(detected_duration_sec) else 0
+    )
     if duration_ms <= 0:
         duration_ms = int(result.get("duration_ms") or 0)
         detected_duration_sec = duration_ms / 1000 if duration_ms > 0 else 1.0

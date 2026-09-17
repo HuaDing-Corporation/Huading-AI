@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Sparkles } from "lucide-react";
 
 import { errorText } from "@/lib/api/error-text";
@@ -169,6 +169,14 @@ export function NewVideoForm({
   });
   const confirmPricingError = confirm.pricing?.error;
   const cancelConfirm = confirm.cancel;
+  const confirmationInput = JSON.stringify([topic, script, voiceId, speed, source, avatar.value,
+    avatarVideo.value, subtitleStyle, applyLabel]);
+  const previousConfirmationInput = useRef(confirmationInput);
+  useEffect(() => {
+    if (previousConfirmationInput.current === confirmationInput) return;
+    previousConfirmationInput.current = confirmationInput;
+    cancelConfirm();
+  }, [cancelConfirm, confirmationInput]);
 
   useEffect(() => {
     if (!isApiError(confirmPricingError) || confirmPricingError.code !== "BILLABLE_TEXT_REQUIRED") return;

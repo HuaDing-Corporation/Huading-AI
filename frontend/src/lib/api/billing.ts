@@ -1,4 +1,5 @@
 import { apiFetch, ApiError, isApiError } from "./client";
+import { parseAvatarDurationPolicy } from "./avatar-duration-policy";
 import type {
   BillingConfirmation,
   BillingBrandVoiceOrderResource,
@@ -262,6 +263,13 @@ export function parseBillingQuote(
   value: unknown,
   videoContext?: VideoPricingContext | null
 ): BillingQuote | null {
+  if (record(value) && Object.hasOwn(value, "avatar_duration_policy")) {
+    const { avatar_duration_policy: rawPolicy, ...base } = value;
+    const parsed = parseBillingQuote(base, videoContext);
+    const policy = parsed && parseAvatarDurationPolicy(rawPolicy, parsed.payable_credits);
+    return parsed?.operation === "video_create" && parsed.pricing_shape === "composite" && policy
+      ? { ...parsed, avatar_duration_policy: policy } : null;
+  }
   if (
     !record(value) ||
     !exactKeys(value, QUOTE_KEYS) ||
@@ -1043,6 +1051,15 @@ function parseBillingOperationLookupUnchecked(
     ) {
       return null;
     }
+  } else if (value.state === "completed" && value.completion_kind === "failed_charged") {
+    // Quote-backed video operations retain the DB positive-price constraint;
+    // generic task/policy readers still allow legitimately zero-priced legacy tasks.
+    if (value.operation !== "video_create" || billing.status !== "settled" || billing.requested_credits <= 0 ||
+      value.result_type !== null || value.result_id !== null || value.result !== null ||
+      !record(value.resource) || !exactKeys(value.resource, ["task_id", "status"]) ||
+      !nonEmptyString(value.resource.task_id) || value.resource.status !== "failed" ||
+      !failure(value.failure) || !record(value.failure) ||
+      value.failure.code !== "HEYGEN_AUDIO_DURATION_EXCEEDED" || value.failure.original_http_status !== 422) return null;
   } else if (value.state === "completed" && value.completion_kind === "failed") {
     if (
       billing.status !== "released" ||

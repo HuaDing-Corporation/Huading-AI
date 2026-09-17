@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.services.pricing import RateScope, RateSource
 
@@ -64,7 +64,20 @@ class BillingDisclosure(_BillingModel):
         return self
 
 
+class AvatarDurationPolicyOffer(_BillingModel):
+    version: Literal["145s-no-refund-v1"]
+    max_seconds: Literal[145]
+    notice: str
+    accepted_credits: int = Field(ge=0)
+    token: str
+    expires_at: datetime
+
+
 class BillingQuote(_BillingModel):
+    avatar_duration_policy: AvatarDurationPolicyOffer | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     pricing_contract: Literal["billing_quote"] = "billing_quote"
     operation: str
     pricing_shape: Literal["simple", "composite"]

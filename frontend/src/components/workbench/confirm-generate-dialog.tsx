@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, TriangleAlert } from "lucide-react";
 
 import { PricingConfirmDialog } from "@/components/billing/pricing-confirm-dialog";
@@ -8,8 +8,10 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { useEstimateVideo } from "@/lib/api/hooks";
 import type { CreateVideoRequest, LegacyVideoEstimate, VideoEstimateContract } from "@/lib/api/types";
-import type { GenerateConfirmPricing } from "@/lib/api/use-generate-confirm";
+import type { GenerateConfirm, GenerateConfirmPricing } from "@/lib/api/use-generate-confirm";
 import { copy } from "@/lib/copy";
+import { isHeygenAvatarRequest, policyForEstimate } from "@/lib/api/avatar-duration-policy";
+import { AvatarDurationPolicyNotice } from "./avatar-duration-policy-notice";
 
 export interface ConfirmGenerateDialogProps {
   open: boolean;
@@ -17,7 +19,7 @@ export interface ConfirmGenerateDialogProps {
   submitting: boolean;
   /** Authoritative one-fetch state supplied by useGenerateConfirm for priced video forms. */
   pricing?: GenerateConfirmPricing | null;
-  onConfirm: () => void;
+  onConfirm: (...args: Parameters<GenerateConfirm["confirm"]>) => void | Promise<void>;
   onCancel: () => void;
 }
 
@@ -58,11 +60,62 @@ export function ConfirmGenerateDialog({
     else reset();
   }, [open, pricing, request, mutate, reset]);
 
-  const estimate = pricing?.estimate ?? legacyCompatibility(fallbackEstimate.data);
+  const fallbackValue = useMemo(() => legacyCompatibility(fallbackEstimate.data), [fallbackEstimate.data]);
+  const estimate = pricing?.estimate ?? fallbackValue;
   const estimating = pricing ? pricing.phase === "estimating" : fallbackEstimate.isPending;
   const estimateFailed = pricing
     ? pricing.phase === "failed"
     : Boolean(fallbackEstimate.isError);
+
+  // Photo and Precision are both avatar requests; Seedance/ecom must not inherit this policy.
+  const needsDurationConsent = isHeygenAvatarRequest(request);
+  const policy = policyForEstimate(estimate);
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!open || !policy) return;
+    setNow(Date.now());
+    const remaining = Date.parse(policy.expires_at) - Date.now();
+    if (remaining <= 0) return;
+    const timer = window.setTimeout(() => setNow(Date.now()), Math.min(remaining, 2_147_483_647));
+    return () => window.clearTimeout(timer);
+  }, [open, policy]);
+  const policyReady = !!policy && Date.parse(policy.expires_at) > now;
+  const requestKey = JSON.stringify(request);
+  const [accepted, setAccepted] = useState(false);
+  const confirming = useRef(false);
+  const [localSubmitting, setLocalSubmitting] = useState(false);
+  useEffect(() => {
+    setAccepted(false);
+  }, [open, requestKey, estimate, pricing?.billingQuote]);
+  const consentMissing = needsDurationConsent && (!accepted || !policyReady);
+  const busy = submitting || localSubmitting;
+  const durationNotice = needsDurationConsent ? (
+    <div className="min-w-0 space-y-2">
+      <AvatarDurationPolicyNotice accepted={accepted} disabled={busy || !policyReady || estimating} onChange={setAccepted} />
+      {!policyReady && <p role="status" className="text-[13px] text-ink-soft">{copy.confirm.avatarPolicyUnavailable}</p>}
+    </div>
+  ) : undefined;
+  const confirmOnce = async () => {
+    if (!open || busy || consentMissing || confirming.current) return;
+    // Event-time validation also covers a throttled/queued expiry timer.
+    if (needsDurationConsent && (!policy || Date.parse(policy.expires_at) <= Date.now())) return;
+    if (!needsDurationConsent) {
+      await onConfirm();
+      return;
+    }
+    confirming.current = true;
+    setLocalSubmitting(true);
+    try {
+      if (!pricing && request && estimate?.pricing_contract === "legacy_estimate") {
+        await onConfirm(true, { request, estimate });
+      } else {
+        await onConfirm(true);
+      }
+    } finally {
+      confirming.current = false;
+      setLocalSubmitting(false);
+    }
+  };
 
   if (pricing && estimate?.pricing_contract === "billing_quote") {
     return (
@@ -75,8 +128,10 @@ export function ConfirmGenerateDialog({
         billing={pricing.billing}
         billingQuerying={pricing.billingPhase === "querying"}
         onContinueLookup={() => void pricing.continueBillingLookup()}
-        onEstimate={() => void pricing.prepareBilling()}
-        onConfirm={onConfirm}
+        onEstimate={() => void pricing.retryEstimate()}
+        confirmationContent={durationNotice}
+        confirmationDisabled={consentMissing || busy}
+        onConfirm={() => void confirmOnce()}
         onCancel={onCancel}
       />
     );
@@ -85,7 +140,8 @@ export function ConfirmGenerateDialog({
   const deferred = estimate?.pricing_contract === "deferred_unpriced";
   const unsupportedBilledFallback = !pricing && estimate?.pricing_contract === "billing_quote";
   const confirmDisabled =
-    submitting ||
+    busy ||
+    consentMissing ||
     estimating ||
     estimateFailed ||
     estimate === null ||
@@ -139,10 +195,10 @@ export function ConfirmGenerateDialog({
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        if (!next && !submitting) onCancel();
+        if (!next && !busy) onCancel();
       }}
     >
-      <DialogContent className="flex flex-col gap-4">
+      <DialogContent className="flex max-h-[90vh] flex-col gap-4 overflow-y-auto">
         <DialogTitle className="text-[18px] font-semibold tracking-[.5px] text-ink">
           {copy.confirm.title}
         </DialogTitle>
@@ -162,8 +218,10 @@ export function ConfirmGenerateDialog({
           </p>
         )}
 
-        <div className="mt-1 flex justify-end gap-2.5">
-          <Button variant="soft" onClick={onCancel} disabled={submitting}>
+        {durationNotice}
+
+        <div className="mt-1 flex flex-wrap justify-end gap-2.5">
+          <Button variant="soft" onClick={onCancel} disabled={busy}>
             {copy.confirm.cancel}
           </Button>
           {estimateFailed && pricing && (
@@ -171,8 +229,8 @@ export function ConfirmGenerateDialog({
               重新获取价格
             </Button>
           )}
-          <Button variant="primary" onClick={onConfirm} disabled={confirmDisabled}>
-            {submitting ? (
+          <Button variant="primary" onClick={() => void confirmOnce()} disabled={confirmDisabled}>
+            {busy ? (
               <span className="inline-flex items-center gap-1.5">
                 <Loader2 size={16} strokeWidth={2} className="animate-spin" />
                 {copy.confirm.confirming}

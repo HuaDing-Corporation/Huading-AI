@@ -4,6 +4,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+from avatar_policy_helpers import accept_policy, post_avatar_with_policy
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -827,6 +828,7 @@ def test_brand_submit_commits_task_operation_and_allocations_before_enqueue(
     }
     client = TestClient(app)
     quote = client.post("/api/v1/videos/estimate", headers=auth_context["headers"], json=payload)
+    payload = accept_policy(payload, quote.json()["data"])
     assert quote.status_code == 200, quote.text
     submission_headers = {
         **auth_context["headers"],
@@ -913,6 +915,7 @@ def test_late_idempotency_replay_does_not_enqueue_existing_video_again(
     }
     client = TestClient(app)
     quote = client.post("/api/v1/videos/estimate", headers=auth_context["headers"], json=payload)
+    payload = accept_policy(payload, quote.json()["data"])
     headers = {
         **auth_context["headers"],
         "Idempotency-Key": str(uuid4()),
@@ -988,6 +991,7 @@ def test_brand_video_enqueue_failure_completes_and_releases_operation(
     }
     client = TestClient(app)
     quote = client.post("/api/v1/videos/estimate", headers=auth_context["headers"], json=payload)
+    payload = accept_policy(payload, quote.json()["data"])
     submission_headers = {
         **auth_context["headers"],
         "Idempotency-Key": str(uuid4()),
@@ -1123,7 +1127,8 @@ def test_legacy_and_deferred_submissions_ignore_forged_billing_headers(
         "Idempotency-Key": str(uuid4()),
         "X-Huading-Quote": "forged-quote-token",
     }
-    legacy = client.post(
+    legacy = post_avatar_with_policy(
+        client,
         "/api/v1/videos",
         headers=forged_headers,
         json={
@@ -1207,6 +1212,7 @@ def test_doubao_seedance_brand_video_runs_full_billing_lifecycle(
     }
     client = TestClient(app)
     quote = client.post("/api/v1/videos/estimate", headers=auth_context["headers"], json=payload)
+    payload = accept_policy(payload, quote.json()["data"])
     assert quote.status_code == 200, quote.text
     assert quote.json()["data"]["pricing_contract"] == "billing_quote"
     created = client.post(

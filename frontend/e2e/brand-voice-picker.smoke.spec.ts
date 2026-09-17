@@ -67,6 +67,8 @@ test("口播「选我的音色」：品牌组+徽标；选中后 POST /videos �
   // 生成 → 服务端权威报价确认 → POST /videos；验收响应、品牌音色 id 与两条必需计费头。
   await page.getByRole("button", { name: "生成视频" }).click();
   await expect(page.getByText("服务端应付积分")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("button", { name: "确认并继续" })).toBeDisabled();
+  await page.getByRole("checkbox", { name: /我已阅读并同意/ }).check();
   const [videoResponse] = await Promise.all([
     page.waitForResponse((response) =>
       response.request().method() === "POST" &&

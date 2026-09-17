@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError } from "@/lib/api/client";
+import { isHeygenAvatarRequest, policyForEstimate } from "./avatar-duration-policy";
 import { parseBillingQuote } from "@/lib/api/billing";
 import { estimateVideo } from "@/lib/api/videos";
 import type {
@@ -11,6 +12,7 @@ import type {
   BillingQuote,
   BillingSummary,
   CreateVideoRequest,
+  LegacyVideoEstimate,
   VideoAcceptedContract,
   VideoEstimateContract,
   VideoPricingContext
@@ -18,6 +20,12 @@ import type {
 import { useBillingAction, type BillingActionPhase } from "@/lib/billing/use-billing-action";
 
 type VideoEstimatePhase = "idle" | "estimating" | "ready" | "failed";
+
+/** The fallback dialog owns this estimate; bind it to the exact open request snapshot. */
+export interface FallbackAvatarConsent {
+  request: CreateVideoRequest;
+  estimate: LegacyVideoEstimate;
+}
 
 export interface GenerateConfirmPricing {
   estimate: VideoEstimateContract | null;
@@ -45,7 +53,7 @@ export interface GenerateConfirm {
   /** Open the confirm dialog with the exact validated request snapshot. */
   requestConfirm: (req: CreateVideoRequest, pricingContext?: VideoPricingContext | null) => void;
   /** Confirm the already-fetched contract; the estimate endpoint is never called here. */
-  confirm: () => Promise<void>;
+  confirm: (durationPolicyAccepted?: boolean, fallbackConsent?: FallbackAvatarConsent) => Promise<void>;
   /** Close without submitting (no-op while a submit/recovery is in flight). */
   cancel: () => void;
   /** Explicitly dismiss the retained billing result. */
@@ -85,6 +93,7 @@ export function useGenerateConfirm(
   const cachedEstimate = useRef<VideoEstimateContract | null>(null);
   const pricingContextRef = useRef<VideoPricingContext | null>(null);
   const billingPrepareStarted = useRef(false);
+  const acceptedPolicyToken = useRef<string | null>(null);
   const [open, setOpen] = useState(false);
   const [request, setRequest] = useState<CreateVideoRequest | null>(null);
   const [legacySubmitting, setLegacySubmitting] = useState(false);
@@ -96,6 +105,15 @@ export function useGenerateConfirm(
     submitRef.current = submit;
     optionsRef.current = options;
   }, [options, submit]);
+
+  function consentedRequest(input: CreateVideoRequest): CreateVideoRequest {
+    if (!isHeygenAvatarRequest(input)) return input;
+    const policy = policyForEstimate(cachedEstimate.current);
+    if (!policy || policy.token !== acceptedPolicyToken.current || Date.parse(policy.expires_at) <= Date.now()) {
+      throw new ApiError("请重新确认时长限制及费用规则。", "AVATAR_DURATION_POLICY_REQUIRED", 422);
+    }
+    return { ...input, avatar_duration_policy: policy.version, avatar_duration_policy_token: policy.token };
+  }
 
   const billing = useBillingAction<
     CreateVideoRequest,
@@ -122,7 +140,7 @@ export function useGenerateConfirm(
       if (!context) {
         throw new ApiError("缺少所选音色的报价校验信息。", "INVALID_VIDEO_PRICING_CONTEXT", 502);
       }
-      const accepted = await submitRef.current(input, value, confirmation, context);
+      const accepted = await submitRef.current(consentedRequest(input), value, confirmation, context);
       if (!accepted || accepted.pricing_contract !== "billing_quote") {
         throw new ApiError(
           "视频创建响应的定价协议异常，请稍后查询任务状态。",
@@ -158,6 +176,7 @@ export function useGenerateConfirm(
   ) => {
     const run = ++estimateRun.current;
     cachedEstimate.current = null;
+    acceptedPolicyToken.current = null;
     pricingContextRef.current = pricingContext;
     billingPrepareStarted.current = false;
     setEstimate(null);
@@ -208,6 +227,7 @@ export function useGenerateConfirm(
   const close = useCallback(() => {
     estimateRun.current += 1;
     cachedEstimate.current = null;
+    acceptedPolicyToken.current = null;
     pricingContextRef.current = null;
     billingPrepareStarted.current = false;
     setOpen(false);
@@ -232,12 +252,23 @@ export function useGenerateConfirm(
     if (!submitting) close();
   }, [close, submitting]);
 
-  const confirm = useCallback(async () => {
+  const confirm = useCallback(async (durationPolicyAccepted = false, fallbackConsent?: FallbackAvatarConsent) => {
     if (!request || submitting) return;
+    if (isHeygenAvatarRequest(request)) {
+      // With authoritative pricing disabled, the dialog (not this hook) fetched
+      // the legacy estimate. A boolean alone is never evidence of its policy.
+      const consentEstimate = enabled ? cachedEstimate.current :
+        fallbackConsent?.request === request && fallbackConsent.estimate.pricing_contract === "legacy_estimate"
+          ? fallbackConsent.estimate : null;
+      const policy = policyForEstimate(consentEstimate);
+      if (!durationPolicyAccepted || !policy || Date.parse(policy.expires_at) <= Date.now()) return;
+      if (!enabled) cachedEstimate.current = consentEstimate;
+      acceptedPolicyToken.current = policy.token;
+    }
     if (!enabled) {
       setLegacySubmitting(true);
       try {
-        await submitRef.current(request);
+        await submitRef.current(consentedRequest(request));
       } catch {
         // The form owns user-facing legacy errors; keep the event promise handled.
       } finally {
@@ -255,7 +286,7 @@ export function useGenerateConfirm(
 
     setLegacySubmitting(true);
     try {
-      await submitRef.current(request, contract, undefined, pricingContextRef.current);
+      await submitRef.current(consentedRequest(request), contract, undefined, pricingContextRef.current);
     } catch {
       // The form owns user-facing legacy/deferred errors.
     } finally {

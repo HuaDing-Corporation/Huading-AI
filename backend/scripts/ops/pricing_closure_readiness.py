@@ -52,7 +52,10 @@ _TARGET_MIGRATION_REVISION = "20260829_0038"
 # Pricing's migration target remains 0038. Later application revisions are
 # accepted only when their additional schema contract is explicitly checked.
 _HEYGEN_MIGRATION_REVISION = "20260915_0039"
-_SUPPORTED_READY_REVISIONS = {_TARGET_MIGRATION_REVISION, _HEYGEN_MIGRATION_REVISION}
+_DURATION_POLICY_REVISION = "20260915_0040"
+_SUPPORTED_READY_REVISIONS = {
+    _TARGET_MIGRATION_REVISION, _HEYGEN_MIGRATION_REVISION, _DURATION_POLICY_REVISION,
+}
 _SUPPORTED_PREFLIGHT_REVISIONS = {
     "20260724_0031",
     "20260804_0032",
@@ -63,6 +66,7 @@ _SUPPORTED_PREFLIGHT_REVISIONS = {
     "20260829_0037",
     _TARGET_MIGRATION_REVISION,
     _HEYGEN_MIGRATION_REVISION,
+    _DURATION_POLICY_REVISION,
 }
 _MIGRATION_0032_EXPECTED_RATES = {
     ("video", "second"): Decimal("80.0000"),
@@ -1291,8 +1295,15 @@ def _target_schema_preflight_blockers(db: Session) -> list[PricingReadinessBlock
         named_indexes=named_indexes,
         foreign_keys=foreign_keys,
     )
-    if _migration_revision(db) == _HEYGEN_MIGRATION_REVISION:
+    if _migration_revision(db) in {_HEYGEN_MIGRATION_REVISION, _DURATION_POLICY_REVISION}:
         blockers.extend(_heygen_schema_blockers(db))
+    if _migration_revision(db) == _DURATION_POLICY_REVISION:
+        blockers.extend(_schema_contract_blockers(
+            db, required_schema={"billing_operations": {"duration_policy_version"},
+                                 "usage_records": {"duration_failure_evidence"}},
+            named_checks={"billing_operations": {"ck_billing_operations_failed_charged"}},
+            named_uniques={}, named_indexes={}, foreign_keys={},
+        ))
     database_inspector = inspect(db.connection())
     if "reasoning_wallets" in set(database_inspector.get_table_names()):
         retained_checks = {
@@ -1947,7 +1958,7 @@ def pricing_closure_preflight(
             PricingReadinessBlocker(
                 code="UNSUPPORTED_SCHEMA_REVISION",
                 record_ids=((migration_revision or "missing"),),
-                detail="Database revision is not on the approved 0031-to-0039 release line.",
+                detail="Database revision is not on the approved 0031-to-0040 release line.",
             )
         )
     configured_ids = {

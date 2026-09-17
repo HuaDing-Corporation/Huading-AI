@@ -62,6 +62,7 @@ export type VideoStatus = "queued" | "running" | "done" | "failed" | "cancelled"
  * 那次就是这么抓到的。故这四个字段补齐、强转删除（HISTORY-VIDEO-DIALOG-UI-0001 · FIX1）。
  */
 export interface VideoListItem {
+  billing_outcome?: AvatarBillingOutcome | null;
   /** HEYGEN-REPLACE: read-only server snapshot; absent legacy avatar tasks remain OmniHuman. */
   avatar_provider?: "omnihuman" | "heygen" | null;
   avatar_model?: string | null;
@@ -94,6 +95,7 @@ export interface VideoListResponse {
 }
 
 export interface VideoDetail {
+  billing_outcome?: AvatarBillingOutcome | null;
   avatar_provider?: "omnihuman" | "heygen" | null;
   avatar_model?: string | null;
   id: string;
@@ -119,6 +121,8 @@ export interface VideoDetail {
 }
 
 export interface CreateVideoRequest {
+  avatar_duration_policy?: "145s-no-refund-v1";
+  avatar_duration_policy_token?: string;
   topic?: string; // 数字人口播/照片/视频生成沿用（≤500）；电商带货 i2v 起可选（ECOM-VIDEO-OPTIMIZE-UI-0001 契约 §4.3/req1：空则不带）
 
   script?: string; // 可选；缺则后端 DeepSeek 生成（前端流程会带）
@@ -214,6 +218,7 @@ export type VideoAcceptedContract =
     });
 
 export interface LegacyVideoEstimate {
+  avatar_duration_policy?: AvatarDurationPolicy;
   pricing_contract: "legacy_estimate";
   estimated_credits: number;
   unit: "credits";
@@ -338,6 +343,7 @@ export interface Quota {
 
 // SSE 新枚举帧（§8）+ 旧帧兜底字段
 export interface VideoEvent {
+  billing_outcome?: AvatarBillingOutcome | null;
   status?: VideoStatus | string;
   progress?: number; // 新帧 0..100 number；旧帧 0..1 小数
   step?: string | null; // tts|avatar|subtitle|compose|upload
@@ -1004,7 +1010,26 @@ export interface BillingDisclosure {
   reference_unit_credits: string;
 }
 
+export interface AvatarDurationPolicy {
+  version: "145s-no-refund-v1";
+  max_seconds: 145;
+  notice: string;
+  accepted_credits: number;
+  token: string;
+  expires_at: string;
+}
+
+export interface AvatarBillingOutcome {
+  completion_kind: "failed_charged";
+  status: "settled";
+  policy_version: "145s-no-refund-v1";
+  requested_credits: number;
+  settled_credits: number;
+  released_credits: 0;
+}
+
 interface BillingQuoteBase {
+  avatar_duration_policy?: AvatarDurationPolicy;
   pricing_contract: "billing_quote";
   operation: string;
   subtotal_credits: string;
@@ -1258,6 +1283,17 @@ type BillingSucceededLookup = {
 export type BillingOperationLookup =
   | BillingInProgressLookup
   | BillingSucceededLookup
+  | (BillingOperationLookupBase & {
+      operation: "video_create";
+      state: "completed";
+      completion_kind: "failed_charged";
+      result_type: null;
+      result_id: null;
+      result: null;
+      resource: { task_id: string; status: "failed" };
+      failure: { code: "HEYGEN_AUDIO_DURATION_EXCEEDED"; original_http_status: 422;
+        detail: { requires_new_quote: boolean | null } | null };
+    })
   | (BillingOperationLookupBase & {
       operation: "doubao_brand_voice_order_create" | "doubao_brand_voice_order_renew";
       state: "completed";

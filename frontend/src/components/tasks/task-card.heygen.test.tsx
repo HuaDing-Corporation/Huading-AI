@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { fromVideoRead, eventToProgress } from "@/lib/sse/progress-mapping";
 import { useMediaUrlRefreshScope } from "@/lib/media/use-media-url-refresh";
 import { TaskCard } from "./task-card";
+import { VideoDetailDialog } from "@/components/history/video-detail-dialog";
 
 const read = {
   id: "heygen-test", status: "running" as const, progress: 38, topic: "口播测试",
@@ -14,6 +15,23 @@ function Card({ task }: { task: ReturnType<typeof fromVideoRead> }) {
 }
 
 describe("HeyGen 任务快照与恢复状态", () => {
+  it("145收费失败：历史卡片与弹窗显示两费不退及实扣，不能一键重付", () => {
+    const task = { ...fromVideoRead({ ...read, status: "failed", error_code: "HEYGEN_AUDIO_DURATION_EXCEEDED",
+      billing_outcome: { completion_kind: "failed_charged", status: "settled", policy_version: "145s-no-refund-v1",
+        requested_credits: 123, settled_credits: 123, released_credits: 0 } }), retryable: true };
+    const card = render(<Card task={task} />);
+    expect(screen.getByText(/生成失败（超145秒，费用不退）。已结算 123 积分/)).toBeVisible();
+    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看详情" })).toBeEnabled();
+    card.unmount();
+    function Detail() {
+      const refresh = useMediaUrlRefreshScope(async () => {});
+      return <VideoDetailDialog detail={{ task, createdAt: read.created_at, modeLabel: "数字人口播" }}
+        onClose={vi.fn()} onOpenPage={vi.fn()} refresh={refresh} />;
+    }
+    render(<Detail />);
+    expect(screen.getByText(/生成失败（超145秒，费用不退）。已结算 123 积分/)).toBeVisible();
+  });
   // 捕获：把新建表单的目标型号用于所有历史，或丢弃服务端模型快照。
   it.each([
     ["heygen", "avatar_iv", "HeyGen Avatar IV"],

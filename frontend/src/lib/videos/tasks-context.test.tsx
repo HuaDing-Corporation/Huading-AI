@@ -590,7 +590,7 @@ function RetryPricedHarness() {
     <div>
       <button
         onClick={() => void createAndTrack(
-          { topic: "retry", voice_id: "brand", avatar_asset_id: "avatar" },
+          { topic: "retry", voice_id: "brand", video_mode: "seedance_i2v", product_image_keys: ["uploads/product.png"] },
           "retry",
           billedAttempt
         )}
@@ -612,12 +612,12 @@ function RetryPricedHarness() {
   );
 }
 
+// Non-HeyGen retry remains supported; avatar retries require a fresh policy confirmation.
 describe("tasks-context explicit priced retry", () => {
   beforeEach(() => {
     mockSession = { token: "t" };
-    // HeyGen retry now requires GET authority as well as an SSE failure.
     (getVideo as Mock).mockImplementation(async (id: string) => ({
-      id, mode: "avatar_talk", avatar_provider: "heygen", avatar_model: "avatar_iv",
+      id, mode: "seedance_i2v",
       status: "failed", progress: 20, topic: "retry", created_at: ""
     }));
     (streamVideoEvents as Mock).mockImplementation(async (_id, onMessage) => {

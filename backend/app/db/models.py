@@ -448,7 +448,7 @@ BILLING_STATE_CHECK = """
 OR
 (
   status = 'completed'
-  AND completion_kind IN ('succeeded', 'failed', 'rejected')
+  AND completion_kind IN ('succeeded', 'failed', 'rejected', 'failed_charged')
   AND completed_at IS NOT NULL
   AND settled_credits + released_credits = requested_credits
 )
@@ -465,6 +465,19 @@ BILLING_COMPLETION_CHECK = """
  (settled_credits = 0 AND released_credits = requested_credits))
 AND
 (completion_kind <> 'succeeded' OR requested_credits = 0 OR settled_credits > 0)
+"""
+
+BILLING_CHARGED_FAILURE_CHECK = """
+completion_kind IS NULL OR completion_kind <> 'failed_charged' OR
+(
+  operation = 'video_create'
+  AND duration_policy_version = '145s-no-refund-v1'
+  AND error_code = 'HEYGEN_AUDIO_DURATION_EXCEEDED'
+  AND error_http_status = 422
+  AND result_type = 'video_task' AND result_id IS NOT NULL
+  AND result_payload IS NOT NULL AND error_payload IS NOT NULL
+  AND settled_credits = requested_credits AND released_credits = 0
+) IS TRUE
 """
 
 BILLING_FINITE_CHECK = """
@@ -510,6 +523,7 @@ class BillingOperation(Base):
         ),
         CheckConstraint(BILLING_ZERO_CHECK, name="ck_billing_operations_zero_price"),
         CheckConstraint(BILLING_COMPLETION_CHECK, name="ck_billing_operations_completion"),
+        CheckConstraint(BILLING_CHARGED_FAILURE_CHECK, name="ck_billing_operations_failed_charged"),
         CheckConstraint(BILLING_FINITE_CHECK, name="ck_billing_operations_amounts_finite"),
         CheckConstraint(
             BILLING_AMOUNT_DOMAIN_CHECK,
@@ -542,7 +556,8 @@ class BillingOperation(Base):
     status: Mapped[Literal["in_progress", "completed"]] = mapped_column(
         String(32), default="in_progress"
     )
-    completion_kind: Mapped[Literal["succeeded", "failed", "rejected"] | None] = (
+    duration_policy_version: Mapped[str | None] = mapped_column(String(64), default=None)
+    completion_kind: Mapped[Literal["succeeded", "failed", "rejected", "failed_charged"] | None] = (
         mapped_column(String(32), default=None)
     )
     completed_at: Mapped[datetime | None] = mapped_column(
@@ -1400,6 +1415,9 @@ class UsageRecord(Base):
         Numeric(18, 8), default=None
     )
     provider_usage: Mapped[dict[str, object] | None] = mapped_column(
+        _json_type(), default=None
+    )
+    duration_failure_evidence: Mapped[dict[str, object] | None] = mapped_column(
         _json_type(), default=None
     )
     currency: Mapped[str] = mapped_column(String(3), default="CNY")

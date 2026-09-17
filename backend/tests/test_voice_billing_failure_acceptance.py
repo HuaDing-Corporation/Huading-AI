@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from avatar_policy_helpers import accept_policy, write_decodable_audio
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
@@ -631,6 +632,7 @@ def _submit_cosy_parent_video(
     assert len(tts_lines) == 1
     assert tts_lines[0]["quantity"] == str(len(script))
     assert tts_lines[0]["unit_credits"] == "0.1000"
+    payload = accept_policy(payload, quote.json()["data"])
     created = client.post(
         "/api/v1/videos",
         headers={
@@ -745,7 +747,7 @@ def test_cosy_parent_fake_tts_terminal_callback_is_exactly_once(
             task.params = {
                 key: value
                 for key, value in task.params.items()
-                if key not in {"avatar_provider", "avatar_model"}
+                if key not in {"avatar_provider", "avatar_model", "avatar_duration_acceptance"}
             }
             db.commit()
     provider_calls: list[dict[str, object]] = []
@@ -754,7 +756,7 @@ def test_cosy_parent_fake_tts_terminal_callback_is_exactly_once(
         async def synthesize_speech(self, payload):
             provider_calls.append(dict(payload))
             audio_path = tmp_path / f"{task_id}.mp3"
-            audio_path.write_bytes(b"fake-cosy-audio")
+            write_decodable_audio(audio_path)
             return {
                 "audio_path": str(audio_path),
                 "duration_ms": 1_000,

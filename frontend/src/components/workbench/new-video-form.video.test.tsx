@@ -1,8 +1,11 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { render } from "@/lib/billing/test-utils";
+import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { copy } from "@/lib/copy";
+import { avatarPolicy } from "@/lib/api/testing/avatar-policy";
+import { server } from "@/mocks/server";
 
 // AVATAR-VIDEO-SOURCE-UI-0001：数字人形象源照片/视频二选一。真实 NewVideoForm + AvatarVideoPicker，
 // mock hooks 层 + mock 视频预检（jsdom 无法解码视频，validateAvatarVideo 注入 null 走通过路径）。
@@ -49,6 +52,12 @@ async function submitAndCapture() {
   await waitFor(() => expect(generate).toBeEnabled());
   fireEvent.click(generate);
   const confirm = await screen.findByRole("button", { name: "确定" });
+  expect(confirm).toBeDisabled();
+  const consent = screen.getByRole("checkbox", { name: /我已阅读并同意/ });
+  // An enabled checkbox implies a valid policy and a completed real estimate.
+  await waitFor(() => expect(consent).toBeEnabled());
+  fireEvent.click(consent);
+  expect(consent).toBeChecked();
   await waitFor(() => expect(confirm).toBeEnabled());
   fireEvent.click(confirm);
   await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
@@ -56,6 +65,76 @@ async function submitAndCapture() {
 }
 
 describe("NewVideoForm 形象源二选一（AVATAR-VIDEO-SOURCE-UI-0001）", () => {
+  it.each(["photo", "video"] as const)("pending estimate: %s requires fresh consent after the policy arrives", async (source) => {
+    let release!: () => void;
+    let estimateRequested = false;
+    const responseGate = new Promise<void>((resolve) => { release = resolve; });
+    server.use(http.post("http://localhost:8000/api/v1/videos/estimate", async () => {
+      estimateRequested = true;
+      await responseGate;
+      return HttpResponse.json({ data: { pricing_contract: "legacy_estimate", estimated_credits: 37,
+        unit: "credits", avatar_duration_policy: avatarPolicy(37) }, error: null, request_id: "held-estimate" });
+    }));
+    try {
+      render(<NewVideoForm />);
+      setTopic();
+      if (source === "video") fireEvent.click(screen.getByRole("button", { name: copy.workbench.sourceVideo }));
+      fireEvent.change(document.querySelector(source === "video" ? "#avatar-video" : 'input[type="file"]')!, {
+        target: { files: [new File(["x"], source === "video" ? "v.mp4" : "a.png",
+          { type: source === "video" ? "video/mp4" : "image/png" })] }
+      });
+      const generate = screen.getByRole("button", { name: /生成视频/ });
+      await waitFor(() => expect(generate).toBeEnabled());
+      fireEvent.click(generate);
+      await waitFor(() => expect(estimateRequested).toBe(true));
+      const consent = screen.getByRole("checkbox", { name: /我已阅读并同意/ });
+      const confirm = screen.getByRole("button", { name: "确定" });
+      expect(consent).toBeDisabled();
+      expect(confirm).toBeDisabled();
+      expect(screen.queryByText("37")).not.toBeInTheDocument();
+      // Reproduce the old helper's premature synthetic clicks, but assert the
+      // user-visible contract: pending policy cannot authorize a submission.
+      fireEvent.click(consent);
+      fireEvent.click(confirm);
+      await act(async () => {});
+      expect(taskMocks.createAndTrack).not.toHaveBeenCalled();
+
+      await act(async () => { release(); });
+      await waitFor(() => expect(consent).toBeEnabled());
+      expect(screen.getByText("37")).toBeVisible();
+      expect(consent).not.toBeChecked();
+      expect(confirm).toBeDisabled();
+      expect(taskMocks.createAndTrack).not.toHaveBeenCalled();
+      fireEvent.click(consent);
+      expect(consent).toBeChecked();
+      await waitFor(() => expect(confirm).toBeEnabled());
+      fireEvent.click(confirm);
+      await waitFor(() => expect(taskMocks.createAndTrack).toHaveBeenCalledTimes(1));
+      expect(taskMocks.createAndTrack.mock.calls[0][0]).toMatchObject({
+        avatar_duration_policy: "145s-no-refund-v1", avatar_duration_policy_token: "synthetic-avatar-policy"
+      });
+    } finally {
+      release();
+    }
+  });
+
+  it("145：确认期间新的prefill使旧报价/同意失效，不能提交旧文案", async () => {
+    const view = render(<NewVideoForm />);
+    setTopic();
+    fireEvent.change(document.querySelector('input[type="file"]')!, {
+      target: { files: [new File(["x"], "a.png", { type: "image/png" })] }
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: /生成视频/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /生成视频/ }));
+    const consent = await screen.findByRole("checkbox", { name: /我已阅读并同意/ });
+    await waitFor(() => expect(consent).toBeEnabled());
+    fireEvent.click(consent);
+    await waitFor(() => expect(screen.getByRole("button", { name: "确定" })).toBeEnabled());
+    view.rerender(<NewVideoForm initialScript="新带入的文案" />);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(taskMocks.createAndTrack).not.toHaveBeenCalled();
+  });
+
   it("HeyGen：来源切换展示不同目标模型，但不声称服务已启用", () => {
     render(<NewVideoForm />);
     expect(screen.getByText(/HeyGen Avatar IV/)).toBeInTheDocument();
