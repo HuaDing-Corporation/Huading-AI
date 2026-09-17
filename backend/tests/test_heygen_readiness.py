@@ -85,7 +85,8 @@ def test_0039_real_gate_and_redacted_cli_accept_valid_schema(heygen_ready_db, mo
     assert safe_payload["ready"] is True
 
 
-def test_0039_production_health_uses_compatible_gate(heygen_ready_db):
+def test_0040_production_health_uses_compatible_gate(heygen_ready_db):
+    heygen_ready_db.execute(text("UPDATE alembic_version SET version_num = '20260915_0040'"))
     app.dependency_overrides[get_db_session] = _health_database_session(heygen_ready_db)
     app.dependency_overrides[get_redis_client] = lambda: _ReadyRedis()
     try:

@@ -5,6 +5,7 @@ P0-A: 下单 must persist video_task before its task_asset (FK ordering).
 P1:   duplicate slug must return 409, not 500.
 """
 
+from avatar_policy_helpers import post_avatar_with_policy
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -80,7 +81,8 @@ def test_registered_tenant_can_order_avatar_talk_without_manual_subscription(
     monkeypatch.setattr(videos_route, "generate_avatar_talk_task", fake)
 
     client = TestClient(app)
-    resp = client.post(
+    resp = post_avatar_with_policy(
+        client,
         "/api/v1/videos",
         json={
             "topic": "三分钟看懂咖啡",

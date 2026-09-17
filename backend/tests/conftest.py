@@ -77,7 +77,7 @@ def auth_db():
         )
         connection.execute(
             text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
-            {"revision": "20260915_0039"},
+            {"revision": "20260915_0040"},
         )
     SessionTesting = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 

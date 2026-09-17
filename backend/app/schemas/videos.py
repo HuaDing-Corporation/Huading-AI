@@ -11,7 +11,7 @@ from app.core.image_aspect_ratio import (
     RequestedImageAspectRatio,
     image_aspect_ratio_from_legacy_size,
 )
-from app.schemas.billing import BillingQuote
+from app.schemas.billing import AvatarDurationPolicyOffer, BillingQuote
 from app.services.billing_operations import BillingSummary
 from app.services.subtitle_styles import SUBTITLE_TEMPLATE_IDS, clamp_subtitle_font_size
 
@@ -124,6 +124,8 @@ class VideoGenerateRequest(BaseModel):
     voice_id: str | None = None
     avatar_asset_id: str | None = None
     avatar_video_asset_id: str | None = None
+    avatar_duration_policy: str | None = Field(default=None, max_length=64)
+    avatar_duration_policy_token: str | None = Field(default=None, max_length=4096)
     align_audio_reverse: bool | None = None
     templ_start_seconds: float | None = Field(default=None, ge=0)
     open_sr: bool | None = None
@@ -446,6 +448,10 @@ VideoAccepted = Annotated[
 
 
 class LegacyVideoEstimate(BaseModel):
+    avatar_duration_policy: AvatarDurationPolicyOffer | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     pricing_contract: Literal["legacy_estimate"] = "legacy_estimate"
     estimated_credits: int
     unit: Literal["credits"] = "credits"
@@ -508,7 +514,24 @@ class VideoTaskStatus(BaseModel):
     error: str | None = None
 
 
+class AvatarBillingOutcome(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    completion_kind: Literal["failed_charged"]
+    status: Literal["settled"]
+    policy_version: Literal["145s-no-refund-v1"]
+    requested_credits: int = Field(ge=0)
+    settled_credits: int = Field(ge=0)
+    released_credits: Literal[0]
+
+    @model_validator(mode="after")
+    def _conserved(self):
+        if self.requested_credits != self.settled_credits:
+            raise ValueError("duration failure must settle the accepted amount exactly")
+        return self
+
+
 class VideoRead(BaseModel):
+    billing_outcome: AvatarBillingOutcome | None = None
     avatar_provider: Literal["omnihuman", "heygen"] | None = None
     avatar_model: str | None = None
     id: str
@@ -548,6 +571,16 @@ class VideoRead(BaseModel):
     error: str | None = None
     error_code: str | None = None
     error_message: str | None = None
+
+    @model_validator(mode="after")
+    def _duration_outcome(self):
+        if self.billing_outcome is not None and (
+            self.status != "failed"
+            or self.error_code != "HEYGEN_AUDIO_DURATION_EXCEEDED"
+            or self.avatar_provider != "heygen"
+        ):
+            raise ValueError("charged failure requires a failed HeyGen duration task")
+        return self
 
 
 class VideoListResponse(BaseModel):
