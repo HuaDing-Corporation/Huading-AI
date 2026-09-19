@@ -6,3 +6,7 @@ tsconfig.tsbuildinfo
 /playwright-report/
 /blob-report/
 /playwright/.cache/
+
+# Stryker 变异测试产物（STRYKER-PILOT-0001）—— 沙箱与报告都是生成物，不入库
+/.stryker-tmp/
+/reports/mutation/
